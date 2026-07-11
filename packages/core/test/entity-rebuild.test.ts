@@ -167,7 +167,6 @@ describe("entity-rebuild", () => {
     // Verify the relation was actually stored.
     const carol = entities.listAll().find((e) => e.canonical_name === "Carol");
     expect(carol).toBeDefined();
-    // biome-ignore lint/style/noNonNullAssertion: carol is asserted above
     const relations = entities.relationsFor(carol!.id);
     expect(relations.length).toBe(1);
     expect(relations[0].relation).toBe("colleague");

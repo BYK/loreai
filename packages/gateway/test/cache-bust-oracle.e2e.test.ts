@@ -36,7 +36,7 @@ let harness: Harness | undefined;
 afterEach(async () => {
   const { resetCalibration } = await import("../../core/src/gradient");
   resetCalibration();
-  await harness?.teardown();
+  if (harness) await harness.teardown();
   harness = undefined;
 });
 

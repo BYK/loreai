@@ -146,7 +146,7 @@ function makeClient() {
               lim = n;
               return b;
             },
-            // biome-ignore lint/suspicious/noThenProperty: faithful PostgREST builder mock
+            // oxlint-disable-next-line unicorn/no-thenable -- faithful PostgREST builder mock
             then(
               resolve: (v: unknown) => unknown,
               reject?: (e: unknown) => unknown,

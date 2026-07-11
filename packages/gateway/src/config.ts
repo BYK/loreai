@@ -355,7 +355,7 @@ export function extractUpstreamUrlHeader(
   if (!raw) return undefined;
 
   // Sanitize: strip control characters, trim.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_UPSTREAM_URL_LENGTH)
     return undefined;
@@ -399,7 +399,7 @@ export function extractUpstreamPathHeader(
   if (!raw) return undefined;
 
   // Sanitize: strip control characters, trim.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_UPSTREAM_PATH_LENGTH)
     return undefined;
@@ -665,7 +665,7 @@ export function extractProviderHeader(
   if (!raw) return undefined;
 
   // Sanitize: strip control characters, trim, lowercase.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, "");
   const sanitized = cleaned.trim().toLowerCase();
   if (!sanitized || sanitized.length > MAX_PROVIDER_ID_LENGTH) return undefined;
@@ -963,7 +963,7 @@ export function extractGitRemoteHeader(
 
   // Strip control characters (newlines, carriage returns, null bytes) to
   // prevent header injection and DB corruption.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_GIT_REMOTE_LENGTH) return undefined;
 
@@ -990,7 +990,7 @@ export function extractProjectHeader(
 
   // Strip control characters (newlines, carriage returns, null bytes) to
   // prevent header injection and DB corruption.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_PROJECT_PATH_LENGTH)
     return undefined;
@@ -1113,9 +1113,9 @@ export function parseCurlHeaders(
     const rawName = line.slice(0, colonIdx).trim();
     const rawValue = line.slice(colonIdx + 1).trim();
     // Header name: RFC 7230 token = visible ASCII + a few separators.
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+    // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
     const name = rawName.replace(/[\x00-\x1f\x7f]/g, "");
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+    // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
     const value = rawValue.replace(/[\x00-\x1f\x7f]/g, "").trim();
     if (!name || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
       log.notice(

@@ -76,7 +76,7 @@ export interface Harness {
   /** Clear in-memory pipeline/core state while preserving the temp DB/server. */
   restartPipeline(): Promise<void>;
   /** Stop the gateway and clean up */
-  teardown(): void;
+  teardown(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,9 +108,8 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // --- 3. Dynamic imports so env vars take effect before module-level code runs ---
   const { makeReplayInterceptor } = await import("./replay");
   const { withSimulatedCache } = await import("./simulated-cache");
-  const { setUpstreamInterceptor, resetPipelineState } = await import(
-    "../../src/pipeline"
-  );
+  const { setUpstreamInterceptor, resetPipelineState } =
+    await import("../../src/pipeline");
   const { startServer } = await import("../../src/server");
   const { loadConfig } = await import("../../src/config");
   // Import close() so we can reset the DB singleton between harnesses.
@@ -179,7 +178,6 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
       const db = new DatabaseSync(dbPath, { readOnly: true });
       try {
         const stmt = db.prepare(sql);
-        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite stmt.all() accepts variadic args
         return stmt.all(...((params ?? []) as any)) as T[];
       } finally {
         db.close();

@@ -231,6 +231,7 @@ async function captureOnePair(
 ): Promise<OraclePair | null> {
   let captured: OraclePair | null = null;
 
+  // oxlint-disable-next-line typescript/no-misused-promises -- createServer ignores the handler's returned promise
   const server = createServer(async (req, res) => {
     if (req.method === "HEAD") {
       res.writeHead(200);

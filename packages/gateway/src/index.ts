@@ -60,7 +60,7 @@ if (isMainModule) {
   // Direct execution (e.g. `bun run src/index.ts` from the OpenCode plugin)
   // defaults to `start` (no agent auto-launch), not `run` — there's no TTY
   // and no reason to auto-detect agents when launched as an embedded server.
-  import("./cli/start").then(({ commandStart }) =>
+  void import("./cli/start").then(({ commandStart }) =>
     commandStart({ quiet: true }),
   );
 }

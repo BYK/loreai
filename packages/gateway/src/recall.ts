@@ -244,8 +244,7 @@ export function expandRecallMarkers(
     // (text blocks) into the same assistant message. Tool_use blocks after
     // the marker are from the same turn (mixed tools) and stay together.
     const afterMarker = msg.content.slice(markerIdx + 1);
-    const hasContinuationAfter =
-      afterMarker.length > 0 && afterMarker.some((b) => b.type !== "tool_use");
+    const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
 
     // Replace marker with tool_use
     msg.content[markerIdx] = {

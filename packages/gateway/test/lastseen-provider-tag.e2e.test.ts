@@ -39,7 +39,7 @@ describe("global fallback provider tag derived from upstream URL (#942)", () => 
   let harness: Harness | undefined;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
     harness = undefined;
   });
 

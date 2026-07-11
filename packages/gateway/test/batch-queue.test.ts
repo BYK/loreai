@@ -496,7 +496,7 @@ describe("BatchLLMClient", () => {
       },
     );
 
-    client.prompt("sys prompt", "user msg", { workerID: "lore-distill" });
+    void client.prompt("sys prompt", "user msg", { workerID: "lore-distill" });
 
     // Wait for auto-flush
     await new Promise((r) => setTimeout(r, 50));
@@ -534,7 +534,7 @@ describe("BatchLLMClient", () => {
       },
     );
 
-    client.prompt("sys", "msg", {
+    void client.prompt("sys", "msg", {
       model: { providerID: "anthropic", modelID: "claude-haiku-3-5-20241022" },
     });
 
@@ -576,11 +576,11 @@ describe("BatchLLMClient", () => {
     );
 
     // Queue one Anthropic item
-    client.prompt("sys", "anthropic-msg", {
+    void client.prompt("sys", "anthropic-msg", {
       model: { providerID: "anthropic", modelID: "claude-sonnet-4-20250514" },
     });
     // Queue one OpenAI item — triggers auto-flush at maxQueueSize=2
-    client.prompt("sys", "openai-msg", {
+    void client.prompt("sys", "openai-msg", {
       model: { providerID: "openai", modelID: "gpt-5.4-mini" },
     });
 
@@ -930,7 +930,7 @@ describe("BatchLLMClient", () => {
       },
     );
 
-    client.prompt("my system prompt", "my user message", {
+    void client.prompt("my system prompt", "my user message", {
       model: { providerID: "openai", modelID: "gpt-5.4-mini" },
     });
 
@@ -1299,7 +1299,10 @@ describe("BatchLLMClient temperature capability", () => {
       },
     );
 
-    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    void client.prompt("sys", "msg", {
+      workerID: "lore-distill",
+      temperature: 0,
+    });
     await new Promise((r) => setTimeout(r, 50));
 
     const params = fetchCalls[0]?.body?.requests[0]?.params;
@@ -1327,7 +1330,10 @@ describe("BatchLLMClient temperature capability", () => {
       },
     );
 
-    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    void client.prompt("sys", "msg", {
+      workerID: "lore-distill",
+      temperature: 0,
+    });
     await new Promise((r) => setTimeout(r, 50));
 
     expect(fetchCalls[0]?.body?.requests[0]?.params.temperature).toBe(0);
@@ -1359,7 +1365,10 @@ describe("BatchLLMClient temperature capability", () => {
       },
     );
 
-    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    void client.prompt("sys", "msg", {
+      workerID: "lore-distill",
+      temperature: 0,
+    });
     await new Promise((r) => setTimeout(r, 50));
 
     const params = fetchCalls[0]?.body?.requests[0]?.params;
@@ -1397,7 +1406,10 @@ describe("BatchLLMClient temperature capability", () => {
       },
     );
 
-    client.prompt("sys", "msg", { workerID: "lore-distill", temperature: 0 });
+    void client.prompt("sys", "msg", {
+      workerID: "lore-distill",
+      temperature: 0,
+    });
     await new Promise((r) => setTimeout(r, 50));
 
     expect(fetchCalls[0]?.body?.requests[0]?.params.temperature).toBe(0);
@@ -1465,7 +1477,7 @@ describe("BatchLLMClient temperature capability", () => {
       },
     );
 
-    client.prompt("sys", "msg", {
+    void client.prompt("sys", "msg", {
       model: { providerID: "openai", modelID: "gpt-5" },
       workerID: "lore-distill",
       temperature: 0,
@@ -1539,7 +1551,7 @@ describe("BatchLLMClient temperature capability", () => {
       },
     );
 
-    client.prompt("sys", "msg", {
+    void client.prompt("sys", "msg", {
       model: { providerID: "openai", modelID: "gpt-5.4-mini" },
       workerID: "lore-distill",
       temperature: 0,

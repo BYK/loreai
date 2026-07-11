@@ -78,7 +78,7 @@ describe("github-copilot upstream URL — full pipeline wiring (#1052)", () => {
   let harness: Harness | undefined;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
     harness = undefined;
   });
 

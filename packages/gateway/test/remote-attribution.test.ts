@@ -43,7 +43,7 @@ describe("remote gateway: path-less session attribution", () => {
   });
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
     if (prevRemote === undefined) delete process.env.LORE_REMOTE_GATEWAY;
     else process.env.LORE_REMOTE_GATEWAY = prevRemote;
   });

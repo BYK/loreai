@@ -610,8 +610,8 @@ export async function startServer(config: GatewayConfig): Promise<{
   let resolvedPort = config.port;
   try {
     for (const host of config.hosts) {
-      const s = createHttpServer(async (nodeReq, nodeRes) => {
-        await handleNodeRequest(nodeReq, nodeRes, fetch, host, resolvedPort);
+      const s = createHttpServer((nodeReq, nodeRes) => {
+        void handleNodeRequest(nodeReq, nodeRes, fetch, host, resolvedPort);
       });
       // LLM streaming responses can be very long-lived — disable Node's
       // default timeouts (request/headers/keep-alive/socket) that would
@@ -735,7 +735,7 @@ export async function startServer(config: GatewayConfig): Promise<{
   // on Promise.prototype, so they only affect this call site.
   const promise = Promise.resolve(result);
   for (const prop of ["port", "hosts", "ready", "stop"] as const) {
-    Object.defineProperty(promise, prop, {
+    void Object.defineProperty(promise, prop, {
       get() {
         throw new TypeError(
           `startServer() is async — use \`const server = await startServer(config)\` ` +

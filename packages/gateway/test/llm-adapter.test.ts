@@ -786,7 +786,7 @@ describe("createGatewayLLMClient.prompt", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       const [url, init] = mockFetch.mock.calls[0];
       expect(url).toContain(":rawPredict");
-      expect((init?.headers as Record<string, string>).Authorization).toBe(
+      expect((init!.headers as Record<string, string>).Authorization).toBe(
         "Bearer test-vertex-token",
       );
     } finally {

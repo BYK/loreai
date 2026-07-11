@@ -65,7 +65,7 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
   let harness: Harness;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
   });
 
   it("does NOT merge two distinct Claude Code conversations into one session", async () => {
@@ -232,7 +232,7 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
   let harness: Harness;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
   });
 
   it("refuses rotation when the incoming confident project differs (Fix 2)", async () => {
@@ -358,7 +358,7 @@ describe("Tier 1b: x-lore-session-id isolation (Lore plugin stable ID)", () => {
   let harness: Harness;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
   });
 
   it("does NOT merge two distinct x-lore-session-id values into one session", async () => {

@@ -86,7 +86,7 @@ describe("Copilot-Integration-Id → github-copilot upstream routing", () => {
   let harness: Harness | undefined;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
     harness = undefined;
   });
 
@@ -140,7 +140,7 @@ describe("Copilot bare (no /v1) ingress paths", () => {
   let harness: Harness | undefined;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
     harness = undefined;
   });
 

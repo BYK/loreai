@@ -862,7 +862,9 @@ export function createBatchLLMClient(
 
       const pollTimer = setInterval(
         () =>
-          pollBatch(batchId).catch((e) => log.error("batch poll error:", e)),
+          void pollBatch(batchId).catch((e) =>
+            log.error("batch poll error:", e),
+          ),
         pollIntervalMs,
       );
 

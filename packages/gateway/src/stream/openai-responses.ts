@@ -738,7 +738,7 @@ export function translateAnthropicStreamToResponses(
       // Client disconnected — cancel the upstream reader to stop wasting bandwidth
       cancelled = true;
       try {
-        anthropicResponse.body?.cancel();
+        void anthropicResponse.body?.cancel();
       } catch {
         // Best-effort cancellation
       }

@@ -251,7 +251,7 @@ export function buildGeminiUpstreamRequest(
   // Reconstruct generationConfig: preserve the client's original config, and
   // ensure maxOutputTokens reflects the gateway's normalized value.
   const genConfig: Record<string, unknown> = {
-    ...((req.metadata.generationConfig as Record<string, unknown>) ?? {}),
+    ...(req.metadata.generationConfig as Record<string, unknown>),
   };
   if (req.maxTokens) genConfig.maxOutputTokens = req.maxTokens;
   if (Object.keys(genConfig).length > 0) body.generationConfig = genConfig;

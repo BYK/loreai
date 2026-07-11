@@ -104,7 +104,7 @@ process.on("SIGINT", () => {
   // stopRecording() clears the module-level path; seqCounter stays at its
   // final value, which equals the number of turns captured.
   // We import stopRecording lazily to read seqCounter after all turns.
-  import("../src/recorder").then(({ stopRecording }) => {
+  void import("../src/recorder").then(({ stopRecording }) => {
     stopRecording();
   });
 

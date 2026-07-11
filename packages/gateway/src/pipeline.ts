@@ -2936,7 +2936,7 @@ export function extractProjectMarker(
     const match = messageText(messages[i]).match(LORE_PROJECT_MARKER_RE);
     if (match?.[1]) {
       // Strip control characters (same as extractProjectHeader in config.ts)
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+      // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
       const sanitized = match[1].replace(/[\x00-\x1f\x7f]/g, "").trim();
       if (!sanitized || sanitized.length > MAX_MARKER_PROJECT_PATH_LENGTH)
         return undefined;
@@ -4312,7 +4312,7 @@ function buildStreamingResponse(
       keepaliveTimer = null;
       cancelled = true;
       try {
-        activeReader?.cancel();
+        void activeReader?.cancel();
       } catch {
         /* ignore */
       }

@@ -254,7 +254,7 @@ function checkForUpdateInBackgroundImpl(): void {
   // Fire-and-forget — this promise is intentionally not awaited.
   // The version check runs concurrently with the main command.
   // Results are cached to disk for the next invocation to display.
-  (async () => {
+  void (async () => {
     try {
       const latestVersion =
         channel === "nightly"

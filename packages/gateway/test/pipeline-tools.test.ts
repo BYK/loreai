@@ -472,7 +472,7 @@ describe("removeOrphanedToolResults", () => {
 
     expect(messages[1]?.content).toHaveLength(2);
     expect(messages[1]?.content[0]?.type).toBe("tool_result");
-    expect((messages[1]?.content[0] as { toolUseId: string }).toolUseId).toBe(
+    expect((messages[1].content[0] as { toolUseId: string }).toolUseId).toBe(
       "toolu_match",
     );
     expect(messages[1]?.content[1]?.type).toBe("text");
@@ -508,7 +508,7 @@ describe("removeOrphanedToolResults", () => {
 
     expect(messages[1]?.content).toHaveLength(1);
     expect(messages[1]?.content[0]?.type).toBe("text");
-    expect((messages[1]?.content[0] as { text: string }).text).toBe(
+    expect((messages[1].content[0] as { text: string }).text).toBe(
       "[tool results provided]",
     );
   });
@@ -534,7 +534,7 @@ describe("removeOrphanedToolResults", () => {
 
     expect(messages[0]?.content).toHaveLength(1);
     expect(messages[0]?.content[0]?.type).toBe("text");
-    expect((messages[0]?.content[0] as { text: string }).text).toBe(
+    expect((messages[0].content[0] as { text: string }).text).toBe(
       "[tool results provided]",
     );
   });
@@ -923,7 +923,7 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
     // The assistant message should have a placeholder instead of being empty
     expect(messages[1]?.content).toHaveLength(1);
     expect(messages[1]?.content[0]?.type).toBe("text");
-    expect((messages[1]?.content[0] as { text: string }).text).toBe(
+    expect((messages[1].content[0] as { text: string }).text).toBe(
       "[assistant response]",
     );
   });

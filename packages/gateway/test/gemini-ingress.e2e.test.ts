@@ -89,7 +89,7 @@ describe("native Gemini ingress → generativelanguage upstream (full pipeline)"
   let harness: Harness | undefined;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
     harness = undefined;
   });
 

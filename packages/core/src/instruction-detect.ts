@@ -70,7 +70,7 @@ const INSTRUCTION_PATTERNS: RegExp[] = [
  */
 export function hasNonAsciiLetters(s: string): boolean {
   // Strip ASCII chars, then count remaining Unicode letters.
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   const nonAscii = s.replace(/[\x00-\x7F]/g, "");
   const letters = nonAscii.match(/\p{L}/gu);
   return (letters?.length ?? 0) >= 3;

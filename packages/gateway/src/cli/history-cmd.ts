@@ -55,7 +55,7 @@ export function lineDiff(a: string, b: string): DiffLine[] {
   const m = y.length;
   // dp[i][j] = LCS length of x[i:] and y[j:].
   const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    new Array(m + 1).fill(0),
+    Array.from({ length: m + 1 }, () => 0),
   );
   for (let i = n - 1; i >= 0; i--)
     for (let j = m - 1; j >= 0; j--)

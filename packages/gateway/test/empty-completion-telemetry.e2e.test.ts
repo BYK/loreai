@@ -10,8 +10,8 @@ import { createHarness, type Harness } from "./helpers/harness";
 
 let harness: Harness | undefined;
 
-afterEach(() => {
-  harness?.teardown();
+afterEach(async () => {
+  if (harness) await harness.teardown();
   harness = undefined;
   vi.restoreAllMocks();
 });

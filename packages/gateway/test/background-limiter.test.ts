@@ -373,6 +373,7 @@ describe("background-limiter", () => {
       const t2 = runBackground(() => blocker);
       const t3 = runBackground(async () => {});
       return new Promise<void>((done) => {
+        // oxlint-disable-next-line typescript/no-misused-promises -- test timer callback; setTimeout ignores the returned promise
         setTimeout(async () => {
           const stats = backgroundLimiterStats();
           expect(stats.activeCount).toBe(2);
@@ -430,6 +431,7 @@ describe("background-limiter", () => {
       const t2 = runBackground(() => blocker);
       const t3 = runBackground(async () => {});
       return new Promise<void>((done) => {
+        // oxlint-disable-next-line typescript/no-misused-promises -- test timer callback; setTimeout ignores the returned promise
         setTimeout(async () => {
           expect(backgroundLimiterStats().activeCount).toBe(2);
           expect(backgroundLimiterStats().pendingCount).toBe(1);

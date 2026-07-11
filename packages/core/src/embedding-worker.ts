@@ -507,7 +507,7 @@ function enqueue(msg: EmbedRequest): void {
   } else {
     queue.push(msg);
   }
-  drain();
+  void drain();
 }
 
 /**

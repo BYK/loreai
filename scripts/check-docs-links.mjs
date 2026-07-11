@@ -68,9 +68,9 @@ function waitForServer(url, timeoutMs) {
       if (Date.now() > deadline) {
         return reject(new Error(`server at ${url} did not become ready`));
       }
-      setTimeout(tick, 200);
+      setTimeout(() => void tick(), 200);
     };
-    tick();
+    void tick();
   });
 }
 
@@ -93,9 +93,13 @@ const root = new URL("..", import.meta.url).pathname;
 process.chdir(root);
 
 console.log("[check-links] building docs site...");
-const build = spawnSync("pnpm", ["--filter", "@loreai/website", "run", "build"], {
-  stdio: "inherit",
-});
+const build = spawnSync(
+  "pnpm",
+  ["--filter", "@loreai/website", "run", "build"],
+  {
+    stdio: "inherit",
+  },
+);
 if (build.status !== 0) {
   console.error("[check-links] site build failed");
   process.exit(1);

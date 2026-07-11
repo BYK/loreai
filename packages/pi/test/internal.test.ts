@@ -124,7 +124,7 @@ describe("runCompaction", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(`${GW}/v1/compact`);
-    expect((init?.headers as Record<string, string>)["x-lore-session-id"]).toBe(
+    expect((init!.headers as Record<string, string>)["x-lore-session-id"]).toBe(
       "sess-c",
     );
     expect(JSON.parse(init?.body as string)).toEqual({

@@ -40,7 +40,7 @@ export interface AgentDef {
 function safeRemote(cwd: string): string | null {
   const remote = getGitRemote(cwd);
   if (!remote) return null;
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   return remote.replace(/[\x00-\x1f\x7f]/g, "");
 }
 
@@ -50,7 +50,7 @@ function safeRemote(cwd: string): string | null {
  * `LORE_UPSTREAM_EXTRA_HEADERS` value-pass-through to Codex via `-c`.
  */
 function tomlQuote(value: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   const cleaned = value.replace(/[\x00-\x1f\x7f]/g, "");
   return `"${cleaned.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }

@@ -739,7 +739,7 @@ describe("runRecallFollowUpStreaming", () => {
     if (result.ok) {
       expect(result.reader).toBeDefined();
       expect(result.followUp).toBeDefined();
-      result.reader.cancel(); // cleanup
+      void result.reader.cancel(); // cleanup
     }
   });
 

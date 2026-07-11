@@ -35,7 +35,7 @@ document.querySelectorAll(".sr").forEach((element) => {
   revealObserver.observe(element);
 });
 
-(async () => {
+void (async () => {
   const versionBadge = document.getElementById("version-badge");
 
   if (versionBadge) {
@@ -92,6 +92,7 @@ retryButton?.addEventListener("click", () => {
   email?.focus();
 });
 
+// oxlint-disable-next-line typescript/no-misused-promises -- DOM submit handler; the event target ignores the returned promise
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
 

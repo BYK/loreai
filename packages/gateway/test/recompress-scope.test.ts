@@ -47,7 +47,7 @@ describe("upstream re-compression scoping (#1032 follow-up, wire-level)", () => 
     setUpstreamDispatcherForTest(null);
     await mock?.close();
     mock = undefined;
-    harness?.teardown();
+    if (harness) await harness.teardown();
     harness = undefined;
   });
 

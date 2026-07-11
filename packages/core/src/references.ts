@@ -490,7 +490,6 @@ export class DirectFsResolver implements ReferenceResolver {
   private view: RepoView | null = null;
   constructor(private readonly root: string) {}
 
-  // biome-ignore lint/suspicious/useAwait: async to satisfy the ReferenceResolver interface
   async resolve(refs: Reference[]): Promise<Map<string, RefStatus> | null> {
     // The file/command view is ref-independent and cached. Symbol presence IS
     // ref-dependent (we grep for exactly the cited names), so compute it per
@@ -640,7 +639,6 @@ export class DirectFsResolver implements ReferenceResolver {
 /** Always-neutral resolver: every batch is unverifiable. Used when the gateway
  *  cannot reach a filesystem and no probe is available. */
 export class NoopResolver implements ReferenceResolver {
-  // biome-ignore lint/suspicious/useAwait: async to satisfy the ReferenceResolver interface
   async resolve(_refs: Reference[]): Promise<Map<string, RefStatus> | null> {
     return null;
   }
@@ -866,7 +864,6 @@ export function parseProbeSnapshot(text: string): RepoView | null {
 export class SyntheticProbeResolver implements ReferenceResolver {
   constructor(private readonly probeText: string) {}
 
-  // biome-ignore lint/suspicious/useAwait: async to satisfy the ReferenceResolver interface
   async resolve(refs: Reference[]): Promise<Map<string, RefStatus> | null> {
     const view = parseProbeSnapshot(this.probeText);
     if (view == null) return null;

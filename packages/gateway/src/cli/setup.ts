@@ -383,7 +383,7 @@ export function normalizeBaseUrl(
  * or could be used for injection (double-quotes, backslashes, control chars).
  */
 function validateUrl(url: string): void {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional control-character sanitization
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
   if (/[\x00-\x1f"\\]/.test(url)) {
     throw new Error(`Invalid characters in URL: ${url}`);
   }
@@ -495,7 +495,7 @@ function isTopLevel(lines: string[], index: number): boolean {
     const line = lines[i].trim();
     if (line === "" || line.startsWith("#")) continue;
     // If we hit a section header, this key is inside that section
-    if (/^\[/.test(line)) return false;
+    if (line.startsWith("[")) return false;
     // Other bare keys don't tell us anything — keep walking back
   }
   // Reached the start of the file without hitting a section header → top level

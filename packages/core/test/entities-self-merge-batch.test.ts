@@ -63,7 +63,6 @@ describe("mergeSelfPersonDuplicates alias lookup is batched (no N+1)", () => {
       });
     }
 
-    // biome-ignore lint/style/noNonNullAssertion: just created
     const selfEntity = entities.getWithAliases(self.id)!;
 
     const counts: Record<string, number> = {};

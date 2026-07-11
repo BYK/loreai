@@ -2531,9 +2531,9 @@ describe("global histogram persistence", () => {
     const binCount = HISTOGRAM_BINS.length + 1;
 
     // Simulate old-format DB rows: work (10 obs in bin 0), evening (5 obs in bin 3)
-    const workCounts = new Array(binCount).fill(0);
+    const workCounts = Array.from({ length: binCount }, () => 0);
     workCounts[0] = 10;
-    const eveningCounts = new Array(binCount).fill(0);
+    const eveningCounts = Array.from({ length: binCount }, () => 0);
     eveningCounts[3] = 5;
 
     d.query(
@@ -2557,7 +2557,7 @@ describe("global histogram persistence", () => {
     const binCount = HISTOGRAM_BINS.length + 1;
 
     // Insert old-format rows
-    const workCounts = new Array(binCount).fill(0);
+    const workCounts = Array.from({ length: binCount }, () => 0);
     workCounts[0] = 10;
     d.query(
       "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -2586,9 +2586,9 @@ describe("global histogram persistence", () => {
     const binCount = HISTOGRAM_BINS.length + 1;
 
     // Insert old-format rows
-    const workCounts = new Array(binCount).fill(0);
+    const workCounts = Array.from({ length: binCount }, () => 0);
     workCounts[0] = 7;
-    const nightCounts = new Array(binCount).fill(0);
+    const nightCounts = Array.from({ length: binCount }, () => 0);
     nightCounts[5] = 3;
     d.query(
       "INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at) VALUES (?, ?, ?, ?, ?)",

@@ -82,7 +82,7 @@ export async function commandImport(
   // core's provider registry. A local project record may be created later by
   // the belt-and-suspenders recordImport() call — that's intentional so the
   // local DB has dedup history if the user later runs without LORE_REMOTE_URL.
-  load(projectPath);
+  await load(projectPath);
   if (!remote) {
     ensureProject(projectPath);
   }

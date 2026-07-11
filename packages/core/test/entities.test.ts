@@ -918,7 +918,6 @@ describe("entities", () => {
       entities.merge(target.id, source.id);
 
       expect(entities.get(source.id)).toBeNull();
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const updated = entities.getWithAliases(target.id)!;
       const aliasValues = updated.aliases.map((a) => a.alias_value);
       // Original target aliases preserved
@@ -950,7 +949,6 @@ describe("entities", () => {
       entities.merge(target.id, source.id);
 
       expect(entities.get(source.id)).toBeNull();
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const updated = entities.getWithAliases(target.id)!;
       const aliasValues = updated.aliases.map((a) => a.alias_value);
       // Shared alias preserved (not duplicated, not lost)
@@ -998,7 +996,6 @@ describe("entities", () => {
         crossProject: true,
       });
 
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const selfEntity = entities.getWithAliases(self.id)!;
       const count = entities.mergeSelfPersonDuplicates(selfEntity);
 
@@ -1023,7 +1020,6 @@ describe("entities", () => {
         crossProject: true,
       });
 
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const selfEntity = entities.getWithAliases(self.id)!;
       const count = entities.mergeSelfPersonDuplicates(selfEntity);
 
@@ -1043,7 +1039,6 @@ describe("entities", () => {
         crossProject: true,
       });
 
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const selfEntity = entities.getWithAliases(self.id)!;
       const count = entities.mergeSelfPersonDuplicates(selfEntity);
 
@@ -1082,7 +1077,6 @@ describe("entities", () => {
         crossProject: true,
       });
 
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const selfEntity = entities.getWithAliases(self.id)!;
       const count = entities.mergeSelfPersonDuplicates(selfEntity);
 
@@ -1114,11 +1108,9 @@ describe("entities", () => {
       // Verify person was actually created separately
       expect(person.created).toBe(true);
       expect(entities.get(person.id)).not.toBeNull();
-      // biome-ignore lint/style/noNonNullAssertion: entity was just created above
       const personAliases = entities.getWithAliases(person.id)!.aliases;
       expect(personAliases.map((a) => a.alias_value)).toContain("alice-gh");
 
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const selfEntity = entities.getWithAliases(self.id)!;
       const count = entities.mergeSelfPersonDuplicates(selfEntity);
       expect(count).toBe(1);
@@ -1127,7 +1119,6 @@ describe("entities", () => {
       expect(entities.get(person.id)).toBeNull();
 
       // Re-fetch self with aliases
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const updated = entities.getWithAliases(self.id)!;
       const aliasValues = updated.aliases.map((a) => a.alias_value);
       expect(aliasValues).toContain("alice-gh");
@@ -1155,7 +1146,6 @@ describe("entities", () => {
         crossProject: true,
       });
 
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const selfEntity = entities.getWithAliases(self.id)!;
       const count = entities.mergeSelfPersonDuplicates(selfEntity);
 
@@ -1176,7 +1166,6 @@ describe("entities", () => {
         crossProject: true,
       });
 
-      // biome-ignore lint/style/noNonNullAssertion: getWithAliases() returns null for missing entities
       const selfEntity = entities.getWithAliases(self.id)!;
       const count = entities.mergeSelfPersonDuplicates(selfEntity);
       expect(count).toBe(1);

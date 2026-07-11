@@ -43,9 +43,7 @@ export class Database extends DatabaseSync {
   ) {
     super(
       path,
-      supportsAllowExtension()
-        ? { ...(options ?? {}), allowExtension: true }
-        : options,
+      supportsAllowExtension() ? { ...options, allowExtension: true } : options,
     );
   }
 
@@ -59,14 +57,11 @@ export class Database extends DatabaseSync {
     if (!entry) {
       const stmt = this.prepare(sql);
       entry = {
-        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite prepare().all() accepts variadic args
         all: (...args: any[]) => stmt.all(...args) as Record<string, unknown>[],
-        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite prepare().get() accepts variadic args
         get: (...args: any[]) => {
           const result = stmt.get(...args) as Record<string, unknown> | null;
           return result ?? null;
         },
-        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite prepare().run() accepts variadic args
         run: (...args: any[]) =>
           stmt.run(...args) as { changes: number; lastInsertRowid: bigint },
       };

@@ -324,7 +324,7 @@ function makeClient() {
               return b;
             },
             // Deliberate thenable — mirrors supabase-js's awaitable query builder.
-            // biome-ignore lint/suspicious/noThenProperty: faithful PostgREST builder mock
+            // oxlint-disable-next-line unicorn/no-thenable -- faithful PostgREST builder mock
             then(
               resolve: (v: unknown) => unknown,
               reject?: (e: unknown) => unknown,

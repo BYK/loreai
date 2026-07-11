@@ -64,7 +64,7 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
   let harness: Harness;
 
   afterEach(async () => {
-    await harness?.teardown();
+    if (harness) await harness.teardown();
   });
 
   it("adopts the prior session when a resumed conversation arrives under a new x-lore-session-id after restart", async () => {

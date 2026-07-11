@@ -312,7 +312,7 @@ describe("cache stability (e2e)", () => {
   afterEach(async () => {
     const { resetCalibration } = await import("../../core/src/gradient");
     resetCalibration();
-    await harness?.teardown();
+    if (harness) await harness.teardown();
   });
   it("guard rejects synthetic distilled-prefix message rewrites", () => {
     // Regression for the gap in #748: accepting every messages[N] divergence

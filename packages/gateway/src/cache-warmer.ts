@@ -553,7 +553,7 @@ export function clearWarmupAuthDisabled(sessionID: string): void {
 
 /** Create an empty histogram with the right number of bins. */
 export function createHistogram(): InterTurnHistogram {
-  return { counts: new Array(BIN_COUNT).fill(0), total: 0 };
+  return { counts: Array.from({ length: BIN_COUNT }, () => 0), total: 0 };
 }
 
 /**

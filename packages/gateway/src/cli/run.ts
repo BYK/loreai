@@ -242,22 +242,26 @@ export async function commandRun(
 
   // Wait for child to exit, then tear down gateway (only if we own it)
   return new Promise<void>((_resolve) => {
-    child.on("exit", async (code, signal) => {
-      // Deadline-bounded so a slow shutdown step can't hang the process.
-      if (owned) await runShutdownWithDeadline(shutdown);
-      // Exit with the child's code (or 128 + signal number for signal deaths)
-      if (signal) {
-        safeExit(signalExitCode(signal));
-      }
-      safeExit(code ?? 0);
+    child.on("exit", (code, signal) => {
+      void (async () => {
+        // Deadline-bounded so a slow shutdown step can't hang the process.
+        if (owned) await runShutdownWithDeadline(shutdown);
+        // Exit with the child's code (or 128 + signal number for signal deaths)
+        if (signal) {
+          safeExit(signalExitCode(signal));
+        }
+        safeExit(code ?? 0);
+      })();
     });
 
-    child.on("error", async (err) => {
-      console.error(
-        `[lore] Failed to launch ${target.command}: ${err.message}`,
-      );
-      if (owned) await runShutdownWithDeadline(shutdown);
-      safeExit(1);
+    child.on("error", (err) => {
+      void (async () => {
+        console.error(
+          `[lore] Failed to launch ${target.command}: ${err.message}`,
+        );
+        if (owned) await runShutdownWithDeadline(shutdown);
+        safeExit(1);
+      })();
     });
   });
 }
