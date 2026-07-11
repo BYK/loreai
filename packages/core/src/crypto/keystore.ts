@@ -50,6 +50,20 @@ export class KeystoreLockedError extends Error {
   }
 }
 
+/**
+ * Thrown by getScopeKey(..., { mint: false }) when a scope has no wrapped DEK for this member
+ * yet — a joining team member whose admin has not group-wrapped the scope's DEK to them. The
+ * caller must DEFER (the DEK is unavailable this cycle), NEVER mint a fresh (divergent) key.
+ */
+export class ScopeKeyUnavailable extends Error {
+  constructor(scopeId: string, memberUserId: string) {
+    super(
+      `no wrapped DEK for scope ${scopeId} member ${memberUserId} — awaiting an admin group-wrap`,
+    );
+    this.name = "ScopeKeyUnavailable";
+  }
+}
+
 // Process-lifetime caches. Cleared by lock(); tests get a fresh db + call lock().
 let identityCache: Keypair | null = null;
 const dekCache = new Map<string, Uint8Array>();
@@ -141,23 +155,43 @@ export function getAccountIdentity(): Keypair {
 export function getScopeKey(
   scopeId: string,
   memberUserId: string = scopeId,
+  opts?: { mint?: boolean },
 ): Promise<Uint8Array> {
   const cached = dekCache.get(scopeId);
   if (cached) return Promise.resolve(cached);
   const inflight = pendingScopeKey.get(scopeId);
   if (inflight) return inflight;
-  const p = loadOrCreateScopeKey(scopeId, memberUserId).finally(() => {
+  // mint defaults to true (the personal / DEK-originator path). A JOINING team member MUST
+  // pass mint:false: the scope's DEK is minted once by its originator and wrapped to each
+  // member — if a member without a wrap yet minted a FRESH DEK here it would diverge from the
+  // scope's real key, making everyone's ciphertext mutually unreadable. mint:false instead
+  // throws ScopeKeyUnavailable so the caller defers until an admin group-wraps the DEK to them.
+  //
+  // mint:false is a DIVERGENCE-SAFETY guard, NOT an access-control boundary. Access control is
+  // enforced by RLS (a member reads only their own scope_keys row) + HPKE (an unwrap needs the
+  // member's own secret). One device = one identity; a warm dekCache hit is proof THIS device's
+  // user already legitimately unwrapped this per-scope DEK, so returning it (below) regardless
+  // of memberUserId is correct — memberUserId only selects which wrap row to unwrap on a MISS,
+  // and every member's wrap yields the same per-scope DEK. Never treat this flag as authz.
+  const mint = opts?.mint ?? true;
+  const p = loadOrCreateScopeKey(scopeId, memberUserId, mint).finally(() => {
     // Delete only if THIS promise is still the registered one — a lock()/installIdentity
     // may have cleared the map and a newer call may have registered its own promise.
     if (pendingScopeKey.get(scopeId) === p) pendingScopeKey.delete(scopeId);
   });
-  pendingScopeKey.set(scopeId, p);
+  // Only the MINTING promise is shared as the in-flight one: it produces the scope DEK, so
+  // every concurrent caller (mint:true OR a mint:false read racing it) may safely await it. A
+  // mint:false read that will REJECT (no wrap yet) must NOT be registered — otherwise a
+  // concurrent mint:true originator would receive that rejection via the shared slot and fail
+  // to mint (keyed by scopeId, not intent). An unregistered read still caches its DEK on success.
+  if (mint) pendingScopeKey.set(scopeId, p);
   return p;
 }
 
 async function loadOrCreateScopeKey(
   scopeId: string,
   memberUserId: string,
+  mint: boolean,
 ): Promise<Uint8Array> {
   const epoch = keystoreEpoch;
   const id = getAccountIdentity();
@@ -176,6 +210,9 @@ async function loadOrCreateScopeKey(
     const dek = await unwrapDek(id.secretKey, toU8(row.w));
     cache(dek);
     return dek;
+  }
+  if (!mint) {
+    throw new ScopeKeyUnavailable(scopeId, memberUserId);
   }
   const dek = generateDek();
   const wrapped = await wrapDekForMember(id.publicKey, dek);
@@ -234,6 +271,46 @@ export function putWrappedScopeKey(
       updatedAt,
     );
   dekCache.delete(scopeId);
+}
+
+/**
+ * Group-wrap: an ADMIN wraps a scope's DEK to another member's identity public key and stores
+ * the `scope_keys(scope, member)` row locally (the sync engine pushes it to the remote so the
+ * member's device can pull + unwrap it). `selfUserId` is the caller, whose own self-wrap holds
+ * the scope DEK. HPKE: only `memberPublicKey` is needed — the member unwraps with their secret.
+ *
+ * FAIL-CLOSED: the self-lookup is `mint:false`. The caller must ALREADY hold the scope DEK
+ * (throws ScopeKeyUnavailable otherwise) — this primitive NEVER originates a key. That closes a
+ * fork hazard: an admin-by-role who does not yet hold their own wrap (e.g. the window between
+ * add_scope_member(...,'admin') and their wrap arriving) must not mint a FRESH divergent DEK and
+ * then propagate it. Origination is a separate, explicit step (the DEK originator mints via the
+ * normal content-encrypt path / getScopeKey(scope) before wrapping to anyone).
+ *
+ * The wrap is sealed at the scope's CURRENT epoch (read from the caller's own row), so this
+ * stays correct once rotation (E-4c-3) bumps epochs. IDEMPOTENT: skips the write if the member
+ * already holds a wrap at this epoch or newer — HPKE is non-deterministic, so re-wrapping would
+ * emit different ciphertext that the remote first-write-wins guard (0012) rejects as poison.
+ */
+export async function wrapScopeKeyForMember(
+  scopeId: string,
+  selfUserId: string,
+  memberUserId: string,
+  memberPublicKey: Uint8Array,
+): Promise<void> {
+  const dek = await getScopeKey(scopeId, selfUserId, { mint: false });
+  const epochOf = (member: string): number | undefined =>
+    (
+      db()
+        .query(
+          "SELECT key_epoch AS e FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+        )
+        .get(scopeId, member) as { e: number } | undefined
+    )?.e;
+  const epoch = epochOf(selfUserId) ?? 0;
+  const existing = epochOf(memberUserId);
+  if (existing !== undefined && existing >= epoch) return; // already wrapped at ≥ this epoch
+  const wrapped = await wrapDekForMember(memberPublicKey, dek);
+  putWrappedScopeKey(scopeId, memberUserId, wrapped, epoch, Date.now());
 }
 
 export interface EscrowRecord {
