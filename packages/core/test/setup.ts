@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, afterEach } from "vitest";
-import { close } from "../src/db";
+import { close, invalidateProjectIdCache } from "../src/db";
 import { silenceStderr } from "../src/log";
 
 // Create an isolated temporary database for the entire test run.
@@ -87,6 +87,11 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 // Reset after every test so silenced state never crosses a test boundary.
 afterEach(() => {
   silenceStderr(false);
+  // The whole run shares one temp DB (single db() instance), so the per-
+  // connection project path→id memo persists across tests. Clear it after each
+  // test to make isolation explicit — a settled/alias mapping cached by one
+  // test must never be served to another test that reuses the same path.
+  invalidateProjectIdCache();
 });
 
 afterAll(() => {

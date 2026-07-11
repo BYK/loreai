@@ -658,6 +658,27 @@ describe("db", () => {
         db().query("SELECT 1 AS n FROM projects WHERE id = ?").get(id2),
       ).toBeTruthy();
     });
+
+    test("mergeProjectInternal invalidates the memo (source path resolves to the winner, not the deleted source)", () => {
+      const loserPath = "/test/memo-merge/loser";
+      const winnerPath = "/test/memo-merge/winner";
+      const loser = ensureProject(loserPath);
+      const winner = ensureProject(winnerPath);
+      // Make the loser remote-backed so its settled exact-path row is memoized
+      // (a remote-less row is intentionally never cached).
+      db()
+        .query("UPDATE projects SET git_remote = ? WHERE id = ?")
+        .run("github.com/test/memo-merge", loser);
+      expect(ensureProject(loserPath)).toBe(loser); // primes the memo
+
+      // Merge deletes the loser row and re-points loserPath as an alias→winner.
+      // Without invalidation the memo would keep serving the DELETED loser id —
+      // a dangling FK target for the next temporal/knowledge write.
+      mergeProjectInternal(loser, winner);
+
+      expect(ensureProject(loserPath)).toBe(winner);
+      expect(projectId(loserPath)).toBe(winner);
+    });
   });
 
   test("ensureProject deduplicates via git_remote", () => {
