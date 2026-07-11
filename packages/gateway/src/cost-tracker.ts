@@ -163,6 +163,22 @@ export type HistoricalEstimates = {
     totalWorkerCost: number;
     /** Persisted conversation cost (from sessions that went idle). */
     persistedConversationCost: number;
+    /**
+     * Per-bucket worker spend, accumulated from persisted
+     * `session_state.worker_breakdown` snapshots. Sessions written before this
+     * field existed (pre-migration) contribute to `totalWorkerCost` but not
+     * here, so this is a best-effort attribution view of where worker cost went.
+     * Warmup is intentionally EXCLUDED here — it is already aggregated in the
+     * dedicated `warmupCost` field, and duplicating it would risk a double-count
+     * if a caller ever summed both. (The per-session `worker_breakdown` JSON
+     * still carries all five buckets as a faithful snapshot.)
+     */
+    workerBreakdown: {
+      distillation: { cost: number; calls: number };
+      curation: { cost: number; calls: number };
+      compaction: { cost: number; calls: number };
+      recall: { cost: number; calls: number };
+    };
   };
 };
 
@@ -1145,6 +1161,12 @@ export function computeHistoricalEstimates(
     messageCount: 0,
     totalWorkerCost: 0,
     persistedConversationCost: 0,
+    workerBreakdown: {
+      distillation: { cost: 0, calls: 0 },
+      curation: { cost: 0, calls: 0 },
+      compaction: { cost: 0, calls: 0 },
+      recall: { cost: 0, calls: 0 },
+    },
   };
 
   const sessionEstimates: HistoricalEstimates["sessions"] = [];
@@ -1282,6 +1304,24 @@ export function computeHistoricalEstimates(
         // The persisted workerCost includes all 5 buckets (distillation, curation,
         // compaction, recall, warmup) from exact API-reported usage.
         totals.totalWorkerCost += persisted.workerCost;
+
+        // Attribute the aggregate to buckets when the split was persisted
+        // (session_state.worker_breakdown). Older rows lack it and contribute
+        // only to totalWorkerCost above. Warmup is deliberately omitted here —
+        // it is aggregated separately in totals.warmupCost, so summing it into
+        // the breakdown too would double-count.
+        const bd = persisted.workerBreakdown;
+        if (bd) {
+          for (const k of [
+            "distillation",
+            "curation",
+            "compaction",
+            "recall",
+          ] as const) {
+            totals.workerBreakdown[k].cost += bd[k]?.cost ?? 0;
+            totals.workerBreakdown[k].calls += bd[k]?.calls ?? 0;
+          }
+        }
 
         // Prefer persisted avoided compaction data over re-simulation.
         // Live tracking uses real API-reported total input tokens; the

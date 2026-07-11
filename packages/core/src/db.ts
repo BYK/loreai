@@ -1705,6 +1705,19 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE temporal_messages ADD COLUMN restored_at INTEGER;
   `,
+  // Version 68 (#961 follow-up): session_state.worker_breakdown — a LOCAL-ONLY JSON
+  // snapshot of per-bucket worker spend, shaped
+  // {distillation,curation,compaction,recall,warmup: {cost,calls}}. Until now only the
+  // AGGREGATE worker_cost was persisted, so once a session ended the split across
+  // background tasks was lost — you couldn't tell whether distillation, curation, or
+  // recall drove the worker overhead. This column captures the breakdown for cost
+  // observability (UI + `lore eval`). NULL for pre-migration / never-costed rows (readers
+  // fall back to the aggregate worker_cost). NEVER synced (not in session_state's sync
+  // surface — it's derived local telemetry). Re-runs harmlessly on recovery
+  // (stripAppliedAlters drops the duplicate ALTER).
+  `
+  ALTER TABLE session_state ADD COLUMN worker_breakdown TEXT;
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3816,6 +3829,20 @@ export function saveForceMinLayer(sessionID: string, layer: number): void {
 }
 
 /** Persisted cost snapshot for a session. */
+/**
+ * Per-bucket worker (background-task) spend. Mirrors the in-memory
+ * `SessionCosts["workers"]` shape in the gateway cost-tracker. Persisted as JSON
+ * in `session_state.worker_breakdown` so the split survives the session and can
+ * be inspected for cost observability. `cost` is USD; `calls` is the LLM call count.
+ */
+export type WorkerCostBreakdown = {
+  distillation: { cost: number; calls: number };
+  curation: { cost: number; calls: number };
+  compaction: { cost: number; calls: number };
+  recall: { cost: number; calls: number };
+  warmup: { cost: number; calls: number };
+};
+
 export type SessionCostSnapshot = {
   conversationCost: number;
   workerCost: number;
@@ -3831,6 +3858,12 @@ export type SessionCostSnapshot = {
   batchSavings: number;
   avoidedCompactions: number;
   avoidedCompactionCost: number;
+  /**
+   * Per-bucket worker spend split. Absent (undefined) when unavailable
+   * (pre-migration rows, or sessions written before this field existed) —
+   * readers fall back to the aggregate `workerCost`.
+   */
+  workerBreakdown?: WorkerCostBreakdown;
 };
 
 /**
@@ -3847,8 +3880,8 @@ export function saveSessionCosts(
          conversation_cost, worker_cost, conversation_turns,
          cache_read_tokens, cache_write_tokens,
          warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
-         avoided_compactions, avoided_compaction_cost)
-       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         avoided_compactions, avoided_compaction_cost, worker_breakdown)
+       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          conversation_cost = excluded.conversation_cost,
          worker_cost = excluded.worker_cost,
@@ -3863,6 +3896,7 @@ export function saveSessionCosts(
          batch_savings = excluded.batch_savings,
          avoided_compactions = excluded.avoided_compactions,
          avoided_compaction_cost = excluded.avoided_compaction_cost,
+         worker_breakdown = excluded.worker_breakdown,
          updated_at = excluded.updated_at`,
     )
     .run(
@@ -3882,7 +3916,24 @@ export function saveSessionCosts(
       costs.batchSavings,
       costs.avoidedCompactions,
       costs.avoidedCompactionCost,
+      costs.workerBreakdown ? JSON.stringify(costs.workerBreakdown) : null,
     );
+}
+
+/**
+ * Parse a `worker_breakdown` JSON column value into a WorkerCostBreakdown.
+ * Returns null for missing/blank/invalid JSON so a corrupt or pre-migration
+ * value never throws on the read path — callers fall back to the aggregate.
+ */
+function parseWorkerBreakdown(raw: unknown): WorkerCostBreakdown | undefined {
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return parsed as WorkerCostBreakdown;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -3897,7 +3948,7 @@ export function loadSessionCosts(
       `SELECT conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
               warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
-              avoided_compactions, avoided_compaction_cost
+              avoided_compactions, avoided_compaction_cost, worker_breakdown
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -3914,6 +3965,7 @@ export function loadSessionCosts(
     batch_savings: number;
     avoided_compactions: number;
     avoided_compaction_cost: number;
+    worker_breakdown: string | null;
   } | null;
   if (!row) return null;
   return {
@@ -3930,6 +3982,7 @@ export function loadSessionCosts(
     batchSavings: row.batch_savings,
     avoidedCompactions: row.avoided_compactions,
     avoidedCompactionCost: row.avoided_compaction_cost,
+    workerBreakdown: parseWorkerBreakdown(row.worker_breakdown),
   };
 }
 
@@ -3943,7 +3996,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       `SELECT session_id, conversation_cost, worker_cost, conversation_turns,
               cache_read_tokens, cache_write_tokens,
               warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
-              avoided_compactions, avoided_compaction_cost
+              avoided_compactions, avoided_compaction_cost, worker_breakdown
        FROM session_state
        WHERE conversation_turns > 0 OR warmup_savings > 0 OR warmup_cost > 0 OR ttl_savings > 0 OR batch_savings > 0`,
     )
@@ -3962,6 +4015,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     batch_savings: number;
     avoided_compactions: number;
     avoided_compaction_cost: number;
+    worker_breakdown: string | null;
   }>;
   const result = new Map<string, SessionCostSnapshot>();
   for (const row of rows) {
@@ -3979,6 +4033,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       batchSavings: row.batch_savings,
       avoidedCompactions: row.avoided_compactions,
       avoidedCompactionCost: row.avoided_compaction_cost,
+      workerBreakdown: parseWorkerBreakdown(row.worker_breakdown),
     });
   }
   return result;

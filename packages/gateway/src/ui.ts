@@ -3002,6 +3002,22 @@ function pageCosts(): string {
       body += ` <span style="color:var(--fg3);font-size:0.85em">(distillation-only estimate: ${formatUSD(hist.distillationCost)})</span>`;
     }
     body += `</td></tr>`;
+    // Break out where the worker overhead actually went, by background task.
+    // Populated from persisted per-bucket snapshots (session_state.worker_breakdown);
+    // sessions recorded before that column existed contribute to the total above
+    // but not to these rows.
+    const wb = hist.workerBreakdown;
+    const bucketRow = (
+      label: string,
+      b: { cost: number; calls: number },
+    ): string =>
+      b.cost > 0
+        ? `<tr><td style="padding-left:1.4em;color:var(--fg3);font-size:0.9em">— ${label}</td><td style="color:var(--fg3);font-size:0.9em">${formatUSD(b.cost)} <span style="font-size:0.85em">(&times;${b.calls})</span></td></tr>`
+        : "";
+    body += bucketRow("distillation", wb.distillation);
+    body += bucketRow("curation", wb.curation);
+    body += bucketRow("compaction", wb.compaction);
+    body += bucketRow("recall", wb.recall);
     // Break out the cache-warmup cost as a visible component of worker overhead.
     // It is ALREADY included in totalWorkerCost above (so the net below is not
     // double-subtracted) — this row just surfaces how much of the overhead is

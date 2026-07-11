@@ -137,6 +137,9 @@ function persistSessionCosts(sessionID: string): void {
       batchSavings: costs.batchSavings,
       avoidedCompactions: costs.counterfactual.avoidedCompactions,
       avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+      // Per-bucket split so the worker overhead can be attributed to
+      // distillation / curation / compaction / recall / warmup after the fact.
+      workerBreakdown: costs.workers,
     });
   }
 }

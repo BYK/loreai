@@ -59,7 +59,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(67);
+    expect(row.version).toBe(68);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -116,7 +116,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(67);
+    expect(ver.version).toBe(68);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -888,6 +888,59 @@ describe("db", () => {
     saveSessionCosts(sid, snapshot);
     const loaded = loadSessionCosts(sid);
     expect(loaded).toEqual(snapshot);
+  });
+
+  test("saveSessionCosts round-trips the per-bucket worker breakdown", () => {
+    const sid = `test-costs-breakdown-${crypto.randomUUID()}`;
+    const workerBreakdown = {
+      distillation: { cost: 0.5, calls: 4 },
+      curation: { cost: 0.2, calls: 2 },
+      compaction: { cost: 0.05, calls: 1 },
+      recall: { cost: 0.05, calls: 3 },
+      warmup: { cost: 0.1, calls: 1 },
+    };
+    saveSessionCosts(sid, {
+      conversationCost: 2.0,
+      workerCost: 0.9,
+      conversationTurns: 12,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 100,
+      warmupSavings: 0,
+      warmupCost: 0.1,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+      workerBreakdown,
+    });
+    // Survives both the single-session and bulk load paths.
+    expect(loadSessionCosts(sid)?.workerBreakdown).toEqual(workerBreakdown);
+    expect(loadAllSessionCosts().get(sid)?.workerBreakdown).toEqual(
+      workerBreakdown,
+    );
+  });
+
+  test("loadSessionCosts leaves workerBreakdown undefined for legacy rows (none stored)", () => {
+    const sid = `test-costs-nobreakdown-${crypto.randomUUID()}`;
+    saveSessionCosts(sid, {
+      conversationCost: 1.0,
+      workerCost: 0.2,
+      conversationTurns: 3,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+      // workerBreakdown intentionally omitted → column stored NULL
+    });
+    expect(loadSessionCosts(sid)?.workerBreakdown).toBeUndefined();
   });
 
   test("saveSessionCosts overwrites existing data", () => {
