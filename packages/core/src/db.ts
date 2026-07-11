@@ -3744,8 +3744,15 @@ export function ensureProject(
         // #1246 (P2): the project just became remote-backed — re-seed the content that
         // was gated out while it was remote-less (else it never gets backed up).
         fireProjectRemoteBackfilled(existing.id);
+        // git_remote is now settled and existing.id survived any conflict merge
+        // above (it is the merge TARGET) — memoize so the next call for this
+        // path skips the exact-path lookup. fireProjectRemoteBackfilled cleared
+        // the map, so this set must come AFTER it.
+        cache.set(path, existing.id);
+        return existing.id;
       }
-      // Uncached: git_remote may still be NULL (no remote found) — keep retrying.
+      // Still remote-less (no remote resolved) — leave uncached so a later call
+      // with an on-disk/supplied remote can still lazily backfill.
       return existing.id;
     }
     // Settled remote-backed row — stable mapping, safe to memoize.

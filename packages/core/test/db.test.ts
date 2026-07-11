@@ -784,6 +784,22 @@ describe("db", () => {
         .get(id1) as { git_remote: string | null };
       expect(rowAfter.git_remote).toBe("github.com/test/backfill-repo");
     });
+
+    test("memoizes the mapping after a successful git_remote backfill (#3K)", () => {
+      const path = "/test/backfill-cache/original";
+      const id = ensureProject(path); // remote-less create → left uncached
+      // The backfill settles git_remote and, per the #3K memo, caches path→id.
+      expect(
+        ensureProject(path, undefined, "github.com/test/backfill-cache"),
+      ).toBe(id);
+      // Raw-delete the row WITHOUT invalidating: a cache HIT must still return
+      // id, proving the post-backfill mapping was memoized (so the next call
+      // skips the exact-path lookup — the extra lookup Seer flagged).
+      db().query("DELETE FROM projects WHERE id = ?").run(id);
+      expect(
+        ensureProject(path, undefined, "github.com/test/backfill-cache"),
+      ).toBe(id);
+    });
   });
 
   // Regression: the "git-remote magnet" bug. A non-repo path (e.g. a parent
