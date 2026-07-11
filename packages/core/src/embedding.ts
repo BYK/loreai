@@ -479,6 +479,16 @@ export class LocalProviderUnavailableError extends Error {
  *  the transient-init-retry budget below being exhausted. */
 let localProviderKnownBroken = false;
 let localProviderErrorLogged = false;
+/** True when the latch cause is the ONE that never recovers on a re-probe: the
+ *  optional embedding stack is absent (needs a reinstall, not a retry). Every
+ *  other latch cause (WASM-fatal, floor OOM, exhausted transient-init budget, a
+ *  non-zero worker exit) can plausibly clear on a fresh worker, so self-heal
+ *  re-probes those on a slow cadence. */
+let localStackMissing = false;
+/** Epoch ms of the last self-heal re-probe; `0` = never (primed on first tick). */
+let lastSelfHealAt = 0;
+/** How long to wait between self-heal re-probes of a latched local provider. */
+const SELF_HEAL_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 
 // --- Transient init-failure retry (self-heal a one-off worker init failure) ---
 // A single model-init failure used to latch the provider FTS-only for the whole
@@ -541,16 +551,54 @@ export function _setLocalInitRetryAtForTest(at: number): void {
 export function _resetLocalProviderProbe(): void {
   localProviderKnownBroken = false;
   localProviderErrorLogged = false;
+  localStackMissing = false;
   localInitFailures = 0;
   localInitRetryAt = 0;
+  lastSelfHealAt = 0;
 }
 
 /** For tests: simulate the local provider being unavailable, without
  *  actually spawning a worker. After this call, `isAvailable()` returns
- *  false for the local provider. */
-export function _markLocalProviderUnavailable(): void {
+ *  false for the local provider. Pass `stackMissing: true` to simulate the
+ *  ONE terminal (non-self-healing) cause. */
+export function _markLocalProviderUnavailable(stackMissing = false): void {
   localProviderKnownBroken = true;
+  localStackMissing = stackMissing;
   localProviderErrorLogged = true; // suppress the info log in tests
+}
+
+/**
+ * Self-heal a permanently-latched LOCAL embedding provider: on a slow cadence,
+ * clear the latch so the next embed spawns a fresh worker and re-attempts init.
+ * Only recoverable causes are re-probed — a missing optional stack
+ * (`localStackMissing`) is skipped, since only a reinstall fixes that. Safe to
+ * call every idle tick: it self-gates on the latch, the cause, and
+ * `SELF_HEAL_INTERVAL_MS`, and primes its clock on the first call so it never
+ * re-probes immediately after a fresh latch. Returns true iff it cleared the
+ * latch on this call. `nowMs` is injectable for tests.
+ */
+export function maybeSelfHealEmbeddingProvider(nowMs = Date.now()): boolean {
+  if (!localProviderKnownBroken || localStackMissing) return false;
+  if (lastSelfHealAt === 0) {
+    // Prime: wait a full interval before the first re-probe.
+    lastSelfHealAt = nowMs;
+    return false;
+  }
+  if (nowMs - lastSelfHealAt < SELF_HEAL_INTERVAL_MS) return false;
+  lastSelfHealAt = nowMs;
+  // Clear the latch + transient counters so getProvider() rebuilds a fresh pool
+  // and the next embed re-inits. If it fails again it simply re-latches — cheap
+  // at this cadence.
+  localProviderKnownBroken = false;
+  localProviderErrorLogged = false;
+  localInitFailures = 0;
+  localInitRetryAt = 0;
+  log.info(
+    "self-heal: re-probing a previously-latched local embedding provider " +
+      "(a fresh worker retries init on the next embed; re-latches if it fails again)",
+  );
+  void resetProvider();
+  return true;
 }
 
 /** Test seam: when set, `ensureWorker()` uses this factory instead of spawning
@@ -826,8 +874,11 @@ class LocalProvider implements EmbeddingProvider {
             if (isMissingLocalStackError(msg.error)) {
               // Optional local-embedding stack not installed (#1026 — an
               // expected, actionable degraded state that will NOT self-heal on
-              // its own). Latch permanently; recall degrades to FTS-only.
+              // its own). Latch permanently; recall degrades to FTS-only. Flag
+              // it so the self-heal re-probe skips it (a reinstall, not a retry,
+              // is what recovers this).
               localProviderKnownBroken = true;
+              localStackMissing = true;
               if (!localProviderErrorLogged) {
                 localProviderErrorLogged = true;
                 log.warn(

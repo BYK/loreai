@@ -53,6 +53,7 @@ import {
   vacuum,
   freelistBytes,
   dbFileSizeBytes,
+  embedding,
 } from "@loreai/core";
 import type { CacheStrategy, ChangedEntry, LLMClient } from "@loreai/core";
 import {
@@ -509,6 +510,17 @@ export function startIdleScheduler(
       } catch (e) {
         log.error("global dead-entry sweep error:", e);
       }
+    }
+
+    // Self-heal a latched local embedding provider — a slow-cadence re-probe so
+    // a transient init failure (or floor OOM) that latched the provider
+    // FTS-only for the whole process lifetime can recover without a restart.
+    // Self-gating (latch + recoverable cause + interval, primed on first call)
+    // and cheap, so it is safe to call every tick. It logs when it fires.
+    try {
+      embedding.maybeSelfHealEmbeddingProvider(now);
+    } catch (e) {
+      log.error("embedding self-heal error:", e);
     }
 
     // Global dead-reference cleanup — once per tick, not per session.
