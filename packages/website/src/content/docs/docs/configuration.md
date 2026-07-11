@@ -122,6 +122,7 @@ Long-term knowledge (curator, entity injection) controls.
 | `outcomeReward` | boolean | `true` |  | Adjust knowledge confidence by within-session verifier (test/build/typecheck/lint) outcomes. Default: true. |
 | `referenceValidation` | boolean | `true` |  | Lower confidence on entries whose file:line / command references no longer resolve against the repo. Unverifiable refs never penalize. Default: true. |
 | `contextSources` | array<enum> | `[]` |  | Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Empty = off. Default: []. |
+| `establishedFacts` | boolean | `true` |  | Surface short concrete captured values in a high-salience 'Established facts' section atop the context-bound injection so weaker models apply them verbatim. Cache-stable reorganization of already-selected entries. Default: true. |
 
 
 ## `curator`

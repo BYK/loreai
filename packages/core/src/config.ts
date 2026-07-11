@@ -305,6 +305,19 @@ export const LoreConfig = z.object({
         .describe(
           "Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Empty = off. Default: [].",
         ),
+      /** Render short, concrete captured values (order status, region, hex,
+       *  dimensions) in a distinct, high-salience "Established facts" section at
+       *  the top of the context-bound (system[2]) block with an imperative
+       *  "use exactly" directive, so weaker models reliably APPLY surfaced
+       *  values instead of skimming past them. Pure reorganization of entries
+       *  already selected for system[2] — cache-stable, no new data. Default
+       *  true; kill-switch. */
+      establishedFacts: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Surface short concrete captured values in a high-salience 'Established facts' section atop the context-bound injection so weaker models apply them verbatim. Cache-stable reorganization of already-selected entries. Default: true.",
+        ),
     })
     .default({
       enabled: true,
@@ -313,6 +326,7 @@ export const LoreConfig = z.object({
       outcomeReward: true,
       referenceValidation: true,
       contextSources: [],
+      establishedFacts: true,
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z

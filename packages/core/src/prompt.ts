@@ -1,5 +1,5 @@
 import type { Root } from "mdast";
-import { serialize, inline, h, ul, liph, strong, t, root } from "./markdown";
+import { serialize, inline, h, p, ul, liph, strong, t, root } from "./markdown";
 
 // All prompts are locked down — they are our core value offering.
 // Do not make these configurable.
@@ -892,6 +892,38 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
+/** Max content length for an entry to be eligible for the high-salience
+ *  "Established facts" section — atomic captured values are short; long-form
+ *  decisions/architecture stay in the main list. */
+export const ESTABLISHED_FACT_MAX_CHARS = 160;
+
+/** A concrete-value signal: a digit, a hex color, a quoted literal, or a
+ *  `key: value` / `key = value` connector. Distinguishes an atomic captured
+ *  value ("region is eu-west-1", "primary color #3a7bd5", "status: shipped")
+ *  from vague prose ("prefer explicit over implicit"). Kept deliberately simple
+ *  and side-effect-free so it is trivially testable and byte-deterministic. */
+const CONCRETE_VALUE_SIGNAL = /[0-9]|["'`][^"'`]+["'`]|[:=]\s*\S/;
+
+/**
+ * True when an entry looks like a short, concrete captured fact worth elevating
+ * into the high-salience "Established facts" section so a weaker model applies
+ * the exact value instead of skimming past it. `"recalled"` entries (passive
+ * distillation/temporal snippets, #1228) are long-form context, not atomic
+ * facts, so they always stay in the main list.
+ */
+export function isEstablishedFact(entry: {
+  category: string;
+  title: string;
+  content: string;
+}): boolean {
+  if (entry.category === "recalled") return false;
+  if (entry.content.length > ESTABLISHED_FACT_MAX_CHARS) return false;
+  return (
+    CONCRETE_VALUE_SIGNAL.test(entry.content) ||
+    CONCRETE_VALUE_SIGNAL.test(entry.title)
+  );
+}
+
 export function formatKnowledge(
   entries: Array<{
     id?: string;
@@ -908,6 +940,16 @@ export function formatKnowledge(
    * busts the cache while a genuine selection change always re-pins.
    */
   outIncludedIds?: string[],
+  /**
+   * system[2]-only options. `establishedFacts` splits the SAME budget-packed
+   * `included` set into a leading "Established facts" section (short concrete
+   * values, rendered with an imperative "use exactly" directive) and the normal
+   * "Long-term Knowledge" list. It is a pure, deterministic reorganization of
+   * entries already selected — `outIncludedIds` (the pin key set) is unchanged,
+   * ordering stays byte-stable, and a fact-less set renders byte-identically to
+   * `establishedFacts` off. Default off, so the other callers are untouched.
+   */
+  opts?: { establishedFacts?: boolean },
 ): string {
   if (!entries.length) return "";
 
@@ -932,24 +974,52 @@ export function formatKnowledge(
     if (!included.length) return "";
   }
 
-  const grouped: Record<
-    string,
-    Array<{ title: string; content: string; id?: string }>
-  > = {};
-
+  // The pin key set covers EVERY rendered entry regardless of which section it
+  // lands in, so populate it from the full `included` set before partitioning.
   if (outIncludedIds) {
     for (const e of included) {
       if (e.id !== undefined) outIncludedIds.push(e.id);
     }
   }
 
-  for (const e of included) {
-    let group = grouped[e.category];
-    if (!group) {
-      group = [];
-      grouped[e.category] = group;
-    }
-    group.push(e);
+  // Deterministic tiebreak used everywhere below: title, then content. Keeps the
+  // rendered order a pure function of the selected set (byte-stable → no churn).
+  const byTitleThenContent = (
+    a: { title: string; content: string },
+    b: { title: string; content: string },
+  ): number => {
+    if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+    return a.content < b.content ? -1 : a.content > b.content ? 1 : 0;
+  };
+
+  const renderEntry = (i: { id?: string; title: string; content: string }) => {
+    const titleText = i.id
+      ? `${inline(`[${shortId(i.id)}] `)}${inline(i.title)}`
+      : inline(i.title);
+    return liph(strong(titleText), t(`: ${inline(i.content)}`));
+  };
+
+  // system[2] only: elevate short, concrete captured values into a leading
+  // high-salience section so weaker models apply them verbatim. A pure split of
+  // the already-selected set — a fact-less set leaves `ltkEntries === included`,
+  // rendering byte-identically to the flag being off.
+  const emitFacts = opts?.establishedFacts === true;
+  const facts = emitFacts ? included.filter(isEstablishedFact) : [];
+  const factSet = new Set(facts);
+  const ltkEntries = emitFacts
+    ? included.filter((e) => !factSet.has(e))
+    : included;
+
+  const children: Root["children"] = [];
+
+  if (facts.length) {
+    children.push(h(2, "Established facts"));
+    children.push(
+      p(
+        "Values captured earlier in this project. Use them exactly — do not guess, approximate, or override them with assumptions.",
+      ),
+    );
+    children.push(ul([...facts].sort(byTitleThenContent).map(renderEntry)));
   }
 
   // Canonical layout: relevance ranking decides *selection* (which entries fit
@@ -957,27 +1027,26 @@ export function formatKnowledge(
   // entries alphabetically by title within each category. This makes the output
   // byte-stable for a stable selected set, so re-ranking the same entries does
   // not churn system[2] text and bust the prompt cache.
-  const children: Root["children"] = [h(2, "Long-term Knowledge")];
-  const categories = Object.keys(grouped).sort();
-  for (const category of categories) {
-    const items = grouped[category];
-    // Sort by title, then content as a deterministic tiebreak so two entries
-    // with identical titles don't render in input-dependent (churning) order.
-    items.sort((a, b) => {
-      if (a.title !== b.title) return a.title < b.title ? -1 : 1;
-      return a.content < b.content ? -1 : a.content > b.content ? 1 : 0;
-    });
-    children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
-    children.push(
-      ul(
-        items.map((i) => {
-          const titleText = i.id
-            ? `${inline(`[${shortId(i.id)}] `)}${inline(i.title)}`
-            : inline(i.title);
-          return liph(strong(titleText), t(`: ${inline(i.content)}`));
-        }),
-      ),
-    );
+  if (ltkEntries.length) {
+    const grouped: Record<
+      string,
+      Array<{ title: string; content: string; id?: string }>
+    > = {};
+    for (const e of ltkEntries) {
+      let group = grouped[e.category];
+      if (!group) {
+        group = [];
+        grouped[e.category] = group;
+      }
+      group.push(e);
+    }
+    children.push(h(2, "Long-term Knowledge"));
+    for (const category of Object.keys(grouped).sort()) {
+      const items = grouped[category];
+      items.sort(byTitleThenContent);
+      children.push(h(3, category.charAt(0).toUpperCase() + category.slice(1)));
+      children.push(ul(items.map(renderEntry)));
+    }
   }
 
   return serialize(root(...children));

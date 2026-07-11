@@ -7003,6 +7003,7 @@ async function handleConversationTurn(
               })),
               contextBudget,
               renderedIds,
+              { establishedFacts: cfg.knowledge.establishedFacts },
             );
             if (formatted) {
               const tokenCount = Math.ceil(formatted.length / 3);
@@ -7265,6 +7266,7 @@ async function handleConversationTurn(
           })),
           contextBudget,
           renderedIds,
+          { establishedFacts: cfg.knowledge.establishedFacts },
         );
 
         if (formatted) {
