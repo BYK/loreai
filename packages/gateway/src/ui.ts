@@ -2625,6 +2625,31 @@ function pageWarming(): string {
 // Global Costs page
 // ---------------------------------------------------------------------------
 
+/**
+ * Render the per-background-task rows for the costs dashboard "Lore Overhead"
+ * section, attributing worker spend to distillation / curation / compaction /
+ * recall. Pure + exported so it can be unit-tested in isolation. Buckets with
+ * zero cost are omitted; warmup is surfaced by a separate row upstream (it is
+ * intentionally not part of this breakdown to avoid double-counting).
+ */
+export function renderWorkerBreakdownRows(wb: {
+  distillation: { cost: number; calls: number };
+  curation: { cost: number; calls: number };
+  compaction: { cost: number; calls: number };
+  recall: { cost: number; calls: number };
+}): string {
+  const row = (label: string, b: { cost: number; calls: number }): string =>
+    b.cost > 0
+      ? `<tr><td style="padding-left:1.4em;color:var(--fg3);font-size:0.9em">— ${label}</td><td style="color:var(--fg3);font-size:0.9em">${formatUSD(b.cost)} <span style="font-size:0.85em">(&times;${b.calls})</span></td></tr>`
+      : "";
+  return (
+    row("distillation", wb.distillation) +
+    row("curation", wb.curation) +
+    row("compaction", wb.compaction) +
+    row("recall", wb.recall)
+  );
+}
+
 function pageCosts(): string {
   let body = breadcrumb([
     { label: "Dashboard", href: "/ui" },
@@ -3006,18 +3031,7 @@ function pageCosts(): string {
     // Populated from persisted per-bucket snapshots (session_state.worker_breakdown);
     // sessions recorded before that column existed contribute to the total above
     // but not to these rows.
-    const wb = hist.workerBreakdown;
-    const bucketRow = (
-      label: string,
-      b: { cost: number; calls: number },
-    ): string =>
-      b.cost > 0
-        ? `<tr><td style="padding-left:1.4em;color:var(--fg3);font-size:0.9em">— ${label}</td><td style="color:var(--fg3);font-size:0.9em">${formatUSD(b.cost)} <span style="font-size:0.85em">(&times;${b.calls})</span></td></tr>`
-        : "";
-    body += bucketRow("distillation", wb.distillation);
-    body += bucketRow("curation", wb.curation);
-    body += bucketRow("compaction", wb.compaction);
-    body += bucketRow("recall", wb.recall);
+    body += renderWorkerBreakdownRows(hist.workerBreakdown);
     // Break out the cache-warmup cost as a visible component of worker overhead.
     // It is ALREADY included in totalWorkerCost above (so the net below is not
     // double-subtracted) — this row just surfaces how much of the overhead is

@@ -258,6 +258,93 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
     expect(totals.warmupSavings - totals.warmupCost).toBeCloseTo(-0.3);
   });
 
+  // A snapshot with all the non-breakdown fields zeroed, parameterized on the
+  // per-bucket breakdown. Cast to the saveSessionCosts param type so tests can
+  // pass an intentionally-partial breakdown (missing buckets) too.
+  function snap(workerBreakdown: unknown) {
+    return {
+      conversationCost: 1.0,
+      workerCost: 0.9,
+      conversationTurns: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+      workerBreakdown,
+    } as Parameters<typeof saveSessionCosts>[1];
+  }
+
+  test("attributes persisted worker cost to per-bucket breakdown (warmup excluded)", () => {
+    const pid = ensureProject("/test/cost-historical/breakdown", "hist-bd");
+    const sid = "sess-breakdown";
+    const now = Date.now();
+    insertMsg(pid, sid, "assistant", 100, now, null);
+    saveSessionCosts(
+      sid,
+      snap({
+        distillation: { cost: 0.5, calls: 4 },
+        curation: { cost: 0.2, calls: 2 },
+        compaction: { cost: 0.05, calls: 1 },
+        recall: { cost: 0.05, calls: 3 },
+        // Present in the persisted snapshot, but must NOT flow into the
+        // aggregated breakdown (it is tracked separately as warmupCost).
+        warmup: { cost: 0.1, calls: 1 },
+      }),
+    );
+
+    const totals = computeHistoricalEstimates().totals;
+    expect(totals.workerBreakdown.distillation.cost).toBeCloseTo(0.5);
+    expect(totals.workerBreakdown.distillation.calls).toBe(4);
+    expect(totals.workerBreakdown.curation.cost).toBeCloseTo(0.2);
+    expect(totals.workerBreakdown.compaction.cost).toBeCloseTo(0.05);
+    expect(totals.workerBreakdown.recall.cost).toBeCloseTo(0.05);
+    expect(totals.workerBreakdown.recall.calls).toBe(3);
+    // The aggregated breakdown carries no warmup entry — it can't double-count
+    // against the dedicated warmupCost total.
+    expect("warmup" in totals.workerBreakdown).toBe(false);
+  });
+
+  test("sums the breakdown across sessions and treats a missing bucket as zero", () => {
+    const pid = ensureProject("/test/cost-historical/breakdown2", "hist-bd2");
+    const now = Date.now();
+
+    insertMsg(pid, "sess-bd-a", "assistant", 100, now, null);
+    saveSessionCosts(
+      "sess-bd-a",
+      snap({
+        distillation: { cost: 0.3, calls: 2 },
+        curation: { cost: 0.1, calls: 1 },
+        compaction: { cost: 0, calls: 0 },
+        recall: { cost: 0.2, calls: 5 },
+        warmup: { cost: 0, calls: 0 },
+      }),
+    );
+
+    // Session B's breakdown omits `curation` entirely — a defensive path
+    // (bd[k]?.cost ?? 0) must treat the absent bucket as zero, not crash.
+    insertMsg(pid, "sess-bd-b", "assistant", 100, now, null);
+    saveSessionCosts(
+      "sess-bd-b",
+      snap({
+        distillation: { cost: 0.4, calls: 3 },
+        compaction: { cost: 0.1, calls: 1 },
+        recall: { cost: 0.1, calls: 2 },
+      }),
+    );
+
+    const totals = computeHistoricalEstimates().totals;
+    expect(totals.workerBreakdown.distillation.cost).toBeCloseTo(0.7); // 0.3 + 0.4
+    expect(totals.workerBreakdown.curation.cost).toBeCloseTo(0.1); // 0.1 + absent→0
+    expect(totals.workerBreakdown.compaction.cost).toBeCloseTo(0.1); // 0 + 0.1
+    expect(totals.workerBreakdown.recall.cost).toBeCloseTo(0.3); // 0.2 + 0.1
+  });
+
   test("batch estimate: a session with no usable model metadata keeps the 167K trigger", () => {
     const pid = ensureProject("/test/cost-historical/nomodel", "hist-nomodel");
     const sid = "sess-nomodel";
