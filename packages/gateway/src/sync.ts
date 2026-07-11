@@ -168,7 +168,13 @@ function isUniqueConstraintError(e: unknown): boolean {
 class EncryptedContentUnavailable extends Error {}
 
 type EncMode = "off" | "locked" | "on";
-type EncCtx = { scope: string; dek: Uint8Array } | null;
+// Multi-epoch (E-4c-3): a scope has one DEK PER rotation epoch. `deks` holds every epoch this
+// device can decrypt; `currentEpoch` is the highest — what new content seals at.
+type EncCtx = {
+  scope: string;
+  currentEpoch: number;
+  deks: Map<number, Uint8Array>;
+} | null;
 /** A per-table snapshot of the encryption state handed to the (sync) apply path. */
 type EncSnapshot = { mode: EncMode; ctx: EncCtx };
 
@@ -192,9 +198,24 @@ function makeEncryptionResolver() {
       if (cached !== undefined) return cached;
       try {
         const scope = (await getCurrentUser())?.user_id;
-        cached = scope
-          ? { scope, dek: await keystore.getScopeKey(scope) }
-          : null;
+        if (!scope) {
+          cached = null;
+          return cached;
+        }
+        // Pre-resolve EVERY epoch's DEK once per cycle (few epochs; HPKE unwrap each, keystore-
+        // cached). Keeps encrypt/decrypt SYNC: decrypt looks up the blob's pinned epoch, encrypt
+        // seals at the current (highest) epoch. On first use the empty list resolves epoch 0,
+        // which MINTS the originator's DEK. An epoch we hold no wrap for is simply absent, so a
+        // blob sealed under it defers the table (EncryptedContentUnavailable) until it arrives.
+        // ONE read of the epoch set (ascending); derive currentEpoch from it — no TOCTOU window
+        // between a separate max-read and the enumeration if a rotate lands mid-cycle.
+        const epochs = keystore.scopeKeyEpochs(scope);
+        const currentEpoch = epochs.length ? epochs[epochs.length - 1] : 0;
+        const deks = new Map<number, Uint8Array>();
+        for (const e of epochs.length ? epochs : [currentEpoch]) {
+          deks.set(e, await keystore.getScopeKey(scope, scope, { epoch: e }));
+        }
+        cached = { scope, currentEpoch, deks };
       } catch (e) {
         log.notice(`sync: encryption key unavailable: ${(e as Error).message}`);
         cached = null;
@@ -214,14 +235,22 @@ function encryptColumns(
   table: string,
   logicalId: string,
   payload: Record<string, unknown>,
-  ctx: { scope: string; dek: Uint8Array },
+  ctx: NonNullable<EncCtx>,
 ): void {
+  // Seal new content at the scope's CURRENT epoch (the envelope pins it, so decrypt dispatches
+  // to the right DEK). ctx() guarantees the current-epoch DEK; its absence is a logic error —
+  // fail CLOSED (throw) rather than push plaintext.
+  const dek = ctx.deks.get(ctx.currentEpoch);
+  if (!dek)
+    throw new Error(
+      `encrypt: no DEK for ${ctx.scope} epoch ${ctx.currentEpoch}`,
+    );
   for (const col of tableMeta(table).encryptedColumns ?? []) {
     const v = payload[col];
     if (typeof v !== "string" || v.length === 0) continue;
     const aad = crypto.buildAad(ctx.scope, table, col, logicalId);
     payload[col] = Buffer.from(
-      crypto.seal(ctx.dek, utf8.encode(v), aad),
+      crypto.seal(dek, utf8.encode(v), aad, { keyEpoch: ctx.currentEpoch }),
     ).toString("base64");
   }
 }
@@ -251,9 +280,20 @@ function decryptColumns(
     if (enc.mode !== "on" || !enc.ctx) {
       throw new EncryptedContentUnavailable(`${table}: no key (locked/off)`);
     }
+    // Dispatch on the blob's PINNED epoch (E-4c-3): open with THAT epoch's DEK, not "current".
+    // A blob sealed under an epoch we hold no wrap for (a rotation we haven't received yet, or
+    // one we were removed before) defers the table until the wrap arrives — never stored as
+    // ciphertext, never crashes the cycle.
+    const blobEpoch = crypto.parseHeader(bytes).keyEpoch;
+    const dek = enc.ctx.deks.get(blobEpoch);
+    if (!dek) {
+      throw new EncryptedContentUnavailable(
+        `${table}: no key for epoch ${blobEpoch}`,
+      );
+    }
     const aad = crypto.buildAad(enc.ctx.scope, table, col, logicalId);
     try {
-      row[col] = fromUtf8.decode(crypto.open(enc.ctx.dek, bytes, aad));
+      row[col] = fromUtf8.decode(crypto.open(dek, bytes, aad));
     } catch (e) {
       // A valid envelope we hold a key for but still can't open (wrong key / tampered /
       // AAD mismatch) is an integrity failure. NEVER store the ciphertext and NEVER let

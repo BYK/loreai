@@ -47,6 +47,16 @@ const storedWrap = (member: string): Uint8Array =>
         .get(TEAM, member) as { w: Uint8Array }
     ).w,
   );
+const storedWrapAt = (member: string, epoch: number): Uint8Array =>
+  Buffer.from(
+    (
+      db()
+        .query(
+          "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id=? AND member_user_id=? AND key_epoch=?",
+        )
+        .get(TEAM, member, epoch) as { w: Uint8Array }
+    ).w,
+  );
 
 describe("keystore — group DEK wrapping (E-4c-2)", () => {
   it("an admin wraps the scope DEK to a member; the member's secret unwraps the SAME DEK", async () => {
@@ -127,6 +137,32 @@ describe("keystore — group DEK wrapping (E-4c-2)", () => {
     ]);
     expect(read.status).toBe("rejected");
     expect(minted.status).toBe("fulfilled");
+  });
+
+  it("rotateScopeKey mints a fresh epoch DEK, wraps to all members, and RETAINS old epochs", async () => {
+    const admin = keystore.getAccountIdentity(); // A (the DEK originator)
+    const dek0 = await keystore.getScopeKey(TEAM, A); // epoch 0
+    expect(keystore.currentScopeEpoch(TEAM, A)).toBe(0);
+    const member = generateIdentityKeypair(); // B, a remaining member
+    // A rotates to epoch 1, re-wrapping to the remaining members (incl. self).
+    await keystore.rotateScopeKey(TEAM, 1, [
+      { userId: A, publicKey: admin.publicKey },
+      { userId: B, publicKey: member.publicKey },
+    ]);
+    expect(keystore.currentScopeEpoch(TEAM, A)).toBe(1);
+    expect(keystore.scopeKeyEpochs(TEAM, A)).toEqual([0, 1]); // BOTH retained
+    const dek1 = await keystore.getScopeKey(TEAM, A, { epoch: 1 });
+    expect(eq(dek1, dek0)).toBe(false); // a genuinely fresh DEK
+    // The OLD epoch stays decryptable (past blobs remain readable).
+    expect(eq(await keystore.getScopeKey(TEAM, A, { epoch: 0 }), dek0)).toBe(
+      true,
+    );
+    // getScopeKey with no epoch now defaults to the CURRENT (highest) epoch.
+    expect(eq(await keystore.getScopeKey(TEAM, A), dek1)).toBe(true);
+    // Member B unwraps the epoch-1 wrap → the same new DEK.
+    expect(
+      eq(await unwrapDek(member.secretKey, storedWrapAt(B, 1)), dek1),
+    ).toBe(true);
   });
 
   it("personal scopes still mint by default (behavior-preserving)", async () => {

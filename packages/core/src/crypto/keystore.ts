@@ -147,19 +147,50 @@ export function getAccountIdentity(): Keypair {
   return kp;
 }
 
+/** dekCache / pendingScopeKey are keyed by (scope, epoch): each rotation epoch has its OWN DEK. */
+const dekKey = (scopeId: string, epoch: number): string =>
+  `${scopeId}\x1f${epoch}`;
+
+/** All rotation epochs this device holds a wrap for, for (scope, member), ascending. */
+export function scopeKeyEpochs(
+  scopeId: string,
+  memberUserId: string = scopeId,
+): number[] {
+  return (
+    db()
+      .query(
+        "SELECT key_epoch AS e FROM scope_keys WHERE scope_id = ? AND member_user_id = ? ORDER BY key_epoch",
+      )
+      .all(scopeId, memberUserId) as { e: number }[]
+  ).map((r) => r.e);
+}
+
+/** The scope's current (highest) epoch this device can encrypt at; 0 if it holds no wrap yet. */
+export function currentScopeEpoch(
+  scopeId: string,
+  memberUserId: string = scopeId,
+): number {
+  const eps = scopeKeyEpochs(scopeId, memberUserId);
+  return eps.length ? eps[eps.length - 1] : 0;
+}
+
 /**
- * The DEK for a scope. Generated + wrapped to the account key on first use (personal
- * v1: `memberUserId` defaults to `scopeId`, so `scope_id = member_user_id = user`).
- * Otherwise unwrapped from the stored `scope_keys` row. Cached in memory per scope.
+ * The DEK for a scope at a given epoch. Minted + wrapped to the account key on first use
+ * (personal v1: `memberUserId` defaults to `scopeId`). Otherwise unwrapped from the stored
+ * `scope_keys` row for that epoch. Cached in memory per (scope, epoch) — each rotation epoch has
+ * its own DEK. `epoch` defaults to the scope's CURRENT (highest) epoch (what encrypt seals at);
+ * decrypt passes the blob's pinned epoch to open past-rotation ciphertext.
  */
 export function getScopeKey(
   scopeId: string,
   memberUserId: string = scopeId,
-  opts?: { mint?: boolean },
+  opts?: { mint?: boolean; epoch?: number },
 ): Promise<Uint8Array> {
-  const cached = dekCache.get(scopeId);
+  const epoch = opts?.epoch ?? currentScopeEpoch(scopeId, memberUserId);
+  const ckey = dekKey(scopeId, epoch);
+  const cached = dekCache.get(ckey);
   if (cached) return Promise.resolve(cached);
-  const inflight = pendingScopeKey.get(scopeId);
+  const inflight = pendingScopeKey.get(ckey);
   if (inflight) return inflight;
   // mint defaults to true (the personal / DEK-originator path). A JOINING team member MUST
   // pass mint:false: the scope's DEK is minted once by its originator and wrapped to each
@@ -174,53 +205,58 @@ export function getScopeKey(
   // of memberUserId is correct — memberUserId only selects which wrap row to unwrap on a MISS,
   // and every member's wrap yields the same per-scope DEK. Never treat this flag as authz.
   const mint = opts?.mint ?? true;
-  const p = loadOrCreateScopeKey(scopeId, memberUserId, mint).finally(() => {
-    // Delete only if THIS promise is still the registered one — a lock()/installIdentity
-    // may have cleared the map and a newer call may have registered its own promise.
-    if (pendingScopeKey.get(scopeId) === p) pendingScopeKey.delete(scopeId);
-  });
+  const p = loadOrCreateScopeKey(scopeId, memberUserId, epoch, mint).finally(
+    () => {
+      // Delete only if THIS promise is still the registered one — a lock()/installIdentity
+      // may have cleared the map and a newer call may have registered its own promise.
+      if (pendingScopeKey.get(ckey) === p) pendingScopeKey.delete(ckey);
+    },
+  );
   // Only the MINTING promise is shared as the in-flight one: it produces the scope DEK, so
   // every concurrent caller (mint:true OR a mint:false read racing it) may safely await it. A
   // mint:false read that will REJECT (no wrap yet) must NOT be registered — otherwise a
   // concurrent mint:true originator would receive that rejection via the shared slot and fail
-  // to mint (keyed by scopeId, not intent). An unregistered read still caches its DEK on success.
-  if (mint) pendingScopeKey.set(scopeId, p);
+  // to mint (keyed by (scope,epoch), not intent). An unregistered read still caches on success.
+  if (mint) pendingScopeKey.set(ckey, p);
   return p;
 }
 
 async function loadOrCreateScopeKey(
   scopeId: string,
   memberUserId: string,
+  epoch: number,
   mint: boolean,
 ): Promise<Uint8Array> {
-  const epoch = keystoreEpoch;
+  const kEpoch = keystoreEpoch;
   const id = getAccountIdentity();
   // Only persist into the shared cache if no lock()/identity-swap happened while we
   // were awaiting — otherwise a stale key would leak back in after invalidation. The
   // caller that requested this DEK still receives it (it asked before the reset).
   const cache = (dek: Uint8Array): void => {
-    if (keystoreEpoch === epoch) dekCache.set(scopeId, dek);
+    if (keystoreEpoch === kEpoch) dekCache.set(dekKey(scopeId, epoch), dek);
   };
   const row = db()
     .query(
-      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ? ORDER BY key_epoch DESC LIMIT 1",
+      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ? AND key_epoch = ?",
     )
-    .get(scopeId, memberUserId) as { w: unknown } | undefined;
+    .get(scopeId, memberUserId, epoch) as { w: unknown } | undefined;
   if (row) {
     const dek = await unwrapDek(id.secretKey, toU8(row.w));
     cache(dek);
     return dek;
   }
-  if (!mint) {
+  // No wrap for this epoch. NEVER mint a ROTATED epoch (rotateScopeKey creates those) and never
+  // mint when the caller forbade it (a joining member awaiting a group-wrap). Only the DEK
+  // ORIGINATOR mints — always at epoch 0.
+  if (!mint || epoch !== 0) {
     throw new ScopeKeyUnavailable(scopeId, memberUserId);
   }
   const dek = generateDek();
   const wrapped = await wrapDekForMember(id.publicKey, dek);
   const now = Date.now();
-  // ON CONFLICT DO NOTHING: if a row already exists for this (scope, member) — a
-  // concurrent writer won the race — keep theirs and never clobber. Read the persisted
-  // row back and unwrap THAT so every caller converges on the one stored DEK; a lost
-  // insert can never leave earlier ciphertext unopenable.
+  // ON CONFLICT DO NOTHING: if an epoch-0 row already exists — a concurrent writer won the race —
+  // keep theirs and never clobber. Read the persisted row back and unwrap THAT so every caller
+  // converges on the one stored DEK; a lost insert can never leave earlier ciphertext unopenable.
   db()
     .query(
       `INSERT INTO scope_keys
@@ -231,7 +267,7 @@ async function loadOrCreateScopeKey(
     .run(scopeId, memberUserId, Buffer.from(wrapped), now, now);
   const stored = db()
     .query(
-      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ? ORDER BY key_epoch DESC LIMIT 1",
+      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ? AND key_epoch = 0",
     )
     .get(scopeId, memberUserId) as { w: unknown };
   const finalDek = await unwrapDek(id.secretKey, toU8(stored.w));
@@ -270,7 +306,45 @@ export function putWrappedScopeKey(
       now,
       updatedAt,
     );
-  dekCache.delete(scopeId);
+  // Invalidate only THIS epoch's cached DEK — a pulled canonical wrap may replace a device's
+  // divergent local mint at the same epoch (lost first-write-wins race), so the next
+  // getScopeKey for (scope, epoch) must re-unwrap the applied value. Other epochs are untouched.
+  dekCache.delete(dekKey(scopeId, keyEpoch));
+}
+
+/**
+ * Rotate the scope's DEK (E-4c-3): mint a FRESH DEK and wrap it to EACH remaining member at
+ * `newEpoch`, INSERTing new rows while OLD-epoch rows are retained (so past blobs stay
+ * decryptable). New content seals at `newEpoch` once it is the highest local epoch. `newEpoch`
+ * MUST be allocated server-atomically via the `rotate_scope_key(scope)` RPC so concurrent admins
+ * never mint the same epoch with divergent DEKs. `members` MUST include the caller (self) with
+ * their own public key, or the rotator locks itself out of the new epoch. Members + their
+ * identity public keys are supplied by the caller (CLI/registry).
+ */
+export async function rotateScopeKey(
+  scopeId: string,
+  newEpoch: number,
+  members: { userId: string; publicKey: Uint8Array }[],
+): Promise<void> {
+  const kEpoch = keystoreEpoch;
+  const dek = generateDek();
+  const now = Date.now();
+  // Wrap to ALL members FIRST (async HPKE), THEN persist — so a mid-wrap failure leaves NO
+  // partial epoch. Otherwise a half-written epoch + a retry (fresh DEK) would collide with the
+  // already-written members at the remote first-write-wins guard (23514 poison).
+  const wraps = await Promise.all(
+    members.map(async (m) => ({
+      userId: m.userId,
+      wrapped: await wrapDekForMember(m.publicKey, dek),
+    })),
+  );
+  for (const w of wraps) {
+    putWrappedScopeKey(scopeId, w.userId, w.wrapped, newEpoch, now);
+  }
+  // Cache the fresh DEK for (scope, newEpoch) so the encrypt path uses it immediately — unless a
+  // lock()/identity swap raced (then leave it for a fresh unwrap; putWrappedScopeKey already
+  // invalidated the slot).
+  if (keystoreEpoch === kEpoch) dekCache.set(dekKey(scopeId, newEpoch), dek);
 }
 
 /**

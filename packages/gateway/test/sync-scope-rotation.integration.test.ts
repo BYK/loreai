@@ -107,6 +107,28 @@ describe.skipIf(gate())("0030 key rotation foundation (E-4c-3a, #827)", () => {
     ).toEqual([0, 1]); // both retained
   });
 
+  it("a rotation's new-epoch wrap is COUNTED against the row cap (0031 per-epoch probe)", async () => {
+    const a = await h.createUser();
+    const scope = await createTeam(a, "Rot Quota");
+    const setCap = (n: number) =>
+      h.client.query(
+        "update public.plan_limits set max_rows=$1 where tier='free' and table_name='scope_keys'",
+        [n],
+      );
+    try {
+      await setCap(1);
+      await putWrap(a, scope, a, 0, "ZDA="); // epoch 0 → count 0→1 (ok)
+      // A rotation writes epoch 1 as a NEW physical row for the SAME member. The 0031 probe now
+      // matches key_epoch, so this row is counted → it trips the cap (before 0031 the probe
+      // matched only (scope,member), early-returned, and let the row escape the cap).
+      expect(
+        (await expectError(() => putWrap(a, scope, a, 1, "ZDE="))).code,
+      ).toBe("23514");
+    } finally {
+      await setCap(100); // restore the default free scope_keys cap
+    }
+  });
+
   it("an existing epoch's wrapped_dek is immutable (rotation writes a new row, never re-wraps)", async () => {
     const a = await h.createUser();
     const scope = await createTeam(a, "Rot C");

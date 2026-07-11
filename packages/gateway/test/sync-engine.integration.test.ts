@@ -641,6 +641,75 @@ describe.skipIf(SKIP)(
       expect(syncData.getRowById("knowledge", "kw")).toBeNull(); // never decrypted
     });
 
+    it("device-2 decrypts each blob at its PINNED epoch after a rotation (epoch dispatch, not 'current') (E-4c-3b)", async () => {
+      const client = clientFor(uid);
+      const P0 = "body sealed at epoch zero";
+      const P1 = "body sealed at epoch one";
+      const scope = uid; // v1 encryption scope = auth.uid()
+
+      // --- Device 1: arm encryption, push kr0 at epoch 0 (2nd push flushes the lazy DEK row). ---
+      keystore.setPassphrase("rotate me", { params: FAST });
+      syncData.enableSync("basic");
+      insertKnowledge("kr0", P0);
+      await pushOnce(client);
+      await pushOnce(client);
+      expect(keystore.currentScopeEpoch(scope)).toBe(0);
+
+      // Rotate to epoch 1 (mint a fresh DEK, re-wrap to self) → new content seals at epoch 1.
+      const self = keystore.getAccountIdentity();
+      await keystore.rotateScopeKey(scope, 1, [
+        { userId: scope, publicKey: self.publicKey },
+      ]);
+      expect(keystore.currentScopeEpoch(scope)).toBe(1);
+      insertKnowledge("kr1", P1);
+      await pushOnce(client); // kr1 (epoch 1) + the epoch-1 scope_keys row
+      await pushOnce(client);
+
+      // The remote blobs carry DISTINCT pinned epochs (kr1 sealed at CURRENT=1, kr0 stayed at 0).
+      const rows = await h.asUser(uid, (c) =>
+        c
+          .query(
+            "select id, content from public.knowledge where id in ('kr0','kr1') order by id",
+          )
+          .then((x) => x.rows),
+      );
+      const epochOf = (b64: string) =>
+        crypto.parseHeader(Buffer.from(b64 as string, "base64")).keyEpoch;
+      expect(epochOf(rows[0].content)).toBe(0); // kr0
+      expect(epochOf(rows[1].content)).toBe(1); // kr1 seals at the current epoch (kills the no-stamp mutant)
+      // Both epoch wraps must be on the remote for a fresh device to decrypt both.
+      expect(
+        await h.asUser(uid, (c) =>
+          c
+            .query("select count(*)::int n from public.scope_keys")
+            .then((x) => x.rows[0].n),
+        ),
+      ).toBe(2);
+
+      // --- Device 2: fresh device, same account. Pull escrow + BOTH epoch wraps, unlock, then
+      // pull knowledge: each blob MUST decrypt with ITS OWN epoch's DEK (kr0→epoch 0, kr1→epoch
+      // 1). Decrypting kr0 with the "current" (epoch-1) DEK would fail the AEAD tag. ---
+      db().exec(
+        "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM knowledge; DELETE FROM knowledge_meta; DELETE FROM knowledge_meta_crdt; DELETE FROM sync_state; DELETE FROM sync_outbox",
+      );
+      keystore.lock();
+      for (const m of syncData.syncedTables("basic")) {
+        setKV(
+          `sync.pull.${m.table}`,
+          m.pullOnly ? `${Date.now() + 31_536_000_000}|` : "0|",
+        );
+        setKV(`sync.push.${m.table}`, "0");
+      }
+      await pullOnce(client); // escrow + both scope_keys epochs → locked
+      expect(keystore.encryptionState()).toBe("locked");
+      expect(keystore.unlockWithPassphrase("rotate me")).toBe(true);
+      expect(keystore.scopeKeyEpochs(scope)).toEqual([0, 1]); // both wraps pulled
+      const p = await pullOnce(client);
+      expect(p.conflicts).toBe(0);
+      expect(syncData.getRowById("knowledge", "kr0")?.content).toBe(P0);
+      expect(syncData.getRowById("knowledge", "kr1")?.content).toBe(P1);
+    });
+
     it("device-1 pushes a project + its content → device-2 restores under the seeded FK parent (P1, #1246)", async () => {
       const REMOTE_URL = "github.com/acme/secret-repo";
       const client = clientFor(uid);
