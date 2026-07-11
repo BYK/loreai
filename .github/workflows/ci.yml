@@ -45,7 +45,8 @@ jobs:
               - 'vitest.config.ts'
               - 'vitest.evals.config.ts'
               - 'package.json'
-              - 'biome.json'
+              - '.oxlintrc.json'
+              - '.oxfmtrc.json'
               - '.craft.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/publish.yml'
@@ -151,6 +152,9 @@ jobs:
 
       - name: Lint
         run: pnpm run lint
+
+      - name: Format check
+        run: pnpm run format:check
 
       - name: Test
         # Runs the gateway bundle (needed by tests) then `vitest run --coverage`.

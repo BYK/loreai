@@ -143,7 +143,7 @@ const VERIFIER_LEADING = new RegExp(
       // typecheck / compile
       String.raw`(?:tsc|tsgo)\b`,
       // linters / formatters used as gates
-      String.raw`(?:eslint|biome|ruff|flake8|mypy|clippy|golangci-lint)\b`,
+      String.raw`(?:eslint|oxlint|oxfmt|biome|ruff|flake8|mypy|clippy|golangci-lint)\b`,
     ].join("|") +
     ")",
   "i",

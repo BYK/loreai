@@ -97,8 +97,8 @@ These are separate subagent invocations with distinct prompts. The adversarial
 review is mandatory before merge; the security review per risk profile.
 
 Reviewers must:
-- Run `pnpm test` (full suite), `pnpm run typecheck`, and `pnpm run lint`
-  (check the exit code — a blank tail can hide a format error).
+- Run `pnpm test` (full suite), `pnpm run typecheck`, `pnpm run lint`, and
+  `pnpm run format:check` (check the exit code — a blank tail can hide a lint/format error).
 - Verify property-test stability (×10 runs).
 - Confirm the working tree is unmodified at the end (hash-verified).
 - Report a per-point verdict (PASS / FAIL / CONCERN / MUST-FIX) with `file:line`

@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_",
+        "ignoreRestSiblings": true
+      }
+    ],
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    "typescript/no-for-in-array": "error",
+    "typescript/no-misused-spread": "error",
+    "typescript/no-unnecessary-type-assertion": "warn",
+    "typescript/no-base-to-string": "warn",
+    "typescript/unbound-method": "warn",
+    "typescript/restrict-template-expressions": "warn",
+    "typescript/no-redundant-type-constituents": "warn"
+  },
+  "ignorePatterns": [
+    "**/dist",
+    "**/dist-bin",
+    "**/dist-tarballs",
+    "**/dist-vendor",
+    "**/.sea-staging",
+    "**/.vendor-build",
+    "**/*.d.ts",
+    "**/eval/**"
+  ]
+}

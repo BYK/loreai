@@ -151,8 +151,8 @@ recall tool (searchRecall) ----------------> Tool response to agent
 pnpm install         # install all workspace dependencies
 pnpm test            # run all tests via Vitest (uses packages/core/test/setup.ts for DB isolation)
 pnpm run typecheck   # typecheck all packages
-pnpm run lint        # Biome lint + format check (CI-gated); `pnpm run lint:fix` to autofix
-pnpm run format      # apply Biome formatting
+pnpm run lint        # oxlint (type-aware, CI-gated); `pnpm run lint:fix` to autofix
+pnpm run format      # apply oxfmt formatting (`pnpm run format:check` verifies in CI)
 pnpm run build       # build all packages (esbuild bundles)
 ```
 
