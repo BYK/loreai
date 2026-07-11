@@ -473,6 +473,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "team": {
+        const { commandTeam } = await import("./team-cmd");
+        await commandTeam(rest, values as Record<string, unknown>);
+        break;
+      }
+
       case "logs": {
         const { commandLogs } = await import("./logs");
         await commandLogs(rest, values as Record<string, unknown>);
@@ -528,6 +534,7 @@ export async function _cli(): Promise<void> {
               "logout",
               "whoami",
               "sync",
+              "team",
               "logs",
               "import",
               "entity",

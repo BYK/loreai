@@ -1393,7 +1393,7 @@ jobs:
           docker pull postgres:16-alpine
           docker pull postgrest/postgrest:v12.2.3
       - name: Run sync integration tests
-        run: pnpm exec vitest run packages/gateway/test/sync-security.integration.test.ts packages/gateway/test/sync-engine.integration.test.ts
+        run: pnpm exec vitest run packages/gateway/test/sync-security.integration.test.ts packages/gateway/test/sync-engine.integration.test.ts packages/gateway/test/team.integration.test.ts
         env:
           LORE_INTEGRATION: '1'
           NODE_NO_WARNINGS: '1'

@@ -248,6 +248,57 @@ function makeClient() {
           }
           return Promise.resolve({ error: null });
         },
+        // supabase-js .insert() — like upsert but a duplicate (same idColumns) is a
+        // unique_violation (23505), never a merge. insertOnly tables (scope_keys) push this way
+        // (no RETURNING/ON CONFLICT — E-4c-4). Mirrors the same schema/quota validation.
+        insert(payload: Record<string, unknown> | Record<string, unknown>[]) {
+          const insertOne = (
+            one: Record<string, unknown>,
+          ): { code: string; message: string } | null => {
+            if (quotaTables.has(table))
+              return { code: "23514", message: `quota exceeded for ${table}` };
+            if (upsertError)
+              return upsertError as { code: string; message: string };
+            const allowed = REMOTE_COLUMNS[table];
+            if (allowed) {
+              for (const k of Object.keys(one)) {
+                if (!allowed.has(k))
+                  return {
+                    code: "PGRST204",
+                    message: `Could not find the '${k}' column of '${table}' in the schema cache`,
+                  };
+              }
+            }
+            for (const k of ["created_at", "updated_at"]) {
+              if (k in one && typeof one[k] !== "string")
+                return {
+                  code: "22008",
+                  message: `date/time field value out of range: "${one[k]}"`,
+                };
+            }
+            const rows = tableRows(table);
+            // Faithful to the REAL composite PK (scope_id, <idColumns>) — a duplicate on the
+            // full key is a unique_violation, mirroring Postgres.
+            const pk = ["scope_id", ...idColumns(table)];
+            if (rows.some((r) => pk.every((c) => r[c] === one[c])))
+              return {
+                code: "23505",
+                message: `duplicate key value violates unique constraint "${table}_pkey"`,
+              };
+            rows.push({
+              scope_id: REMOTE_SCOPE,
+              author_id: REMOTE_SCOPE,
+              ...one,
+              updated_at: nextTs(),
+            } as RemoteRow);
+            return null;
+          };
+          for (const one of Array.isArray(payload) ? payload : [payload]) {
+            const error = insertOne(one);
+            if (error) return Promise.resolve({ error });
+          }
+          return Promise.resolve({ error: null });
+        },
         update(patch: Record<string, unknown>) {
           return {
             match(filter: Record<string, string>) {
@@ -1917,6 +1968,26 @@ describe("encryption key store — C-3 (#825)", () => {
     // cursor is the #828 prune-floor wedge — assert both moved off 0.
     expect(Number(getKV("sync.push.account_escrow") ?? "0")).toBeGreaterThan(0);
     expect(Number(getKV("sync.push.scope_keys") ?? "0")).toBeGreaterThan(0);
+  });
+
+  test("re-pushing a scope_keys wrap already on the remote advances (insertOnly 23505 = synced, not a wedge)", async () => {
+    syncData.enableSync("basic");
+    keystore.setPassphrase("pw", { params: { t: 1, m: 256, p: 1 } });
+    await keystore.getScopeKey(SCOPE, SCOPE);
+    await pushOnce(makeClient() as never); // the wrap lands on the remote
+    expect(tableRows("scope_keys")).toHaveLength(1);
+
+    // Simulate a re-push against a row the remote ALREADY has (e.g. an upgrade that re-hashes the
+    // row, or a peer that pushed first): forget we synced it + rewind the push cursor so the
+    // engine re-attempts the INSERT. insertOnly hits a 23505, which MUST be treated as
+    // already-synced — the cursor advances (no #828 prune-floor wedge) and no duplicate lands.
+    db().exec("DELETE FROM sync_state WHERE table_name='scope_keys'");
+    setKV("sync.push.scope_keys", "0");
+
+    const r = await pushOnce(makeClient() as never);
+    expect(r.quotaHit).toBeUndefined();
+    expect(Number(getKV("sync.push.scope_keys") ?? "0")).toBeGreaterThan(0); // advanced, not wedged at 0
+    expect(tableRows("scope_keys")).toHaveLength(1); // no duplicate row on the remote
   });
 });
 

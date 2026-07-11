@@ -41,6 +41,7 @@ Commands:
   logout              Sign out and clear the local session
   whoami              Show the signed-in Folk Lore account
   sync <subcommand>   Cloud-sync knowledge + entities (enable, disable, status, now)
+  team <subcommand>   Manage shared team scopes (list, members, create, add, remove, set-role)
   entity <subcommand> Manage the entity registry (list, show, add, merge)
   upgrade [version]   Update lore to the latest (or specified) version
                        Flags: --check, --force, --offline, --channel <ch>

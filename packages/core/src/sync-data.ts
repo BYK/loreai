@@ -125,6 +125,17 @@ export interface SyncTableMeta {
    * means "no own trigger, enqueued via fanout"). Defaults to false.
    */
   deleteInvisible?: boolean;
+  /**
+   * Push rows with a plain INSERT (return=minimal) instead of an UPSERT. Two reasons for
+   * scope_keys (E-4c-4): (1) a wrap is IMMUTABLE per (scope, member, epoch) — rotation appends a
+   * NEW epoch row, never mutates an existing one (the 0012/0030 guard rejects a changed
+   * wrapped_dek) — so there is nothing to "update"; (2) PostgREST's UPSERT (ON CONFLICT) always
+   * RETURNINGs internally, and for a co-member wrap the returned row fails scope_keys_read (a
+   * member reads only their OWN wrap), so an admin group-wrapping to a co-member gets 42501. A
+   * plain INSERT with return=minimal has no RETURNING → no read-back → it lands. A re-push that
+   * hits the existing row (unique_violation 23505) is treated as already-synced. Defaults to false.
+   */
+  insertOnly?: boolean;
 }
 
 /** ASCII Unit Separator — joins composite row ids (mirrors the SQL `char(31)`). */
@@ -213,8 +224,22 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       // The remote PK is (scope_id, member_user_id, key_epoch); onConflict prepends scope_id.
       idColumns: ["member_user_id", "key_epoch"],
       ftsTables: [],
-      syncColumns: ["member_user_id", "wrapped_dek", "key_epoch", "updated_at"],
+      // scope_id IS sent (unlike other tables that rely on the remote `default auth.uid()`): a
+      // TEAM wrap's scope_id is the team scope, NOT the writer's uid (E-4c-4). For personal v1 the
+      // local scope_id already == auth.uid(), so sending it matches the old default (no regression).
+      // The PULL still reconstructs the local scope_id via the custom applyRemoteScopeKey.
+      syncColumns: [
+        "scope_id",
+        "member_user_id",
+        "wrapped_dek",
+        "key_epoch",
+        "updated_at",
+      ],
       blobColumns: ["wrapped_dek"],
+      // A wrap is write-once per (scope, member, epoch); a co-member wrap can't be read back by
+      // the writing admin (scope_keys_read = own wrap only), so UPSERT's RETURNING 42501s. Push
+      // via plain INSERT (no RETURNING); a 23505 on re-push means already-synced.
+      insertOnly: true,
     },
     {
       // #1246: the cross-device project-identity mapping. project_id is a random

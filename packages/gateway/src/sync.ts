@@ -566,14 +566,30 @@ async function pushEntry(
     payload.content_hash = hash;
     payload.revision = revision;
   }
-  // The REMOTE primary key is composite — (scope_id, <idColumns>) — so the
-  // ON CONFLICT target must include scope_id (the local PK is just idColumns).
-  // scope_id is filled by the column's auth.uid() default (v1: scope = user).
-  const { error } = await client.from(table).upsert(payload, {
-    onConflict: ["scope_id", ...idColumns(table)].join(","),
-  });
+  // insertOnly tables (scope_keys) push via a plain INSERT — a wrap is immutable per
+  // (scope, member, epoch), and UPSERT's internal RETURNING can't pass scope_keys_read for a
+  // co-member wrap (own-wrap-only), so an admin group-wrapping would get 42501. Every other
+  // table UPSERTs: the REMOTE PK is composite (scope_id, <idColumns>), so the ON CONFLICT target
+  // includes scope_id; scope_id is filled by the column's auth.uid() default (v1: scope = user).
+  const insertOnly = tableMeta(table).insertOnly === true;
+  const { error } = insertOnly
+    ? await client.from(table).insert(payload)
+    : await client.from(table).upsert(payload, {
+        onConflict: ["scope_id", ...idColumns(table)].join(","),
+      });
 
   if (error) {
+    // insertOnly re-push: the immutable row already exists (unique_violation) → already synced,
+    // so advance rather than retry forever. (An immutable wrap can't legitimately differ.)
+    if (insertOnly && error.code === "23505") {
+      syncData.setSyncState(table, effectiveId, {
+        content_hash: hash,
+        revision,
+        remote_updated_at: state?.remote_updated_at ?? null,
+      });
+      res.pushed++;
+      return "ok";
+    }
     const kind = classifyPushError(error);
     if (kind === "quota") {
       if (!res.quotaHit) res.quotaHit = { table, message: error.message };
