@@ -530,6 +530,96 @@ describe("findRepeatedInstructions", () => {
     // Just verify it doesn't throw
     expect(Array.isArray(results)).toBe(true);
   });
+
+  test("attributes batched FTS hits to the correct candidate (no cross-contamination)", async () => {
+    // Two candidates with disjoint term sets are searched in a single batched
+    // query. Candidate 1 appears in 2 prior sessions; candidate 2 in only 1.
+    // The batched UNION ALL must keep each candidate's session set separate —
+    // if hits leaked across candidates, candidate 2 would be pushed over the
+    // threshold and candidate 1's count would be inflated.
+    insertDistillation({
+      projectId: pid,
+      sessionID: "pr-sess-1",
+      observations: "🔴 (14:30) User stated always create a PR for changes.",
+    });
+    insertDistillation({
+      projectId: pid,
+      sessionID: "pr-sess-2",
+      observations: "🔴 (10:00) User said create a PR before merging.",
+    });
+    // Only ONE prior session mentions running tests.
+    insertDistillation({
+      projectId: pid,
+      sessionID: "test-sess-1",
+      observations: "🟡 (09:00) Agent always run the tests before committing.",
+    });
+
+    const candidates: InstructionCandidate[] = [
+      { text: "create a PR for changes", sessionID: "current-sess" },
+      { text: "run the tests locally", sessionID: "current-sess" },
+    ];
+
+    const results = await findRepeatedInstructions({
+      projectPath: PROJECT,
+      currentSessionID: "current-sess",
+      candidates,
+      threshold: 2,
+    });
+
+    // Candidate 1 met the threshold (2 distinct sessions); candidate 2 did not
+    // (1 session) and must be absent — proving hits were not merged.
+    expect(results).toHaveLength(1);
+    expect(results[0].instruction).toBe("create a PR for changes");
+    expect(results[0].priorSessionCount).toBe(2);
+  });
+
+  test("returns a result per matching candidate in a multi-candidate batch", async () => {
+    // Both candidates independently clear the threshold. Verifies the batched
+    // query returns rows tagged for every candidate, not just the first.
+    // (Term sets are kept disjoint AND free of shared prefixes — FTS matches
+    // on prefixes, e.g. "pr"* would match "prefers".)
+    insertDistillation({
+      projectId: pid,
+      sessionID: "deploy-sess-1",
+      observations: "🔴 User stated always squash before merging.",
+    });
+    insertDistillation({
+      projectId: pid,
+      sessionID: "deploy-sess-2",
+      observations: "🔴 User said squash the commits before merging.",
+    });
+    insertDistillation({
+      projectId: pid,
+      sessionID: "fmt-sess-1",
+      observations: "🔴 User wants biome formatting everywhere.",
+    });
+    insertDistillation({
+      projectId: pid,
+      sessionID: "fmt-sess-2",
+      observations: "🔴 User likes biome formatting on save.",
+    });
+
+    const candidates: InstructionCandidate[] = [
+      { text: "squash before merging", sessionID: "current-sess" },
+      { text: "biome formatting everywhere", sessionID: "current-sess" },
+    ];
+
+    const results = await findRepeatedInstructions({
+      projectPath: PROJECT,
+      currentSessionID: "current-sess",
+      candidates,
+      threshold: 2,
+    });
+
+    // Both candidates must be returned — proving the batched UNION ALL emits
+    // rows for every candidate index, not just the first branch.
+    expect(results).toHaveLength(2);
+    const byText = new Map(
+      results.map((r) => [r.instruction, r.priorSessionCount]),
+    );
+    expect(byText.get("squash before merging")).toBeGreaterThanOrEqual(2);
+    expect(byText.get("biome formatting everywhere")).toBeGreaterThanOrEqual(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

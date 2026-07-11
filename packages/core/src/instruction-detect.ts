@@ -182,6 +182,21 @@ export async function findRepeatedInstructions(input: {
 
   const results: RepeatedInstruction[] = [];
 
+  // Path B (FTS) pre-pass: build the per-candidate MATCH expressions and run
+  // them as ONE batched query instead of one query per candidate. The old
+  // per-candidate loop issued up to MAX_CANDIDATES identical-fingerprint FTS
+  // scans per curation run, which Sentry flagged as an N+1 under lore.curator.
+  const ftsMatchByIndex: Array<{ index: number; matchExpr: string }> = [];
+  for (let i = 0; i < input.candidates.length; i++) {
+    const terms = filterTerms(input.candidates[i].text);
+    // Need >= 2 meaningful terms; cap at 5 to keep queries focused.
+    if (terms.length < 2) continue;
+    const matchExpr = ftsQueryOr(terms.slice(0, 5).join(" "));
+    if (matchExpr === EMPTY_QUERY) continue;
+    ftsMatchByIndex.push({ index: i, matchExpr });
+  }
+  const ftsSessionsByIndex = searchDistillationsFTSBatch(pid, ftsMatchByIndex);
+
   for (let i = 0; i < input.candidates.length; i++) {
     const candidate = input.candidates[i];
     const sessionIDs = new Set<string>();
@@ -203,15 +218,13 @@ export async function findRepeatedInstructions(input: {
       }
     }
 
-    // Path B: FTS fallback (always runs to complement vector search)
-    const terms = filterTerms(candidate.text);
-    if (terms.length >= 2) {
-      // Cap at 5 terms to keep queries focused
-      const searchText = terms.slice(0, 5).join(" ");
-      const ftsHits = searchDistillationsFTS(pid, searchText);
-      for (const hit of ftsHits) {
-        if (hit.session_id !== input.currentSessionID) {
-          sessionIDs.add(hit.session_id);
+    // Path B: FTS fallback (always runs to complement vector search).
+    // Results were pre-computed above in a single batched query.
+    const ftsSessions = ftsSessionsByIndex.get(i);
+    if (ftsSessions) {
+      for (const sessionID of ftsSessions) {
+        if (sessionID !== input.currentSessionID) {
+          sessionIDs.add(sessionID);
         }
       }
     }
@@ -228,40 +241,75 @@ export async function findRepeatedInstructions(input: {
 }
 
 /**
- * Simple FTS5 search over distillation observations, returning session_id
- * for cross-session counting. Searches all distillations (including archived).
+ * Batched FTS5 search over distillation observations for MULTIPLE candidate
+ * instructions at once, returning the matching prior-session IDs grouped by
+ * candidate index. Searches all distillations (including archived).
  *
  * Uses OR semantics — we want to find any distillation mentioning any of
  * the instruction's key terms, since paraphrased instructions may share
  * only some terms. This is a recall-oriented search (find all possible
  * matches), not a precision-oriented one.
  *
+ * Each candidate contributes one `UNION ALL` branch tagged with its index and
+ * wrapped in a subquery so the per-candidate `ORDER BY rank LIMIT 30` bound is
+ * preserved exactly as the previous per-candidate query applied it. Collapsing
+ * these into a single statement avoids the N+1 query pattern (one FTS scan per
+ * candidate) that Sentry flagged under the `lore.curator` transaction.
+ *
+ * The candidate index is interpolated directly into the SQL — it is always a
+ * caller-supplied loop index (a trusted integer), never user input. The MATCH
+ * expression and project id are bound as parameters.
+ *
  * @param projectId  The resolved project ID (from ensureProject).
- * @param rawQuery   Raw search text — will be converted to OR-based FTS expression.
+ * @param queries    Per-candidate `{ index, matchExpr }` pairs. `matchExpr`
+ *                   must already be a sanitized FTS expression (from
+ *                   `ftsQueryOr`) and not `EMPTY_QUERY`.
+ * @returns          Map keyed by candidate index → set of matching session IDs.
  */
-function searchDistillationsFTS(
+function searchDistillationsFTSBatch(
   projectId: string,
-  rawQuery: string,
-): Array<{ id: string; session_id: string }> {
-  const matchExpr = ftsQueryOr(rawQuery);
-  if (matchExpr === EMPTY_QUERY) return [];
+  queries: ReadonlyArray<{ index: number; matchExpr: string }>,
+): Map<number, Set<string>> {
+  const out = new Map<number, Set<string>>();
+  if (!queries.length) return out;
 
-  const sql = `SELECT d.id, d.session_id
-     FROM distillation_fts f
-     CROSS JOIN distillations d ON d.rowid = f.rowid
-     WHERE distillation_fts MATCH ?
-     AND d.project_id = ?
-     ORDER BY rank LIMIT 30`;
+  const sql = queries
+    .map(
+      ({ index }) =>
+        `SELECT ${index | 0} AS cand, session_id FROM (
+           SELECT d.session_id AS session_id
+           FROM distillation_fts f
+           CROSS JOIN distillations d ON d.rowid = f.rowid
+           WHERE distillation_fts MATCH ? AND d.project_id = ?
+           ORDER BY rank LIMIT 30
+         )`,
+    )
+    .join("\nUNION ALL\n");
+
+  const params: string[] = [];
+  for (const { matchExpr } of queries) params.push(matchExpr, projectId);
 
   try {
-    return db().query(sql).all(matchExpr, projectId) as Array<{
-      id: string;
+    const rows = db()
+      .query(sql)
+      .all(...params) as Array<{
+      cand: number;
       session_id: string;
     }>;
+    for (const row of rows) {
+      let set = out.get(row.cand);
+      if (!set) {
+        set = new Set<string>();
+        out.set(row.cand, set);
+      }
+      set.add(row.session_id);
+    }
   } catch (err) {
-    log.warn("instruction-detect: FTS search failed:", err);
-    return [];
+    // Graceful degradation: the curator simply gets no cross-session FTS
+    // context this run (same outcome as the pre-batch per-candidate catch).
+    log.warn("instruction-detect: batched FTS search failed:", err);
   }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
