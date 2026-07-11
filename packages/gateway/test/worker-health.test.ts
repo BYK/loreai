@@ -298,13 +298,17 @@ describe("worker-health", () => {
       expect(msg).toBe("Worker health degraded");
     });
 
-    test("a genuine reason after a credential-class window still fires the first alert", () => {
-      // Two no-auth failures do not (and, being credential-class, would not)
-      // alert; alertSentAt must stay unset so the next genuine reason alerts.
+    test("a genuine reason after a suppressed window still fires the first alert", () => {
+      // Drive 3 credential-class failures so the escalation path actually RUNS
+      // (failureCount reaches DEGRADED_THRESHOLD) and is suppressed — this is
+      // the path that, if buggy, would wrongly stamp `alertSentAt`.
+      recordWorkerFailure("s1", "lore-distill", "no-auth");
       recordWorkerFailure("s1", "lore-distill", "no-auth");
       recordWorkerFailure("s1", "lore-distill", "no-auth");
       expect(Sentry.captureMessage).not.toHaveBeenCalled();
-      // 3rd failure is a genuine outage → escalates (window not all-credential).
+      // A genuine outage in the same window must still fire the FIRST alert:
+      // `alertSentAt` was left unset by the suppressed run, so the debounce
+      // does not swallow it.
       recordWorkerFailure("s1", "lore-distill", "upstream-error");
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     });
