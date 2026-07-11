@@ -353,6 +353,7 @@ vi.mock("../src/supabase", () => ({
 import {
   __resetQuotaWarnedTables,
   classifyPushError,
+  publishIdentityPub,
   pushOnce,
   pullOnce,
   type SyncProgress,
@@ -463,6 +464,55 @@ beforeEach(() => {
 });
 
 afterEach(() => syncData.assertSyncInvariants()); // #834 — continuous invariant guard
+
+// E-3b (#827/#1260): publishIdentityPub publishes this device's account PUBLIC key to the
+// remote identity_pub directory. Unit-covered here (the integration test needs Docker, so it
+// doesn't run in the coverage job). Exercises all branches: on→publish, off→no-op+no-mint,
+// KV-gate skip, best-effort error.
+describe("publishIdentityPub — identity directory (E-3b)", () => {
+  const PP = { params: { t: 1, m: 256, p: 1 } }; // light Argon2id (test-only)
+  const b64Pub = () =>
+    Buffer.from(keystore.getAccountIdentity().publicKey).toString("base64");
+
+  test("publishes the account PUBLIC key (base64) when encryption is on", async () => {
+    keystore.setPassphrase("pw", PP); // creates identity + escrow → "on"
+    setKV("sync.identityPub", "");
+    await publishIdentityPub(makeClient() as never);
+    const rows = remote.get("identity_pub") ?? [];
+    expect(rows).toHaveLength(1);
+    expect(typeof rows[0].public_key).toBe("string"); // base64 text, not \x-hex
+    expect(rows[0].public_key).toBe(b64Pub()); // the PUBLIC key, never the secret
+    expect(getKV("sync.identityPub")).toBe(b64Pub()); // gate recorded on success
+  });
+
+  test("is a no-op when encryption is off (never publishes or auto-mints an identity)", async () => {
+    setKV("sync.identityPub", "");
+    expect(keystore.encryptionState()).toBe("off"); // beforeEach wiped escrow + identity
+    await publishIdentityPub(makeClient() as never);
+    expect(remote.get("identity_pub") ?? []).toHaveLength(0);
+    expect(keystore.hasAccountIdentity()).toBe(false); // no escrow-less key minted as a side effect
+  });
+
+  test("skips re-publishing an unchanged key (KV-gated — no updated_at churn)", async () => {
+    keystore.setPassphrase("pw", PP);
+    setKV("sync.identityPub", "");
+    await publishIdentityPub(makeClient() as never); // publishes + records the gate
+    remote.set("identity_pub", []); // a 2nd publish would re-appear here if not gated
+    await publishIdentityPub(makeClient() as never);
+    expect(remote.get("identity_pub") ?? []).toHaveLength(0);
+  });
+
+  test("is best-effort: a client error does not throw and leaves the gate unset (retry next cycle)", async () => {
+    keystore.setPassphrase("pw", PP);
+    setKV("sync.identityPub", "");
+    upsertError = { message: "network down" };
+    await expect(
+      publishIdentityPub(makeClient() as never),
+    ).resolves.toBeUndefined();
+    expect(getKV("sync.identityPub")).toBe(""); // NOT recorded → retried next cycle
+    upsertError = null;
+  });
+});
 
 describe("pushOnce — happy path", () => {
   test("uploads new rows and records sync_state", async () => {
