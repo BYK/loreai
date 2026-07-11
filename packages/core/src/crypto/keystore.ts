@@ -203,7 +203,7 @@ async function loadOrCreateScopeKey(
   };
   const row = db()
     .query(
-      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ? ORDER BY key_epoch DESC LIMIT 1",
     )
     .get(scopeId, memberUserId) as { w: unknown } | undefined;
   if (row) {
@@ -226,12 +226,12 @@ async function loadOrCreateScopeKey(
       `INSERT INTO scope_keys
          (scope_id, member_user_id, wrapped_dek, key_epoch, created_at, updated_at)
        VALUES (?, ?, ?, 0, ?, ?)
-       ON CONFLICT(scope_id, member_user_id) DO NOTHING`,
+       ON CONFLICT(scope_id, member_user_id, key_epoch) DO NOTHING`,
     )
     .run(scopeId, memberUserId, Buffer.from(wrapped), now, now);
   const stored = db()
     .query(
-      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+      "SELECT wrapped_dek AS w FROM scope_keys WHERE scope_id = ? AND member_user_id = ? ORDER BY key_epoch DESC LIMIT 1",
     )
     .get(scopeId, memberUserId) as { w: unknown };
   const finalDek = await unwrapDek(id.secretKey, toU8(stored.w));
@@ -257,7 +257,7 @@ export function putWrappedScopeKey(
       `INSERT INTO scope_keys
          (scope_id, member_user_id, wrapped_dek, key_epoch, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(scope_id, member_user_id) DO UPDATE SET
+       ON CONFLICT(scope_id, member_user_id, key_epoch) DO UPDATE SET
          wrapped_dek = excluded.wrapped_dek,
          key_epoch = excluded.key_epoch,
          updated_at = excluded.updated_at`,
@@ -302,7 +302,7 @@ export async function wrapScopeKeyForMember(
     (
       db()
         .query(
-          "SELECT key_epoch AS e FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+          "SELECT key_epoch AS e FROM scope_keys WHERE scope_id = ? AND member_user_id = ? ORDER BY key_epoch DESC LIMIT 1",
         )
         .get(scopeId, member) as { e: number } | undefined
     )?.e;

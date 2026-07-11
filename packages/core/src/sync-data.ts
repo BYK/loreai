@@ -208,7 +208,10 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       // stripSyncCols would drop it, leaving the NOT-NULL local column unfilled).
       // wrapped_dek is ciphertext → base64 on the wire. Pulled BEFORE knowledge (C-4).
       table: "scope_keys",
-      idColumns: ["member_user_id"],
+      // key_epoch is part of the identity now (E-4c-3): a member holds one wrap PER epoch
+      // (rotation adds a new-epoch row; old epochs are retained so past blobs stay readable).
+      // The remote PK is (scope_id, member_user_id, key_epoch); onConflict prepends scope_id.
+      idColumns: ["member_user_id", "key_epoch"],
       ftsTables: [],
       syncColumns: ["member_user_id", "wrapped_dek", "key_epoch", "updated_at"],
       blobColumns: ["wrapped_dek"],

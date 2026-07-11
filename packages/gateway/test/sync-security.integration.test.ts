@@ -330,21 +330,33 @@ describe.skipIf(gate())(
       expect(rows[0].wrapped_dek).toBe("T1JJR0lOQUw=");
     });
 
-    it("allows changing wrapped_dek at a HIGHER key_epoch (rotation)", async () => {
+    it("rotation writes a NEW epoch row (coexists with epoch 0); an in-place re-wrap stays blocked", async () => {
       const a = await h.createUser();
-      await insKey(a, "ZXBvY2gw"); // "epoch0"
-      const r = await updKey(a, "wrapped_dek='ZXBvY2gx', key_epoch=1");
+      await insKey(a, "ZXBvY2gw"); // "epoch0" at key_epoch 0 (default)
+      // E-4c-3: rotation is an INSERT of a new-epoch row (the PK includes key_epoch), NOT an
+      // in-place re-wrap. The old epoch is retained so pre-rotation blobs stay decryptable.
+      const r = await h.asUser(a, (c) =>
+        c.query(
+          `insert into public.scope_keys (member_user_id, scope_id, author_id, wrapped_dek, key_epoch)
+           values ($1, $2, $2, 'ZXBvY2gx', 1)`,
+          [a, a],
+        ),
+      );
       expect(r.rowCount).toBe(1);
+      // In-place re-wrap of the existing epoch-0 row is still a poison clobber.
+      expect(
+        (await expectError(() => updKey(a, "wrapped_dek='Q0xPQkJFUg=='"))).code,
+      ).toBe("23514");
     });
 
     it("allows an idempotent upsert of the SAME wrapped_dek (production convergence)", async () => {
       const a = await h.createUser();
-      await insKey(a, "U0FNRQ=="); // "SAME"
+      await insKey(a, "U0FNRQ=="); // "SAME" at key_epoch 0
       const r = await h.asUser(a, (c) =>
         c.query(
           `insert into public.scope_keys (member_user_id, scope_id, author_id, wrapped_dek)
            values ($1, $2, $2, 'U0FNRQ==')
-           on conflict (scope_id, member_user_id)
+           on conflict (scope_id, member_user_id, key_epoch)
              do update set wrapped_dek = excluded.wrapped_dek, updated_at = now()`,
           [a, a],
         ),

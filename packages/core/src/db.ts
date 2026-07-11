@@ -1718,6 +1718,15 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE session_state ADD COLUMN worker_breakdown TEXT;
   `,
+  // Version 69 (#827 E-4c-3a): scope_keys PK gains key_epoch → (scope_id, member_user_id,
+  // key_epoch), so a member retains ONE wrapped DEK PER epoch (key rotation writes a new-epoch
+  // row; old epochs stay readable). SQLite can't ALTER a PK, so the table is RECREATED by a JS
+  // SAVEPOINT step (applyScopeKeyEpochPk), special-cased in migrate() by
+  // SCOPE_KEY_EPOCH_MIGRATION_INDEX so the recreate is all-or-nothing. This string is a no-op
+  // marker so MIGRATIONS.length still counts.
+  `
+  -- Version 69 (#827): see applyScopeKeyEpochPk — no-op SQL marker.
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -1739,6 +1748,12 @@ const SESSION_ROLLUP_MIGRATION_INDEX = 59; // 0-based index of version-60
 // tables (plain exec() of CREATE/DROP/RENAME is NOT atomic). The MIGRATIONS entry at
 // this index is a no-op documentation marker.
 const REF_FK_DROP_MIGRATION_INDEX = 65; // 0-based index of version-66
+
+// Index of the scope_keys PK-widening migration (adds key_epoch to the PK). SQLite cannot
+// ALTER a primary key, so it recreates the table; done as a JS SAVEPOINT step so a crash
+// mid-recreate rolls back instead of boot-looping. Idempotent (skips if key_epoch already
+// in the PK). The MIGRATIONS entry at this index is a no-op documentation marker.
+const SCOPE_KEY_EPOCH_MIGRATION_INDEX = 68; // 0-based index of version-69
 
 /**
  * Idempotent, column-presence-aware application of the v55 knowledge_meta register
@@ -2448,8 +2463,9 @@ function installSyncCapture(database: Database) {
       VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});
     END;`;
   // C-3 (#825): encryption key store. account_escrow is single-row (keyed by id=1);
-  // scope_keys is keyed by member_user_id (v1: one scope per user). INSERT + UPDATE
-  // (set/rotate the wrapping); no DELETE (keys/escrow are not deleted in v1).
+  // scope_keys is keyed by (member_user_id, key_epoch) — one wrap per member PER epoch since
+  // rotation (E-4c-3), so the outbox row_id is composite (member_user_id ⟳ char(31) ⟳ key_epoch),
+  // matching idColumns. INSERT + UPDATE (set/rotate the wrapping); no DELETE (v1).
   sql += `
     CREATE TEMP TRIGGER IF NOT EXISTS account_escrow_outbox_ins
     AFTER INSERT ON account_escrow WHEN (${gate})
@@ -2467,13 +2483,13 @@ function installSyncCapture(database: Database) {
     AFTER INSERT ON scope_keys WHEN (${gate})
     BEGIN
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('scope_keys', new.member_user_id, 'upsert', ${ts});
+      VALUES ('scope_keys', new.member_user_id || char(31) || new.key_epoch, 'upsert', ${ts});
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS scope_keys_outbox_upd
     AFTER UPDATE ON scope_keys WHEN (${gate})
     BEGIN
       INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('scope_keys', new.member_user_id, 'upsert', ${ts});
+      VALUES ('scope_keys', new.member_user_id || char(31) || new.key_epoch, 'upsert', ${ts});
     END;`;
   // #1246: projects identity mapping (id→git_remote). Gated on git_remote IS NOT NULL —
   // only remote-backed projects sync (a remote-less project's random id can't correlate
@@ -2631,6 +2647,41 @@ function applyRefFkDrop(database: Database) {
   }
 }
 
+// v69 (#827 E-4c-3a): widen the scope_keys PK to include key_epoch so a member retains one
+// wrapped DEK per epoch (rotation writes a new-epoch row). SQLite can't ALTER a PK → recreate.
+// Idempotent: skips if key_epoch is already part of the PK (a re-run after recovery).
+function applyScopeKeyEpochPk(database: Database) {
+  const cols = database.query("PRAGMA table_info('scope_keys')").all() as {
+    name: string;
+    pk: number;
+  }[];
+  if (cols.some((c) => c.name === "key_epoch" && c.pk > 0)) return; // already widened
+  database.exec("SAVEPOINT scope_key_epoch_pk");
+  try {
+    database.exec(`
+      DROP TABLE IF EXISTS scope_keys_new;
+      CREATE TABLE scope_keys_new (
+        scope_id        TEXT NOT NULL,
+        member_user_id  TEXT NOT NULL,
+        wrapped_dek     BLOB NOT NULL,
+        key_epoch       INTEGER NOT NULL DEFAULT 0,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (scope_id, member_user_id, key_epoch)
+      );
+      INSERT INTO scope_keys_new (scope_id, member_user_id, wrapped_dek, key_epoch, created_at, updated_at)
+        SELECT scope_id, member_user_id, wrapped_dek, key_epoch, created_at, updated_at FROM scope_keys;
+      DROP TABLE scope_keys;
+      ALTER TABLE scope_keys_new RENAME TO scope_keys;
+    `);
+    database.exec("RELEASE scope_key_epoch_pk");
+  } catch (e) {
+    database.exec("ROLLBACK TO scope_key_epoch_pk");
+    database.exec("RELEASE scope_key_epoch_pk");
+    throw e;
+  }
+}
+
 /**
  * Preflight check: verify the runtime's SQLite has the FTS5 full-text search
  * extension compiled in.
@@ -2708,6 +2759,10 @@ function migrate(database: Database) {
       // Recreate the ref tables without their knowledge(id) FKs, atomically (SAVEPOINT)
       // so a crash mid-recreate rolls back instead of boot-looping the retry (#909).
       applyRefFkDrop(database);
+    } else if (i === SCOPE_KEY_EPOCH_MIGRATION_INDEX) {
+      // Recreate scope_keys with key_epoch in the PK, atomically (SAVEPOINT), idempotent
+      // (skips if already migrated) so a partial apply can't boot-loop (#827 E-4c-3a).
+      applyScopeKeyEpochPk(database);
     } else {
       try {
         database.exec(MIGRATIONS[i]);
@@ -3085,7 +3140,7 @@ function recoverMissingObjects(database: Database) {
     scope_id TEXT NOT NULL, member_user_id TEXT NOT NULL,
     wrapped_dek BLOB NOT NULL, key_epoch INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (scope_id, member_user_id)
+    PRIMARY KEY (scope_id, member_user_id, key_epoch)
   );`);
 
   // Version 36: session project binding. Recover each column independently in

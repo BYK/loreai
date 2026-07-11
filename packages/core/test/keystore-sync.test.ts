@@ -87,7 +87,22 @@ describe("C-3 registry — encryption key-store tables", () => {
     expect(escrow.length).toBeGreaterThan(0);
     expect(escrow[0].row_id).toBe("1"); // single-row id
     expect(sk.length).toBeGreaterThan(0);
-    expect(sk[0].row_id).toBe(SCOPE); // keyed by member_user_id
+    expect(sk[0].row_id).toBe(`${SCOPE}\x1f0`); // composite: member_user_id ⟳ key_epoch (E-4c-3)
+  });
+
+  it("the captured scope_keys outbox row_id resolves back to its row (trigger ⇄ idColumns order)", async () => {
+    keystore.setPassphrase("pw", { params: FAST });
+    await keystore.getScopeKey(SCOPE, SCOPE); // captures a scope_keys row
+    const sk = syncData
+      .readOutbox(0)
+      .filter((e) => e.table_name === "scope_keys");
+    expect(sk.length).toBeGreaterThan(0);
+    // The trigger-produced row_id MUST decompose (via idColumns) back to the real row. An
+    // idColumns-order regression vs the capture trigger would return null here — catching the
+    // silent-corruption vector in the fast unit suite, not only the Docker round-trip (E-4c-3a).
+    const row = syncData.getRowById("scope_keys", sk[0].row_id);
+    expect(row?.member_user_id).toBe(SCOPE);
+    expect(Number(row?.key_epoch)).toBe(0);
   });
 });
 

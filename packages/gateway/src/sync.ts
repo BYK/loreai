@@ -636,7 +636,6 @@ export async function pullOnce(
       }
     }
 
-    const idc = meta.idColumns[0];
     const skippedBefore = res.skipped;
     try {
       for (;;) {
@@ -644,13 +643,20 @@ export async function pullOnce(
         // Page by (updated_at, id). `gte` includes cursor.ms; the in-memory keyset
         // skip drops rows already applied. (timestamptz is compared by VALUE, so
         // Z vs +00:00 / fractional formats are equivalent.)
+        // Order by (updated_at, <FULL composite id>) — every id column, not just the first.
+        // The in-memory keyset skip (below) compares the FULL composite rowIdOf; if the page
+        // were ordered by only idColumns[0], two rows sharing (updated_at, idColumns[0]) but
+        // differing in a later id column could arrive in reverse-keyset order, and the one
+        // sorting earlier in the full keyset would be wrongly skipped (never applied) after the
+        // cursor advanced past the other. For scope_keys that means a member's lower-epoch wrap
+        // could be dropped when it shares updated_at with a higher epoch (E-4c-3). Matches
+        // drainTimestamp, which already keysets on the full composite.
         let q = client
           .from(meta.table)
           .select("*")
-          .order("updated_at", { ascending: true })
-          .order(idc, { ascending: true })
-          .limit(PAGE);
-        q = q.gte("updated_at", sinceIso);
+          .order("updated_at", { ascending: true });
+        for (const c of meta.idColumns) q = q.order(c, { ascending: true });
+        q = q.limit(PAGE).gte("updated_at", sinceIso);
         const { data, error } = await q;
         if (error) {
           log.notice(`sync: pull ${meta.table}: ${error.message}`);
