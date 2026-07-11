@@ -33,6 +33,7 @@ import {
   getDailyCostForDay,
   isUnattributedProjectPath,
   UNATTRIBUTED_PROJECT_PREFIX,
+  assertFts5Available,
 } from "../src/db";
 import { enableHostedMode, _resetHostedModeForTest } from "../src/hosted";
 
@@ -53,6 +54,56 @@ describe("db", () => {
     expect(names).toContain("metadata");
     expect(names).toContain("import_history");
     expect(names).toContain("tool_calls");
+  });
+
+  describe("assertFts5Available", () => {
+    test("passes on a runtime whose SQLite has FTS5 and leaves no temp table", () => {
+      const database = db();
+      expect(() => assertFts5Available(database)).not.toThrow();
+      // The probe must clean up after itself — no stray temp table left behind.
+      const leftover = database
+        .query(
+          "SELECT name FROM sqlite_temp_master WHERE type='table' AND name='lore_fts5_probe'",
+        )
+        .get() as { name: string } | null;
+      expect(leftover).toBeNull();
+    });
+
+    test("throws an actionable FTS5 error when the module is missing", () => {
+      // Stub a connection whose exec fails exactly as an FTS5-less SQLite does.
+      const cause = new Error("no such module: fts5");
+      const stub = {
+        exec: () => {
+          throw cause;
+        },
+      } as unknown as Parameters<typeof assertFts5Available>[0];
+
+      let thrown: unknown;
+      try {
+        assertFts5Available(stub);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      const msg = (thrown as Error).message;
+      expect(msg).toContain("FTS5");
+      expect(msg).toContain("no such module: fts5");
+      // Actionable guidance + preserved cause for debugging.
+      expect(msg).toMatch(/lore` binary|Node\.js\/Bun|sqlite\.org\/fts5/);
+      expect((thrown as Error).cause).toBe(cause);
+    });
+
+    test("surfaces an unexpected (non-FTS5) probe error unchanged", () => {
+      const cause = new Error("disk I/O error");
+      const stub = {
+        exec: () => {
+          throw cause;
+        },
+      } as unknown as Parameters<typeof assertFts5Available>[0];
+
+      // Must NOT be mislabeled as an FTS5 problem — rethrown as-is.
+      expect(() => assertFts5Available(stub)).toThrow(cause);
+    });
   });
 
   test("schema version is set", () => {

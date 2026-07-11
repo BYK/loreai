@@ -2250,6 +2250,10 @@ export function db(): Database {
   // that resets it — the backstop for the active TRUNCATE checkpoint the idle
   // scheduler runs via checkpointWal(). Default is -1 (never truncate).
   database.exec(`PRAGMA journal_size_limit = ${WAL_JOURNAL_SIZE_LIMIT_BYTES}`);
+  // Preflight: Lore's schema is built on FTS5 virtual tables. If this runtime's
+  // SQLite lacks the FTS5 module, fail fast with an actionable message instead
+  // of a cryptic mid-migration `no such module: fts5` crash-loop (#3M).
+  assertFts5Available(database);
   migrate(database);
   installSyncCapture(database);
   // Load the sqlite-vec native extension (if available) on the RAW connection,
@@ -2611,6 +2615,41 @@ function applyRefFkDrop(database: Database) {
     database.exec("ROLLBACK TO ref_fk_drop");
     database.exec("RELEASE ref_fk_drop");
     throw e;
+  }
+}
+
+/**
+ * Preflight check: verify the runtime's SQLite has the FTS5 full-text search
+ * extension compiled in.
+ *
+ * Every memory feature (temporal / knowledge / entity / distillation search)
+ * is built on FTS5 virtual tables, so a SQLite without it cannot function —
+ * this is a hard requirement, not a degradable one. Some system SQLite builds
+ * (notably on Windows) omit FTS5; without this probe the absence surfaced only
+ * mid-migration as a cryptic `no such module: fts5` that crash-looped on every
+ * request (Sentry LOREAI-GATEWAY-3M). Probing up front lets us fail with a
+ * clear, actionable message.
+ *
+ * The probe creates and drops a connection-scoped TEMP virtual table so it
+ * never touches the persistent schema. Only the absence of the module makes
+ * `CREATE VIRTUAL TABLE ... USING fts5` fail; any other (e.g. disk/IO) error is
+ * unexpected and is surfaced unchanged rather than mislabeled as "FTS5 missing".
+ */
+export function assertFts5Available(database: Database): void {
+  try {
+    database.exec(
+      "CREATE VIRTUAL TABLE IF NOT EXISTS temp.lore_fts5_probe USING fts5(x)",
+    );
+    database.exec("DROP TABLE IF EXISTS temp.lore_fts5_probe");
+  } catch (e: unknown) {
+    const detail = e instanceof Error ? e.message : String(e);
+    if (!/fts5|no such module/i.test(detail)) throw e;
+    throw new Error(
+      `Lore requires SQLite with the FTS5 full-text search extension, but this runtime's SQLite was built without it (${detail}). ` +
+        "FTS5 powers Lore's memory search and cannot be disabled. Use the standalone `lore` binary, or a Node.js/Bun build whose bundled SQLite includes FTS5. " +
+        "See https://www.sqlite.org/fts5.html",
+      { cause: e },
+    );
   }
 }
 
