@@ -55,7 +55,9 @@ async function expectError(fn: () => Promise<unknown>): Promise<{
   throw new Error("expected the query to fail, but it succeeded");
 }
 
-const pubkey = (b: number) => Buffer.alloc(b, 7); // deterministic bytea of length b
+// A member's published key travels as base64 TEXT (0026 — the wire convention for all key
+// material). `raw` = the number of raw key bytes; the stored value is their base64.
+const pubkey = (raw = 32) => Buffer.alloc(raw, 7).toString("base64");
 const publishPub = (uid: string, bytes = 32) =>
   h.asUser(uid, (c) =>
     c.query("insert into public.identity_pub (public_key) values ($1)", [
@@ -106,7 +108,8 @@ describe.skipIf(gate())(
 
     it("identity_pub: an oversized public key is rejected (anti-abuse cap)", async () => {
       const a = await h.createUser();
-      const err = await expectError(() => publishPub(a, 257));
+      // base64 of 512 raw bytes is ~684 chars > the 512-char text cap → rejected.
+      const err = await expectError(() => publishPub(a, 512));
       expect(err.code).toBe("23514"); // check_violation
     });
 
@@ -204,23 +207,35 @@ describe.skipIf(gate())(
     it("identity_pub: a user cannot modify another user's pubkey row (update-forge is a no-op)", async () => {
       const a = await h.createUser();
       const b = await h.createUser();
-      await publishPub(a, 32); // A's key = 32 bytes of 0x07
+      await publishPub(a, 32); // A's key = base64 of 32×0x07
       await addMember(a, b, "editor"); // B can even READ A's key now, but still cannot write it
       // B's UPDATE matches no row under the owner policy USING (user_id = auth.uid()) → no-op.
       await h.asUser(b, (cl) =>
         cl.query(
           "update public.identity_pub set public_key=$1 where user_id=$2",
-          [Buffer.alloc(32, 9), a],
+          [Buffer.alloc(32, 9).toString("base64"), a],
         ),
       );
-      const len = await h.client
+      const k = await h.client
         .query(
-          "select octet_length(public_key) as l, public_key as k from public.identity_pub where user_id=$1",
+          "select public_key as k from public.identity_pub where user_id=$1",
           [a],
         )
-        .then((r) => r.rows[0]);
-      expect(len.l).toBe(32);
-      expect((len.k as Buffer)[0]).toBe(7); // unchanged (still A's original key, not B's 0x09)
+        .then((r) => r.rows[0].k);
+      expect(k).toBe(pubkey(32)); // unchanged — still A's original key, not B's 0x09
+    });
+
+    it("identity_pub: public_key is stored as base64 text (wire convention, not \\x-hex bytea)", async () => {
+      const a = await h.createUser();
+      await publishPub(a, 32);
+      const k = await h.client
+        .query(
+          "select public_key as k from public.identity_pub where user_id=$1",
+          [a],
+        )
+        .then((r) => r.rows[0].k);
+      expect(typeof k).toBe("string");
+      expect(k).toBe(Buffer.alloc(32, 7).toString("base64")); // decodes with Buffer.from(k,'base64')
     });
   },
 );

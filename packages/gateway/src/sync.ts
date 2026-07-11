@@ -1038,6 +1038,42 @@ async function reportDeviceProgress(client: SupabaseClient): Promise<void> {
   }
 }
 
+const IDENTITY_PUB_KV = "sync.identityPub"; // base64 of the last-published public key
+
+/**
+ * Publish this device's account identity PUBLIC key to the remote `identity_pub` directory
+ * (E-3, #827) so a scope admin can later HPKE-wrap the per-scope DEK to this member (E-4).
+ * The PRIVATE key never leaves the device. Best-effort: any failure is logged at info and
+ * never breaks sync. Only runs when encryption is "on" (an identity exists + is unlocked).
+ *
+ * `user_id` is filled by the remote column's `default auth.uid()` (like scope_id elsewhere),
+ * so the payload carries only the key. Gated on a KV hash of the published key so we upsert
+ * ONLY when it changes — re-publishing every cycle would bump the remote `updated_at` and
+ * churn co-members' pull cursors for no reason. The key is base64 (the wire convention for
+ * all key material — matches scope_keys.wrapped_dek so E-4 decodes it identically).
+ */
+export async function publishIdentityPub(
+  client: SupabaseClient,
+): Promise<void> {
+  try {
+    if (keystore.encryptionState() !== "on") return; // no unlocked identity to publish
+    const pub = Buffer.from(keystore.getAccountIdentity().publicKey).toString(
+      "base64",
+    );
+    if (getKV(IDENTITY_PUB_KV) === pub) return; // already published this exact key
+    const { error } = await client
+      .from("identity_pub")
+      .upsert({ public_key: pub }, { onConflict: "user_id" });
+    if (error) {
+      log.info(`sync: identity_pub publish skipped: ${error.message}`);
+      return;
+    }
+    setKV(IDENTITY_PUB_KV, pub);
+  } catch (e) {
+    log.info(`sync: identity_pub publish skipped: ${(e as Error).message}`);
+  }
+}
+
 export async function syncOnce(
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
@@ -1078,6 +1114,8 @@ export async function syncOnce(
   }
   // Report AFTER the pull so pulled_through reflects the freshly-advanced cursors.
   await reportDeviceProgress(client);
+  // Publish this device's identity public key so admins can wrap the DEK to it (E-3, #827).
+  await publishIdentityPub(client);
   return {
     pushed: push.pushed,
     pulled: pull.pulled,

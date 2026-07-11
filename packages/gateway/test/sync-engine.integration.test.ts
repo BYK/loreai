@@ -33,7 +33,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { pullOnce, pushOnce } from "../src/sync";
+import { publishIdentityPub, pullOnce, pushOnce } from "../src/sync";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 
 // The engine drives real supabase-js clients we pass in explicitly, but the encryption
@@ -466,9 +466,76 @@ describe.skipIf(SKIP)(
       );
       // #1246: projects (local + remote) are cleaned by the top-level beforeEach.
       keystore.lock();
-      for (const t of ["account_escrow", "scope_keys"]) {
+      setKV("sync.identityPub", ""); // reset the identity-publish gate
+      for (const t of ["account_escrow", "scope_keys", "identity_pub"]) {
         await h.client.query(`DELETE FROM public.${t}`);
       }
+    });
+
+    it("publishes this device's identity public key to the remote directory (E-3)", async () => {
+      const client = clientFor(uid);
+      keystore.setPassphrase("correct horse battery", { params: FAST }); // identity+escrow → "on"
+      syncData.enableSync("basic");
+      await publishIdentityPub(client);
+      const expected = Buffer.from(
+        keystore.getAccountIdentity().publicKey,
+      ).toString("base64");
+      const rows = await h.asUser(uid, (c) =>
+        c
+          .query("select user_id, public_key from public.identity_pub")
+          .then((x) => x.rows),
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].user_id).toBe(uid); // user_id filled by default auth.uid()
+      expect(rows[0].public_key).toBe(expected); // base64 text (wire convention) == local pubkey
+      // Idempotent: a second publish is a no-op (KV-hash gated) — no updated_at churn.
+      const before = await h.asUser(uid, (c) =>
+        c
+          .query(
+            "select updated_at from public.identity_pub where user_id=$1",
+            [uid],
+          )
+          .then((x) => x.rows[0].updated_at),
+      );
+      await publishIdentityPub(client);
+      const after = await h.asUser(uid, (c) =>
+        c
+          .query(
+            "select updated_at from public.identity_pub where user_id=$1",
+            [uid],
+          )
+          .then((x) => x.rows[0].updated_at),
+      );
+      expect(after).toStrictEqual(before);
+    });
+
+    it("publishIdentityPub is a no-op when encryption is off/locked (never auto-mints or publishes)", async () => {
+      const client = clientFor(uid);
+      syncData.enableSync("basic");
+      setKV("sync.identityPub", "");
+      // OFF (beforeEach wiped identity+escrow and locked): must NOT auto-mint an identity as a
+      // side effect of getAccountIdentity (the keystore warns against escrow-less auto-mint), nor publish.
+      expect(keystore.encryptionState()).toBe("off");
+      await publishIdentityPub(client);
+      expect(keystore.hasAccountIdentity()).toBe(false); // no identity minted
+      expect(
+        await h.asUser(uid, (c) =>
+          c.query("select 1 from public.identity_pub").then((x) => x.rowCount),
+        ),
+      ).toBe(0);
+      // LOCKED (escrow exists but identity not installed — a fresh device that pulled the
+      // escrow but hasn't unlocked): still a no-op, and must not throw. Simulate by keeping the
+      // escrow row but dropping the local identity (which is otherwise stored in the clear).
+      keystore.setPassphrase("pw", { params: FAST });
+      db().exec("DELETE FROM account_identity");
+      keystore.lock();
+      expect(keystore.encryptionState()).toBe("locked");
+      await publishIdentityPub(client);
+      expect(
+        await h.asUser(uid, (c) =>
+          c.query("select 1 from public.identity_pub").then((x) => x.rowCount),
+        ),
+      ).toBe(0);
     });
 
     it("device-1 encrypts → remote stores CIPHERTEXT → device-2 unlocks + pulls plaintext", async () => {
