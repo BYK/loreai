@@ -4,6 +4,7 @@ import {
   close,
   ensureProject,
   projectId,
+  invalidateProjectIdCache,
   mergeProjectInternal,
   loadForceMinLayer,
   saveForceMinLayer,
@@ -36,6 +37,7 @@ import {
   assertFts5Available,
 } from "../src/db";
 import { enableHostedMode, _resetHostedModeForTest } from "../src/hosted";
+import { deleteProject } from "../src/data";
 
 describe("db", () => {
   test("initializes and creates tables", () => {
@@ -600,6 +602,62 @@ describe("db", () => {
 
     // projectId should resolve the alias
     expect(projectId("/test/alias/worktree")).toBe(id);
+  });
+
+  // Regression (LOREAI-GATEWAY-3K): the hot request path resolves the same
+  // worktree/alias path many times per turn. ensureProject/projectId memoize
+  // path→id per connection; the memo must be honored AND invalidated correctly.
+  describe("project id memoization (#3K)", () => {
+    test("serves a resolved alias path from the memo until it is invalidated", () => {
+      const canonical = "/test/memo/canonical";
+      const worktree = "/test/memo/worktree";
+      const id = ensureProject(canonical);
+      db()
+        .query(
+          "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+        )
+        .run(worktree, id);
+
+      // First resolve caches worktree→id via the (stable) alias branch.
+      expect(ensureProject(worktree)).toBe(id);
+
+      // Remove the alias row WITHOUT invalidating the memo. If the memo is live,
+      // a cache HIT still returns the old id even though the DB no longer has
+      // the alias — this is what proves the lookups are actually memoized.
+      db()
+        .query("DELETE FROM project_path_aliases WHERE path = ?")
+        .run(worktree);
+      expect(ensureProject(worktree)).toBe(id); // served from memo
+      expect(projectId(worktree)).toBe(id); // shared memo
+
+      // After explicit invalidation the stale mapping is gone → the now-orphan
+      // worktree path resolves fresh (a brand-new project).
+      invalidateProjectIdCache();
+      expect(ensureProject(worktree)).not.toBe(id);
+    });
+
+    test("deleteProject invalidates the memo so a reused path is never a dangling id", () => {
+      const canonical = "/test/memo-del/canonical";
+      const worktree = "/test/memo-del/worktree";
+      const id1 = ensureProject(canonical);
+      db()
+        .query(
+          "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+        )
+        .run(worktree, id1);
+      expect(ensureProject(worktree)).toBe(id1); // prime the memo
+
+      deleteProject(id1);
+
+      // The memo must have been cleared: the path resolves to a FRESH project,
+      // never the deleted id, and the returned id must actually exist (a stale
+      // memo would hand back id1 and FK-violate on the next temporal write).
+      const id2 = ensureProject(worktree);
+      expect(id2).not.toBe(id1);
+      expect(
+        db().query("SELECT 1 AS n FROM projects WHERE id = ?").get(id2),
+      ).toBeTruthy();
+    });
   });
 
   test("ensureProject deduplicates via git_remote", () => {

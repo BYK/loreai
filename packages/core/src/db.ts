@@ -26,6 +26,10 @@ export function onProjectMutation(cb: () => void): void {
 
 /** Fire the project mutation callback (if registered). */
 function fireProjectMutation(): void {
+  // Project creation and merge (mergeProjectInternal) both route through here,
+  // and a merge re-points a path to a different project id. Drop the memo so a
+  // stale path→id can never survive a mutation.
+  invalidateProjectIdCache();
   onProjectMutationCb?.();
 }
 
@@ -46,7 +50,53 @@ export function onProjectRemoteBackfilled(
 }
 
 function fireProjectRemoteBackfilled(projectId: string): void {
+  // git_remote just flipped NULL→set (possibly via a merge inside the backfill),
+  // so the project's identity may have changed — drop the memo to be safe.
+  invalidateProjectIdCache();
   onProjectRemoteBackfilledCb?.(projectId);
+}
+
+/**
+ * Per-connection memo of resolved project IDs keyed by the input `path`.
+ *
+ * The hot request path resolves the SAME session path many times per turn:
+ * `storeTurnTemporal` warms `ensureProject` once, then temporal.store /
+ * recordToolCalls each call `ensureProject`/`projectId` again (pipeline.ts,
+ * #1084 explicitly expects these to be "cheap cache hits"), and worktree/alias
+ * paths cost TWO lookups each (a `projects.path` miss + a `project_path_aliases`
+ * hit) — the sequential per-request DB churn Sentry flagged as a blocking
+ * operation (LOREAI-GATEWAY-3K).
+ *
+ * A path→id mapping is stable: it only changes when a project is created (new
+ * path, never rewrites an existing entry), merged, git_remote-backfilled, or
+ * deleted. The first three all fire {@link fireProjectMutation} /
+ * {@link fireProjectRemoteBackfilled}; deletion invalidates via
+ * {@link invalidateProjectIdCache} (called by data.ts `deleteProject`). Keyed by
+ * the live `db()` instance (WeakMap) so a test harness swapping the DB — or
+ * close() — starts from a fresh cache automatically, mirroring the column-list
+ * memo. Only STABLE resolutions are cached; the NULL-git_remote "existing"
+ * branch is intentionally left uncached so lazy backfill keeps retrying.
+ */
+const projectIdByPathCache = new WeakMap<Database, Map<string, string>>();
+
+function projectIdCacheFor(conn: Database): Map<string, string> {
+  let m = projectIdByPathCache.get(conn);
+  if (!m) {
+    m = new Map();
+    projectIdByPathCache.set(conn, m);
+  }
+  return m;
+}
+
+/**
+ * Drop the memoized path→id map for the current connection. Called on every
+ * project mutation (create/merge/backfill via the fire-hooks) and by data.ts
+ * after a project is deleted, so a stale mapping can never be served.
+ */
+export function invalidateProjectIdCache(): void {
+  // Read `instance` directly (not db()) so invalidation never forces a DB open.
+  if (!instance) return;
+  projectIdByPathCache.get(instance)?.clear();
 }
 
 /**
@@ -3660,12 +3710,21 @@ export function ensureProject(
     );
   }
 
+  // 0. Memoized fast path — the same session path is resolved many times per
+  // request (see projectIdByPathCache docs / LOREAI-GATEWAY-3K).
+  const cache = projectIdCacheFor(db());
+  const cached = cache.get(path);
+  if (cached !== undefined) return cached;
+
   // 1. Exact path match (fast path)
   const existing = db()
     .query("SELECT id, git_remote FROM projects WHERE path = ?")
     .get(path) as { id: string; git_remote: string | null } | null;
   if (existing) {
-    // Lazy backfill: populate git_remote on pre-v14 rows
+    // Lazy backfill: populate git_remote on pre-v14 rows. NOTE: this branch is
+    // intentionally left UNCACHED — git_remote is still NULL, so backfill must
+    // keep retrying on subsequent calls until it settles (at which point the
+    // `existing.git_remote` branch below caches the stable mapping).
     if (!existing.git_remote) {
       const resolvedRemote = resolveTrustedRemote(path, suppliedGitRemote);
       if (resolvedRemote) {
@@ -3686,15 +3745,22 @@ export function ensureProject(
         // was gated out while it was remote-less (else it never gets backed up).
         fireProjectRemoteBackfilled(existing.id);
       }
+      // Uncached: git_remote may still be NULL (no remote found) — keep retrying.
+      return existing.id;
     }
+    // Settled remote-backed row — stable mapping, safe to memoize.
+    cache.set(path, existing.id);
     return existing.id;
   }
 
-  // 2. Check path aliases (worktree/clone re-visits)
+  // 2. Check path aliases (worktree/clone re-visits) — the hot 3K path.
   const alias = db()
     .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
     .get(path) as { project_id: string } | null;
-  if (alias) return alias.project_id;
+  if (alias) {
+    cache.set(path, alias.project_id);
+    return alias.project_id;
+  }
 
   // 3. Git remote identification
   const gitRemote = resolveTrustedRemote(path, suppliedGitRemote);
@@ -3709,6 +3775,7 @@ export function ensureProject(
           "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
         )
         .run(path, byRemote.id);
+      cache.set(path, byRemote.id);
       return byRemote.id;
     }
   }
@@ -3728,21 +3795,43 @@ export function ensureProject(
       "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
     )
     .run(id, path, derivedName, gitRemote, Date.now());
+  // fireProjectMutation() clears the memo (same map ref); populate AFTER it so
+  // the just-created mapping survives. Only memoize when the new project is
+  // already settled (has a remote): a remote-less project can still be
+  // git_remote-backfilled by a later ensureProject(path, suppliedGitRemote)
+  // call, so leave it uncached (mirrors the NULL-git_remote existing branch).
   fireProjectMutation();
+  if (gitRemote) cache.set(path, id);
   return id;
 }
 
 export function projectId(path: string): string | undefined {
-  const row = db()
-    .query("SELECT id FROM projects WHERE path = ?")
-    .get(path) as { id: string } | null;
-  if (row) return row.id;
+  // Shares ensureProject's per-connection memo (LOREAI-GATEWAY-3K).
+  const cache = projectIdCacheFor(db());
+  const cached = cache.get(path);
+  if (cached !== undefined) return cached;
 
-  // Check path aliases (worktree/clone paths registered by ensureProject)
+  const row = db()
+    .query("SELECT id, git_remote FROM projects WHERE path = ?")
+    .get(path) as { id: string; git_remote: string | null } | null;
+  if (row) {
+    // Mirror ensureProject: only memoize a settled (remote-backed) exact-path
+    // row so a NULL-git_remote project still gets its lazy backfill retried
+    // there. An unsettled row is returned but left uncached.
+    if (row.git_remote) cache.set(path, row.id);
+    return row.id;
+  }
+
+  // Check path aliases (worktree/clone paths registered by ensureProject). An
+  // alias only exists for an already-resolved project — safe to memoize.
   const alias = db()
     .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
     .get(path) as { project_id: string } | null;
-  return alias?.project_id;
+  if (alias) {
+    cache.set(path, alias.project_id);
+    return alias.project_id;
+  }
+  return undefined;
 }
 
 /**

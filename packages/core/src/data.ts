@@ -19,6 +19,7 @@ import {
   close,
   dbPath,
   mergeProjectInternal,
+  invalidateProjectIdCache,
   repoNameFromRemote,
   onProjectMutation,
   loadParentChildMap,
@@ -904,6 +905,9 @@ export function deleteProject(projectId: string): ClearResult | null {
 
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
+  // The project row is gone — drop any memoized path→id entry pointing at it so
+  // a later ensureProject() can't return a dangling id and FK-violate (#3K).
+  invalidateProjectIdCache();
 
   return {
     knowledge_deleted: counts.knowledge,
