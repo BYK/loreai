@@ -688,6 +688,41 @@ export function getWorkerHealth(): Array<{
   return result;
 }
 
+export interface WorkerHealthSummary {
+  /** True when no session is in sustained (degraded/critical) failure. */
+  ok: boolean;
+  /** Number of sessions past the degraded threshold. */
+  degradedSessions: number;
+  detail: string;
+}
+
+/**
+ * Gateway-wide roll-up of the per-session failure ladder, for health surfaces
+ * (`/health`, `lore doctor`). Sustained background-worker failures mean
+ * distillation/curation aren't running — context isn't being compressed and
+ * knowledge isn't being captured — which is otherwise only visible once a
+ * single session crosses the 30-minute response-warning threshold.
+ */
+export function workerHealthSummary(): WorkerHealthSummary {
+  const degraded = getWorkerHealth().filter(
+    (h) => h.status === "degraded" || h.status === "critical",
+  );
+  if (degraded.length === 0) {
+    return {
+      ok: true,
+      degradedSessions: 0,
+      detail: "background workers healthy",
+    };
+  }
+  return {
+    ok: false,
+    degradedSessions: degraded.length,
+    detail:
+      `${degraded.length} session(s) with sustained background-worker failures — ` +
+      "distillation/curation may be stalled (likely stale auth or exhausted credit)",
+  };
+}
+
 /**
  * Build the adapter that core passes around as `input.workerHealth`.
  * The core's `recordFailure` accepts a free-form string; the gateway's typed

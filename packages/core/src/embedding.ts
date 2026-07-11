@@ -531,6 +531,12 @@ export function _getLocalInitRetryAtForTest(): number {
   return localInitRetryAt;
 }
 
+/** For tests: arm/clear the init-retry deadline (epoch ms; 0 = none) so the
+ *  transient "retrying" health state is drivable without a fake worker. */
+export function _setLocalInitRetryAtForTest(at: number): void {
+  localInitRetryAt = at;
+}
+
 /** For tests: reset the local provider probe + transient-retry state. */
 export function _resetLocalProviderProbe(): void {
   localProviderKnownBroken = false;
@@ -1678,6 +1684,80 @@ export function isAvailable(): boolean {
     }
   }
   return true;
+}
+
+/** Coarse embedding-subsystem state for health surfaces. */
+export type EmbeddingHealthState =
+  | "ok"
+  | "retrying"
+  | "unavailable"
+  | "disabled";
+
+export interface EmbeddingHealth {
+  /** Whether vector recall is currently usable. */
+  available: boolean;
+  state: EmbeddingHealthState;
+  provider: "local" | "remote" | "none";
+  /** Human-readable explanation for logs / `lore doctor` / `/health`. */
+  detail: string;
+}
+
+/**
+ * Read-only snapshot of embedding availability for health surfaces
+ * (`/health`, `lore doctor`). Unlike {@link isAvailable}, this has NO side
+ * effects: it never logs, never triggers a retry, and never spawns a worker.
+ * When it reports `unavailable` or `retrying`, recall is running FTS-only —
+ * the degradation that was previously visible only as a one-time log line.
+ */
+export function embeddingStatus(): EmbeddingHealth {
+  const provider = getProvider();
+  if (!provider) {
+    return {
+      available: false,
+      state: "disabled",
+      provider: "none",
+      detail:
+        "no embedding provider configured (or disabled) — recall uses FTS-only search",
+    };
+  }
+  if (provider instanceof EmbeddingPool) {
+    if (localProviderKnownUnavailable()) {
+      return {
+        available: false,
+        state: "unavailable",
+        provider: "local",
+        detail:
+          "local embedding provider failed to initialize — recall is FTS-only (semantic search degraded)",
+      };
+    }
+    if (localInitRetryAt > 0) {
+      // A transient init failure has a retry armed. This is a pure read, so —
+      // unlike isAvailable() — we do NOT clear the deadline or trigger the
+      // reset here; the provider is not confirmed healthy until a later embed
+      // re-inits it. Report "retrying" (recall is FTS-only) for the whole
+      // armed window, whether or not the cooldown has elapsed, so health checks
+      // never show a false "ok" before recovery actually happens.
+      return {
+        available: false,
+        state: "retrying",
+        provider: "local",
+        detail:
+          "local embedding provider init failed; a retry is armed — recall is FTS-only until it recovers",
+      };
+    }
+    return {
+      available: true,
+      state: "ok",
+      provider: "local",
+      detail: "local ONNX embeddings active (vector recall enabled)",
+    };
+  }
+  return {
+    available: true,
+    state: "ok",
+    provider: "remote",
+    detail: "remote embedding provider active (vector recall enabled)",
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import {
   formatFinding,
   collectInventory,
   commandDoctor,
+  fetchMemoryHealth,
   type Finding,
 } from "../src/cli/inventory";
 
@@ -192,6 +193,61 @@ describe("runDoctorDiagnostics (pure)", () => {
       f.label.includes("ANTHROPIC_BASE_URL in shell env"),
     );
     expect(env?.level).toBe("WARN");
+  });
+
+  const baseInput = {
+    inventory: emptyInventory,
+    gatewayAlive: true,
+    gatewayPort: 3207,
+    env: {},
+    opencodePluginInstalled: false,
+  };
+
+  it("PASS: embeddings available", () => {
+    const findings = runDoctorDiagnostics({
+      ...baseInput,
+      memoryHealth: {
+        embeddings: {
+          available: true,
+          state: "ok",
+          detail: "vector recall on",
+        },
+      },
+    });
+    const f = findings.find((f) => f.label === "memory: embeddings");
+    expect(f?.level).toBe("PASS");
+  });
+
+  it("WARN: embeddings unavailable (FTS-only) with remediation", () => {
+    const findings = runDoctorDiagnostics({
+      ...baseInput,
+      memoryHealth: {
+        embeddings: {
+          available: false,
+          state: "unavailable",
+          detail: "recall is FTS-only",
+        },
+      },
+    });
+    const f = findings.find((f) => f.label === "memory: embeddings");
+    expect(f?.level).toBe("WARN");
+    expect(f?.detail).toContain("FTS-only");
+    expect(f?.remediation).toBeTruthy();
+  });
+
+  it("WARN: background workers degraded with remediation", () => {
+    const findings = runDoctorDiagnostics({
+      ...baseInput,
+      memoryHealth: { worker: { ok: false, detail: "2 session(s) failing" } },
+    });
+    const f = findings.find((f) => f.label === "memory: background workers");
+    expect(f?.level).toBe("WARN");
+    expect(f?.remediation).toBeTruthy();
+  });
+
+  it("omits memory findings when the gateway did not report /health", () => {
+    const findings = runDoctorDiagnostics({ ...baseInput, memoryHealth: null });
+    expect(findings.some((f) => f.label.startsWith("memory:"))).toBe(false);
   });
 
   it("fails on a Bedrock conflict", () => {
@@ -443,5 +499,56 @@ describe("commandDoctor (integration)", () => {
     const diagIdx = out.indexOf("Diagnostics:");
     expect(invIdx).toBeGreaterThanOrEqual(0);
     expect(diagIdx).toBeGreaterThan(invIdx);
+  });
+});
+
+describe("fetchMemoryHealth", () => {
+  let fetchSpy: MockInstance;
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+  });
+
+  it("parses embeddings + worker from a healthy /health response", async () => {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "ok",
+          version: "1.2.3",
+          embeddings: { available: true, state: "ok", detail: "on" },
+          worker: { ok: true, degradedSessions: 0, detail: "healthy" },
+        }),
+        { status: 200 },
+      ),
+    );
+    const h = await fetchMemoryHealth("http://127.0.0.1:3207");
+    expect(h?.embeddings?.available).toBe(true);
+    expect(h?.worker?.ok).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://127.0.0.1:3207/health",
+      expect.anything(),
+    );
+  });
+
+  it("returns null on a non-OK response", async () => {
+    fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("nope", { status: 500 }));
+    expect(await fetchMemoryHealth("http://127.0.0.1:3207")).toBeNull();
+  });
+
+  it("returns null when the gateway predates the fields (no embeddings/worker)", async () => {
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok", version: "0.1.0" }), {
+        status: 200,
+      }),
+    );
+    expect(await fetchMemoryHealth("http://127.0.0.1:3207")).toBeNull();
+  });
+
+  it("returns null when the request throws", async () => {
+    fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("connection refused"));
+    expect(await fetchMemoryHealth("http://127.0.0.1:3207")).toBeNull();
   });
 });

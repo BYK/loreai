@@ -18,9 +18,10 @@ import { createServer as createHttpServer } from "node:http";
 import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
-import { log } from "@loreai/core";
+import { embedding, log } from "@loreai/core";
 import { DEFAULT_PORT, type GatewayConfig } from "./config";
 import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
+import { workerHealthSummary } from "./worker-health";
 import {
   setupEmbeddingFailureCapture,
   setupBustSpiralCapture,
@@ -233,7 +234,26 @@ async function handleModelsPassthrough(
 }
 
 function handleHealth(): Response {
-  return jsonResponse({ status: "ok", version });
+  // Subsystem health so silent degradation (embeddings dropping to FTS-only,
+  // background workers stalling) is observable via `lore doctor` / monitoring
+  // instead of only a one-time gateway log line.
+  const embeddings = embedding.embeddingStatus();
+  const worker = workerHealthSummary();
+  return jsonResponse({
+    status: "ok",
+    version,
+    embeddings: {
+      available: embeddings.available,
+      state: embeddings.state,
+      provider: embeddings.provider,
+      detail: embeddings.detail,
+    },
+    worker: {
+      ok: worker.ok,
+      degradedSessions: worker.degradedSessions,
+      detail: worker.detail,
+    },
+  });
 }
 
 async function handleOpenAIChatCompletions(

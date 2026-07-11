@@ -7,6 +7,7 @@ import {
   getStatus,
   getDegradationWarning,
   getWorkerHealth,
+  workerHealthSummary,
   markWorkerPaused,
   isWorkerCreditPaused,
   clearWorkerPaused,
@@ -71,6 +72,26 @@ describe("worker-health", () => {
       _setNowForTest(() => t);
       expect(getStatus("s1")).toBe("degraded");
       expect(getDegradationWarning("s1")).not.toBeNull();
+    });
+
+    test("workerHealthSummary: ok when nothing is failing", () => {
+      _setNowForTest(() => 1_000_000);
+      const s = workerHealthSummary();
+      expect(s.ok).toBe(true);
+      expect(s.degradedSessions).toBe(0);
+    });
+
+    test("workerHealthSummary: rolls up sustained failures as degraded", () => {
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s1", "lore-distill", "no-auth");
+      // 31 min later the single session is past the degraded threshold.
+      t = 1_000_000 + 31 * 60 * 1000;
+      _setNowForTest(() => t);
+      const s = workerHealthSummary();
+      expect(s.ok).toBe(false);
+      expect(s.degradedSessions).toBe(1);
+      expect(s.detail).toContain("stalled");
     });
 
     test("degradation warning points at a REAL CLI command (lore doctor, not lore status)", () => {

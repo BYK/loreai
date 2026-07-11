@@ -393,6 +393,14 @@ export function runDoctorDiagnostics(input: {
     ANTHROPIC_BEDROCK_BASE_URL?: string;
   };
   opencodePluginInstalled: boolean;
+  /**
+   * Memory-subsystem health read from the running gateway's `/health`. Null
+   * when the gateway is unreachable or did not report it (older gateway).
+   */
+  memoryHealth?: {
+    embeddings?: { available: boolean; state: string; detail: string };
+    worker?: { ok: boolean; detail: string };
+  } | null;
 }): Finding[] {
   const findings: Finding[] = [];
 
@@ -421,6 +429,44 @@ export function runDoctorDiagnostics(input: {
             "run `lore start --bg` (or `lore run` to launch an agent through the gateway)",
         },
   );
+
+  // 2b. Memory health (from the gateway's /health). Both are WARN, not FAIL:
+  // recall still works via FTS when embeddings are down, and workers recover on
+  // their own — but the user should know memory is running degraded.
+  const emb = input.memoryHealth?.embeddings;
+  if (emb) {
+    findings.push(
+      emb.available
+        ? { level: "PASS", label: "memory: embeddings", detail: emb.detail }
+        : {
+            level: "WARN",
+            label: "memory: embeddings",
+            detail: emb.detail,
+            remediation:
+              "reinstall Lore so its optional embedding dependency (onnxruntime-node) is present, " +
+              "or set search.embeddings.provider (e.g. voyage/openai) in .lore.json to use a remote provider",
+          },
+    );
+  }
+  const wrk = input.memoryHealth?.worker;
+  if (wrk) {
+    findings.push(
+      wrk.ok
+        ? {
+            level: "PASS",
+            label: "memory: background workers",
+            detail: wrk.detail,
+          }
+        : {
+            level: "WARN",
+            label: "memory: background workers",
+            detail: wrk.detail,
+            remediation:
+              "check that the session's provider auth is valid and has credit; " +
+              "workers recover automatically once a call succeeds",
+          },
+    );
+  }
 
   // 3. Port consistency: does any setup-routed LOCAL URL match the running port?
   if (input.gatewayAlive && input.gatewayPort !== null) {
@@ -545,6 +591,11 @@ export async function commandDoctor(): Promise<void> {
     ? await probeGateway(`http://127.0.0.1:${gatewayPort}`)
     : false;
 
+  const memoryHealth =
+    gatewayAlive && gatewayPort
+      ? await fetchMemoryHealth(`http://127.0.0.1:${gatewayPort}`)
+      : null;
+
   const findings = runDoctorDiagnostics({
     inventory,
     gatewayAlive,
@@ -557,6 +608,7 @@ export async function commandDoctor(): Promise<void> {
       ANTHROPIC_BEDROCK_BASE_URL: process.env.ANTHROPIC_BEDROCK_BASE_URL,
     },
     opencodePluginInstalled: isNpmPackageInstalledSafe("@loreai/opencode"),
+    memoryHealth,
   });
 
   // Print inventory first, then findings. Reuse the already-collected
@@ -575,6 +627,31 @@ export async function commandDoctor(): Promise<void> {
     } PASS.`,
   );
   if (fails > 0) process.exitCode = 1;
+}
+
+/**
+ * Read memory-subsystem health from the gateway's `/health`. Returns null on
+ * any failure or if the gateway predates these fields (older binary), so the
+ * doctor simply omits the memory findings rather than erroring.
+ */
+export async function fetchMemoryHealth(base: string): Promise<{
+  embeddings?: { available: boolean; state: string; detail: string };
+  worker?: { ok: boolean; detail: string };
+} | null> {
+  try {
+    const res = await fetch(`${base}/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      embeddings?: { available: boolean; state: string; detail: string };
+      worker?: { ok: boolean; detail: string };
+    };
+    if (!body.embeddings && !body.worker) return null;
+    return { embeddings: body.embeddings, worker: body.worker };
+  } catch {
+    return null;
+  }
 }
 
 // Local copy to avoid importing the private isNpmPackageInstalled from setup.ts.
