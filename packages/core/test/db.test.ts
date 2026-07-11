@@ -63,7 +63,7 @@ describe("db", () => {
       // The probe must clean up after itself — no stray temp table left behind.
       const leftover = database
         .query(
-          "SELECT name FROM sqlite_temp_master WHERE type='table' AND name='lore_fts5_probe'",
+          "SELECT name FROM sqlite_temp_master WHERE type='table' AND name='lore_fulltext_probe'",
         )
         .get() as { name: string } | null;
       expect(leftover).toBeNull();
@@ -101,8 +101,15 @@ describe("db", () => {
         },
       } as unknown as Parameters<typeof assertFts5Available>[0];
 
-      // Must NOT be mislabeled as an FTS5 problem — rethrown as-is.
-      expect(() => assertFts5Available(stub)).toThrow(cause);
+      // Must NOT be mislabeled as an FTS5 problem — rethrown as the SAME object
+      // (identity, not just message), so no wrapping occurred.
+      let thrown: unknown;
+      try {
+        assertFts5Available(stub);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBe(cause);
     });
   });
 

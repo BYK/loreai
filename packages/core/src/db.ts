@@ -2637,10 +2637,12 @@ function applyRefFkDrop(database: Database) {
  */
 export function assertFts5Available(database: Database): void {
   try {
+    // Table name deliberately omits the literal "fts5" so the classifier below
+    // can only match the module name in a real error, never our own probe SQL.
     database.exec(
-      "CREATE VIRTUAL TABLE IF NOT EXISTS temp.lore_fts5_probe USING fts5(x)",
+      "CREATE VIRTUAL TABLE IF NOT EXISTS temp.lore_fulltext_probe USING fts5(x)",
     );
-    database.exec("DROP TABLE IF EXISTS temp.lore_fts5_probe");
+    database.exec("DROP TABLE IF EXISTS temp.lore_fulltext_probe");
   } catch (e: unknown) {
     const detail = e instanceof Error ? e.message : String(e);
     if (!/fts5|no such module/i.test(detail)) throw e;
