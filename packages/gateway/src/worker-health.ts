@@ -70,6 +70,29 @@ export type FailureReason =
   // visibility and cache the verdict so we stop calling that model.
   | "worker-incapable";
 
+/**
+ * Failure reasons that are credential/config conditions rather than upstream
+ * outages. On a self-hosted gateway (the common case), these mean the user
+ * hasn't provided a usable worker credential — NOT that lore or the upstream is
+ * broken — so they are not actionable bugs for the lore team and must never
+ * spawn a "Worker health degraded/critical" Sentry issue (LOREAI-GATEWAY-3J).
+ *
+ * They are NOT fully silenced (unlike `worker-incapable`, which early-returns):
+ * the local error log, the time-based degraded/critical STATUS, the user-facing
+ * `lore doctor` warning, and the circuit breaker are all preserved so the user
+ * still gets an actionable local signal. Only the Sentry escalation is
+ * suppressed, and only when EVERY failure in the current window is
+ * credential-class — a window mixing in any genuine outage reason still
+ * escalates. Both reasons also have dedicated handling elsewhere: `no-auth` is
+ * pre-guarded at scheduling (idle.ts / scheduleBackgroundWork) and self-limits
+ * once the session credential goes stale; `cross-provider` is soft-paused at
+ * the call site via {@link markWorkerPaused}.
+ */
+const CREDENTIAL_CLASS_REASONS: ReadonlySet<FailureReason> = new Set([
+  "no-auth",
+  "cross-provider",
+]);
+
 /** Snapshot of a session's worker health, suitable for the dashboard. */
 export type SessionHealth = {
   sessionID: string;
@@ -426,9 +449,23 @@ export function recordWorkerFailure(
     `[worker-health] ${workerID} degraded: ${entry.failureCount} failures in 5min for session=${sessionID.slice(0, 16)} (reasons: ${[...entry.reasons].join(", ")})`,
   );
 
-  // Debounce: don't re-alert within ALERT_COOLDOWN_MS.
+  // Suppress the Sentry escalation when EVERY failure in this window is a
+  // credential/config condition (see CREDENTIAL_CLASS_REASONS): those are the
+  // user's local setup, not a lore bug, and were the source of the
+  // LOREAI-GATEWAY-3J "Worker health degraded" noise. The local error log
+  // above, the degraded STATUS, and the `lore doctor` warning still fire — only
+  // the Sentry issue is withheld. A window with any genuine outage reason
+  // (`.reasons` is accumulated across the window) still escalates normally.
+  const allCredentialClass = [...entry.reasons].every((r) =>
+    CREDENTIAL_CLASS_REASONS.has(r),
+  );
+
+  // Debounce: don't re-alert within ALERT_COOLDOWN_MS. Skipping the alert when
+  // allCredentialClass ALSO leaves `alertSentAt` unset, so a later genuine
+  // outage reason in the same window can still fire the first real alert.
   const shouldAlert =
-    !entry.alertSentAt || t - entry.alertSentAt > ALERT_COOLDOWN_MS;
+    !allCredentialClass &&
+    (!entry.alertSentAt || t - entry.alertSentAt > ALERT_COOLDOWN_MS);
   if (shouldAlert) {
     entry.alertSentAt = t;
     // Stable message + fingerprint so Sentry groups all degradations of a
@@ -462,7 +499,8 @@ export function recordWorkerFailure(
   const sustainedMs = t - entry.firstFailureAt;
   if (sustainedMs >= CRITICAL_THRESHOLD_MS) {
     const shouldException =
-      !entry.exceptionSentAt || t - entry.exceptionSentAt > 60 * 60 * 1000;
+      !allCredentialClass &&
+      (!entry.exceptionSentAt || t - entry.exceptionSentAt > 60 * 60 * 1000);
     if (shouldException) {
       entry.exceptionSentAt = t;
       // Stable Error message + fingerprint so Sentry groups all critical
