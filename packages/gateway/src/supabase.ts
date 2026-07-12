@@ -79,7 +79,7 @@ export function persistSession(session: PersistedSession): void {
   // account's profile is re-pulled fresh. A token refresh (same user_id) keeps
   // the mirror intact.
   if (prev && prev.user_id !== session.user_id) {
-    syncData.clearProfileMirror();
+    syncData.clearPullOnlyMirrors();
   }
   setTeamConfig(SESSION_KEY, JSON.stringify(session));
 }
@@ -90,7 +90,7 @@ export function clearSession(): void {
   // The mirrored plan tier is server-authoritative; it must not survive a
   // sign-out (otherwise currentTier() would keep reporting the logged-out
   // user's tier until a future login + pull).
-  syncData.clearProfileMirror();
+  syncData.clearPullOnlyMirrors();
 }
 
 /** True when a session is persisted locally. Does NOT verify with the server. */

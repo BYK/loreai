@@ -121,6 +121,10 @@ beforeEach(async () => {
     "entities",
     "projects", // #1246: parent — after its content children above (local FK order)
     "profiles",
+    "orgs", // E-5: registry mirrors (pull-only, no local FKs between them)
+    "org_members",
+    "scopes",
+    "scope_members",
     "sync_outbox",
     "sync_state",
     "sync_conflicts",
@@ -429,6 +433,56 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     expect(r.conflicts).toBe(0);
 
     // And it was never pushed back (pull-only): a push is a no-op.
+    expect((await pushOnce(clientFor(uid))).pushed).toBe(0);
+  });
+
+  it("mirrors the member's org/scope registry on pull (E-5 foundation, #827)", async () => {
+    // A team scope + the caller's admin membership, created server-side by the lifecycle RPC.
+    const scopeId = await h.asUser(uid, (c) =>
+      c
+        .query("select public.create_team($1) as s", ["Rockets"])
+        .then((r) => r.rows[0].s),
+    );
+    // Opt in to pulling the (pull-only, otherwise parked) registry mirrors.
+    for (const t of ["orgs", "org_members", "scopes", "scope_members"]) {
+      setKV(`sync.pull.${t}`, "0|");
+    }
+    syncData.enableSync("basic");
+    const r = await pullOnce(clientFor(uid));
+    expect(r.conflicts).toBe(0);
+
+    // The new team scope + the caller's admin membership are mirrored locally.
+    expect(
+      (
+        db().query("SELECT kind FROM scopes WHERE id=?").get(scopeId) as
+          | { kind?: string }
+          | undefined
+      )?.kind,
+    ).toBe("team");
+    expect(
+      (
+        db()
+          .query(
+            "SELECT role FROM scope_members WHERE scope_id=? AND user_id=?",
+          )
+          .get(scopeId, uid) as { role?: string } | undefined
+      )?.role,
+    ).toBe("admin");
+    // The WHOLE registry pulls, not just the team: the personal scope (id == user id) too,
+    // plus the org it belongs to — proving the pull is not team-only.
+    expect(
+      (
+        db().query("SELECT kind FROM scopes WHERE id=?").get(uid) as
+          | { kind?: string }
+          | undefined
+      )?.kind,
+    ).toBe("personal");
+    expect(
+      (db().query("SELECT COUNT(*) n FROM orgs").get() as { n: number }).n,
+    ).toBeGreaterThan(0);
+
+    // Idempotent + pull-only: a second pull mirrors nothing new, a push is a no-op.
+    expect((await pullOnce(clientFor(uid))).pulled).toBe(0);
     expect((await pushOnce(clientFor(uid))).pushed).toBe(0);
   });
 

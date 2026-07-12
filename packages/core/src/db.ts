@@ -1783,8 +1783,50 @@ const MIGRATIONS: string[] = [
   // SCOPE_KEY_EPOCH_MIGRATION_INDEX so the recreate is all-or-nothing. This string is a no-op
   // marker so MIGRATIONS.length still counts.
   `
-  -- Version 69 (#827): see applyScopeKeyEpochPk — no-op SQL marker.
-  `,
+   -- Version 69 (#827): see applyScopeKeyEpochPk — no-op SQL marker.
+   `,
+  // Version 70 (#827 E-5): local pull-only mirror of the org/scope registry so the client can
+  // discover which orgs/team scopes it belongs to (and co-members' roles) — the foundation for
+  // unwrapping a team DEK and pulling+decrypting shared content. Populated ONLY by the sync pull
+  // (pull-only SYNCED_TABLES entries); never written locally. Columns mirror supabase 0023 + the
+  // 0033 updated_at (INTEGER epoch-ms locally, per the profiles-mirror convention).
+  `
+   CREATE TABLE IF NOT EXISTS orgs (
+     id            TEXT PRIMARY KEY,
+     kind          TEXT NOT NULL DEFAULT 'team',
+     owner_user_id TEXT,
+     tier          TEXT NOT NULL DEFAULT 'free',
+     name          TEXT,
+     created_at    INTEGER,
+     updated_at    INTEGER
+   );
+   CREATE TABLE IF NOT EXISTS org_members (
+     org_id     TEXT NOT NULL,
+     user_id    TEXT NOT NULL,
+     role       TEXT NOT NULL DEFAULT 'member',
+     created_at INTEGER,
+     updated_at INTEGER,
+     PRIMARY KEY (org_id, user_id)
+   );
+   CREATE TABLE IF NOT EXISTS scopes (
+     id         TEXT PRIMARY KEY,
+     org_id     TEXT,
+     kind       TEXT NOT NULL,
+     name       TEXT,
+     created_at INTEGER,
+     updated_at INTEGER
+   );
+   CREATE TABLE IF NOT EXISTS scope_members (
+     scope_id   TEXT NOT NULL,
+     user_id    TEXT NOT NULL,
+     role       TEXT NOT NULL DEFAULT 'editor',
+     created_at INTEGER,
+     updated_at INTEGER,
+     PRIMARY KEY (scope_id, user_id)
+   );
+   CREATE INDEX IF NOT EXISTS idx_scope_members_user ON scope_members(user_id);
+   CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(user_id);
+   `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3200,6 +3242,29 @@ function recoverMissingObjects(database: Database) {
     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (scope_id, member_user_id, key_epoch)
   );`);
+  // Version 70 (#827 E-5): org/scope registry pull-only mirrors.
+  database.exec(`CREATE TABLE IF NOT EXISTS orgs (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'team', owner_user_id TEXT,
+    tier TEXT NOT NULL DEFAULT 'free', name TEXT, created_at INTEGER, updated_at INTEGER
+  );`);
+  database.exec(`CREATE TABLE IF NOT EXISTS org_members (
+    org_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member',
+    created_at INTEGER, updated_at INTEGER, PRIMARY KEY (org_id, user_id)
+  );`);
+  database.exec(`CREATE TABLE IF NOT EXISTS scopes (
+    id TEXT PRIMARY KEY, org_id TEXT, kind TEXT NOT NULL, name TEXT,
+    created_at INTEGER, updated_at INTEGER
+  );`);
+  database.exec(`CREATE TABLE IF NOT EXISTS scope_members (
+    scope_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'editor',
+    created_at INTEGER, updated_at INTEGER, PRIMARY KEY (scope_id, user_id)
+  );`);
+  database.exec(
+    "CREATE INDEX IF NOT EXISTS idx_scope_members_user ON scope_members(user_id);",
+  );
+  database.exec(
+    "CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(user_id);",
+  );
 
   // Version 36: session project binding. Recover each column independently in
   // case a partial ALTER (e.g. the first succeeded, the second was skipped on a

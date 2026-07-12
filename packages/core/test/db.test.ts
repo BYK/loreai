@@ -119,7 +119,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(69);
+    expect(row.version).toBe(70);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -176,7 +176,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(69);
+    expect(ver.version).toBe(70);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh

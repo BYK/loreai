@@ -403,6 +403,52 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
         "updated_at",
       ],
     },
+    // E-5 (#827) foundation: pull-only mirrors of the org/scope registry so the client learns
+    // which orgs/team scopes it belongs to (and co-members' roles) — the basis for unwrapping a
+    // team DEK and pulling+decrypting shared content. Written ONLY server-side (provisioning
+    // trigger + lifecycle RPCs); never pushed. RLS (0023) scopes reads to the member. No
+    // content_hash/revision remotely, so versioned:false (pull classifies by remote updated_at,
+    // added by 0033). Applied via the generic upsert path (no custom handler needed).
+    {
+      table: "orgs",
+      idColumns: ["id"],
+      ftsTables: [],
+      versioned: false,
+      pullOnly: true,
+      syncColumns: [
+        "id",
+        "kind",
+        "owner_user_id",
+        "tier",
+        "name",
+        "created_at",
+        "updated_at",
+      ],
+    },
+    {
+      table: "org_members",
+      idColumns: ["org_id", "user_id"],
+      ftsTables: [],
+      versioned: false,
+      pullOnly: true,
+      syncColumns: ["org_id", "user_id", "role", "created_at", "updated_at"],
+    },
+    {
+      table: "scopes",
+      idColumns: ["id"],
+      ftsTables: [],
+      versioned: false,
+      pullOnly: true,
+      syncColumns: ["id", "org_id", "kind", "name", "created_at", "updated_at"],
+    },
+    {
+      table: "scope_members",
+      idColumns: ["scope_id", "user_id"],
+      ftsTables: [],
+      versioned: false,
+      pullOnly: true,
+      syncColumns: ["scope_id", "user_id", "role", "created_at", "updated_at"],
+    },
   ],
   pro: [
     {
@@ -525,7 +571,7 @@ export function metaFor(table: string): SyncTableMeta {
  */
 export function currentTier(): string {
   // INVARIANT: the mirror holds AT MOST the currently-authenticated user's row.
-  // `clearProfileMirror()` is called on logout and on account switch, so a stale
+  // `clearPullOnlyMirrors()` is called on logout and on account switch, so a stale
   // OR foreign account's tier can never linger here — making this unqualified
   // `LIMIT 1` deterministic and safe (RLS already guarantees a pull returns only
   // the caller's own profile, so the network path never adds a second row).
@@ -536,18 +582,29 @@ export function currentTier(): string {
 }
 
 /**
- * Drop the pulled `profiles` mirror (row + its sync_state + pull cursor). Called
- * when the authenticated identity changes — logout or account switch — so the
- * server-authoritative plan tier can never survive a sign-out or leak across
- * accounts (see `currentTier`'s single-row invariant). The next sync re-pulls
- * the current account's profile from scratch.
+ * Drop EVERY pull-only mirror (profiles + the org/scope registry) — row(s), their
+ * sync_state, and pull cursor. Called when the authenticated identity changes — logout
+ * or account switch — because pull-only tables are server-authoritative and MUST NOT
+ * survive an identity change: otherwise (a) the prior account's rows linger under the
+ * new account, and (b) the new account's rows with updated_at <= the inherited cursor
+ * are skipped forever (#828). Resetting each cursor forces a fresh full re-pull. Iterates
+ * the registry so any future pull-only table is covered automatically (guarded by a
+ * completeness test in sync-registry-contract). A token refresh (same user_id) keeps the
+ * mirror intact — callers gate on a user_id change.
  */
-export function clearProfileMirror(): void {
-  db().exec("DELETE FROM profiles");
-  db().query("DELETE FROM sync_state WHERE table_name = 'profiles'").run();
-  // Reset the pull cursor so the (new) account's profile is re-pulled from the
-  // start rather than skipped by a cursor inherited from the previous account.
-  setKV("sync.pull.profiles", "0|");
+export function clearPullOnlyMirrors(): void {
+  for (const m of [
+    ...SYNCED_TABLES.basic,
+    ...SYNCED_TABLES.pro,
+    ...SYNCED_TABLES.max,
+  ]) {
+    if (!m.pullOnly) continue;
+    db().exec(`DELETE FROM ${m.table}`);
+    db().query("DELETE FROM sync_state WHERE table_name = ?").run(m.table);
+    // Reset the pull cursor so the (new) account's rows are re-pulled from the
+    // start rather than skipped by a cursor inherited from the previous account.
+    setKV(`sync.pull.${m.table}`, "0|");
+  }
 }
 
 function meta(table: string): SyncTableMeta {
@@ -2016,7 +2073,7 @@ export function assertSyncInvariants(): void {
 
   // 2. The profiles mirror holds AT MOST the current account's row, so
   //    currentTier()'s unqualified LIMIT 1 is deterministic and a logged-out or
-  //    foreign account's tier can't linger (#828). clearProfileMirror() enforces
+  //    foreign account's tier can't linger (#828). clearPullOnlyMirrors() enforces
   //    this on logout/account-switch.
   const profileRows = (
     db().query("SELECT COUNT(*) AS n FROM profiles").get() as { n: number }

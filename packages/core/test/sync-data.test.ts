@@ -16,7 +16,7 @@ import {
   applyRemoteUpsert,
   assertSyncInvariants,
   classifyRemoteRow,
-  clearProfileMirror,
+  clearPullOnlyMirrors,
   clearSyncState,
   contentHash,
   currentKnowledgeRow,
@@ -724,7 +724,7 @@ describe("profiles pull-only mirror", () => {
     expect(outboxFor("profiles")).toHaveLength(0);
   });
 
-  test("clearProfileMirror drops the row, its sync_state, and resets the pull cursor", () => {
+  test("clearPullOnlyMirrors drops the row, its sync_state, and resets the pull cursor", () => {
     insertProfile("u1", "pro");
     setSyncState("profiles", "u1", {
       content_hash: null,
@@ -733,13 +733,31 @@ describe("profiles pull-only mirror", () => {
     });
     setKV("sync.pull.profiles", "999|u1");
     expect(currentTier()).toBe("pro");
+    // A registry mirror (also pull-only) with a live row + advanced cursor — must be
+    // cleared too, or a prior account's team roster + inherited cursor leak into the next.
+    db()
+      .query(
+        "INSERT INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES ('s1','u1','admin',0,0)",
+      )
+      .run();
+    setKV("sync.pull.scope_members", "999|s1");
 
-    clearProfileMirror();
+    clearPullOnlyMirrors();
 
     expect(currentTier()).toBe("free");
     expect(getRowById("profiles", "u1")).toBeNull();
     expect(getSyncState("profiles", "u1")).toBeNull();
     expect(getKV("sync.pull.profiles")).toBe("0|");
+    // Every pull-only mirror is cleared + its cursor reset (completeness — the loop
+    // covers any future pull-only table automatically).
+    expect(
+      (
+        db().query("SELECT COUNT(*) n FROM scope_members").get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(0);
+    expect(getKV("sync.pull.scope_members")).toBe("0|");
   });
 });
 

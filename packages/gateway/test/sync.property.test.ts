@@ -450,12 +450,12 @@ describe("sync engine — property/sequence tests (#833)", () => {
               // Sign in as `user`: wipe the previous mirror (+ reset its pull
               // cursor) then pull this user's single server profile.
               currentUser = op.user;
-              syncData.clearProfileMirror();
+              syncData.clearPullOnlyMirrors();
               seedCurrentProfile();
               await pullOnce(client());
               expected = USERS[op.user];
             } else {
-              syncData.clearProfileMirror(); // logout wipes the mirror
+              syncData.clearPullOnlyMirrors(); // logout wipes the mirror
               expected = "free";
             }
             expect(syncData.currentTier()).toBe(expected);

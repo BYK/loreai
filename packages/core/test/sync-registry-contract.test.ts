@@ -53,6 +53,30 @@ const SAMPLE_ROW: Record<string, () => void> = {
         "INSERT INTO profiles (id, tier, created_at, updated_at) VALUES ('rc-sample', 'pro', ?, ?)",
       )
       .run(now(), now()),
+  orgs: () =>
+    db()
+      .query(
+        "INSERT INTO orgs (id, kind, owner_user_id, tier, created_at, updated_at) VALUES ('rc-org', 'team', 'rc-user', 'free', ?, ?)",
+      )
+      .run(now(), now()),
+  org_members: () =>
+    db()
+      .query(
+        "INSERT INTO org_members (org_id, user_id, role, created_at, updated_at) VALUES ('rc-org', 'rc-user', 'member', ?, ?)",
+      )
+      .run(now(), now()),
+  scopes: () =>
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, created_at, updated_at) VALUES ('rc-scope', 'rc-org', 'team', ?, ?)",
+      )
+      .run(now(), now()),
+  scope_members: () =>
+    db()
+      .query(
+        "INSERT INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES ('rc-scope', 'rc-user', 'editor', ?, ?)",
+      )
+      .run(now(), now()),
 };
 
 function tempTriggers(): string[] {

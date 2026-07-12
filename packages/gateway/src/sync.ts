@@ -1050,6 +1050,13 @@ function applyRemote(
       // the plaintext git_remote/name (C-4). Same-remote dupes are merged post-pull by
       // convergeProjectsByRemote (see syncOnce).
       syncData.applyRemoteProject(decrypted ?? stripSyncCols(remote));
+    } else if (meta.table === "scope_members") {
+      // E-5 (#827): scope_members.scope_id is REAL data (half the PK), not the remote-only
+      // tenant column stripSyncCols drops — keep it so the local upsert has a non-null PK.
+      syncData.applyRemoteUpsert(
+        "scope_members",
+        stripSyncCols(remote, SCOPE_MEMBER_KEEP),
+      );
     } else {
       syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
     }
@@ -1251,13 +1258,20 @@ const REMOTE_ONLY_COLS = new Set([
 ]);
 
 const TS_COLS = new Set(["created_at", "updated_at"]);
+// scope_members keys on scope_id locally (half its PK), so it must survive stripSyncCols
+// even though scope_id is a remote-only tenant column on every content table.
+const SCOPE_MEMBER_KEEP = new Set(["scope_id"]);
 
 function stripSyncCols(
   remote: Record<string, unknown>,
+  keep?: Set<string>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(remote)) {
-    if (REMOTE_ONLY_COLS.has(k)) continue;
+    // `keep` retains columns that are REAL local data despite sharing a name with a
+    // remote-only sync column — e.g. scope_members.scope_id is half the PK, not the tenant
+    // column stripped on content tables (cf. scope_keys' dedicated applyRemoteScopeKey).
+    if (REMOTE_ONLY_COLS.has(k) && !keep?.has(k)) continue;
     // Remote timestamps are ISO strings; the local schema stores epoch ms.
     if (TS_COLS.has(k) && typeof v === "string") {
       // Distinguish a real parse failure from a valid epoch 0 (Date.parse → 0
