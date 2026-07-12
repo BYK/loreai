@@ -356,6 +356,26 @@ export const LORE_COMMIT_REMINDER =
   "NEVER leave `.lore.md` modified or untracked after a commit. " +
   "`.lore.md` is shared project knowledge and must always be version-controlled.";
 
+/**
+ * A short, capability-framed note telling the agent that Lore is actively
+ * managing the context window, so it should not hedge or stop over
+ * context-length concerns. Prepended to the frozen system[1] block.
+ *
+ * MUST stay static — no token counts, no compression-layer names, no per-turn
+ * values. A per-turn "Context health" note that varied by layer used to live in
+ * system[2] and busted the conversation cache on every layer oscillation
+ * (issue #741). This note is safe precisely because it never changes: it is
+ * frozen with the system[1] baseline (1h cache) and present from turn 1, so it
+ * is a stable cache read on every turn.
+ *
+ * Exported for unit testing.
+ */
+export const LORE_CONTEXT_CAPABILITY_NOTE =
+  "Lore actively manages and compresses this session's context and preserves " +
+  "older turns as recall-able summaries, so your effective context is far " +
+  "larger than it looks. Don't hedge or stop over context limits; take on " +
+  "large, multi-step tasks directly.";
+
 // ---------------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------------
@@ -6887,22 +6907,27 @@ async function handleConversationTurn(
           log.warn("knowledge catalog injection failed (non-fatal):", err);
         }
 
-        const formatted = [prefText, entitiesText, knowledgeTocText]
+        // The context-capability note is a static preamble, always present so
+        // the agent knows from turn 1 that Lore manages the window (see
+        // LORE_CONTEXT_CAPABILITY_NOTE). Because it never varies and is frozen
+        // with this baseline, system[1] is now always present and byte-stable —
+        // which also means the "empty baseline" case below can no longer occur.
+        const formatted = [
+          LORE_CONTEXT_CAPABILITY_NOTE,
+          prefText,
+          entitiesText,
+          knowledgeTocText,
+        ]
           .filter(Boolean)
           .join("\n\n");
-        // Freeze this baseline durably (v45) — INCLUDING an empty result. The
-        // in-memory cache is lost on process restart / session eviction;
-        // persisting lets getOrCreateSession restore the exact bytes so system[1]
-        // is never recomputed from the live knowledge table mid-session (which is
-        // what let a consolidation delete bust the cached prefix — ses_14b9bf3d…
-        // incident). Caching even the EMPTY baseline matters: a session that
-        // starts with no preferences/entities must stay system[1]-absent for its
-        // life — otherwise a preference minted mid-session (curator/pattern-
-        // extract) would make system[1] appear, growing the array and busting the
-        // prefix once. An empty `formatted` is falsy at the assembly site
-        // (anthropic.ts `if (stableLtm)`), so freezing "" keeps system[1] absent
-        // rather than injecting an empty block; new preferences surface next
-        // session. This compute path only runs once per session (cache miss).
+        // Freeze this baseline durably (v45). The in-memory cache is lost on
+        // process restart / session eviction; persisting lets getOrCreateSession
+        // restore the exact bytes so system[1] is never recomputed from the live
+        // knowledge table mid-session (which is what let a consolidation delete
+        // bust the cached prefix — ses_14b9bf3d… incident). The freeze also pins
+        // preferences/entities minted mid-session (curator/pattern-extract) out
+        // of this block until the next session, so the prefix never grows
+        // mid-session. This compute path only runs once per session (cache miss).
         const tokenCount = formatted ? Math.ceil(formatted.length / 3) : 0;
         stable = { formatted, tokenCount };
         stableLtmCache.set(sessionID, stable);
