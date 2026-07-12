@@ -70,6 +70,24 @@ describe("LoreConfig — knowledge schema", () => {
     expect(cfg.knowledge.enabled).toBe(false);
   });
 
+  test("knowledge.contextSources defaults to ['distillation'] and is overridable", () => {
+    // Default-on so cross-session facts surface from gen-0 distillations (before
+    // curation promotes them to knowledge) without the model calling recall.
+    expect(LoreConfig.parse({}).knowledge.contextSources).toEqual([
+      "distillation",
+    ]);
+    // Opt into raw temporal too, or turn the whole thing off.
+    expect(
+      LoreConfig.parse({
+        knowledge: { contextSources: ["distillation", "temporal"] },
+      }).knowledge.contextSources,
+    ).toEqual(["distillation", "temporal"]);
+    expect(
+      LoreConfig.parse({ knowledge: { contextSources: [] } }).knowledge
+        .contextSources,
+    ).toEqual([]);
+  });
+
   test("knowledge section is optional — omitting it uses defaults", () => {
     const cfg = LoreConfig.parse({ curator: { enabled: false } });
     expect(cfg.knowledge.enabled).toBe(true);

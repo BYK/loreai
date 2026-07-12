@@ -297,13 +297,21 @@ export const LoreConfig = z.object({
        *  the context-bound (system[2]) injection so in-session facts are "just
        *  there" without the model calling the recall tool. Scored on the same
        *  cosine scale as knowledge and packed under the same stickyIds
-       *  hysteresis so the prompt cache stays stable. Empty = off (default);
-       *  example: ["distillation","temporal"]. */
+       *  hysteresis so the prompt cache stays stable.
+       *
+       *  Default: ["distillation"]. Cross-session facts survive in gen-0
+       *  distillations the moment a session is distilled — well before the
+       *  slower curation path promotes them to durable knowledge. Folding
+       *  distillations in gives those facts a path into system[2] without
+       *  waiting on promotion, which is what actually makes offhand facts get
+       *  applied on cheaper models (application tracks presence in system[2],
+       *  not any salience treatment). Raw "temporal" stays opt-in — it is
+       *  larger and noisier. Empty = off. */
       contextSources: z
         .array(z.enum(["distillation", "temporal"]))
-        .default([])
+        .default(["distillation"])
         .describe(
-          "Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Empty = off. Default: [].",
+          'Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Default: ["distillation"]; add "temporal" for raw messages; [] = off.',
         ),
     })
     .default({
@@ -312,7 +320,7 @@ export const LoreConfig = z.object({
       autoToolFailureGotchas: false,
       outcomeReward: true,
       referenceValidation: true,
-      contextSources: [],
+      contextSources: ["distillation"],
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z
