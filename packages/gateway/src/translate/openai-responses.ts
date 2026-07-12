@@ -223,12 +223,17 @@ function parseInputItems(input: unknown): GatewayMessage[] {
     if (itemType === "function_call_output") {
       // Function output — maps to tool_result. Coalesce consecutive outputs
       // into one user message (see the function_call comment above).
-      // Normalize the output string to a block array for consistency.
-      const outputText = asString(item.output);
+      //
+      // `output` is usually a plain string, but the Responses API also allows
+      // an array of content parts (e.g. `output_text`, plus multimodal parts
+      // for tool results). Reuse parseMessageContent so the string form yields
+      // a single text block (unchanged) while the array form extracts its text
+      // parts and preserves any non-text parts as opaque blocks — rather than
+      // flattening the whole array to "".
       const toolResultBlock: GatewayContentBlock = {
         type: "tool_result",
         toolUseId: asString(item.call_id),
-        content: outputText ? [{ type: "text", text: outputText }] : [],
+        content: parseMessageContent(item.output),
       };
       const last = messages[messages.length - 1];
       const lastIsToolResultMessage =

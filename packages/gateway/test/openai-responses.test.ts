@@ -127,6 +127,56 @@ describe("parseOpenAIResponsesRequest", () => {
     ]);
   });
 
+  test("extracts text from a structured (array) function_call_output.output", () => {
+    // The Responses API also allows `output` to be an array of content parts
+    // instead of a plain string. Its text must be extracted (not flattened to
+    // "") and any non-text parts preserved as opaque blocks.
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-4o",
+        input: [
+          { type: "message", role: "user", content: "read the chart" },
+          {
+            type: "function_call",
+            call_id: "call_img",
+            name: "read",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_img",
+            output: [
+              { type: "output_text", text: "chart summary" },
+              {
+                type: "input_image",
+                image_url: "data:image/png;base64,AAA",
+              },
+            ],
+          },
+        ],
+      },
+      headers,
+    );
+
+    expect(req.messages[2].role).toBe("user");
+    expect(req.messages[2].content).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "call_img",
+        content: [
+          { type: "text", text: "chart summary" },
+          {
+            type: "opaque",
+            raw: {
+              type: "input_image",
+              image_url: "data:image/png;base64,AAA",
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
   test("coalesces parallel function_call items into one assistant message", () => {
     const req = parseOpenAIResponsesRequest(
       {
