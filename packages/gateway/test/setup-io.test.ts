@@ -231,6 +231,59 @@ describe("commandSetup — OpenCode", () => {
     expect(restored._loreBackup).toBeUndefined();
     expect(existsSync(`${ocPath()}.lore-backup`)).toBe(false);
   });
+
+  it("undo restores directly from a legacy in-config _loreBackup (no sidecar)", async () => {
+    // An install written by older lore that has NOT been re-run through setup:
+    // the backup still lives in the config, there is no sidecar. Undo must
+    // restore from it and strip the schema-invalid key.
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      ocPath(),
+      JSON.stringify(
+        {
+          provider: {
+            anthropic: { options: { baseURL: "http://127.0.0.1:3207/v1" } },
+          },
+          compaction: { auto: false },
+          _loreBackup: {
+            version: 1,
+            savedAt: "2026-01-01T00:00:00.000Z",
+            entries: [
+              { path: "compaction.auto", loreValue: false, hadPrior: false },
+              {
+                path: "provider.anthropic.options.baseURL",
+                loreValue: "http://127.0.0.1:3207/v1",
+                hadPrior: true,
+                priorValue: "https://api.anthropic.com",
+              },
+            ],
+            pluginAdded: false,
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await commandSetup(["undo", "opencode"], {});
+
+    const restored = JSON.parse(readFileSync(ocPath(), "utf8"));
+    expect(restored.provider.anthropic.options.baseURL).toBe(
+      "https://api.anthropic.com",
+    );
+    expect(restored._loreBackup).toBeUndefined();
+    // No sidecar was ever created for a legacy-only install.
+    expect(existsSync(`${ocPath()}.lore-backup`)).toBe(false);
+  });
+
+  it("tolerates a corrupt sidecar backup (nothing to undo, no throw)", async () => {
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(ocPath(), JSON.stringify({ provider: {} }, null, 2));
+    writeFileSync(`${ocPath()}.lore-backup`, "{ not valid json");
+
+    await commandSetup(["undo", "opencode"], {});
+    expect(logged().toLowerCase()).toContain("no lore backup");
+  });
 });
 
 describe("commandSetup — Pi", () => {
