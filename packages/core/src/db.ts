@@ -49,7 +49,15 @@ export function onProjectRemoteBackfilled(
   onProjectRemoteBackfilledCb = cb;
 }
 
-function fireProjectRemoteBackfilled(projectId: string): void {
+/**
+ * Signal that a project's git_remote just flipped NULL→set. Exported so the
+ * `lore data`-triggered {@link backfillGitRemotes} path (data.ts) can fire the
+ * same reseed side-effect as {@link ensureProject}'s inline lazy backfill —
+ * both must notify the sync layer so content gated out while the project was
+ * remote-less gets re-enqueued (#1246). Safe to call when sync is disabled (the
+ * registered handler no-ops).
+ */
+export function fireProjectRemoteBackfilled(projectId: string): void {
   // git_remote just flipped NULL→set (possibly via a merge inside the backfill),
   // so the project's identity may have changed — drop the memo to be safe.
   invalidateProjectIdCache();

@@ -20,6 +20,7 @@ import {
   dbPath,
   mergeProjectInternal,
   invalidateProjectIdCache,
+  fireProjectRemoteBackfilled,
   repoNameFromRemote,
   onProjectMutation,
   loadParentChildMap,
@@ -1698,6 +1699,12 @@ export function backfillGitRemotes(): {
       db()
         .query("UPDATE projects SET git_remote = ? WHERE id = ?")
         .run(gitRemote, project.id);
+      // Mirror ensureProject's inline lazy backfill (db.ts): signal the NULL→set
+      // flip so the sync layer re-seeds content that was gated out while the
+      // project was remote-less (#1246). Without this, a project whose remote is
+      // backfilled through THIS path silently stops being pushed when sync is
+      // enabled. No-op when sync is disabled.
+      fireProjectRemoteBackfilled(project.id);
       updated++;
     }
 
