@@ -887,7 +887,7 @@ export async function load(directory: string): Promise<LoreConfig> {
         return current;
       } catch (e) {
         warn(
-          `Failed to parse ${path}: ${e instanceof Error ? e.message : e}. Using defaults.`,
+          `Failed to parse ${path}: ${e instanceof Error ? e.message : String(e)}. Using defaults.`,
         );
       }
     }

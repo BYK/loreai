@@ -2282,7 +2282,7 @@ export async function executeWarmup(
           );
         }
       } catch (err) {
-        log.warn(`warmup-probe: probe failed (ignored): ${err}`);
+        log.warn(`warmup-probe: probe failed (ignored): ${String(err)}`);
       }
     }
 

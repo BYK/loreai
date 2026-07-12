@@ -1368,7 +1368,7 @@ export async function commandSetup(
       chooseSetupPort({ explicitPort, remoteUrl, livePort }),
     );
   } catch (e) {
-    console.error(`[lore] ${e instanceof Error ? e.message : e}`);
+    console.error(`[lore] ${e instanceof Error ? e.message : String(e)}`);
     process.exitCode = 1;
     return;
   }

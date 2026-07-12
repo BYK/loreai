@@ -393,7 +393,7 @@ async function importRemote(
       );
     } catch (err) {
       console.error(
-        `[lore] Extraction failed for ${result.agentDisplayName}: ${err instanceof Error ? err.message : err}`,
+        `[lore] Extraction failed for ${result.agentDisplayName}: ${err instanceof Error ? err.message : String(err)}`,
       );
       totalFailed += chunks.length;
       continue;
@@ -421,7 +421,7 @@ async function importRemote(
         });
       } catch (err) {
         console.error(
-          `[lore] Warning: failed to record import on remote: ${err instanceof Error ? err.message : err}`,
+          `[lore] Warning: failed to record import on remote: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
       // Also record locally (belt-and-suspenders)

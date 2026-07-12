@@ -163,7 +163,10 @@ try {
     const resp = await fetch(`${BASE}/health`);
     assert(resp.status === 200, `Expected 200, got ${resp.status}`);
     const body = (await resp.json()) as Record<string, unknown>;
-    assert(body.status === "ok", `Expected status "ok", got "${body.status}"`);
+    assert(
+      body.status === "ok",
+      `Expected status "ok", got "${String(body.status)}"`,
+    );
   });
 
   // -----------------------------------------------------------------------
@@ -231,7 +234,7 @@ try {
     const markerBlock = content[0];
     assert(
       markerBlock.type === "text",
-      `First block type should be "text", got "${markerBlock.type}"`,
+      `First block type should be "text", got "${String(markerBlock.type)}"`,
     );
     const markerText = markerBlock.text as string;
     const parsedMarker = parseMarker(markerText);
@@ -245,7 +248,7 @@ try {
     const responseBlock = content[1];
     assert(
       responseBlock.type === "text",
-      `Second block type should be "text", got "${responseBlock.type}"`,
+      `Second block type should be "text", got "${String(responseBlock.type)}"`,
     );
     responseTextFromTest2 = responseBlock.text as string;
     assert(responseTextFromTest2.length > 0, "Response text block is empty");

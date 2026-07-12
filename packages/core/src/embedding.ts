@@ -1592,7 +1592,7 @@ function getProvider(): EmbeddingProvider | null {
       break;
     }
     default:
-      log.info(`unknown embedding provider: ${providerName}`);
+      log.info(`unknown embedding provider: ${String(providerName)}`);
       cachedProvider = null;
   }
 

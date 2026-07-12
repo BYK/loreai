@@ -55,7 +55,7 @@ async function fetchWithRetry(url: string): Promise<Response> {
       // Network-level failure (DNS, TLS, connection reset)
       if (attempt === MAX_RETRIES) {
         console.error(
-          `✗ network error: ${url} → ${err}` +
+          `✗ network error: ${url} → ${String(err)}` +
             (attempt > 0 ? ` (after ${attempt + 1} attempts)` : ""),
         );
         process.exit(1);

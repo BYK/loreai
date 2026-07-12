@@ -820,7 +820,7 @@ export function analyzeCacheTurn(
         analytics.probePrefixSha = dg.prefixSha;
       }
     } catch (err) {
-      log.warn(`warmup-probe: turn probe failed (ignored): ${err}`);
+      log.warn(`warmup-probe: turn probe failed (ignored): ${String(err)}`);
     }
   }
 

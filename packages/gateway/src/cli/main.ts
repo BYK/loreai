@@ -212,7 +212,7 @@ export async function _cli(): Promise<void> {
     positionals = parsed.positionals;
     tokens = parsed.tokens;
   } catch (e) {
-    console.error(`Error: ${e instanceof Error ? e.message : e}`);
+    console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
     printHelp();
     process.exit(1);
   }

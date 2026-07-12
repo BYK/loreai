@@ -226,7 +226,7 @@ function makeClient() {
               if (k in one && typeof one[k] !== "string")
                 return {
                   code: "22008",
-                  message: `date/time field value out of range: "${one[k]}"`,
+                  message: `date/time field value out of range: "${String(one[k])}"`,
                 };
             }
             const rows = tableRows(table);
@@ -273,7 +273,7 @@ function makeClient() {
               if (k in one && typeof one[k] !== "string")
                 return {
                   code: "22008",
-                  message: `date/time field value out of range: "${one[k]}"`,
+                  message: `date/time field value out of range: "${String(one[k])}"`,
                 };
             }
             const rows = tableRows(table);

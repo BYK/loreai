@@ -42,7 +42,7 @@ function parseLimit(v: unknown, def: number): number {
   if (v === undefined) return def;
   const n = Number(v);
   if (Number.isInteger(n) && n > 0) return n;
-  console.error(`Ignoring invalid --limit "${v}" (using ${def}).`);
+  console.error(`Ignoring invalid --limit "${String(v)}" (using ${def}).`);
   return def;
 }
 
