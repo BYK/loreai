@@ -15,17 +15,17 @@ import {
 // Part fixtures — mirror the producers in temporal.partsToText (and the helpers
 // in distillation.test.ts) so content strings are byte-identical to production.
 function textPart(text: string): LorePart {
-  return { type: "text", text } as LorePart;
+  return { type: "text", text };
 }
 function reasoningPart(text: string): LorePart {
-  return { type: "reasoning", text } as LorePart;
+  return { type: "reasoning", text };
 }
 function toolPart(tool: string, output: string): LorePart {
   return {
     type: "tool",
     tool,
     state: { status: "completed", output },
-  } as unknown as LorePart;
+  };
 }
 
 describe("buildEmbeddingUnits", () => {

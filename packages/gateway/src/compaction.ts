@@ -61,7 +61,7 @@ function lastUserText(req: GatewayRequest): string {
     if (msg.role === "user") {
       return msg.content
         .filter((b) => b.type === "text")
-        .map((b) => (b as { type: "text"; text: string }).text)
+        .map((b) => b.text)
         .join("\n");
     }
   }

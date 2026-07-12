@@ -389,7 +389,7 @@ describe("parseOpenAIResponsesRequest", () => {
         m.content.some((b: GatewayContentBlock) => b.type === "tool_use"),
     );
     if (!assistant) throw new Error("expected assistant message");
-    const ids = (assistant.content as GatewayContentBlock[])
+    const ids = assistant.content
       .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
       .map((b) => b.id)
       .sort();

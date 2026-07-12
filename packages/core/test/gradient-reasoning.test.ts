@@ -136,7 +136,7 @@ function makeAssistantMsgWithReasoning(
         metadata: {},
         time: { start: Date.now(), end: Date.now() },
       },
-    } as LorePart);
+    });
   }
   return { info, parts };
 }
@@ -323,7 +323,7 @@ describe("reasoning preservation — Layer 2/3 (tool-output stripping)", () => {
           metadata: {},
           time: { start: Date.now(), end: Date.now() },
         },
-      } as LorePart);
+      });
       messages.push(a);
     }
 

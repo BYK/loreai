@@ -369,8 +369,8 @@ describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
       pReturn: 0.8,
       expectedCycles: 1,
       expectedFutureTurns: 5,
-      metaThreshold: undefined as unknown as number,
-      metaDistillCostPerCall: undefined as unknown as number,
+      metaThreshold: undefined,
+      metaDistillCostPerCall: undefined,
     });
     expect(r.confident).toBe(true);
     // No meta adjustment → coolBustCost matches the no-meta formula.
@@ -410,7 +410,7 @@ describe("decideCacheStrategy — meta-aware cost model (#947)", () => {
 
 describe("decideCacheStrategy — non-finite inputs break confidence, not the contract", () => {
   test("undefined pricing (missing model) → confident:false, no NaN", () => {
-    const r = decide({ readPerToken: undefined as unknown as number });
+    const r = decide({ readPerToken: undefined });
     expect(r.confident).toBe(false);
     expect(Number.isNaN(r.holdWarmCost)).toBe(false);
   });

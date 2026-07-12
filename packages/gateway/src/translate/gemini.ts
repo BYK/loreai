@@ -201,7 +201,7 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
       return [{ functionResponse: { name: block.toolUseId, response } }];
     }
     case "opaque":
-      return [block.raw as GeminiPart];
+      return [block.raw];
   }
 }
 

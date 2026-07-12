@@ -290,7 +290,7 @@ function makeClient() {
               author_id: REMOTE_SCOPE,
               ...one,
               updated_at: nextTs(),
-            } as RemoteRow);
+            });
             return null;
           };
           for (const one of Array.isArray(payload) ? payload : [payload]) {
@@ -1134,7 +1134,7 @@ describe("pullOnce", () => {
       content_hash: null,
       revision: 5,
       updated_at: new Date(3_000_000).toISOString(),
-    } as never);
+    });
     await pullOnce(makeClient() as never);
     expect(currentContent("kd")).toBeNull(); // death-cert applied → no live current
   });
@@ -1159,7 +1159,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: new Date(2_000_000).toISOString(),
-    } as never);
+    });
     tableRows("entity_aliases").push({
       id: "al-orphan",
       entity_id: "22222222-2222-4222-8222-222222222222", // no such entity → local FK 787
@@ -1168,7 +1168,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: new Date(2_000_001).toISOString(),
-    } as never);
+    });
 
     // Must NOT throw — one FK-failing row can't abort the whole multi-table sync.
     const noticeSpy = vi.spyOn(log, "notice");
@@ -1223,7 +1223,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: new Date(2_000_000).toISOString(),
-    } as never);
+    });
 
     const noticeSpy = vi.spyOn(log, "notice");
     const r = await pullOnce(makeClient() as never);
@@ -1272,7 +1272,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: new Date(2_000_000).toISOString(),
-    } as never);
+    });
 
     const r = await pullOnce(makeClient() as never);
 
@@ -1322,7 +1322,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: new Date(2_000_000).toISOString(),
-    } as never);
+    });
 
     const noticeSpy = vi.spyOn(log, "notice");
     const r = await pullOnce(makeClient() as never);
@@ -1374,7 +1374,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: new Date(2_000_000).toISOString(),
-    } as never);
+    });
 
     const r = await pullOnce(makeClient() as never);
 
@@ -1416,7 +1416,7 @@ describe("pullOnce", () => {
         source: null,
         created_at: 1,
         updated_at: ts,
-      } as never);
+      });
     }
     // Sorts LAST (so it lands in the DRAIN batch, not the first page) and its entity is absent.
     tableRows("entity_aliases").push({
@@ -1427,7 +1427,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: ts,
-    } as never);
+    });
 
     const r = await pullOnce(makeClient() as never); // must NOT throw (drain path)
 
@@ -1480,7 +1480,7 @@ describe("pullOnce", () => {
         source: null,
         created_at: 1,
         updated_at: ts,
-      } as never);
+      });
     }
     // The collider sorts LAST (→ lands in the DRAIN batch) and has a LOWER id than the
     // local alias ('alias-…' < 'zzzzzzzz-local') → remote wins, dropping the local loser.
@@ -1492,7 +1492,7 @@ describe("pullOnce", () => {
       source: null,
       created_at: 1,
       updated_at: ts,
-    } as never);
+    });
 
     const r = await pullOnce(makeClient() as never); // must NOT throw (drain path)
 
@@ -1736,7 +1736,7 @@ describe("profiles (pull-only mirror)", () => {
       email: "octo@cat.dev",
       created_at: new Date(atMs).toISOString(),
       updated_at: new Date(atMs).toISOString(),
-    } as never);
+    });
   }
 
   test("pushOnce never uploads profiles (pull-only, no capture)", async () => {

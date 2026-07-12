@@ -1695,7 +1695,7 @@ describe("worker-model resolution memoization", () => {
           },
         },
       },
-    } as unknown);
+    });
 
     const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
 

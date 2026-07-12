@@ -126,7 +126,7 @@ function extractBodyString(
   }
   if (ArrayBuffer.isView(body)) {
     try {
-      return new TextDecoder().decode(body as ArrayBufferView);
+      return new TextDecoder().decode(body);
     } catch {
       return undefined;
     }

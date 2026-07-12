@@ -2008,10 +2008,10 @@ export async function vectorSearch(
   limit = 10,
   excludeCategories?: string[],
 ): Promise<VectorHit[]> {
-  return (await poolOrInProcess(
+  return await poolOrInProcess(
     { kind: "knowledge", limit, excludeCategories },
     queryEmbedding,
-  )) as VectorHit[];
+  );
 }
 
 /**
@@ -2022,10 +2022,7 @@ export async function vectorSearchEntities(
   queryEmbedding: Float32Array,
   limit = 10,
 ): Promise<VectorHit[]> {
-  return (await poolOrInProcess(
-    { kind: "entities", limit },
-    queryEmbedding,
-  )) as VectorHit[];
+  return await poolOrInProcess({ kind: "entities", limit }, queryEmbedding);
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,10 +2037,10 @@ export async function vectorSearchDistillations(
   queryEmbedding: Float32Array,
   limit = 10,
 ): Promise<VectorHit[]> {
-  return (await poolOrInProcess(
+  return await poolOrInProcess(
     { kind: "distillations", limit },
     queryEmbedding,
-  )) as VectorHit[];
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2330,10 +2327,10 @@ export async function vectorSearchTemporal(
   limit = 10,
   sessionId?: string,
 ): Promise<VectorHit[]> {
-  return (await poolOrInProcess(
+  return await poolOrInProcess(
     { kind: "temporal", projectId, limit, sessionId },
     queryEmbedding,
-  )) as VectorHit[];
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -62,7 +62,7 @@ const CANNED_MODELS_DEV = {
 };
 
 const realFetch = globalThis.fetch;
-globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   const url =
     typeof input === "string"
       ? input
@@ -78,7 +78,7 @@ globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     );
   }
   return realFetch(input, init);
-}) as typeof globalThis.fetch;
+};
 
 // The Pi/OpenCode plugins flip `log.silenceStderr()` when they activate inside
 // their TUI host. A force-active plugin test (LORE_*_FORCE_ACTIVE=1) would

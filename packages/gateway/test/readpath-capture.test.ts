@@ -43,9 +43,7 @@ const sample = (
 });
 
 function distNames(): string[] {
-  return vi
-    .mocked(Sentry.metrics.distribution)
-    .mock.calls.map((c) => c[0] as string);
+  return vi.mocked(Sentry.metrics.distribution).mock.calls.map((c) => c[0]);
 }
 
 describe("read-path timing Sentry capture (#999)", () => {

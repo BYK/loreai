@@ -674,7 +674,7 @@ describe.skipIf(SKIP)(
           .then((x) => x.rows),
       );
       const epochOf = (b64: string) =>
-        crypto.parseHeader(Buffer.from(b64 as string, "base64")).keyEpoch;
+        crypto.parseHeader(Buffer.from(b64, "base64")).keyEpoch;
       expect(epochOf(rows[0].content)).toBe(0); // kr0
       expect(epochOf(rows[1].content)).toBe(1); // kr1 seals at the current epoch (kills the no-stamp mutant)
       // Both epoch wraps must be on the remote for a fresh device to decrypt both.

@@ -250,7 +250,7 @@ async function cmdEdit(
   const updates: Record<string, unknown> = {};
 
   if (flags.name) {
-    updates.canonicalName = flags.name as string;
+    updates.canonicalName = flags.name;
   }
 
   if (flags.cross !== undefined) {

@@ -27,7 +27,7 @@ function insertDistill(id: string, pid: string, session: string): void {
 }
 
 function stubLLM(): LLMClient {
-  return { prompt: vi.fn() } as unknown as LLMClient;
+  return { prompt: vi.fn() };
 }
 
 describe("pattern-echo cooldown", () => {

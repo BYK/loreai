@@ -1380,17 +1380,17 @@ describe("mode-aware detection predicates", () => {
 // --- Phase 2 multi-vector temporal writes -----------------------------------
 // Part fixtures mirror temporal.partsToText so content is byte-identical to prod.
 function textPart(text: string): LorePart {
-  return { type: "text", text } as LorePart;
+  return { type: "text", text };
 }
 function reasoningPart(text: string): LorePart {
-  return { type: "reasoning", text } as LorePart;
+  return { type: "reasoning", text };
 }
 function toolPart(tool: string, output: string): LorePart {
   return {
     type: "tool",
     tool,
     state: { status: "completed", output },
-  } as unknown as LorePart;
+  };
 }
 function chunkIds(messageId: string): string[] {
   return (

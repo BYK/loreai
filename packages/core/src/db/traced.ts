@@ -64,7 +64,7 @@ type QueryableDatabase = { query(sql: string): unknown };
  * Intercepts only `query()`; all other members pass through bound to `db`.
  */
 export function tracedDatabase<T extends QueryableDatabase>(db: T): T {
-  const originalQuery = db.query.bind(db) as (sql: string) => unknown;
+  const originalQuery = db.query.bind(db);
   return new Proxy(db, {
     get(target, prop) {
       if (prop === "query") {
@@ -74,5 +74,5 @@ export function tracedDatabase<T extends QueryableDatabase>(db: T): T {
       const value = Reflect.get(target, prop);
       return typeof value === "function" ? value.bind(target) : value;
     },
-  }) as T;
+  });
 }

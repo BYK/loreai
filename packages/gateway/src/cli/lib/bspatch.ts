@@ -171,9 +171,7 @@ function createZstdStreamReader(compressed: Uint8Array): BufferedStreamReader {
   const webStream = Readable.toWeb(
     decompressor,
   ) as unknown as ReadableStream<Uint8Array>;
-  return new BufferedStreamReader(
-    webStream.getReader() as ReadableStreamDefaultReader<Uint8Array>,
-  );
+  return new BufferedStreamReader(webStream.getReader());
 }
 
 type OldFileHandle = {

@@ -738,7 +738,7 @@ export async function checkReadOffload(
             type: "read",
             id: READ_OFFLOAD_PROBE_ID,
             spec: { sql: "SELECT 1 AS one", params: [], mode: "get" },
-          } as VectorWorkerInbound);
+          });
         } catch (err) {
           finish({
             status: "spawn-error",
@@ -787,7 +787,7 @@ export function shutdownVectorPool(): void {
   for (const pw of workers) {
     failAll(pw, new Error("vector pool shutting down"));
     try {
-      pw.worker.postMessage({ type: "shutdown" } as VectorWorkerInbound);
+      pw.worker.postMessage({ type: "shutdown" });
     } catch {
       // worker may already be gone
     }

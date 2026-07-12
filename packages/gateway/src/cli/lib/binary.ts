@@ -78,7 +78,7 @@ export function isNightlyVersion(version: string): boolean {
  * build is always less than the stable release it precedes.
  */
 export function compareVersions(a: string, b: string): -1 | 0 | 1 {
-  return semverCompare(a, b) as -1 | 0 | 1;
+  return semverCompare(a, b);
 }
 
 /**

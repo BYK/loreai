@@ -919,8 +919,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
     // No recall tool_use blocks remain
     expect(
       markerResp.content.every((b) => {
-        if (b.type === "tool_use")
-          return (b as GatewayToolUseBlock).name !== "recall";
+        if (b.type === "tool_use") return b.name !== "recall";
         return true;
       }),
     ).toBe(true);

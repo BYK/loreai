@@ -139,7 +139,7 @@ describe("zstd-compressed request bodies (issue #1032)", () => {
         r.on("data", (c: Buffer) => chunks.push(c));
         r.on("end", () => {
           captured = {
-            encoding: r.headers["content-encoding"] as string | undefined,
+            encoding: r.headers["content-encoding"],
             raw: Buffer.concat(chunks),
           };
           res.writeHead(200, { "content-type": "application/json" });

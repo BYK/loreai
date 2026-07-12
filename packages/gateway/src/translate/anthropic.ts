@@ -478,7 +478,7 @@ export function buildAnthropicRequest(
       const prefixMsg = messages[prefixLen - 1];
       const prefixBlock = prefixMsg?.content[prefixMsg.content.length - 1];
       if (prefixBlock) {
-        (prefixBlock as Record<string, unknown>).cache_control =
+        prefixBlock.cache_control =
           cache.systemTTL === "1h"
             ? { type: "ephemeral", ttl: "1h" }
             : { type: "ephemeral" };
@@ -490,7 +490,7 @@ export function buildAnthropicRequest(
     if (lastBlock) {
       // Use configured TTL: "1h" for extended cache tier (2× write cost but
       // 12× longer eviction window), bare ephemeral (5m) otherwise.
-      (lastBlock as Record<string, unknown>).cache_control =
+      lastBlock.cache_control =
         cache.conversationTTL === "1h"
           ? { type: "ephemeral", ttl: "1h" }
           : { type: "ephemeral" };

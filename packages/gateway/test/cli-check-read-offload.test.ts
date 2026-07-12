@@ -17,6 +17,7 @@ import type { ReadOffloadCheck } from "@loreai/core";
 const { state, safeExit } = vi.hoisted(() => ({
   state: {
     dbThrows: false,
+    // oxlint-disable-next-line typescript/no-unnecessary-type-assertion -- widening for the mutable fixture; tests reassign error results below
     result: { status: "ok" } as ReadOffloadCheck,
   },
   safeExit: vi.fn(),

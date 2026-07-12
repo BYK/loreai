@@ -238,9 +238,7 @@ function messageToText(msg: ClineMessage): string | null {
     return msg.content ? `[${msg.role}] ${msg.content}` : null;
   }
 
-  const parts = (msg.content as ContentBlock[])
-    .map(blockToText)
-    .filter(Boolean) as string[];
+  const parts = msg.content.map(blockToText).filter(Boolean) as string[];
   return parts.length > 0 ? `[${msg.role}] ${parts.join("\n")}` : null;
 }
 

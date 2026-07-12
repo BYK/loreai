@@ -175,7 +175,7 @@ export async function accumulateResponsesSSEStream(
               usage.inputTokens = respUsage.input_tokens;
             }
             if (typeof respUsage.output_tokens === "number") {
-              usage.outputTokens = respUsage.output_tokens as number;
+              usage.outputTokens = respUsage.output_tokens;
             }
             const promptDetails = respUsage.prompt_tokens_details as
               | Record<string, number>

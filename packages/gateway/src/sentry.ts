@@ -710,7 +710,7 @@ export function setupBustSpiralCapture(): void {
         level: "info",
         message:
           "Cold-start bust spiral observed (within grace window) — expected per #796/#804",
-        data: info as unknown as Record<string, unknown>,
+        data: info,
       });
     },
     onSpiral: (info: BustSpiralInfo) => {
@@ -736,7 +736,7 @@ export function setupBustSpiralCapture(): void {
         category: "lore.cache.bust_spiral",
         level: "info",
         message: "Bust spiral recovered",
-        data: info as unknown as Record<string, unknown>,
+        data: info,
       });
     },
   });

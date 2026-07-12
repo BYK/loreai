@@ -4413,7 +4413,7 @@ function accumulateOpenAINonStreamJSON(
         let input: unknown = {};
         if (typeof fn?.arguments === "string") {
           try {
-            input = JSON.parse(fn.arguments as string);
+            input = JSON.parse(fn.arguments);
           } catch {
             input = fn.arguments;
           }
@@ -4476,7 +4476,7 @@ export function accumulateResponsesNonStreamJSON(
         let input: unknown = {};
         if (typeof item.arguments === "string") {
           try {
-            input = JSON.parse(item.arguments as string);
+            input = JSON.parse(item.arguments);
           } catch {
             input = item.arguments;
           }
@@ -8344,7 +8344,7 @@ export function loreMessagesToGateway(
       }
     }
 
-    out.push({ role: msg.info.role as "user" | "assistant", content });
+    out.push({ role: msg.info.role, content });
   }
 
   return out;
@@ -8389,9 +8389,7 @@ export function removeOrphanedToolResults(
     // Remove tool_result blocks that reference missing tool_use IDs
     const before = msg.content.length;
     msg.content = msg.content.filter(
-      (b) =>
-        b.type !== "tool_result" ||
-        toolUseIds.has((b as GatewayToolResultBlock).toolUseId),
+      (b) => b.type !== "tool_result" || toolUseIds.has(b.toolUseId),
     );
     if (msg.content.length < before) {
       log.warn(
@@ -8428,9 +8426,7 @@ export function removeOrphanedToolResults(
     // Remove tool_use blocks that have no matching tool_result
     const before = msg.content.length;
     msg.content = msg.content.filter(
-      (b) =>
-        b.type !== "tool_use" ||
-        toolResultIds.has((b as GatewayToolUseBlock).id),
+      (b) => b.type !== "tool_use" || toolResultIds.has(b.id),
     );
     if (msg.content.length < before) {
       log.warn(
@@ -8458,7 +8454,7 @@ function lastUserTextTrimmed(req: GatewayRequest): string {
     if (msg.role !== "user") continue;
     const text = msg.content
       .filter((b) => b.type === "text")
-      .map((b) => (b as { type: "text"; text: string }).text)
+      .map((b) => b.text)
       .join("\n")
       .trim();
     return text;

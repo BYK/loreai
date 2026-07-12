@@ -118,11 +118,11 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
 
       // session_start: updates the session id and re-registers providers.
       await onStart?.(
-        {} as never,
+        {},
         {
           cwd: process.cwd(),
           sessionManager: { getSessionFile: () => "/tmp/lore-pi-session" },
-        } as never,
+        },
       );
 
       // Compaction → gateway returns 404 session_not_found → graceful fallback.
@@ -133,8 +133,8 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
             firstKeptEntryId: "entry-1",
             tokensBefore: 100,
           },
-        } as never,
-        {} as never,
+        },
+        {},
       );
       expect(result).toBeUndefined();
 

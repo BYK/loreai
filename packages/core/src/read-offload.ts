@@ -42,7 +42,7 @@ export async function offloadAll(
   if (res) return res.rows as unknown[];
   return db()
     .query(sql)
-    .all(...params) as unknown[];
+    .all(...params);
 }
 
 /**
@@ -62,7 +62,7 @@ export async function offloadAllOrTimeout(
   if (res) return res.rows as unknown[];
   return db()
     .query(sql)
-    .all(...params) as unknown[];
+    .all(...params);
 }
 
 /**

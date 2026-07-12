@@ -138,9 +138,7 @@ function lineToText(parsed: ClaudeCodeLine): string | null {
       return `[user] ${content}`;
     }
     // Array content — extract text blocks, tool_result blocks
-    const parts = (content as ContentBlock[])
-      .map(blockToText)
-      .filter(Boolean) as string[];
+    const parts = content.map(blockToText).filter(Boolean) as string[];
     return parts.length > 0 ? `[user] ${parts.join("\n")}` : null;
   }
 
@@ -303,7 +301,7 @@ const claudeCodeProvider: AgentHistoryProvider = {
 
         const ts =
           "timestamp" in line && line.timestamp
-            ? new Date(line.timestamp as string).getTime()
+            ? new Date(line.timestamp).getTime()
             : Date.now();
 
         messages.push({ text, timestamp: ts });

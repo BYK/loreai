@@ -457,10 +457,7 @@ describe("prepareAnthropicWarmupBody", () => {
     const breakpoints = (fromStore.messages as Array<{ content: unknown[] }>)
       .flatMap((m) => m.content)
       .filter(
-        (b) =>
-          typeof b === "object" &&
-          b !== null &&
-          "cache_control" in (b as object),
+        (b) => typeof b === "object" && b !== null && "cache_control" in b,
       );
     expect(breakpoints).toHaveLength(1);
     const lastMsg = fromStore.messages[fromStore.messages.length - 1];
@@ -486,10 +483,7 @@ describe("prepareAnthropicWarmupBody", () => {
     const breakpoints = (result.messages as Array<{ content: unknown[] }>)
       .flatMap((m) => m.content)
       .filter(
-        (b) =>
-          typeof b === "object" &&
-          b !== null &&
-          "cache_control" in (b as object),
+        (b) => typeof b === "object" && b !== null && "cache_control" in b,
       );
     expect(breakpoints).toHaveLength(1);
     expect(result.messages[0].content[0].cache_control).toEqual({

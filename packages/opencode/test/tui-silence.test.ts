@@ -43,7 +43,7 @@ describe("opencode plugin — TUI stderr silencing on activation", () => {
       worktree: process.cwd(),
       serverUrl: new URL("http://localhost:0"),
       $: {} as unknown as PluginInput["$"],
-    } as PluginInput);
+    });
 
     expect(log.isStderrSilenced()).toBe(true);
   });

@@ -72,7 +72,7 @@ function makeClient() {
           const i = rows.findIndex((r) =>
             idc.every((c) => r[c] === payload[c]),
           );
-          const stamped = { ...payload, updated_at: nextTs() } as RemoteRow;
+          const stamped = { ...payload, updated_at: nextTs() };
           if (i >= 0) rows[i] = stamped;
           else rows.push(stamped);
           return Promise.resolve({ error: null });
@@ -194,7 +194,7 @@ function seedCurrentProfile(): void {
       is_deleted: false,
       created_at: new Date(1000).toISOString(),
       updated_at: nextTs(),
-    } as RemoteRow,
+    },
   ]);
 }
 

@@ -130,7 +130,7 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
       worktree: process.cwd(),
       serverUrl: new URL("http://localhost:0"),
       $: {} as unknown as PluginInput["$"],
-    } as PluginInput);
+    });
   });
 
   afterAll(async () => {
@@ -198,9 +198,8 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
       provider: { id: "anthropic" },
       message: { id: "msg-1" },
     } as unknown as Parameters<NonNullable<Hooks["chat.headers"]>>[0];
-    const output = { headers: {} as Record<string, string> } as Parameters<
-      NonNullable<Hooks["chat.headers"]>
-    >[1];
+    // oxlint-disable-next-line typescript/no-unnecessary-type-assertion -- Record cast makes headers indexable for the assertions below
+    const output = { headers: {} as Record<string, string> };
 
     await hooks["chat.headers"]?.(input, output);
     expect(output.headers["x-lore-session-id"]).toBe("oc-sess-1");

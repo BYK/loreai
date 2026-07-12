@@ -1012,10 +1012,7 @@ export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
       // Resolve the synced columns ONCE per table (one PRAGMA table_info) — not
       // per row, which is what `contentHash` would do (an N+1 on large tables).
       const cols = columns(m.table);
-      const rows = db().query(seedSelect(m.table)).all() as Record<
-        string,
-        unknown
-      >[];
+      const rows = db().query(seedSelect(m.table)).all();
       for (const row of rows) {
         const rowId = rowIdOf(m.table, row);
         const pending =

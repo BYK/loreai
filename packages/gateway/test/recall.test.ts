@@ -108,7 +108,7 @@ describe("RECALL_GATEWAY_TOOL", () => {
   test("has correct name and schema", () => {
     expect(RECALL_GATEWAY_TOOL.name).toBe("recall");
     expect(RECALL_GATEWAY_TOOL.description).toBeTruthy();
-    const schema = RECALL_GATEWAY_TOOL.inputSchema as Record<string, unknown>;
+    const schema = RECALL_GATEWAY_TOOL.inputSchema;
     expect(schema.type).toBe("object");
     const props = schema.properties as Record<string, unknown>;
     expect(props).toHaveProperty("query");

@@ -55,10 +55,7 @@ function openDB(): InstanceType<typeof Database> | null {
     // `readOnly`. Pass both via a structurally-typed options object that
     // covers either runtime's constructor signature.
     const options = { readonly: true, readOnly: true };
-    return new Database(
-      OPENCODE_DB_PATH,
-      options as ConstructorParameters<typeof Database>[1],
-    );
+    return new Database(OPENCODE_DB_PATH, options);
   } catch {
     return null;
   }

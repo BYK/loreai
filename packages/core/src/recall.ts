@@ -1111,7 +1111,7 @@ export async function searchRecall(
               source: "cross-knowledge" as const,
               item,
               projectLabel: label,
-            } as TaggedResult;
+            };
           }),
           key: (r) => `xk:${r.item.id}`,
         });
@@ -1306,7 +1306,7 @@ export async function searchRecall(
       for (const item of list.items) {
         if (item.source !== "distillation") continue;
         const key = `d:${item.item.id}`;
-        const d = item.item as ScoredDistillation;
+        const d = item.item;
         const cNorm = d.c_norm ?? 0; // NULL → treat as uniform (best case)
         // Quality score: lower c_norm is better. For high c_norm, recency
         // partially compensates. Age is normalized to days (capped at 90).

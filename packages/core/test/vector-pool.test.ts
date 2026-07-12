@@ -193,10 +193,10 @@ describe("vector-pool fallback paths (resolve null, never throw)", () => {
 
   it("returns null and latches broken when spawning throws (no retry)", async () => {
     let calls = 0;
-    _setTestVectorWorkerFactory((() => {
+    _setTestVectorWorkerFactory(() => {
       calls++;
       throw new Error("spawn failed");
-    }) as never);
+    });
     expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
     const afterFirst = calls;
     expect(afterFirst).toBeGreaterThan(0);
@@ -351,9 +351,9 @@ describe("vector-pool structural-failure latch (review #989)", () => {
     _setTestVectorWorkerFactory((() => {
       const w = new FakeWorker(() => {});
       // Simulate the worker dying between leastBusy() and postMessage().
-      w.postMessage = (() => {
+      w.postMessage = () => {
         throw new Error("dead pipe");
-      }) as never;
+      };
       return w;
     }) as never);
     expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
@@ -660,9 +660,9 @@ describe("checkVecWorker (off-thread read-pool vec probe, #1033)", () => {
   });
 
   it("reports spawn-error when spawning throws synchronously", async () => {
-    _setTestVectorWorkerFactory((() => {
+    _setTestVectorWorkerFactory(() => {
       throw new Error("no worker");
-    }) as unknown as (d: VectorWorkerInitData) => never);
+    });
     const r = await checkVecWorker();
     expect(r).toEqual({
       status: "spawn-error",
@@ -779,9 +779,9 @@ describe("checkReadOffload (off-thread read-job round-trip probe, #1029)", () =>
   });
 
   it("reports spawn-error when spawning throws synchronously", async () => {
-    _setTestVectorWorkerFactory((() => {
+    _setTestVectorWorkerFactory(() => {
       throw new Error("no worker");
-    }) as unknown as (d: VectorWorkerInitData) => never);
+    });
     const r = await checkReadOffload();
     expect(r).toEqual({ status: "spawn-error", error: "no worker" });
   });

@@ -210,7 +210,7 @@ export async function _cli(): Promise<void> {
     });
     values = parsed.values;
     positionals = parsed.positionals;
-    tokens = parsed.tokens as ParseToken[];
+    tokens = parsed.tokens;
   } catch (e) {
     console.error(`Error: ${e instanceof Error ? e.message : e}`);
     printHelp();
@@ -371,17 +371,7 @@ export async function _cli(): Promise<void> {
   const command = positionals[0] ?? "run";
   const rest = positionals.slice(1);
 
-  const startOpts = buildStartOptions(
-    values as {
-      port?: string;
-      host?: string[];
-      debug?: boolean;
-      remote?: string;
-      local?: boolean;
-      bg?: boolean;
-      daemon?: boolean;
-    },
-  );
+  const startOpts = buildStartOptions(values);
 
   // Start background update check (non-blocking).
   // Suppressed for commands where the banner would be confusing or redundant.
@@ -415,7 +405,7 @@ export async function _cli(): Promise<void> {
 
       case "setup": {
         const { commandSetup } = await import("./setup");
-        await commandSetup(rest, values as Record<string, unknown>);
+        await commandSetup(rest, values);
         break;
       }
 
@@ -427,31 +417,31 @@ export async function _cli(): Promise<void> {
 
       case "data": {
         const { commandData } = await import("./data");
-        await commandData(rest, values as Record<string, unknown>);
+        await commandData(rest, values);
         break;
       }
 
       case "recall": {
         const { commandRecall } = await import("./recall-cmd");
-        await commandRecall(rest, values as Record<string, unknown>);
+        await commandRecall(rest, values);
         break;
       }
 
       case "log": {
         const { commandLog } = await import("./history-cmd");
-        await commandLog(rest, values as Record<string, unknown>);
+        await commandLog(rest, values);
         break;
       }
 
       case "diff": {
         const { commandDiff } = await import("./history-cmd");
-        await commandDiff(rest, values as Record<string, unknown>);
+        await commandDiff(rest, values);
         break;
       }
 
       case "login": {
         const { commandLogin } = await import("./login");
-        await commandLogin(rest, values as Record<string, unknown>);
+        await commandLogin(rest, values);
         break;
       }
 
@@ -463,37 +453,37 @@ export async function _cli(): Promise<void> {
 
       case "whoami": {
         const { commandWhoami } = await import("./login");
-        await commandWhoami(rest, values as Record<string, unknown>);
+        await commandWhoami(rest, values);
         break;
       }
 
       case "sync": {
         const { commandSync } = await import("./sync-cmd");
-        await commandSync(rest, values as Record<string, unknown>);
+        await commandSync(rest, values);
         break;
       }
 
       case "team": {
         const { commandTeam } = await import("./team-cmd");
-        await commandTeam(rest, values as Record<string, unknown>);
+        await commandTeam(rest, values);
         break;
       }
 
       case "logs": {
         const { commandLogs } = await import("./logs");
-        await commandLogs(rest, values as Record<string, unknown>);
+        await commandLogs(rest, values);
         break;
       }
 
       case "import": {
         const { commandImport } = await import("./import");
-        await commandImport(rest, values as Record<string, unknown>);
+        await commandImport(rest, values);
         break;
       }
 
       case "entity": {
         const { commandEntity } = await import("./entity");
-        await commandEntity(rest, values as Record<string, unknown>);
+        await commandEntity(rest, values);
         break;
       }
 

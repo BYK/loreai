@@ -18,7 +18,7 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { openReaderConnection, type ReaderConnection } from "./db/reader";
 import { resolveReadMode, readStorageMode } from "./db/vec-store";
-import { type ReadJobConn, runReadJob } from "./read-job";
+import { runReadJob } from "./read-job";
 import { runVectorQuery } from "./vector-query";
 import type {
   VectorWorkerInbound,
@@ -107,7 +107,7 @@ port.on("message", (msg: VectorWorkerInbound) => {
       }
       try {
         // The connection is query_only=TRUE, so a read job can only SELECT.
-        const rows = runReadJob(conn.db as unknown as ReadJobConn, msg.spec);
+        const rows = runReadJob(conn.db, msg.spec);
         post({ type: "read-result", id: msg.id, rows });
       } catch (err) {
         // Per-request failure — reject just this request, keep serving. The

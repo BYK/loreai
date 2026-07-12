@@ -45,7 +45,7 @@ describe("signalExitCode", () => {
   });
 
   test("falls back to 129 (128 + 1) for unknown signals", () => {
-    expect(signalExitCode("SIGUSR2" as NodeJS.Signals)).toBe(129);
+    expect(signalExitCode("SIGUSR2")).toBe(129);
   });
 });
 

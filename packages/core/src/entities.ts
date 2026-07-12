@@ -412,10 +412,7 @@ export function ensureSelfEntity(
     }
     // Merge config metadata into existing
     if (cfg?.metadata && Object.keys(cfg.metadata).length > 0) {
-      const merged = mergeMetadata(
-        existing.metadata,
-        cfg.metadata as Record<string, unknown>,
-      );
+      const merged = mergeMetadata(existing.metadata, cfg.metadata);
       if (merged) updates.metadata = merged;
     }
     let changed = Object.keys(updates).length > 0;
@@ -427,8 +424,7 @@ export function ensureSelfEntity(
     // Add config aliases
     if (cfg?.aliases) {
       for (const a of cfg.aliases) {
-        if (addAlias(existing.id, a.type as AliasType, a.value, "config"))
-          changed = true;
+        if (addAlias(existing.id, a.type, a.value, "config")) changed = true;
       }
     }
     // Only re-embed when the name or alias set actually changed.
@@ -443,7 +439,7 @@ export function ensureSelfEntity(
   if (cfg?.aliases) {
     for (const a of cfg.aliases) {
       aliases.push({
-        type: a.type as AliasType,
+        type: a.type,
         value: a.value,
         source: "config",
       });
@@ -456,7 +452,7 @@ export function ensureSelfEntity(
     entityType: "self",
     canonicalName: name,
     aliases,
-    metadata: cfg?.metadata as Record<string, unknown> | undefined,
+    metadata: cfg?.metadata,
     crossProject: true,
   });
 

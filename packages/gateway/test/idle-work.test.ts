@@ -990,7 +990,7 @@ describe("buildIdleWorkHandler — contradiction detection (#1123)", () => {
       prompt: vi.fn(async () =>
         JSON.stringify({ contradict: true, reason: "opposed" }),
       ),
-    } as unknown as LLMClient;
+    };
   }
 
   async function runIdle(

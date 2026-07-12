@@ -234,7 +234,7 @@ export function extractReferences(text: string): Reference[] {
     out.push({
       kind: "file",
       path,
-      line: Number.isNaN(line as number) ? null : line,
+      line: Number.isNaN(line) ? null : line,
       raw,
     });
   }

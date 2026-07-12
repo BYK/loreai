@@ -1283,7 +1283,7 @@ function toRemoteRow(
   const out: Record<string, unknown> = { ...row };
   for (const k of TS_COLS) {
     if (typeof out[k] === "number") {
-      out[k] = new Date(out[k] as number).toISOString();
+      out[k] = new Date(out[k]).toISOString();
     }
   }
   // Base64-encode BLOB columns for the PostgREST/JSON wire (remote stores `text`).

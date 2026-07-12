@@ -68,7 +68,7 @@ function toolPart(
     tool,
     callID,
     state,
-  } as unknown as LorePart;
+  };
 }
 
 describe("temporal", () => {

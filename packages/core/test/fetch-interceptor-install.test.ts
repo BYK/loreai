@@ -30,7 +30,7 @@ describe("installFetchInterceptor — end-to-end routing", () => {
         init,
       };
       return new Response("ok", { status: 200 });
-    }) as unknown as typeof globalThis.fetch;
+    });
     globalThis.fetch = realFetch;
 
     cleanup = installFetchInterceptor({

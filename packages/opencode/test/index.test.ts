@@ -42,7 +42,7 @@ async function initPlugin() {
     worktree: tmpDir,
     serverUrl: new URL("http://localhost:0"),
     $: {} as unknown as PluginInput["$"],
-  } as PluginInput);
+  });
 
   return {
     hooks,

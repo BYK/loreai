@@ -3390,10 +3390,7 @@ function pageEntity(id: string): string | null {
       body += `<div class="field"><span class="key">Notes:</span> ${esc(parsedMeta.notes)}</div>`;
     }
     // Show any extra keys as raw JSON
-    const { role, description, notes, ...extra } = parsedMeta as Record<
-      string,
-      unknown
-    >;
+    const { role, description, notes, ...extra } = parsedMeta;
     if (Object.keys(extra).length > 0) {
       body += `<div class="field"><span class="key">Other:</span></div><pre>${esc(JSON.stringify(extra, null, 2))}</pre>`;
     }

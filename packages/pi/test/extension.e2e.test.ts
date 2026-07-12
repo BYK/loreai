@@ -162,13 +162,13 @@ describe("pi extension — e2e against a real gateway", () => {
     const before = mock.registrations.length;
     const onStart = mock.handlers.get("session_start");
     await onStart?.(
-      {} as never,
+      {},
       {
         cwd: process.cwd(),
         sessionManager: {
           getSessionFile: () => "/tmp/lore-pi-e2e-session.json",
         },
-      } as never,
+      },
     );
     const after = mock.registrations.slice(before);
     expect(after.length).toBeGreaterThan(0);
@@ -186,8 +186,8 @@ describe("pi extension — e2e against a real gateway", () => {
           firstKeptEntryId: "e1",
           tokensBefore: 100,
         },
-      } as never,
-      {} as never,
+      },
+      {},
     );
     // The gateway returns 404 session_not_found for a session that never sent
     // a turn; the handler must return undefined (use Pi's default compaction).

@@ -53,7 +53,7 @@ async function initPluginForProject(
     worktree: worktree ?? directory,
     serverUrl: new URL("http://localhost:0"),
     $: {} as unknown as PluginInput["$"],
-  } as PluginInput);
+  });
   return hooks;
 }
 
@@ -84,7 +84,7 @@ function buildChatHeadersInput(
     provider: providerID ? { id: providerID } : undefined,
     message: { id: "msg-1" },
   } as unknown as ChatHeadersInput;
-  const output = { headers: {} as Record<string, string> } as ChatHeadersOutput;
+  const output = { headers: {} };
   return { input, output };
 }
 

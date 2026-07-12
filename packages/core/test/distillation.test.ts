@@ -368,17 +368,17 @@ describe("messagesToText", () => {
 // or trailing-text loss. This is the F3b correctness guarantee.
 
 function textPart(text: string): LorePart {
-  return { type: "text", text } as LorePart;
+  return { type: "text", text };
 }
 function reasoningPart(text: string): LorePart {
-  return { type: "reasoning", text } as LorePart;
+  return { type: "reasoning", text };
 }
 function toolPart(tool: string, output: string): LorePart {
   return {
     type: "tool",
     tool,
     state: { status: "completed", output },
-  } as unknown as LorePart;
+  };
 }
 
 describe("partsToText + truncateToolOutputsInContent round trip", () => {

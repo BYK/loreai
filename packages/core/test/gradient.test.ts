@@ -77,7 +77,7 @@ function toolStateOf(part: LorePart | undefined): TestToolState {
   if (!part || !isToolPart(part)) {
     throw new Error("expected tool part");
   }
-  return part.state as unknown as TestToolState;
+  return part.state;
 }
 
 function makeMsg(
@@ -162,7 +162,7 @@ describe("gradient", () => {
       const role = i % 2 === 0 ? "user" : "assistant";
       return makeMsg(
         `bulk-${i}`,
-        role as "user" | "assistant",
+        role,
         `Message content number ${i} with some padding text to take up token space.`,
       );
     });
@@ -187,7 +187,7 @@ describe("gradient", () => {
     const messages = Array.from({ length: 10 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       const text = `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`;
-      return makeMsg(`nuclear-${i}`, role as "user" | "assistant", text);
+      return makeMsg(`nuclear-${i}`, role, text);
     });
     setModelLimits({ context: 2_000, output: 500 }); // 1500 usable, rawBudget ~600
     calibrate(0); // keep overhead at zero for this test
@@ -210,11 +210,7 @@ describe("gradient", () => {
     // Verify that more than the old fixed 3 are included.
     const messages = Array.from({ length: 20 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      return makeMsg(
-        `tiny-${i}`,
-        role as "user" | "assistant",
-        `Msg ${i}: short`,
-      );
+      return makeMsg(`tiny-${i}`, role, `Msg ${i}: short`);
     });
     setModelLimits({ context: 12_000, output: 2_000 }); // usable ~10000
     calibrate(0);
@@ -259,12 +255,7 @@ describe("gradient", () => {
     const medMessages = Array.from({ length: 14 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       const text = `Message ${i}: ${"some content that fills the budget moderately well ".repeat(8)}`;
-      return makeMsg(
-        `ltm-flag-med-${i}`,
-        role as "user" | "assistant",
-        text,
-        "ltm-flag-med-sess",
-      );
+      return makeMsg(`ltm-flag-med-${i}`, role, text, "ltm-flag-med-sess");
     });
     const layerMidResult = transform({
       messages: medMessages,
@@ -281,12 +272,7 @@ describe("gradient", () => {
     const bigMessages = Array.from({ length: 10 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
       const text = `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`;
-      return makeMsg(
-        `ltm-flag-big-${i}`,
-        role as "user" | "assistant",
-        text,
-        "ltm-flag-big-sess",
-      );
+      return makeMsg(`ltm-flag-big-${i}`, role, text, "ltm-flag-big-sess");
     });
     const layer4Result = transform({
       messages: bigMessages,
@@ -322,11 +308,7 @@ describe("gradient", () => {
     calibrate(0);
     const messages = Array.from({ length: 6 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      return makeMsg(
-        `exhaust-${i}`,
-        role as "user" | "assistant",
-        "X".repeat(2_000),
-      );
+      return makeMsg(`exhaust-${i}`, role, "X".repeat(2_000));
     });
     const result = transform({
       messages,
@@ -1204,7 +1186,7 @@ function makeStepWithTool(
         sessionID,
         messageID: id,
         type: "step-start",
-      } as LorePart,
+      },
       {
         id: `tool-${id}`,
         sessionID,
@@ -1220,7 +1202,7 @@ function makeStepWithTool(
           metadata: {},
           time: { start: Date.now(), end: Date.now() },
         },
-      } as unknown as LorePart,
+      },
       {
         id: `step-finish-${id}`,
         sessionID,
@@ -1234,7 +1216,7 @@ function makeStepWithTool(
           reasoning: 0,
           cache: { read: 0, write: 0 },
         },
-      } as unknown as LorePart,
+      },
     ],
   };
 }
@@ -1279,7 +1261,7 @@ function makeStepWithPendingTool(
         sessionID,
         messageID: id,
         type: "step-start",
-      } as LorePart,
+      },
       {
         id: `tool-${id}`,
         sessionID,
@@ -1292,7 +1274,7 @@ function makeStepWithPendingTool(
           input: { command: "ls" },
           raw: '{"command": "ls"}',
         },
-      } as unknown as LorePart,
+      },
     ],
   };
 }
@@ -1330,7 +1312,7 @@ function makeStepWithRunningTool(
         sessionID,
         messageID: id,
         type: "step-start",
-      } as LorePart,
+      },
       {
         id: `tool-${id}`,
         sessionID,
@@ -1345,7 +1327,7 @@ function makeStepWithRunningTool(
           metadata: { cwd: "/test" },
           time: { start: startTime },
         },
-      } as unknown as LorePart,
+      },
     ],
   };
 }
@@ -2652,7 +2634,7 @@ function makeMsgWithTool(
           time: { start: Date.now(), end: Date.now() },
         },
         time: { start: Date.now(), end: Date.now() },
-      } as LorePart,
+      },
     ],
   };
 }
@@ -3622,7 +3604,7 @@ describe("reasoning preservation (F-REASONING-AUDIT mini-pin)", () => {
             type: "reasoning",
             text: "I should consider the trade-offs carefully here.",
             time: { start: Date.now(), end: Date.now() },
-          } as LorePart,
+          },
           {
             id: "rm-t1",
             sessionID: SID,
@@ -5725,9 +5707,7 @@ describe("gradient — free-write session compresses earlier than normal", () =>
       const msgs: ReturnType<typeof makeMsg>[] = [];
       for (let i = 0; i < 40; i++) {
         const role = i % 2 === 0 ? "user" : "assistant";
-        msgs.push(
-          makeMsg(`fw-${i}`, role as "user" | "assistant", bigText, sid),
-        );
+        msgs.push(makeMsg(`fw-${i}`, role, bigText, sid));
       }
       msgs.push(makeMsg("fw-final", "user", "do the fix", sid));
       return msgs;
@@ -5923,7 +5903,7 @@ describe("gradient — prefix/raw boundary role alternation (#424)", () => {
             output,
             time: { start: Date.now(), end: Date.now() },
           },
-        } as unknown as LorePart,
+        },
       ],
     };
   }
@@ -6166,7 +6146,7 @@ describe("gradient — error-state tool outputs are estimated (not flat 20)", ()
             error: bigError,
             time: { start: Date.now(), end: Date.now() },
           },
-        } as unknown as LorePart,
+        },
       ],
     };
     const estimate = estimateMessages([errorMsg]);
@@ -6219,7 +6199,7 @@ describe("gradient — atomic tool_use/tool_result pair (no orphan on eviction)"
             time: { start: Date.now(), end: Date.now() },
           },
           time: { start: Date.now(), end: Date.now() },
-        } as LorePart,
+        },
       ],
     };
   }
@@ -6252,7 +6232,7 @@ describe("gradient — atomic tool_use/tool_result pair (no orphan on eviction)"
             time: { start: Date.now(), end: Date.now() },
           },
           time: { start: Date.now(), end: Date.now() },
-        } as LorePart,
+        },
       ],
     };
   }

@@ -43,7 +43,7 @@ function stubLLM(response: string | null): {
   prompt: ReturnType<typeof vi.fn>;
 } {
   const prompt = vi.fn().mockResolvedValue(response);
-  return { llm: { prompt } as unknown as LLMClient, prompt };
+  return { llm: { prompt }, prompt };
 }
 
 beforeEach(() => {

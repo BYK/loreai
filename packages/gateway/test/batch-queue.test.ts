@@ -881,7 +881,7 @@ describe("BatchLLMClient", () => {
         url.includes("/v1/files") &&
         init?.body instanceof FormData
       ) {
-        const formData = init.body as FormData;
+        const formData = init.body;
         const file = formData.get("file") as Blob;
         if (file) {
           capturedJsonl = await file.text();
@@ -1435,7 +1435,7 @@ describe("BatchLLMClient temperature capability", () => {
         url.includes("/v1/files") &&
         init?.body instanceof FormData
       ) {
-        const file = (init.body as FormData).get("file") as Blob;
+        const file = init.body.get("file") as Blob;
         if (file) capturedJsonl = await file.text();
         return {
           ok: true,
@@ -1509,7 +1509,7 @@ describe("BatchLLMClient temperature capability", () => {
         url.includes("/v1/files") &&
         init?.body instanceof FormData
       ) {
-        const file = (init.body as FormData).get("file") as Blob;
+        const file = init.body.get("file") as Blob;
         if (file) capturedJsonl = await file.text();
         return {
           ok: true,

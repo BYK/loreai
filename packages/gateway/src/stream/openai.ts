@@ -437,9 +437,9 @@ export async function accumulateOpenAISSEStream(
     const usage = parsed.usage as Record<string, unknown> | undefined;
     if (usage) {
       if (typeof usage.prompt_tokens === "number")
-        inputTokens = usage.prompt_tokens as number;
+        inputTokens = usage.prompt_tokens;
       if (typeof usage.completion_tokens === "number")
-        outputTokens = usage.completion_tokens as number;
+        outputTokens = usage.completion_tokens;
       const details = usage.prompt_tokens_details as
         | Record<string, number>
         | undefined;

@@ -151,12 +151,7 @@ describe("pi extension — e2e against the real Pi runtime", () => {
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir,
-      extensionFactories: [
-        (pi) =>
-          lorePiExtension(
-            pi as Parameters<typeof lorePiExtension>[0],
-          ) as void | Promise<void>,
-      ],
+      extensionFactories: [(pi) => lorePiExtension(pi)],
     });
 
     // Capture everything written to the terminal across the entire real

@@ -17,12 +17,14 @@ const { state, safeExit } = vi.hoisted(() => ({
   state: {
     vecAvailable: true,
     // `undefined` simulates `SELECT vec_version()` returning a row with no `v`.
+    // oxlint-disable-next-line typescript/no-unnecessary-type-assertion -- widening for the mutable fixture; tests reassign undefined below
     vecVersion: "v0.1.9" as string | undefined,
     dbThrows: false,
     // Drives the off-thread read-pool probe (checkVecWorker). Defaults to a
     // healthy native worker so the main-thread assertions in existing tests
     // keep exiting 0.
     worker: {
+      // oxlint-disable-next-line typescript/no-unnecessary-type-assertion -- widening for the mutable fixture; tests reassign other statuses below
       status: "ready" as "ready" | "init-error" | "timeout" | "spawn-error",
       vecAvailable: true,
       error: undefined as string | undefined,

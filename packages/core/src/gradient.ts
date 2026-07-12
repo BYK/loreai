@@ -1847,7 +1847,7 @@ function cleanParts(parts: LorePart[]): LorePart[] {
     if (!isTextPart(part)) return part;
     const text = stripSystemReminders(part.text);
     if (text === part.text) return part;
-    return { ...part, text } as LorePart;
+    return { ...part, text };
   });
   // Filter out text parts that became empty after stripping
   const filtered = cleaned.filter(
@@ -1860,7 +1860,7 @@ function cleanParts(parts: LorePart[]): LorePart[] {
   if (filtered.length === 0 && parts.length > 0) {
     const first = parts[0];
     if (isTextPart(first)) {
-      return [{ ...first, text: "..." } as LorePart];
+      return [{ ...first, text: "..." }];
     }
   }
   return filtered.length > 0 ? filtered : parts;
@@ -2179,7 +2179,7 @@ export function deduplicateToolOutputs(
           output: dedupAnnotation(part.tool, readRange?.path, readRange),
           blocks: undefined,
         },
-      } as LorePart;
+      };
     });
 
     if (!partsChanged) return msg;
@@ -2228,7 +2228,7 @@ function sanitizeToolParts(messages: MessageWithParts[]): MessageWithParts[] {
             end: existingStart,
           },
         },
-      } as LorePart;
+      };
     });
 
     if (!partsChanged) return msg;
@@ -2251,7 +2251,7 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
           output: toolStripAnnotation(part.tool, part.state.output),
           blocks: undefined,
         },
-      } as LorePart;
+      };
     }
     // Error outputs (e.g. large stack traces) must also be stripped under
     // aggressive (Layer 2) compression — otherwise failure-heavy turns evade
@@ -2264,7 +2264,7 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
           error: toolStripAnnotation(part.tool, part.state.error),
           blocks: undefined,
         },
-      } as LorePart;
+      };
     }
     return part;
   });
@@ -2282,7 +2282,7 @@ function _stripToTextOnly(parts: LorePart[]): LorePart[] {
   // toModelMessages and the conversation doesn't end with an assistant message.
   if (stripped.length === 0 && parts.length > 0) {
     const first = parts.find(isTextPart);
-    if (first) return [{ ...first, text: "..." } as LorePart];
+    if (first) return [{ ...first, text: "..." }];
   }
   return stripped;
 }

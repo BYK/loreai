@@ -1455,9 +1455,7 @@ export function createGatewayLLMClient(
       // upstream (the vertex builder constructs its own headers and ignores it).
       const cred =
         getAuth(opts?.sessionID, model.providerID) ??
-        (protocol === "vertex"
-          ? ({ scheme: "bearer", value: "" } as AuthCredential)
-          : null);
+        (protocol === "vertex" ? { scheme: "bearer", value: "" } : null);
       if (!cred) {
         log.warn("no auth credentials available for worker call");
         recordWorkerFailure(

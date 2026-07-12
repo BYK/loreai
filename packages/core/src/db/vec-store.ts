@@ -101,7 +101,7 @@ export const VEC_TABLES = Object.freeze([
   "entity_vec",
   "distillation_vec",
   "temporal_vec",
-]) as readonly string[];
+]);
 
 /** Minimal connection shape for reading the stored storage mode. */
 export interface StorageModeConn {

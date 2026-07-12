@@ -19,7 +19,7 @@
     "typescript/await-thenable": "error",
     "typescript/no-for-in-array": "error",
     "typescript/no-misused-spread": "error",
-    "typescript/no-unnecessary-type-assertion": "warn",
+    "typescript/no-unnecessary-type-assertion": "error",
     "typescript/no-base-to-string": "warn",
     "typescript/unbound-method": "warn",
     "typescript/restrict-template-expressions": "warn",

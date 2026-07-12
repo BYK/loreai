@@ -26,7 +26,7 @@ function countListItems(md: string): number {
     for (const child of node.children ?? [])
       walk(child as { type: string; children?: unknown[] });
   }
-  walk(proc.parse(md) as { type: string; children?: unknown[] });
+  walk(proc.parse(md));
   return items;
 }
 

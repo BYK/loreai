@@ -12,7 +12,7 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { remark } from "remark";
-import type { Root, Heading, Paragraph, Text } from "mdast";
+import type { Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
 import {
@@ -89,7 +89,7 @@ export function parseSections(
   content: string,
   projectRoot: string,
 ): ParsedSection[] {
-  const tree = processor.parse(content) as Root;
+  const tree = processor.parse(content);
   const fileRel = relative(projectRoot, filePath).replace(/\.md$/, "");
   const lines = content.split("\n");
 

@@ -218,7 +218,7 @@ function filterRelations(arr: unknown[]): DetectedRelation[] {
         !Array.isArray(obj.metadata)
       ) {
         const filtered = Object.fromEntries(
-          Object.entries(obj.metadata as Record<string, unknown>).filter(
+          Object.entries(obj.metadata).filter(
             ([, v]) => typeof v === "string" && v.length > 0 && v.length <= 500,
           ),
         );

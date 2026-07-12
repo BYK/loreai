@@ -1204,7 +1204,7 @@ export function createRecallAwareAccumulator(
         ) {
           const adjusted = {
             ...parsed,
-            index: (parsed.index as number) - suppressedCount + baseOffset,
+            index: parsed.index - suppressedCount + baseOffset,
           };
           return formatSSEEvent(eventType, JSON.stringify(adjusted));
         }

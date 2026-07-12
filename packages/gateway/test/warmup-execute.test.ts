@@ -70,7 +70,7 @@ function makeState(): SessionState {
     upstreamByProvider: new Map(),
     resolvedConversationTTL: "5m",
     lastInputTokens: 100_000,
-  } as SessionState;
+  };
 }
 
 /** Build a fetch mock returning the given usage block as an Anthropic resp. */

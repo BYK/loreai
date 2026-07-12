@@ -20,7 +20,7 @@ function toolStateOf(part: LorePart | undefined): TestToolState {
   if (!part || !isToolPart(part)) {
     throw new Error("expected tool part");
   }
-  return part.state as unknown as TestToolState;
+  return part.state;
 }
 
 /** Read the text of a text part, asserting it is one. */
