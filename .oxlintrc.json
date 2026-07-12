@@ -21,10 +21,19 @@
     "typescript/no-misused-spread": "error",
     "typescript/no-unnecessary-type-assertion": "error",
     "typescript/no-base-to-string": "error",
+    // warn (intentionally not error): oxlint's unbound-method has no this-usage
+    // analysis (unlike typescript-eslint), so every current hit is a false
+    // positive — pure node-builtin destructuring (`const { join } =
+    // require("node:path")`) and vitest spy inspections (`expect(obj.method)`).
+    // Enforcing would mean ~30 useless disables. Revisit if oxlint adds
+    // this-checking. See PR #1288 discussion.
     "typescript/unbound-method": "warn",
     "typescript/restrict-template-expressions": "error",
     "typescript/no-redundant-type-constituents": "error",
     "typescript/no-explicit-any": "error",
+    // warn (intentionally not error): 54/55 current hits are idiomatic `!` in
+    // tests where the value is known to exist. Enforcing would add churn/
+    // disables for ~zero real bug-catching. Kept visible as advisory.
     "typescript/no-non-null-assertion": "warn"
   },
   "ignorePatterns": [
