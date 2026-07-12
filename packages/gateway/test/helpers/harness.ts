@@ -11,7 +11,7 @@
  *   harness.teardown();
  */
 import { unlinkSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { FixtureEntry } from "../../src/recorder";
 import type { SimulatedCacheTurn } from "./simulated-cache";
 
@@ -178,7 +178,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
       const db = new DatabaseSync(dbPath, { readOnly: true });
       try {
         const stmt = db.prepare(sql);
-        return stmt.all(...((params ?? []) as any)) as T[];
+        return stmt.all(...((params ?? []) as SQLInputValue[])) as T[];
       } finally {
         db.close();
       }

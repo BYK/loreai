@@ -88,7 +88,7 @@ export interface BatchProvider {
       providerID: string;
       params: PendingRequest["params"];
     }>,
-  ): Promise<string | "auth-error" | "not-found" | null>;
+  ): Promise<(string & {}) | "auth-error" | "not-found" | null>;
   /** Poll a batch for completion. */
   poll(auth: AuthCredential, batchId: string): Promise<PollResult>;
 }
@@ -397,7 +397,7 @@ async function uploadOpenAIBatchFile(
   baseUrl: string,
   auth: AuthCredential,
   jsonlContent: string,
-): Promise<string | "auth-error" | "not-found" | null> {
+): Promise<(string & {}) | "auth-error" | "not-found" | null> {
   const formData = new FormData();
   formData.append("purpose", "batch");
   formData.append(

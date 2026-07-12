@@ -8,7 +8,7 @@
 // from this file must go through `#db/driver`. Never import `node:sqlite`
 // directly outside this file — it will break the test runner which runs against src.
 
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { createHash } from "node:crypto";
 
 const statementCache = new WeakMap<DatabaseSync, Map<string, unknown>>();
@@ -57,12 +57,13 @@ export class Database extends DatabaseSync {
     if (!entry) {
       const stmt = this.prepare(sql);
       entry = {
-        all: (...args: any[]) => stmt.all(...args) as Record<string, unknown>[],
-        get: (...args: any[]) => {
+        all: (...args: SQLInputValue[]) =>
+          stmt.all(...args) as Record<string, unknown>[],
+        get: (...args: SQLInputValue[]) => {
           const result = stmt.get(...args) as Record<string, unknown> | null;
           return result ?? null;
         },
-        run: (...args: any[]) =>
+        run: (...args: SQLInputValue[]) =>
           stmt.run(...args) as { changes: number; lastInsertRowid: bigint },
       };
       map.set(sql, entry);

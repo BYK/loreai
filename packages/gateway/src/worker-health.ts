@@ -100,7 +100,7 @@ export type SessionHealth = {
   lastFailureAt: number;
   failureCount: number; // in current sliding window
   reasons: Set<FailureReason>;
-  workerIDs: Set<WorkerID | string>;
+  workerIDs: Set<WorkerID | (string & {})>;
   alertSentAt?: number; // last Sentry message timestamp (debounce)
   exceptionSentAt?: number; // last Sentry exception timestamp (per-hour cap)
 };
@@ -366,7 +366,7 @@ export function clearWorkerPaused(sessionID: string): void {
  */
 export function recordWorkerFailure(
   sessionID: string,
-  workerID: WorkerID | string,
+  workerID: WorkerID | (string & {}),
   reason: FailureReason,
 ): void {
   const t = now();
@@ -651,7 +651,7 @@ export function getWorkerHealth(): Array<{
   lastFailureAt: number;
   sustainedMs: number;
   reasons: FailureReason[];
-  workerIDs: Array<WorkerID | string>;
+  workerIDs: Array<WorkerID | (string & {})>;
   warning: string | null;
 }> {
   const t = now();
@@ -663,7 +663,7 @@ export function getWorkerHealth(): Array<{
     lastFailureAt: number;
     sustainedMs: number;
     reasons: FailureReason[];
-    workerIDs: Array<WorkerID | string>;
+    workerIDs: Array<WorkerID | (string & {})>;
     warning: string | null;
   }> = [];
   for (const entry of state.values()) {
@@ -731,7 +731,7 @@ export function workerHealthSummary(): WorkerHealthSummary {
  */
 export function makeWorkerHealth(
   sessionID: string,
-  workerID: WorkerID | string,
+  workerID: WorkerID | (string & {}),
 ): {
   recordFailure(reason: string): void;
   recordSuccess(): void;

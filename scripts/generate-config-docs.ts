@@ -74,7 +74,7 @@ function getShape(schema: ZodTypeAny): Record<string, ZodTypeAny> | null {
  *  wrapper chain (default/optional) to find the most-specific description
  *  — outer wrappers override inner ones. */
 function getDescription(schema: ZodTypeAny): string | undefined {
-  let current: ZodTypeAny | undefined = schema;
+  let current: ZodTypeAny = schema;
   let lastSeen: string | undefined;
   while (current) {
     const desc = (current as { description?: string }).description;
