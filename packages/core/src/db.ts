@@ -4056,6 +4056,19 @@ export function setProjectScope(id: string, scopeId: string | null): void {
 }
 
 /**
+ * Set (or clear, with null) a project-level override of the team-promotion policy. Null ⇒ inherit
+ * the bound team scope's default (see effectivePromotionPolicy).
+ */
+export function setProjectPromotionPolicy(
+  id: string,
+  policy: "manual" | "auto" | null,
+): void {
+  db()
+    .query("UPDATE projects SET promotion_policy = ? WHERE id = ?")
+    .run(policy, id);
+}
+
+/**
  * Effective team-promotion policy for a project: the project override if set, else the bound team
  * scope's default (from the pulled scopes mirror), else 'manual' — never auto-promote to a team
  * without review unless explicitly opted in.

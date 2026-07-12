@@ -19,7 +19,14 @@ vi.mock("../src/team", () => ({
   teamMembers: vi.fn(),
 }));
 
-import { db, ensureProject, projectScope, setProjectScope } from "@loreai/core";
+import {
+  db,
+  effectivePromotionPolicy,
+  ensureProject,
+  ltm,
+  projectScope,
+  setProjectScope,
+} from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "../src/supabase";
 import { commandTeam } from "../src/cli/team-cmd";
 import * as team from "../src/team";
@@ -316,5 +323,89 @@ describe("link / unlink (E-5-F3-1)", () => {
     await commandTeam(["link"], { project: PROJECT });
     expect(errs.join("\n")).toMatch(/Usage: lore team/);
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("review / approve / reject / policy (E-5-F3-2)", () => {
+  const PROJECT = "/test/f3cli2/proj";
+  let pid: string;
+  let id: string;
+
+  function approvalOf(logicalId: string): string | undefined {
+    return (
+      db()
+        .query(
+          "SELECT approval_status FROM knowledge_current WHERE logical_id = ?",
+        )
+        .get(logicalId) as { approval_status?: string } | undefined
+    )?.approval_status;
+  }
+
+  beforeEach(() => {
+    db().exec("DELETE FROM scopes");
+    db().exec("DELETE FROM knowledge");
+    db().exec("DELETE FROM knowledge_meta");
+    pid = ensureProject(PROJECT);
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('sc','o','team','T','manual',0,0)",
+      )
+      .run();
+    setProjectScope(pid, "sc"); // manual policy → new entries land 'pending'
+    id = ltm.create({
+      projectPath: PROJECT,
+      category: "pattern",
+      title: "Reviewable",
+      content: "c",
+      scope: "project",
+    });
+  });
+
+  it("review lists the pending entry", async () => {
+    await commandTeam(["review"], { project: PROJECT });
+    expect(process.exitCode).toBe(0);
+    expect(logs.join("\n")).toContain(id);
+  });
+
+  it("review prints nothing-pending when clear", async () => {
+    ltm.approveForTeam(id, "u1");
+    await commandTeam(["review"], { project: PROJECT });
+    expect(logs.join("\n")).toMatch(/Nothing pending/);
+  });
+
+  it("review with an unknown --project errors (does not silently list all)", async () => {
+    await commandTeam(["review"], { project: "/test/f3cli2/absent" });
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toMatch(/No lore project/);
+  });
+
+  it("approve transitions to approved", async () => {
+    await commandTeam(["approve", id], {});
+    expect(process.exitCode).toBe(0);
+    expect(approvalOf(id)).toBe("approved");
+  });
+
+  it("reject transitions to rejected", async () => {
+    await commandTeam(["reject", id], {});
+    expect(process.exitCode).toBe(0);
+    expect(approvalOf(id)).toBe("rejected");
+  });
+
+  it("approve an unknown id → error + exit 1", async () => {
+    await commandTeam(["approve", "nope"], {});
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toMatch(/No current knowledge entry/);
+  });
+
+  it("policy sets the project override", async () => {
+    await commandTeam(["policy", "auto"], { project: PROJECT });
+    expect(process.exitCode).toBe(0);
+    expect(effectivePromotionPolicy(pid)).toBe("auto");
+  });
+
+  it("policy with an invalid value → usage + exit 1", async () => {
+    await commandTeam(["policy", "bogus"], { project: PROJECT });
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
   });
 });

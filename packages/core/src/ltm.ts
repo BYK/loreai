@@ -1,8 +1,10 @@
 import { uuidv7 } from "uuidv7";
 import {
   db,
+  effectivePromotionPolicy,
   ensureProject,
   getKV,
+  projectScope,
   setKV,
   withSyncApplying,
   withTransaction,
@@ -358,10 +360,22 @@ export function create(input: {
   const now = Date.now();
   const confidence =
     input.confidence != null ? Math.max(0, Math.min(1, input.confidence)) : 1.0;
+  // E-5-F3-2: team-promotion review gate. In a team-bound project, new knowledge is gated by the
+  // effective policy — 'auto' auto-approves it for the team, 'manual' holds it 'pending' for
+  // review. Outside a team-bound project the status stays 'auto' (legacy/neutral: it is never
+  // team-synced — F3-3 gates team scope on 'approved' only, so a pre-existing 'auto' entry never
+  // auto-promotes when its project is later linked). approved_at marks the auto-approval time.
+  let approvalStatus: ApprovalStatus = "auto";
+  let approvedAt: number | null = null;
+  if (pid && projectScope(pid)) {
+    approvalStatus =
+      effectivePromotionPolicy(pid) === "auto" ? "approved" : "pending";
+    if (approvalStatus === "approved") approvedAt = now;
+  }
   db()
     .query(
-      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, metadata, approval_status, approved_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -379,6 +393,8 @@ export function create(input: {
       input.workerProviderID ?? null,
       input.workerModelID ?? null,
       stringifyMetadata(input.metadata),
+      approvalStatus,
+      approvedAt,
     );
   // The mutable metrics live on the register, keyed by logical_id (A2 3b). A fresh
   // entry starts its decay clock now (last_reinforced_at = now).
@@ -403,8 +419,9 @@ export function create(input: {
  * NULL so the new content is re-embedded lazily. Returns the new version row id,
  * or `null` if `logicalId` has no current row.
  *
- * Low-level seam: `ltm.update()`/`remove()` are rewired onto this in a follow-up
- * PR — nothing calls it in production yet, so this PR changes no behavior.
+ * Low-level seam driving `ltm.update()` (content edits) and `ltm.remove()` (death-cert). The
+ * forward-copy SELECT carries all metadata — including `approval_status`/`approved_by`/`approved_at`
+ * — into the new version, so a team-approval survives a later content edit.
  */
 export function appendVersion(
   logicalId: string,
@@ -556,6 +573,93 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
   // No dedup hit — call create() to actually insert. The id is fresh.
   const id = create(input);
   return { id, created: true };
+}
+
+// ---------------------------------------------------------------------------
+// E-5-F3-2 (#827): team-promotion review gate
+// ---------------------------------------------------------------------------
+// A knowledge entry's `approval_status` governs whether it is shared to its project's team scope
+// (F3-3 gates team scope on 'approved' ONLY). Under 'manual' policy new entries land 'pending';
+// under 'auto' they land 'approved'. These functions drive the manual review workflow. The status
+// is a LOCAL, mutable metadata field (not synced; not content) — updated in place on the current
+// version, and copied forward by appendVersion so it survives content edits.
+
+export type TeamPromotionCandidate = {
+  logicalId: string;
+  title: string;
+  category: string;
+  projectId: string | null;
+};
+
+/**
+ * Knowledge entries in a TEAM-BOUND project awaiting a promotion decision, newest first —
+ * everything not yet 'approved'/'rejected' (i.e. 'pending' from the manual-policy gate AND legacy
+ * 'auto' entries that predate the binding), so pre-existing knowledge in a newly-linked project is
+ * reviewable too. Scoped to team-bound projects (JOIN projects WHERE scope_id IS NOT NULL) so a
+ * user's personal 'auto' knowledge never floods the queue. Optionally narrowed to one project.
+ */
+export function listPendingTeamPromotions(
+  projectId?: string,
+): TeamPromotionCandidate[] {
+  const where =
+    "p.scope_id IS NOT NULL AND k.approval_status NOT IN ('approved','rejected')";
+  const rows = (
+    projectId
+      ? db()
+          .query(
+            `SELECT k.logical_id, k.title, k.category, k.project_id
+             FROM knowledge_current k JOIN projects p ON p.id = k.project_id
+             WHERE ${where} AND k.project_id = ? ORDER BY k.updated_at DESC`,
+          )
+          .all(projectId)
+      : db()
+          .query(
+            `SELECT k.logical_id, k.title, k.category, k.project_id
+             FROM knowledge_current k JOIN projects p ON p.id = k.project_id
+             WHERE ${where} ORDER BY k.updated_at DESC`,
+          )
+          .all()
+  ) as Array<{
+    logical_id: string;
+    title: string;
+    category: string;
+    project_id: string | null;
+  }>;
+  return rows.map((r) => ({
+    logicalId: r.logical_id,
+    title: r.title,
+    category: r.category,
+    projectId: r.project_id,
+  }));
+}
+
+/**
+ * Approve a knowledge entry for team promotion (manual review). Sets 'approved' + reviewer/time on
+ * the current version, in place. Idempotent; returns false if no current row matched the id.
+ */
+export function approveForTeam(
+  logicalId: string,
+  approvedBy?: string,
+): boolean {
+  const res = db()
+    .query(
+      "UPDATE knowledge SET approval_status = 'approved', approved_by = ?, approved_at = ? WHERE logical_id = ? AND is_current = 1",
+    )
+    .run(approvedBy ?? null, Date.now(), logicalId);
+  return res.changes > 0;
+}
+
+/**
+ * Reject a knowledge entry for team promotion — it stays personal. Clears any prior reviewer/time.
+ * Idempotent; returns false if no current row matched the id.
+ */
+export function rejectForTeam(logicalId: string): boolean {
+  const res = db()
+    .query(
+      "UPDATE knowledge SET approval_status = 'rejected', approved_by = NULL, approved_at = NULL WHERE logical_id = ? AND is_current = 1",
+    )
+    .run(logicalId);
+  return res.changes > 0;
 }
 
 export function update(

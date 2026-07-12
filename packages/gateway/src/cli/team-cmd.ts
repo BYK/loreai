@@ -6,8 +6,10 @@ import { resolve } from "node:path";
 import {
   effectivePromotionPolicy,
   keystore,
+  ltm,
   projectId,
   resolveWritableScope,
+  setProjectPromotionPolicy,
   setProjectScope,
   syncData,
 } from "@loreai/core";
@@ -22,7 +24,7 @@ import {
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | link <team> [--project <path>] | unlink [--project <path>]]";
+  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>]]";
 
 export async function commandTeam(
   positionals: string[],
@@ -176,6 +178,70 @@ export async function commandTeam(
         }
         setProjectScope(pid, null);
         console.log("Unlinked — this project's knowledge stays personal.");
+        break;
+      }
+      case "review": {
+        // List knowledge awaiting team-promotion review. Scoped to --project if given, else all
+        // team-bound projects. An explicit but unknown --project errors (don't silently widen to all).
+        let proj: string | undefined;
+        if (values.project) {
+          const rp = resolve(values.project as string);
+          proj = projectId(rp);
+          if (!proj) {
+            console.error(`No lore project for ${rp}.`);
+            process.exitCode = 1;
+            return;
+          }
+        }
+        const pending = ltm.listPendingTeamPromotions(proj);
+        if (pending.length === 0) {
+          console.log("Nothing pending team review.");
+          break;
+        }
+        for (const p of pending)
+          console.log(`${p.logicalId}  [${p.category}]  ${p.title}`);
+        console.log(
+          "\nApprove with `lore team approve <id>`, reject with `lore team reject <id>`.",
+        );
+        break;
+      }
+      case "approve": {
+        const id = positionals[1];
+        if (!id) return usage();
+        const user = await getCurrentUser();
+        if (!ltm.approveForTeam(id, user?.user_id)) {
+          console.error(`No current knowledge entry "${id}".`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log(`Approved ${id} for team promotion.`);
+        break;
+      }
+      case "reject": {
+        const id = positionals[1];
+        if (!id) return usage();
+        if (!ltm.rejectForTeam(id)) {
+          console.error(`No current knowledge entry "${id}".`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log(`Rejected ${id} — it stays personal.`);
+        break;
+      }
+      case "policy": {
+        const policy = positionals[1];
+        if (policy !== "manual" && policy !== "auto") return usage();
+        const projectPath = resolve(
+          (values.project as string) ?? process.cwd(),
+        );
+        const pid = projectId(projectPath);
+        if (!pid) {
+          console.error(`No lore project for ${projectPath}.`);
+          process.exitCode = 1;
+          return;
+        }
+        setProjectPromotionPolicy(pid, policy);
+        console.log(`Set this project's team-promotion policy to ${policy}.`);
         break;
       }
       default:

@@ -104,6 +104,7 @@ export {
   projectGitRemote,
   projectScope,
   setProjectScope,
+  setProjectPromotionPolicy,
   effectivePromotionPolicy,
   resolveWritableScope,
   resolveProjectByRemoteOrPath,
