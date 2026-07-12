@@ -111,7 +111,7 @@ export function classifyToolError(_tool: string, error: string): string {
  * Recognizes a test / build / typecheck / lint runner at the START of a command
  * segment. Anchoring to command position (rather than matching the token
  * anywhere) is what makes the verdict high-precision: `pnpm test` matches, but
- * `cat vitest.config.ts`, `vim biome.json`, and `echo 'run mypy'` do NOT — they
+ * `cat vitest.config.ts`, `vim .oxlintrc.json`, and `echo 'run mypy'` do NOT — they
  * merely mention a runner. Optional benign prefixes (sudo/env/time/npx/…) are
  * skipped so `npx vitest` / `sudo pnpm test` still match. A non-match means "not
  * a verifier" (no signal), the safe default for a confidence-adjusting loop.
@@ -170,7 +170,7 @@ export function extractCommand(input: unknown): string | null {
  * split into segments on the shell chaining/pipe operators (`&&`, `||`, `;`,
  * `|`, newline) and a segment counts only when a runner leads it — so
  * `cd pkg && pnpm test` matches (2nd segment) while `cat vitest.config.ts` and
- * `grep biome .` do not.
+ * `grep oxlint .` do not.
  */
 export function isVerifierCall(input: unknown): boolean {
   const cmd = extractCommand(input);

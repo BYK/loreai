@@ -737,7 +737,7 @@ function applySeed(
   const { pin = true } = opts;
 
   // Normalize the seed to a lowercase `0x...n` BigInt literal so it matches
-  // the existing constants in cch.ts and stays Biome-clean.
+  // the existing constants in cch.ts and stays lint-clean.
   const rawHex = (seedHex.startsWith("0x") ? seedHex.slice(2) : seedHex)
     .replace(/n$/i, "")
     .toLowerCase();

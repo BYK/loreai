@@ -23,7 +23,9 @@
     "typescript/no-base-to-string": "warn",
     "typescript/unbound-method": "warn",
     "typescript/restrict-template-expressions": "warn",
-    "typescript/no-redundant-type-constituents": "warn"
+    "typescript/no-redundant-type-constituents": "warn",
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-non-null-assertion": "warn"
   },
   "ignorePatterns": [
     "**/dist",
