@@ -89,9 +89,11 @@ export function clearGitRemoteCache(): void {
 /**
  * Get the canonical git remote URL for a repository at the given path.
  *
- * Prefers `upstream` remote (for forks) over `origin`, then falls back
- * to any other remote. Returns null if the path is not in a git repo
- * or has no remotes configured.
+ * Prefers `origin` (the canonical clone source) over `upstream`, then falls
+ * back to any other remote. Origin-first is deliberate: unrelated repos
+ * bootstrapped from a common template share an `upstream` but keep distinct
+ * `origin`s, so keying on the shared upstream would falsely merge them into one
+ * project. Returns null if the path is not in a git repo or has no remotes.
  *
  * Results are cached in-memory for the process lifetime to avoid repeated
  * subprocess calls — `git remote -v` only runs once per unique path.

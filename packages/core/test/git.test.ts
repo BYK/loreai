@@ -121,7 +121,13 @@ describe("getGitRemote remote preference", () => {
   });
 
   test("falls back to upstream when no origin is configured", () => {
+    // Include a second, alphabetically-earlier remote ("backup" < "upstream").
+    // `git remote -v` lists remotes alphabetically, so the generic
+    // `remotes.values().next()` fallback would return "backup" — this asserts
+    // the upstream branch is actually preferred over that arbitrary fallback
+    // (guards against the upstream fallback being silently dropped).
     const dir = makeRepo({
+      backup: "git@github.com:mirror/backup.git",
       upstream: "https://github.com/template/starter.git",
     });
     expect(getGitRemote(dir)).toBe("github.com/template/starter");
