@@ -435,8 +435,12 @@ export function runDoctorDiagnostics(input: {
   // their own — but the user should know memory is running degraded.
   const emb = input.memoryHealth?.embeddings;
   if (emb) {
+    // `disabled` means the user turned embeddings off (or configured no provider)
+    // on purpose — recall runs FTS-only by design, so that is a PASS, not a
+    // degradation. Only a genuine failure (`unavailable`/`retrying`) is a WARN
+    // whose "reinstall / set a remote provider" remediation actually applies.
     findings.push(
-      emb.available
+      emb.available || emb.state === "disabled"
         ? { level: "PASS", label: "memory: embeddings", detail: emb.detail }
         : {
             level: "WARN",

@@ -218,6 +218,24 @@ describe("runDoctorDiagnostics (pure)", () => {
     expect(f?.level).toBe("PASS");
   });
 
+  it("PASS: embeddings intentionally disabled — no misleading WARN/remediation", () => {
+    const findings = runDoctorDiagnostics({
+      ...baseInput,
+      memoryHealth: {
+        embeddings: {
+          available: false,
+          state: "disabled",
+          detail:
+            "no embedding provider configured (or disabled) — recall uses FTS-only search",
+        },
+      },
+    });
+    const f = findings.find((f) => f.label === "memory: embeddings");
+    expect(f?.level).toBe("PASS");
+    // Must NOT tell the user to reinstall/reconfigure something they turned off.
+    expect(f?.remediation).toBeUndefined();
+  });
+
   it("WARN: embeddings unavailable (FTS-only) with remediation", () => {
     const findings = runDoctorDiagnostics({
       ...baseInput,
