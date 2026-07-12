@@ -586,19 +586,26 @@ describe("gradient — LTM budget coordination", () => {
     calibrate(0); // zero overhead for these tests
   });
 
-  test("getLtmBudget returns fraction of usable context, quantized to LTM_BUDGET_STEP", () => {
-    // usable = 10_000 - 2_000 - 0 (overhead) = 8_000
-    // ltm fraction 0.10 → raw 800 → quantized to nearest 8_000 step, floored at
-    // one step so LTM is never disabled on small-context models → 8_000.
-    const budget = getLtmBudget(0.1);
-    expect(budget).toBe(8_000);
+  test("getLtmBudget clips to the context-aware ceiling on a small window", () => {
+    // usable = 10_000 - 2_000 - 0 (overhead) = 8_000. The 8K quantization floor
+    // alone would hand LTM the ENTIRE window; the context-aware ceiling caps a
+    // single LTM block at 20% of usable (1_600) so real work keeps its room.
+    expect(getLtmBudget(0.1)).toBe(1_600);
+
+    // On a large window the ceiling never binds and the historical floor still
+    // applies (raw below one step → quantized up to the 8K floor).
+    setModelLimits({ context: 200_000, output: 32_000 }); // usable = 168_000
+    calibrate(0);
+    expect(getLtmBudget(0.05)).toBe(8_000);
+    setModelLimits({ context: 10_000, output: 2_000 });
+    calibrate(0);
   });
 
-  test("getLtmBudget respects different fractions (quantized, never below one step)", () => {
-    // raw 2_000 → rounds to 0 step but floored to one step (8_000).
-    expect(getLtmBudget(0.25)).toBe(8_000);
-    // raw 400 → floored to one step (8_000).
-    expect(getLtmBudget(0.05)).toBe(8_000);
+  test("getLtmBudget ceiling dominates the floor for any fraction on a small window", () => {
+    // Both fractions would be floored to 8_000 (100% of an 8_000-token window);
+    // the ceiling clips both to 20% of usable = 1_600.
+    expect(getLtmBudget(0.25)).toBe(1_600);
+    expect(getLtmBudget(0.05)).toBe(1_600);
   });
 
   test("getLtmBudget returns 0 only when there is no usable budget", () => {

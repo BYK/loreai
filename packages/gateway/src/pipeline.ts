@@ -6799,10 +6799,18 @@ async function handleConversationTurn(
       const ltmFraction = cfg.budget.ltm;
       // Per-session overhead (Bug 1, lever 2): budget off this session's own
       // calibrated overhead, not a global EMA blended across sessions.
-      const ltmBudget = getLtmBudget(ltmFraction, sessionID ?? undefined);
+      // Sub-agent sessions get a smaller, needs-based LTM budget so injected
+      // knowledge doesn't crowd out a short focused task's own context/output.
+      const ltmBudgetOpts = { isSubagent: !!sessionState.isSubagent };
+      const ltmBudget = getLtmBudget(
+        ltmFraction,
+        sessionID ?? undefined,
+        ltmBudgetOpts,
+      );
       const prefBudget = getPreferenceLtmBudget(
         cfg.budget.preferenceLtm,
         sessionID ?? undefined,
+        ltmBudgetOpts,
       );
       const isFirstTurn =
         sessionID != null && !temporal.hasMessages(projectPath, sessionID);
@@ -7224,8 +7232,11 @@ async function handleConversationTurn(
   if (result.refreshLtm && cfg.knowledge.enabled) {
     try {
       const ltmFraction = cfg.budget.ltm;
-      // Per-session overhead (Bug 1, lever 2).
-      const ltmBudget = getLtmBudget(ltmFraction, sessionID);
+      // Per-session overhead (Bug 1, lever 2). Sub-agents keep the smaller
+      // needs-based budget on the emergency-refresh path too.
+      const ltmBudget = getLtmBudget(ltmFraction, sessionID, {
+        isSubagent: !!sessionState.isSubagent,
+      });
       // Full context-bound budget — preferences have their own dedicated budget.
       const contextBudget = ltmBudget;
       const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
