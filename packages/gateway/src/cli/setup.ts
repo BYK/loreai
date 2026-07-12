@@ -641,16 +641,19 @@ export function jsonBackupPath(configPath: string): string {
 
 /**
  * Read + validate the sidecar backup for a JSON config, or null if it is
- * absent or corrupt. A corrupt sidecar is treated as absent (rather than
- * throwing) so undo degrades to a no-op and setup won't overwrite it.
+ * absent, unreadable, or corrupt. Any read failure (missing file, permission
+ * error, path-is-a-directory, etc.) or parse failure is treated as "no
+ * backup" — never thrown — so read-only callers (`lore doctor`, `lore setup
+ * status`) and `undo` degrade gracefully instead of crashing on a bad file.
  */
 export function loadJsonSetupBackup(configPath: string): JsonBackup | null {
   let raw: string;
   try {
     raw = readFileSync(jsonBackupPath(configPath), "utf8");
-  } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw e;
+  } catch {
+    // Absent (ENOENT) or unreadable (EACCES, EISDIR, ...) — report no backup
+    // rather than propagating an exception into a read-only command.
+    return null;
   }
   try {
     const parsed = JSON.parse(raw) as unknown;

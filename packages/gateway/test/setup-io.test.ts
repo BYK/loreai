@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commandSetup } from "../src/cli/setup";
+import { commandSetup, loadJsonSetupBackup } from "../src/cli/setup";
 import { writePortFile } from "../src/portfile";
 
 // Integration coverage for the setup.ts IO surface (backup capture on setup,
@@ -282,6 +282,27 @@ describe("commandSetup — OpenCode", () => {
     writeFileSync(`${ocPath()}.lore-backup`, "{ not valid json");
 
     await commandSetup(["undo", "opencode"], {});
+    expect(logged().toLowerCase()).toContain("no lore backup");
+  });
+
+  it("loadJsonSetupBackup returns null for an unreadable sidecar (never throws)", () => {
+    // A sidecar that exists but can't be read (permissions, or — as simulated
+    // here deterministically — the path is a directory → EISDIR) must be
+    // treated as "no backup", not crash read-only callers like `lore doctor`
+    // (Seer[bot] r3566840253).
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    mkdirSync(`${ocPath()}.lore-backup`, { recursive: true });
+    expect(loadJsonSetupBackup(ocPath())).toBeNull();
+  });
+
+  it("undo tolerates an unreadable sidecar instead of crashing", async () => {
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(ocPath(), JSON.stringify({ provider: {} }, null, 2));
+    mkdirSync(`${ocPath()}.lore-backup`, { recursive: true });
+
+    await expect(
+      commandSetup(["undo", "opencode"], {}),
+    ).resolves.toBeUndefined();
     expect(logged().toLowerCase()).toContain("no lore backup");
   });
 
