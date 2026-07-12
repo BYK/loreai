@@ -281,6 +281,7 @@ export {
   clearWorkspaceCache,
 } from "./workspace";
 export { workerSessionIDs, isWorkerSession } from "./worker";
+export { asString } from "./coerce";
 export { setReadPathTimingHook, type ReadPathTiming } from "./read-telemetry";
 export {
   recordVecReadLatency,

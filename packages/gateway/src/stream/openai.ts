@@ -17,7 +17,7 @@
  * events, and `createStreamAccumulator` to build the internal GatewayResponse
  * (for pipeline post-processing that may read it).
  */
-import { log } from "@loreai/core";
+import { asString, log } from "@loreai/core";
 import {
   ZERO_USAGE,
   type GatewayContentBlock,
@@ -415,12 +415,12 @@ export async function accumulateOpenAISSEStream(
             const existing = toolCalls.get(idx);
             if (!existing) {
               toolCalls.set(idx, {
-                id: String(tc.id ?? ""),
-                name: String(fn?.name ?? ""),
-                args: String(fn?.arguments ?? ""),
+                id: asString(tc.id),
+                name: asString(fn?.name),
+                args: asString(fn?.arguments),
               });
             } else {
-              if (fn?.arguments) existing.args += fn.arguments;
+              if (fn?.arguments) existing.args += asString(fn.arguments);
             }
           }
         }

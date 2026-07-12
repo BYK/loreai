@@ -12,6 +12,7 @@ import type {
   GatewayTool,
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
+import { asString } from "@loreai/core";
 import { extractAuth } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ export function parseOpenAIRequest(
   const raw = (body ?? {}) as Record<string, unknown>;
 
   // Extract known fields
-  const model = String(raw.model ?? "");
+  const model = asString(raw.model);
   const stream = raw.stream === true;
 
   // max_tokens defaults to 4096 if not specified
@@ -74,7 +75,7 @@ export function parseOpenAIRequest(
       } else if (Array.isArray(content)) {
         text = (content as Array<Record<string, unknown>>)
           .filter((b) => b.type === "text")
-          .map((b) => String(b.text ?? ""))
+          .map((b) => asString(b.text))
           .join("\n");
       }
       if (system) {
@@ -135,8 +136,8 @@ export function parseOpenAIRequest(
   const tools: GatewayTool[] = rawTools.map((t: Record<string, unknown>) => {
     const func = t.function as Record<string, unknown> | undefined;
     return {
-      name: String(func?.name ?? t.name ?? ""),
-      description: String(func?.description ?? ""),
+      name: asString(func?.name ?? t.name),
+      description: asString(func?.description),
       inputSchema: (func?.parameters as Record<string, unknown>) ?? {},
     };
   });
@@ -169,12 +170,12 @@ function parseUserContent(
   } else if (Array.isArray(content)) {
     for (const item of content as Array<Record<string, unknown>>) {
       if (item.type === "text") {
-        blocks.push({ type: "text", text: String(item.text ?? "") });
+        blocks.push({ type: "text", text: asString(item.text) });
       } else if (item.type === "tool_use") {
         blocks.push({
           type: "tool_use",
-          id: String(item.id ?? ""),
-          name: String(item.name ?? ""),
+          id: asString(item.id),
+          name: asString(item.name),
           input: item.input ?? {},
         });
       } else {
@@ -199,8 +200,8 @@ function parseUserContent(
       }
       blocks.push({
         type: "tool_use",
-        id: String(tc.id ?? ""),
-        name: String(fn?.name ?? ""),
+        id: asString(tc.id),
+        name: asString(fn?.name),
         input,
       });
     }
@@ -220,12 +221,12 @@ function parseAssistantContent(
   } else if (Array.isArray(content)) {
     for (const item of content as Array<Record<string, unknown>>) {
       if (item.type === "text") {
-        blocks.push({ type: "text", text: String(item.text ?? "") });
+        blocks.push({ type: "text", text: asString(item.text) });
       } else if (item.type === "tool_use") {
         blocks.push({
           type: "tool_use",
-          id: String(item.id ?? ""),
-          name: String(item.name ?? ""),
+          id: asString(item.id),
+          name: asString(item.name),
           input: item.input ?? {},
         });
       } else {
@@ -249,8 +250,8 @@ function parseAssistantContent(
       }
       blocks.push({
         type: "tool_use",
-        id: String(tc.id ?? ""),
-        name: String(fn?.name ?? ""),
+        id: asString(tc.id),
+        name: asString(fn?.name),
         input,
       });
     }
@@ -260,7 +261,7 @@ function parseAssistantContent(
 }
 
 function parseToolResult(msg: Record<string, unknown>): GatewayContentBlock[] {
-  const toolCallId = String(msg.tool_call_id ?? "");
+  const toolCallId = asString(msg.tool_call_id);
   const content = msg.content;
 
   // Normalize tool-result content to a block array so non-text sub-blocks
@@ -271,7 +272,7 @@ function parseToolResult(msg: Record<string, unknown>): GatewayContentBlock[] {
   } else if (Array.isArray(content)) {
     innerBlocks = (content as Array<Record<string, unknown>>).map((item) => {
       if (item.type === "text") {
-        return { type: "text" as const, text: String(item.text ?? "") };
+        return { type: "text" as const, text: asString(item.text) };
       }
       // Unknown sub-block (image_url, …) — preserve as opaque.
       return { type: "opaque" as const, raw: item };
@@ -696,7 +697,7 @@ function buildOpenAIMessages(
           msgRecord.content = contentParts;
         } else {
           msgRecord.content = contentParts
-            .map((p) => String(p.text ?? ""))
+            .map((p) => asString(p.text))
             .join("");
         }
       }

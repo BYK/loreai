@@ -41,6 +41,7 @@ export function stringifyUnknown(value: unknown): string {
     try {
       return JSON.stringify(value);
     } catch {
+      // oxlint-disable-next-line typescript/no-base-to-string -- last-resort fallback when JSON.stringify throws (e.g. circular refs)
       return String(value);
     }
   }

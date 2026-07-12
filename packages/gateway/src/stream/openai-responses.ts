@@ -14,7 +14,7 @@
  * Reuses `parseSSEStream` from the Anthropic stream module since the
  * underlying SSE wire format is the same.
  */
-import { log } from "@loreai/core";
+import { asString, log } from "@loreai/core";
 import {
   ZERO_USAGE,
   type GatewayContentBlock,
@@ -95,9 +95,9 @@ export async function accumulateResponsesSSEStream(
         } else if (item.type === "function_call") {
           items.set(outputIndex, {
             type: "tool_use",
-            id: String(item.id ?? ""),
-            callId: String(item.call_id ?? ""),
-            name: String(item.name ?? ""),
+            id: asString(item.id),
+            callId: asString(item.call_id),
+            name: asString(item.name),
             args: "",
           });
         }

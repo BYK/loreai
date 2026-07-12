@@ -17,6 +17,7 @@
  * overridden to invoke the real (mocked) request so the URL flows into the mock.
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
+import { fetchArgUrl } from "./helpers/fetch-url";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -79,7 +80,7 @@ async function captureUpstreamUrl(
   await res.text().catch(() => undefined);
 
   expect(mockFetch).toHaveBeenCalled();
-  return String(mockFetch.mock.calls[0][0]);
+  return fetchArgUrl(mockFetch.mock.calls[0][0]);
 }
 
 describe("Copilot-Integration-Id → github-copilot upstream routing", () => {

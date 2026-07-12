@@ -15,6 +15,7 @@
  * retention window are gone by design, so `log` shows the kept window.
  */
 import { resolve } from "node:path";
+import { asString } from "@loreai/core";
 
 type KnowledgeVersion = import("@loreai/core").ltm.KnowledgeVersion;
 
@@ -42,7 +43,7 @@ function parseLimit(v: unknown, def: number): number {
   if (v === undefined) return def;
   const n = Number(v);
   if (Number.isInteger(n) && n > 0) return n;
-  console.error(`Ignoring invalid --limit "${String(v)}" (using ${def}).`);
+  console.error(`Ignoring invalid --limit "${asString(v)}" (using ${def}).`);
   return def;
 }
 

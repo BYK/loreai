@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { fetchArgUrl } from "./helpers/fetch-url";
 
 // Mock the upstream fetch wrapper so the adapter's retry loop is driven by our
 // stubbed responses regardless of whether a fetch interceptor is installed on
@@ -1004,7 +1005,7 @@ describe("cross-provider collusion guard", () => {
     // The invariant: if any upstream call was made, it must NOT be to the
     // Anthropic direct endpoint with the minimax model.
     for (const call of mockFetch.mock.calls) {
-      const url = String(call[0]);
+      const url = fetchArgUrl(call[0]);
       expect(url).not.toContain("api.anthropic.com");
     }
   });
@@ -1066,7 +1067,7 @@ describe("cross-provider collusion guard", () => {
 
     expect(result).toBe("minimax reply");
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    const url = String(mockFetch.mock.calls[0][0]);
+    const url = fetchArgUrl(mockFetch.mock.calls[0][0]);
     // minimax PROVIDER_ROUTES url is https://api.minimax.io/anthropic
     expect(url).toContain("api.minimax.io");
     expect(url).not.toContain("api.anthropic.com");
@@ -1154,7 +1155,7 @@ describe("cross-provider collusion guard", () => {
     });
 
     for (const call of mockFetch.mock.calls) {
-      expect(String(call[0])).not.toContain("api.anthropic.com");
+      expect(fetchArgUrl(call[0])).not.toContain("api.anthropic.com");
     }
   });
 });

@@ -12,6 +12,7 @@
  * the resolved url) so the mocked fetch runs and records the destination.
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
+import { fetchArgUrl } from "./helpers/fetch-url";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -71,7 +72,7 @@ async function captureUpstreamUrl(
   await res.text().catch(() => undefined);
 
   expect(mockFetch).toHaveBeenCalled();
-  return String(mockFetch.mock.calls[0][0]);
+  return fetchArgUrl(mockFetch.mock.calls[0][0]);
 }
 
 describe("github-copilot upstream URL — full pipeline wiring (#1052)", () => {

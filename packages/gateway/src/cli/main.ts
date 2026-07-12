@@ -13,6 +13,7 @@
  *   help           → print usage
  */
 import { parseArgs } from "node:util";
+import { stringifyUnknown } from "./lib/errors";
 import { printHelp, printVersion } from "./help";
 import { commandStart, type StartOptions } from "./start";
 import {
@@ -258,7 +259,7 @@ export async function _cli(): Promise<void> {
       );
       if (cause)
         console.error(
-          `  cause: ${cause instanceof Error ? (cause.stack ?? cause.message) : String(cause)}`,
+          `  cause: ${cause instanceof Error ? (cause.stack ?? cause.message) : stringifyUnknown(cause)}`,
         );
       process.exit(1);
     }

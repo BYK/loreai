@@ -6,6 +6,7 @@
  * `buildOpenAIChatCompletionsUrl`.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { fetchArgUrl } from "./helpers/fetch-url";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -60,7 +61,7 @@ describe("worker github-copilot URL (#1052)", () => {
     });
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    const url = String(mockFetch.mock.calls[0][0]);
+    const url = fetchArgUrl(mockFetch.mock.calls[0][0]);
     expect(url).toBe("https://api.githubcopilot.com/chat/completions");
     expect(url).not.toContain("/v1/chat/completions");
   });

@@ -12,6 +12,7 @@
  *  3. Normal conversation turns → full pipeline.
  */
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
+import { asString } from "@loreai/core";
 import {
   load,
   config as loreConfig,
@@ -4420,8 +4421,8 @@ function accumulateOpenAINonStreamJSON(
         }
         content.push({
           type: "tool_use",
-          id: String(tc.id ?? ""),
-          name: String(fn?.name ?? ""),
+          id: asString(tc.id),
+          name: asString(fn?.name),
           input,
         });
       }
@@ -4441,8 +4442,8 @@ function accumulateOpenAINonStreamJSON(
     | undefined;
 
   return {
-    id: String(json.id ?? ""),
-    model: String(json.model ?? ""),
+    id: asString(json.id),
+    model: asString(json.model),
     content,
     stopReason,
     usage: {
@@ -4468,7 +4469,7 @@ export function accumulateResponsesNonStreamJSON(
         if (msgContent) {
           for (const part of msgContent) {
             if (part.type === "output_text") {
-              content.push({ type: "text", text: String(part.text ?? "") });
+              content.push({ type: "text", text: asString(part.text) });
             }
           }
         }
@@ -4483,8 +4484,8 @@ export function accumulateResponsesNonStreamJSON(
         }
         content.push({
           type: "tool_use",
-          id: String(item.call_id ?? item.id ?? ""),
-          name: String(item.name ?? ""),
+          id: asString(item.call_id ?? item.id),
+          name: asString(item.name),
           input,
         });
       }
@@ -4505,8 +4506,8 @@ export function accumulateResponsesNonStreamJSON(
     | undefined;
 
   return {
-    id: String(json.id ?? ""),
-    model: String(json.model ?? ""),
+    id: asString(json.id),
+    model: asString(json.model),
     content,
     stopReason,
     usage: {

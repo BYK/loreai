@@ -12,6 +12,7 @@
  * curation for gemini sessions with zero test failure.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { fetchArgUrl } from "./helpers/fetch-url";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -61,11 +62,11 @@ async function runWorker(cred: AuthCredential | null) {
   const call = mockFetch.mock.calls[0];
   return {
     result,
-    url: String(call?.[0]),
+    url: fetchArgUrl(call?.[0]),
     headers: (call?.[1] as { headers?: Record<string, string> } | undefined)
       ?.headers,
     body: JSON.parse(
-      String((call?.[1] as { body?: unknown } | undefined)?.body ?? "{}"),
+      String((call?.[1] as { body?: string } | undefined)?.body ?? "{}"),
     ) as Record<string, unknown>,
   };
 }

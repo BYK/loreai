@@ -22,6 +22,7 @@
  *                          skipped).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { asString } from "@loreai/core";
 import {
   syncData,
   getKV,
@@ -723,7 +724,7 @@ export async function pullOnce(
 
         let advanced = false;
         for (const remote of rows) {
-          const ms = Date.parse(String(remote.updated_at ?? "")) || 0;
+          const ms = Date.parse(asString(remote.updated_at)) || 0;
           const rid = syncData.rowIdOf(meta.table, remote);
           if (ms < cursor.ms || (ms === cursor.ms && rid <= cursor.id))
             continue;
@@ -946,7 +947,7 @@ function applyRemote(
         ? syncData.contentHash(meta.table, localRow)
         : null,
       revision: 0,
-      remote_updated_at: String(remote.updated_at ?? ""),
+      remote_updated_at: asString(remote.updated_at),
     });
     res.pulled++;
     return;
@@ -1055,7 +1056,7 @@ function applyRemote(
     syncData.setSyncState(meta.table, rowId, {
       content_hash: remoteHash,
       revision: typeof remote.revision === "number" ? remote.revision : 0,
-      remote_updated_at: String(remote.updated_at ?? ""),
+      remote_updated_at: asString(remote.updated_at),
     });
     for (const fts of meta.ftsTables) touchedFts.add(fts);
   }

@@ -10,7 +10,7 @@
  *   - System prompt is in the `instructions` field
  *   - Tools use `parameters` directly (not wrapped in `function`)
  */
-import { log } from "@loreai/core";
+import { asString, log } from "@loreai/core";
 import type {
   GatewayContentBlock,
   GatewayMessage,
@@ -31,7 +31,7 @@ export function parseOpenAIResponsesRequest(
 ): GatewayRequest {
   const raw = (body ?? {}) as Record<string, unknown>;
 
-  const model = String(raw.model ?? "");
+  const model = asString(raw.model);
   const stream = raw.stream === true;
 
   // max_output_tokens defaults to 4096 if not specified
@@ -49,8 +49,8 @@ export function parseOpenAIResponsesRequest(
   const tools: GatewayTool[] = rawTools
     .filter((t: Record<string, unknown>) => t.type === "function")
     .map((t: Record<string, unknown>) => ({
-      name: String(t.name ?? ""),
-      description: String(t.description ?? ""),
+      name: asString(t.name),
+      description: asString(t.description),
       inputSchema: (t.parameters as Record<string, unknown>) ?? {},
     }));
 
@@ -202,8 +202,8 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       // together (and matched by the coalesced tool_result message below).
       const toolUseBlock: GatewayContentBlock = {
         type: "tool_use",
-        id: String(item.call_id ?? item.id ?? ""),
-        name: String(item.name ?? ""),
+        id: asString(item.call_id ?? item.id),
+        name: asString(item.name),
         input: parseArguments(item.arguments),
       };
       const last = messages[messages.length - 1];
@@ -224,10 +224,10 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       // Function output — maps to tool_result. Coalesce consecutive outputs
       // into one user message (see the function_call comment above).
       // Normalize the output string to a block array for consistency.
-      const outputText = String(item.output ?? "");
+      const outputText = asString(item.output);
       const toolResultBlock: GatewayContentBlock = {
         type: "tool_result",
-        toolUseId: String(item.call_id ?? ""),
+        toolUseId: asString(item.call_id),
         content: outputText ? [{ type: "text", text: outputText }] : [],
       };
       const last = messages[messages.length - 1];
@@ -257,7 +257,7 @@ function parseInputItems(input: unknown): GatewayMessage[] {
     // and intentionally dropped — don't warn on those.)
     if (itemType === "item_reference") {
       log.warn(
-        `dropping unresolvable Responses API item_reference (id=${String(item.id ?? "?")}); ` +
+        `dropping unresolvable Responses API item_reference (id=${asString(item.id, "?")}); ` +
           `gateway is stateless full-history and cannot resolve server-side item references`,
       );
     }
@@ -280,7 +280,7 @@ function parseMessageContent(content: unknown): GatewayContentBlock[] {
       part.type === "output_text" ||
       part.type === "text"
     ) {
-      const text = String(part.text ?? "");
+      const text = asString(part.text);
       if (text) blocks.push({ type: "text", text });
     } else {
       // Unknown content part (input_image, input_audio, input_file, …) —

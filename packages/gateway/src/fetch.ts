@@ -94,7 +94,13 @@ function nodeHttpFetch(
   init?: RequestInit,
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
-    const url = new URL(typeof input === "string" ? input : input.toString());
+    const url = new URL(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url,
+    );
     const isHttps = url.protocol === "https:";
     const mod = isHttps ? https : http;
 

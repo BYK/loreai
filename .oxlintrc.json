@@ -20,7 +20,7 @@
     "typescript/no-for-in-array": "error",
     "typescript/no-misused-spread": "error",
     "typescript/no-unnecessary-type-assertion": "error",
-    "typescript/no-base-to-string": "warn",
+    "typescript/no-base-to-string": "error",
     "typescript/unbound-method": "warn",
     "typescript/restrict-template-expressions": "error",
     "typescript/no-redundant-type-constituents": "error",

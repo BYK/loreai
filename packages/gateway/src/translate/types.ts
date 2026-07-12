@@ -11,6 +11,8 @@
  * specific fields the gateway doesn't process live in `metadata`.
  */
 
+import { asString } from "@loreai/core";
+
 // ---------------------------------------------------------------------------
 // Content blocks — discriminated union on `type`
 // ---------------------------------------------------------------------------
@@ -140,7 +142,7 @@ export function isEmptyCompletion(resp: GatewayResponse): boolean {
  * embedding the payload itself — so the placeholder is stable and cheap.
  */
 export function opaquePlaceholder(raw: Record<string, unknown>): string {
-  const type = String(raw.type ?? "unknown");
+  const type = asString(raw.type, "unknown");
   const source = raw.source as Record<string, unknown> | undefined;
   const mediaType =
     (source?.media_type as string | undefined) ??

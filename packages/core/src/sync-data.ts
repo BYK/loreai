@@ -17,6 +17,7 @@
  */
 import { createHash } from "node:crypto";
 import { uuidv7 } from "uuidv7";
+import { asString } from "./coerce";
 import {
   db,
   deleteTeamConfig,
@@ -629,6 +630,7 @@ function splitRowId(rowId: string): string[] {
 function serializeValue(v: unknown): string {
   if (v === null || v === undefined) return "\x00";
   if (v instanceof Uint8Array) return Buffer.from(v).toString("base64");
+  // oxlint-disable-next-line typescript/no-base-to-string -- v is a SQLite scalar (number/bigint/string) here; null/Uint8Array handled above
   return String(v);
 }
 
@@ -1333,8 +1335,8 @@ export function applyRemoteUpsert(
  */
 export function applyRemoteProject(row: Record<string, unknown>): void {
   const id = String(row.id);
-  const gitRemote = row.git_remote != null ? String(row.git_remote) : null;
-  const name = row.name != null ? String(row.name) : null;
+  const gitRemote = typeof row.git_remote === "string" ? row.git_remote : null;
+  const name = typeof row.name === "string" ? row.name : null;
   const createdAt = Number(row.created_at) || Date.now();
   withApplying(() => {
     const existing = db()
@@ -1459,7 +1461,7 @@ export function applyRemoteScopeKey(remote: Record<string, unknown>): void {
       ? new Uint8Array(Buffer.from(remote.wrapped_dek, "base64"))
       : new Uint8Array(remote.wrapped_dek as Uint8Array);
   const keyEpoch = Number(remote.key_epoch ?? 0);
-  const updatedAt = Date.parse(String(remote.updated_at ?? "")) || Date.now();
+  const updatedAt = Date.parse(asString(remote.updated_at)) || Date.now();
   withApplying(() =>
     putWrappedScopeKey(scopeId, memberUserId, wrapped, keyEpoch, updatedAt),
   );

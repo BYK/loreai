@@ -26,7 +26,12 @@ describe("installFetchInterceptor — end-to-end routing", () => {
     // Stub the underlying fetch so the interceptor calls into our capture.
     realFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       captured = {
-        url: typeof input === "string" ? input : input.toString(),
+        url:
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url,
         init,
       };
       return new Response("ok", { status: 200 });

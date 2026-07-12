@@ -11,6 +11,7 @@
  *     is native Gemini (`candidates`).
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
+import { fetchArgUrl } from "./helpers/fetch-url";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -76,7 +77,7 @@ async function sendGemini(
   expect(mockFetch).toHaveBeenCalled();
   const call = mockFetch.mock.calls[0];
   return {
-    upstreamUrl: String(call[0]),
+    upstreamUrl: fetchArgUrl(call[0]),
     upstreamBody: (call[1] as { body?: unknown } | undefined)?.body,
     upstreamHeaders: (
       call[1] as { headers?: Record<string, string> } | undefined

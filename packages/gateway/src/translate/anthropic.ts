@@ -13,6 +13,7 @@ import type {
   GatewayTool,
 } from "./types";
 import { forwardClientHeaders, ZERO_USAGE } from "./types";
+import { asString } from "@loreai/core";
 import { extractAuth, authHeaders } from "../auth";
 
 // ---------------------------------------------------------------------------
@@ -47,22 +48,22 @@ const KNOWN_BODY_FIELDS = new Set([
 function toGatewayBlock(block: Record<string, unknown>): GatewayContentBlock {
   switch (block.type) {
     case "text":
-      return { type: "text", text: String(block.text ?? "") };
+      return { type: "text", text: asString(block.text) };
 
     case "thinking":
       return {
         type: "thinking",
-        thinking: String(block.thinking ?? ""),
+        thinking: asString(block.thinking),
         ...(block.signature != null
-          ? { signature: String(block.signature) }
+          ? { signature: asString(block.signature) }
           : undefined),
       };
 
     case "tool_use":
       return {
         type: "tool_use",
-        id: String(block.id ?? ""),
-        name: String(block.name ?? ""),
+        id: asString(block.id),
+        name: asString(block.name),
         input: block.input,
       };
 
@@ -83,7 +84,7 @@ function toGatewayBlock(block: Record<string, unknown>): GatewayContentBlock {
       }
       return {
         type: "tool_result",
-        toolUseId: String(block.tool_use_id ?? ""),
+        toolUseId: asString(block.tool_use_id),
         content,
         ...(block.is_error ? { isError: true } : undefined),
       };
@@ -129,11 +130,13 @@ function normalizeSystem(system: unknown): string {
   if (Array.isArray(system)) {
     return (system as Array<Record<string, unknown>>)
       .filter((block) => block.type === "text")
-      .map((block) => String(block.text ?? ""))
+      .map((block) => asString(block.text))
       .join("\n");
   }
 
-  return String(system);
+  // Unreachable for valid input (system is string | block[] | null per the
+  // Anthropic API); a malformed non-string/array shape normalizes to "".
+  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +202,7 @@ export function parseAnthropicRequest(
   const raw = (body ?? {}) as Record<string, unknown>;
 
   // --- Extract known fields ---
-  const model = String(raw.model ?? "");
+  const model = asString(raw.model);
   const system = normalizeSystem(raw.system);
   const stream = raw.stream === true;
   const maxTokens = typeof raw.max_tokens === "number" ? raw.max_tokens : 4096;
@@ -216,8 +219,8 @@ export function parseAnthropicRequest(
   // --- Tools ---
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
   const tools: GatewayTool[] = rawTools.map((t: Record<string, unknown>) => ({
-    name: String(t.name ?? ""),
-    description: String(t.description ?? ""),
+    name: asString(t.name),
+    description: asString(t.description),
     inputSchema: (t.input_schema as Record<string, unknown>) ?? {},
   }));
 
@@ -557,22 +560,22 @@ export function parseAnthropicResponseJSON(
     for (const block of rawContent) {
       switch (block.type) {
         case "text":
-          content.push({ type: "text", text: String(block.text ?? "") });
+          content.push({ type: "text", text: asString(block.text) });
           break;
         case "thinking":
           content.push({
             type: "thinking",
-            thinking: String(block.thinking ?? ""),
+            thinking: asString(block.thinking),
             ...(block.signature
-              ? { signature: String(block.signature) }
+              ? { signature: asString(block.signature) }
               : undefined),
           });
           break;
         case "tool_use":
           content.push({
             type: "tool_use",
-            id: String(block.id ?? ""),
-            name: String(block.name ?? ""),
+            id: asString(block.id),
+            name: asString(block.name),
             input: block.input,
           });
           break;
@@ -588,8 +591,8 @@ export function parseAnthropicResponseJSON(
   const usage = json.usage as Record<string, number> | undefined;
 
   return {
-    id: String(json.id ?? ""),
-    model: String(json.model ?? ""),
+    id: asString(json.id),
+    model: asString(json.model),
     content,
     stopReason: String((json.stop_reason as string) ?? "end_turn"),
     usage: {

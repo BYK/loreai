@@ -20,6 +20,7 @@ import type {
   GatewayUsage,
 } from "../translate/types";
 import { ZERO_USAGE } from "../translate/types";
+import { asString } from "@loreai/core";
 import {
   buildGeminiResponseBody,
   geminiUsageFromMetadata,
@@ -79,7 +80,7 @@ export async function accumulateGeminiSSEStream(
         else textContent += p.text;
       } else if (p.functionCall && typeof p.functionCall === "object") {
         const fc = p.functionCall as { name?: unknown; args?: unknown };
-        toolUses.push({ name: String(fc.name ?? ""), input: fc.args ?? {} });
+        toolUses.push({ name: asString(fc.name), input: fc.args ?? {} });
       }
     }
     if (first.finishReason != null) finishReason = first.finishReason;

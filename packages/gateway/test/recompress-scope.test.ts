@@ -19,6 +19,7 @@
  * intercept it). Fully hermetic: no real network, DNS/hosts, or TLS.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { asString } from "@loreai/core";
 import { MockAgent } from "undici";
 import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import type { Harness } from "./helpers/harness";
@@ -36,7 +37,7 @@ function toBuffer(body: unknown): Buffer {
   if (Buffer.isBuffer(body)) return body;
   if (typeof body === "string") return Buffer.from(body);
   if (body instanceof Uint8Array) return Buffer.from(body);
-  return Buffer.from(String(body ?? ""));
+  return Buffer.from(asString(body));
 }
 
 describe("upstream re-compression scoping (#1032 follow-up, wire-level)", () => {

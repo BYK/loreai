@@ -199,6 +199,7 @@ function formatDefault(value: unknown): string {
   if (typeof value === "string") return `\`"${value}"\``;
   if (value === null) return "`null`";
   if (typeof value === "object") return `\`${JSON.stringify(value)}\``;
+  // oxlint-disable-next-line typescript/no-base-to-string -- value is a non-object primitive here (string/null/object handled above)
   return `\`${String(value)}\``;
 }
 

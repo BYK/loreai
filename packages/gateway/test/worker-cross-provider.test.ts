@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { fetchArgUrl } from "./helpers/fetch-url";
 
 // Structural / property-based guard against CROSS-PROVIDER COLLUSION on worker
 // calls. This is the permanent regression net for the production incident where
@@ -143,7 +144,7 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
         // THE INVARIANT: no request may go to a direct provider host that the
         // worker model does NOT belong to.
         for (const call of mockFetch.mock.calls) {
-          const url = String(call[0]);
+          const url = fetchArgUrl(call[0]);
           for (const host of DIRECT_HOSTS) {
             const belongsToWorker = wp.ownHost === host;
             if (!belongsToWorker) {
@@ -158,7 +159,7 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
         // a foreign host, this fails. Unknown/unroutable providers fail closed.
         if (wp.ownHost) {
           expect(mockFetch).toHaveBeenCalledTimes(1);
-          expect(String(mockFetch.mock.calls[0][0])).toContain(wp.ownHost);
+          expect(fetchArgUrl(mockFetch.mock.calls[0][0])).toContain(wp.ownHost);
         } else {
           expect(mockFetch).not.toHaveBeenCalled();
         }

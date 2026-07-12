@@ -28,6 +28,7 @@ import type {
   GatewayUsage,
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
+import { asString } from "@loreai/core";
 
 /** Default Gemini API version segment used when building upstream URLs. */
 const GEMINI_API_VERSION = "v1beta";
@@ -65,13 +66,13 @@ function partToBlock(part: GeminiPart): GatewayContentBlock | null {
   }
   if (part.functionCall && typeof part.functionCall === "object") {
     const fc = part.functionCall as { name?: unknown; args?: unknown };
-    const name = String(fc.name ?? "");
+    const name = asString(fc.name);
     // Gemini has no per-call id; pair by NAME (see file header).
     return { type: "tool_use", id: name, name, input: fc.args ?? {} };
   }
   if (part.functionResponse && typeof part.functionResponse === "object") {
     const fr = part.functionResponse as { name?: unknown; response?: unknown };
-    const name = String(fr.name ?? "");
+    const name = asString(fr.name);
     return {
       type: "tool_result",
       toolUseId: name,
@@ -104,7 +105,7 @@ export function parseGeminiRequest(
   const rawContents = Array.isArray(raw.contents) ? raw.contents : [];
   const messages: GatewayMessage[] = [];
   for (const c of rawContents as Array<Record<string, unknown>>) {
-    const geminiRole = String(c.role ?? "user");
+    const geminiRole = asString(c.role, "user");
     // Gemini roles: "model" → assistant; "user"/"function" → user.
     const role: "user" | "assistant" =
       geminiRole === "model" ? "assistant" : "user";
@@ -126,8 +127,8 @@ export function parseGeminiRequest(
       : [];
     for (const d of decls) {
       tools.push({
-        name: String(d.name ?? ""),
-        description: String(d.description ?? ""),
+        name: asString(d.name),
+        description: asString(d.description),
         inputSchema: (d.parameters as Record<string, unknown>) ?? {},
       });
     }
@@ -287,7 +288,7 @@ export function mapGeminiFinishReason(
   reason: unknown,
   hasToolCall: boolean,
 ): string {
-  const r = String(reason ?? "");
+  const r = asString(reason);
   const isNormal =
     r === "" ||
     r === "STOP" ||
@@ -367,12 +368,12 @@ export function parseGeminiResponseJSON(
     | undefined;
   const stopReason =
     candidates.length === 0 && promptFeedback?.blockReason
-      ? String(promptFeedback.blockReason)
+      ? asString(promptFeedback.blockReason)
       : mapGeminiFinishReason(first.finishReason, hasToolCall);
 
   return {
-    id: String(json.responseId ?? ""),
-    model: String(json.modelVersion ?? ""),
+    id: asString(json.responseId),
+    model: asString(json.modelVersion),
     content: blocks,
     stopReason,
     usage: parseGeminiUsage(json),

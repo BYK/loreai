@@ -40,6 +40,7 @@ import {
   type SessionCosts,
 } from "./cost-tracker";
 import { getActiveSessions, rebindActiveSession } from "./pipeline";
+import { asString } from "@loreai/core";
 import {
   computeWarmingSnapshot,
   getCircuitBreakerSummary,
@@ -3399,9 +3400,9 @@ function pageEntity(id: string): string | null {
   // Metadata edit form
   body += `<h2>Edit Metadata</h2>`;
   body += `<form method="POST" action="/ui/api/update/entity/${esc(entity.id)}/metadata" style="display:flex;flex-direction:column;gap:8px;max-width:500px;">`;
-  body += `<label>Role: <input name="role" value="${esc(String(parsedMeta.role ?? ""))}" style="width:100%;" /></label>`;
-  body += `<label>Description: <input name="description" value="${esc(String(parsedMeta.description ?? ""))}" style="width:100%;" /></label>`;
-  body += `<label>Notes: <textarea name="notes" rows="3" style="width:100%;">${esc(String(parsedMeta.notes ?? ""))}</textarea></label>`;
+  body += `<label>Role: <input name="role" value="${esc(asString(parsedMeta.role))}" style="width:100%;" /></label>`;
+  body += `<label>Description: <input name="description" value="${esc(asString(parsedMeta.description))}" style="width:100%;" /></label>`;
+  body += `<label>Notes: <textarea name="notes" rows="3" style="width:100%;">${esc(asString(parsedMeta.notes))}</textarea></label>`;
   body += `<button type="submit">Save Metadata</button>`;
   body += `</form>`;
 
