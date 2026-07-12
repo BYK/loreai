@@ -4,8 +4,8 @@ import {
   setPath,
   deletePath,
   captureJsonBackup,
-  attachJsonBackup,
-  restoreJsonBackup,
+  applyJsonBackup,
+  readLegacyJsonBackup,
   LORE_BACKUP_KEY,
   getTomlTopLevelValue,
   deleteTomlTopLevelKey,
@@ -84,31 +84,7 @@ describe("captureJsonBackup", () => {
   });
 });
 
-describe("attachJsonBackup", () => {
-  it("attaches when absent", () => {
-    const cfg: Record<string, unknown> = {};
-    attachJsonBackup(cfg, captureJsonBackup({}, CLAUDE_LORE_VALUES));
-    expect(cfg[LORE_BACKUP_KEY]).toBeDefined();
-  });
-
-  it("does NOT overwrite an existing backup (preserves the true original)", () => {
-    const original = captureJsonBackup(
-      { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
-      CLAUDE_LORE_VALUES,
-    );
-    const cfg: Record<string, unknown> = {};
-    attachJsonBackup(cfg, original);
-    // Second setup run: prior now looks like lore's own value — must be ignored.
-    const second = captureJsonBackup(
-      { env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:3207" } },
-      CLAUDE_LORE_VALUES,
-    );
-    attachJsonBackup(cfg, second);
-    expect(cfg[LORE_BACKUP_KEY]).toBe(original);
-  });
-});
-
-describe("restoreJsonBackup", () => {
+describe("applyJsonBackup", () => {
   it("restores prior values and deletes keys that were originally unset", () => {
     // Simulate the post-setup config.
     const cfg: Record<string, unknown> = {
@@ -117,14 +93,11 @@ describe("restoreJsonBackup", () => {
         DISABLE_AUTO_COMPACT: "1",
       },
     };
-    attachJsonBackup(
-      cfg,
-      captureJsonBackup(
-        { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
-        CLAUDE_LORE_VALUES,
-      ),
+    const backup = captureJsonBackup(
+      { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+      CLAUDE_LORE_VALUES,
     );
-    const summary = restoreJsonBackup(cfg);
+    const summary = applyJsonBackup(cfg, backup);
     expect(summary.hadBackup).toBe(true);
     expect(summary.restored.sort()).toEqual([
       "env.ANTHROPIC_BASE_URL",
@@ -142,35 +115,27 @@ describe("restoreJsonBackup", () => {
         DISABLE_AUTO_COMPACT: "1",
       },
     };
-    attachJsonBackup(
-      cfg,
-      captureJsonBackup(
-        { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
-        CLAUDE_LORE_VALUES,
-      ),
+    const backup = captureJsonBackup(
+      { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+      CLAUDE_LORE_VALUES,
     );
-    const summary = restoreJsonBackup(cfg);
+    const summary = applyJsonBackup(cfg, backup);
     expect(summary.skipped).toContain("env.ANTHROPIC_BASE_URL");
     expect(summary.restored).toContain("env.DISABLE_AUTO_COMPACT");
     // The user's value is preserved.
     expect(getPath(cfg, "env.ANTHROPIC_BASE_URL")).toBe(
       "http://user-changed:9999",
     );
-    // A key was skipped → the sidecar is KEPT so its prior value stays
-    // recoverable (Seer #876 — no metadata loss).
-    expect(LORE_BACKUP_KEY in cfg).toBe(true);
-  });
-
-  it("reports no backup when the sidecar is missing", () => {
-    expect(restoreJsonBackup({ env: {} }).hadBackup).toBe(false);
   });
 
   it("removes a plugin lore appended (OpenCode)", () => {
     const cfg: Record<string, unknown> = {
       plugin: ["@other/plugin", "@loreai/opencode"],
     };
-    attachJsonBackup(cfg, captureJsonBackup({}, {}, { pluginAdded: true }));
-    const summary = restoreJsonBackup(cfg);
+    const summary = applyJsonBackup(
+      cfg,
+      captureJsonBackup({}, {}, { pluginAdded: true }),
+    );
     expect(summary.restored).toContain("plugin[@loreai/opencode]");
     expect(cfg.plugin).toEqual(["@other/plugin"]);
   });
@@ -179,21 +144,27 @@ describe("restoreJsonBackup", () => {
     const cfg: Record<string, unknown> = {
       plugin: ["@loreai/opencode"],
     };
-    attachJsonBackup(cfg, captureJsonBackup({}, {}, { pluginAdded: false }));
-    restoreJsonBackup(cfg);
+    applyJsonBackup(cfg, captureJsonBackup({}, {}, { pluginAdded: false }));
     expect(cfg.plugin).toEqual(["@loreai/opencode"]);
   });
+});
 
-  it("survives a full round-trip and leaves no _loreBackup key", () => {
-    const cfg: Record<string, unknown> = {
-      env: {
-        ANTHROPIC_BASE_URL: "http://127.0.0.1:3207",
-        DISABLE_AUTO_COMPACT: "1",
-      },
-    };
-    attachJsonBackup(cfg, captureJsonBackup({}, CLAUDE_LORE_VALUES));
-    restoreJsonBackup(cfg);
-    expect(LORE_BACKUP_KEY in cfg).toBe(false);
+describe("readLegacyJsonBackup", () => {
+  it("returns a valid legacy in-config backup", () => {
+    const backup = captureJsonBackup(
+      { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+      CLAUDE_LORE_VALUES,
+    );
+    const cfg: Record<string, unknown> = { [LORE_BACKUP_KEY]: backup };
+    expect(readLegacyJsonBackup(cfg)).toEqual(backup);
+  });
+
+  it("returns null when the key is absent or malformed", () => {
+    expect(readLegacyJsonBackup({ env: {} })).toBeNull();
+    expect(readLegacyJsonBackup({ [LORE_BACKUP_KEY]: 42 })).toBeNull();
+    expect(
+      readLegacyJsonBackup({ [LORE_BACKUP_KEY]: { version: 1 } }),
+    ).toBeNull();
   });
 });
 

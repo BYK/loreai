@@ -4,9 +4,13 @@
  * `lore setup` rewrites third-party config files. To make the change
  * reversible (and visible) we record what was there before:
  *
- *  - JSON agents (Claude Code, OpenCode): a top-level `_loreBackup` sidecar
- *    key. We can't use literal `//` comments — the files are strict JSON and
- *    our own `readJsonConfig` does `JSON.parse`, which would throw on comments.
+ *  - JSON agents (Claude Code, OpenCode, Pi): a sidecar *file* next to the
+ *    config (`<config>.lore-backup`). Older versions stored this as a top-level
+ *    `_loreBackup` key *inside* the config, but OpenCode's schema is
+ *    `additionalProperties: false` and rejects unknown keys — that broke
+ *    OpenCode startup ("unknown field `_loreBackup`"), so the backup now lives
+ *    out-of-band. The sidecar file IO lives in setup.ts; the helpers here stay
+ *    pure so the revert logic is unit-testable without touching the filesystem.
  *  - TOML agent (Codex): a `#`-commented backup block at the top of the file
  *    (TOML supports native comments — this is the inline-visible backup).
  *
@@ -130,20 +134,6 @@ export function captureJsonBackup(
   return backup;
 }
 
-/**
- * Attach a backup to a config — but only if one isn't already present, so
- * re-running setup never overwrites the *true* original with lore's own
- * values. Mutates and returns `config`.
- */
-export function attachJsonBackup(
-  config: Record<string, unknown>,
-  backup: JsonBackup,
-): Record<string, unknown> {
-  if (LORE_BACKUP_KEY in config) return config;
-  config[LORE_BACKUP_KEY] = backup;
-  return config;
-}
-
 export interface RestoreSummary {
   hadBackup: boolean;
   restored: string[];
@@ -151,18 +141,38 @@ export interface RestoreSummary {
 }
 
 /**
- * Restore a JSON config from its `_loreBackup` sidecar. Revert-only-if-
- * unchanged: a path is reverted only when its current value still equals what
- * lore wrote. Removes the sidecar key on completion. Mutates `config`.
+ * Read a *legacy* in-config `_loreBackup` key, if present and valid.
+ *
+ * Older lore versions stored the JSON backup as a top-level key inside the
+ * config itself. OpenCode's config schema is `additionalProperties: false`, so
+ * that key makes newer OpenCode reject the whole file ("unknown field
+ * `_loreBackup`") and refuse to start. Backups now live in a sidecar *file*
+ * (see `loadJsonSetupBackup` in setup.ts); this reader exists only so `lore
+ * setup` / `lore setup undo` can migrate (and clean up) installs written by the
+ * old scheme. Pure — does not mutate `config`.
  */
-export function restoreJsonBackup(
+export function readLegacyJsonBackup(
   config: Record<string, unknown>,
-): RestoreSummary {
+): JsonBackup | null {
   const raw = config[LORE_BACKUP_KEY];
-  if (!isPlainObject(raw) || !Array.isArray(raw.entries)) {
-    return { hadBackup: false, restored: [], skipped: [] };
-  }
-  const backup = raw as unknown as JsonBackup;
+  if (!isPlainObject(raw) || !Array.isArray(raw.entries)) return null;
+  return raw as unknown as JsonBackup;
+}
+
+/**
+ * Apply a captured backup to a config, reverting lore's changes. Pure: mutates
+ * and reports on `config`, but never reads or removes any `_loreBackup` key
+ * (backups are stored out-of-band in a sidecar file, and the caller owns that).
+ *
+ * Revert-only-if-unchanged: a path is reverted only when its current value
+ * still equals what lore wrote, so a value the user changed after setup is left
+ * untouched and reported as skipped. `hadBackup` is always true — the caller
+ * supplies a real backup.
+ */
+export function applyJsonBackup(
+  config: Record<string, unknown>,
+  backup: JsonBackup,
+): RestoreSummary {
   const restored: string[] = [];
   const skipped: string[] = [];
 
@@ -192,12 +202,6 @@ export function restoreJsonBackup(
     }
   }
 
-  // Consume the backup only when everything was reverted. If some keys were
-  // skipped (the user changed them after setup), keep the sidecar so their
-  // original values remain recoverable — never silently drop that metadata.
-  if (skipped.length === 0) {
-    delete config[LORE_BACKUP_KEY];
-  }
   return { hadBackup: true, restored, skipped };
 }
 

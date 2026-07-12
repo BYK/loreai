@@ -12,11 +12,12 @@ import {
   codexConfigPath,
   hermesEnvPath,
   geminiEnvPath,
+  loadJsonSetupBackup,
   opencodeConfigPath,
   piModelsConfigPath,
   readJsonConfig,
 } from "./setup";
-import { getPath, LORE_BACKUP_KEY } from "./setup-backup";
+import { getPath, readLegacyJsonBackup } from "./setup-backup";
 import { getEnvValue, getTomlTopLevelValue } from "./setup-backup";
 import { readPortFile } from "../portfile";
 import { probeGateway } from "./start";
@@ -128,16 +129,10 @@ export function collectClaudeCodeInventory(): AppInventory {
   let hasBackup = false;
   if (fileExists) {
     const cfg = readJsonConfig(file);
-    const backup = cfg[LORE_BACKUP_KEY] as
-      | {
-          entries?: {
-            path: string;
-            priorValue?: unknown;
-            hadPrior?: boolean;
-          }[];
-        }
-      | undefined;
-    hasBackup = backup !== undefined;
+    // Sidecar file is the current backup store; fall back to a legacy in-config
+    // key for installs written by older lore versions.
+    const backup = loadJsonSetupBackup(file) ?? readLegacyJsonBackup(cfg);
+    hasBackup = backup !== null;
     for (const key of ["env.ANTHROPIC_BASE_URL", "env.DISABLE_AUTO_COMPACT"]) {
       const v = getPath(cfg, key);
       const entry = backup?.entries?.find((e) => e.path === key);
@@ -197,7 +192,8 @@ export function collectOpencodeInventory(): AppInventory {
   let hasBackup = false;
   if (fileExists) {
     const cfg = readJsonConfig(file);
-    hasBackup = LORE_BACKUP_KEY in cfg;
+    hasBackup =
+      (loadJsonSetupBackup(file) ?? readLegacyJsonBackup(cfg)) !== null;
     const url = getPath(cfg, "provider.anthropic.options.baseURL");
     rows.push({
       app: "OpenCode",
@@ -231,7 +227,8 @@ export function collectPiInventory(): AppInventory {
   let hasBackup = false;
   if (fileExists) {
     const cfg = readJsonConfig(file);
-    hasBackup = LORE_BACKUP_KEY in cfg;
+    hasBackup =
+      (loadJsonSetupBackup(file) ?? readLegacyJsonBackup(cfg)) !== null;
     // `anthropic` is the representative provider (gateway root). If setup ran,
     // every gateway-routable provider carries a baseUrl; probing one is enough.
     const url = getPath(cfg, "providers.anthropic.baseUrl");

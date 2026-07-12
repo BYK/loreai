@@ -13,6 +13,7 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,7 +75,9 @@ describe("commandSetup — Claude Code", () => {
     const cfg = JSON.parse(readFileSync(claudePath(), "utf8"));
     expect(cfg.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3299");
     expect(cfg.env.DISABLE_AUTO_COMPACT).toBe("1");
-    expect(cfg._loreBackup).toBeDefined();
+    // Backup lives in a sidecar file, NOT inside the config.
+    expect(cfg._loreBackup).toBeUndefined();
+    expect(existsSync(`${claudePath()}.lore-backup`)).toBe(true);
     // Liveness probe failed (no gateway) → WARN with remediation.
     expect(logged()).toContain("not reachable");
     expect(logged()).toContain("lore start --bg");
@@ -85,6 +88,8 @@ describe("commandSetup — Claude Code", () => {
     expect(restored.env.ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com");
     expect(restored.env.DISABLE_AUTO_COMPACT).toBeUndefined();
     expect(restored._loreBackup).toBeUndefined();
+    // Sidecar consumed once everything was reverted.
+    expect(existsSync(`${claudePath()}.lore-backup`)).toBe(false);
   });
 
   it("detects the live gateway port from the port file (falls back when down)", async () => {
@@ -132,7 +137,11 @@ describe("commandSetup — OpenCode", () => {
       "http://127.0.0.1:3299/v1",
     );
     expect(cfg.compaction).toEqual({ auto: false });
-    expect(cfg._loreBackup).toBeDefined();
+    // The config must NOT carry a `_loreBackup` key — OpenCode's schema is
+    // `additionalProperties: false` and rejects unknown keys (Sergiy report).
+    expect(cfg._loreBackup).toBeUndefined();
+    expect(Object.keys(cfg)).not.toContain("_loreBackup");
+    expect(existsSync(`${ocPath()}.lore-backup`)).toBe(true);
 
     await commandSetup(["undo", "opencode"], {});
 
@@ -142,6 +151,7 @@ describe("commandSetup — OpenCode", () => {
     expect(restored.provider).toBeUndefined();
     expect(restored.compaction).toBeUndefined();
     expect(restored._loreBackup).toBeUndefined();
+    expect(existsSync(`${ocPath()}.lore-backup`)).toBe(false);
   });
 
   it("does NOT remove a plugin lore never added (Seer #876)", async () => {
@@ -149,10 +159,11 @@ describe("commandSetup — OpenCode", () => {
     // false in the backup. If the user adds it themselves afterwards, undo must
     // leave it alone.
     await commandSetup(["opencode"], { port: 3299, noPlugin: true });
-    const cfg = JSON.parse(readFileSync(ocPath(), "utf8"));
-    expect(cfg._loreBackup.pluginAdded).toBe(false);
+    const backup = JSON.parse(readFileSync(`${ocPath()}.lore-backup`, "utf8"));
+    expect(backup.pluginAdded).toBe(false);
 
     // User manually adds the plugin after setup.
+    const cfg = JSON.parse(readFileSync(ocPath(), "utf8"));
     cfg.plugin = ["@loreai/opencode"];
     writeFileSync(ocPath(), JSON.stringify(cfg, null, 2));
 
@@ -160,6 +171,65 @@ describe("commandSetup — OpenCode", () => {
 
     const restored = JSON.parse(readFileSync(ocPath(), "utf8"));
     expect(restored.plugin).toEqual(["@loreai/opencode"]); // preserved
+  });
+
+  it("migrates a legacy in-config _loreBackup out of opencode.json (Sergiy report)", async () => {
+    // Reproduce an install written by older lore: routing values PLUS the
+    // illegal top-level `_loreBackup` key that newer OpenCode rejects with
+    // "unknown field _loreBackup". Use port 3207 so the recorded lore-set
+    // value matches what this setup run writes (revert-only-if-unchanged).
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      ocPath(),
+      JSON.stringify(
+        {
+          provider: {
+            anthropic: { options: { baseURL: "http://127.0.0.1:3207/v1" } },
+          },
+          compaction: { auto: false },
+          _loreBackup: {
+            version: 1,
+            savedAt: "2026-01-01T00:00:00.000Z",
+            entries: [
+              { path: "compaction.auto", loreValue: false, hadPrior: false },
+              {
+                path: "provider.anthropic.options.baseURL",
+                loreValue: "http://127.0.0.1:3207/v1",
+                hadPrior: true,
+                priorValue: "https://api.anthropic.com",
+              },
+            ],
+            pluginAdded: false,
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await commandSetup(["opencode"], { port: 3207, noPlugin: true });
+
+    // The illegal key is stripped → config is schema-valid for OpenCode again.
+    const cfg = JSON.parse(readFileSync(ocPath(), "utf8"));
+    expect(cfg._loreBackup).toBeUndefined();
+    // The TRUE original was migrated to the sidecar (not overwritten by the
+    // fresh capture, which would have recorded lore's own value as the prior).
+    const migrated = JSON.parse(
+      readFileSync(`${ocPath()}.lore-backup`, "utf8"),
+    );
+    const entry = migrated.entries.find(
+      (e: { path: string }) => e.path === "provider.anthropic.options.baseURL",
+    );
+    expect(entry.priorValue).toBe("https://api.anthropic.com");
+
+    // Undo restores the true original and removes the sidecar.
+    await commandSetup(["undo", "opencode"], {});
+    const restored = JSON.parse(readFileSync(ocPath(), "utf8"));
+    expect(restored.provider.anthropic.options.baseURL).toBe(
+      "https://api.anthropic.com",
+    );
+    expect(restored._loreBackup).toBeUndefined();
+    expect(existsSync(`${ocPath()}.lore-backup`)).toBe(false);
   });
 });
 
@@ -200,7 +270,8 @@ describe("commandSetup — Pi", () => {
       baseUrl: "http://localhost:8000",
       models: [],
     });
-    expect(cfg._loreBackup).toBeDefined();
+    expect(cfg._loreBackup).toBeUndefined();
+    expect(existsSync(`${piPath()}.lore-backup`)).toBe(true);
 
     await commandSetup(["undo", "pi"], {});
 
@@ -214,6 +285,7 @@ describe("commandSetup — Pi", () => {
       models: [],
     });
     expect(restored._loreBackup).toBeUndefined();
+    expect(existsSync(`${piPath()}.lore-backup`)).toBe(false);
   });
 });
 

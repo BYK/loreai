@@ -14,7 +14,13 @@
  * or accepts an explicit app name (e.g. `lore setup codex`).
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
@@ -23,8 +29,9 @@ import { detectAgents } from "./agents";
 import { probeGateway } from "./start";
 import {
   captureJsonBackup,
-  attachJsonBackup,
-  restoreJsonBackup,
+  applyJsonBackup,
+  readLegacyJsonBackup,
+  LORE_BACKUP_KEY,
   buildTomlBackupBlock,
   prependTomlBackupBlock,
   restoreTomlBackup,
@@ -33,6 +40,7 @@ import {
   restoreEnvBackup,
   setEnvValueRaw,
   type RestoreSummary,
+  type JsonBackup,
 } from "./setup-backup";
 
 // ---------------------------------------------------------------------------
@@ -616,6 +624,79 @@ function deepMerge(
 }
 
 // ---------------------------------------------------------------------------
+// JSON backup sidecar file (Claude Code, OpenCode, Pi)
+// ---------------------------------------------------------------------------
+//
+// The backup that makes `lore setup` reversible used to live as a top-level
+// `_loreBackup` key inside the JSON config. OpenCode's config schema is
+// `additionalProperties: false`, so that key made newer OpenCode reject the
+// whole file ("unknown field `_loreBackup`") and refuse to start. The backup
+// now lives in a sidecar file next to the config, so the config itself only
+// ever carries schema-valid keys.
+
+/** Path to the sidecar backup file for a JSON config (`<config>.lore-backup`). */
+export function jsonBackupPath(configPath: string): string {
+  return `${configPath}.lore-backup`;
+}
+
+/**
+ * Read + validate the sidecar backup for a JSON config, or null if it is
+ * absent or corrupt. A corrupt sidecar is treated as absent (rather than
+ * throwing) so undo degrades to a no-op and setup won't overwrite it.
+ */
+export function loadJsonSetupBackup(configPath: string): JsonBackup | null {
+  let raw: string;
+  try {
+    raw = readFileSync(jsonBackupPath(configPath), "utf8");
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      Array.isArray((parsed as { entries?: unknown }).entries)
+    ) {
+      return parsed as JsonBackup;
+    }
+  } catch {
+    // Corrupt sidecar — fall through and report "no backup".
+  }
+  return null;
+}
+
+/** Remove the sidecar backup file (no-op if it doesn't exist). */
+function removeJsonSetupBackup(configPath: string): void {
+  try {
+    rmSync(jsonBackupPath(configPath));
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+}
+
+/**
+ * Persist the backup for a JSON config to its sidecar file. Preserves the TRUE
+ * original: if a sidecar already exists it is kept (re-running setup never
+ * overwrites the original with lore's own values); otherwise a migrated
+ * `legacyBackup` (from an old in-config `_loreBackup` key) is written, else the
+ * freshly-captured `freshBackup`.
+ */
+function persistJsonSetupBackup(
+  configPath: string,
+  legacyBackup: JsonBackup | null,
+  freshBackup: JsonBackup,
+): void {
+  if (existsSync(jsonBackupPath(configPath))) return;
+  writeFileSync(
+    jsonBackupPath(configPath),
+    `${JSON.stringify(legacyBackup ?? freshBackup, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // opencode setup
 // ---------------------------------------------------------------------------
 
@@ -721,6 +802,12 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   mkdirSync(configDir, { recursive: true });
 
   const existing = readJsonConfig(configPath);
+  // Migrate away from any legacy in-config `_loreBackup` key: capture it for the
+  // sidecar, then strip it so every config we write is schema-valid for
+  // OpenCode (its schema is `additionalProperties: false` and rejects unknown
+  // keys — the illegal key made OpenCode refuse to start).
+  const legacyBackup = readLegacyJsonBackup(existing);
+  delete existing[LORE_BACKUP_KEY];
 
   // Values lore is about to set (provider baseURLs + compaction), captured from
   // the ORIGINAL config for the backup's prior values.
@@ -769,10 +856,13 @@ function setupOpencode(baseUrl: string, noPlugin: boolean): void {
   // registration of the plugin in the config), so `pluginInstalled && !pluginAlreadyPresent`
   // accurately reflects whether lore actually added the plugin.
   const finalConfig = readJsonConfig(configPath);
+  // Defensive: never let the schema-invalid key reach OpenCode's config, even
+  // if some earlier write reintroduced it.
+  delete finalConfig[LORE_BACKUP_KEY];
   const backup = captureJsonBackup(existing, loreValues, {
     pluginAdded: pluginInstalled && !pluginAlreadyPresent,
   });
-  attachJsonBackup(finalConfig, backup);
+  persistJsonSetupBackup(configPath, legacyBackup, backup);
   writeFileSync(
     configPath,
     `${JSON.stringify(finalConfig, null, 2)}\n`,
@@ -835,13 +925,15 @@ function setupClaudeCode(baseUrl: string): void {
     : baseUrl;
 
   const existing = readJsonConfig(configPath);
+  const legacyBackup = readLegacyJsonBackup(existing);
+  delete existing[LORE_BACKUP_KEY];
   const backup = captureJsonBackup(existing, {
     "env.ANTHROPIC_BASE_URL": anthropicBaseUrl,
     "env.DISABLE_AUTO_COMPACT": "1",
     [`env.${CLAUDE_CODE_FIRST_PARTY_ENV}`]: "1",
   });
   const updated = updateClaudeCodeSettings(existing, anthropicBaseUrl);
-  attachJsonBackup(updated, backup);
+  persistJsonSetupBackup(configPath, legacyBackup, backup);
   writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
 
   console.log(`[lore] Claude Code configured to use Lore gateway.`);
@@ -953,6 +1045,8 @@ function setupPi(baseUrl: string): void {
   const root = baseUrl.replace(/\/v1$/, "");
 
   const existing = readJsonConfig(configPath);
+  const legacyBackup = readLegacyJsonBackup(existing);
+  delete existing[LORE_BACKUP_KEY];
 
   // Record the exact values lore is about to set so undo reverts only if the
   // file still holds them (a value the user changed post-setup is left alone).
@@ -966,7 +1060,7 @@ function setupPi(baseUrl: string): void {
 
   const backup = captureJsonBackup(existing, loreValues);
   const updated = updatePiModelsConfig(existing, root);
-  attachJsonBackup(updated, backup);
+  persistJsonSetupBackup(configPath, legacyBackup, backup);
   writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
 
   const total = PI_ANTHROPIC_PROVIDERS.length + PI_OPENAI_PROVIDERS.length;
@@ -1171,13 +1265,33 @@ function setupGemini(baseUrl: string): void {
 // Undo (`lore setup undo [app]`)
 // ---------------------------------------------------------------------------
 
-/** Restore a JSON-config app (Claude Code, OpenCode) from its `_loreBackup`. */
+/**
+ * Restore a JSON-config app (Claude Code, OpenCode, Pi) from its sidecar
+ * backup — falling back to a legacy in-config `_loreBackup` key, which is
+ * always stripped so a schema-invalid config never lingers. The sidecar is
+ * consumed only when everything was reverted; if the user changed a value
+ * after setup it is kept so their prior value stays recoverable.
+ */
 function undoJsonApp(configPath: string): RestoreSummary {
   const cfg = readJsonConfig(configPath);
-  const summary = restoreJsonBackup(cfg);
-  if (summary.hadBackup) {
-    writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+  const backup = loadJsonSetupBackup(configPath) ?? readLegacyJsonBackup(cfg);
+  const hadLegacyKey = LORE_BACKUP_KEY in cfg;
+
+  if (!backup) {
+    // Nothing to restore. Still strip a stray/legacy key so a schema-invalid
+    // config can't linger (e.g. a corrupt sidecar with an in-config key).
+    if (hadLegacyKey) {
+      delete cfg[LORE_BACKUP_KEY];
+      writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+    }
+    return { hadBackup: false, restored: [], skipped: [] };
   }
+
+  const summary = applyJsonBackup(cfg, backup);
+  // Always drop any legacy in-config backup key (migration cleanup).
+  delete cfg[LORE_BACKUP_KEY];
+  writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+  if (summary.skipped.length === 0) removeJsonSetupBackup(configPath);
   return summary;
 }
 
