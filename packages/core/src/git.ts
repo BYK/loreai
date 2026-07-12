@@ -5,7 +5,8 @@
  * repository identity rather than filesystem path. This enables:
  *  - Worktree awareness: main checkout and worktrees share one project
  *  - Clone deduplication: same repo cloned to different paths is one project
- *  - Fork awareness: prefers `upstream` remote to unify forks with their source
+ *  - Fork safety: prefers `origin` over `upstream` so unrelated repos sharing a
+ *    common template's upstream are NOT collapsed into one project
  *
  * Remote URL normalization strips protocol, auth, and `.git` suffix to produce
  * a stable canonical identifier (e.g. "github.com/user/repo") regardless of
@@ -127,10 +128,17 @@ export function getGitRemote(path: string): string | null {
       return null;
     }
 
-    // Prefer upstream (fork source) > origin > any other
+    // Prefer origin (the canonical clone source) > upstream > any other.
+    // Origin-first (not upstream-first) is deliberate: two unrelated repos that
+    // were forked/bootstrapped from a common template each keep their own
+    // `origin` but may share an `upstream` pointing at that template. Keying on
+    // the shared upstream would collapse them into one project (a false merge),
+    // and an incorrect merge is far worse than failing to unify a genuine fork
+    // with its source. So we key on origin and fall back to upstream only when
+    // no origin is configured.
     const url =
-      remotes.get("upstream") ??
       remotes.get("origin") ??
+      remotes.get("upstream") ??
       remotes.values().next().value;
     if (!url) {
       gitRemoteCache.set(path, null);
