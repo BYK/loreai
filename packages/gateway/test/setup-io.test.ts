@@ -284,6 +284,70 @@ describe("commandSetup — OpenCode", () => {
     await commandSetup(["undo", "opencode"], {});
     expect(logged().toLowerCase()).toContain("no lore backup");
   });
+
+  it("re-running setup never overwrites the TRUE original backup", async () => {
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      ocPath(),
+      JSON.stringify(
+        {
+          provider: {
+            anthropic: { options: { baseURL: "https://api.anthropic.com" } },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await commandSetup(["opencode"], { port: 3299, noPlugin: true });
+    const first = JSON.parse(readFileSync(`${ocPath()}.lore-backup`, "utf8"));
+    const firstEntry = first.entries.find(
+      (e: { path: string }) => e.path === "provider.anthropic.options.baseURL",
+    );
+    expect(firstEntry.priorValue).toBe("https://api.anthropic.com");
+
+    // Second run: the config now holds lore's own value. The sidecar must NOT
+    // be rewritten with lore's value recorded as the "prior".
+    await commandSetup(["opencode"], { port: 3299, noPlugin: true });
+    const second = JSON.parse(readFileSync(`${ocPath()}.lore-backup`, "utf8"));
+    expect(second).toEqual(first);
+  });
+
+  it("keeps the sidecar when the user changed a lore-set value (recoverable)", async () => {
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      ocPath(),
+      JSON.stringify(
+        {
+          provider: {
+            anthropic: { options: { baseURL: "https://api.anthropic.com" } },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await commandSetup(["opencode"], { port: 3299, noPlugin: true });
+
+    // User edits the lore-set anthropic baseURL after setup.
+    const cfg = JSON.parse(readFileSync(ocPath(), "utf8"));
+    cfg.provider.anthropic.options.baseURL = "http://user-changed:9999";
+    writeFileSync(ocPath(), JSON.stringify(cfg, null, 2));
+
+    await commandSetup(["undo", "opencode"], {});
+
+    const restored = JSON.parse(readFileSync(ocPath(), "utf8"));
+    // The user's change is preserved (revert-only-if-unchanged)...
+    expect(restored.provider.anthropic.options.baseURL).toBe(
+      "http://user-changed:9999",
+    );
+    // ...values the user did NOT touch were still reverted...
+    expect(restored.compaction).toBeUndefined();
+    // ...and the sidecar is KEPT so the untouched prior stays recoverable.
+    expect(existsSync(`${ocPath()}.lore-backup`)).toBe(true);
+  });
 });
 
 describe("commandSetup — Pi", () => {
