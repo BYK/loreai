@@ -189,39 +189,58 @@ const fromUtf8 = new TextDecoder();
  * keystore). Only meaningful when `mode() === "on"`.
  */
 function makeEncryptionResolver() {
-  let cached: EncCtx | undefined;
-  return {
-    mode: (): EncMode => keystore.encryptionState(),
-    // NEVER throws: any resolution failure (no user_id, a corrupt scope_keys row, an
-    // HPKE unwrap error) returns null so callers degrade gracefully — push fails closed
-    // ("stop"), pull defers the table — rather than crashing the whole sync cycle.
-    async ctx(): Promise<EncCtx> {
-      if (cached !== undefined) return cached;
-      try {
-        const scope = (await getCurrentUser())?.user_id;
-        if (!scope) {
-          cached = null;
-          return cached;
-        }
-        // Pre-resolve EVERY epoch's DEK once per cycle (few epochs; HPKE unwrap each, keystore-
-        // cached). Keeps encrypt/decrypt SYNC: decrypt looks up the blob's pinned epoch, encrypt
-        // seals at the current (highest) epoch. On first use the empty list resolves epoch 0,
-        // which MINTS the originator's DEK. An epoch we hold no wrap for is simply absent, so a
-        // blob sealed under it defers the table (EncryptedContentUnavailable) until it arrives.
-        // ONE read of the epoch set (ascending); derive currentEpoch from it — no TOCTOU window
-        // between a separate max-read and the enumeration if a rotate lands mid-cycle.
+  // E-5-F3-3: DEKs are resolved PER SCOPE (personal + any team scope in play this cycle) and
+  // cached. A team-scoped row seals with its team DEK; a personal row with the personal DEK.
+  const byScope = new Map<string, EncCtx>();
+  let self: string | null | undefined;
+  async function personalScope(): Promise<string | null> {
+    if (self === undefined) self = (await getCurrentUser())?.user_id ?? null;
+    return self;
+  }
+  // NEVER throws: any resolution failure (no user_id, a corrupt scope_keys row, an HPKE unwrap
+  // error, or a team scope this device holds no wrap for yet) returns null so callers degrade
+  // gracefully — push fails closed ("stop"), pull defers the table — never crashing the cycle.
+  async function ctxForScope(scope: string): Promise<EncCtx> {
+    const hit = byScope.get(scope);
+    if (hit !== undefined) return hit;
+    let result: EncCtx = null;
+    try {
+      const me = await personalScope();
+      if (me) {
+        // Pre-resolve EVERY epoch's DEK once (few epochs; keystore-cached). Keeps encrypt/decrypt
+        // SYNC. `mint` is true ONLY for the caller's OWN (personal) scope, which may originate its
+        // DEK; a TEAM scope MUST use the existing wrap (mint:false) — minting a fresh team DEK
+        // would diverge from the real key. A team scope with no wrap yet → ScopeKeyUnavailable →
+        // null → defer.
+        const mint = scope === me;
         const epochs = keystore.scopeKeyEpochs(scope);
         const currentEpoch = epochs.length ? epochs[epochs.length - 1] : 0;
         const deks = new Map<number, Uint8Array>();
         for (const e of epochs.length ? epochs : [currentEpoch]) {
-          deks.set(e, await keystore.getScopeKey(scope, scope, { epoch: e }));
+          deks.set(
+            e,
+            await keystore.getScopeKey(scope, me, { epoch: e, mint }),
+          );
         }
-        cached = { scope, currentEpoch, deks };
-      } catch (e) {
-        log.notice(`sync: encryption key unavailable: ${(e as Error).message}`);
-        cached = null;
+        result = { scope, currentEpoch, deks };
       }
-      return cached;
+    } catch (e) {
+      log.notice(
+        `sync: encryption key unavailable for ${scope}: ${(e as Error).message}`,
+      );
+      result = null;
+    }
+    byScope.set(scope, result);
+    return result;
+  }
+  return {
+    mode: (): EncMode => keystore.encryptionState(),
+    personalScope,
+    ctxForScope,
+    // The personal-scope ctx (auth.uid()) — the v1 default scope for non-team rows.
+    async ctx(): Promise<EncCtx> {
+      const p = await personalScope();
+      return p ? ctxForScope(p) : null;
     },
   };
 }
@@ -505,6 +524,7 @@ async function pushEntry(
           content_hash: null,
           revision: (prev?.revision ?? 0) + 1,
           remote_updated_at: prev?.remote_updated_at ?? null,
+          scope_id: prev?.scope_id ?? null,
         });
         return "ok"; // advance past the poison delete
       }
@@ -518,6 +538,7 @@ async function pushEntry(
       content_hash: null,
       revision: (prev?.revision ?? 0) + 1,
       remote_updated_at: prev?.remote_updated_at ?? null,
+      scope_id: prev?.scope_id ?? null,
     });
     quotaWarnedTables.delete(table); // real progress → a future re-pause may warn again
     res.pushed++;
@@ -529,9 +550,68 @@ async function pushEntry(
   if (!row) return "ok"; // row gone; a later delete entry (if any) handles it
   const hash = syncData.contentHash(table, row);
   const state = syncData.getSyncState(table, effectiveId);
-  if (state?.content_hash === hash) {
-    res.pushed++; // already in sync — no-op
+  // E-5-F3-3: which scope this row must live in — a team scope iff it's approved+bound (knowledge)
+  // or linked into a team (entity graph), else null (personal). A scope CHANGE (e.g. approval into
+  // a team) is invisible to content_hash, so we detect it via the last-pushed scope in sync_state
+  // and MIGRATE — otherwise the hash short-circuit below would skip it and the promotion would
+  // never reach the team.
+  const teamScope = syncData.teamScopeForContent(table, effectiveId);
+  const priorScope = state?.scope_id ?? null;
+  const scopeChanged = teamScope !== priorScope;
+  if (state?.content_hash === hash && !scopeChanged) {
+    res.pushed++; // already in sync (same content AND scope) — no-op
     return "ok";
+  }
+  // Only injected/migrated when a team scope is involved (now or previously) — pure-personal rows
+  // keep relying on the remote `auth.uid()` default, so their behavior is unchanged.
+  const teamInvolved = teamScope !== null || priorScope !== null;
+  // Resolve the personal scope (auth.uid()) ONLY when actually needed — a team is involved, or the
+  // row is encrypted AND encryption is on (the DEK path). This avoids a getCurrentUser() call on the
+  // pure-personal-plaintext push path (matching the pre-F3-3 behavior, where getCurrentUser ran only
+  // when encryption was on).
+  const encOn =
+    (tableMeta(table).encryptedColumns?.length ?? 0) > 0 && enc.mode() === "on";
+  const personal = teamInvolved || encOn ? await enc.personalScope() : null;
+  // The scope_id this push targets on the wire (team if promoted, else the personal scope).
+  const targetScope = teamScope ?? personal;
+  // C-4 (#825) + F3-3: resolve the TARGET scope's encryption context (DEK) BEFORE any migration
+  // delete, so a fail-closed pause never happens AFTER we've already deleted the old-scope copy
+  // (which would leave a transient remote gap). "locked" (escrow present, device not unlocked) or an
+  // unresolvable DEK (e.g. a team wrap not on this device yet) → pause the table (keep pending),
+  // never leak plaintext. content_hash is over the PLAINTEXT row, so it stays cross-device stable.
+  let encCtx: NonNullable<EncCtx> | null = null;
+  if (tableMeta(table).encryptedColumns?.length) {
+    const mode = enc.mode();
+    if (mode === "locked") return "stop";
+    if (mode === "on") {
+      if (!targetScope) return "stop";
+      const ctx = await enc.ctxForScope(targetScope);
+      if (!ctx) return "stop";
+      encCtx = ctx;
+    }
+  }
+  // Scope migration: the row moved scopes → hard-delete it from the OLD scope on the remote before
+  // pushing under the new one (its old-scope copy is now obsolete — this is a move, not a delete).
+  // Best-effort; only when the row was previously pushed (state exists). Runs AFTER the DEK check
+  // above so we never delete the old copy and then fail to push the new one.
+  if (scopeChanged && state) {
+    const oldScopeId = priorScope ?? personal;
+    if (oldScopeId) {
+      const { error: delErr } = await client
+        .from(table)
+        .delete()
+        .match({ scope_id: oldScopeId, ...decomposeId(table, effectiveId) });
+      if (delErr) {
+        // Don't block the new-scope push on a stale-copy cleanup failure; a later reconcile/reaper
+        // collects it. Keep the row pending only on a transient error.
+        if (classifyPushError(delErr) === "transient") {
+          log.notice(
+            `sync: scope-migrate delete ${table}/${effectiveId} from ${oldScopeId}: ${delErr.message}`,
+          );
+          return "stop";
+        }
+      }
+    }
   }
 
   const revision = (state?.revision ?? 0) + 1;
@@ -545,22 +625,12 @@ async function pushEntry(
   // whole table (#826/D). versioned is the wrong gate (the join table is versioned:false
   // yet HAS is_deleted).
   if (!tableMeta(table).appendOnly) payload.is_deleted = false;
-  // C-4 (#825): encrypt the content-bearing columns for the wire (server stores only
-  // ciphertext). content_hash above is over the PLAINTEXT row, so it stays cross-device
-  // stable. "locked" means escrow is present but the device isn't unlocked — we can't
-  // encrypt, so pause this (knowledge) table until it is (return "stop", keep pending).
-  if (tableMeta(table).encryptedColumns?.length) {
-    const mode = enc.mode();
-    if (mode === "locked") return "stop";
-    if (mode === "on") {
-      const ctx = await enc.ctx();
-      // Fail CLOSED: if encryption is on but the scope/DEK can't be resolved (e.g. a
-      // missing user_id), pause the table rather than leak plaintext content to the
-      // server. It retries next cycle once the context resolves.
-      if (!ctx) return "stop";
-      encryptColumns(table, effectiveId, payload, ctx);
-    }
-  }
+  // E-5-F3-3: for a team-involved row, set scope_id EXPLICITLY (team scope, or the personal scope
+  // on a migrate-back) rather than relying on the remote auth.uid() default. Pure-personal rows
+  // omit it and keep the default — no behavior change.
+  if (teamInvolved && targetScope) payload.scope_id = targetScope;
+  // Seal the content columns with the TARGET scope's DEK (resolved above, before the migration).
+  if (encCtx) encryptColumns(table, effectiveId, payload, encCtx);
   // Only versioned tables have content_hash/revision columns remotely; sending
   // them to the join table is a PGRST204 schema error (and would never sync it).
   if (tableMeta(table).versioned !== false) {
@@ -587,6 +657,7 @@ async function pushEntry(
         content_hash: hash,
         revision,
         remote_updated_at: state?.remote_updated_at ?? null,
+        scope_id: teamScope,
       });
       res.pushed++;
       return "ok";
@@ -615,6 +686,7 @@ async function pushEntry(
         content_hash: hash,
         revision,
         remote_updated_at: state?.remote_updated_at ?? null,
+        scope_id: teamScope,
       });
       return "ok";
     }
@@ -626,6 +698,7 @@ async function pushEntry(
     content_hash: hash,
     revision,
     remote_updated_at: state?.remote_updated_at ?? null,
+    scope_id: teamScope, // record the scope we pushed under (null = personal) for future migration
   });
   quotaWarnedTables.delete(table); // real progress → a future re-pause may warn again
   res.pushed++;
@@ -955,16 +1028,6 @@ function applyRemote(
 
   const isDeleted = remote.is_deleted === true || remote.is_deleted === 1;
 
-  // C-4 (#825): decrypt an encrypted table's content columns BEFORE any classify /
-  // conflict side effect, so a non-decryptable ciphertext (no key) throws and aborts
-  // the table cleanly with nothing partially applied. Deletes carry no content. The
-  // decrypted row is reused at the apply below.
-  let decrypted: Record<string, unknown> | undefined;
-  if (meta.encryptedColumns?.length && !isDeleted) {
-    decrypted = stripSyncCols(remote);
-    decryptColumns(meta.table, rowId, decrypted, enc);
-  }
-
   // classifyRemoteRow's contract: "remoteHash is null for a tombstone". A delete
   // has no content to compare, so a tombstone is NEVER a content-match "skip".
   // Honor that here regardless of the row's stored content_hash — pushEntry nulls
@@ -998,6 +1061,18 @@ function applyRemote(
       });
 
   if (cls === "skip") return;
+
+  // C-4/E-5-F3-3: decrypt the content columns AFTER the skip check but BEFORE any conflict side
+  // effect (recordConflict) or apply — so (a) a clean ECHO of our OWN push (a team-scoped row comes
+  // back sealed with the TEAM DEK) is skipped without needing that scope's key here, and (b) a
+  // non-decryptable ciphertext still throws and aborts the table cleanly with nothing applied.
+  // (Consumer-side multi-scope pull decrypt of OTHER members' team rows is F2.)
+  let decrypted: Record<string, unknown> | undefined;
+  if (meta.encryptedColumns?.length && !isDeleted) {
+    decrypted = stripSyncCols(remote);
+    decryptColumns(meta.table, rowId, decrypted, enc);
+  }
+
   if (cls === "conflict") {
     res.conflicts++;
     // Preserve the local row we're about to overwrite (LWW = remote wins). For

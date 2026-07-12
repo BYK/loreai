@@ -7,7 +7,14 @@ import {
   deleteTeamConfig,
   reinstallSyncCapture,
 } from "@loreai/core";
-import { ltm, log, keystore, crypto, syncData } from "@loreai/core";
+import {
+  ltm,
+  log,
+  keystore,
+  crypto,
+  syncData,
+  setProjectScope,
+} from "@loreai/core";
 
 // P2a (#1246): these tests exercise content that must SYNC, so their projects must be
 // REMOTE-BACKED — the git_remote gate skips project-scoped content of a remote-less
@@ -231,7 +238,14 @@ function makeClient() {
             }
             const rows = tableRows(table);
             const idc = idColumns(table);
-            const i = rows.findIndex((r) => idc.every((c) => r[c] === one[c]));
+            // Faithful to the REAL composite PK (scope_id, <idColumns>): a row under a DIFFERENT
+            // scope_id is a DISTINCT remote row (so a scope migration MUST delete the old-scope copy
+            // — otherwise both linger). scope_id defaults to REMOTE_SCOPE (the server auth.uid()).
+            const scopeId = one.scope_id ?? REMOTE_SCOPE;
+            const i = rows.findIndex(
+              (r) =>
+                r.scope_id === scopeId && idc.every((c) => r[c] === one[c]),
+            );
             const stamped = {
               scope_id: REMOTE_SCOPE,
               author_id: REMOTE_SCOPE,
@@ -307,6 +321,19 @@ function makeClient() {
                 if (Object.entries(filter).every(([k, v]) => r[k] === v)) {
                   Object.assign(r, patch, { updated_at: nextTs() });
                 }
+              }
+              return Promise.resolve({ error: null });
+            },
+          };
+        },
+        // E-5-F3-3 scope migration: hard-delete rows matching a filter (scope_id + idColumns).
+        delete() {
+          return {
+            match(filter: Record<string, string>) {
+              const rows = tableRows(table);
+              for (let i = rows.length - 1; i >= 0; i--) {
+                if (Object.entries(filter).every(([k, v]) => rows[i][k] === v))
+                  rows.splice(i, 1);
               }
               return Promise.resolve({ error: null });
             },
@@ -2266,5 +2293,82 @@ describe("projects identity sync — #1246", () => {
       .get() as { path: string; git_remote: string } | null;
     expect(p?.path).toBe("lore:project/pj2"); // synthetic placeholder
     expect(p?.git_remote).toBe("github.com/o/r2"); // decrypted on the wire
+  });
+});
+
+describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
+  function approvalOf(logicalId: string): string | undefined {
+    return (
+      db()
+        .query(
+          "SELECT approval_status FROM knowledge_current WHERE logical_id = ?",
+        )
+        .get(logicalId) as { approval_status?: string } | undefined
+    )?.approval_status;
+  }
+
+  test("migrates a knowledge entry from personal to team scope on approval", async () => {
+    // A team-bound project WITH a git_remote (else the P2a content gate blocks capture).
+    const pid = ensureProjectCore("/tmp/lore-f3team");
+    db()
+      .query("UPDATE projects SET git_remote='github.com/x/f3' WHERE id=?")
+      .run(pid);
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('T','o','team','Team','manual',0,0)",
+      )
+      .run();
+    setProjectScope(pid, "T");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-f3team",
+      category: "pattern",
+      title: "Shared",
+      content: "secret",
+      scope: "project",
+    });
+    expect(approvalOf(id)).toBe("pending"); // manual policy → pending
+
+    syncData.enableSync("basic");
+    // First push: pending → the user's PERSONAL scope (the remote auth.uid() default).
+    await pushOnce(makeClient() as never);
+    let rows = tableRows("knowledge").filter((r) => r.id === id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].scope_id).toBe(REMOTE_SCOPE); // personal
+    expect(syncData.getSyncState("knowledge", id)?.scope_id ?? null).toBeNull();
+
+    // Approve → the next push MIGRATES it: the personal copy is deleted, and it is
+    // (re-)pushed under the team scope. content_hash is unchanged, so this proves the
+    // scope-change was detected via sync_state.scope_id (not the hash).
+    expect(ltm.approveForTeam(id, "u1")).toBe(true);
+    await pushOnce(makeClient() as never);
+    rows = tableRows("knowledge").filter((r) => r.id === id);
+    expect(rows).toHaveLength(1); // exactly one — no duplicate across scopes
+    expect(rows[0].scope_id).toBe("T");
+    expect(syncData.getSyncState("knowledge", id)?.scope_id).toBe("T");
+  });
+
+  test("a pending entry is NOT team-scoped (stays personal until approved)", async () => {
+    const pid = ensureProjectCore("/tmp/lore-f3team2");
+    db()
+      .query("UPDATE projects SET git_remote='github.com/x/f3b' WHERE id=?")
+      .run(pid);
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('T2','o','team','Team2','manual',0,0)",
+      )
+      .run();
+    setProjectScope(pid, "T2");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-f3team2",
+      category: "pattern",
+      title: "Held",
+      content: "c",
+      scope: "project",
+    });
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+    const rows = tableRows("knowledge").filter((r) => r.id === id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].scope_id).toBe(REMOTE_SCOPE); // personal — pending is not promoted
   });
 });

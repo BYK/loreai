@@ -14,6 +14,7 @@ import {
   rejectForTeam,
   update,
 } from "../src/ltm";
+import { teamScopeForContent } from "../src/sync-data";
 
 function approvalOf(logicalId: string): string | undefined {
   return (
@@ -49,12 +50,32 @@ function seedMember(scopeId: string, userId: string, role: string): void {
 }
 
 beforeEach(() => {
+  db().exec("DELETE FROM knowledge_entity_refs");
+  db().exec("DELETE FROM entity_aliases");
+  db().exec("DELETE FROM entity_relations");
+  db().exec("DELETE FROM entities");
   db().exec("DELETE FROM knowledge");
   db().exec("DELETE FROM knowledge_meta");
   db().exec("DELETE FROM projects");
   db().exec("DELETE FROM scopes");
   db().exec("DELETE FROM scope_members");
 });
+
+function seedEntity(id: string, projectId: string): void {
+  db()
+    .query(
+      "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES (?,?,?,?,0,0)",
+    )
+    .run(id, projectId, "tool", id);
+}
+
+function link(knowledgeLogicalId: string, entityId: string): void {
+  db()
+    .query(
+      "INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?,?)",
+    )
+    .run(knowledgeLogicalId, entityId);
+}
 
 describe("E-5-F3 scope selection & promotion policy", () => {
   it("projectScope binds and unbinds a project to a team scope", () => {
@@ -252,5 +273,110 @@ describe("E-5-F3-2 team-promotion review gate", () => {
       scope: "project",
     });
     expect(approvalOf(id)).toBe("approved");
+  });
+});
+
+describe("E-5-F3-3 effective-scope resolution (teamScopeForContent)", () => {
+  it("knowledge: team iff approved AND team-bound", () => {
+    const pid = ensureProject("/test/f3res/team");
+    seedScope("T", "TeamT", "auto"); // auto → created 'approved'
+    setProjectScope(pid, "T");
+    const approvedId = create({
+      projectPath: "/test/f3res/team",
+      category: "pattern",
+      title: "Approved",
+      content: "c",
+      scope: "project",
+    });
+    expect(teamScopeForContent("knowledge", approvedId)).toBe("T");
+
+    // manual policy → 'pending' → personal (not yet approved)
+    db()
+      .query("UPDATE scopes SET promotion_policy='manual' WHERE id='T'")
+      .run();
+    const pendingId = create({
+      projectPath: "/test/f3res/team",
+      category: "pattern",
+      title: "Pending",
+      content: "c",
+      scope: "project",
+    });
+    expect(teamScopeForContent("knowledge", pendingId)).toBeNull();
+
+    // approved but in an UNBOUND project → personal
+    const uId = create({
+      projectPath: "/test/f3res/personal",
+      category: "pattern",
+      title: "Unbound",
+      content: "c",
+      scope: "project",
+    });
+    approveForTeam(uId);
+    expect(teamScopeForContent("knowledge", uId)).toBeNull();
+  });
+
+  it("entities/refs/aliases follow linked team-approved knowledge", () => {
+    const pid = ensureProject("/test/f3res/e");
+    seedScope("TE", "TeamE", "auto");
+    setProjectScope(pid, "TE");
+    const kId = create({
+      projectPath: "/test/f3res/e",
+      category: "pattern",
+      title: "K",
+      content: "c",
+      scope: "project",
+    });
+    seedEntity("e1", pid);
+    link(kId, "e1");
+    expect(teamScopeForContent("entities", "e1")).toBe("TE");
+    expect(teamScopeForContent("knowledge_entity_refs", `${kId}\x1fe1`)).toBe(
+      "TE",
+    );
+    db()
+      .query(
+        "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, created_at) VALUES ('a1','e1','name','X',0)",
+      )
+      .run();
+    expect(teamScopeForContent("entity_aliases", "a1")).toBe("TE");
+
+    // an entity linked to NO team-approved knowledge → personal
+    seedEntity("e2", pid);
+    expect(teamScopeForContent("entities", "e2")).toBeNull();
+  });
+
+  it("relation: team iff BOTH endpoints resolve to the same team", () => {
+    const pid = ensureProject("/test/f3res/r");
+    seedScope("TR", "TeamR", "auto");
+    setProjectScope(pid, "TR");
+    const k = create({
+      projectPath: "/test/f3res/r",
+      category: "pattern",
+      title: "KR",
+      content: "c",
+      scope: "project",
+    });
+    seedEntity("ra", pid);
+    seedEntity("rb", pid);
+    seedEntity("rc", pid);
+    link(k, "ra");
+    link(k, "rb"); // ra, rb → team TR; rc personal
+    db()
+      .query(
+        "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES ('rel1','ra','rb','x',0,0)",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES ('rel2','ra','rc','x',0,0)",
+      )
+      .run();
+    expect(teamScopeForContent("entity_relations", "rel1")).toBe("TR");
+    expect(teamScopeForContent("entity_relations", "rel2")).toBeNull();
+  });
+
+  it("non-content tables always resolve personal (null)", () => {
+    expect(teamScopeForContent("knowledge_meta", "anything")).toBeNull();
+    expect(teamScopeForContent("distillations", "anything")).toBeNull();
+    expect(teamScopeForContent("projects", "anything")).toBeNull();
   });
 });

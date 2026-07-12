@@ -1837,6 +1837,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE projects ADD COLUMN promotion_policy TEXT;
    ALTER TABLE scopes ADD COLUMN promotion_policy TEXT;
    `,
+  // Version 72 (#827 E-5-F3-3): sync_state.scope_id = the scope a row was last PUSHED under
+  // (NULL = personal). Lets the push detect a scope change (e.g. knowledge approved into a team)
+  // that does NOT change content_hash, and MIGRATE the row (delete old scope → push new scope).
+  `
+   ALTER TABLE sync_state ADD COLUMN scope_id TEXT;
+   `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3362,6 +3368,15 @@ function recoverMissingObjects(database: Database) {
     }>;
     if (scols.length && !scols.some((c) => c.name === "promotion_policy")) {
       database.exec("ALTER TABLE scopes ADD COLUMN promotion_policy TEXT;");
+    }
+  }
+  {
+    // Version 72: sync_state.scope_id (E-5-F3-3, #827).
+    const sscols = database
+      .query("PRAGMA table_info(sync_state)")
+      .all() as Array<{ name: string }>;
+    if (sscols.length && !sscols.some((c) => c.name === "scope_id")) {
+      database.exec("ALTER TABLE sync_state ADD COLUMN scope_id TEXT;");
     }
   }
 }

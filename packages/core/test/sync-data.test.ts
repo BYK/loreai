@@ -930,11 +930,30 @@ describe("getSyncState / maxOutboxSeq", () => {
       revision: 3,
       remote_updated_at: "2026-01-01T00:00:00Z",
     });
+    // scope_id defaults to null (personal) when the caller omits it (E-5-F3-3).
     expect(getSyncState("knowledge", "k1")).toEqual({
       content_hash: "abc",
       revision: 3,
       remote_updated_at: "2026-01-01T00:00:00Z",
+      scope_id: null,
     });
+  });
+
+  test("sync_state round-trips scope_id (E-5-F3-3)", () => {
+    setSyncState("knowledge", "k2", {
+      content_hash: "abc",
+      revision: 1,
+      remote_updated_at: null,
+      scope_id: "team-xyz",
+    });
+    expect(getSyncState("knowledge", "k2")?.scope_id).toBe("team-xyz");
+    // Overwriting without scope_id resets it to null (the last-pushed scope is authoritative).
+    setSyncState("knowledge", "k2", {
+      content_hash: "def",
+      revision: 2,
+      remote_updated_at: null,
+    });
+    expect(getSyncState("knowledge", "k2")?.scope_id).toBeNull();
   });
 
   test("maxOutboxSeq tracks the high-watermark", () => {

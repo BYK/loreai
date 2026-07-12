@@ -1268,6 +1268,13 @@ export interface SyncRowState {
   content_hash: string | null;
   revision: number;
   remote_updated_at: string | null;
+  /**
+   * E-5-F3-3: the scope this row was last PUSHED under (NULL = personal = auth.uid()). When a row's
+   * effective scope changes (e.g. a knowledge entry approved into a team), the push detects
+   * `effectiveScope !== scope_id` and MIGRATES it (delete under the old scope, push under the new) —
+   * the scope change is invisible to content_hash, so this column is how it is detected.
+   */
+  scope_id?: string | null;
 }
 
 export function getSyncState(
@@ -1277,7 +1284,7 @@ export function getSyncState(
   meta(table);
   const row = db()
     .query(
-      `SELECT content_hash, revision, remote_updated_at
+      `SELECT content_hash, revision, remote_updated_at, scope_id
          FROM sync_state WHERE table_name = ? AND row_id = ?`,
     )
     .get(table, rowId) as unknown as SyncRowState | undefined;
@@ -1292,12 +1299,13 @@ export function setSyncState(
   meta(table);
   db()
     .query(
-      `INSERT INTO sync_state (table_name, row_id, content_hash, revision, remote_updated_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO sync_state (table_name, row_id, content_hash, revision, remote_updated_at, scope_id)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(table_name, row_id) DO UPDATE SET
          content_hash = excluded.content_hash,
          revision = excluded.revision,
-         remote_updated_at = excluded.remote_updated_at`,
+         remote_updated_at = excluded.remote_updated_at,
+         scope_id = excluded.scope_id`,
     )
     .run(
       table,
@@ -1305,6 +1313,7 @@ export function setSyncState(
       state.content_hash,
       state.revision,
       state.remote_updated_at,
+      state.scope_id ?? null,
     );
 }
 
@@ -1313,6 +1322,93 @@ export function clearSyncState(table: string, rowId: string): void {
   db()
     .query(`DELETE FROM sync_state WHERE table_name = ? AND row_id = ?`)
     .run(table, rowId);
+}
+
+// ---------------------------------------------------------------------------
+// E-5-F3-3 (#827): per-row effective SCOPE resolution for team promotion
+// ---------------------------------------------------------------------------
+
+/** Composite row-id separator (mirrors the outbox capture triggers). */
+const ROW_ID_SEP = "\x1f";
+
+/**
+ * The TEAM scope a knowledge logical_id resolves to, or null (personal). A knowledge entry is
+ * team-scoped iff its project is team-bound AND it has been APPROVED for promotion. (Gates on the
+ * live current row; a superseded/deleted row is not team-scoped by content — deletes migrate by the
+ * scope recorded in sync_state.)
+ */
+function knowledgeTeamScope(logicalId: string): string | null {
+  const row = db()
+    .query(
+      `SELECT p.scope_id FROM knowledge_current k JOIN projects p ON p.id = k.project_id
+       WHERE k.logical_id = ? AND k.approval_status = 'approved' AND p.scope_id IS NOT NULL`,
+    )
+    .get(logicalId) as { scope_id: string } | undefined;
+  return row?.scope_id ?? null;
+}
+
+/**
+ * The TEAM scope an entity resolves to, or null (personal). An entity is team-scoped iff it is
+ * referenced (knowledge_entity_refs) by at least one APPROVED knowledge entry in a team-bound
+ * project. v1 LIMITATION: an entity linked into TWO teams resolves to the lexicographically
+ * smallest scope id (deterministic) — the other team won't see it (documented; no fan-out yet).
+ */
+function entityTeamScope(entityId: string): string | null {
+  const row = db()
+    .query(
+      `SELECT MIN(p.scope_id) AS scope_id FROM knowledge_entity_refs r
+       JOIN knowledge_current k ON k.logical_id = r.knowledge_id
+       JOIN projects p ON p.id = k.project_id
+       WHERE r.entity_id = ? AND k.approval_status = 'approved' AND p.scope_id IS NOT NULL`,
+    )
+    .get(entityId) as { scope_id: string | null } | undefined;
+  return row?.scope_id ?? null;
+}
+
+/**
+ * The TEAM scope a content row's UPSERT should target, or null (personal = auth.uid()). Only the
+ * five content tables can be team-scoped (knowledge + its entity graph); every other table
+ * (knowledge_meta*, projects, distillations, temporal, pull-only mirrors) stays personal in v1.
+ * `rowId` is the remote key (knowledge → logical_id; refs → "knowledge_id\x1fentity_id").
+ *   - knowledge            → team iff approved+bound
+ *   - knowledge_entity_refs→ follows its knowledge
+ *   - entities             → team iff referenced by team-approved knowledge
+ *   - entity_aliases       → follows its entity
+ *   - entity_relations     → team iff BOTH endpoints resolve to the SAME team (else personal)
+ */
+export function teamScopeForContent(
+  table: string,
+  rowId: string,
+): string | null {
+  switch (table) {
+    case "knowledge":
+      return knowledgeTeamScope(rowId);
+    case "entities":
+      return entityTeamScope(rowId);
+    case "knowledge_entity_refs": {
+      const knowledgeId = rowId.split(ROW_ID_SEP)[0];
+      return knowledgeTeamScope(knowledgeId);
+    }
+    case "entity_aliases": {
+      const r = db()
+        .query("SELECT entity_id FROM entity_aliases WHERE id = ?")
+        .get(rowId) as { entity_id: string } | undefined;
+      return r ? entityTeamScope(r.entity_id) : null;
+    }
+    case "entity_relations": {
+      const r = db()
+        .query("SELECT entity_a, entity_b FROM entity_relations WHERE id = ?")
+        .get(rowId) as { entity_a: string; entity_b: string } | undefined;
+      if (!r) return null;
+      const a = entityTeamScope(r.entity_a);
+      const b = entityTeamScope(r.entity_b);
+      // A relation is meaningful only where BOTH endpoints exist — team-scope it only when both
+      // resolve to the same team; otherwise keep it personal.
+      return a && a === b ? a : null;
+    }
+    default:
+      return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
