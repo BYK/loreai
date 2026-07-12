@@ -1100,39 +1100,45 @@ export function getLtmBudget(
 ): number {
   const overhead = getOverhead(sessionID);
   const usable = Math.max(0, contextLimit - outputReserved - overhead);
-  const raw = Math.floor(usable * ltmFraction);
+  // Snap usable DOWN to the LTM_BUDGET_STEP grid before deriving anything.
+  // Bucketing absorbs the per-turn overhead-EMA wobble so the budget — and thus
+  // the ltm.forSession() packing boundary and the pinned system[2] set — stays
+  // stable turn-to-turn. A wobbling boundary drops/re-adds the lowest-ranked
+  // entry every turn, appending a durable prompt-delta into the cached prefix (a
+  // cache bust). Floor (not round) so the ceiling below can never exceed its
+  // fraction of the REAL window. Driving BOTH the fraction budget and the
+  // ceiling off this one grid keeps the whole result stable, including the
+  // ceiling-bound small-window path.
+  const gridUsable = Math.floor(usable / LTM_BUDGET_STEP) * LTM_BUDGET_STEP;
+  const raw = Math.floor(gridUsable * ltmFraction);
   if (raw <= 0) return 0;
 
-  // Context-aware ceiling: an LTM block must never swallow a large share of the
-  // window. On big models this never binds (ltmFraction << the ceiling
-  // fraction), so the budget is exactly the historical value; on small/short
-  // windows it stops the quantization floor below from ballooning a 5% request
-  // into 25-50% of the context. See #1300 context (subagent output crowding).
+  // Context-aware ceiling: the safe share of the window a single LTM block may
+  // take. On large models it caps only the "never disable" floor below (the
+  // configured fraction is well under it); on small/short windows it stops that
+  // floor from ballooning a small request into a large share of the context.
+  // See #1300 context (sub-agent output crowding).
   const ceiling = Math.floor(
-    usable *
+    gridUsable *
       (opts?.isSubagent
         ? SUBAGENT_MAX_LTM_BUDGET_FRACTION
         : MAX_LTM_BUDGET_FRACTION),
   );
 
-  // Sub-agents are short-lived (1-3 turns), so cache-stability quantization and
-  // the "never disable LTM" floor matter little. Give them exactly the
-  // requested fraction (capped by the tighter ceiling) so a focused task keeps
-  // its window for real work instead of injected knowledge.
+  // Sub-agents are short-lived (1-3 turns): give them exactly the requested
+  // fraction, capped by the tighter ceiling, so a focused task keeps its window
+  // for real work instead of injected knowledge.
   if (opts?.isSubagent) return Math.min(raw, ceiling);
 
-  // Quantize to a coarse step so per-turn `usable` wobble (overhead EMA drift)
-  // does not move the ltm.forSession() packing boundary and churn the pinned
-  // LTM set every turn. See LTM_BUDGET_STEP.
-  //
-  // Round to the NEAREST step (not floor) so the budget never collapses to 0
-  // when the raw budget is below one step (small-context models): a raw budget
-  // under half a step rounds up to one full step rather than to zero, and the
-  // common large-context case (raw >> step) is unaffected. This keeps the
-  // budget stable across wobble while never disabling LTM — but never above the
-  // context-aware ceiling.
+  // Main sessions: quantize the fraction-derived budget to the step (so large
+  // windows are byte-identical to the historical value) and floor at one step
+  // so LTM is never disabled on small-context models — but cap ONLY that floor
+  // by the ceiling so a small window isn't flooded. The configured fraction
+  // itself is never clipped, so a large `budget.ltm` passes through on large
+  // models.
   const quantized = Math.round(raw / LTM_BUDGET_STEP) * LTM_BUDGET_STEP;
-  return Math.min(Math.max(LTM_BUDGET_STEP, quantized), ceiling);
+  const floor = Math.min(LTM_BUDGET_STEP, ceiling);
+  return Math.max(floor, quantized);
 }
 
 /** Returns the token budget for stable LTM (preferences). Independent of context-bound LTM budget. */
