@@ -158,28 +158,109 @@ describe.skipIf(gate())(
       expect(after).toBe("pro");
     });
 
-    it("is_member/scope_role/org_role resolve the owner and reject non-members", async () => {
+    it("is_member/scope_role/org_role resolve the SELF caller (1-arg) for the owner", async () => {
       const a = await h.createUser();
-      const b = await h.createUser();
-      const selfMember = (
-        await h.client.query("select public.is_member($1,$1) as x", [a])
-      ).rows[0].x;
-      const otherMember = (
-        await h.client.query("select public.is_member($1,$2) as x", [a, b])
-      ).rows[0].x;
-      const scopeRole = (
-        await h.client.query("select public.scope_role($1,$1) as x", [a])
-      ).rows[0].x;
-      const orgRole = (
+      const orgA = (
         await h.client.query(
-          "select public.org_role((select id from public.orgs where owner_user_id=$1),$1) as x",
+          "select id from public.orgs where owner_user_id=$1",
           [a],
         )
-      ).rows[0].x;
-      expect(selfMember).toBe(true);
-      expect(otherMember).toBe(false);
-      expect(scopeRole).toBe("admin");
-      expect(orgRole).toBe("owner");
+      ).rows[0].id;
+      // The 1-arg form (p_uid defaults to auth.uid()) resolves the caller's own personal
+      // scope/org — the shape RLS relies on, never pinned.
+      await h.asUser(a, async (c) => {
+        expect(
+          (await c.query("select public.is_member($1) x", [a])).rows[0].x,
+        ).toBe(true);
+        expect(
+          (await c.query("select public.scope_role($1) x", [a])).rows[0].x,
+        ).toBe("admin");
+        expect(
+          (await c.query("select public.org_role($1) x", [orgA])).rows[0].x,
+        ).toBe("owner");
+      });
+    });
+
+    it("pins the 2-arg helper oracles to self — never leaks a co-member's membership/role (0032)", async () => {
+      // b IS a genuine member of a's team scope; a is an admin of it. Even so, a cannot use the
+      // 2-arg helpers to read b's membership/role — they are pinned to the SELF caller. (This is
+      // the discriminating case: without the guard, is_member(scope,b) would return the REAL
+      // `true`/`editor`; the roster itself stays readable via scope_members RLS.)
+      const a = await h.createUser();
+      const b = await h.createUser();
+      const scope = await h.asUser(a, (c) =>
+        c
+          .query("select public.create_team($1) s", ["Probe"])
+          .then((r) => r.rows[0].s),
+      );
+      await h.asUser(a, (c) =>
+        c.query("select public.add_scope_member($1,$2,'editor')", [scope, b]),
+      );
+      await h.asUser(a, async (c) => {
+        expect(
+          (await c.query("select public.is_member($1,$2) x", [scope, b]))
+            .rows[0].x,
+        ).toBe(false); // pinned (b IS a member, but a≠b)
+        expect(
+          (await c.query("select public.scope_role($1,$2) x", [scope, b]))
+            .rows[0].x,
+        ).toBeNull(); // pinned
+        // Self (2-arg with p_uid == auth.uid()) still resolves honestly.
+        expect(
+          (await c.query("select public.is_member($1,$2) x", [scope, a]))
+            .rows[0].x,
+        ).toBe(true);
+      });
+      // The pin masks a REAL membership — raw registry (owner conn) confirms b is an editor.
+      expect(
+        (
+          await h.client.query(
+            "select role from public.scope_members where scope_id=$1 and user_id=$2",
+            [scope, b],
+          )
+        ).rows[0].role,
+      ).toBe("editor");
+    });
+
+    it("pins the 2-arg ORG helper oracles to self (is_org_member/org_role) (0032)", async () => {
+      // b is a REAL member of a's org (no cross-user org RPC exists yet → raw insert via the owner
+      // conn to set up the discriminating case). a still cannot probe b's org membership/role.
+      const a = await h.createUser();
+      const b = await h.createUser();
+      const orgA = (
+        await h.client.query(
+          "select id from public.orgs where owner_user_id=$1",
+          [a],
+        )
+      ).rows[0].id;
+      await h.client.query(
+        "insert into public.org_members(org_id, user_id, role) values ($1,$2,'member') on conflict do nothing",
+        [orgA, b],
+      );
+      await h.asUser(a, async (c) => {
+        expect(
+          (await c.query("select public.is_org_member($1,$2) x", [orgA, b]))
+            .rows[0].x,
+        ).toBe(false); // pinned (b IS an org member, but a≠b)
+        expect(
+          (await c.query("select public.org_role($1,$2) x", [orgA, b])).rows[0]
+            .x,
+        ).toBeNull(); // pinned
+        // Self (2-arg with p_uid == auth.uid()) still resolves honestly.
+        expect(
+          (await c.query("select public.is_org_member($1,$2) x", [orgA, a]))
+            .rows[0].x,
+        ).toBe(true);
+      });
+      // The pin masks a REAL membership — raw registry confirms b is a member.
+      expect(
+        (
+          await h.client.query(
+            "select role from public.org_members where org_id=$1 and user_id=$2",
+            [orgA, b],
+          )
+        ).rows[0].role,
+      ).toBe("member");
     });
 
     it("content scope_id now references the scopes registry, not auth.users (the FK relax)", async () => {
