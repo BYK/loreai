@@ -1824,8 +1824,18 @@ const MIGRATIONS: string[] = [
      updated_at INTEGER,
      PRIMARY KEY (scope_id, user_id)
    );
-   CREATE INDEX IF NOT EXISTS idx_scope_members_user ON scope_members(user_id);
-   CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_scope_members_user ON scope_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(user_id);
+    `,
+  // Version 71 (#827 E-5-F3): scope selection & team-promotion policy plumbing (producer side).
+  // `projects.scope_id` = the team scope a project is ASSOCIATED with (promotion TARGET; NULL =
+  // personal). `projects.promotion_policy` = per-project override of the auto/manual promotion
+  // policy (NULL = inherit the team default). `scopes.promotion_policy` = the team-level default,
+  // pulled from remote (0034). All behavior-preserving until F3-3 wires push scope resolution.
+  `
+   ALTER TABLE projects ADD COLUMN scope_id TEXT;
+   ALTER TABLE projects ADD COLUMN promotion_policy TEXT;
+   ALTER TABLE scopes ADD COLUMN promotion_policy TEXT;
    `,
 ];
 
@@ -3338,6 +3348,21 @@ function recoverMissingObjects(database: Database) {
         "ALTER TABLE projects ADD COLUMN last_refcheck_at INTEGER;",
       );
     }
+    // Version 71: scope selection & team-promotion policy (E-5-F3, #827).
+    if (pcols.length && !pcols.some((c) => c.name === "scope_id")) {
+      database.exec("ALTER TABLE projects ADD COLUMN scope_id TEXT;");
+    }
+    if (pcols.length && !pcols.some((c) => c.name === "promotion_policy")) {
+      database.exec("ALTER TABLE projects ADD COLUMN promotion_policy TEXT;");
+    }
+  }
+  {
+    const scols = database.query("PRAGMA table_info(scopes)").all() as Array<{
+      name: string;
+    }>;
+    if (scols.length && !scols.some((c) => c.name === "promotion_policy")) {
+      database.exec("ALTER TABLE scopes ADD COLUMN promotion_policy TEXT;");
+    }
   }
 }
 
@@ -4008,6 +4033,80 @@ export function projectGitRemote(id: string): string | null {
     .query("SELECT git_remote FROM projects WHERE id = ?")
     .get(id) as { git_remote: string | null } | null;
   return row?.git_remote ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// E-5-F3 (#827): scope selection & team-promotion policy (producer side)
+// ---------------------------------------------------------------------------
+
+/**
+ * The team scope a project is bound to (the promotion TARGET), or null (personal). Binding is
+ * intent only — content is not team-scoped until it is promoted+approved (F3-2/F3-3).
+ */
+export function projectScope(id: string): string | null {
+  const row = db()
+    .query("SELECT scope_id FROM projects WHERE id = ?")
+    .get(id) as { scope_id: string | null } | null;
+  return row?.scope_id ?? null;
+}
+
+/** Bind (scopeId) or unbind (null) a project to a team scope. */
+export function setProjectScope(id: string, scopeId: string | null): void {
+  db().query("UPDATE projects SET scope_id = ? WHERE id = ?").run(scopeId, id);
+}
+
+/**
+ * Effective team-promotion policy for a project: the project override if set, else the bound team
+ * scope's default (from the pulled scopes mirror), else 'manual' — never auto-promote to a team
+ * without review unless explicitly opted in.
+ */
+export function effectivePromotionPolicy(id: string): "manual" | "auto" {
+  const p = db()
+    .query("SELECT scope_id, promotion_policy FROM projects WHERE id = ?")
+    .get(id) as {
+    scope_id: string | null;
+    promotion_policy: string | null;
+  } | null;
+  if (p?.promotion_policy === "auto" || p?.promotion_policy === "manual") {
+    return p.promotion_policy;
+  }
+  if (p?.scope_id) {
+    const s = db()
+      .query("SELECT promotion_policy FROM scopes WHERE id = ?")
+      .get(p.scope_id) as { promotion_policy: string | null } | null;
+    if (s?.promotion_policy === "auto") return "auto";
+  }
+  return "manual";
+}
+
+/**
+ * Resolve a `lore team link` target — an exact scope id or a case-insensitive team name — from the
+ * LOCAL registry mirror (F1), requiring `userId` to be a WRITE member (admin|editor). Returns the
+ * scope `{id, name}` or null (not found locally / not a writable member). Offline-friendly: reads
+ * only the pulled mirror, so `lore sync now` must have populated it.
+ */
+export function resolveWritableScope(
+  ref: string,
+  userId: string,
+): { id: string; name: string | null } | null {
+  const byId = db()
+    .query("SELECT id, name FROM scopes WHERE id = ?")
+    .get(ref) as { id: string; name: string | null } | null;
+  const scope =
+    byId ??
+    (db()
+      .query(
+        // ORDER BY id so a case-insensitive name shared by two teams resolves deterministically
+        // (rather than by arbitrary row order); the exact-id form is the unambiguous escape hatch.
+        "SELECT id, name FROM scopes WHERE kind = 'team' AND LOWER(name) = LOWER(?) ORDER BY id LIMIT 1",
+      )
+      .get(ref) as { id: string; name: string | null } | null);
+  if (!scope) return null;
+  const m = db()
+    .query("SELECT role FROM scope_members WHERE scope_id = ? AND user_id = ?")
+    .get(scope.id, userId) as { role: string } | null;
+  if (!m || (m.role !== "admin" && m.role !== "editor")) return null;
+  return scope;
 }
 
 /** Look up a project's display name by its internal ID. */

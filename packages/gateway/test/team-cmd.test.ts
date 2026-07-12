@@ -6,7 +6,10 @@
 import { keystore, syncData } from "@loreai/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../src/supabase", () => ({ getAuthedClient: vi.fn() }));
+vi.mock("../src/supabase", () => ({
+  getAuthedClient: vi.fn(),
+  getCurrentUser: vi.fn(),
+}));
 vi.mock("../src/team", () => ({
   createTeam: vi.fn(),
   addTeamMember: vi.fn(),
@@ -16,7 +19,8 @@ vi.mock("../src/team", () => ({
   teamMembers: vi.fn(),
 }));
 
-import { getAuthedClient } from "../src/supabase";
+import { db, ensureProject, projectScope, setProjectScope } from "@loreai/core";
+import { getAuthedClient, getCurrentUser } from "../src/supabase";
 import { commandTeam } from "../src/cli/team-cmd";
 import * as team from "../src/team";
 
@@ -250,6 +254,67 @@ describe("unknown subcommand + errors", () => {
     vi.mocked(team.listTeams).mockRejectedValue(new Error("boom"));
     await run("list");
     expect(errs.join("\n")).toMatch(/lore team: boom/);
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("link / unlink (E-5-F3-1)", () => {
+  const PROJECT = "/test/f3cli/proj";
+  let pid: string;
+
+  beforeEach(() => {
+    db().exec("DELETE FROM scopes");
+    db().exec("DELETE FROM scope_members");
+    pid = ensureProject(PROJECT);
+    setProjectScope(pid, null);
+    // A team the caller (u1) can write to, in the local registry mirror.
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('s9','o1','team','Rockets','manual',0,0)",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES ('s9','u1','editor',0,0)",
+      )
+      .run();
+    vi.mocked(getCurrentUser).mockResolvedValue({ user_id: "u1" } as never);
+  });
+
+  it("binds the project to a team resolved by name", async () => {
+    await commandTeam(["link", "Rockets"], { project: PROJECT });
+    expect(process.exitCode).toBe(0);
+    expect(projectScope(pid)).toBe("s9");
+    expect(logs.join("\n")).toContain("Rockets");
+    expect(logs.join("\n")).toContain("MANUAL"); // manual policy surfaced
+  });
+
+  it("unlink clears the binding", async () => {
+    setProjectScope(pid, "s9");
+    await commandTeam(["unlink"], { project: PROJECT });
+    expect(process.exitCode).toBe(0);
+    expect(projectScope(pid)).toBeNull();
+  });
+
+  it("refuses to link to a team the caller cannot write to (no bind)", async () => {
+    db()
+      .query("UPDATE scope_members SET role='viewer' WHERE scope_id='s9'")
+      .run();
+    await commandTeam(["link", "Rockets"], { project: PROJECT });
+    expect(process.exitCode).toBe(1);
+    expect(projectScope(pid)).toBeNull();
+    expect(errs.join("\n")).toMatch(/No team "Rockets" you can write to/);
+  });
+
+  it("errors when the directory has no lore project (no bind)", async () => {
+    await commandTeam(["link", "Rockets"], { project: "/test/f3cli/absent" });
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toMatch(/No lore project/);
+  });
+
+  it("link with no team argument prints usage", async () => {
+    await commandTeam(["link"], { project: PROJECT });
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
     expect(process.exitCode).toBe(1);
   });
 });

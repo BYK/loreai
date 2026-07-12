@@ -439,7 +439,15 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ftsTables: [],
       versioned: false,
       pullOnly: true,
-      syncColumns: ["id", "org_id", "kind", "name", "created_at", "updated_at"],
+      syncColumns: [
+        "id",
+        "org_id",
+        "kind",
+        "name",
+        "promotion_policy",
+        "created_at",
+        "updated_at",
+      ],
     },
     {
       table: "scope_members",

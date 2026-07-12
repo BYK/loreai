@@ -480,6 +480,16 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     expect(
       (db().query("SELECT COUNT(*) n FROM orgs").get() as { n: number }).n,
     ).toBeGreaterThan(0);
+    // F3-1: the team-promotion policy column mirrors. create_team defaults it to 'manual'; a NULL
+    // here would mean the column never synced (local schema has no default) — so this is
+    // discriminating for promotion_policy being in the scopes pull columns.
+    expect(
+      (
+        db()
+          .query("SELECT promotion_policy FROM scopes WHERE id=?")
+          .get(scopeId) as { promotion_policy?: string } | undefined
+      )?.promotion_policy,
+    ).toBe("manual");
 
     // Idempotent + pull-only: a second pull mirrors nothing new, a push is a no-op.
     expect((await pullOnce(clientFor(uid))).pulled).toBe(0);

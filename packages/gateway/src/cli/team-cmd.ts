@@ -2,8 +2,16 @@
  * `lore team` — manage shared team scopes (E-4c-4, #827): membership + per-member DEK wrapping +
  * key rotation on removal. Thin CLI over the client-injected orchestration in ../team.ts.
  */
-import { keystore, syncData } from "@loreai/core";
-import { getAuthedClient } from "../supabase";
+import { resolve } from "node:path";
+import {
+  effectivePromotionPolicy,
+  keystore,
+  projectId,
+  resolveWritableScope,
+  setProjectScope,
+  syncData,
+} from "@loreai/core";
+import { getAuthedClient, getCurrentUser } from "../supabase";
 import {
   addTeamMember,
   createTeam,
@@ -14,11 +22,11 @@ import {
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role>]";
+  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | link <team> [--project <path>] | unlink [--project <path>]]";
 
 export async function commandTeam(
   positionals: string[],
-  _values: Record<string, unknown>,
+  values: Record<string, unknown>,
 ): Promise<void> {
   const sub = positionals[0] ?? "list";
 
@@ -111,6 +119,63 @@ export async function commandTeam(
           return usage();
         await setTeamRole(client, scope, userId, role);
         console.log(`Set ${userId} to ${role}.`);
+        break;
+      }
+      case "link": {
+        // Bind THIS project (cwd or --project) to a team scope: the promotion TARGET. Local only —
+        // content is not shared until it is promoted+approved (F3-2/F3-3). Resolves the team from
+        // the pulled registry mirror (F1), requiring the caller to be a write member.
+        const teamRef = positionals[1];
+        if (!teamRef) return usage();
+        const projectPath = resolve(
+          (values.project as string) ?? process.cwd(),
+        );
+        const pid = projectId(projectPath);
+        if (!pid) {
+          console.error(
+            `No lore project for ${projectPath} yet — use lore here first, or pass --project <path>.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const user = await getCurrentUser();
+        if (!user) {
+          console.error("Not logged in — run `lore login` first.");
+          process.exitCode = 1;
+          return;
+        }
+        const scope = resolveWritableScope(teamRef, user.user_id);
+        if (!scope) {
+          console.error(
+            `No team "${teamRef}" you can write to in the local registry. Run \`lore sync now\` to refresh, then \`lore team list\`.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        setProjectScope(pid, scope.id);
+        const policy = effectivePromotionPolicy(pid);
+        console.log(
+          `Linked this project to team "${scope.name ?? scope.id}" (${scope.id}).`,
+        );
+        console.log(
+          policy === "auto"
+            ? "Policy: AUTO — new knowledge here will be shared to the team."
+            : "Policy: MANUAL — knowledge here stays personal until you approve it for the team (`lore team review`).",
+        );
+        break;
+      }
+      case "unlink": {
+        const projectPath = resolve(
+          (values.project as string) ?? process.cwd(),
+        );
+        const pid = projectId(projectPath);
+        if (!pid) {
+          console.error(`No lore project for ${projectPath}.`);
+          process.exitCode = 1;
+          return;
+        }
+        setProjectScope(pid, null);
+        console.log("Unlinked — this project's knowledge stays personal.");
         break;
       }
       default:
