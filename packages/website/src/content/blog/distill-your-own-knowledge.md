@@ -1,6 +1,6 @@
 ---
 title: "Distill the knowledge, not the model"
-subtitle: "You pay for intelligence twice. Keeping the second payment doesn't require training a thing."
+subtitle: "You pay for intelligence twice. Keeping what you reveal doesn't require training a model."
 description: "Satya Nadella named the Reverse Information Paradox. His fix over-solves it: your learning can stay yours in token space, without training a model."
 pubDate: 2026-07-13
 author: Lore Team
@@ -26,28 +26,31 @@ nothing about what they kept.
 
 ## Look closely at the fix
 
-Here's where we part ways with him, and it's worth being specific about how.
+Here's where we part ways with him, and it's worth being specific about how. Much of what he
+prescribes we have no quarrel with, and some of it we already build. This is about one piece.
 
 Nadella's answer is that enterprises should win "the rights to use model outputs to fine tune
 and/or train their own models." Read that twice. The remedy he's reaching for is the right to
 train on the exhaust. In the industry that has a name, distillation: using a strong model's
-outputs to teach another model. Anthropic and the other frontier labs prohibit exactly this,
-which is what he means by "restrictive terms on distillation."
+outputs to teach a competing model. Anthropic and the other frontier labs restrict exactly
+this, which is what he means by "restrictive terms on distillation."
 
 It's worth asking who that fix helps most. Training or fine-tuning a model on your own traces
 is expensive, and it pays off only at a scale and with a purpose most companies don't have. It
 reads less like a fix for everyone and more like one sized for large players who want to build
-or tune models of their own. Microsoft, for its part, has no frontier model of its own, its
-bet on a single provider has grown complicated, and it's now building in-house. We can't see
-anyone's intent and won't pretend to. But when a fix this specific arrives bundled with the
-diagnosis, it's fair to notice that the principle and the interest happen to point the same way.
+or tune models of their own. Microsoft, for its part, has no frontier-class model of its own
+yet, its bet on a single provider has grown complicated, and it's now building in-house. We
+can't see anyone's intent and won't pretend to. But when a fix this specific arrives bundled
+with the diagnosis, it's fair to notice that the principle and the interest happen to point the
+same way.
 
-It also over-solves the problem. Nadella writes that the answer "requires more than data
-protection." For the leak he described, it doesn't. The thing he diagnosed, paying twice and
-watching your learning flow one way, is a data-protection problem. Keep your traces, decisions,
-and memory on your side of the boundary and you've stopped the leak. You do not need the right
-to train a model to stop paying twice. Training rights are a separate, much larger ask, folded
-into the same sentence as if they were the same need.
+It also reaches further than the problem needs. Nadella writes that the answer "requires more
+than data protection," and leans on that to justify training rights. But look at the leak he
+actually describes: the provider walks away with a compounding record of how you work, and you
+walk away with nothing durable. That gap closes the moment you start keeping and compounding
+the learning on your own side. You do not need the right to train a model to do that. Training
+rights are a separate, much larger ask, folded into the same sentence as if they were the same
+need.
 
 ## Learning doesn't have to live in weights
 
@@ -71,14 +74,15 @@ The learning accumulates in a single file on your own disk. Distillation compres
 sessions into a dense record of what was established. The knowledge layer pulls out the
 decisions, conventions, and gotchas as they happen, including the ones you only ever expressed
 by correcting the model. You never have to remember to save anything, and none of it lives in
-someone else's tenant. No account, no server, nothing leaving your machine unless you choose to
-share it with your team.
+someone else's tenant. No account, no server, and none of this learning leaves your machine
+unless you choose to share it with your team.
 
 Be honest about the wire: your prompts still go to whatever model you're using, because that's
-how you get an answer. What stays home is the learning. The distilled history, the extracted
-knowledge, the patterns, the record of every correction. The exhaust Nadella says leaks away is
-the exact thing Lore captures and keeps on your side of the boundary, in token space, where no
-distillation rule reaches.
+how you get an answer. Lore doesn't pretend otherwise. What it changes is the other side of the
+ledger. The distilled history, the extracted knowledge, the patterns, the record of every
+correction, all of it gets captured and compounded on your side too, in token space, where no
+distillation rule reaches. The provider still sees each turn. It just stops being the only one
+that walks away with a durable record.
 
 That seat, seeing every token of every session, only makes sense if it's yours. It's why Lore
 is [Fair Source](https://fair.io) (FSL-1.1-Apache-2.0): the code that touches your tokens is
@@ -104,5 +108,6 @@ welcome to watch it.
 
 You don't have to wait for it. The learning loop Nadella says every organization needs already
 exists in a form that asks no one's permission: token-space, local, model-agnostic, running
-today. In consuming intelligence, you're creating intelligence. That's his line, and he's right
-about it. The only question is who keeps it, and you can answer that one yourself this afternoon.
+today. In consuming intelligence, you are creating intelligence. That's his line, and he's
+right about it. The only question is who keeps it, and you can answer that one yourself this
+afternoon.
