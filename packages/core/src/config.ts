@@ -313,6 +313,21 @@ export const LoreConfig = z.object({
         .describe(
           'Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Default: ["distillation"]; add "temporal" for raw messages; [] = off.',
         ),
+      /** Minimum cosine similarity for a vector-scored knowledge/context entry
+       *  to be surfaced into a session (system[2] + delta ToC + overflow). An
+       *  entry whose ONLY signal is a weak vector similarity below this floor is
+       *  dropped, so off-task project knowledge (e.g. watchOS entries during a
+       *  React Native task) isn't surfaced. FTS keyword matches are inherently
+       *  relevant and bypass the floor. Set to 0 to disable (surface any vector
+       *  hit, the pre-#1211 behavior). Default: 0.35. */
+      minRelevance: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.35)
+        .describe(
+          "Minimum cosine similarity for a vector-only knowledge match to be surfaced into a session. FTS keyword matches bypass it. 0 disables. Default: 0.35.",
+        ),
     })
     .default({
       enabled: true,
@@ -321,6 +336,7 @@ export const LoreConfig = z.object({
       outcomeReward: true,
       referenceValidation: true,
       contextSources: ["distillation"],
+      minRelevance: 0.35,
     })
     .describe("Long-term knowledge (curator, entity injection) controls."),
   curator: z

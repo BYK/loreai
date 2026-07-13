@@ -14,8 +14,9 @@
  * the tail and these tests fail — turning whack-a-mole into a guardrail.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { log } from "@loreai/core";
+import * as embedding from "../../core/src/embedding";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import {
@@ -310,6 +311,7 @@ async function seedMemory(projectPath: string, sessionID: string) {
 describe("cache stability (e2e)", () => {
   let harness: Harness;
   afterEach(async () => {
+    vi.restoreAllMocks();
     const { resetCalibration } = await import("../../core/src/gradient");
     resetCalibration();
     if (harness) await harness.teardown();
@@ -498,6 +500,20 @@ describe("cache stability (e2e)", () => {
     let contextID = "";
     let largeContextID = "";
 
+    // Deterministic relevance scoring: stub the knowledge vector search so both
+    // seeded entries score above the floor and pin (mirrors the vector-churn
+    // unit tests). Restored by afterEach's vi.restoreAllMocks(). Runs on the main
+    // thread — forSession's embedding.vectorSearch call is intercepted before any
+    // worker offload, so pinning no longer hinges on embedding-worker readiness.
+    let scoreableIds: string[] = [];
+    vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    vi.spyOn(embedding, "embed").mockResolvedValue([
+      new Float32Array([1, 0, 0]),
+    ]);
+    vi.spyOn(embedding, "vectorSearch").mockImplementation(async () =>
+      scoreableIds.map((id) => ({ id, similarity: 0.9 })),
+    );
+
     for (let i = 0; i < turns.length; i++) {
       if (i === 2) setForceMinLayer(4, sessionID);
       const resp = await harness.chat(
@@ -539,6 +555,13 @@ describe("cache stability (e2e)", () => {
             "Initial filler. ".repeat(160),
           session: sessionID,
         });
+        // Relevance scoring is stubbed for this test (see the spy setup above the
+        // loop) so BOTH just-created entries score above the floor and pin
+        // deterministically. Without it, the relevance floor's fallback-only
+        // safety net makes 2-entry pinning depend on embedding-worker readiness
+        // and cosine asymmetry (flaky under load). The floor is covered in
+        // ltm.test.ts; this test targets durable-delta replay + system[2] stability.
+        scoreableIds = [contextID, largeContextID];
       }
 
       if (i === 1) {
