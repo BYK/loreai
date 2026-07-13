@@ -1,7 +1,7 @@
 ---
 title: "Distill the knowledge, not the model"
 subtitle: "You pay for intelligence twice. Keeping the second payment doesn't require training a thing."
-description: Satya Nadella diagnosed the Reverse Information Paradox correctly, then reached for a fix only large companies without a frontier model need: the right to train on your interactions. There are two kinds of distillation, and the useful one doesn't touch a model's weights. It happens in token space, today, without anyone's permission.
+description: "Satya Nadella diagnosed the Reverse Information Paradox correctly, then reached for a fix only large companies without a frontier model need: the right to train on your interactions. There are two kinds of distillation, and the useful one doesn't touch a model's weights. It happens in token space, today, without anyone's permission."
 pubDate: 2026-07-13
 author: Lore Team
 tags:
