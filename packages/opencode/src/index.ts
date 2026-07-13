@@ -1,4 +1,4 @@
-import type { Plugin, Hooks } from "@opencode-ai/plugin";
+import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 import {
   log,
   getGitRemote,
@@ -159,6 +159,58 @@ function reapStaleProjectState(): void {
   const cutoff = Date.now() - SESSION_STATE_TTL_MS;
   for (const [id, entry] of projectState) {
     if (entry.lastSeenAt < cutoff) projectState.delete(id);
+  }
+}
+
+/** session.id → { parentID (null = primary session), lastSeenAt }.
+ *  A session's parent never changes, so the result is cached for the process
+ *  lifetime (reaped by the same TTL as projectState) to avoid an SDK round-trip
+ *  on every turn. */
+const sessionParent = new Map<
+  string,
+  { parentID: string | null; lastSeenAt: number }
+>();
+
+function reapStaleSessionParent(): void {
+  const cutoff = Date.now() - SESSION_STATE_TTL_MS;
+  for (const [id, entry] of sessionParent) {
+    if (entry.lastSeenAt < cutoff) sessionParent.delete(id);
+  }
+}
+
+/**
+ * Resolve a session's parent session ID via the OpenCode SDK.
+ *
+ * OpenCode Task sub-agents run in a child session whose `parentID` points at
+ * the session that spawned them; primary sessions have no parent. We forward a
+ * non-null parent as the `x-parent-session-id` header so the gateway flags the
+ * session as a sub-agent and sizes its LTM injection accordingly (#1300) — the
+ * same signal Claude Code emits natively for its Task sub-agents.
+ *
+ * Cached per session (parentID is immutable). A successful lookup — including
+ * the common `null` for a primary session — is cached so we never re-query.
+ * Failures (gateway server unreachable, session not yet persisted) are NOT
+ * cached and never throw, so a transient error is retried on the next turn
+ * rather than permanently latching a real sub-agent as "not a sub-agent".
+ */
+async function resolveParentSession(
+  client: PluginInput["client"],
+  sessionID: string,
+): Promise<string | null> {
+  const cached = sessionParent.get(sessionID);
+  if (cached) {
+    cached.lastSeenAt = Date.now();
+    return cached.parentID;
+  }
+  try {
+    const res = await client.session.get({ path: { id: sessionID } });
+    const parentID = res.data?.parentID ?? null;
+    sessionParent.set(sessionID, { parentID, lastSeenAt: Date.now() });
+    reapStaleSessionParent();
+    return parentID;
+  } catch {
+    // Best-effort: never break or slow the request path on a lookup failure.
+    return null;
   }
 }
 
@@ -327,6 +379,18 @@ export const LorePlugin: Plugin = async (ctx) => {
         // unlike x-session-affinity (nanoid regenerated per process).
         output.headers["x-lore-session-id"] = input.sessionID;
         output.headers["x-lore-agent"] = input.agent;
+        // Flag OpenCode Task sub-agents so the gateway sizes their LTM
+        // injection (see #1300). A sub-agent runs in a child session carrying a
+        // parentID; forward it as the `x-parent-session-id` signal the gateway
+        // already understands (Claude Code sends this natively). Resolution is
+        // cached and never blocks or throws on failure.
+        const parentSessionID = await resolveParentSession(
+          ctx.client,
+          input.sessionID,
+        );
+        if (parentSessionID) {
+          output.headers["x-parent-session-id"] = parentSessionID;
+        }
         // Inject project path + git remote for THIS request based on the
         // current plugin's project. Setting it here (rather than relying on
         // the fetch interceptor's getHeaders() global) ensures that
