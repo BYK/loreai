@@ -213,7 +213,11 @@ function makeEncryptionResolver() {
         // would diverge from the real key. A team scope with no wrap yet → ScopeKeyUnavailable →
         // null → defer.
         const mint = scope === me;
-        const epochs = keystore.scopeKeyEpochs(scope);
+        // Enumerate epochs for OUR wrap (keyed by our uid `me`), not by the scope — a team
+        // member's wraps live under member_user_id = me, so scopeKeyEpochs(scope) alone returns
+        // [] and would collapse `deks` to only epoch 0, breaking decrypt of rotated-team content
+        // (epoch >= 1) this device DOES hold a wrap for (E-4c-3 rotation; F2 consumer).
+        const epochs = keystore.scopeKeyEpochs(scope, me);
         const currentEpoch = epochs.length ? epochs[epochs.length - 1] : 0;
         const deks = new Map<number, Uint8Array>();
         for (const e of epochs.length ? epochs : [currentEpoch]) {
@@ -761,10 +765,26 @@ export async function pullOnce(
       if (mode === "locked") continue;
       if (mode === "on") {
         const ctx = await encResolver.ctx(); // never throws (returns null on failure)
-        if (!ctx) continue; // can't resolve the key → defer the table this cycle
+        if (!ctx) continue; // can't resolve the personal key → defer the table this cycle
         enc = { mode, ctx };
       }
     }
+    // E-5-F2: decrypt each pulled row with ITS scope's DEK (personal OR a team scope). The per-table
+    // `enc` above is the personal baseline; a team-scoped row (remote.scope_id != our uid) is opened
+    // with that team's DEK (unwrapped from our own scope_keys wrap — key tables pull BEFORE content,
+    // so it's local by now). A team row we hold no wrap for → ctxForScope returns null → decrypt
+    // throws EncryptedContentUnavailable → the table defers (cursor frozen) until the wrap arrives.
+    const rowEncFor = async (
+      remote: Record<string, unknown>,
+    ): Promise<EncSnapshot> => {
+      if (enc.mode !== "on" || !meta.encryptedColumns?.length) return enc;
+      // A personal row carries scope_id = our uid (the remote auth.uid() default); a legacy row
+      // may have none (asString → ""). Either way it reuses the already-resolved per-table personal
+      // ctx (whose scope IS our uid). Only a genuine TEAM scope resolves a different ctx.
+      const rowScope = asString(remote.scope_id);
+      if (!rowScope || rowScope === enc.ctx?.scope) return enc;
+      return { mode: "on", ctx: await encResolver.ctxForScope(rowScope) };
+    };
 
     const skippedBefore = res.skipped;
     try {
@@ -801,8 +821,9 @@ export async function pullOnce(
           const rid = syncData.rowIdOf(meta.table, remote);
           if (ms < cursor.ms || (ms === cursor.ms && rid <= cursor.id))
             continue;
+          const rowEnc = await rowEncFor(remote);
           try {
-            applyRemote(meta, remote, res, touchedFts, enc);
+            applyRemote(meta, remote, res, touchedFts, rowEnc);
           } catch (e) {
             // A ciphertext row we can't decrypt defers the WHOLE table (outer catch,
             // no cursor advance) so it re-pulls once the key is available. Everything
@@ -815,7 +836,7 @@ export async function pullOnce(
               e,
               res,
               touchedFts,
-              enc,
+              rowEnc,
             );
           }
           cursor = { ms, id: rid };
@@ -843,7 +864,7 @@ export async function pullOnce(
             cursor,
             res,
             touchedFts,
-            enc,
+            rowEncFor,
           );
           cursor = drained;
           setKV(pullKey(meta.table), formatCursor(cursor));
@@ -888,7 +909,7 @@ async function drainTimestamp(
   cursor: KeysetCursor,
   res: SyncResult,
   touchedFts: Set<string>,
-  enc: EncSnapshot,
+  rowEncFor: (remote: Record<string, unknown>) => Promise<EncSnapshot>,
 ): Promise<KeysetCursor> {
   const cols = meta.idColumns;
   // Per-id-column "last applied" values; seed from the cursor's composite id.
@@ -931,13 +952,22 @@ async function drainTimestamp(
 
     for (const remote of rows) {
       const rid = syncData.rowIdOf(meta.table, remote);
+      const rowEnc = await rowEncFor(remote); // E-5-F2: per-row (per-scope) DEK
       try {
-        applyRemote(meta, remote, res, touchedFts, enc);
+        applyRemote(meta, remote, res, touchedFts, rowEnc);
       } catch (e) {
         // Same resolve-or-skip as the primary loop (incl. #1217 alias convergence) so
         // the drain path — used when >PAGE rows share one exact ms — can't diverge or
         // wedge; `last`/`cursor` still advance below.
-        handlePulledRowConstraint(meta, remote, rid, e, res, touchedFts, enc);
+        handlePulledRowConstraint(
+          meta,
+          remote,
+          rid,
+          e,
+          res,
+          touchedFts,
+          rowEnc,
+        );
       }
       cols.forEach((c, i) => {
         last[i] = String(remote[c]);

@@ -2372,3 +2372,121 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
     expect(rows[0].scope_id).toBe(REMOTE_SCOPE); // personal — pending is not promoted
   });
 });
+
+describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
+  const SELF = REMOTE_SCOPE; // == getCurrentUser().user_id in the mock
+  const TEAM = "team-f2";
+  const FAST = { t: 1, m: 256, p: 1 };
+
+  // A team-bound, auto-approved project so the knowledge resolves to the TEAM scope on push (F3-3).
+  function bindTeamProject(path: string): string {
+    const pid = ensureProjectCore(path);
+    db()
+      .query("UPDATE projects SET git_remote='github.com/x/f2' WHERE id=?")
+      .run(pid);
+    db()
+      .query(
+        "INSERT OR IGNORE INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES (?,?,?,?,?,0,0)",
+      )
+      .run(TEAM, "o", "team", "F2", "auto");
+    setProjectScope(pid, TEAM);
+    return pid;
+  }
+
+  function resetLocalKnowledge() {
+    db().exec("DELETE FROM knowledge");
+    db().exec("DELETE FROM knowledge_meta");
+    db().exec("DELETE FROM knowledge_meta_crdt");
+    db().exec("DELETE FROM sync_state WHERE table_name='knowledge'");
+    db().exec("DELETE FROM sync_outbox WHERE table_name='knowledge'");
+    setKV("sync.push.knowledge", "0");
+    setKV("sync.pull.knowledge", "0|");
+  }
+
+  test("a team-scoped ciphertext row decrypts with the TEAM DEK on pull", async () => {
+    keystore.setPassphrase("pw", { params: FAST });
+    await keystore.getScopeKey(SELF, SELF); // personal DEK
+    await keystore.getScopeKey(TEAM, SELF, { mint: true }); // hold a wrap for the TEAM DEK
+    bindTeamProject("/tmp/lore-f2team");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-f2team",
+      category: "pattern",
+      title: "Shared",
+      content: "team secret",
+      scope: "project",
+    });
+
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+    const row = tableRows("knowledge").find((r) => r.id === id) as RemoteRow;
+    expect(row.scope_id).toBe(TEAM); // pushed under the team scope
+    expect(crypto.isEnvelope(Buffer.from(String(row.content), "base64"))).toBe(
+      true,
+    ); // sealed with the TEAM DEK
+
+    // A member device (holds the TEAM wrap) re-pulls: decrypt uses the row's OWN scope DEK.
+    resetLocalKnowledge();
+    const r = await pullOnce(makeClient() as never);
+    expect(currentContent(id)).toBe("team secret");
+    expect(r.conflicts).toBe(0);
+  });
+
+  test("a team row this device holds NO wrap for defers (cursor frozen, never stored as ciphertext)", async () => {
+    keystore.setPassphrase("pw", { params: FAST });
+    await keystore.getScopeKey(SELF, SELF);
+    await keystore.getScopeKey(TEAM, SELF, { mint: true });
+    bindTeamProject("/tmp/lore-f2team2");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-f2team2",
+      category: "pattern",
+      title: "Shared",
+      content: "team secret",
+      scope: "project",
+    });
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+
+    // Simulate a non-wrapped device: wipe local knowledge AND the TEAM key material.
+    resetLocalKnowledge();
+    db().exec(`DELETE FROM scope_keys WHERE scope_id = '${TEAM}'`);
+    keystore.lock();
+    keystore.unlockWithPassphrase("pw"); // unlocked, but no TEAM wrap
+
+    await pullOnce(makeClient() as never);
+    expect(currentContent(id)).toBeNull(); // deferred — never stored as ciphertext
+    expect(getKV("sync.pull.knowledge")).toBe("0|"); // cursor frozen → re-pulls when wrapped
+  });
+
+  test("decrypts rotated-team content sealed at epoch >= 1 (per-member epoch enumeration)", async () => {
+    keystore.setPassphrase("pw", { params: FAST });
+    await keystore.getScopeKey(SELF, SELF);
+    await keystore.getScopeKey(TEAM, SELF, { mint: true }); // team epoch 0
+    // Rotate the team key to epoch 1 (re-wrapped to us) — simulates a post-rotation member device.
+    await keystore.rotateScopeKey(TEAM, 1, [
+      { userId: SELF, publicKey: keystore.getAccountIdentity().publicKey },
+    ]);
+    bindTeamProject("/tmp/lore-f2rot");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-f2rot",
+      category: "pattern",
+      title: "Rotated",
+      content: "rotated secret",
+      scope: "project",
+    });
+
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+    const row = tableRows("knowledge").find((r) => r.id === id) as RemoteRow;
+    // The producer seals at the CURRENT (highest) epoch = 1, which proves ctxForScope enumerated
+    // OUR member wraps [0,1] via scopeKeyEpochs(scope, me). The buggy single-arg form returns [] for
+    // a team scope → collapses to epoch 0 → this assertion (and rotated-team decrypt) would fail.
+    expect(
+      crypto.parseHeader(Buffer.from(String(row.content), "base64")).keyEpoch,
+    ).toBe(1);
+
+    resetLocalKnowledge();
+    const r = await pullOnce(makeClient() as never);
+    expect(currentContent(id)).toBe("rotated secret"); // consumer decrypts the epoch-1 blob
+    expect(r.conflicts).toBe(0);
+  });
+});
