@@ -1109,7 +1109,14 @@ export function getLtmBudget(
   // fraction of the REAL window. Driving BOTH the fraction budget and the
   // ceiling off this one grid keeps the whole result stable, including the
   // ceiling-bound small-window path.
-  const gridUsable = Math.floor(usable / LTM_BUDGET_STEP) * LTM_BUDGET_STEP;
+  //
+  // Guard the sub-one-step window (0 < usable < LTM_BUDGET_STEP): flooring would
+  // snap it to 0 and disable LTM entirely, which we never want on tiny-context
+  // models. There, fall back to the real `usable` — the grid can't stabilize a
+  // window smaller than one bucket anyway, and such a window is too small/cheap
+  // for cache churn to matter.
+  const bucketed = Math.floor(usable / LTM_BUDGET_STEP) * LTM_BUDGET_STEP;
+  const gridUsable = bucketed > 0 ? bucketed : usable;
   const raw = Math.floor(gridUsable * ltmFraction);
   if (raw <= 0) return 0;
 

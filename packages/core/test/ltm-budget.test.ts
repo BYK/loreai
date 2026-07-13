@@ -53,6 +53,15 @@ describe("getLtmBudget context-aware ceiling + sub-agent sizing", () => {
     expect([...budgets][0]).toBe(1_600);
   });
 
+  test("sub-one-step window still gets a non-zero (never-disabled) budget", () => {
+    setModelLimits({ context: 24_000, output: 2_000 }); // usable 7_000 (< 8K step)
+    // Flooring would snap gridUsable to 0 and disable LTM; instead we fall back
+    // to real usable so a tiny window keeps LTM. Main = 20% of 7_000 = 1_400;
+    // sub-agent takes the exact 5% fraction = 350.
+    expect(getLtmBudget(0.05)).toBe(1_400);
+    expect(getLtmBudget(0.05, undefined, { isSubagent: true })).toBe(350);
+  });
+
   test("sub-agent gets a smaller budget than a main session (large context)", () => {
     setModelLimits({ context: 200_000, output: 32_000 }); // usable 153_000, grid 152_000
     const main = getLtmBudget(0.05);
