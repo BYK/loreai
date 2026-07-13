@@ -2371,6 +2371,93 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].scope_id).toBe(REMOTE_SCOPE); // personal — pending is not promoted
   });
+
+  test("approval migrates the linked entity graph too (#1307)", async () => {
+    const pid = ensureProjectCore("/tmp/lore-f3graph");
+    db()
+      .query("UPDATE projects SET git_remote='github.com/x/g' WHERE id=?")
+      .run(pid);
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('TG','o','team','TG','manual',0,0)",
+      )
+      .run();
+    setProjectScope(pid, "TG");
+    const kid = ltm.create({
+      projectPath: "/tmp/lore-f3graph",
+      category: "pattern",
+      title: "K",
+      content: "c",
+      scope: "project",
+    });
+    // Two entities in the project, both linked to K, with an alias + a relation between them.
+    for (const e of ["e1", "e2"])
+      db()
+        .query(
+          "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES (?,?,'tool',?,0,0)",
+        )
+        .run(e, pid, e);
+    for (const e of ["e1", "e2"])
+      db()
+        .query(
+          "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
+        )
+        .run(kid, e);
+    db()
+      .query(
+        "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, created_at) VALUES ('a1','e1','name','X',0)",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES ('r1','e1','e2','rel',0,0)",
+      )
+      .run();
+
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+    const scopeOf = (t: string, pred: (r: RemoteRow) => boolean) =>
+      tableRows(t).find(pred)?.scope_id;
+    // While K is pending, the whole graph is personal.
+    expect(scopeOf("knowledge", (r) => r.id === kid)).toBe(REMOTE_SCOPE);
+    expect(scopeOf("entities", (r) => r.id === "e1")).toBe(REMOTE_SCOPE);
+    expect(scopeOf("entity_relations", (r) => r.id === "r1")).toBe(
+      REMOTE_SCOPE,
+    );
+
+    // Approve K → the next push migrates K AND its linked entity graph to the team scope.
+    expect(ltm.approveForTeam(kid, "u1")).toBe(true);
+    await pushOnce(makeClient() as never);
+    expect(scopeOf("knowledge", (r) => r.id === kid)).toBe("TG");
+    expect(scopeOf("entities", (r) => r.id === "e1")).toBe("TG");
+    expect(scopeOf("entities", (r) => r.id === "e2")).toBe("TG");
+    expect(scopeOf("entity_aliases", (r) => r.id === "a1")).toBe("TG");
+    expect(scopeOf("entity_relations", (r) => r.id === "r1")).toBe("TG"); // both endpoints team
+    expect(
+      scopeOf(
+        "knowledge_entity_refs",
+        (r) => r.knowledge_id === kid && r.entity_id === "e1",
+      ),
+    ).toBe("TG");
+    // No personal duplicate lingers after the migration.
+    expect(tableRows("entities").filter((r) => r.id === "e1")).toHaveLength(1);
+
+    // Symmetric: rejecting demotes K AND its linked graph BACK to personal (no team leftovers).
+    expect(ltm.rejectForTeam(kid)).toBe(true);
+    await pushOnce(makeClient() as never);
+    expect(scopeOf("knowledge", (r) => r.id === kid)).toBe(REMOTE_SCOPE);
+    expect(scopeOf("entities", (r) => r.id === "e1")).toBe(REMOTE_SCOPE);
+    expect(scopeOf("entity_relations", (r) => r.id === "r1")).toBe(
+      REMOTE_SCOPE,
+    );
+    expect(
+      scopeOf(
+        "knowledge_entity_refs",
+        (r) => r.knowledge_id === kid && r.entity_id === "e1",
+      ),
+    ).toBe(REMOTE_SCOPE);
+    expect(tableRows("entities").filter((r) => r.id === "e1")).toHaveLength(1);
+  });
 });
 
 describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {

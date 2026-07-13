@@ -30,7 +30,10 @@ import {
   withTransaction,
 } from "./db";
 import { putWrappedScopeKey } from "./crypto/keystore";
-import { rematerializeConfidence } from "./ltm";
+import {
+  onKnowledgeTeamPromotionChanged,
+  rematerializeConfidence,
+} from "./ltm";
 
 // The stable per-device id (also used by the confidence CRDT) doubles as the device id
 // for sync's server-side reaper watermark (#909). Re-exported so the gateway can report
@@ -1259,6 +1262,62 @@ export function reseedProjectContent(projectId: string): void {
   }
 }
 onProjectRemoteBackfilled(reseedProjectContent);
+
+/**
+ * E-5-F3 (#1307): when a knowledge entry is APPROVED into a team, re-enqueue its LINKED ENTITY GRAPH
+ * so the next push migrates those rows to the team scope too. The knowledge row itself is already
+ * re-enqueued by approveForTeam's UPDATE (column-agnostic capture trigger); its entities/aliases/
+ * relations/refs have no trigger from that UPDATE. The push's teamScopeForContent resolver decides
+ * each row's actual scope (e.g. a relation migrates only when BOTH endpoints share the team); here
+ * we just re-enqueue the candidates, gated on the same parent/remote gates as the capture triggers.
+ * Idempotent: an unchanged row short-circuits in the push (same content_hash AND scope).
+ */
+export function reenqueueKnowledgeTeamGraph(logicalId: string): void {
+  if (getTeamConfig(ENABLED_KEY) !== "1") return;
+  const now = Date.now();
+  const enqueue = (sql: string, ...params: unknown[]) =>
+    db()
+      .query(
+        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at) ${sql}`,
+      )
+      .run(...params);
+  const linkedEntities =
+    "SELECT entity_id FROM knowledge_entity_refs WHERE knowledge_id = ?";
+  // The refs of this knowledge (they follow the knowledge → team).
+  enqueue(
+    `SELECT 'knowledge_entity_refs', knowledge_id || char(31) || entity_id, 'upsert', ?
+       FROM knowledge_entity_refs ref
+      WHERE ref.knowledge_id = ?
+        AND ${knowledgeParentGate("ref.knowledge_id")} AND ${entityParentGate("ref.entity_id")}`,
+    now,
+    logicalId,
+  );
+  // The linked entities (now referenced by team-approved knowledge).
+  enqueue(
+    `SELECT 'entities', e.id, 'upsert', ? FROM entities e
+      WHERE e.id IN (${linkedEntities}) AND ${remoteBackedGate("e.")}`,
+    now,
+    logicalId,
+  );
+  // Their aliases (follow the entity).
+  enqueue(
+    `SELECT 'entity_aliases', a.id, 'upsert', ? FROM entity_aliases a
+      WHERE a.entity_id IN (${linkedEntities}) AND ${entityParentGate("a.entity_id")}`,
+    now,
+    logicalId,
+  );
+  // Relations touching a linked entity (both endpoints gated; the push migrates only those whose
+  // BOTH endpoints resolve to the same team).
+  enqueue(
+    `SELECT 'entity_relations', r.id, 'upsert', ? FROM entity_relations r
+      WHERE (r.entity_a IN (${linkedEntities}) OR r.entity_b IN (${linkedEntities}))
+        AND ${entityParentGate("r.entity_a")} AND ${entityParentGate("r.entity_b")}`,
+    now,
+    logicalId,
+    logicalId,
+  );
+}
+onKnowledgeTeamPromotionChanged(reenqueueKnowledgeTeamGraph);
 
 // ---------------------------------------------------------------------------
 // Per-row sync state

@@ -633,6 +633,18 @@ export function listPendingTeamPromotions(
   }));
 }
 
+// E-5-F3 (#1307): notified with a knowledge logical_id whenever its team-promotion status CHANGES
+// (approve OR reject), so the sync layer can re-enqueue the entry's linked entity graph and let the
+// push re-resolve each row's scope — migrating it INTO the team on approve and BACK to personal on
+// reject (symmetric). A hook (not a direct import) because sync-data.ts already imports ltm.ts — the
+// reverse import would be a cycle.
+let teamPromotionChangedCb: ((logicalId: string) => void) | null = null;
+export function onKnowledgeTeamPromotionChanged(
+  cb: (logicalId: string) => void,
+): void {
+  teamPromotionChangedCb = cb;
+}
+
 /**
  * Approve a knowledge entry for team promotion (manual review). Sets 'approved' + reviewer/time on
  * the current version, in place. Idempotent; returns false if no current row matched the id.
@@ -646,6 +658,9 @@ export function approveForTeam(
       "UPDATE knowledge SET approval_status = 'approved', approved_by = ?, approved_at = ? WHERE logical_id = ? AND is_current = 1",
     )
     .run(approvedBy ?? null, Date.now(), logicalId);
+  // The knowledge row's own migration rides its UPDATE (column-agnostic capture trigger); its linked
+  // entity graph has no such trigger from this UPDATE, so re-enqueue it explicitly (#1307).
+  if (res.changes > 0) teamPromotionChangedCb?.(logicalId);
   return res.changes > 0;
 }
 
@@ -659,6 +674,9 @@ export function rejectForTeam(logicalId: string): boolean {
       "UPDATE knowledge SET approval_status = 'rejected', approved_by = NULL, approved_at = NULL WHERE logical_id = ? AND is_current = 1",
     )
     .run(logicalId);
+  // Symmetric with approveForTeam: re-enqueue the linked graph so it migrates BACK to personal
+  // (unless an entity is still linked to OTHER team-approved knowledge — the resolver decides).
+  if (res.changes > 0) teamPromotionChangedCb?.(logicalId);
   return res.changes > 0;
 }
 
