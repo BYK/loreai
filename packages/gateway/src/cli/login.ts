@@ -162,7 +162,10 @@ async function loginWithGitHub(): Promise<void> {
 
   const { data, error } = await client.auth.signInWithOAuth({
     provider: "github",
-    options: { skipBrowserRedirect: true, redirectTo },
+    // read:org lets us mirror the user's GitHub org/team memberships into Lore teams at login
+    // (E-5-a, #827). Verified server-side via the github-provision Edge Function using the returned
+    // provider_token — the client never asserts memberships.
+    options: { skipBrowserRedirect: true, redirectTo, scopes: "read:org" },
   });
   if (error || !data.url) {
     done.close();
@@ -181,6 +184,7 @@ async function loginWithGitHub(): Promise<void> {
   if (!sess.session) throw new Error("No session returned after OAuth.");
 
   await finalizeLogin(client, sessionToPersisted(sess.session));
+  await provisionGitHubTeams(client, sess.session.provider_token);
 }
 
 // --- GitHub OAuth, headless (manual code paste, no loopback) ----------------
@@ -201,7 +205,7 @@ async function loginWithGitHubManual(): Promise<void> {
   const redirectTo = "http://127.0.0.1/callback";
   const { data, error } = await client.auth.signInWithOAuth({
     provider: "github",
-    options: { skipBrowserRedirect: true, redirectTo },
+    options: { skipBrowserRedirect: true, redirectTo, scopes: "read:org" },
   });
   if (error || !data.url) {
     throw new Error(error?.message ?? "Could not start GitHub OAuth.");
@@ -232,6 +236,34 @@ async function loginWithGitHubManual(): Promise<void> {
   if (!sess.session) throw new Error("No session returned after OAuth.");
 
   await finalizeLogin(client, sessionToPersisted(sess.session));
+  await provisionGitHubTeams(client, sess.session.provider_token);
+}
+
+/**
+ * Best-effort: mirror the user's GitHub org/team memberships into Lore teams via the
+ * `github-provision` Edge Function (E-5-a, #827). The OAuth `provider_token` is only present on the
+ * fresh session (not persisted, not re-issued on refresh), so provisioning runs at login time only.
+ * A failure NEVER fails login — it simply retries on the next login.
+ */
+async function provisionGitHubTeams(
+  client: SupabaseClient,
+  providerToken?: string | null,
+): Promise<void> {
+  if (!providerToken) return; // no read:org grant (older session / non-github login)
+  try {
+    const { data, error } = await client.functions.invoke("github-provision", {
+      body: { provider_token: providerToken },
+    });
+    if (error) return; // best-effort — Edge Function not deployed, GitHub error, etc.
+    const teams = (data as { teams?: number } | null)?.teams ?? 0;
+    if (teams > 0) {
+      console.log(
+        `Synced ${teams} GitHub team${teams === 1 ? "" : "s"} to Lore.`,
+      );
+    }
+  } catch {
+    // Best-effort — provisioning retries on next login.
+  }
 }
 
 /** Pull the OAuth `code` out of a pasted redirect URL, or return the raw code. */

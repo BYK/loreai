@@ -370,6 +370,7 @@ describe("commandLogin (GitHub --no-browser)", () => {
       options: {
         skipBrowserRedirect: true,
         redirectTo: "http://127.0.0.1/callback",
+        scopes: "read:org",
       },
     });
     // The pasted URL's ?code= is extracted before exchange.

@@ -85,6 +85,25 @@ Migrations are plain SQL, applied in filename order:
   regardless of `is_deleted`) — abuse-proof and forward-compatible with the
   append-only knowledge model; a hard delete (reaper/compaction) frees footprint.
 
+## Edge Functions
+
+Edge Functions live in `supabase/functions/` and are **not** applied by `supabase db push` —
+deploy them separately (they are not auto-deployed by CI):
+
+```bash
+supabase functions deploy github-provision
+```
+
+- **`github-provision`** (E-5-a, #827) — mirrors a user's GitHub org/team memberships into Lore
+  teams. At login the CLI requests the `read:org` OAuth scope and passes the returned
+  `provider_token` to this function; the function verifies the caller's Supabase JWT, reads the
+  user's *own* memberships from the GitHub API (unforgeable — a client can never assert
+  memberships), and calls the **service-role-only** `provision_github_membership` RPC (migration
+  `0035`). `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` are injected by the
+  platform; `GITHUB_API_URL` is optional (defaults to `https://api.github.com`). `verify_jwt = true`
+  (config.toml) so only a signed-in user can invoke it. Provisioning is best-effort — a missing
+  deploy or GitHub error never fails `lore login`; it simply retries on the next login.
+
 ## Conflict resolution (last-writer-to-remote-wins)
 
 The gateway syncs push-then-pull. When the same row was changed on two machines

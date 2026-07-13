@@ -21,3 +21,8 @@ additional_redirect_urls = ["http://127.0.0.1:*/**", "http://127.0.0.1/**"]
 # Email magic-link / OTP sign-in for non-GitHub users. The OTP code path
 # requires `{{ .Token }}` in the Magic Link email template (dashboard).
 enable_signup = true
+
+[functions.github-provision]
+# E-5-a (#827): mirrors GitHub org/team memberships into Lore teams. verify_jwt=true so only a
+# signed-in user can invoke it; it then uses their provider_token to read memberships from GitHub.
+verify_jwt = true
