@@ -74,6 +74,17 @@ function text(t: string): GatewayContentBlock {
   return { type: "text", text: t };
 }
 
+// A delta block's stored content is a user→assistant PAIR (JSON array); legacy
+// blocks stored a single message object. Join the text across whichever shape.
+function deltaPayloadText(rawContent: string): string {
+  const parsed = JSON.parse(rawContent) as unknown;
+  const msgs = Array.isArray(parsed) ? parsed : [parsed];
+  return msgs
+    .flatMap((m) => (m as { content?: Array<{ text?: string }> }).content ?? [])
+    .map((b) => b.text ?? "")
+    .join("");
+}
+
 /**
  * Asserts every tool_use has an adjacent matching tool_result on the next
  * message, and every tool_result has an adjacent matching tool_use on the
@@ -1025,7 +1036,7 @@ describe("reanchorDeltaOnCompression — re-anchors (never deletes) on a compres
     expect(wrote1).toBe(true);
     expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
     expect(
-      JSON.parse(listSessionPromptDeltas(sessionID)[0].content).content[0].text,
+      deltaPayloadText(listSessionPromptDeltas(sessionID)[0].content),
     ).toContain("v2 materially changed.");
 
     // Turns 2..6: each is a COMPRESSION turn that ALSO carries a pending delta.
@@ -1138,9 +1149,7 @@ describe("reanchorDeltaOnCompression — re-anchors (never deletes) on a compres
     expect(rows).toHaveLength(2);
     // The newest block surfaces B's new content and only B in its mut.
     const newest = rows[rows.length - 1];
-    expect(JSON.parse(newest.content).content[0].text).toContain(
-      "b-v2 changed.",
-    );
+    expect(deltaPayloadText(newest.content)).toContain("b-v2 changed.");
     const newestMut = JSON.parse(newest.selector).mut as {
       changed: Array<{ id: string }>;
     };

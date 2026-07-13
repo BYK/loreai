@@ -26,6 +26,7 @@ import {
   applySessionPromptDeltas,
   removeOrphanedToolResults,
   captureToolPairing400,
+  buildKnowledgeDeltaMessage,
 } from "../src/pipeline";
 import { appendSessionPromptDelta, ensureProject } from "@loreai/core";
 import type {
@@ -245,6 +246,91 @@ describe("captureToolPairing400 — detection", () => {
         sessionID: "abc",
       }),
     ).toBe(false);
+  });
+});
+
+// The knowledge delta is injected as a user→assistant PAIR. In a mid-tool-loop
+// turn the tool-pair guard seats it before the assistant(tool_use), which would
+// otherwise leave the pair's trailing assistant abutting that real assistant
+// (two consecutive assistant messages — a strict-alternation 400). The
+// assistant-coalesce pass in applySessionPromptDeltas must fold them into one.
+describe("knowledge-delta PAIR — no consecutive assistants, tool-pairing intact", () => {
+  const CHANGED = [
+    {
+      id: "019aaaaa-1111-7111-8111-111111111111",
+      category: "pattern",
+      title: "Card primitive",
+      content: "Use the shared Card component.",
+    },
+  ];
+
+  function assertNoConsecutiveAssistants(messages: GatewayMessage[]): void {
+    for (let i = 1; i < messages.length; i++) {
+      expect(
+        messages[i].role === "assistant" &&
+          messages[i - 1].role === "assistant",
+        `consecutive assistant messages at ${i - 1},${i}: ${messages
+          .map((m) => m.role)
+          .join(",")}`,
+      ).toBe(false);
+    }
+  }
+
+  function seedPair(sessionID: string, projectID: string, insertAt: number) {
+    const pair = buildKnowledgeDeltaMessage(CHANGED, []);
+    expect(pair).toHaveLength(2);
+    expect(pair[0].role).toBe("user");
+    expect(pair[1].role).toBe("assistant");
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      selector: JSON.stringify({ target: "messages", insertAt }),
+      content: JSON.stringify(pair),
+    });
+  }
+
+  test("mid-tool-loop tail: pair folds into the tool_use assistant, alternation preserved", () => {
+    const sessionID = `pair-toolloop-${Date.now()}`;
+    const projectID = ensureProject(`/tmp/lore-pair-toolloop-${Date.now()}`);
+    // Realistic agent turn: assistant plans + calls a tool in ONE message, then
+    // the tool_result comes back as the final (user) message.
+    const layout: GatewayMessage[] = [
+      user(text("migrate the card")),
+      assistant(text("on it"), toolUse("X")),
+      user(toolResult("X")),
+    ];
+    // insertAt = len-1 = 2 lands between tool_use and tool_result → guard walks
+    // it before the assistant, seating the injected assistant next to it.
+    seedPair(sessionID, projectID, layout.length - 1);
+    const out = applySessionPromptDeltas(layout, sessionID);
+    removeOrphanedToolResults(out);
+    assertNoOrphanedTools(out);
+    assertNoConsecutiveAssistants(out);
+    // The framing note (non-ack) survived as its own user turn…
+    const joined = out
+      .flatMap((m) => m.content.map((b) => (b as { text?: string }).text ?? ""))
+      .join("\n");
+    expect(joined).toContain("Lore knowledge update");
+    // …and the knowledge payload rode along (folded into the assistant).
+    expect(joined).toContain("Card primitive");
+    // Stable on replay (frozen position → byte-identical roles).
+    const out2 = applySessionPromptDeltas(layout, sessionID);
+    removeOrphanedToolResults(out2);
+    expect(out2.map((m) => m.role)).toEqual(out.map((m) => m.role));
+  });
+
+  test("plain tail (final user turn): pair sits cleanly before it", () => {
+    const sessionID = `pair-plain-${Date.now()}`;
+    const projectID = ensureProject(`/tmp/lore-pair-plain-${Date.now()}`);
+    const layout: GatewayMessage[] = [
+      user(text("hi")),
+      assistant(text("hello")),
+      user(text("do the thing")),
+    ];
+    seedPair(sessionID, projectID, layout.length - 1);
+    const out = applySessionPromptDeltas(layout, sessionID);
+    assertNoOrphanedTools(out);
+    assertNoConsecutiveAssistants(out);
   });
 });
 

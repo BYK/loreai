@@ -37,13 +37,21 @@ function keyOf(id: string, title: string, content: string): string {
   return `${id}:${fnv1a(`${title}\x1f${content}`)}`;
 }
 
+// A delta block's content is a user→assistant PAIR (JSON array); older blocks
+// stored a single message object. Join the text across whichever shape.
+function deltaText(raw: string): string {
+  const parsed = JSON.parse(raw) as unknown;
+  const msgs = Array.isArray(parsed) ? parsed : [parsed];
+  return msgs
+    .flatMap((m) => (m as { content?: Array<{ text?: string }> }).content ?? [])
+    .map((b) => b.text ?? "")
+    .join("");
+}
+
 function deltaContents(sessionID: string): string[] {
   return listSessionPromptDeltas(sessionID).map((r) => {
     try {
-      const msg = JSON.parse(r.content) as {
-        content: Array<{ text?: string }>;
-      };
-      return msg.content.map((b) => b.text ?? "").join("");
+      return deltaText(r.content);
     } catch {
       return "";
     }
@@ -325,10 +333,7 @@ describe("append-only durable knowledge deltas", () => {
     // After crossing the cap, the blocks coalesced to a single cumulative block.
     expect(lastLen).toBe(1);
     // That one block describes the full pin→DB delta (all 9 entries changed).
-    const text = JSON.parse(listSessionPromptDeltas(sessionID)[0].content) as {
-      content: Array<{ text?: string }>;
-    };
-    const body = text.content.map((b) => b.text ?? "").join("");
+    const body = deltaText(listSessionPromptDeltas(sessionID)[0].content);
     expect(body).toContain("cap v2 0.");
   });
 

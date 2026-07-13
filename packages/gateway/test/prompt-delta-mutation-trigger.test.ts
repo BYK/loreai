@@ -32,10 +32,16 @@ function deltaText(sessionID: string): string {
   return listSessionPromptDeltas(sessionID)
     .map((r) => {
       try {
-        const msg = JSON.parse(r.content) as {
-          content: Array<{ text?: string }>;
-        };
-        return msg.content.map((b) => b.text ?? "").join("");
+        // A delta block stores a user→assistant PAIR (JSON array); legacy blocks
+        // stored a single message object. Join text across whichever shape.
+        const parsed = JSON.parse(r.content) as unknown;
+        const msgs = Array.isArray(parsed) ? parsed : [parsed];
+        return msgs
+          .flatMap(
+            (m) => (m as { content?: Array<{ text?: string }> }).content ?? [],
+          )
+          .map((b) => b.text ?? "")
+          .join("");
       } catch {
         return "";
       }

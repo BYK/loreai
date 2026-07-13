@@ -6,11 +6,13 @@ import {
 } from "../src/pipeline";
 import type { GatewayMessage } from "../src/translate/types";
 
-// Extract the single text part of a delta message.
-function text(msg: GatewayMessage | null): string {
-  if (!msg) return "";
-  const part = msg.content[0] as { type: string; text: string };
-  return part.text;
+// Join the text of every part across the delta's message pair (user framing +
+// assistant payload) so content assertions match regardless of which turn a
+// string lands on.
+function text(msgs: GatewayMessage[]): string {
+  return msgs
+    .flatMap((m) => m.content.map((b) => (b as { text?: string }).text ?? ""))
+    .join("\n");
 }
 
 const id = (prefix: string) => `${prefix}-1111-7111-8111-111111111111`;
@@ -50,7 +52,7 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     // Cache-stability invariant: a delta is only created on material change.
     // Overflow must never trigger one on its own, or it would add cache churn.
     const msg = buildKnowledgeDeltaMessage([], [], [toc("019bbbbb", "Lonely")]);
-    expect(msg).toBeNull();
+    expect(msg).toEqual([]);
   });
 
   test("overflow is id-sorted (byte-stable across per-turn relevance re-ranking)", () => {
@@ -200,5 +202,46 @@ describe("ToC ids are recall-resolvable (#917 round-trip)", () => {
     const detail = recallById(token as string);
     expect(detail).not.toMatch(/No entry found/);
     expect(detail).toContain("Round-trip overflow entry");
+  });
+});
+
+// The knowledge-delta block is injected mid-conversation. As a lone user-role
+// message it read as an open user turn, so instruction-literal models (e.g.
+// MiniMax M3) "Acknowledged… none of this applies… I won't reference it" on
+// every turn. Mirroring the distilled-prefix pattern (buildPrefixMessages), the
+// block is now a user→assistant PAIR: a tiny framing note on the user side and
+// the knowledge payload on the assistant side, so the exchange is already
+// closed and the model does not react to it.
+describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", () => {
+  test("returns a pair: user framing (non-ack) + assistant payload", () => {
+    const msgs = buildKnowledgeDeltaMessage(
+      [changed("019aaaaa", "Changed entry")],
+      [],
+      [toc("019bbbbb", "Overflow one")],
+    );
+    expect(Array.isArray(msgs)).toBe(true);
+    expect(msgs).toHaveLength(2);
+    const user = msgs[0];
+    const assistant = msgs[1];
+    expect(user.role).toBe("user");
+    expect(assistant.role).toBe("assistant");
+    const userText = (user.content[0] as { text: string }).text;
+    const asstText = (assistant.content[0] as { text: string }).text;
+    // Keeps the substring the cache-stability e2e assertions rely on.
+    expect(userText).toContain("Lore knowledge update");
+    // Explicit non-acknowledgment framing — the whole point of the fix.
+    expect(userText.toLowerCase()).toContain("do not");
+    // Payload rides the ASSISTANT turn so the model treats it as settled
+    // context (its own prior note), not a pending user request.
+    expect(asstText).toContain("Changed entry");
+    expect(asstText).toContain("## Long-term Knowledge");
+    // The framing note must NOT carry the payload.
+    expect(userText).not.toContain("## Long-term Knowledge");
+  });
+
+  test("no genuine change → empty array (no pair injected)", () => {
+    expect(
+      buildKnowledgeDeltaMessage([], [], [toc("019bbbbb", "Lonely")]),
+    ).toEqual([]);
   });
 });
