@@ -11,6 +11,9 @@
  * The upstream interceptor captures the built Anthropic request body so the
  * test can assert on the system blocks the gateway actually sends upstream.
  */
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_MODEL, DEFAULT_SYSTEM } from "./helpers/fixtures";
 import type { Harness } from "./helpers/harness";
@@ -70,8 +73,15 @@ describe("Pipeline — context-capability note injection (system[1])", () => {
 
   afterEach(() => harness?.teardown());
 
-  it("injects the capability note into system[1] on turn 1 with no knowledge", async () => {
-    harness = await createHarness({ fixtures: [] });
+  it("injects the note into an OTHERWISE-EMPTY system[1] on turn 1", async () => {
+    // Point the request at a fresh temp project dir with no `.lore.md`, so no
+    // preferences/entities/knowledge are imported and the stable baseline would
+    // be empty. (The default harness project is process.cwd(), whose `.lore.md`
+    // IS imported — that would not exercise the empty-baseline case this test
+    // claims to cover.) The note must still appear, proving it is always-present
+    // and makes system[1] non-empty even with zero knowledge.
+    const projectPath = mkdtempSync(join(tmpdir(), "lore-capnote-"));
+    harness = await createHarness({ fixtures: [], projectPath });
 
     const sink: Sink = {};
     setUpstreamInterceptor(captureInterceptor(sink));
@@ -81,9 +91,9 @@ describe("Pipeline — context-capability note injection (system[1])", () => {
     await resp.text();
 
     const sys = JSON.stringify(sink.body?.system ?? "");
-    // Present even though no entities/preferences/knowledge were seeded — the
-    // note is always-present so the agent sees it from the first turn.
     expect(sys).toContain("effective context is far larger than it looks");
     expect(sys).toContain("take on large, multi-step tasks directly");
+    // The baseline is genuinely empty: no imported knowledge block rode along.
+    expect(sys).not.toContain("Long-term Knowledge");
   });
 });

@@ -1276,15 +1276,16 @@ describe("cache stability (e2e)", () => {
     ).toBe(sys1(bodies[0]));
   });
 
-  it("an EMPTY system[1] is frozen too: a preference minted mid-session does not appear (no array-grow bust)", async () => {
-    // Point-4 gap from the adversarial review: a session that starts with no
-    // preferences/entities has an empty system[1] (the cache breakpoint falls on
-    // the host block). Before the empty-baseline freeze, the compute path skipped
-    // caching when `formatted` was empty, so it recomputed every turn — and the
-    // moment the curator/pattern-extract minted a preference mid-session, system[1]
-    // appeared, growing the system array and busting the prefix once. Freezing the
-    // empty baseline keeps system[1] absent for the session's life (new prefs
-    // surface next session).
+  it("the note-only system[1] baseline is frozen: a preference minted mid-session does not appear (no array-grow bust)", async () => {
+    // A session that starts with no preferences/entities/knowledge still has a
+    // system[1] block: the static capability note (#1303) is always present, so
+    // the baseline is "note-only" rather than empty/absent. It is frozen on turn
+    // 1 and must never change mid-session. This guards that the moment the
+    // curator/pattern-extract mints a preference mid-session, system[1] does NOT
+    // grow/change (which would bust the prefix once); the new preference surfaces
+    // next session instead. (Historically, before the note, this same freeze kept
+    // an empty system[1] from appearing mid-session — the note now makes the
+    // block always-present, so the array can never grow at all.)
     const turns = Array.from({ length: 3 }, (_, i) => ({
       userMessage: `Empty-stable turn ${i}: continue the work.`,
       assistantText: `Empty-stable response ${i}.`,
@@ -1315,8 +1316,8 @@ describe("cache stability (e2e)", () => {
         content: [{ type: "text", text: turns[i].assistantText }],
       });
 
-      // After the empty baseline is frozen on turn 1, mint a project preference
-      // mid-session. With the freeze it must NOT appear as a new system[1] block.
+      // After the note-only baseline is frozen on turn 1, mint a project
+      // preference mid-session. With the freeze it must NOT change system[1].
       if (i === 0) {
         ltm.create({
           projectPath,
@@ -1340,7 +1341,7 @@ describe("cache stability (e2e)", () => {
       expect(
         systems[i],
         `system array changed on turn ${i + 1} after a mid-session preference ` +
-          `mint — the empty system[1] baseline was not frozen (array-grow bust)`,
+          `mint — the note-only system[1] baseline was not frozen (array-grow bust)`,
       ).toBe(systems[0]);
     }
     // And the minted preference's title must NOT have leaked into the prompt.
