@@ -1181,15 +1181,46 @@ export function coalesceAdjacentAssistants(
   for (const m of messages) {
     const last = merged[merged.length - 1];
     if (last && last.role === "assistant" && m.role === "assistant") {
+      // Anthropic (and the block-order-preserving egress) require any leading
+      // thinking / redacted_thinking blocks to stay FIRST in an assistant
+      // message when extended thinking is active — clients inspect content[0].
+      // The injected knowledge-delta payload lives in `last`; naively
+      // concatenating `[...last.content, ...m.content]` would push `m`'s leading
+      // reasoning blocks off index 0 and produce a wire-invalid message (hard
+      // 400 on every replay turn of an extended-thinking tool loop). Splice
+      // `last`'s blocks AFTER `m`'s leading reasoning run instead — mirrors the
+      // injectContextWarning insertion rule. `last` is the earlier message and
+      // never itself leads with reasoning (it is the synthetic delta payload),
+      // so only `m`'s leading run needs to be protected.
+      let lead = 0;
+      while (lead < m.content.length && isReasoningBlock(m.content[lead])) {
+        lead++;
+      }
       merged[merged.length - 1] = {
         role: "assistant",
-        content: [...last.content, ...m.content],
+        content: [
+          ...m.content.slice(0, lead),
+          ...last.content,
+          ...m.content.slice(lead),
+        ],
       };
     } else {
       merged.push(m);
     }
   }
   return merged;
+}
+
+/**
+ * True for a thinking block or a redacted_thinking block (the latter carried as
+ * an `opaque` passthrough — see requestHasThinking). Such blocks must remain at
+ * the head of an assistant message when extended thinking is active.
+ */
+function isReasoningBlock(block: GatewayContentBlock): boolean {
+  return (
+    block.type === "thinking" ||
+    (block.type === "opaque" && block.raw.type === "redacted_thinking")
+  );
 }
 
 /** @internal Exported for tests. */
