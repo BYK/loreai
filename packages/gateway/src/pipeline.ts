@@ -825,6 +825,45 @@ export function sameEntryKeys(
   return true;
 }
 
+/** True when two id sets contain exactly the same ids. */
+export function sameIdSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) {
+    if (!b.has(id)) return false;
+  }
+  return true;
+}
+
+/**
+ * Decide whether a persisted pin's `entryKeys` should be silently re-anchored
+ * to the freshly-computed `cachedKeys` WITHOUT counting as a change. This is the
+ * key-format migration guard for the surfaceSignature switch (#1320): a pin
+ * persisted with the old `id:fnv1a(title\x1f content)` keys mismatches the new
+ * normalized-signature keys on the first post-deploy turn even though the
+ * selection is identical. Re-anchoring costs zero cache bust when — and only
+ * when — it is provably the SAME selection:
+ *   1. the keys actually differ (nothing to do otherwise),
+ *   2. the freshly rendered text is byte-identical to the pinned text (so
+ *      system[2] would render the same bytes — no content change hides here),
+ *   3. the id SETS are identical (same entries, only the hash encoding moved).
+ * A genuine content edit fails (2); a set change fails (3). Both correctly fall
+ * through to the normal re-pin path.
+ *
+ * @internal Exported for tests.
+ */
+export function shouldReanchorPinKeys(
+  pinnedKeys: string[],
+  cachedKeys: string[],
+  cachedFormatted: string,
+  pinnedFormatted: string,
+): boolean {
+  return (
+    !sameEntryKeys(pinnedKeys, cachedKeys) &&
+    cachedFormatted === pinnedFormatted &&
+    sameIdSet(entryKeyIds(pinnedKeys), entryKeyIds(cachedKeys))
+  );
+}
+
 const KNOWLEDGE_DELTA_TOKEN_BUDGET = 400;
 
 /** Cap on appended durable-delta blocks before forcing a coalesce. Append-only
@@ -7238,6 +7277,26 @@ async function handleConversationTurn(
           // selected set changes, an entry's content changed (curator update),
           // or there is no pin yet. See ltmPinnedText docs.
           const pinned = ltmPinnedText.get(sessionID);
+          // Key-format migration guard (#1320): a persisted pin from before the
+          // surfaceSignature change stores entryKeys in the old
+          // `id:fnv1a(title\x1f content)` format. On the first post-deploy turn
+          // the recomputed `cachedKeys` use the new normalized signature, so a
+          // pure element-wise compare would spuriously mismatch and re-pin (one-
+          // time cache bust for every warm session). shouldReanchorPinKeys
+          // detects the SAME selection in a new key encoding (same id set +
+          // byte-identical rendered text) so we re-anchor with zero bust.
+          if (
+            pinned?.entryKeys &&
+            cachedKeys &&
+            shouldReanchorPinKeys(
+              pinned.entryKeys,
+              cachedKeys,
+              cached.formatted,
+              pinned.formatted,
+            )
+          ) {
+            pinned.entryKeys = cachedKeys;
+          }
           const setUnchanged = cachedKeys
             ? // Recompute path: compare entry-key sets.
               sameEntryKeys(pinned?.entryKeys, cachedKeys)
