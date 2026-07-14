@@ -191,6 +191,45 @@ describe("buildOpenAIUpstreamRequest — conversation caching", () => {
     const count = (JSON.stringify(msgs).match(/"cache_control"/g) ?? []).length;
     expect(count).toBe(1);
   });
+
+  test("tool_calls-only assistant tail: breakpoint walks back to a message with content", () => {
+    // Regression for the case where the last non-tool message is an assistant
+    // message carrying ONLY tool_calls (no `content` field) — the breakpoint
+    // must not be silently dropped; it walks further back to the user message.
+    const req = makeRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "do it" }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "recall", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              toolUseId: "t1",
+              content: [{ type: "text", text: "result" }],
+            },
+          ],
+        },
+      ],
+    });
+    const msgs = messagesOf(getBody(req, { cacheConversation: true }));
+    // the assistant message has only tool_calls, no content to annotate
+    const assistant = msgs.find((m) => m.role === "assistant");
+    expect(assistant?.content).toBeUndefined();
+    // ...so the breakpoint lands on the first user message ("do it")
+    const firstUser = msgs.find(
+      (m) => m.role === "user" && JSON.stringify(m.content).includes("do it"),
+    );
+    expect(JSON.stringify(firstUser?.content)).toContain("cache_control");
+    // exactly one breakpoint total, and NOT on the tool message
+    const count = (JSON.stringify(msgs).match(/"cache_control"/g) ?? []).length;
+    expect(count).toBe(1);
+    const toolMsg = msgs.find((m) => m.role === "tool");
+    expect(typeof toolMsg?.content).toBe("string");
+  });
 });
 
 // ---------------------------------------------------------------------------

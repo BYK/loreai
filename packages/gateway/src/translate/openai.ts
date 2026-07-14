@@ -760,14 +760,24 @@ function buildOpenAIMessages(
   // the block-array content form, so promote a plain-string message body to a
   // single text block before annotating it.
   //
-  // Skip `role: "tool"` messages: the OpenAI Chat Completions API requires tool
-  // messages to carry STRING content, so we can't attach a block-level
-  // breakpoint there. Walk back to the most recent non-tool message instead —
-  // the cached prefix still covers the tool results in between (they precede
-  // the breakpoint), so no cache coverage is lost.
+  // Walk back to the most recent message we can annotate, skipping:
+  //   - `role: "tool"` messages — the OpenAI Chat Completions API requires tool
+  //     messages to carry STRING content, so we can't attach a block-level
+  //     breakpoint there; and
+  //   - assistant messages that carry only `tool_calls` (no `content`) — there
+  //     is no content block to hang the breakpoint on.
+  // The cached prefix still covers every skipped message (they precede the
+  // breakpoint), so no cache coverage is lost.
   if (cache?.cacheConversation && result.length > 0) {
+    const isAnnotatable = (m: Record<string, unknown>): boolean => {
+      if (m.role === "tool") return false;
+      return (
+        (typeof m.content === "string" && m.content.length > 0) ||
+        (Array.isArray(m.content) && m.content.length > 0)
+      );
+    };
     let idx = result.length - 1;
-    while (idx >= 0 && result[idx].role === "tool") idx--;
+    while (idx >= 0 && !isAnnotatable(result[idx])) idx--;
     const target = idx >= 0 ? result[idx] : undefined;
     if (target) {
       const cc = ephemeralCacheControl(cache.conversationTTL);
@@ -775,7 +785,7 @@ function buildOpenAIMessages(
         target.content = [
           { type: "text", text: target.content, cache_control: cc },
         ];
-      } else if (Array.isArray(target.content) && target.content.length > 0) {
+      } else {
         const parts = target.content as Array<Record<string, unknown>>;
         parts[parts.length - 1].cache_control = cc;
       }
