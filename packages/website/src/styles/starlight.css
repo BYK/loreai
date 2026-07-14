@@ -4,14 +4,20 @@
   --sl-color-accent-low: #c4ddc7;
   --sl-color-accent: #3d6644;
   --sl-color-accent-high: #8fba96;
-  --sl-color-white: #f7f2e8;
-  --sl-color-gray-1: #e8f2e9;
+  /* Dark theme (default). Aligned with the marketing dark palette in
+   * public/theme.css so docs, blog, and home share one dark surface scale:
+   *   black  → page bg (--bg #0d1913)
+   *   gray-6 → nav / sidebar / code surface (near --nav-bg / --surface)
+   *   gray-1 → primary text (--text)
+   * Text greys descend gray-1..gray-6 from light text to dark surface. */
+  --sl-color-white: #f2f7ee;
+  --sl-color-gray-1: #e8f1e6;
   --sl-color-gray-2: #c4ddc7;
-  --sl-color-gray-3: #8fba96;
-  --sl-color-gray-4: #5a8f63;
-  --sl-color-gray-5: #3d6644;
-  --sl-color-gray-6: #2a4d32;
-  --sl-color-black: #102015;
+  --sl-color-gray-3: #9fbaa6;
+  --sl-color-gray-4: #5a7a63;
+  --sl-color-gray-5: #26402f;
+  --sl-color-gray-6: #14251b;
+  --sl-color-black: #0d1913;
 }
 
 html[data-theme="light"] {

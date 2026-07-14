@@ -1,6 +1,6 @@
 .blog-body {
   min-height: 100svh;
-  background: var(--c0);
+  background: var(--bg);
   cursor: auto;
 }
 
@@ -17,8 +17,8 @@
   justify-content: space-between;
   gap: 2rem;
   padding: .6rem 3rem;
-  background: var(--ink);
-  color: var(--c0);
+  background: var(--nav-bg);
+  color: var(--inverse-text);
 }
 
 .blog-brand img {
@@ -49,7 +49,7 @@
 .blog-post h1 {
   font-family: var(--serif);
   font-weight: 400;
-  color: var(--g0);
+  color: var(--heading);
 }
 
 .blog-hero h1 {
@@ -62,26 +62,26 @@
 .blog-card p,
 .blog-post header p {
   max-width: 68ch;
-  color: var(--mid);
+  color: var(--text-muted);
 }
 
 .blog-list {
   display: grid;
   gap: 1px;
   padding-bottom: 6rem;
-  border: 1px solid var(--c2);
-  background: var(--c2);
+  border: 1px solid var(--border);
+  background: var(--border);
 }
 
 .blog-card {
-  background: var(--c0);
+  background: var(--surface);
   padding: 2rem;
 }
 
 .blog-card time,
 .blog-post time,
 .blog-back {
-  color: var(--g3);
+  color: var(--eyebrow);
   font-size: .78rem;
   letter-spacing: .1em;
   text-transform: uppercase;
@@ -103,10 +103,10 @@
 }
 
 .blog-card li {
-  border: 1px solid var(--c2);
+  border: 1px solid var(--border);
   border-radius: 3px;
   padding: .15rem .5rem;
-  color: var(--g2);
+  color: var(--link);
   font-size: .78rem;
 }
 
@@ -132,7 +132,7 @@
   font-weight: 400;
   font-size: clamp(1.3rem, 3vw, 1.9rem);
   line-height: 1.2;
-  color: var(--g2);
+  color: var(--heading-accent);
 }
 
 .blog-post time {
@@ -152,7 +152,7 @@
 
 .blog-prose p,
 .blog-prose li {
-  color: var(--ink);
+  color: var(--text);
   font-size: 1.05rem;
   line-height: 1.75;
 }
@@ -176,7 +176,7 @@
   font-weight: 500;
   font-size: 1.75rem;
   line-height: 1.2;
-  color: var(--g0);
+  color: var(--heading);
 }
 
 .blog-prose h3 {
@@ -185,7 +185,7 @@
   font-weight: 500;
   font-size: 1.3rem;
   line-height: 1.25;
-  color: var(--g0);
+  color: var(--heading);
 }
 
 .blog-prose ul,
@@ -202,27 +202,27 @@
 }
 
 .blog-prose a {
-  color: var(--g1);
+  color: var(--link);
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
 }
 
 .blog-prose a:hover {
-  color: var(--g0);
+  color: var(--link-hover);
 }
 
 .blog-prose :not(pre) > code {
   padding: .12em .35em;
   border-radius: 3px;
-  background: var(--c1);
+  background: var(--bg-alt);
   font-size: .9em;
 }
 
 .blog-prose blockquote {
   padding: .4rem 0 .4rem 1.3rem;
-  border-left: 3px solid var(--g3);
-  color: var(--g1);
+  border-left: 3px solid var(--eyebrow);
+  color: var(--heading-accent);
   font-family: var(--serif);
   font-style: italic;
   font-size: 1.45rem;
@@ -242,28 +242,28 @@
 .blog-prose th,
 .blog-prose td {
   padding: .7rem .9rem;
-  border: 1px solid var(--c2);
+  border: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
   line-height: 1.55;
 }
 
 .blog-prose thead th {
-  background: var(--c1);
-  color: var(--g0);
+  background: var(--surface-alt);
+  color: var(--heading);
   font-weight: 600;
 }
 
 .blog-prose tbody tr:nth-child(even) td {
-  background: var(--c1);
+  background: var(--surface-alt);
 }
 
 .blog-prose pre {
   overflow-x: auto;
   border-radius: 4px;
   padding: 1rem;
-  background: var(--g0);
-  color: var(--g5);
+  background: var(--inverse-bg);
+  color: var(--inverse-text-dim);
 }
 
 @media (max-width: 780px) {
