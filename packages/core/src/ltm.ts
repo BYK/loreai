@@ -2420,11 +2420,14 @@ export async function forSession(
         return (ftsScores.get(id) ?? 0) > 0;
       };
       const scoreOf = (entry: KnowledgeEntry): number => {
-        const vecScore = vectorScores.get(entry.id);
-        return (
-          (vecScore != null ? vecScore : (ftsScores.get(entry.id) ?? 0)) *
-          entry.confidence
-        );
+        // Rank by the STRONGER of the two normalized signals (both are 0–1:
+        // cosine, and BM25 min-max normalized). An entry that qualified via a
+        // high FTS keyword score but has a present-but-below-floor cosine must
+        // not be under-ranked by that weak cosine — take the max, not the
+        // vector-preferred value. (Seer #1318.)
+        const vecScore = vectorScores.get(entry.id) ?? 0;
+        const ftsScore = ftsScores.get(entry.id) ?? 0;
+        return Math.max(vecScore, ftsScore) * entry.confidence;
       };
 
       const matched = projectEntries

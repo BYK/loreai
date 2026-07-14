@@ -1619,6 +1619,37 @@ describe("ltm.forSession — relevance floor", () => {
     expect(got.has(ids[3])).toBe(false);
   });
 
+  test("FTS-qualified entry is ranked by its FTS score, not a weak below-floor cosine (Seer #1318)", async () => {
+    // An entry whose content shares keywords with the session context gets an
+    // FTS hit (qualifies past the floor) even with a below-floor cosine. scoreOf
+    // must rank it by the STRONGER signal (FTS), else a tight budget under-ranks
+    // and drops it below an above-floor-but-lower-combined competitor.
+    config().knowledge.minRelevance = 0.35;
+    // Matches the session context "quarterly financial reconciliation ledger
+    // audit invoice" on multiple tokens → strong FTS (BM25) score.
+    const ftsId = ltm.create({
+      projectPath: PROJ,
+      category: "pattern",
+      title: "Ledger entry",
+      content:
+        "quarterly financial reconciliation ledger audit invoice workflow",
+      scope: "project",
+      crossProject: false,
+    });
+    // ftsId has a present-but-below-floor cosine; a vector-only competitor sits
+    // just above the floor. Old scoreOf ranked ftsId by 0.1 (loses); the max()
+    // fix ranks it by its high FTS score (wins its slot).
+    scores = new Map([
+      [ftsId, 0.1], // below floor on the vector signal
+      [ids[0], 0.4], // above floor, but no FTS overlap
+    ]);
+    const ranked = (await ltm.forSession(PROJ, SESSION, WIDE)).map((e) => e.id);
+    expect(ranked).toContain(ftsId); // qualified via FTS, must be present
+    // Ranked ahead of the weak above-floor vector-only entry.
+    expect(ranked.indexOf(ftsId)).toBeLessThan(ranked.indexOf(ids[0]));
+    db().query("DELETE FROM knowledge WHERE logical_id = ?").run(ftsId);
+  });
+
   test("safety net is fallback-only: nothing clears the floor → top entries still surface", async () => {
     config().knowledge.minRelevance = 0.35;
     // Every entry is below the floor → no genuine match.
