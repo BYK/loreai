@@ -2156,3 +2156,45 @@ describe.skipIf(gate())(
     });
   },
 );
+
+describe.skipIf(gate())(
+  "sync migrations — function search_path pinned (advisor 0037)",
+  () => {
+    // The five trigger functions the security advisor flagged for a mutable
+    // search_path must carry an empty pinned search_path after 0037. proconfig
+    // holds GUC overrides as `key=value` strings; Postgres normalises `set
+    // search_path = ''` to the quoted empty form `search_path=""` (an empty
+    // token would be ambiguous), so match the pinned-empty value exactly.
+    const FLAGGED = [
+      "set_profiles_updated_at",
+      "sync_set_updated_at",
+      "guard_scope_key_immutable",
+      "sync_device_progress_touch",
+      "sync_device_progress_cap",
+    ];
+
+    it("all five flagged functions have search_path pinned to empty", async () => {
+      const rows = await h.asService((c) =>
+        c
+          .query(
+            `select p.proname, p.proconfig
+               from pg_proc p
+               join pg_namespace n on n.oid = p.pronamespace
+              where n.nspname = 'public' and p.proname = any($1)`,
+            [FLAGGED],
+          )
+          .then(
+            (r) =>
+              r.rows as Array<{ proname: string; proconfig: string[] | null }>,
+          ),
+      );
+      expect(rows.length).toBe(FLAGGED.length);
+      for (const row of rows) {
+        expect(
+          (row.proconfig ?? []).some((c) => c === 'search_path=""'),
+          `${row.proname} must pin an empty search_path`,
+        ).toBe(true);
+      }
+    });
+  },
+);
