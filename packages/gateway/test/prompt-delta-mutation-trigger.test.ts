@@ -418,4 +418,28 @@ describe("detectSurfacedMutations — materiality gate", () => {
       surfaceSignature("Title B", "body"),
     );
   });
+
+  it("surfaceSignature preserves operators so symbol-only edits stay MATERIAL", () => {
+    // Regression for the operator-erasure gap (Seer #1320 review): stripping
+    // ALL non-alphanumerics collapsed comparator/boolean flips to the same
+    // signature, silently suppressing a material edit in code/config-heavy
+    // entries. Each pair below is a genuine semantic change and must differ.
+    const pairs: Array<[string, string]> = [
+      [">= floor", "> floor"], // comparator relaxed
+      ["x == y", "x != y"], // equality flipped
+      ["a || b", "a && b"], // boolean flipped
+      ["foo?.bar", "foo.bar"], // optional chain vs plain access
+      ["count + 1", "count - 1"], // arithmetic flipped
+      ["rate < 0.5", "rate > 0.5"], // direction flipped
+    ];
+    for (const [a, b] of pairs) {
+      expect(surfaceSignature("T", a), `${a} vs ${b}`).not.toBe(
+        surfaceSignature("T", b),
+      );
+    }
+    // But cosmetic markdown/quotes/sentence punctuation is still ignored.
+    expect(surfaceSignature("T", "*Use* `tabs`, not spaces!")).toBe(
+      surfaceSignature("T", "use tabs not spaces!"),
+    );
+  });
 });

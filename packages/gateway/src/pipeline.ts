@@ -727,17 +727,26 @@ export function fnv1a(s: string): string {
  *     pinned text and never re-pins on a cosmetic edit.
  * Because the KEY itself is unchanged for an immaterial edit, the surfaced set
  * needs no advancing and the check never re-fires per turn (the 🔴 invariant).
- * A genuine content/title change, or a category change (folded in by callers
- * via the entry id + this sig), still changes the signature and fires normally.
+ * A genuine title or content change changes the signature and fires normally.
+ * NOTE: category is deliberately NOT part of the signature — a category-only
+ * edit keeps the same key, so the pin is reused and the model keeps the old
+ * `### Category` grouping until the next natural re-pin (consistent with the
+ * materiality intent; a bare re-grouping is not worth a mid-session cache bust).
  * The material (substantive) edit surfaces on the next natural re-pin.
  */
 export function surfaceSignature(title: string, content: string): string {
   const normalize = (s: string): string =>
     s
       .toLowerCase()
-      // Strip anything that isn't a letter, number, or whitespace (punctuation,
-      // markdown scaffolding) — Unicode-aware so non-ASCII letters are kept.
-      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      // Strip only COSMETIC punctuation: markdown scaffolding (*_`~#),
+      // quotes/brackets, and the sentence separators . , ; : … — Deliberately
+      // KEEP operator/comparator/boolean chars (= < > & | + / ^ % - ! ?) so a
+      // MATERIAL edit that changes only symbols is not collapsed to the same
+      // signature — e.g. `>= floor` vs `> floor`, `x == y` vs `x != y`,
+      // `a || b` vs `a && b`, `foo?.bar` vs `foo.bar` must remain distinct.
+      // `!`/`?` are kept (needed for `!=`, `?.`, ternary) at the cost of a cheap
+      // false-positive delta on an "excited!" reword — the safe failure mode.
+      .replace(/["'`*_~#()[\]{}.,;:…]/gu, " ")
       // Collapse all whitespace runs to a single space and trim.
       .replace(/\s+/g, " ")
       .trim();
