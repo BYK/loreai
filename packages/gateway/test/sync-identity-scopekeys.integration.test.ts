@@ -106,6 +106,37 @@ describe.skipIf(gate())(
       expect(await canReadPub(b, a)).toBe(1); // B can now read A's pubkey (to be wrapped to)
     });
 
+    it("identity_pub: exactly one permissive SELECT policy (advisor 0038)", async () => {
+      // 0038 collapsed the FOR ALL owner policy + standalone co-member read into
+      // a single SELECT policy, so a read no longer evaluates two permissive
+      // policies (multiple_permissive_policies advisor). Writes stay owner-only.
+      const rows = await h.asService((c) =>
+        c
+          .query(
+            `select policyname, cmd
+               from pg_policies
+              where schemaname = 'public' and tablename = 'identity_pub'
+              order by policyname`,
+          )
+          .then((r) => r.rows as Array<{ policyname: string; cmd: string }>),
+      );
+      // A FOR ALL policy would count toward SELECT too; there must be none, and
+      // exactly ONE policy whose command applies to SELECT.
+      const selectApplicable = rows.filter(
+        (p) => p.cmd === "SELECT" || p.cmd === "ALL",
+      );
+      expect(selectApplicable.map((p) => p.policyname)).toEqual([
+        "identity_pub_read",
+      ]);
+      // Owner writes are split into dedicated INSERT + UPDATE policies.
+      const names = rows.map((p) => p.policyname).sort();
+      expect(names).toEqual([
+        "identity_pub_insert",
+        "identity_pub_read",
+        "identity_pub_update",
+      ]);
+    });
+
     it("identity_pub: an oversized public key is rejected (anti-abuse cap)", async () => {
       const a = await h.createUser();
       // base64 of 512 raw bytes is ~684 chars > the 512-char text cap → rejected.
