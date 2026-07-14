@@ -1643,6 +1643,23 @@ describe("ltm.forSession — relevance floor", () => {
     expect(got.has(ids[1])).toBe(true);
     expect(got.has(ids[2])).toBe(true);
   });
+
+  test("minRelevance = 0 still excludes an exactly-orthogonal (cosine 0) entry", async () => {
+    // Seer #1318: with the floor at 0, `vecScore >= 0` would admit a cosine-0
+    // entry, diverging from the pre-floor `score > 0` semantics. A vector match
+    // must be a POSITIVE cosine. ids[1] has an exact-0 score and no FTS hit, so
+    // it must NOT surface; ids[0] (positive) still does.
+    config().knowledge.minRelevance = 0;
+    scores = new Map([
+      [ids[0], 0.5],
+      [ids[1], 0],
+    ]);
+    const got = new Set(
+      (await ltm.forSession(PROJ, SESSION, WIDE)).map((e) => e.id),
+    );
+    expect(got.has(ids[0])).toBe(true);
+    expect(got.has(ids[1])).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

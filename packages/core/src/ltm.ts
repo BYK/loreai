@@ -2411,7 +2411,12 @@ export async function forSession(
       const minRelevance = config().knowledge.minRelevance;
       const isRelevant = (id: string): boolean => {
         const vecScore = vectorScores.get(id);
-        if (vecScore != null && vecScore >= minRelevance) return true;
+        // A vector match must be a POSITIVE cosine at or above the floor. The
+        // `> 0` clause preserves the pre-floor `score > 0` semantics when
+        // minRelevance is 0: an exactly-orthogonal (cosine 0) or negative entry
+        // is never surfaced on the vector signal alone.
+        if (vecScore != null && vecScore > 0 && vecScore >= minRelevance)
+          return true;
         return (ftsScores.get(id) ?? 0) > 0;
       };
       const scoreOf = (entry: KnowledgeEntry): number => {
