@@ -12,6 +12,7 @@ import type {
   GatewayTool,
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
+import type { AnthropicCacheOptions } from "./anthropic";
 import { asString } from "@loreai/core";
 import { extractAuth } from "../auth";
 
@@ -569,6 +570,7 @@ export function buildOpenAIChatCompletionsUrl(base: string): string {
 export function buildOpenAIUpstreamRequest(
   req: GatewayRequest,
   upstreamBase: string,
+  cache?: AnthropicCacheOptions,
 ): { url: string; headers: Record<string, string>; body: unknown } {
   // Forward non-managed client headers first, then overlay gateway-managed.
   const headers: Record<string, string> = {
@@ -585,7 +587,7 @@ export function buildOpenAIUpstreamRequest(
 
   const body: Record<string, unknown> = {
     model: req.model,
-    messages: buildOpenAIMessages(req.messages, req.system),
+    messages: buildOpenAIMessages(req.messages, req.system, cache),
     stream: req.stream,
   };
 
@@ -593,16 +595,24 @@ export function buildOpenAIUpstreamRequest(
     body.max_tokens = req.maxTokens;
   }
 
-  // Add tools in OpenAI format
+  // Add tools in OpenAI format. OpenRouter honors Anthropic-style
+  // `cache_control` on the last tool definition for Anthropic models, exactly
+  // like the native Anthropic path (see buildAnthropicRequest). Tool defs are
+  // stable across turns, so a breakpoint here keeps them as cache reads.
   if (req.tools.length > 0) {
-    body.tools = req.tools.map((t) => ({
-      type: "function",
+    const tools = req.tools.map((t) => ({
+      type: "function" as const,
       function: {
         name: t.name,
         description: t.description,
         parameters: t.inputSchema,
       },
     }));
+    if (cache?.cacheTools && tools.length > 0) {
+      const lastTool = tools[tools.length - 1] as Record<string, unknown>;
+      lastTool.cache_control = ephemeralCacheControl(cache.systemTTL);
+    }
+    body.tools = tools;
   }
 
   // Forward extras
@@ -637,15 +647,48 @@ export function buildOpenAIUpstreamRequest(
   };
 }
 
+/**
+ * Build the `cache_control` object for an ephemeral breakpoint. OpenRouter
+ * accepts Anthropic's `{ type: "ephemeral", ttl?: "1h" }` shape verbatim on the
+ * OpenAI Chat Completions API for Anthropic models. Non-Anthropic OpenRouter
+ * models (and other OpenAI-protocol providers) simply ignore the annotation, so
+ * emitting it is safe across the board.
+ */
+function ephemeralCacheControl(ttl?: "5m" | "1h" | false): {
+  type: "ephemeral";
+  ttl?: "1h";
+} {
+  return ttl === "1h"
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" };
+}
+
 function buildOpenAIMessages(
   messages: GatewayMessage[],
   system: string,
+  cache?: AnthropicCacheOptions,
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
 
-  // Add system prompt if present
+  // Add system prompt if present. When system caching is requested, emit the
+  // block-array form with a `cache_control` breakpoint so OpenRouter caches the
+  // (large, stable) system prefix. Otherwise keep the plain-string form for
+  // maximum compatibility and cache stability (byte-identical across turns).
   if (system) {
-    result.push({ role: "system", content: system });
+    if (cache?.systemTTL) {
+      result.push({
+        role: "system",
+        content: [
+          {
+            type: "text",
+            text: system,
+            cache_control: ephemeralCacheControl(cache.systemTTL),
+          },
+        ],
+      });
+    } else {
+      result.push({ role: "system", content: system });
+    }
   }
 
   for (const msg of messages) {
@@ -707,6 +750,35 @@ function buildOpenAIMessages(
       }
 
       result.push(msgRecord);
+    }
+  }
+
+  // Conversation caching: place a `cache_control` breakpoint on the final
+  // content block of the last cacheable message. OpenRouter's lookback finds
+  // the prior turn's breakpoint, reads the cached prefix, and writes only the
+  // new tail — the same strategy as the native Anthropic path. This requires
+  // the block-array content form, so promote a plain-string message body to a
+  // single text block before annotating it.
+  //
+  // Skip `role: "tool"` messages: the OpenAI Chat Completions API requires tool
+  // messages to carry STRING content, so we can't attach a block-level
+  // breakpoint there. Walk back to the most recent non-tool message instead —
+  // the cached prefix still covers the tool results in between (they precede
+  // the breakpoint), so no cache coverage is lost.
+  if (cache?.cacheConversation && result.length > 0) {
+    let idx = result.length - 1;
+    while (idx >= 0 && result[idx].role === "tool") idx--;
+    const target = idx >= 0 ? result[idx] : undefined;
+    if (target) {
+      const cc = ephemeralCacheControl(cache.conversationTTL);
+      if (typeof target.content === "string") {
+        target.content = [
+          { type: "text", text: target.content, cache_control: cc },
+        ];
+      } else if (Array.isArray(target.content) && target.content.length > 0) {
+        const parts = target.content as Array<Record<string, unknown>>;
+        parts[parts.length - 1].cache_control = cc;
+      }
     }
   }
 

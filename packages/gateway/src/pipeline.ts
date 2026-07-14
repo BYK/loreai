@@ -3604,9 +3604,29 @@ async function forwardToUpstream(
           system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
         }
       : req;
+    // Pass cache options through so OpenRouter (and other OpenAI-protocol
+    // Anthropic-compatible endpoints) receive `cache_control` breakpoints on
+    // the system prefix, the conversation tail, and the last tool. OpenRouter
+    // honors Anthropic-style ephemeral breakpoints on the OpenAI Chat
+    // Completions API for Anthropic models; providers that don't support
+    // caching ignore the annotation. Downgrade the extended "1h" TTL to bare
+    // ephemeral (5m) for non-native endpoints, mirroring the Anthropic-compat
+    // branch below — the "1h" ttl is an Anthropic beta that third parties may
+    // reject. The LTM now rides the single system-string breakpoint, so drop
+    // the (now-inlined) stableLtmSystem/ltmSystem fields.
+    const effectiveCache: AnthropicCacheOptions | undefined = cache
+      ? {
+          ...cache,
+          systemTTL: cache.systemTTL === false ? false : "5m",
+          conversationTTL: "5m",
+          stableLtmSystem: undefined,
+          ltmSystem: undefined,
+        }
+      : cache;
     const result = buildOpenAIUpstreamRequest(
       reqWithLtm,
       effectiveUpstreamBase,
+      effectiveCache,
     );
     url = result.url;
     headers = result.headers;
