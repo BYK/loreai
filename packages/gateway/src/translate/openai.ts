@@ -797,13 +797,20 @@ function buildOpenAIMessages(
     const target = idx >= 0 ? result[idx] : undefined;
     if (target) {
       const cc = ephemeralCacheControl(cache.conversationTTL);
-      if (typeof target.content === "string") {
-        target.content = [
-          { type: "text", text: target.content, cache_control: cc },
-        ];
-      } else {
+      // Under `cacheConversation`, every text-only message is emitted in array
+      // form above (the shape-stability invariant that stops the string↔array
+      // flip from busting the cache), and `role:"tool"` string-content messages
+      // are excluded by `isAnnotatable`. So a targetable message's content is
+      // always a block array here — annotate its last block. The string case is
+      // handled defensively (single-block promotion) in case that invariant ever
+      // changes; today it is unreachable on this path.
+      if (Array.isArray(target.content)) {
         const parts = target.content as Array<Record<string, unknown>>;
         parts[parts.length - 1].cache_control = cc;
+      } else {
+        target.content = [
+          { type: "text", text: target.content as string, cache_control: cc },
+        ];
       }
     }
   }
