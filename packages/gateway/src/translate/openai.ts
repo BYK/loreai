@@ -734,9 +734,22 @@ function buildOpenAIMessages(
 
       if (contentParts.length > 0) {
         // Use array form when non-text (opaque) parts are present — OpenAI
-        // requires array content for multimodal messages. Use plain string
-        // when text-only for maximum compatibility and cache stability.
-        if (hasOpaque) {
+        // requires array content for multimodal messages.
+        //
+        // For text-only messages the shape choice must be STABLE across turns
+        // or it busts the prompt cache: the conversation breakpoint below is
+        // placed on the LAST message and promotes a plain string to a single
+        // text block to hang `cache_control` on it. That breakpoint moves
+        // forward every turn, so a message annotated on turn N (array form)
+        // would revert to string form on turn N+1 — flipping
+        //   "content":[{"type":"text","text":"…"}]  ⇄  "content":"…"
+        // for the SAME historical message and breaking the cached prefix at
+        // that point (observed as recurring `messages[N].content` divergences).
+        // When conversation caching is on, emit array form uniformly so only
+        // the single `cache_control` marker moves between turns (matching the
+        // always-array native Anthropic path); keep the plain-string form when
+        // caching is off, where it's simpler and there's no breakpoint to move.
+        if (hasOpaque || cache?.cacheConversation) {
           msgRecord.content = contentParts;
         } else {
           msgRecord.content = contentParts

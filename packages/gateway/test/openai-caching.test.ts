@@ -155,6 +155,53 @@ describe("buildOpenAIUpstreamRequest — conversation caching", () => {
     );
   });
 
+  test("all text messages use array content (no string↔array flip as the breakpoint moves)", () => {
+    // Regression (#cache-content-flip): the conversation breakpoint is placed on
+    // the LAST message and promotes a plain string to a [{type:text}] block to
+    // carry cache_control. Because that breakpoint moves forward every turn, a
+    // message emitted as an array on turn N would revert to a plain string on
+    // turn N+1 — flipping the SAME historical message's bytes and busting the
+    // cached prefix at that point. With caching on, EVERY text message must be
+    // array-form so only the single cache_control marker moves (matching the
+    // always-array native Anthropic path).
+    const req = makeRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "reply" }] },
+        { role: "user", content: [{ type: "text", text: "second" }] },
+      ],
+    });
+    const msgs = messagesOf(getBody(req, { cacheConversation: true }));
+    const convo = msgs.filter((m) => m.role !== "system");
+    // Every conversation message is array-form — including the interior ones
+    // that do NOT carry the (moving) breakpoint.
+    expect(convo.every((m) => Array.isArray(m.content))).toBe(true);
+    // The interior messages carry NO cache_control (only the last does), so the
+    // only per-turn delta is the marker moving — the content bytes are stable.
+    const interior = convo.slice(0, -1);
+    expect(
+      interior.every(
+        (m) => !JSON.stringify(m.content).includes("cache_control"),
+      ),
+    ).toBe(true);
+  });
+
+  test("caching OFF keeps text-only content as a plain string (no breakpoint to move)", () => {
+    // The shape-stability promotion to array form only applies when conversation
+    // caching is on; without it, the simpler plain-string form is preserved
+    // (and there is no moving breakpoint, so no flip risk).
+    const req = makeRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "reply" }] },
+        { role: "user", content: [{ type: "text", text: "second" }] },
+      ],
+    });
+    const msgs = messagesOf(getBody(req)); // no cache options
+    const convo = msgs.filter((m) => m.role !== "system");
+    expect(convo.every((m) => typeof m.content === "string")).toBe(true);
+  });
+
   test("tool-role tail: breakpoint moves to prior non-tool message, tool content stays a string", () => {
     // Agentic mid-turn shape: assistant tool_call, then a tool_result message.
     const req = makeRequest({
