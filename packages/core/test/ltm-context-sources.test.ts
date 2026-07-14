@@ -3,6 +3,7 @@ import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
+import { config } from "../src/config";
 
 /**
  * forSession `includeContextSources`: relevance-ranked distillation + temporal
@@ -307,5 +308,32 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     expect(byId.has(`t:${tempId}`)).toBe(false);
     // Above-floor knowledge (0.6, from beforeEach) is unaffected.
     expect(byId.has(knowledgeId)).toBe(true);
+  });
+
+  test("minRelevance = 0 still excludes an exactly-orthogonal (cosine 0) context source", async () => {
+    // Consistency with the knowledge path's `vecScore > 0` clause (Seer #1318):
+    // when the floor is disabled, a cosine-0 (orthogonal) or negative hit must
+    // still be excluded from the context-source fold — `h.similarity < 0` alone
+    // would admit it. Guards the `<= 0` clause on both source guards.
+    const orig = config().knowledge.minRelevance;
+    config().knowledge.minRelevance = 0;
+    try {
+      vi.spyOn(embedding, "vectorSearchDistillations").mockResolvedValue([
+        { id: distId, similarity: 0 },
+      ]);
+      vi.spyOn(embedding, "vectorSearchTemporal").mockResolvedValue([
+        { id: `${tempId}#0`, similarity: 0 },
+      ]);
+      const result = await ltm.forSession(PROJ, undefined, 4000, {
+        excludeCategories: ["preference"],
+        contextHint: HINT,
+        includeContextSources: ["distillation", "temporal"],
+      });
+      const byId = new Set(result.map((e) => e.id));
+      expect(byId.has(`d:${distId}`)).toBe(false);
+      expect(byId.has(`t:${tempId}`)).toBe(false);
+    } finally {
+      config().knowledge.minRelevance = orig;
+    }
   });
 });

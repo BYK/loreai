@@ -2763,7 +2763,11 @@ async function loadContextSourceCandidates(
         let added = 0;
         for (const h of hits) {
           if (added >= limit) break;
-          if (h.similarity < minRelevance) continue;
+          // Match the knowledge path's floor semantics: a context source must
+          // be a POSITIVE cosine at or above the floor. The `<= 0` clause keeps
+          // an exactly-orthogonal (or negative) hit out even when minRelevance
+          // is 0, so context sources and knowledge behave identically.
+          if (h.similarity <= 0 || h.similarity < minRelevance) continue;
           const r = byId.get(h.id);
           if (!r?.observations) continue;
           out.push({
@@ -2807,7 +2811,9 @@ async function loadContextSourceCandidates(
         const byId = new Map(rows.map((r) => [r.id, r]));
         const seen = new Set<string>();
         for (const h of hits) {
-          if (h.similarity < minRelevance) continue;
+          // Match the knowledge path's floor semantics (positive cosine at or
+          // above the floor); see the distillation source above.
+          if (h.similarity <= 0 || h.similarity < minRelevance) continue;
           const mid = h.id.split("#")[0];
           if (seen.has(mid)) continue;
           seen.add(mid);
