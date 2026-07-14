@@ -6814,6 +6814,7 @@ async function handleConversationTurn(
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
       `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
+      `subagent=${!!sessionState.isSubagent} ` +
       `source=${pathResult.source} ` +
       `hdrProject=${req.rawHeaders["x-lore-project"] ? "present" : "absent"} ` +
       `provisional=${sessionState.projectPathProvisional === true} ` +
@@ -7078,6 +7079,16 @@ async function handleConversationTurn(
         cfg.budget.preferenceLtm,
         sessionID ?? undefined,
         ltmBudgetOpts,
+      );
+      // Surface the resolved LTM budget so a "knowledge is crowding my
+      // sub-agent" report is a one-grep diagnosis (LORE_DEBUG=1) instead of an
+      // inference from window sizes: sub-agents are capped tighter
+      // (SUBAGENT_MAX_LTM_BUDGET_FRACTION) so a small ctxBound here is expected
+      // and NOT the crowding cause — see the Onur sub-agent triage, Jul 2026.
+      log.info(
+        `ltm-budget: session=${sessionID?.slice(0, 16) ?? "none"} ` +
+          `subagent=${!!sessionState.isSubagent} ` +
+          `ctxBound=${ltmBudget} pref=${prefBudget} fraction=${ltmFraction}`,
       );
       const isFirstTurn =
         sessionID != null && !temporal.hasMessages(projectPath, sessionID);
