@@ -75,6 +75,8 @@ describe("/ui/costs renders the worker breakdown end-to-end", () => {
       conversationCost: 1.0,
       workerCost: 0.75,
       conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0,

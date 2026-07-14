@@ -238,6 +238,8 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
       conversationCost: 1.0,
       workerCost: 0.5, // includes the warmup cost bucket
       conversationTurns: 4,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 1000,
       cacheWriteTokens: 500,
       warmupSavings: 0.2,
@@ -266,6 +268,8 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
       conversationCost: 1.0,
       workerCost: 0.9,
       conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0,

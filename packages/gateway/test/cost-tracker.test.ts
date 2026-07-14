@@ -1,5 +1,9 @@
 import { describe, test, expect } from "vitest";
-import { computeCallCost } from "../src/cost-tracker";
+import {
+  computeCallCost,
+  recordConversationCost,
+  getSessionCosts,
+} from "../src/cost-tracker";
 
 // Use a fake model name to guarantee we hit getPricingSync defaults:
 //   input: 3 $/MTok, output: 15 $/MTok,
@@ -78,5 +82,29 @@ describe("computeCallCost", () => {
     expect(cost.cacheReadCost).toBe(0);
     expect(cost.cacheWriteCost).toBe(0);
     expect(cost.outputCost).toBe(0);
+  });
+});
+
+describe("recordConversationCost token accumulation", () => {
+  // The raw input/output token buckets accumulated here are what
+  // persistSessionCosts flushes to session_state (migration v73), enabling
+  // offline cost re-derivation after a future accounting bug.
+  test("accumulates input and output tokens across turns", () => {
+    const sid = `test-io-accum-${crypto.randomUUID()}`;
+    recordConversationCost(sid, MODEL, {
+      input_tokens: 100,
+      output_tokens: 20,
+      cache_read_input_tokens: 30,
+      cache_creation_input_tokens: 10,
+    });
+    recordConversationCost(sid, MODEL, {
+      input_tokens: 200,
+      output_tokens: 40,
+    });
+    const costs = getSessionCosts(sid);
+    expect(costs?.conversation.inputTokens).toBe(300);
+    expect(costs?.conversation.outputTokens).toBe(60);
+    expect(costs?.conversation.cacheReadTokens).toBe(30);
+    expect(costs?.conversation.cacheWriteTokens).toBe(10);
   });
 });

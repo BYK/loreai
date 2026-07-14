@@ -128,6 +128,8 @@ function persistSessionCosts(sessionID: string): void {
       conversationCost: costs.conversation.cost,
       workerCost: totalWorkerCost(costs),
       conversationTurns: costs.conversation.turns,
+      inputTokens: costs.conversation.inputTokens,
+      outputTokens: costs.conversation.outputTokens,
       cacheReadTokens: costs.conversation.cacheReadTokens,
       cacheWriteTokens: costs.conversation.cacheWriteTokens,
       warmupSavings: costs.counterfactual.warmupSavings,

@@ -119,7 +119,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(72);
+    expect(row.version).toBe(73);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -176,7 +176,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(72);
+    expect(ver.version).toBe(73);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -1027,6 +1027,8 @@ describe("db", () => {
       conversationCost: 1.23,
       workerCost: 0.45,
       conversationTurns: 10,
+      inputTokens: 120000,
+      outputTokens: 8000,
       cacheReadTokens: 50000,
       cacheWriteTokens: 5000,
       warmupSavings: 0.12,
@@ -1043,6 +1045,48 @@ describe("db", () => {
     expect(loaded).toEqual(snapshot);
   });
 
+  test("saveSessionCosts round-trips input/output token buckets", () => {
+    const sid = `test-costs-io-${crypto.randomUUID()}`;
+    saveSessionCosts(sid, {
+      conversationCost: 1.0,
+      workerCost: 0,
+      conversationTurns: 3,
+      inputTokens: 123456,
+      outputTokens: 7890,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 200,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+    });
+    // Survives both the single-session and bulk load paths.
+    expect(loadSessionCosts(sid)?.inputTokens).toBe(123456);
+    expect(loadSessionCosts(sid)?.outputTokens).toBe(7890);
+    const all = loadAllSessionCosts().get(sid);
+    expect(all?.inputTokens).toBe(123456);
+    expect(all?.outputTokens).toBe(7890);
+  });
+
+  test("input/output tokens default to 0 for rows written without them", () => {
+    // Simulate a legacy row: insert directly without the token columns, relying
+    // on the NOT NULL DEFAULT 0 from the migration.
+    const sid = `test-costs-legacy-io-${crypto.randomUUID()}`;
+    db()
+      .query(
+        `INSERT INTO session_state (session_id, force_min_layer, updated_at, conversation_turns)
+         VALUES (?, 0, ?, 1)`,
+      )
+      .run(sid, Date.now());
+    const loaded = loadSessionCosts(sid);
+    expect(loaded?.inputTokens).toBe(0);
+    expect(loaded?.outputTokens).toBe(0);
+  });
+
   test("saveSessionCosts round-trips the per-bucket worker breakdown", () => {
     const sid = `test-costs-breakdown-${crypto.randomUUID()}`;
     const workerBreakdown = {
@@ -1056,6 +1100,8 @@ describe("db", () => {
       conversationCost: 2.0,
       workerCost: 0.9,
       conversationTurns: 12,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 1000,
       cacheWriteTokens: 100,
       warmupSavings: 0,
@@ -1081,6 +1127,8 @@ describe("db", () => {
       conversationCost: 1.0,
       workerCost: 0.2,
       conversationTurns: 3,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0,
@@ -1102,6 +1150,8 @@ describe("db", () => {
       conversationCost: 1.0,
       workerCost: 0,
       conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0,
@@ -1117,6 +1167,8 @@ describe("db", () => {
       conversationCost: 2.0,
       workerCost: 0.5,
       conversationTurns: 15,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 100000,
       cacheWriteTokens: 10000,
       warmupSavings: 0.5,
@@ -1143,6 +1195,8 @@ describe("db", () => {
       conversationCost: 1.0,
       workerCost: 0,
       conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0,
@@ -1200,6 +1254,8 @@ describe("db", () => {
       conversationCost: 1.0,
       workerCost: 0,
       conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       warmupSavings: 0.1,
@@ -1640,6 +1696,8 @@ describe("db", () => {
       conversationCost: 0.05,
       workerCost: 0.01,
       conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
       cacheReadTokens: 1000,
       cacheWriteTokens: 2000,
       warmupSavings: 0.02,

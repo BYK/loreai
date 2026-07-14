@@ -1843,6 +1843,17 @@ const MIGRATIONS: string[] = [
   `
    ALTER TABLE sync_state ADD COLUMN scope_id TEXT;
    `,
+  // Version 73: session_state.input_tokens / output_tokens — cumulative raw
+  // conversation token buckets. Previously only cache_read_tokens/cache_write_tokens
+  // were persisted; input/output were accumulated in memory but dropped on flush.
+  // Persisting them makes cost re-derivation possible after a future accounting
+  // bug (e.g. the OpenAI/OpenRouter inclusive→disjoint fix in #1322): given
+  // stored input + cache buckets, a corrected cost can be recomputed offline.
+  // LOCAL-ONLY telemetry — session_state is not synced.
+  `
+   ALTER TABLE session_state ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE session_state ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+   `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4252,6 +4263,8 @@ export type SessionCostSnapshot = {
   conversationCost: number;
   workerCost: number;
   conversationTurns: number;
+  inputTokens: number;
+  outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
   warmupSavings: number;
@@ -4283,14 +4296,17 @@ export function saveSessionCosts(
     .query(
       `INSERT INTO session_state (session_id, force_min_layer, updated_at,
          conversation_cost, worker_cost, conversation_turns,
+         input_tokens, output_tokens,
          cache_read_tokens, cache_write_tokens,
          warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
          avoided_compactions, avoided_compaction_cost, worker_breakdown)
-       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          conversation_cost = excluded.conversation_cost,
          worker_cost = excluded.worker_cost,
          conversation_turns = excluded.conversation_turns,
+         input_tokens = excluded.input_tokens,
+         output_tokens = excluded.output_tokens,
          cache_read_tokens = excluded.cache_read_tokens,
          cache_write_tokens = excluded.cache_write_tokens,
          warmup_savings = excluded.warmup_savings,
@@ -4311,6 +4327,8 @@ export function saveSessionCosts(
       costs.conversationCost,
       costs.workerCost,
       costs.conversationTurns,
+      costs.inputTokens,
+      costs.outputTokens,
       costs.cacheReadTokens,
       costs.cacheWriteTokens,
       costs.warmupSavings,
@@ -4351,6 +4369,7 @@ export function loadSessionCosts(
   const row = db()
     .query(
       `SELECT conversation_cost, worker_cost, conversation_turns,
+              input_tokens, output_tokens,
               cache_read_tokens, cache_write_tokens,
               warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
               avoided_compactions, avoided_compaction_cost, worker_breakdown
@@ -4360,6 +4379,8 @@ export function loadSessionCosts(
     conversation_cost: number;
     worker_cost: number;
     conversation_turns: number;
+    input_tokens: number;
+    output_tokens: number;
     cache_read_tokens: number;
     cache_write_tokens: number;
     warmup_savings: number;
@@ -4377,6 +4398,8 @@ export function loadSessionCosts(
     conversationCost: row.conversation_cost,
     workerCost: row.worker_cost,
     conversationTurns: row.conversation_turns,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
     cacheReadTokens: row.cache_read_tokens,
     cacheWriteTokens: row.cache_write_tokens,
     warmupSavings: row.warmup_savings,
@@ -4399,6 +4422,7 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
   const rows = db()
     .query(
       `SELECT session_id, conversation_cost, worker_cost, conversation_turns,
+              input_tokens, output_tokens,
               cache_read_tokens, cache_write_tokens,
               warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
               avoided_compactions, avoided_compaction_cost, worker_breakdown
@@ -4410,6 +4434,8 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     conversation_cost: number;
     worker_cost: number;
     conversation_turns: number;
+    input_tokens: number;
+    output_tokens: number;
     cache_read_tokens: number;
     cache_write_tokens: number;
     warmup_savings: number;
@@ -4428,6 +4454,8 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       conversationCost: row.conversation_cost,
       workerCost: row.worker_cost,
       conversationTurns: row.conversation_turns,
+      inputTokens: row.input_tokens,
+      outputTokens: row.output_tokens,
       cacheReadTokens: row.cache_read_tokens,
       cacheWriteTokens: row.cache_write_tokens,
       warmupSavings: row.warmup_savings,
