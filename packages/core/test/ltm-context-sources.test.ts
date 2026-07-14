@@ -284,4 +284,28 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
       overflowSink.every((e) => e.category !== ltm.RECALLED_CONTEXT_CATEGORY),
     ).toBe(true);
   });
+
+  test("relevance floor: a below-floor distillation/temporal hit is NOT folded in", async () => {
+    // Seer #1318 coverage gap: the context-source floor guards
+    // (`h.similarity < minRelevance` in the distillation + temporal folds) had
+    // zero test coverage — a regression there would pass CI. Drive both hits
+    // BELOW the default floor (0.35) and assert neither synthetic surfaces,
+    // while knowledge (above floor) still does.
+    vi.spyOn(embedding, "vectorSearchDistillations").mockResolvedValue([
+      { id: distId, similarity: 0.1 },
+    ]);
+    vi.spyOn(embedding, "vectorSearchTemporal").mockResolvedValue([
+      { id: `${tempId}#0`, similarity: 0.1 },
+    ]);
+    const result = await ltm.forSession(PROJ, undefined, 4000, {
+      excludeCategories: ["preference"],
+      contextHint: HINT,
+      includeContextSources: ["distillation", "temporal"],
+    });
+    const byId = new Set(result.map((e) => e.id));
+    expect(byId.has(`d:${distId}`)).toBe(false);
+    expect(byId.has(`t:${tempId}`)).toBe(false);
+    // Above-floor knowledge (0.6, from beforeEach) is unaffected.
+    expect(byId.has(knowledgeId)).toBe(true);
+  });
 });

@@ -1660,6 +1660,39 @@ describe("ltm.forSession — relevance floor", () => {
     expect(got.has(ids[0])).toBe(true);
     expect(got.has(ids[1])).toBe(false);
   });
+
+  test("applies the floor to the CROSS-PROJECT pool (below-floor cross entry dropped)", async () => {
+    // A cross-project entry lives in a DIFFERENT project so it enters the cross
+    // pool for this session. With only a below-floor vector score and no FTS
+    // hit, it must NOT surface. Guards the cross-pool isRelevant branch (Seer
+    // #1318 coverage gap: the base floor tests seed only crossProject:false).
+    config().knowledge.minRelevance = 0.35;
+    const crossId = ltm.create({
+      projectPath: "/test/ltm/relevance-floor-OTHER",
+      category: "pattern",
+      title: "Cross off-task",
+      content: "mainframe cobol batch job control language",
+      scope: "project",
+      crossProject: true,
+    });
+    // Above-floor local entry (so there IS a match set) + below-floor cross.
+    scores = new Map([
+      [ids[0], 0.6],
+      [crossId, 0.1],
+    ]);
+    const got = new Set(
+      (await ltm.forSession(PROJ, SESSION, WIDE)).map((e) => e.id),
+    );
+    expect(got.has(ids[0])).toBe(true);
+    expect(got.has(crossId)).toBe(false);
+    // Above the floor, the same cross entry DOES surface.
+    scores.set(crossId, 0.6);
+    const got2 = new Set(
+      (await ltm.forSession(PROJ, SESSION, WIDE)).map((e) => e.id),
+    );
+    expect(got2.has(crossId)).toBe(true);
+    db().query("DELETE FROM knowledge WHERE logical_id = ?").run(crossId);
+  });
 });
 
 // ---------------------------------------------------------------------------
