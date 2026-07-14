@@ -761,6 +761,9 @@ function buildOpenAIMessages(
   // single text block before annotating it.
   //
   // Walk back to the most recent message we can annotate, skipping:
+  //   - `role: "system"` messages — the system prefix owns its own breakpoint
+  //     (via `systemTTL`); the conversation breakpoint must never overwrite it,
+  //     which would clobber a distinct system TTL;
   //   - `role: "tool"` messages — the OpenAI Chat Completions API requires tool
   //     messages to carry STRING content, so we can't attach a block-level
   //     breakpoint there; and
@@ -770,7 +773,7 @@ function buildOpenAIMessages(
   // breakpoint), so no cache coverage is lost.
   if (cache?.cacheConversation && result.length > 0) {
     const isAnnotatable = (m: Record<string, unknown>): boolean => {
-      if (m.role === "tool") return false;
+      if (m.role === "system" || m.role === "tool") return false;
       return (
         (typeof m.content === "string" && m.content.length > 0) ||
         (Array.isArray(m.content) && m.content.length > 0)

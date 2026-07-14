@@ -230,6 +230,45 @@ describe("buildOpenAIUpstreamRequest — conversation caching", () => {
     const toolMsg = msgs.find((m) => m.role === "tool");
     expect(typeof toolMsg?.content).toBe("string");
   });
+
+  test("never overwrites the system breakpoint when no message is annotatable", () => {
+    // All post-system messages are non-annotatable (tool_calls-only assistant +
+    // tool result), so the walk-back would otherwise reach the system message.
+    // The system keeps its own (1h) breakpoint; the conversation (5m) one is
+    // simply not placed rather than clobbering the system TTL.
+    const req = makeRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "recall", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              toolUseId: "t1",
+              content: [{ type: "text", text: "result" }],
+            },
+          ],
+        },
+      ],
+    });
+    const msgs = messagesOf(
+      getBody(req, {
+        systemTTL: "1h",
+        cacheConversation: true,
+        conversationTTL: "5m",
+      }),
+    );
+    const sys = msgs.find((m) => m.role === "system");
+    const sysBlock = (sys?.content as Array<Record<string, unknown>>)?.[0];
+    // system breakpoint intact at 1h — NOT downgraded to the 5m conversation TTL
+    expect(sysBlock.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // exactly one breakpoint total (the system one)
+    const count = (JSON.stringify(msgs).match(/"cache_control"/g) ?? []).length;
+    expect(count).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
