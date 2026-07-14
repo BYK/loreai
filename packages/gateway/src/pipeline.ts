@@ -4432,7 +4432,7 @@ async function accumulateNonStreamResponse(
 // Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON
 const accumulateAnthropicNonStreamJSON = parseAnthropicResponseJSON;
 
-function accumulateOpenAINonStreamJSON(
+export function accumulateOpenAINonStreamJSON(
   json: Record<string, unknown>,
 ): GatewayResponse {
   const content: GatewayContentBlock[] = [];
@@ -4490,6 +4490,12 @@ function accumulateOpenAINonStreamJSON(
       inputTokens: (usage?.prompt_tokens as number) ?? 0,
       outputTokens: (usage?.completion_tokens as number) ?? 0,
       cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+      // OpenRouter reports cache-write tokens (Anthropic explicit caching) in
+      // prompt_tokens_details.cache_write_tokens. OpenAI proper doesn't report
+      // writes separately (leaves it undefined) — see the OpenRouter usage
+      // accounting docs. Left undefined when absent so it never masquerades
+      // as a real zero-write in analytics/cost tracking.
+      cacheCreationInputTokens: promptTokensDetails?.cache_write_tokens,
     },
   };
 }
@@ -4541,9 +4547,11 @@ export function accumulateResponsesNonStreamJSON(
   }
 
   const usage = json.usage as Record<string, unknown> | undefined;
-  const promptTokensDetails = usage?.prompt_tokens_details as
-    | Record<string, number>
-    | undefined;
+  // Responses API reports cache details under `input_tokens_details`; fall back
+  // to `prompt_tokens_details` (Chat Completions shape) for resilience across
+  // OpenAI-compatible providers.
+  const inputTokensDetails = (usage?.input_tokens_details ??
+    usage?.prompt_tokens_details) as Record<string, number> | undefined;
 
   return {
     id: asString(json.id),
@@ -4553,7 +4561,8 @@ export function accumulateResponsesNonStreamJSON(
     usage: {
       inputTokens: (usage?.input_tokens as number) ?? 0,
       outputTokens: (usage?.output_tokens as number) ?? 0,
-      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+      cacheReadInputTokens: inputTokensDetails?.cached_tokens,
+      cacheCreationInputTokens: inputTokensDetails?.cache_write_tokens,
     },
   };
 }

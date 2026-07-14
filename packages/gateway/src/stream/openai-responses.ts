@@ -177,11 +177,17 @@ export async function accumulateResponsesSSEStream(
             if (typeof respUsage.output_tokens === "number") {
               usage.outputTokens = respUsage.output_tokens;
             }
-            const promptDetails = respUsage.prompt_tokens_details as
+            // Responses API reports cache details under `input_tokens_details`;
+            // fall back to `prompt_tokens_details` for OpenAI-compatible providers.
+            const promptDetails = (respUsage.input_tokens_details ??
+              respUsage.prompt_tokens_details) as
               | Record<string, number>
               | undefined;
             if (promptDetails?.cached_tokens !== undefined) {
               usage.cacheReadInputTokens = promptDetails.cached_tokens;
+            }
+            if (promptDetails?.cache_write_tokens !== undefined) {
+              usage.cacheCreationInputTokens = promptDetails.cache_write_tokens;
             }
           }
         }

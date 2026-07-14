@@ -376,6 +376,7 @@ export async function accumulateOpenAISSEStream(
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens: number | undefined;
+  let cacheWriteTokens: number | undefined;
 
   if (!upstreamResponse.body) {
     throw new Error("Upstream response has no body");
@@ -445,6 +446,8 @@ export async function accumulateOpenAISSEStream(
         | undefined;
       if (details?.cached_tokens !== undefined)
         cachedTokens = details.cached_tokens;
+      if (details?.cache_write_tokens !== undefined)
+        cacheWriteTokens = details.cache_write_tokens;
     }
   }
 
@@ -475,6 +478,7 @@ export async function accumulateOpenAISSEStream(
       inputTokens,
       outputTokens,
       cacheReadInputTokens: cachedTokens,
+      cacheCreationInputTokens: cacheWriteTokens,
     },
   };
 }

@@ -458,7 +458,10 @@ type OpenAIChatResponse = {
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+    };
   };
 };
 
@@ -466,10 +469,13 @@ type OpenAIChatResponse = {
  * Normalize OpenAI usage to the AnthropicUsage shape for unified cost tracking.
  *
  * Maps:
- *   prompt_tokens                          → input_tokens
- *   completion_tokens                      → output_tokens
- *   prompt_tokens_details.cached_tokens    → cache_read_input_tokens
- *   (not reported by OpenAI)               → cache_creation_input_tokens = 0
+ *   prompt_tokens                              → input_tokens
+ *   completion_tokens                          → output_tokens
+ *   prompt_tokens_details.cached_tokens        → cache_read_input_tokens
+ *   prompt_tokens_details.cache_write_tokens   → cache_creation_input_tokens
+ *
+ * OpenAI proper doesn't report cache writes (field absent → 0); OpenRouter does
+ * report them for Anthropic explicit caching.
  */
 export function normalizeOpenAIUsage(
   usage: OpenAIChatResponse["usage"],
@@ -478,7 +484,8 @@ export function normalizeOpenAIUsage(
     input_tokens: usage?.prompt_tokens ?? 0,
     output_tokens: usage?.completion_tokens ?? 0,
     cache_read_input_tokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
-    cache_creation_input_tokens: 0, // OpenAI doesn't report this separately
+    cache_creation_input_tokens:
+      usage?.prompt_tokens_details?.cache_write_tokens ?? 0,
   };
 }
 

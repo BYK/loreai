@@ -469,7 +469,10 @@ async function downloadOpenAIResults(
             usage?: {
               prompt_tokens?: number;
               completion_tokens?: number;
-              prompt_tokens_details?: { cached_tokens?: number };
+              prompt_tokens_details?: {
+                cached_tokens?: number;
+                cache_write_tokens?: number;
+              };
             };
             error?: { message?: string; type?: string; code?: string | null };
           };
