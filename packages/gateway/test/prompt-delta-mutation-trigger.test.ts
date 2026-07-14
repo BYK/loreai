@@ -17,14 +17,14 @@ import { ltm, listSessionPromptDeltas } from "@loreai/core";
 import {
   appendKnowledgePromptDelta,
   detectSurfacedMutations,
-  fnv1a,
   ltmEntryKeys,
+  surfaceSignature,
 } from "../src/pipeline";
 
 const PROJECT = "/tmp/lore-delta-mutation-trigger";
 
 function keyOf(id: string, title: string, content: string): string {
-  return `${id}:${fnv1a(`${title}\x1f${content}`)}`;
+  return `${id}:${surfaceSignature(title, content)}`;
 }
 
 /** Parse the persisted delta row's rendered text (the GatewayMessage content). */
@@ -364,5 +364,58 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
       changed: [],
       removedIds: [],
     });
+  });
+});
+
+// Materiality gate: a delta fires only on a MATERIAL change. A trivial reword
+// (whitespace / punctuation / capitalization only) produces the SAME surface
+// signature, so detectSurfacedMutations reports no change and no delta block is
+// appended — keeping the mid-session delta channel quiet on cosmetic curator
+// edits. A substantive content edit, a title change, or a category change all
+// change the signature and DO fire.
+describe("detectSurfacedMutations — materiality gate", () => {
+  const P = "/tmp/lore-delta-materiality";
+
+  it("trivial reword (whitespace/punctuation/case only) → NOT material, no change", () => {
+    const id = ltm.create({
+      projectPath: P,
+      scope: "project",
+      category: "gotcha",
+      title: "Prefer tabs",
+      content: "Always use tabs, not spaces.",
+    });
+    const surfaced = [keyOf(id, "Prefer tabs", "Always use tabs, not spaces.")];
+    // Curator rewrites with only cosmetic differences.
+    ltm.update(id, { content: "always   use tabs not spaces" });
+    expect(detectSurfacedMutations(surfaced).changed).toEqual([]);
+  });
+
+  it("substantive content edit → material, reported as changed", () => {
+    const id = ltm.create({
+      projectPath: P,
+      scope: "project",
+      category: "gotcha",
+      title: "Prefer tabs 2",
+      content: "Always use tabs, not spaces.",
+    });
+    const surfaced = [
+      keyOf(id, "Prefer tabs 2", "Always use tabs, not spaces."),
+    ];
+    ltm.update(id, { content: "Always use spaces, never tabs." });
+    expect(detectSurfacedMutations(surfaced).changed).toHaveLength(1);
+  });
+
+  it("surfaceSignature normalizes whitespace, punctuation, and case", () => {
+    expect(surfaceSignature("T", "Always use tabs, not spaces.")).toBe(
+      surfaceSignature("T", "always   use tabs  not  spaces"),
+    );
+    // A genuine word change must differ.
+    expect(surfaceSignature("T", "use tabs")).not.toBe(
+      surfaceSignature("T", "use spaces"),
+    );
+    // Title participates in the signature.
+    expect(surfaceSignature("Title A", "body")).not.toBe(
+      surfaceSignature("Title B", "body"),
+    );
   });
 });
