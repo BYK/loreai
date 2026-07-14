@@ -1167,8 +1167,8 @@ describe("db", () => {
       conversationCost: 2.0,
       workerCost: 0.5,
       conversationTurns: 15,
-      inputTokens: 0,
-      outputTokens: 0,
+      inputTokens: 987654,
+      outputTokens: 54321,
       cacheReadTokens: 100000,
       cacheWriteTokens: 10000,
       warmupSavings: 0.5,
@@ -1186,6 +1186,12 @@ describe("db", () => {
     expect(loaded?.warmupSavings).toBe(0.5);
     expect(loaded?.avoidedCompactions).toBe(3);
     expect(loaded?.avoidedCompactionCost).toBe(1.5);
+    // Exercise the ON CONFLICT DO UPDATE path for the token columns: the
+    // second (updating) save must overwrite, not silently drop, these buckets.
+    expect(loaded?.inputTokens).toBe(987654);
+    expect(loaded?.outputTokens).toBe(54321);
+    expect(loaded?.cacheReadTokens).toBe(100000);
+    expect(loaded?.cacheWriteTokens).toBe(10000);
   });
 
   test("saveSessionCosts preserves existing forceMinLayer", () => {
