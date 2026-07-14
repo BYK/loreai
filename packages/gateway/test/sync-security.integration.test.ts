@@ -2198,3 +2198,105 @@ describe.skipIf(gate())(
     });
   },
 );
+
+describe.skipIf(gate())(
+  "sync migrations — definer function EXECUTE lockdown (advisor 0039)",
+  () => {
+    // 0039 revokes the default PUBLIC/anon EXECUTE grant on every SECURITY
+    // DEFINER function so PostgREST no longer exposes them to unauthenticated
+    // (or, for triggers, any) clients via /rpc. `authenticated` KEEPS EXECUTE on
+    // the five client RPCs (the CLI calls them) and on the RLS helpers (a policy
+    // expression runs AS the querying role, so it needs helper EXECUTE), and
+    // LOSES it on the trigger/internal functions.
+    const CLIENT_RPCS = [
+      "create_team",
+      "add_scope_member",
+      "remove_scope_member",
+      "set_scope_role",
+      "rotate_scope_key",
+    ];
+    const RLS_HELPERS = [
+      "is_member",
+      "is_org_member",
+      "scope_role",
+      "org_role",
+      "shares_scope",
+      "current_tier",
+      "effective_tier",
+    ];
+    const TRIGGERS = [
+      "enforce_row_quota",
+      "guard_org_tier",
+      "guard_profile_tier",
+      "handle_new_user",
+      "maintain_usage",
+      "on_auth_user_provision_scope",
+      "provision_personal_scope",
+    ];
+
+    // grantees holding EXECUTE on a given public function name. Read from
+    // pg_proc.proacl via aclexplode (information_schema.routine_privileges is
+    // role-filtered and unreliable here); PUBLIC surfaces as a NULL grantee oid.
+    async function execGrantees(fn: string): Promise<Set<string>> {
+      const rows = await h.asService((c) =>
+        c
+          .query(
+            `select coalesce(r.rolname, 'PUBLIC') as grantee
+               from pg_proc p
+               join pg_namespace n on n.oid = p.pronamespace
+               cross join lateral
+                 aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+               left join pg_roles r on r.oid = a.grantee
+              where n.nspname = 'public'
+                and p.proname = $1
+                and a.privilege_type = 'EXECUTE'`,
+            [fn],
+          )
+          .then((r) => r.rows as Array<{ grantee: string }>),
+      );
+      return new Set(rows.map((r) => r.grantee));
+    }
+
+    it("PUBLIC and anon hold no EXECUTE on any locked-down definer function", async () => {
+      for (const fn of [...CLIENT_RPCS, ...RLS_HELPERS, ...TRIGGERS]) {
+        const g = await execGrantees(fn);
+        expect(g.has("PUBLIC"), `${fn}: PUBLIC must not EXECUTE`).toBe(false);
+        expect(g.has("anon"), `${fn}: anon must not EXECUTE`).toBe(false);
+      }
+    });
+
+    it("authenticated keeps EXECUTE on client RPCs and RLS helpers", async () => {
+      for (const fn of [...CLIENT_RPCS, ...RLS_HELPERS]) {
+        const g = await execGrantees(fn);
+        expect(
+          g.has("authenticated"),
+          `${fn}: authenticated must EXECUTE`,
+        ).toBe(true);
+      }
+    });
+
+    it("trigger/internal functions are executable only by postgres/service_role", async () => {
+      // Load-bearing form: the triggers' pre-0039 grantees were {PUBLIC, postgres},
+      // so authenticated only ever reached them THROUGH PUBLIC. Asserting merely
+      // that `authenticated` is absent would be vacuous (it never held a direct
+      // grant). Instead assert PUBLIC and anon are gone and the survivors are a
+      // subset of the admin roles — this actually guards the step-1 PUBLIC revoke.
+      const ADMIN = new Set(["postgres", "service_role"]);
+      for (const fn of TRIGGERS) {
+        const g = await execGrantees(fn);
+        expect(g.has("PUBLIC"), `${fn}: PUBLIC must not EXECUTE`).toBe(false);
+        expect(g.has("anon"), `${fn}: anon must not EXECUTE`).toBe(false);
+        expect(
+          g.has("authenticated"),
+          `${fn}: authenticated must not EXECUTE`,
+        ).toBe(false);
+        for (const grantee of g) {
+          expect(
+            ADMIN.has(grantee),
+            `${fn}: unexpected EXECUTE grantee ${grantee}`,
+          ).toBe(true);
+        }
+      }
+    });
+  },
+);
