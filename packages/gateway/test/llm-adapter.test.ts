@@ -163,7 +163,9 @@ describe("normalizeOpenAIUsage", () => {
     });
 
     expect(result).toEqual({
-      input_tokens: 100,
+      // prompt_tokens (100) is inclusive of cached_tokens (30); the disjoint
+      // convention subtracts it → input_tokens = 70.
+      input_tokens: 70,
       output_tokens: 50,
       cache_read_input_tokens: 30,
       cache_creation_input_tokens: 0,

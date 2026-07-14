@@ -200,7 +200,10 @@ import {
   resolveToolResults,
   deterministicID,
 } from "./temporal-adapter";
-import { createGatewayLLMClient } from "./llm-adapter";
+import {
+  createGatewayLLMClient,
+  disjointOpenAIInputTokens,
+} from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
 import {
   runBackground,
@@ -4487,7 +4490,13 @@ export function accumulateOpenAINonStreamJSON(
     content,
     stopReason,
     usage: {
-      inputTokens: (usage?.prompt_tokens as number) ?? 0,
+      // prompt_tokens is inclusive of cache reads/writes; convert to the
+      // gateway's disjoint convention so cache tokens aren't double-counted.
+      inputTokens: disjointOpenAIInputTokens(
+        usage?.prompt_tokens as number | undefined,
+        promptTokensDetails?.cached_tokens,
+        promptTokensDetails?.cache_write_tokens,
+      ),
       outputTokens: (usage?.completion_tokens as number) ?? 0,
       cacheReadInputTokens: promptTokensDetails?.cached_tokens,
       // OpenRouter reports cache-write tokens (Anthropic explicit caching) in
@@ -4559,7 +4568,11 @@ export function accumulateResponsesNonStreamJSON(
     content,
     stopReason,
     usage: {
-      inputTokens: (usage?.input_tokens as number) ?? 0,
+      inputTokens: disjointOpenAIInputTokens(
+        usage?.input_tokens as number | undefined,
+        inputTokensDetails?.cached_tokens,
+        inputTokensDetails?.cache_write_tokens,
+      ),
       outputTokens: (usage?.output_tokens as number) ?? 0,
       cacheReadInputTokens: inputTokensDetails?.cached_tokens,
       cacheCreationInputTokens: inputTokensDetails?.cache_write_tokens,

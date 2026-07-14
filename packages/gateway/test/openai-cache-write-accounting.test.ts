@@ -20,7 +20,10 @@ import {
 } from "../src/pipeline";
 import { accumulateOpenAISSEStream } from "../src/stream/openai";
 import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
-import { normalizeOpenAIUsage } from "../src/llm-adapter";
+import {
+  normalizeOpenAIUsage,
+  disjointOpenAIInputTokens,
+} from "../src/llm-adapter";
 
 /** One SSE event per entry; blank-line delimited per the spec. */
 function sse(lines: string[]): Response {
@@ -58,6 +61,9 @@ describe("non-stream Chat Completions cache-write accounting", () => {
     });
     expect(resp.usage?.cacheReadInputTokens).toBe(50);
     expect(resp.usage?.cacheCreationInputTokens).toBe(100);
+    // prompt_tokens (200) is inclusive of cache read (50) + write (100);
+    // disjoint input = 200 − 50 − 100 = 50.
+    expect(resp.usage?.inputTokens).toBe(50);
   });
 
   test("leaves cacheCreationInputTokens undefined when the field is absent", () => {
@@ -101,6 +107,8 @@ describe("non-stream Responses API cache-write accounting", () => {
     });
     expect(resp.usage?.cacheReadInputTokens).toBe(20);
     expect(resp.usage?.cacheCreationInputTokens).toBe(250);
+    // input_tokens (300) inclusive of read (20) + write (250) → 300−20−250 = 30.
+    expect(resp.usage?.inputTokens).toBe(30);
   });
 
   test("falls back to prompt_tokens_details for OpenAI-compatible providers", () => {
@@ -117,6 +125,8 @@ describe("non-stream Responses API cache-write accounting", () => {
     });
     expect(resp.usage?.cacheReadInputTokens).toBe(10);
     expect(resp.usage?.cacheCreationInputTokens).toBe(90);
+    // input_tokens (100) inclusive of read (10) + write (90) → 100−10−90 = 0.
+    expect(resp.usage?.inputTokens).toBe(0);
   });
 });
 
@@ -136,6 +146,8 @@ describe("stream Chat Completions cache-write accounting", () => {
     );
     expect(resp.usage?.cacheReadInputTokens).toBe(50);
     expect(resp.usage?.cacheCreationInputTokens).toBe(100);
+    // prompt_tokens (200) inclusive of read (50) + write (100) → 200−50−100 = 50.
+    expect(resp.usage?.inputTokens).toBe(50);
   });
 
   test("leaves cacheCreationInputTokens undefined when absent", async () => {
@@ -183,6 +195,8 @@ describe("stream Responses API cache-write accounting", () => {
     );
     expect(resp.usage?.cacheReadInputTokens).toBe(20);
     expect(resp.usage?.cacheCreationInputTokens).toBe(250);
+    // input_tokens (300) inclusive of read (20) + write (250) → 300−20−250 = 30.
+    expect(resp.usage?.inputTokens).toBe(30);
   });
 });
 
@@ -199,6 +213,8 @@ describe("normalizeOpenAIUsage cache-write accounting", () => {
     });
     expect(result.cache_read_input_tokens).toBe(50);
     expect(result.cache_creation_input_tokens).toBe(100);
+    // prompt_tokens (200) inclusive of read (50) + write (100) → disjoint 50.
+    expect(result.input_tokens).toBe(50);
   });
 
   test("defaults cache_creation_input_tokens to 0 when absent (OpenAI proper)", () => {
@@ -208,5 +224,31 @@ describe("normalizeOpenAIUsage cache-write accounting", () => {
       prompt_tokens_details: { cached_tokens: 0 },
     });
     expect(result.cache_creation_input_tokens).toBe(0);
+    // no cache tokens → input_tokens unchanged.
+    expect(result.input_tokens).toBe(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// disjointOpenAIInputTokens — the shared inclusive→disjoint converter
+// ---------------------------------------------------------------------------
+
+describe("disjointOpenAIInputTokens", () => {
+  test("subtracts cache read + write from the raw input", () => {
+    expect(disjointOpenAIInputTokens(200, 50, 100)).toBe(50);
+  });
+
+  test("treats missing cache fields as zero", () => {
+    expect(disjointOpenAIInputTokens(200, undefined, undefined)).toBe(200);
+    expect(disjointOpenAIInputTokens(200, 30, undefined)).toBe(170);
+  });
+
+  test("clamps at 0 when cache tokens exceed the reported input", () => {
+    // Defensive: a provider must never drive input negative.
+    expect(disjointOpenAIInputTokens(100, 80, 90)).toBe(0);
+  });
+
+  test("treats missing raw input as zero", () => {
+    expect(disjointOpenAIInputTokens(undefined, 10, 10)).toBe(0);
   });
 });

@@ -171,9 +171,6 @@ export async function accumulateResponsesSSEStream(
 
           const respUsage = resp.usage as Record<string, unknown> | undefined;
           if (respUsage) {
-            if (typeof respUsage.input_tokens === "number") {
-              usage.inputTokens = respUsage.input_tokens;
-            }
             if (typeof respUsage.output_tokens === "number") {
               usage.outputTokens = respUsage.output_tokens;
             }
@@ -188,6 +185,16 @@ export async function accumulateResponsesSSEStream(
             }
             if (promptDetails?.cache_write_tokens !== undefined) {
               usage.cacheCreationInputTokens = promptDetails.cache_write_tokens;
+            }
+            if (typeof respUsage.input_tokens === "number") {
+              // input_tokens is inclusive of cache reads/writes; subtract them
+              // to match the gateway's disjoint token convention.
+              usage.inputTokens = Math.max(
+                0,
+                respUsage.input_tokens -
+                  (promptDetails?.cached_tokens ?? 0) -
+                  (promptDetails?.cache_write_tokens ?? 0),
+              );
             }
           }
         }

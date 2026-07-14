@@ -470,7 +470,9 @@ describe("accumulateResponsesSSEStream", () => {
     ]);
 
     const result = await accumulateResponsesSSEStream(response);
-    expect(result.usage?.inputTokens).toBe(100);
+    // input_tokens (100) is inclusive of cached_tokens (80); the gateway's
+    // disjoint convention subtracts it → 100 − 80 = 20.
+    expect(result.usage?.inputTokens).toBe(20);
     expect(result.usage?.outputTokens).toBe(10);
     expect(result.usage?.cacheReadInputTokens).toBe(80);
   });

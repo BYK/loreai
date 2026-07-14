@@ -475,7 +475,14 @@ export async function accumulateOpenAISSEStream(
     content,
     stopReason,
     usage: {
-      inputTokens,
+      // prompt_tokens is inclusive of cache reads/writes; subtract them to
+      // match the gateway's disjoint token convention (see
+      // disjointOpenAIInputTokens in llm-adapter.ts). Inlined here to keep this
+      // leaf stream module free of a cross-module import.
+      inputTokens: Math.max(
+        0,
+        inputTokens - (cachedTokens ?? 0) - (cacheWriteTokens ?? 0),
+      ),
       outputTokens,
       cacheReadInputTokens: cachedTokens,
       cacheCreationInputTokens: cacheWriteTokens,

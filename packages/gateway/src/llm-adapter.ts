@@ -466,26 +466,59 @@ type OpenAIChatResponse = {
 };
 
 /**
+ * OpenAI-protocol usage reports cache reads (`cached_tokens`) and writes
+ * (`cache_write_tokens`) as a SUBSET of `prompt_tokens` (inclusive accounting —
+ * confirmed by the OpenAI prompt-caching docs: `prompt_tokens: 2006` includes
+ * `cached_tokens: 1920`). The gateway's cost model and cache analytics treat
+ * input / cache-read / cache-write as DISJOINT buckets (the Anthropic-native
+ * convention, where `input_tokens` already EXCLUDES cache tokens). Feeding the
+ * raw inclusive `prompt_tokens` straight through double-bills the cached and
+ * written tokens (once at input rate, again at cache-read/write rate) and
+ * inflates the analytics denominator.
+ *
+ * Convert to the disjoint convention by subtracting the cache buckets from the
+ * reported input. Clamped at 0 so a provider that (incorrectly) reports cache
+ * tokens exceeding `prompt_tokens` can never yield a negative input count.
+ */
+export function disjointOpenAIInputTokens(
+  rawInputTokens: number | undefined,
+  cachedTokens: number | undefined,
+  cacheWriteTokens: number | undefined,
+): number {
+  return Math.max(
+    0,
+    (rawInputTokens ?? 0) - (cachedTokens ?? 0) - (cacheWriteTokens ?? 0),
+  );
+}
+
+/**
  * Normalize OpenAI usage to the AnthropicUsage shape for unified cost tracking.
  *
  * Maps:
- *   prompt_tokens                              → input_tokens
+ *   prompt_tokens − cached − written           → input_tokens (disjoint)
  *   completion_tokens                          → output_tokens
  *   prompt_tokens_details.cached_tokens        → cache_read_input_tokens
  *   prompt_tokens_details.cache_write_tokens   → cache_creation_input_tokens
  *
  * OpenAI proper doesn't report cache writes (field absent → 0); OpenRouter does
- * report them for Anthropic explicit caching.
+ * report them for Anthropic explicit caching. See `disjointOpenAIInputTokens`
+ * for why the cache buckets are subtracted from `prompt_tokens`.
  */
 export function normalizeOpenAIUsage(
   usage: OpenAIChatResponse["usage"],
 ): AnthropicUsage {
+  const cachedTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
+  const cacheWriteTokens =
+    usage?.prompt_tokens_details?.cache_write_tokens ?? 0;
   return {
-    input_tokens: usage?.prompt_tokens ?? 0,
+    input_tokens: disjointOpenAIInputTokens(
+      usage?.prompt_tokens,
+      cachedTokens,
+      cacheWriteTokens,
+    ),
     output_tokens: usage?.completion_tokens ?? 0,
-    cache_read_input_tokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
-    cache_creation_input_tokens:
-      usage?.prompt_tokens_details?.cache_write_tokens ?? 0,
+    cache_read_input_tokens: cachedTokens,
+    cache_creation_input_tokens: cacheWriteTokens,
   };
 }
 
