@@ -436,6 +436,7 @@ import {
   pullOnce,
   type SyncProgress,
   syncOnce,
+  startSyncScheduler,
 } from "../src/sync";
 
 const now = () => Date.now();
@@ -1876,6 +1877,62 @@ describe("syncOnce", () => {
     expect(new Set(prog.map((r) => r.table_name))).toEqual(new Set(reported));
     // pulled_through is the device's keyset cursor as an ISO string, never null.
     expect(prog.every((r) => typeof r.pulled_through === "string")).toBe(true);
+  });
+
+  test("an unexpected throw is tagged with its phase and preserves the original as cause", async () => {
+    // Regression: pushOnce/pullOnce classify EXPECTED errors internally (quota/poison/
+    // transient) and never throw; a throw reaching syncOnce is a genuine bug (e.g. the
+    // sync_conflicts.local_content schema mismatch that flooded logs). withPhase must tag
+    // WHICH phase threw and keep the original error (and its stack) as `cause` so the
+    // scheduler's log.error -> captureException reports the real trace.
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    const raw = new Error("no such column: local_content");
+    const spy = vi.spyOn(syncData, "readOutbox").mockImplementation(() => {
+      throw raw;
+    });
+    try {
+      await expect(syncOnce()).rejects.toMatchObject({
+        message: expect.stringContaining("push phase:"),
+        cause: raw, // original error preserved for the stack trace
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("the background scheduler logs the Error OBJECT (not a string) so Sentry gets a stack", async () => {
+    // Regression: the scheduler previously logged `${e.message}`, a plain string, so
+    // log.error's findError -> captureException never fired (no Sentry stack). It must
+    // pass the Error object itself.
+    syncData.enableSync("basic");
+    insertKnowledge("k1", "hello");
+    const raw = new Error("boom");
+    const spy = vi.spyOn(syncData, "readOutbox").mockImplementation(() => {
+      throw raw;
+    });
+    const errSpy = vi.spyOn(log, "error").mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      const stop = startSyncScheduler(60_000);
+      // The scheduler runs its first cycle ~5s after start; drive it deterministically.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await stop();
+      // Called with a message string AND the real Error object (arg 2), the shape
+      // log.error needs to route through findError -> captureException.
+      const call = errSpy.mock.calls.find(
+        (c) =>
+          typeof c[0] === "string" && c[0].includes("background cycle failed"),
+      );
+      expect(call).toBeTruthy();
+      const logged = (call as unknown[])[1];
+      expect(logged).toBeInstanceOf(Error);
+      expect((logged as Error).cause).toBe(raw);
+    } finally {
+      vi.useRealTimers();
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
   });
 });
 

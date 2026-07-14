@@ -1249,6 +1249,24 @@ export async function publishIdentityPub(
   }
 }
 
+/**
+ * Tag an unexpected throw from a sync phase (push/pull) with which phase failed,
+ * preserving the original error (and its stack) as `cause` so the scheduler's
+ * captureException still gets the real trace. pushOnce/pullOnce classify all
+ * EXPECTED errors internally (quota/poison/transient); a throw reaching here is a
+ * genuine bug (e.g. a local schema mismatch), and knowing the phase narrows it fast.
+ */
+async function withPhase<T>(
+  phase: "push" | "pull",
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    throw new Error(`${phase} phase: ${(e as Error).message}`, { cause: e });
+  }
+}
+
 export async function syncOnce(
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
@@ -1263,8 +1281,8 @@ export async function syncOnce(
   // or the very first pull on a fresh Pro device). Snapshot before/after so we can
   // arm/disarm the Pro capture + seed the newly-synced tier (#826/D).
   const tierBefore = syncData.currentSyncTier();
-  const push = await pushOnce(client, onProgress);
-  const pull = await pullOnce(client, onProgress);
+  const push = await withPhase("push", () => pushOnce(client, onProgress));
+  const pull = await withPhase("pull", () => pullOnce(client, onProgress));
   // #1246: after content is applied, merge any projects that a peer's pulled identity
   // row revealed to share a git_remote (min-id winner, deterministic → no ping-pong).
   // Post-content so the re-key finds the applied rows; the re-keyed content re-pushes
@@ -1322,9 +1340,12 @@ export function startSyncScheduler(
     inflight = syncOnce()
       // A quota pause is already reported once per table by pushEntry (deduped) — no
       // per-cycle scheduler summary, which would re-spam the same state every interval.
-      .catch((e) =>
-        log.error(`sync: background cycle failed: ${(e as Error).message}`),
-      )
+      // Pass the Error OBJECT (not a pre-formatted string) so log.error routes it through
+      // findError -> captureException: a pre-formatted `${e.message}` string drops the
+      // stack from the file AND never reaches Sentry, leaving an unexpected throw here
+      // (the "background cycle failed" case) undiagnosable — exactly what happened with
+      // the sync_conflicts.local_content column mismatch.
+      .catch((e) => log.error("sync: background cycle failed", e as Error))
       .finally(() => {
         inflight = null;
       });

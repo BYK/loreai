@@ -1915,6 +1915,34 @@ describe("db", () => {
       ).toBe(true);
     });
 
+    test("recoverMissingObjects re-adds sync_conflicts.local_content when missing", () => {
+      // Regression: the first sync-engine release (#782) shipped sync_conflicts
+      // WITHOUT local_content, then the column was added only to the CREATE TABLE
+      // IF NOT EXISTS definition (no ALTER). An early sync adopter's table keeps
+      // the old 5-column shape forever, so recordConflict()'s INSERT throws
+      // "no such column: local_content" on every sync cycle. Reproduce the old
+      // shape, reopen, and confirm recoverMissingObjects self-heals the column.
+      const d = db();
+      d.exec("ALTER TABLE sync_conflicts DROP COLUMN local_content");
+      expect(
+        (
+          d.query("PRAGMA table_info(sync_conflicts)").all() as Array<{
+            name: string;
+          }>
+        ).some((c) => c.name === "local_content"),
+      ).toBe(false);
+
+      close();
+      const fresh = db();
+      expect(
+        (
+          fresh.query("PRAGMA table_info(sync_conflicts)").all() as Array<{
+            name: string;
+          }>
+        ).some((c) => c.name === "local_content"),
+      ).toBe(true);
+    });
+
     test("recoverMissingObjects re-adds knowledge_session_injections.verdict without throwing on the index", () => {
       // Regression: the (logical_id, verdict) index must be created AFTER the
       // verdict column is ensured. Dropping the column (SQLite also drops the

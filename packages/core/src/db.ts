@@ -3121,6 +3121,19 @@ function recoverMissingObjects(database: Database) {
   if (!cols.some((c) => c.name === "call_type")) {
     database.exec("ALTER TABLE distillations ADD COLUMN call_type TEXT;");
   }
+  // sync_conflicts.local_content was added to the CREATE TABLE definition AFTER
+  // the first sync-engine release (#782) shipped the table without it. Because
+  // both the migration and the CREATE above use IF NOT EXISTS, an early sync
+  // adopter's table keeps the old 5-column shape forever — and recordConflict()'s
+  // INSERT ... local_content then throws "no such column" on EVERY sync cycle,
+  // escaping to the scheduler catch-all. There was no ALTER to add it, so recover
+  // it here (same self-heal pattern as call_type above).
+  const scCols = database
+    .query("PRAGMA table_info(sync_conflicts)")
+    .all() as Array<{ name: string }>;
+  if (!scCols.some((c) => c.name === "local_content")) {
+    database.exec("ALTER TABLE sync_conflicts ADD COLUMN local_content TEXT;");
+  }
   // Version 35: worker source attribution. The first ALTER may have applied
   // while a sibling ALTER in the same migration was skipped; recover each
   // column independently. Also recover the composite indexes which are
