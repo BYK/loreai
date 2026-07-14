@@ -41,6 +41,11 @@
   --link-border: var(--g4);
   --link-hover: var(--g0);
 
+  /* Deep emphasis green — headline stats, "Lore" comparison cells, CTA
+   * vision line, blog links/blockquotes. Light value is --g1 (one step
+   * darker than the --g2 accent) to preserve the original design exactly. */
+  --emphasis: var(--g1);
+
   --highlight-bg: var(--g6);
   --highlight-border: var(--g5);
   --highlight-text: var(--g2);
@@ -76,6 +81,8 @@
     --link: #a6d6ae;
     --link-border: #4a7a55;
     --link-hover: #dcecdd;
+
+    --emphasis: #9ad3a4;
 
     --highlight-bg: #172c20;
     --highlight-border: #2a4634;
@@ -121,6 +128,8 @@
   --link: #a6d6ae;
   --link-border: #4a7a55;
   --link-hover: #dcecdd;
+
+  --emphasis: #9ad3a4;
 
   --highlight-bg: #172c20;
   --highlight-border: #2a4634;
@@ -477,7 +486,7 @@ h1 em::after {
   border-bottom: 1px solid var(--link-border);
   transition: color .2s;
 }
-.hero-folklore a:hover { color: var(--link-hover); }
+.hero-folklore a:hover { color: var(--emphasis); }
 
 .btn-fill {
   display: inline-flex;
@@ -632,7 +641,7 @@ h1 em::after {
 .stat-n {
   font-family: var(--serif);
   font-size: 2.2rem;
-  color: var(--heading-accent);
+  color: var(--emphasis);
   line-height: 1;
   margin-bottom: .3rem;
 }
@@ -907,7 +916,7 @@ h1 em::after {
 }
 
 .cmp thead th.cmp-lore {
-  color: var(--heading-accent);
+  color: var(--emphasis);
 }
 
 .cmp thead th .cmp-eyebrow {
@@ -948,7 +957,7 @@ h1 em::after {
 
 .cmp tbody td.cmp-lore {
   background: var(--highlight-bg);
-  color: var(--heading-accent);
+  color: var(--emphasis);
 }
 
 .cmp tbody tr:last-child th,
@@ -1046,7 +1055,7 @@ h1 em::after {
 .cta-vision {
   font-size: 1.05rem;
   line-height: 1.6;
-  color: var(--heading-accent);
+  color: var(--emphasis);
   text-align: center;
   max-width: 56ch;
   margin: 1.25rem auto 0;

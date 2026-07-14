@@ -202,7 +202,7 @@
 }
 
 .blog-prose a {
-  color: var(--link);
+  color: var(--emphasis);
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
@@ -222,7 +222,7 @@
 .blog-prose blockquote {
   padding: .4rem 0 .4rem 1.3rem;
   border-left: 3px solid var(--eyebrow);
-  color: var(--heading-accent);
+  color: var(--emphasis);
   font-family: var(--serif);
   font-style: italic;
   font-size: 1.45rem;
