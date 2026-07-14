@@ -338,6 +338,12 @@ a.logo .logo-text {
   display: block;
 }
 
+/* "Get Started" CTA pill. It sits on the always-dark nav bar (--nav-bg,
+ * dark in both themes), so it is intentionally a cream pill with dark ink
+ * text in BOTH themes — a constant high-contrast accent, not a
+ * theme-switching surface. Raw --c0/--ink/--g5 are deliberate here (same
+ * rationale as the .logo rules above); routing them through --bg/--text
+ * would make it a dark pill on a dark bar. */
 .nav-btn {
   font-size: 1rem;
   font-family: var(--sans);
