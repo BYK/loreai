@@ -785,33 +785,24 @@ function buildOpenAIMessages(
   // The cached prefix still covers every skipped message (they precede the
   // breakpoint), so no cache coverage is lost.
   if (cache?.cacheConversation && result.length > 0) {
-    const isAnnotatable = (m: Record<string, unknown>): boolean => {
-      if (m.role === "system" || m.role === "tool") return false;
-      return (
-        (typeof m.content === "string" && m.content.length > 0) ||
-        (Array.isArray(m.content) && m.content.length > 0)
-      );
-    };
+    // Under `cacheConversation`, every text-only message is emitted in array
+    // form above (the shape-stability invariant that stops the string↔array
+    // flip from busting the cache). `role:"tool"` messages carry STRING content
+    // (OpenAI requirement) and can't hold a block-level breakpoint. So a
+    // message is annotatable only when its content is a non-empty block array.
+    const isAnnotatable = (m: Record<string, unknown>): boolean =>
+      m.role !== "system" &&
+      m.role !== "tool" &&
+      Array.isArray(m.content) &&
+      m.content.length > 0;
     let idx = result.length - 1;
     while (idx >= 0 && !isAnnotatable(result[idx])) idx--;
     const target = idx >= 0 ? result[idx] : undefined;
     if (target) {
-      const cc = ephemeralCacheControl(cache.conversationTTL);
-      // Under `cacheConversation`, every text-only message is emitted in array
-      // form above (the shape-stability invariant that stops the string↔array
-      // flip from busting the cache), and `role:"tool"` string-content messages
-      // are excluded by `isAnnotatable`. So a targetable message's content is
-      // always a block array here — annotate its last block. The string case is
-      // handled defensively (single-block promotion) in case that invariant ever
-      // changes; today it is unreachable on this path.
-      if (Array.isArray(target.content)) {
-        const parts = target.content as Array<Record<string, unknown>>;
-        parts[parts.length - 1].cache_control = cc;
-      } else {
-        target.content = [
-          { type: "text", text: target.content as string, cache_control: cc },
-        ];
-      }
+      const parts = target.content as Array<Record<string, unknown>>;
+      parts[parts.length - 1].cache_control = ephemeralCacheControl(
+        cache.conversationTTL,
+      );
     }
   }
 
