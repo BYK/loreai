@@ -1073,13 +1073,26 @@ export function parseOpenAIResponse(data: OpenAIChatResponse): {
  * the `openai-codex` worker path). Text lives in `output[].content[].text` for
  * `output_text` parts; usage uses `input_tokens`/`output_tokens`.
  */
-function parseResponsesWorkerResponse(data: {
+export function parseResponsesWorkerResponse(data: {
   output?: Array<{
     type?: string;
     content?: Array<{ type?: string; text?: string }>;
   }>;
   output_text?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    // Responses API reports cache details under `input_tokens_details`;
+    // OpenAI-compatible providers may use `prompt_tokens_details` instead.
+    input_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+    };
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+    };
+  };
   model?: string;
 }): {
   text: string | null;
@@ -1103,12 +1116,25 @@ function parseResponsesWorkerResponse(data: {
     if (parts.length > 0) text = parts.join("");
   }
 
-  const usage: AnthropicUsage | null = data.usage
-    ? {
-        input_tokens: data.usage.input_tokens ?? 0,
-        output_tokens: data.usage.output_tokens ?? 0,
-      }
-    : null;
+  let usage: AnthropicUsage | null = null;
+  if (data.usage) {
+    const details =
+      data.usage.input_tokens_details ?? data.usage.prompt_tokens_details;
+    const cachedTokens = details?.cached_tokens;
+    const cacheWriteTokens = details?.cache_write_tokens;
+    usage = {
+      // input_tokens is inclusive of cache reads/writes; convert to the
+      // gateway's disjoint convention so cache tokens aren't double-counted.
+      input_tokens: disjointOpenAIInputTokens(
+        data.usage.input_tokens,
+        cachedTokens,
+        cacheWriteTokens,
+      ),
+      output_tokens: data.usage.output_tokens ?? 0,
+      cache_read_input_tokens: cachedTokens ?? 0,
+      cache_creation_input_tokens: cacheWriteTokens ?? 0,
+    };
+  }
 
   return { text, usage, model: data.model ?? null };
 }
