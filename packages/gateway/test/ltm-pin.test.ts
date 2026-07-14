@@ -13,6 +13,9 @@ import {
   fnv1a,
   ltmEntryKeys,
   sameEntryKeys,
+  sameIdSet,
+  shouldReanchorPinKeys,
+  surfaceSignature,
 } from "../src/pipeline";
 
 type Entry = { id: string; title: string; content: string };
@@ -126,5 +129,76 @@ describe("reorder-tolerant pin decision", () => {
     // Turn 2: re-ranked to c,a,b but again only a,c fit — same rendered set.
     const next = decide(first.keys, [C, A, B], ["a", "c"]);
     expect(next.rePin).toBe(false);
+  });
+
+  test("cosmetic reword → same key → pin reused (materiality gate)", () => {
+    const first = decide(undefined, [A, B]);
+    // Curator rewrites B with whitespace/punctuation/case-only differences.
+    const reworded = decide(first.keys, [
+      A,
+      { ...B, content: "  SECOND.  " }, // was "second"
+    ]);
+    expect(reworded.rePin).toBe(false);
+  });
+});
+
+describe("sameIdSet", () => {
+  test("true when both sets contain the same ids", () => {
+    expect(sameIdSet(new Set(["a", "b"]), new Set(["b", "a"]))).toBe(true);
+  });
+  test("false when sizes differ", () => {
+    expect(sameIdSet(new Set(["a"]), new Set(["a", "b"]))).toBe(false);
+  });
+  test("false when an id differs", () => {
+    expect(sameIdSet(new Set(["a", "b"]), new Set(["a", "c"]))).toBe(false);
+  });
+});
+
+// Key-format migration (#1320 Seer HIGH): a pin persisted before the
+// surfaceSignature change stores keys as `id:fnv1a(title\x1f content)`. The
+// migration guard must recognize such a pin as the SAME selection (same id set
+// + byte-identical rendered text) so it re-anchors to the new-format keys with
+// zero cache bust, instead of treating every entry as "changed".
+describe("shouldReanchorPinKeys — surfaceSignature key-format migration", () => {
+  const legacyKey = (e: Entry) =>
+    `${e.id}:${fnv1a(`${e.title}\x1f${e.content}`)}`;
+  const legacy = [legacyKey(A), legacyKey(B)].sort();
+  const current = ltmEntryKeys([A, B]);
+  const rendered = "system[2] rendered bytes for A + B";
+
+  test("legacy and new keys differ but share the same id set", () => {
+    expect(sameEntryKeys(legacy, current)).toBe(false);
+    expect(sameIdSet(entryKeyIds(legacy), entryKeyIds(current))).toBe(true);
+  });
+
+  test("re-anchors when id set matches AND rendered text is byte-identical", () => {
+    expect(shouldReanchorPinKeys(legacy, current, rendered, rendered)).toBe(
+      true,
+    );
+  });
+
+  test("does NOT re-anchor when the rendered text differs (real content edit)", () => {
+    expect(
+      shouldReanchorPinKeys(legacy, current, rendered, `${rendered} EDITED`),
+    ).toBe(false);
+  });
+
+  test("does NOT re-anchor when the id set changed", () => {
+    const grownCurrent = ltmEntryKeys([A, B, C]);
+    expect(
+      shouldReanchorPinKeys(legacy, grownCurrent, rendered, rendered),
+    ).toBe(false);
+  });
+
+  test("does NOT re-anchor when keys are already identical (no migration needed)", () => {
+    expect(shouldReanchorPinKeys(current, current, rendered, rendered)).toBe(
+      false,
+    );
+  });
+
+  test("new signature is stable across a cosmetic reword (no legacy re-bust)", () => {
+    expect(surfaceSignature("Bravo", "second")).toBe(
+      surfaceSignature("Bravo", "  Second.  "),
+    );
   });
 });
