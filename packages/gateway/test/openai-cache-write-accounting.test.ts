@@ -23,6 +23,7 @@ import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
 import {
   normalizeOpenAIUsage,
   disjointOpenAIInputTokens,
+  gatewayResponseToWorkerResult,
 } from "../src/llm-adapter";
 
 /** One SSE event per entry; blank-line delimited per the spec. */
@@ -250,5 +251,31 @@ describe("disjointOpenAIInputTokens", () => {
 
   test("treats missing raw input as zero", () => {
     expect(disjointOpenAIInputTokens(undefined, 10, 10)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gatewayResponseToWorkerResult — SSE worker path must forward cache writes
+// ---------------------------------------------------------------------------
+
+describe("gatewayResponseToWorkerResult cache-write forwarding", () => {
+  test("maps cacheCreationInputTokens to cache_creation_input_tokens", () => {
+    const result = gatewayResponseToWorkerResult({
+      id: "w1",
+      model: "anthropic/claude-opus-4.8",
+      content: [{ type: "text", text: "ok" }],
+      stopReason: "end_turn",
+      usage: {
+        inputTokens: 50,
+        outputTokens: 5,
+        cacheReadInputTokens: 20,
+        cacheCreationInputTokens: 100,
+      },
+    });
+    // The SSE worker path dropped cache_creation_input_tokens, under-reporting
+    // worker cache-creation cost. It must be forwarded verbatim.
+    expect(result.usage?.cache_creation_input_tokens).toBe(100);
+    expect(result.usage?.cache_read_input_tokens).toBe(20);
+    expect(result.usage?.input_tokens).toBe(50);
   });
 });

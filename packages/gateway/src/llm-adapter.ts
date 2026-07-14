@@ -1316,7 +1316,7 @@ function accumulateWorkerSSE(
  * text — a response that is purely tool_use (no text) is treated as empty,
  * matching parseWorkerResponse (workers consume text, not tool calls).
  */
-function gatewayResponseToWorkerResult(resp: GatewayResponse): {
+export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
   text: string | null;
   usage: AnthropicUsage | null;
   model: string | null;
@@ -1333,6 +1333,7 @@ function gatewayResponseToWorkerResult(resp: GatewayResponse): {
         input_tokens: resp.usage.inputTokens,
         output_tokens: resp.usage.outputTokens,
         cache_read_input_tokens: resp.usage.cacheReadInputTokens,
+        cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
       }
     : null;
   return { text: text || null, usage, model: resp.model || null };
