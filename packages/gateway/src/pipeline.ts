@@ -746,7 +746,10 @@ export function surfaceSignature(title: string, content: string): string {
       // `a || b` vs `a && b`, `foo?.bar` vs `foo.bar` must remain distinct.
       // `!`/`?` are kept (needed for `!=`, `?.`, ternary) at the cost of a cheap
       // false-positive delta on an "excited!" reword — the safe failure mode.
-      .replace(/["'`*_~#()[\]{}.,;:…]/gu, " ")
+      // Em/en dashes (— –) are cosmetic typography (an AI-tell in prose) and
+      // are stripped; the ASCII hyphen-minus `-` is KEPT since it doubles as
+      // the arithmetic/negation operator.
+      .replace(/["'`*_~#()[\]{}.,;:…—–]/gu, " ")
       // Collapse all whitespace runs to a single space and trim.
       .replace(/\s+/g, " ")
       .trim();

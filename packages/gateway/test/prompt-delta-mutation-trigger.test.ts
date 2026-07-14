@@ -441,5 +441,14 @@ describe("detectSurfacedMutations — materiality gate", () => {
     expect(surfaceSignature("T", "*Use* `tabs`, not spaces!")).toBe(
       surfaceSignature("T", "use tabs not spaces!"),
     );
+    // Em/en dashes are cosmetic typography → stripped (Seer #1328), but the
+    // ASCII hyphen-minus is preserved (arithmetic/negation operator).
+    expect(surfaceSignature("T", "fast — reliable")).toBe(
+      surfaceSignature("T", "fast reliable"),
+    );
+    expect(surfaceSignature("T", "a – b")).toBe(surfaceSignature("T", "a b"));
+    expect(surfaceSignature("T", "count - 1")).not.toBe(
+      surfaceSignature("T", "count 1"),
+    );
   });
 });
