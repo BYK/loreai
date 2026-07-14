@@ -122,6 +122,7 @@ Long-term knowledge (curator, entity injection) controls.
 | `outcomeReward` | boolean | `true` |  | Adjust knowledge confidence by within-session verifier (test/build/typecheck/lint) outcomes. Default: true. |
 | `referenceValidation` | boolean | `true` |  | Lower confidence on entries whose file:line / command references no longer resolve against the repo. Unverifiable refs never penalize. Default: true. |
 | `contextSources` | array<enum> | `["distillation"]` |  | Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Default: ["distillation"]; add "temporal" for raw messages; [] = off. |
+| `minRelevance` | number | `0.35` | min 0, max 1 | Minimum cosine similarity for a vector-only knowledge match to be surfaced into a session. FTS keyword matches bypass it. 0 disables. Default: 0.35. |
 
 
 ## `curator`
