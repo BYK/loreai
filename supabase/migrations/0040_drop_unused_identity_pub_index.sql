@@ -1,0 +1,21 @@
+-- 0040_drop_unused_identity_pub_index.sql
+-- Performance advisor (unused_index): drop idx_identity_pub_updated.
+--
+-- identity_pub is a publish-only directory: rows are written via direct upsert
+-- keyed by user_id, and read only by exact user_id (own row + co-members'
+-- pubkeys via RLS). It is NOT a synced pull table — nothing scans it by
+-- updated_at, so the (updated_at) index added in 0025 has never been used and
+-- only costs write amplification. Drop it.
+--
+-- The three OTHER indexes the advisor flags are kept deliberately — they are
+-- load-bearing once the relevant feature sees traffic, and are "unused" only
+-- because those paths are pre-GA / low-volume:
+--   * idx_distillations_scope_updated, idx_temporal_messages_scope_updated —
+--     the (scope_id, updated_at) pull-cursor keyset indexes for the pro tables
+--     (sync isn't GA yet).
+--   * idx_scopes_org — the org_id FK-lookup index (teams just landed).
+--
+-- The updated_at BEFORE-UPDATE trigger on identity_pub is unaffected (it stamps
+-- the column; it does not need an index on it).
+
+drop index if exists public.idx_identity_pub_updated;

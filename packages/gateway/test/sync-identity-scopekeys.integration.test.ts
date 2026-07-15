@@ -137,6 +137,21 @@ describe.skipIf(gate())(
       ]);
     });
 
+    it("identity_pub: the unused updated_at index is dropped (advisor 0040)", async () => {
+      // identity_pub is publish-only (upsert by user_id, read by exact user_id),
+      // never scanned by updated_at, so 0040 dropped idx_identity_pub_updated.
+      const rows = await h.asService((c) =>
+        c
+          .query(
+            `select indexname from pg_indexes
+              where schemaname = 'public' and tablename = 'identity_pub'`,
+          )
+          .then((r) => r.rows as Array<{ indexname: string }>),
+      );
+      const names = rows.map((r) => r.indexname);
+      expect(names).not.toContain("idx_identity_pub_updated");
+    });
+
     it("identity_pub: an oversized public key is rejected (anti-abuse cap)", async () => {
       const a = await h.createUser();
       // base64 of 512 raw bytes is ~684 chars > the 512-char text cap → rejected.
