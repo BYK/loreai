@@ -21,7 +21,7 @@ describe("Aider provider", () => {
 
   describe("detect", () => {
     test("returns empty for directory without .aider.chat.history.md", () => {
-      const sessions = provider.detect("/nonexistent/path");
+      const sessions = provider.detect(["/nonexistent/path"]);
       expect(sessions).toEqual([]);
     });
 
@@ -34,7 +34,7 @@ describe("Aider provider", () => {
         join(tmp, ".aider.chat.history.md"),
       );
 
-      const sessions = provider.detect(tmp);
+      const sessions = provider.detect([tmp]);
       expect(sessions.length).toBe(1);
       expect(sessions[0].id).toBe(join(tmp, ".aider.chat.history.md"));
       expect(sessions[0].messageCount).toBe(6); // 3 user + 3 assistant
@@ -45,7 +45,7 @@ describe("Aider provider", () => {
       mkdirSync(tmp, { recursive: true });
       writeFileSync(join(tmp, ".aider.chat.history.md"), "");
 
-      const sessions = provider.detect(tmp);
+      const sessions = provider.detect([tmp]);
       expect(sessions).toEqual([]);
     });
 
@@ -57,8 +57,56 @@ describe("Aider provider", () => {
         "#### user\nHello\n\n#### assistant\nHi!\n",
       );
 
-      const sessions = provider.detect(tmp);
+      const sessions = provider.detect([tmp]);
       expect(sessions).toEqual([]); // Only 2 messages, need >= 3
+    });
+
+    test("matches sessions from any of multiple candidate paths (worktree fix)", () => {
+      // Regression for the git-worktree import bug: a repo's history is spread
+      // across its main checkout and each worktree (agent history is keyed by
+      // the cwd it ran in). detect() must find sessions under ANY candidate.
+      const main = join(tmpdir(), `lore-aider-main-${Date.now()}`);
+      const worktree = join(tmpdir(), `lore-aider-wt-${Date.now()}`);
+      mkdirSync(main, { recursive: true });
+      mkdirSync(worktree, { recursive: true });
+      copyFileSync(
+        join(FIXTURES, "aider-history.md"),
+        join(main, ".aider.chat.history.md"),
+      );
+      copyFileSync(
+        join(FIXTURES, "aider-history.md"),
+        join(worktree, ".aider.chat.history.md"),
+      );
+
+      // Importing from the main checkout with the worktree as a sibling
+      // candidate must surface BOTH history files.
+      const sessions = provider.detect([main, worktree]);
+      const ids = sessions.map((s) => s.id).sort();
+      expect(ids).toEqual(
+        [
+          join(main, ".aider.chat.history.md"),
+          join(worktree, ".aider.chat.history.md"),
+        ].sort(),
+      );
+
+      // A session recorded ONLY under the worktree is still found when the
+      // main path is listed first (the exact reported scenario).
+      const worktreeOnly = provider
+        .detect([main, worktree])
+        .filter((s) => s.id === join(worktree, ".aider.chat.history.md"));
+      expect(worktreeOnly.length).toBe(1);
+    });
+
+    test("deduplicates when the same path appears twice", () => {
+      const tmp = join(tmpdir(), `lore-aider-dupe-${Date.now()}`);
+      mkdirSync(tmp, { recursive: true });
+      copyFileSync(
+        join(FIXTURES, "aider-history.md"),
+        join(tmp, ".aider.chat.history.md"),
+      );
+
+      const sessions = provider.detect([tmp, tmp]);
+      expect(sessions.length).toBe(1);
     });
   });
 

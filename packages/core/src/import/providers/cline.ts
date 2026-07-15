@@ -250,44 +250,49 @@ const clineProvider: AgentHistoryProvider = {
   name: "cline",
   displayName: "Cline",
 
-  detect(projectPath: string): DetectedSession[] {
+  detect(projectPaths: string[]): DetectedSession[] {
     const sessions: DetectedSession[] = [];
+    const seen = new Set<string>();
     const storageDirs = findGlobalStorageDirs();
 
     for (const storageDir of storageDirs) {
-      const tasks = loadTaskHistory(storageDir, projectPath);
+      for (const projectPath of projectPaths) {
+        const tasks = loadTaskHistory(storageDir, projectPath);
 
-      for (const task of tasks) {
-        const taskDir = join(storageDir, "tasks", task.id);
-        if (!existsSync(taskDir)) continue;
+        for (const task of tasks) {
+          const taskDir = join(storageDir, "tasks", task.id);
+          if (seen.has(taskDir)) continue;
+          if (!existsSync(taskDir)) continue;
 
-        // Quick count of messages
-        const messages = readConversation(taskDir);
-        if (messages.length < 3) continue;
+          // Quick count of messages
+          const messages = readConversation(taskDir);
+          if (messages.length < 3) continue;
 
-        const dateStr = new Date(task.ts).toISOString().slice(0, 10);
-        const label = task.task
-          ? `${dateStr} - ${truncate(task.task, 60)} (${messages.length} messages)`
-          : `${dateStr} (${messages.length} messages)`;
+          const dateStr = new Date(task.ts).toISOString().slice(0, 10);
+          const label = task.task
+            ? `${dateStr} - ${truncate(task.task, 60)} (${messages.length} messages)`
+            : `${dateStr} (${messages.length} messages)`;
 
-        // Estimate tokens from file size
-        const historyFile = join(taskDir, "api_conversation_history.json");
-        let estimatedTokens = messages.length * 500;
-        try {
-          const stat = statSync(historyFile);
-          estimatedTokens = Math.ceil(stat.size / 5);
-        } catch {
-          // Use the message-count-based estimate
+          // Estimate tokens from file size
+          const historyFile = join(taskDir, "api_conversation_history.json");
+          let estimatedTokens = messages.length * 500;
+          try {
+            const stat = statSync(historyFile);
+            estimatedTokens = Math.ceil(stat.size / 5);
+          } catch {
+            // Use the message-count-based estimate
+          }
+
+          seen.add(taskDir);
+          sessions.push({
+            id: taskDir,
+            label,
+            startedAt: task.ts,
+            lastActivityAt: task.ts,
+            estimatedTokens,
+            messageCount: messages.length,
+          });
         }
-
-        sessions.push({
-          id: taskDir,
-          label,
-          startedAt: task.ts,
-          lastActivityAt: task.ts,
-          estimatedTokens,
-          messageCount: messages.length,
-        });
       }
     }
 

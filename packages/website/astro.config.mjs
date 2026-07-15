@@ -83,6 +83,7 @@ export default defineConfig({
             { label: "Configuration", slug: "docs/configuration" },
             { label: "Environment variables", slug: "docs/environment" },
             { label: "Setup command", slug: "docs/setup" },
+            { label: "Import conversations", slug: "docs/import" },
           ],
         },
       ],

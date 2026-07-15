@@ -311,13 +311,23 @@ lore recall "migration error" --project /path/to/project --json
 ### `lore import` — Import conversation history
 
 ```bash
-# Auto-detect and import conversations from all supported agents
+# Auto-detect prior conversations and pick which agents to import
 lore import
+
+# Import from one agent only (non-interactive)
+lore import --agent claude-code
+
+# Only scan the current directory (skip sibling git worktrees)
+lore import --no-worktrees
 
 # Supported: Claude Code, Codex, Aider, Cline, Continue, OpenCode, Pi
 ```
 
 Extracts knowledge from your existing sessions so Lore starts with context from day one. Idempotent — safe to run multiple times.
+
+When more than one agent has history, `lore import` shows a numbered list and lets you select which agents to import (comma-separated numbers, or `a` for all).
+
+**Worktrees & monorepos:** agent history is keyed by the directory the agent ran in, so a repo's conversations are spread across its main checkout and every git worktree. `lore import` finds them all by default (via `git worktree list`) — pass `--no-worktrees` to restrict to the current directory.
 
 ### Web dashboard
 

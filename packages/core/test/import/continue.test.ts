@@ -21,7 +21,9 @@ describe("Continue provider", () => {
 
   describe("detect", () => {
     test("returns empty for nonexistent project", () => {
-      const sessions = provider.detect("/nonexistent/path/that/does/not/exist");
+      const sessions = provider.detect([
+        "/nonexistent/path/that/does/not/exist",
+      ]);
       expect(sessions).toEqual([]);
     });
 
@@ -60,14 +62,27 @@ describe("Continue provider", () => {
       const original = process.env.CONTINUE_GLOBAL_DIR;
       process.env.CONTINUE_GLOBAL_DIR = tmp;
       try {
-        const sessions = provider.detect("/test/continue-project");
+        const sessions = provider.detect(["/test/continue-project"]);
         expect(sessions.length).toBe(1);
         expect(sessions[0].id).toBe("sess-continue-1");
         expect(sessions[0].messageCount).toBe(4);
 
         // Should not find sessions for other project
-        const otherSessions = provider.detect("/test/other-project");
+        const otherSessions = provider.detect(["/test/other-project"]);
         expect(otherSessions).toEqual([]);
+
+        // Worktree fix: listing both workspace dirs as candidates finds the
+        // matching session regardless of which one is the cwd.
+        const bothA = provider.detect([
+          "/test/continue-project",
+          "/test/other-project",
+        ]);
+        expect(bothA.map((s) => s.id)).toContain("sess-continue-1");
+        const bothB = provider.detect([
+          "/test/other-project",
+          "/test/continue-project",
+        ]);
+        expect(bothB.map((s) => s.id)).toContain("sess-continue-1");
       } finally {
         if (original !== undefined) {
           process.env.CONTINUE_GLOBAL_DIR = original;

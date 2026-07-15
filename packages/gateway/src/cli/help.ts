@@ -82,10 +82,12 @@ Data subcommands:
   Clear flags: --knowledge, --temporal, --distillations, --all
 
 Import options:
-  --yes / -y                    Skip confirmation prompt
+  --yes / -y                    Skip confirmation prompt (import all agents)
   --agent <name>                Import from specific agent only
                                 (claude-code, codex, opencode, cline, continue, pi, aider)
   --project <path>              Target project (default: cwd)
+  --no-worktrees                Only scan the current directory, not sibling
+                                git worktrees / clones of the same repo
   --dry-run                     Show what would be imported, no LLM calls
 
 Agent arguments:
@@ -164,9 +166,10 @@ Examples:
   lore data list knowledge      # List knowledge entries for current project
   lore data clear --project .   # Clear all data for the current project
   lore data clear --all         # Wipe the entire database
-  lore import                   # Import knowledge from prior AI conversations
+  lore import                   # Pick agents to import (all by default)
   lore import --dry-run         # Show what would be imported
   lore import --agent claude-code  # Import from Claude Code only
+  lore import --no-worktrees    # Only this directory, skip sibling worktrees
   lore logs                     # Show recent log entries
   lore logs -f                  # Follow log output in real-time
   lore logs -n 100              # Show last 100 lines

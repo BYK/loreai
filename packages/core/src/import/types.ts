@@ -68,11 +68,17 @@ export interface AgentHistoryProvider {
 
   /**
    * Detect whether this agent has conversation history for the given
-   * project path. Should be a fast check — avoid reading full file contents.
+   * project paths. Should be a fast check — avoid reading full file contents.
+   *
+   * A session matches if the directory it was recorded under equals ANY of the
+   * supplied paths. `projectPaths[0]` is the primary project path (cwd); the
+   * remaining entries are sibling worktree/clone paths for the same repo (see
+   * `projectSearchPaths`). Implementations MUST deduplicate returned sessions
+   * (e.g. by their `id`) so overlapping candidate paths never yield duplicates.
    *
    * @returns Array of detected sessions, or empty array if none found.
    */
-  detect(projectPath: string): DetectedSession[];
+  detect(projectPaths: string[]): DetectedSession[];
 
   /**
    * Read conversation text from specific sessions, chunked for LLM

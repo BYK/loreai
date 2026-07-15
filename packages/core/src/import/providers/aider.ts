@@ -105,42 +105,49 @@ const aiderProvider: AgentHistoryProvider = {
   name: "aider",
   displayName: "Aider",
 
-  detect(projectPath: string): DetectedSession[] {
-    const filePath = join(projectPath, HISTORY_FILE);
-    if (!existsSync(filePath)) return [];
+  detect(projectPaths: string[]): DetectedSession[] {
+    const sessions: DetectedSession[] = [];
+    const seen = new Set<string>();
 
-    let stat: Stats;
-    try {
-      stat = statSync(filePath);
-    } catch {
-      return [];
-    }
+    for (const projectPath of projectPaths) {
+      const filePath = join(projectPath, HISTORY_FILE);
+      if (seen.has(filePath)) continue;
+      if (!existsSync(filePath)) continue;
 
-    if (!stat.isFile() || stat.size === 0) return [];
+      let stat: Stats;
+      try {
+        stat = statSync(filePath);
+      } catch {
+        continue;
+      }
 
-    // Quick scan to count messages without full parsing
-    let content: string;
-    try {
-      content = readFileSync(filePath, "utf-8");
-    } catch {
-      return [];
-    }
+      if (!stat.isFile() || stat.size === 0) continue;
 
-    const messages = parseAiderHistory(content);
-    if (messages.length < 3) return [];
+      // Quick scan to count messages without full parsing
+      let content: string;
+      try {
+        content = readFileSync(filePath, "utf-8");
+      } catch {
+        continue;
+      }
 
-    const estimatedTokens = estimateTokens(content);
+      const messages = parseAiderHistory(content);
+      if (messages.length < 3) continue;
 
-    return [
-      {
+      const estimatedTokens = estimateTokens(content);
+      seen.add(filePath);
+
+      sessions.push({
         id: filePath,
         label: `Chat history (${messages.length} messages, ${Math.round(stat.size / 1024)}KB)`,
         startedAt: stat.birthtimeMs || stat.ctimeMs,
         lastActivityAt: stat.mtimeMs,
         estimatedTokens,
         messageCount: messages.length,
-      },
-    ];
+      });
+    }
+
+    return sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   },
 
   readChunks(

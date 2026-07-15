@@ -101,6 +101,7 @@ export {
   projectId,
   projectName,
   projectPath,
+  projectKnownPaths,
   projectGitRemote,
   projectScope,
   setProjectScope,

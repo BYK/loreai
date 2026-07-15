@@ -22,7 +22,9 @@ describe("Cline provider", () => {
   describe("detect", () => {
     test("returns empty for nonexistent project", () => {
       // Cline detect looks in VS Code globalStorage, which won't have this path
-      const sessions = provider.detect("/nonexistent/path/that/does/not/exist");
+      const sessions = provider.detect([
+        "/nonexistent/path/that/does/not/exist",
+      ]);
       expect(sessions).toEqual([]);
     });
   });

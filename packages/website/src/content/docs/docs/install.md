@@ -45,4 +45,6 @@ Lore can import previous coding conversations so a new project memory does not s
 lore import
 ```
 
-Imported history feeds the same distillation and knowledge pipeline as live sessions.
+Imported history feeds the same distillation and knowledge pipeline as live sessions. `lore import` detects Claude Code, Codex, OpenCode, Pi, Aider, Cline, and Continue, lets you pick which agents to import, and finds conversations across all of a repo's git worktrees.
+
+→ See the full [Import conversations](/docs/import/) guide.

@@ -20,7 +20,9 @@ describe("Claude Code provider", () => {
 
   describe("detect", () => {
     test("returns empty for nonexistent project", () => {
-      const sessions = provider.detect("/nonexistent/path/that/does/not/exist");
+      const sessions = provider.detect([
+        "/nonexistent/path/that/does/not/exist",
+      ]);
       expect(sessions).toEqual([]);
     });
   });

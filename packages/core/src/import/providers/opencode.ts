@@ -111,7 +111,7 @@ const opencodeProvider: AgentHistoryProvider = {
   name: "opencode",
   displayName: "OpenCode",
 
-  detect(projectPath: string): DetectedSession[] {
+  detect(projectPaths: string[]): DetectedSession[] {
     const database = openDB();
     if (!database) return [];
 
@@ -125,11 +125,18 @@ const opencodeProvider: AgentHistoryProvider = {
         return [];
       }
 
-      // Find the project by worktree path
-      const project = database
-        .query("SELECT id FROM project WHERE worktree = ?")
-        .get(projectPath) as { id: string } | null;
-      if (!project) return [];
+      if (projectPaths.length === 0) return [];
+
+      // Find the project(s) by worktree path — a repo's history may live under
+      // the main checkout or any sibling worktree/clone path.
+      const projPlaceholders = projectPaths.map(() => "?").join(", ");
+      const projectRows = database
+        .query(`SELECT id FROM project WHERE worktree IN (${projPlaceholders})`)
+        .all(...projectPaths) as Array<{ id: string }>;
+      if (projectRows.length === 0) return [];
+
+      const projectIds = projectRows.map((r) => r.id);
+      const sessPlaceholders = projectIds.map(() => "?").join(", ");
 
       // Get sessions with message counts
       const sessions = database
@@ -137,10 +144,10 @@ const opencodeProvider: AgentHistoryProvider = {
           `SELECT s.id, s.title, s.time_created, s.time_updated,
                   (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) as msg_count
            FROM session s
-           WHERE s.project_id = ? AND s.parent_id IS NULL
+           WHERE s.project_id IN (${sessPlaceholders}) AND s.parent_id IS NULL
            ORDER BY s.time_updated DESC`,
         )
-        .all(project.id) as Array<{
+        .all(...projectIds) as Array<{
         id: string;
         title: string;
         time_created: number;
@@ -149,9 +156,13 @@ const opencodeProvider: AgentHistoryProvider = {
       }>;
 
       const results: DetectedSession[] = [];
+      const seen = new Set<string>();
       for (const sess of sessions) {
         // Skip trivially small sessions
         if (sess.msg_count < 3) continue;
+        // Dedupe by session id (defensive — sessions are per-project).
+        if (seen.has(sess.id)) continue;
+        seen.add(sess.id);
 
         // Estimate tokens from message count (rough: ~500 tokens/message avg)
         const estimatedTokens = sess.msg_count * 500;

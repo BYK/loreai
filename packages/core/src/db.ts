@@ -4055,6 +4055,48 @@ export function resolveProjectByRemoteOrPath(
 }
 
 /**
+ * List every filesystem path lore knows for the project that `path` belongs to.
+ *
+ * Read-only (never creates a project or registers aliases). Resolves the project
+ * by git remote (preferred) then by exact path / alias, then returns the
+ * canonical `projects.path` plus all `project_path_aliases` rows for that
+ * project. Returns `[]` when the project isn't known yet (e.g. first-ever
+ * import), which callers treat as "no extra paths".
+ *
+ * This is the DB half of import's worktree-aware detection: agent history is
+ * keyed by the directory the agent ran in, so a repo's history is spread across
+ * its main checkout and every worktree/clone path. Runtime resolution already
+ * collapses those to one project (see `ensureProject`); this exposes the reverse
+ * mapping (project → all its known paths) so import can search all of them.
+ */
+export function projectKnownPaths(path: string): string[] {
+  let projId: string | null = null;
+  try {
+    const remote = getGitRemote(path); // null in hosted mode OR when not a repo
+    projId = resolveProjectByRemoteOrPath(remote ?? undefined, path);
+  } catch {
+    return [];
+  }
+  if (!projId) return [];
+
+  const paths: string[] = [];
+  try {
+    const row = db()
+      .query("SELECT path FROM projects WHERE id = ?")
+      .get(projId) as { path: string } | null;
+    if (row?.path) paths.push(row.path);
+
+    const aliasRows = db()
+      .query("SELECT path FROM project_path_aliases WHERE project_id = ?")
+      .all(projId) as { path: string }[];
+    for (const r of aliasRows) if (r.path) paths.push(r.path);
+  } catch {
+    return [];
+  }
+  return paths;
+}
+
+/**
  * Look up the path for a project by its internal ID.
  * Used by the REST API to resolve project UUID → path for core functions
  * that require a path argument.

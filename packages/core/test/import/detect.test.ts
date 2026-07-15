@@ -111,4 +111,25 @@ describe("detectAll", () => {
     const results = detectAll("/some/path");
     expect(results[0].totalTokens).toBe(3000);
   });
+
+  test("forwards the widened candidate path set to provider.detect", () => {
+    // With worktrees disabled, detection collapses to just the cwd — so the
+    // provider must receive an array containing (at minimum) the resolved cwd.
+    let received: string[] | null = null;
+    registerProvider({
+      name: "spy",
+      displayName: "Spy",
+      detect: (paths: string[]) => {
+        received = paths;
+        return [makeSession()];
+      },
+      readChunks: () => [],
+    });
+
+    detectAll("/some/path", { worktrees: false });
+    expect(received).not.toBeNull();
+    expect(Array.isArray(received)).toBe(true);
+    // cwd is always present and first.
+    expect((received as unknown as string[])[0]).toBe("/some/path");
+  });
 });

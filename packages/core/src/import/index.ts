@@ -13,6 +13,7 @@ export type {
 
 // Detection
 export { detectAll } from "./detect";
+export { projectSearchPaths } from "./scope";
 
 // Provider registry
 export {

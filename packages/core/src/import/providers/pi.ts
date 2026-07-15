@@ -211,39 +211,46 @@ const piProvider: AgentHistoryProvider = {
   name: "pi",
   displayName: "Pi",
 
-  detect(projectPath: string): DetectedSession[] {
-    const encoded = encodeCwd(projectPath);
-    const dir = join(PI_DIR, encoded);
-
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return []; // Directory doesn't exist
-    }
-
+  detect(projectPaths: string[]): DetectedSession[] {
     const sessions: DetectedSession[] = [];
-    for (const entry of entries) {
-      if (!entry.endsWith(".jsonl")) continue;
+    const seen = new Set<string>();
 
-      const filePath = join(dir, entry);
-      const meta = getSessionMeta(filePath);
-      if (!meta) continue;
+    for (const projectPath of projectPaths) {
+      const encoded = encodeCwd(projectPath);
+      const dir = join(PI_DIR, encoded);
 
-      // Skip trivially small sessions
-      if (meta.messageCount < 3) continue;
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        continue; // Directory doesn't exist for this candidate path
+      }
 
-      const dateStr = new Date(meta.timestamp).toISOString().slice(0, 10);
-      const estimatedTokens = Math.ceil(meta.fileSize / 5);
+      for (const entry of entries) {
+        if (!entry.endsWith(".jsonl")) continue;
 
-      sessions.push({
-        id: filePath,
-        label: `${dateStr} (${meta.messageCount} messages)`,
-        startedAt: meta.timestamp,
-        lastActivityAt: meta.timestamp,
-        estimatedTokens,
-        messageCount: meta.messageCount,
-      });
+        const filePath = join(dir, entry);
+        if (seen.has(filePath)) continue;
+
+        const meta = getSessionMeta(filePath);
+        if (!meta) continue;
+
+        // Skip trivially small sessions
+        if (meta.messageCount < 3) continue;
+
+        seen.add(filePath);
+        const dateStr = new Date(meta.timestamp).toISOString().slice(0, 10);
+        const estimatedTokens = Math.ceil(meta.fileSize / 5);
+
+        sessions.push({
+          id: filePath,
+          label: `${dateStr} (${meta.messageCount} messages)`,
+          startedAt: meta.timestamp,
+          lastActivityAt: meta.timestamp,
+          estimatedTokens,
+          messageCount: meta.messageCount,
+        });
+      }
     }
 
     return sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt);

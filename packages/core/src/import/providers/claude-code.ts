@@ -239,44 +239,53 @@ const claudeCodeProvider: AgentHistoryProvider = {
   name: "claude-code",
   displayName: "Claude Code",
 
-  detect(projectPath: string): DetectedSession[] {
-    const mangled = manglePath(projectPath);
-    const dir = join(CLAUDE_DIR, mangled);
-
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return []; // Directory doesn't exist
-    }
-
+  detect(projectPaths: string[]): DetectedSession[] {
     const sessions: DetectedSession[] = [];
-    for (const entry of entries) {
-      if (!entry.endsWith(".jsonl")) continue;
+    const seen = new Set<string>();
 
-      const filePath = join(dir, entry);
+    for (const projectPath of projectPaths) {
+      const mangled = manglePath(projectPath);
+      const dir = join(CLAUDE_DIR, mangled);
+
+      let entries: string[];
       try {
-        const stat = statSync(filePath);
-        if (!stat.isFile()) continue;
+        entries = readdirSync(dir);
       } catch {
-        continue;
+        continue; // Directory doesn't exist for this candidate path
       }
 
-      const meta = getSessionMetadata(filePath);
-      if (!meta) continue;
+      for (const entry of entries) {
+        if (!entry.endsWith(".jsonl")) continue;
 
-      // Skip trivially small sessions (< 3 messages)
-      if (meta.messageCount < 3) continue;
+        const filePath = join(dir, entry);
+        // Dedupe across candidate paths (mangled dirs are distinct per path,
+        // but guard anyway).
+        if (seen.has(filePath)) continue;
 
-      const dateStr = new Date(meta.startedAt).toISOString().slice(0, 10);
-      sessions.push({
-        id: filePath,
-        label: `${dateStr} (${meta.messageCount} messages)`,
-        startedAt: meta.startedAt,
-        lastActivityAt: meta.lastActivityAt,
-        estimatedTokens: meta.estimatedTokens,
-        messageCount: meta.messageCount,
-      });
+        try {
+          const stat = statSync(filePath);
+          if (!stat.isFile()) continue;
+        } catch {
+          continue;
+        }
+
+        const meta = getSessionMetadata(filePath);
+        if (!meta) continue;
+
+        // Skip trivially small sessions (< 3 messages)
+        if (meta.messageCount < 3) continue;
+
+        seen.add(filePath);
+        const dateStr = new Date(meta.startedAt).toISOString().slice(0, 10);
+        sessions.push({
+          id: filePath,
+          label: `${dateStr} (${meta.messageCount} messages)`,
+          startedAt: meta.startedAt,
+          lastActivityAt: meta.lastActivityAt,
+          estimatedTokens: meta.estimatedTokens,
+          messageCount: meta.messageCount,
+        });
+      }
     }
 
     // Sort by most recent first

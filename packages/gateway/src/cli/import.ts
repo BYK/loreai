@@ -60,6 +60,88 @@ async function confirm(message: string, defaultYes = true): Promise<boolean> {
   });
 }
 
+/**
+ * Read a single line from the given prompt. Returns "" for non-TTY input so
+ * callers can apply their own default. Injectable reader for testing.
+ */
+type LineReader = (prompt: string) => Promise<string>;
+
+const readLine: LineReader = (prompt: string) =>
+  new Promise<string>((resolve) => {
+    if (!process.stdin.isTTY) {
+      resolve("");
+      return;
+    }
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stderr,
+    });
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+
+/**
+ * Parse a comma/space-separated list of 1-based indices into 0-based indices.
+ *
+ * Accepts:
+ *   - "" / "a" / "all"  → all indices [0..count)
+ *   - "1,3" / "1 3"     → [0, 2]
+ * Invalid/out-of-range tokens cause a return of `null` (caller re-prompts).
+ * Duplicates are collapsed; result is sorted ascending.
+ */
+export function parseIndexSelection(
+  input: string,
+  count: number,
+): number[] | null {
+  const trimmed = input.trim().toLowerCase();
+  if (trimmed === "" || trimmed === "a" || trimmed === "all") {
+    return Array.from({ length: count }, (_, i) => i);
+  }
+
+  const tokens = trimmed.split(/[\s,]+/).filter(Boolean);
+  const picked = new Set<number>();
+  for (const tok of tokens) {
+    if (!/^\d+$/.test(tok)) return null;
+    const n = Number.parseInt(tok, 10);
+    if (n < 1 || n > count) return null;
+    picked.add(n - 1);
+  }
+  if (picked.size === 0) return null;
+  return [...picked].sort((a, b) => a - b);
+}
+
+/**
+ * Prompt the user to pick a subset of items by number. Returns the selected
+ * 0-based indices. Non-TTY (and no injected reader) → all. After `maxTries`
+ * invalid attempts → all.
+ */
+export async function selectIndices(
+  count: number,
+  opts: { reader?: LineReader; maxTries?: number } = {},
+): Promise<number[]> {
+  const reader = opts.reader ?? readLine;
+  const maxTries = opts.maxTries ?? 3;
+  const all = () => Array.from({ length: count }, (_, i) => i);
+  // Without an injected reader, only prompt on a real TTY; otherwise import all.
+  if (!opts.reader && !process.stdin.isTTY) return all();
+
+  for (let attempt = 0; attempt < maxTries; attempt++) {
+    const answer = await reader(
+      "[lore] Select agents (comma-separated numbers, or 'a' for all): ",
+    );
+    const parsed = parseIndexSelection(answer, count);
+    if (parsed) return parsed;
+    console.error(
+      "[lore] Invalid selection — enter e.g. '1,3' or 'a' for all.",
+    );
+  }
+  // Fall back to importing everything after repeated invalid input.
+  console.error("[lore] Defaulting to all agents.");
+  return all();
+}
+
 // ---------------------------------------------------------------------------
 // Command entry point
 // ---------------------------------------------------------------------------
@@ -72,6 +154,8 @@ export async function commandImport(
   const dryRun = flags["dry-run"] === true || flags.dryRun === true;
   const yes = flags.yes === true || flags.y === true;
   const agentFilter = (flags.agent as string) ?? null;
+  const noWorktrees =
+    flags["no-worktrees"] === true || flags.noWorktrees === true;
   const projectFlag = flags.project as string | undefined;
   const projectPath = projectFlag ? resolve(projectFlag) : process.cwd();
 
@@ -90,7 +174,7 @@ export async function commandImport(
   // Detect conversation history (local filesystem scan — always local)
   console.log("[lore] Scanning for conversation history...\n");
 
-  let results = detectAll(projectPath);
+  let results = detectAll(projectPath, { worktrees: !noWorktrees });
 
   if (agentFilter) {
     results = results.filter((r) => r.agentName === agentFilter);
@@ -180,13 +264,20 @@ export async function commandImport(
     return;
   }
 
-  // Show detection summary
-  const totalMessages = results.reduce((s, r) => s + r.totalMessages, 0);
-  const totalSessions = results.reduce((s, r) => s + r.sessions.length, 0);
+  // Show detection summary. When more than one agent was detected and we can
+  // prompt interactively (TTY, no --agent filter, not --yes/--dry-run), offer a
+  // numbered multi-select so the user can import a subset.
+  const canSelect =
+    results.length > 1 &&
+    !agentFilter &&
+    !yes &&
+    !dryRun &&
+    process.stdin.isTTY;
 
   console.log("Found prior conversations for this project:\n");
-  for (const result of results) {
-    console.log(`  ${result.agentDisplayName}`);
+  results.forEach((result, i) => {
+    const prefix = canSelect ? `  ${i + 1}. ` : "  ";
+    console.log(`${prefix}${result.agentDisplayName}`);
     console.log(
       `    ${result.sessions.length} sessions, ~${result.totalMessages} messages`,
     );
@@ -195,7 +286,21 @@ export async function commandImport(
       console.log(`    Most recent: ${formatDate(latest.lastActivityAt)}`);
     }
     console.log();
+  });
+
+  // Interactive agent selection (subset). Non-TTY / --yes / --agent → all.
+  if (canSelect) {
+    const chosen = await selectIndices(results.length);
+    results = chosen.map((i) => results[i]);
+    if (results.length === 0) {
+      console.log("[lore] No agents selected — import cancelled.");
+      return;
+    }
   }
+
+  // Recompute totals over the (possibly narrowed) selection.
+  const totalMessages = results.reduce((s, r) => s + r.totalMessages, 0);
+  const totalSessions = results.reduce((s, r) => s + r.sessions.length, 0);
 
   // Estimate LLM calls (one per ~12K token chunk)
   const totalTokens = results.reduce((s, r) => s + r.totalTokens, 0);

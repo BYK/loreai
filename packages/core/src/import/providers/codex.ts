@@ -245,8 +245,10 @@ const codexProvider: AgentHistoryProvider = {
   name: "codex",
   displayName: "Codex",
 
-  detect(projectPath: string): DetectedSession[] {
+  detect(projectPaths: string[]): DetectedSession[] {
     const sessions: DetectedSession[] = [];
+    const pathSet = new Set(projectPaths);
+    const seen = new Set<string>();
 
     // Scan both active and archived sessions
     const allFiles = [
@@ -258,11 +260,16 @@ const codexProvider: AgentHistoryProvider = {
       const meta = getSessionMeta(filePath);
       if (!meta) continue;
 
-      // Match by CWD — the session must have been started in this project
-      if (meta.cwd !== projectPath) continue;
+      // Match by CWD — the session must have been started in one of the
+      // project's paths (main checkout or a sibling worktree/clone).
+      if (!pathSet.has(meta.cwd)) continue;
 
       // Skip trivially small sessions
       if (meta.messageCount < 3) continue;
+
+      // Dedupe by file path (candidate paths may overlap).
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
 
       const ts = new Date(meta.timestamp).getTime();
       const estimatedTokens = Math.ceil(meta.fileSize / 5);

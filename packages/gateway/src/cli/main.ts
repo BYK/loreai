@@ -110,6 +110,9 @@ const OPTIONS = {
   json: { type: "boolean" as const },
   "dry-run": { type: "boolean" as const },
   "no-children": { type: "boolean" as const },
+  // `lore import` flag — restrict detection to the current directory only
+  // (skip sibling git worktrees / clone paths of the same repo).
+  "no-worktrees": { type: "boolean" as const },
   "min-confidence": { type: "string" as const },
   "no-backup": { type: "boolean" as const },
   // `lore data clear` flags

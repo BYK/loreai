@@ -62,8 +62,9 @@ export async function maybeAutoImport(
     return; // Can't determine project — skip
   }
 
-  // Detect conversation history across all known agents.
-  let results = detectAll(projectPath);
+  // Detect conversation history across all known agents. Worktree-aware:
+  // finds sessions recorded under the repo's main checkout and any worktree.
+  let results = detectAll(projectPath, { worktrees: true });
   if (results.length === 0) return;
 
   // PER-AGENT GATE (apply FIRST): only consider agents we've never handled
