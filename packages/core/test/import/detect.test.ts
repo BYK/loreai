@@ -50,14 +50,14 @@ describe("detectAll", () => {
   });
 
   test("returns empty when no providers are registered", () => {
-    const results = detectAll("/some/path");
+    const results = detectAll("/some/path", { worktrees: false });
     expect(results).toEqual([]);
   });
 
   test("returns empty when no providers have sessions", () => {
     registerProvider(makeProvider("agent-a", []));
     registerProvider(makeProvider("agent-b", []));
-    const results = detectAll("/some/path");
+    const results = detectAll("/some/path", { worktrees: false });
     expect(results).toEqual([]);
   });
 
@@ -72,7 +72,7 @@ describe("detectAll", () => {
       ]),
     );
 
-    const results = detectAll("/some/path");
+    const results = detectAll("/some/path", { worktrees: false });
     expect(results.length).toBe(2);
     // Sorted by totalMessages descending
     expect(results[0].agentName).toBe("agent-b");
@@ -95,7 +95,7 @@ describe("detectAll", () => {
       makeProvider("working", [makeSession({ messageCount: 5 })]),
     );
 
-    const results = detectAll("/some/path");
+    const results = detectAll("/some/path", { worktrees: false });
     expect(results.length).toBe(1);
     expect(results[0].agentName).toBe("working");
   });
@@ -108,7 +108,7 @@ describe("detectAll", () => {
       ]),
     );
 
-    const results = detectAll("/some/path");
+    const results = detectAll("/some/path", { worktrees: false });
     expect(results[0].totalTokens).toBe(3000);
   });
 
