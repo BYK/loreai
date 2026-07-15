@@ -238,3 +238,19 @@ describe("SYNCED_TABLES local-only secondary UNIQUE → convergence handling (#1
     });
   }
 });
+
+describe("server-internal tables are intentionally NOT synced", () => {
+  // pending_invites (E-5-c, #827) is written/read ONLY by the SECURITY DEFINER RPCs
+  // (create_scope_invite / accept_scope_invite) and has no local mirror — it is deny-all under RLS
+  // and never leaves the server. It MUST stay out of SYNCED_TABLES: registering it would install a
+  // capture trigger + seed it into the outbox, and since the client can't push it, its push cursor
+  // would pin at 0 and (via the prune floor) permanently disable outbox pruning for EVERY table
+  // (the #828 wedge). This guards against a future "helpful" addition.
+  test("pending_invites is absent from every tier's registry", () => {
+    for (const tier of ["basic", "pro", "max"] as const)
+      expect(
+        SYNCED_TABLES[tier].find((m) => m.table === "pending_invites"),
+        `pending_invites must NOT be in SYNCED_TABLES.${tier} — it is a server-internal, RPC-only table (deny-all RLS, no local mirror). Syncing it would wedge the outbox prune floor.`,
+      ).toBeUndefined();
+  });
+});

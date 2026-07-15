@@ -127,6 +127,7 @@ const OPTIONS = {
   daemon: { type: "boolean" as const },
   // `lore login` / `lore whoami` flags
   email: { type: "string" as const },
+  role: { type: "string" as const },
   verify: { type: "boolean" as const },
   "no-browser": { type: "boolean" as const },
   // Hidden diagnostic: prints the vendored-model registration set by

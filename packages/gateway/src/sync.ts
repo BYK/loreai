@@ -30,6 +30,7 @@ import {
   log,
   keystore,
   crypto,
+  db,
   reinstallSyncCapture,
   convergeProjectsByRemote,
 } from "@loreai/core";
@@ -1287,6 +1288,84 @@ async function withPhase<T>(
   }
 }
 
+/** A member's published identity public key from the remote `identity_pub` directory, or null. */
+async function fetchMemberPubKey(
+  client: SupabaseClient,
+  userId: string,
+): Promise<Uint8Array | null> {
+  const { data, error } = await client
+    .from("identity_pub")
+    .select("public_key")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error || !data?.public_key) return null;
+  return Buffer.from(data.public_key as string, "base64");
+}
+
+/**
+ * Auto-wrap the scope DEK to co-members who have joined a team (e.g. via an E-5-c invite) but
+ * don't yet hold a wrap at the current epoch — the "no follow-up" core of the invite flow. Called
+ * from syncOnce on every tick. For each TEAM scope the caller ADMINS (and holds a DEK for), it
+ * wraps to each OTHER member that has a published identity_pub but no scope_keys row at the admin's
+ * current epoch. Idempotent (wrapScopeKeyForMember skips members already at ≥ the current epoch)
+ * and cheap when there's nothing to do (the common case — no admined team scope — returns at once).
+ * A member without a published key is left for a later tick; a per-member failure is swallowed so
+ * one bad member can't abort the loop or the sync cycle.
+ */
+export async function reconcileScopeWraps(
+  client: SupabaseClient,
+): Promise<{ wrapped: number }> {
+  const u = await getCurrentUser();
+  if (!u) return { wrapped: 0 };
+  const self = u.user_id;
+  // Team scopes I administer AND hold a DEK for (a scope_keys row for myself → I can wrap).
+  const adminScopes = db()
+    .query(
+      `SELECT DISTINCT sm.scope_id AS scopeId
+         FROM scope_members sm
+         JOIN scope_keys sk ON sk.scope_id = sm.scope_id AND sk.member_user_id = sm.user_id
+        WHERE sm.user_id = ? AND sm.role = 'admin'`,
+    )
+    .all(self) as { scopeId: string }[];
+  if (adminScopes.length === 0) return { wrapped: 0 };
+
+  let wrapped = 0;
+  for (const { scopeId } of adminScopes) {
+    // The epoch a new member must be wrapped at = my current (highest) epoch for this scope.
+    const myEpoch =
+      (
+        db()
+          .query(
+            "SELECT MAX(key_epoch) AS e FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+          )
+          .get(scopeId, self) as { e: number | null } | undefined
+      )?.e ?? 0;
+    // Co-members with NO wrap at >= my epoch (LEFT JOIN → NULL means none). Excludes self.
+    const behind = db()
+      .query(
+        `SELECT sm.user_id AS userId
+           FROM scope_members sm
+           LEFT JOIN scope_keys sk
+             ON sk.scope_id = sm.scope_id AND sk.member_user_id = sm.user_id
+            AND sk.key_epoch >= ?
+          WHERE sm.scope_id = ? AND sm.user_id <> ? AND sk.member_user_id IS NULL`,
+      )
+      .all(myEpoch, scopeId, self) as { userId: string }[];
+    for (const { userId } of behind) {
+      try {
+        const pub = await fetchMemberPubKey(client, userId);
+        if (!pub) continue; // hasn't published their identity yet — retry a later tick
+        await keystore.wrapScopeKeyForMember(scopeId, self, userId, pub);
+        wrapped++;
+      } catch {
+        // Best-effort: one member's wrap failure must not abort the loop or the sync cycle.
+      }
+    }
+  }
+  if (wrapped > 0) await pushOnce(client);
+  return { wrapped };
+}
+
 export async function syncOnce(
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
@@ -1329,6 +1408,18 @@ export async function syncOnce(
   await reportDeviceProgress(client);
   // Publish this device's identity public key so admins can wrap the DEK to it (E-3, #827).
   await publishIdentityPub(client);
+  // Zero-follow-up invites (E-5-c): if I admin any team scope, wrap the DEK to co-members who
+  // joined (via an invite) and have published a key but hold no current-epoch wrap. Runs after
+  // the pull (so a member who just accepted is visible in the local scope_members mirror) and
+  // after publishIdentityPub (so the freshest keys are available). Best-effort: a wrap failure
+  // must never abort the sync cycle — it retries next tick. Cheap no-op when I admin no scopes.
+  try {
+    await reconcileScopeWraps(client);
+  } catch (e) {
+    log.notice(
+      `sync: scope-wrap reconcile deferred — ${(e as Error).message ?? e}`,
+    );
+  }
   return {
     pushed: push.pushed,
     pulled: pull.pulled,

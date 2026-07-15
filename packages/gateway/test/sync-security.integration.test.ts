@@ -771,6 +771,17 @@ describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
 
   it("caps scope_keys inserts at the free-tier row cap (member_user_id key probe, C-3)", async () => {
     const a = await h.createUser();
+    // Real members: a wrap may only target a CURRENT scope member (0043 target-membership guard),
+    // so the quota probe uses real users added to a's scope rather than synthetic ids.
+    const m1 = await h.createUser();
+    const m2 = await h.createUser();
+    const m3 = await h.createUser();
+    // a's personal scope; make m1..m3 members of it (superuser setup, bypasses RLS + grants).
+    for (const m of [m1, m2, m3])
+      await h.client.query(
+        "insert into public.scope_members (scope_id, user_id, role) values ($1,$2,'editor') on conflict do nothing",
+        [a, m],
+      );
     await setCap("scope_keys", 2);
     const ins = (member: string) =>
       h.asUser(a, (c) =>
@@ -779,9 +790,9 @@ describe.skipIf(gate())("sync migrations — quota + anti-abuse", () => {
           [member, a],
         ),
       );
-    await ins("m-1");
-    await ins("m-2");
-    const err = await expectError(() => ins("m-3"));
+    await ins(m1);
+    await ins(m2);
+    const err = await expectError(() => ins(m3));
     expect(err.code).toBe("23514"); // quota, NOT 42703 (undefined_column)
     expect(err.message).toMatch(/quota exceeded/i);
   });

@@ -16,7 +16,9 @@ import {
 import { getAuthedClient, getCurrentUser } from "../supabase";
 import {
   addTeamMember,
+  acceptTeamInvite,
   createTeam,
+  createTeamInvite,
   listTeams,
   removeTeamMember,
   setTeamRole,
@@ -24,7 +26,7 @@ import {
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>]]";
+  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>]]";
 
 export async function commandTeam(
   positionals: string[],
@@ -40,7 +42,14 @@ export async function commandTeam(
   }
   // Mutating a team's KEYS needs an unlocked identity (to mint/wrap DEKs) and sync enabled (so the
   // scope_keys writes are captured and pushed). Read-only list/members need neither — only auth.
-  const MUTATING = new Set(["create", "add", "remove", "set-role"]);
+  const MUTATING = new Set([
+    "create",
+    "add",
+    "remove",
+    "set-role",
+    "invite",
+    "accept",
+  ]);
   if (MUTATING.has(sub)) {
     if (keystore.encryptionState() !== "on") {
       console.error(
@@ -121,6 +130,29 @@ export async function commandTeam(
           return usage();
         await setTeamRole(client, scope, userId, role);
         console.log(`Set ${userId} to ${role}.`);
+        break;
+      }
+      case "invite": {
+        const scope = positionals[1];
+        if (!scope) return usage();
+        const role = (values.role as string) ?? "editor";
+        if (role !== "editor" && role !== "viewer") return usage();
+        const hint = values.email as string | undefined;
+        const token = await createTeamInvite(client, scope, role, hint);
+        console.log(
+          `Invite created (${role}${hint ? `, for ${hint}` : ""}). It expires in 14 days.\n` +
+            `Share this with the invitee — they run:\n\n  lore team accept ${token}\n`,
+        );
+        break;
+      }
+      case "accept": {
+        const token = positionals[1];
+        if (!token) return usage();
+        const { scopeId, role } = await acceptTeamInvite(client, token);
+        console.log(
+          `Joined team scope ${scopeId} as ${role}. Shared memory will decrypt once an admin's ` +
+            `next sync shares the team key (automatic — no action needed).`,
+        );
         break;
       }
       case "link": {

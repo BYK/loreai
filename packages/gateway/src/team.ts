@@ -11,7 +11,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { keystore } from "@loreai/core";
 import { getCurrentUser } from "./supabase";
-import { pushOnce } from "./sync";
+import { publishIdentityPub, pullOnce, pushOnce } from "./sync";
 
 export interface TeamSummary {
   scopeId: string;
@@ -190,4 +190,54 @@ export async function removeTeamMember(
   await keystore.rotateScopeKey(scopeId, newEpoch, wraps);
   await pushOnce(client);
   return { newEpoch, rewrapped: wraps.length, skipped };
+}
+
+/**
+ * Mint a capability invite token for a scope (E-5-c). Admin-only + role ≤ editor is enforced
+ * server-side (create_scope_invite). The token is an unguessable secret; whoever holds it and is
+ * logged in can `acceptTeamInvite` to JOIN — it grants FETCH only (RLS is_member), never decrypt
+ * (the DEK is wrapped to the new member by the admin's next sync, see reconcileScopeWraps).
+ * `hint` is a free-text label for the admin's own reference; it is NOT resolved/verified.
+ */
+export async function createTeamInvite(
+  client: SupabaseClient,
+  scopeId: string,
+  role: "editor" | "viewer" = "editor",
+  hint?: string,
+): Promise<string> {
+  const { data, error } = await client.rpc("create_scope_invite", {
+    p_scope: scopeId,
+    p_role: role,
+    p_hint: hint ?? null,
+  });
+  if (error) throw new Error(`create_scope_invite: ${error.message}`);
+  return data as string;
+}
+
+/**
+ * Redeem an invite token (E-5-c): self-add to the scope, publish this device's identity key so the
+ * admin can wrap the DEK, and pull so the joined team shows in `lore team list`. Returns the scope
+ * id + role. Content stays unreadable until the admin's next sync wraps the DEK to this member
+ * (reconcileScopeWraps) — which is automatic, no follow-up on either side.
+ */
+export async function acceptTeamInvite(
+  client: SupabaseClient,
+  token: string,
+): Promise<{ scopeId: string; role: string }> {
+  const { data, error } = await client.rpc("accept_scope_invite", {
+    p_token: token,
+  });
+  if (error) throw new Error(`accept_scope_invite: ${error.message}`);
+  // The RPC returns a single-row set: [{ out_scope_id, out_role, out_eph_pub }] (OUT columns are
+  // prefixed to avoid a name collision with the table columns inside the function body).
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row?.out_scope_id) throw new Error("accept_scope_invite: empty result");
+  // Publish our identity key so the admin's reconcile can wrap the DEK to us, then pull the
+  // membership mirror so the team is visible locally.
+  await publishIdentityPub(client);
+  await pullOnce(client);
+  return {
+    scopeId: row.out_scope_id as string,
+    role: row.out_role as string,
+  };
 }
