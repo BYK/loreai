@@ -338,6 +338,10 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       table: "entities",
       idColumns: ["id"],
       ftsTables: ["entities_fts"],
+      // C-4 (#825): the entity's human-readable name + metadata blob are PII
+      // (person/service/repo names, descriptions). Seal them on the wire like
+      // knowledge.content — decrypted locally so FTS + local reads are unchanged.
+      encryptedColumns: ["canonical_name", "metadata"],
       syncColumns: [
         "id",
         "project_id",
@@ -354,6 +358,12 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       table: "entity_aliases",
       idColumns: ["id"],
       ftsTables: ["entity_aliases_fts"],
+      // C-4 (#825): alias_value is PII (alternate names, emails, handles). Seal it.
+      // alias_type is a low-cardinality structural enum — left cleartext. The local
+      // UNIQUE(alias_type, alias_value) + convergence run on the DECRYPTED local
+      // row (applyRemote decrypts before upsert), and the remote has no UNIQUE on
+      // these columns, so encryption does not break dedup/convergence.
+      encryptedColumns: ["alias_value"],
       syncColumns: [
         "id",
         "entity_id",
@@ -367,6 +377,10 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       table: "entity_relations",
       idColumns: ["id"],
       ftsTables: [],
+      // C-4 (#825): relation label + metadata blob can carry PII. Seal them. The
+      // local UNIQUE(entity_a, entity_b, relation) + convergence run on the
+      // decrypted local row; the remote has no UNIQUE on relation.
+      encryptedColumns: ["relation", "metadata"],
       syncColumns: [
         "id",
         "entity_a",

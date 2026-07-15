@@ -1004,12 +1004,25 @@ function handlePulledRowConstraint(
   // lower id wins on every device, so pull order can't leave devices divergent (#1217).
   // Falls through to the generic skip when there's no local collision / it's an orphan.
   if (isUniqueConstraintError(e)) {
+    // The resolver matches the remote row against LOCAL rows by their natural key
+    // (alias_type+alias_value / entity_a+entity_b+relation) — which is stored
+    // DECRYPTED locally. For an encrypted table the raw `remote` carries ciphertext
+    // in those columns, so we must decrypt a copy first or the lookup never matches
+    // and convergence silently fails (#1234/#1236 regression). `reapply` keeps using
+    // the raw `remote` (applyRemote re-decrypts internally). If decrypt can't proceed
+    // (locked / missing key), it throws EncryptedContentUnavailable → propagate so the
+    // whole table defers, exactly as the initial apply would have.
+    let resolveRow = remote;
+    if (meta.encryptedColumns?.length) {
+      resolveRow = stripSyncCols(remote);
+      decryptColumns(meta.table, rid, resolveRow, enc);
+    }
     const reapply = () => applyRemote(meta, remote, res, touchedFts, enc);
     if (
       (meta.table === "entity_aliases" &&
-        syncData.resolveAliasUniqueConflict(remote, reapply)) ||
+        syncData.resolveAliasUniqueConflict(resolveRow, reapply)) ||
       (meta.table === "entity_relations" &&
-        syncData.resolveRelationUniqueConflict(remote, reapply))
+        syncData.resolveRelationUniqueConflict(resolveRow, reapply))
     ) {
       res.conflicts++;
       return;
@@ -1163,7 +1176,14 @@ function applyRemote(
         stripSyncCols(remote, SCOPE_MEMBER_KEEP),
       );
     } else {
-      syncData.applyRemoteUpsert(meta.table, stripSyncCols(remote));
+      // Generic content tables (entities, entity_aliases, entity_relations, …).
+      // Use `decrypted` when the table has sealed columns (C-4) so the plaintext —
+      // not the pulled ciphertext — is stored locally; falls back to the stripped
+      // raw row for unencrypted tables.
+      syncData.applyRemoteUpsert(
+        meta.table,
+        decrypted ?? stripSyncCols(remote),
+      );
     }
     syncData.setSyncState(meta.table, rowId, {
       content_hash: remoteHash,

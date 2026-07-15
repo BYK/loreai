@@ -678,6 +678,203 @@ describe.skipIf(SKIP)(
       expect((await pushOnce(client)).pushed).toBe(0);
     });
 
+    it("device-1 encrypts the entity graph → remote stores CIPHERTEXT → device-2 decrypts (C-4 entities)", async () => {
+      const NAME = "MiniMax Corp";
+      const META = JSON.stringify({ note: "a private description" });
+      const ALIAS = "founder@example.com";
+      const REL = "works_with";
+      const client = clientFor(uid);
+      const pid = ensureProject("/tmp/lore-engine-it");
+      const now = Date.now();
+
+      // --- Device 1: arm encryption, create an entity + alias + relation, push. ---
+      keystore.setPassphrase("correct horse battery", { params: FAST });
+      syncData.enableSync("basic");
+      db()
+        .query(
+          `INSERT INTO entities (id, project_id, entity_type, canonical_name, metadata, created_at, updated_at)
+           VALUES (?, ?, 'person', ?, ?, ?, ?)`,
+        )
+        .run("e1", pid, NAME, META, now, now);
+      db()
+        .query(
+          `INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at)
+           VALUES ('e2', ?, 'person', 'Other', ?, ?)`,
+        )
+        .run(pid, now, now);
+      db()
+        .query(
+          `INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at)
+           VALUES ('a1', 'e1', 'email', ?, 'curator', ?)`,
+        )
+        .run(ALIAS, now);
+      db()
+        .query(
+          `INSERT INTO entity_relations (id, entity_a, entity_b, relation, metadata, source, created_at, updated_at)
+           VALUES ('r1', 'e1', 'e2', ?, ?, 'curator', ?, ?)`,
+        )
+        .run(REL, META, now, now);
+
+      await pushOnce(client);
+      await pushOnce(client); // flush the lazily-minted DEK (see knowledge test note)
+
+      // The remote MUST hold ciphertext for the sealed columns and CLEARTEXT for
+      // the structural ones (entity_type / alias_type / source).
+      const ent = await h.asUser(uid, (c) =>
+        c
+          .query(
+            "select entity_type, canonical_name, metadata from public.entities where id='e1'",
+          )
+          .then((x) => x.rows[0]),
+      );
+      expect(ent.entity_type).toBe("person"); // structural → cleartext
+      expect(ent.canonical_name).not.toBe(NAME);
+      expect(
+        crypto.isEnvelope(Buffer.from(ent.canonical_name as string, "base64")),
+      ).toBe(true);
+      expect(
+        crypto.isEnvelope(Buffer.from(ent.metadata as string, "base64")),
+      ).toBe(true);
+
+      const al = await h.asUser(uid, (c) =>
+        c
+          .query(
+            "select alias_type, alias_value, source from public.entity_aliases where id='a1'",
+          )
+          .then((x) => x.rows[0]),
+      );
+      expect(al.alias_type).toBe("email"); // structural → cleartext
+      expect(al.source).toBe("curator"); // provenance → cleartext
+      expect(al.alias_value).not.toBe(ALIAS);
+      expect(
+        crypto.isEnvelope(Buffer.from(al.alias_value as string, "base64")),
+      ).toBe(true);
+
+      const rel = await h.asUser(uid, (c) =>
+        c
+          .query(
+            "select relation, metadata, source from public.entity_relations where id='r1'",
+          )
+          .then((x) => x.rows[0]),
+      );
+      expect(rel.source).toBe("curator");
+      expect(rel.relation).not.toBe(REL);
+      expect(
+        crypto.isEnvelope(Buffer.from(rel.relation as string, "base64")),
+      ).toBe(true);
+      expect(
+        crypto.isEnvelope(Buffer.from(rel.metadata as string, "base64")),
+      ).toBe(true);
+
+      // --- Device 2: fresh device, same account. Wipe all local state. ---
+      db().exec(
+        "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM entity_relations; DELETE FROM entity_aliases; DELETE FROM entities; DELETE FROM sync_state; DELETE FROM sync_outbox",
+      );
+      keystore.lock();
+      for (const m of syncData.syncedTables("basic")) {
+        setKV(
+          `sync.pull.${m.table}`,
+          m.pullOnly ? `${Date.now() + 31_536_000_000}|` : "0|",
+        );
+        setKV(`sync.push.${m.table}`, "0");
+      }
+
+      // First pull → escrow/scope_keys arrive first → "locked" → entity tables deferred.
+      await pullOnce(client);
+      expect(keystore.encryptionState()).toBe("locked");
+      expect(syncData.getRowById("entities", "e1")).toBeNull();
+
+      // Unlock → "on" → second pull decrypts the whole graph back to plaintext.
+      expect(keystore.unlockWithPassphrase("correct horse battery")).toBe(true);
+      await pullOnce(client);
+      expect(syncData.getRowById("entities", "e1")?.canonical_name).toBe(NAME);
+      expect(syncData.getRowById("entities", "e1")?.metadata).toBe(META);
+      expect(syncData.getRowById("entity_aliases", "a1")?.alias_value).toBe(
+        ALIAS,
+      );
+      expect(syncData.getRowById("entity_relations", "r1")?.relation).toBe(REL);
+      expect(syncData.getRowById("entity_relations", "r1")?.metadata).toBe(
+        META,
+      );
+
+      // No ping-pong: content_hash is over plaintext, pulled under capture-suppression.
+      expect((await pushOnce(client)).pushed).toBe(0);
+    });
+
+    it("converges an encrypted alias UNIQUE collision across devices (#1234 under C-4)", async () => {
+      // Two devices independently mint the SAME (alias_type, alias_value) under
+      // different ids; both reach the remote sealed (different ciphertext, same
+      // plaintext). On pull the second collides with the local UNIQUE(alias_type,
+      // alias_value) — the resolver must see the DECRYPTED value to match the local
+      // row and converge (lower id wins). Regression: it was fed the raw ciphertext,
+      // so the local lookup never matched and devices stayed divergent.
+      const VALUE = "shared@example.com";
+      const client = clientFor(uid);
+      const pid = ensureProject("/tmp/lore-engine-it");
+      const now = Date.now();
+      keystore.setPassphrase("correct horse battery", { params: FAST });
+      syncData.enableSync("basic");
+      db()
+        .query(
+          "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES ('e1', ?, 'person', 'E', ?, ?)",
+        )
+        .run(pid, now, now);
+
+      // Push the HIGHER-id alias ("a-2") FIRST so it gets the earlier server
+      // updated_at and is therefore PULLED first (applied cleanly). This forces the
+      // resolver's delete-and-reapply path: the lower-id winner ("a-1") arrives
+      // second, collides, and must DELETE the already-applied a-2 to converge. (If
+      // the resolver were fed ciphertext, its local lookup would miss, it would skip
+      // a-1, and the wrong row a-2 would survive — the discriminating case.)
+      db()
+        .query(
+          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, created_at) VALUES ('a-2', 'e1', 'email', ?, ?)",
+        )
+        .run(VALUE, now);
+      await pushOnce(client);
+      await pushOnce(client); // flush the lazily-minted DEK
+
+      // Swap in the LOWER-id row ("a-1") with the SAME (type,value); push it so BOTH
+      // exist on the remote (distinct ciphertext) with a-1's updated_at LATER.
+      syncData.withApplying(() =>
+        db().query("DELETE FROM entity_aliases WHERE id='a-2'").run(),
+      );
+      db()
+        .query(
+          "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, created_at) VALUES ('a-1', 'e1', 'email', ?, ?)",
+        )
+        .run(VALUE, now + 1);
+      await pushOnce(client);
+      const remoteCount = await h.asUser(uid, (c) =>
+        c
+          .query("select count(*)::int as n from public.entity_aliases")
+          .then((x) => x.rows[0].n),
+      );
+      expect(remoteCount).toBe(2); // both a-lo and a-hi on the remote (sealed)
+
+      // Fresh device: pull BOTH. Whichever applies first, the second hits the local
+      // UNIQUE → resolver decrypts, matches on plaintext, converges to the lower id.
+      db().exec(
+        "DELETE FROM entity_aliases; DELETE FROM sync_state; DELETE FROM sync_outbox",
+      );
+      for (const m of syncData.syncedTables("basic")) {
+        setKV(
+          `sync.pull.${m.table}`,
+          m.pullOnly ? `${now + 31_536_000_000}|` : "0|",
+        );
+        setKV(`sync.push.${m.table}`, "0");
+      }
+      await pullOnce(client);
+
+      // Exactly ONE alias survives locally, and it's the lower id (a-1), decrypted.
+      const local = db()
+        .query("SELECT id, alias_value FROM entity_aliases ORDER BY id")
+        .all() as Array<{ id: string; alias_value: string }>;
+      expect(local).toHaveLength(1);
+      expect(local[0].id).toBe("a-1");
+      expect(local[0].alias_value).toBe(VALUE); // decrypted, not ciphertext
+    });
+
     it("a wrong passphrase does NOT unlock, and knowledge stays deferred", async () => {
       const client = clientFor(uid);
       keystore.setPassphrase("the-right-one", { params: FAST });
