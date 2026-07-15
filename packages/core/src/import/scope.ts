@@ -36,24 +36,29 @@ export function projectSearchPaths(
   projectPath: string,
   opts?: { worktrees?: boolean },
 ): string[] {
-  const base = resolve(projectPath);
-  const ordered: string[] = [base];
-
-  // `--no-worktrees` restricts to the current directory only.
-  if (opts?.worktrees === false) return ordered;
-
-  // 1. git worktrees for the repo containing `base`.
-  for (const p of gitWorktreePaths(base)) ordered.push(p);
-
-  // 2. DB-known paths (main path + aliases) for the resolved project.
   try {
-    for (const p of projectKnownPaths(base)) ordered.push(resolve(p));
-  } catch {
-    // fail open — DB unavailable / project unknown
-  }
+    const base = resolve(projectPath);
+    const ordered: string[] = [base];
 
-  // Dedupe, preserving order (base guaranteed first).
-  return [...new Set(ordered)];
+    // `--no-worktrees` restricts to the current directory only.
+    if (opts?.worktrees === false) return ordered;
+
+    // 1. git worktrees for the repo containing `base`.
+    for (const p of gitWorktreePaths(base)) ordered.push(p);
+
+    // 2. DB-known paths (main path + aliases) for the resolved project.
+    try {
+      for (const p of projectKnownPaths(base)) ordered.push(resolve(p));
+    } catch {
+      // fail open — DB unavailable / project unknown
+    }
+
+    // Dedupe, preserving order (base guaranteed first).
+    return [...new Set(ordered)];
+  } catch {
+    // Fail open: never let path resolution / DB access break import detection.
+    return [projectPath];
+  }
 }
 
 /**

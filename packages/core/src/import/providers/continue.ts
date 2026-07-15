@@ -190,6 +190,11 @@ const continueProvider: AgentHistoryProvider = {
     const pathSet = new Set(projectPaths);
     const index = loadSessionIndex();
 
+    // No explicit `seen` set is needed for dedup: a session has exactly one
+    // `workspaceDirectory`, so the `pathSet.has()` filter yields each session
+    // at most once even when candidate paths overlap. The fallback scan below
+    // additionally guards against re-adding an already-indexed session via
+    // `existingIds`.
     for (const meta of index) {
       // Filter by workspace directory (main checkout or a sibling worktree).
       if (!meta.workspaceDirectory || !pathSet.has(meta.workspaceDirectory))
