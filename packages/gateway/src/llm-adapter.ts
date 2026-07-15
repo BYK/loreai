@@ -1488,10 +1488,12 @@ export function createGatewayLLMClient(
     async prompt(system, user, opts) {
       const model = opts?.model ?? defaultModel;
 
-      // Skip models already known to produce no usable worker output. This is
-      // a capability verdict (not an outage): the call would just waste a round
-      // trip and re-fail. Distillation/curation defer; data stays recallable.
-      if (isWorkerIncapable(model.providerID, model.modelID)) {
+      // Skip models already known to produce no usable worker output for THIS
+      // worker kind. This is a capability verdict (not an outage): the call
+      // would just waste a round trip and re-fail. The failing worker defers;
+      // data stays recallable. Scoped per worker so a model that can distill
+      // but not curate is still used for distillation.
+      if (isWorkerIncapable(model.providerID, model.modelID, opts?.workerID)) {
         return null;
       }
 
@@ -1919,8 +1921,13 @@ export function createGatewayLLMClient(
                 if (parsed.text) {
                   // A usable response resets the consecutive-empty streak so a
                   // model that recovers isn't pushed toward an incapable verdict
-                  // by old, non-consecutive empties.
-                  clearEmptyWorkerStreak(model.providerID, model.modelID);
+                  // by old, non-consecutive empties. Scoped per worker: a usable
+                  // distillation must NOT reset the curator's empty streak.
+                  clearEmptyWorkerStreak(
+                    model.providerID,
+                    model.modelID,
+                    opts?.workerID,
+                  );
                   return parsed.text;
                 }
 
@@ -1953,6 +1960,7 @@ export function createGatewayLLMClient(
                     model.providerID,
                     model.modelID,
                     finishReason,
+                    opts?.workerID,
                   )
                 ) {
                   recordWorkerFailure(

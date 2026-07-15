@@ -171,13 +171,26 @@ const state: Map<string, SessionHealth> = new Map();
 const creditPaused: Map<string, { lastProbe: number }> = new Map();
 
 /**
- * Provider+model verdicts for models that consistently return no usable worker
- * output even after the reasoning-field fallback. Keyed by `${providerID}/${modelID}`.
- * Once a model is marked incapable, callers skip worker LLM calls for it
- * (distillation/curation simply defer; the raw data stays recallable). This is
- * a process-lifetime cache — a verdict is a stable capability fact, not a
- * transient outage, so it is intentionally NOT TTL-evicted. Cleared only on
- * process restart or `_resetForTest`.
+ * Provider+model+worker verdicts for models that consistently return no usable
+ * worker output even after the reasoning-field fallback. Keyed by
+ * `${providerID}/${modelID}/${workerID}`.
+ *
+ * The worker dimension is load-bearing: capability is worker-kind specific. A
+ * cheap model can be perfectly capable of one worker prompt (e.g. distillation,
+ * which is free-form prose) yet consistently incapable of another (e.g. the
+ * curator, which demands strict structured JSON). Keying the verdict on the
+ * model ALONE meant a model that could distill but not curate was never marked
+ * incapable — its distillation successes reset the curator empty streak (see
+ * {@link consecutiveEmpty}) before it ever reached the threshold, so the broken
+ * curator kept getting called and escalated the failure ladder forever with a
+ * misleading "auth stale" warning. Scoping by worker fixes that: the curator is
+ * disabled for the model while distillation keeps using it.
+ *
+ * Once a (model, worker) pair is marked incapable, callers skip worker LLM
+ * calls for that pair (that worker simply defers; the raw data stays
+ * recallable). This is a process-lifetime cache — a verdict is a stable
+ * capability fact, not a transient outage, so it is intentionally NOT
+ * TTL-evicted. Cleared only on process restart or `_resetForTest`.
  */
 const incapableModels: Set<string> = new Set();
 
@@ -209,19 +222,30 @@ export function _resetForTest(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Consecutive complete-but-empty responses a model must produce before we
- * conclude it is genuinely incapable. A single empty completion is often
- * transient or prompt-specific (a one-off glitch, a refusal), so we require a
- * small run before permanently skipping the model.
+ * Consecutive complete-but-empty responses a (model, worker) pair must produce
+ * before we conclude it is genuinely incapable. A single empty completion is
+ * often transient or prompt-specific (a one-off glitch, a refusal), so we
+ * require a small run before permanently skipping the pair.
  */
 const INCAPABLE_THRESHOLD = 3;
 
-/** Per-model count of consecutive complete-but-empty responses. */
+/** Per-(model, worker) count of consecutive complete-but-empty responses. */
 const consecutiveEmpty: Map<string, number> = new Map();
 
-/** Build the verdict key for a provider+model pair. */
-function modelKey(providerID: string, modelID: string): string {
-  return `${providerID}/${modelID}`;
+/**
+ * Sentinel worker used when a caller does not scope by worker kind. Keeps the
+ * per-worker key well-formed and lets legacy call sites (and tests) that only
+ * care about the model share one bucket.
+ */
+const ANY_WORKER = "_any";
+
+/** Build the verdict key for a provider+model+worker triple. */
+function modelKey(
+  providerID: string,
+  modelID: string,
+  workerID: WorkerID | (string & {}) = ANY_WORKER,
+): string {
+  return `${providerID}/${modelID}/${workerID}`;
 }
 
 /**
@@ -253,17 +277,22 @@ export function isCapabilityEmpty(finishReason: string | undefined): boolean {
 }
 
 /**
- * Record a complete-but-empty worker response for a model and return true when
- * the model should now be marked incapable (threshold of consecutive empties
- * reached). Non-capability finish reasons (truncation, content filter, tool
- * calls) reset the streak and never mark.
+ * Record a complete-but-empty worker response for a (model, worker) pair and
+ * return true when the pair should now be marked incapable (threshold of
+ * consecutive empties reached). Non-capability finish reasons (truncation,
+ * content filter, tool calls) reset the streak and never mark.
+ *
+ * The streak is scoped per worker: a distillation success on the same model
+ * must NOT reset a curator's empty streak, otherwise a model that can distill
+ * but not curate is never marked incapable (see {@link incapableModels}).
  */
 export function recordEmptyWorkerResponse(
   providerID: string,
   modelID: string,
   finishReason: string | undefined,
+  workerID: WorkerID | (string & {}) = ANY_WORKER,
 ): boolean {
-  const key = modelKey(providerID, modelID);
+  const key = modelKey(providerID, modelID, workerID);
   if (!isCapabilityEmpty(finishReason)) {
     consecutiveEmpty.delete(key); // transient/expected — reset the streak
     return false;
@@ -271,42 +300,53 @@ export function recordEmptyWorkerResponse(
   const n = (consecutiveEmpty.get(key) ?? 0) + 1;
   consecutiveEmpty.set(key, n);
   if (n >= INCAPABLE_THRESHOLD) {
-    markWorkerIncapable(providerID, modelID);
+    markWorkerIncapable(providerID, modelID, workerID);
     return true;
   }
   return false;
 }
 
-/** Clear the consecutive-empty streak for a model (on a usable response). */
+/**
+ * Clear the consecutive-empty streak for a (model, worker) pair (on a usable
+ * response). Only the streak for THIS worker is cleared — a usable
+ * distillation must not wipe the curator's accumulating empties.
+ */
 export function clearEmptyWorkerStreak(
   providerID: string,
   modelID: string,
+  workerID: WorkerID | (string & {}) = ANY_WORKER,
 ): void {
-  consecutiveEmpty.delete(modelKey(providerID, modelID));
+  consecutiveEmpty.delete(modelKey(providerID, modelID, workerID));
 }
 
 /**
- * Mark a provider+model as incapable of producing usable worker output, so
- * future worker calls for it are skipped. Idempotent. Logs once per model.
+ * Mark a provider+model+worker as incapable of producing usable worker output,
+ * so future calls to that worker for that model are skipped. Idempotent. Logs
+ * once per (model, worker).
  */
-export function markWorkerIncapable(providerID: string, modelID: string): void {
-  const key = modelKey(providerID, modelID);
+export function markWorkerIncapable(
+  providerID: string,
+  modelID: string,
+  workerID: WorkerID | (string & {}) = ANY_WORKER,
+): void {
+  const key = modelKey(providerID, modelID, workerID);
   if (incapableModels.has(key)) return;
   incapableModels.add(key);
   log.warn(
-    `[worker-health] model ${key} marked worker-incapable — ` +
-      `it returned no usable text after the reasoning-field fallback ` +
-      `for ${INCAPABLE_THRESHOLD} consecutive complete responses; ` +
-      `skipping background worker calls for it (data stays recallable)`,
+    `[worker-health] model ${providerID}/${modelID} marked worker-incapable ` +
+      `for worker=${workerID} — it returned no usable text after the ` +
+      `reasoning-field fallback for ${INCAPABLE_THRESHOLD} consecutive ` +
+      `complete responses; skipping this worker for it (data stays recallable)`,
   );
 }
 
-/** True when a provider+model has been marked worker-incapable. */
+/** True when a provider+model+worker has been marked worker-incapable. */
 export function isWorkerIncapable(
   providerID: string,
   modelID: string,
+  workerID: WorkerID | (string & {}) = ANY_WORKER,
 ): boolean {
-  return incapableModels.has(modelKey(providerID, modelID));
+  return incapableModels.has(modelKey(providerID, modelID, workerID));
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +647,41 @@ export function allowWorkerProbe(sessionID: string): boolean {
 }
 
 /**
+ * Best-effort human-readable "likely cause" derived from the failure reasons
+ * actually recorded for the session. Previously this was hard-coded to "session
+ * authentication has gone stale", which sent users chasing an auth problem when
+ * the real cause was often a worker model returning empty responses. We now key
+ * the guidance off the recorded reasons.
+ */
+function likelyCauseFor(reasons: Set<FailureReason>): string {
+  if (reasons.has("no-auth") || reasons.has("auth-rejected")) {
+    return (
+      "session authentication has gone stale. Run `lore doctor` or check the " +
+      "dashboard for details."
+    );
+  }
+  if (
+    reasons.has("no-response") ||
+    reasons.has("worker-incapable") ||
+    reasons.has("parse-error")
+  ) {
+    return (
+      "the background worker model is returning empty or unusable responses. " +
+      "Set an explicit `workerModel` (same provider as the session) in your " +
+      "lore config, or run `lore doctor` / check the dashboard for details."
+    );
+  }
+  if (reasons.has("rate-limit")) {
+    return (
+      "the upstream is rate-limiting background worker calls. Run `lore " +
+      "doctor` or check the dashboard for details."
+    );
+  }
+  // Fallback for upstream-error / cross-provider / protocol-mismatch / etc.
+  return "the upstream is failing background worker calls. Run `lore doctor` or check the dashboard for details.";
+}
+
+/**
  * Returns the user-facing warning message for the next response, or null
  * if the session is healthy.
  *
@@ -622,8 +697,7 @@ export function getDegradationWarning(sessionID: string): string | null {
     `[Lore: Background workers (distillation, curation, cache warming) for this session ` +
     `have been failing for ${formatDuration(sustainedMs)}. This is harmful — your ` +
     `context window is not being compressed and long-term knowledge is not being ` +
-    `captured. Likely cause: session authentication has gone stale. Run \`lore doctor\` ` +
-    `or check the dashboard for details.]`
+    `captured. Likely cause: ${likelyCauseFor(entry.reasons)}]`
   );
 }
 

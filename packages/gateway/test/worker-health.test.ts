@@ -605,4 +605,118 @@ describe("worker-health", () => {
       expect(isWorkerIncapable("opencode", "m")).toBe(false);
     });
   });
+
+  describe("per-worker incapable streak (regression: distill must not reset curator)", () => {
+    // Production repro (2026-07-15): openrouter/meta-llama/llama-4-scout could
+    // distill (returned text, resetting the streak) but returned empty for the
+    // curator every time. With a per-MODEL streak, the interleaved distillation
+    // successes reset the curator empty streak before it reached 3, so the model
+    // was never marked incapable and the failure ladder escalated forever with a
+    // misleading "auth stale" warning. The streak must be scoped per worker.
+    const P = "openrouter";
+    const M = "meta-llama/llama-4-scout";
+
+    test("a usable distillation does NOT reset the curator empty streak", () => {
+      // Two consecutive curator empties.
+      expect(recordEmptyWorkerResponse(P, M, "stop", "lore-curator")).toBe(
+        false,
+      );
+      expect(recordEmptyWorkerResponse(P, M, "stop", "lore-curator")).toBe(
+        false,
+      );
+      // A successful distillation on the SAME model clears only its own streak.
+      clearEmptyWorkerStreak(P, M, "lore-distill");
+      // 3rd consecutive curator empty must still mark the curator incapable.
+      expect(recordEmptyWorkerResponse(P, M, "stop", "lore-curator")).toBe(
+        true,
+      );
+      expect(isWorkerIncapable(P, M, "lore-curator")).toBe(true);
+    });
+
+    test("clearEmptyWorkerStreak only resets the streak for its OWN worker", () => {
+      // Locks the keyspace-coherence invariant: recordEmptyWorkerResponse and
+      // clearEmptyWorkerStreak MUST share the same per-worker key. Without the
+      // workerID dimension on clear, a distill success would wipe the curator
+      // streak (the original bug). This asserts BOTH directions:
+      //   (a) clearing a DIFFERENT worker does not reset curator, and
+      //   (b) clearing the SAME worker DOES reset it.
+      const P2 = "openrouter";
+      const M2 = "some/other-model";
+      // (a) Different-worker clear must not touch curator's streak.
+      recordEmptyWorkerResponse(P2, M2, "stop", "lore-curator"); // curator=1
+      recordEmptyWorkerResponse(P2, M2, "stop", "lore-curator"); // curator=2
+      clearEmptyWorkerStreak(P2, M2, "lore-distill"); // must NOT reset curator
+      expect(recordEmptyWorkerResponse(P2, M2, "stop", "lore-curator")).toBe(
+        true, // curator reached 3 → incapable
+      );
+      // (b) Same-worker clear must reset that worker's streak. Use a fresh model
+      // so the incapable verdict above doesn't interfere.
+      const M3 = "some/third-model";
+      recordEmptyWorkerResponse(P2, M3, "stop", "lore-curator"); // curator=1
+      recordEmptyWorkerResponse(P2, M3, "stop", "lore-curator"); // curator=2
+      clearEmptyWorkerStreak(P2, M3, "lore-curator"); // resets curator to 0
+      // Next empty is streak=1, NOT 3 → must not mark incapable.
+      expect(recordEmptyWorkerResponse(P2, M3, "stop", "lore-curator")).toBe(
+        false,
+      );
+      expect(isWorkerIncapable(P2, M3, "lore-curator")).toBe(false);
+    });
+
+    test("incapable verdict is scoped per worker — distillation stays usable", () => {
+      for (let i = 0; i < 3; i++) {
+        recordEmptyWorkerResponse(P, M, "stop", "lore-curator");
+      }
+      expect(isWorkerIncapable(P, M, "lore-curator")).toBe(true);
+      // The model is NOT marked incapable for distillation.
+      expect(isWorkerIncapable(P, M, "lore-distill")).toBe(false);
+    });
+
+    test("empties from different workers accumulate on independent streaks", () => {
+      // One empty each for curator and distill — neither reaches the threshold.
+      expect(recordEmptyWorkerResponse(P, M, "stop", "lore-curator")).toBe(
+        false,
+      );
+      expect(recordEmptyWorkerResponse(P, M, "stop", "lore-distill")).toBe(
+        false,
+      );
+      expect(recordEmptyWorkerResponse(P, M, "stop", "lore-curator")).toBe(
+        false,
+      );
+      expect(recordEmptyWorkerResponse(P, M, "stop", "lore-distill")).toBe(
+        false,
+      );
+      // Neither is incapable yet (each has 2, not 3).
+      expect(isWorkerIncapable(P, M, "lore-curator")).toBe(false);
+      expect(isWorkerIncapable(P, M, "lore-distill")).toBe(false);
+    });
+  });
+
+  describe("getDegradationWarning — cause derived from reasons (Fix B)", () => {
+    test("no-response reasons name the worker model, not auth", () => {
+      const t0 = 1_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("s-nr", "lore-curator", "no-response");
+      // Advance past the 30m response-message threshold.
+      _setNowForTest(() => t0 + 31 * 60 * 1000);
+      // Keep the entry alive with another failure in the current window.
+      recordWorkerFailure("s-nr", "lore-curator", "no-response");
+      const warning = getDegradationWarning("s-nr");
+      expect(warning).not.toBeNull();
+      expect(warning).toContain("workerModel");
+      expect(warning).toContain("`lore doctor`");
+      expect(warning).not.toContain("lore status");
+      expect(warning).not.toContain("authentication has gone stale");
+    });
+
+    test("auth reasons still surface the stale-auth guidance", () => {
+      const t0 = 2_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("s-auth", "lore-curator", "auth-rejected");
+      _setNowForTest(() => t0 + 31 * 60 * 1000);
+      recordWorkerFailure("s-auth", "lore-curator", "auth-rejected");
+      const warning = getDegradationWarning("s-auth");
+      expect(warning).not.toBeNull();
+      expect(warning).toContain("authentication has gone stale");
+    });
+  });
 });
