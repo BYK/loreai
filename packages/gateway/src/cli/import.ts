@@ -17,6 +17,8 @@ import {
   setLastImportAt,
   load,
 } from "@loreai/core";
+type DetectionResult =
+  import("@loreai/core").conversationImport.DetectionResult;
 import { createGatewayLLMClient } from "../llm-adapter";
 import { resolveAuth } from "../auth";
 import { exportLoreFile } from "@loreai/core";
@@ -142,6 +144,90 @@ export async function selectIndices(
   return all();
 }
 
+/** A detected session already recorded on the remote gateway. */
+type RemoteImportRecord = {
+  agent_name: string;
+  source_id: string;
+  source_hash: string;
+};
+
+/**
+ * Restrict detection results to a single agent by internal name.
+ *
+ * Returns the filtered results (possibly empty). Pure — no I/O.
+ */
+export function applyAgentFilter(
+  results: DetectionResult[],
+  agentFilter: string | null,
+): DetectionResult[] {
+  if (!agentFilter) return results;
+  return results.filter((r) => r.agentName === agentFilter);
+}
+
+/**
+ * Drop sessions that have already been imported, recompute per-agent totals,
+ * and remove agents left with no new sessions.
+ *
+ * Dedup source depends on mode:
+ *   - remote: match against the remote gateway's import-history rows
+ *   - local:  consult the local import DB via `isImportedLocal`
+ *
+ * Both the hash function and the local-check are injected so this is a pure,
+ * testable transform with no direct filesystem/DB dependency.
+ */
+export function filterAlreadyImported(
+  results: DetectionResult[],
+  opts: {
+    projectPath: string;
+    hashOf: (sess: { messageCount: number; lastActivityAt: number }) => string;
+    remoteImports?: RemoteImportRecord[];
+    isImportedLocal: (
+      projectPath: string,
+      agentName: string,
+      sourceId: string,
+      hash: string,
+    ) => unknown;
+    hasProvider?: (agentName: string) => boolean;
+  },
+): DetectionResult[] {
+  const { projectPath, hashOf, remoteImports, isImportedLocal } = opts;
+  const hasProvider = opts.hasProvider ?? (() => true);
+
+  for (const result of results) {
+    if (!hasProvider(result.agentName)) continue;
+
+    result.sessions = result.sessions.filter((sess) => {
+      const hash = hashOf({
+        messageCount: sess.messageCount,
+        lastActivityAt: sess.lastActivityAt,
+      });
+      if (remoteImports) {
+        // Check against remote import history
+        return !remoteImports.some(
+          (r) =>
+            r.agent_name === result.agentName &&
+            r.source_id === sess.id &&
+            r.source_hash === hash,
+        );
+      }
+      // Local mode: check local DB (truthy record → already imported)
+      return !isImportedLocal(projectPath, result.agentName, sess.id, hash);
+    });
+
+    result.totalMessages = result.sessions.reduce(
+      (s, sess) => s + sess.messageCount,
+      0,
+    );
+    result.totalTokens = result.sessions.reduce(
+      (s, sess) => s + sess.estimatedTokens,
+      0,
+    );
+  }
+
+  // Remove agents with no new sessions
+  return results.filter((r) => r.sessions.length > 0);
+}
+
 // ---------------------------------------------------------------------------
 // Command entry point
 // ---------------------------------------------------------------------------
@@ -177,7 +263,7 @@ export async function commandImport(
   let results = detectAll(projectPath, { worktrees: !noWorktrees });
 
   if (agentFilter) {
-    results = results.filter((r) => r.agentName === agentFilter);
+    results = applyAgentFilter(results, agentFilter);
     if (results.length === 0) {
       console.log(
         `[lore] No conversation history found from "${agentFilter}" for this project.`,
@@ -195,9 +281,7 @@ export async function commandImport(
 
   // Filter out already-imported sessions.
   // In remote mode, fetch import history from the remote gateway.
-  let remoteImports:
-    | Array<{ agent_name: string; source_id: string; source_hash: string }>
-    | undefined;
+  let remoteImports: RemoteImportRecord[] | undefined;
   if (remote) {
     try {
       const pq = projectQueryParams(projectPath);
@@ -222,40 +306,17 @@ export async function commandImport(
     }
   }
 
-  for (const result of results) {
-    const provider = getProvider(result.agentName);
-    if (!provider) continue;
-
-    result.sessions = result.sessions.filter((sess) => {
-      const hash = computeHash({
+  results = filterAlreadyImported(results, {
+    projectPath,
+    hashOf: (sess) =>
+      computeHash({
         messageCount: sess.messageCount,
         lastTimestamp: sess.lastActivityAt,
-      });
-      if (remote && remoteImports) {
-        // Check against remote import history
-        return !remoteImports.some(
-          (r) =>
-            r.agent_name === result.agentName &&
-            r.source_id === sess.id &&
-            r.source_hash === hash,
-        );
-      }
-      // Local mode: check local DB
-      return !isImported(projectPath, result.agentName, sess.id, hash);
-    });
-
-    result.totalMessages = result.sessions.reduce(
-      (s, sess) => s + sess.messageCount,
-      0,
-    );
-    result.totalTokens = result.sessions.reduce(
-      (s, sess) => s + sess.estimatedTokens,
-      0,
-    );
-  }
-
-  // Remove agents with no new sessions
-  results = results.filter((r) => r.sessions.length > 0);
+      }),
+    remoteImports,
+    isImportedLocal: isImported,
+    hasProvider: (name) => getProvider(name) != null,
+  });
 
   if (results.length === 0) {
     console.log(
