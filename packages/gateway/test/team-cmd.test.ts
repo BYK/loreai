@@ -17,6 +17,8 @@ vi.mock("../src/team", () => ({
   setTeamRole: vi.fn(),
   listTeams: vi.fn(),
   teamMembers: vi.fn(),
+  createTeamInvite: vi.fn(),
+  acceptTeamInvite: vi.fn(),
 }));
 
 import {
@@ -247,6 +249,65 @@ describe("set-role", () => {
       "admin",
     );
     expect(logs.join("\n")).toContain("Set u to admin.");
+  });
+});
+
+describe("invite (E-5-c)", () => {
+  it("requires a scope", async () => {
+    await run("invite");
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("rejects an invalid role", async () => {
+    await commandTeam(["invite", "s"], { role: "admin" });
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+  });
+
+  it("mints an invite (default editor) and prints the accept command", async () => {
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-abc");
+    await commandTeam(["invite", "s-1"], {});
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-1",
+      "editor",
+      undefined,
+    );
+    expect(logs.join("\n")).toContain("lore team accept tok-abc");
+  });
+
+  it("passes --role and --email through to the client", async () => {
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-xyz");
+    await commandTeam(["invite", "s-2"], { role: "viewer", email: "a@b.dev" });
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-2",
+      "viewer",
+      "a@b.dev",
+    );
+    expect(logs.join("\n")).toMatch(/for a@b.dev/);
+  });
+});
+
+describe("accept (E-5-c)", () => {
+  it("requires a token", async () => {
+    await run("accept");
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("redeems the token and reports the joined scope + role", async () => {
+    vi.mocked(team.acceptTeamInvite).mockResolvedValue({
+      scopeId: "s-9",
+      role: "editor",
+    });
+    await run("accept", "tok-abc");
+    expect(vi.mocked(team.acceptTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "tok-abc",
+    );
+    expect(logs.join("\n")).toMatch(/Joined team scope s-9 as editor/);
   });
 });
 

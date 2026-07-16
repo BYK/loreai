@@ -401,6 +401,12 @@ function makeClient() {
               lim = n;
               return b;
             },
+            // supabase-js single-row terminator: resolves to the first match or null.
+            // Used by fetchMemberPubKey (identity_pub lookup) in reconcileScopeWraps.
+            maybeSingle() {
+              const { data, error } = run();
+              return Promise.resolve({ data: data[0] ?? null, error });
+            },
             // Deliberate thenable — mirrors supabase-js's awaitable query builder.
             // oxlint-disable-next-line unicorn/no-thenable -- faithful PostgREST builder mock
             then(
@@ -434,6 +440,7 @@ import {
   publishIdentityPub,
   pushOnce,
   pullOnce,
+  reconcileScopeWraps,
   type SyncProgress,
   syncOnce,
   startSyncScheduler,
@@ -590,6 +597,114 @@ describe("publishIdentityPub — identity directory (E-3b)", () => {
     ).resolves.toBeUndefined();
     expect(getKV("sync.identityPub")).toBe(""); // NOT recorded → retried next cycle
     upsertError = null;
+  });
+});
+
+describe("reconcileScopeWraps — auto-wrap the DEK to joined members (E-5-c)", () => {
+  const PP = { params: { t: 1, m: 256, p: 1 } };
+  const SCOPE = "aaaaaaaa-0000-4000-8000-000000000001";
+  const SELF = "00000000-0000-4000-8000-000000000001"; // == mockUserId
+  const MEMBER = "bbbbbbbb-0000-4000-8000-000000000002";
+
+  // Seed a local team roster row (registry mirror is normally pull-only; write directly for the unit).
+  function addMember(scope: string, user: string, role: string): void {
+    db()
+      .query(
+        `INSERT OR REPLACE INTO scope_members (scope_id, user_id, role, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(scope, user, role, Date.now());
+  }
+  // Publish a member's identity public key to the remote directory (what `lore team accept` does).
+  function publishMemberPub(user: string): void {
+    const kp = crypto.generateIdentityKeypair();
+    remote.set("identity_pub", [
+      ...(remote.get("identity_pub") ?? []),
+      {
+        user_id: user,
+        public_key: Buffer.from(kp.publicKey).toString("base64"),
+        updated_at: "2020-01-01T00:00:00Z",
+      },
+    ]);
+  }
+
+  beforeEach(() => {
+    db().exec("DELETE FROM scope_members; DELETE FROM scopes");
+    keystore.setPassphrase("pw", PP); // unlock so getScopeKey can mint/unwrap
+    syncData.enableSync("basic");
+  });
+
+  test("no admined team scope → no-op (the common steady-state case)", async () => {
+    // I'm only a plain member here (role != admin), so nothing to reconcile.
+    addMember(SCOPE, SELF, "editor");
+    expect(await reconcileScopeWraps(makeClient() as never)).toEqual({
+      wrapped: 0,
+    });
+  });
+
+  test("wraps the DEK to a member who is behind, then pushes", async () => {
+    addMember(SCOPE, SELF, "admin");
+    addMember(SCOPE, MEMBER, "editor");
+    await keystore.getScopeKey(SCOPE, SELF); // I hold the DEK@0 (self scope_keys row)
+    publishMemberPub(MEMBER);
+
+    const { wrapped } = await reconcileScopeWraps(makeClient() as never);
+    expect(wrapped).toBe(1);
+    // A local wrap row now exists for the member at my epoch (0)...
+    const local = db()
+      .query(
+        "SELECT key_epoch FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+      )
+      .get(SCOPE, MEMBER) as { key_epoch: number } | undefined;
+    expect(local?.key_epoch).toBe(0);
+    // ...and it was pushed to the remote.
+    expect(
+      (remote.get("scope_keys") ?? []).some((r) => r.member_user_id === MEMBER),
+    ).toBe(true);
+  });
+
+  test("skips a member who has not published an identity key (retried next tick)", async () => {
+    addMember(SCOPE, SELF, "admin");
+    addMember(SCOPE, MEMBER, "editor");
+    await keystore.getScopeKey(SCOPE, SELF);
+    // MEMBER has NO identity_pub row → fetchMemberPubKey returns null → skip.
+    const { wrapped } = await reconcileScopeWraps(makeClient() as never);
+    expect(wrapped).toBe(0);
+    expect(
+      db()
+        .query(
+          "SELECT 1 FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+        )
+        .get(SCOPE, MEMBER),
+    ).toBeNull();
+  });
+
+  test("is idempotent: a second run wraps nobody new (no churn, no push)", async () => {
+    addMember(SCOPE, SELF, "admin");
+    addMember(SCOPE, MEMBER, "editor");
+    await keystore.getScopeKey(SCOPE, SELF);
+    publishMemberPub(MEMBER);
+    expect((await reconcileScopeWraps(makeClient() as never)).wrapped).toBe(1);
+    // Second pass: MEMBER already holds a wrap at >= my epoch → nothing to do.
+    expect((await reconcileScopeWraps(makeClient() as never)).wrapped).toBe(0);
+  });
+
+  test("best-effort: a per-member wrap failure does not abort the run", async () => {
+    addMember(SCOPE, SELF, "admin");
+    addMember(SCOPE, MEMBER, "editor");
+    await keystore.getScopeKey(SCOPE, SELF);
+    // A corrupt (non-base64-decodable-to-a-valid-key) pub makes wrapScopeKeyForMember throw;
+    // the loop swallows it and returns wrapped:0 rather than propagating.
+    remote.set("identity_pub", [
+      {
+        user_id: MEMBER,
+        public_key: "not-a-real-key",
+        updated_at: "2020-01-01T00:00:00Z",
+      },
+    ]);
+    await expect(reconcileScopeWraps(makeClient() as never)).resolves.toEqual({
+      wrapped: 0,
+    });
   });
 });
 

@@ -17,14 +17,19 @@ vi.mock("../src/supabase", () => ({
   getCurrentUser: () => Promise.resolve(currentUser),
 }));
 // pushOnce is a no-op spy — the wrap writes are asserted directly against the local scope_keys.
+// publishIdentityPub + pullOnce are no-op spies too (acceptTeamInvite calls them post-join).
 vi.mock("../src/sync", () => ({
   pushOnce: vi.fn().mockResolvedValue({ pushed: 0 }),
+  publishIdentityPub: vi.fn().mockResolvedValue(undefined),
+  pullOnce: vi.fn().mockResolvedValue({ pulled: 0 }),
 }));
 
-import { pushOnce } from "../src/sync";
+import { publishIdentityPub, pullOnce, pushOnce } from "../src/sync";
 import {
+  acceptTeamInvite,
   addTeamMember,
   createTeam,
+  createTeamInvite,
   listTeams,
   removeTeamMember,
   setTeamRole,
@@ -43,7 +48,7 @@ interface ClientOpts {
   rpc?: (
     name: string,
     params: Record<string, unknown>,
-  ) => { data?: unknown; error?: { message: string } } | null;
+  ) => { data?: unknown; error?: { message: string } | null } | null;
 }
 
 function makeClient(opts: ClientOpts = {}) {
@@ -129,6 +134,8 @@ beforeEach(() => {
     "base64",
   );
   vi.mocked(pushOnce).mockClear();
+  vi.mocked(publishIdentityPub).mockClear();
+  vi.mocked(pullOnce).mockClear();
 });
 
 describe("createTeam", () => {
@@ -345,5 +352,116 @@ describe("listTeams", () => {
   it("throws 'not logged in' when there is no session", async () => {
     currentUser = null;
     await expect(listTeams(makeClient())).rejects.toThrow(/not logged in/);
+  });
+});
+
+describe("createTeamInvite", () => {
+  it("calls create_scope_invite with scope/role/hint and returns the token", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "create_scope_invite"
+          ? { data: "tok-123", error: null }
+          : null,
+    });
+    const token = await createTeamInvite(c, "s-1", "viewer", "a@b.dev");
+    expect(token).toBe("tok-123");
+    expect(c.rpcCalls).toContainEqual({
+      name: "create_scope_invite",
+      params: { p_scope: "s-1", p_role: "viewer", p_hint: "a@b.dev" },
+    });
+  });
+
+  it("defaults role to editor and hint to null", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "create_scope_invite" ? { data: "t", error: null } : null,
+    });
+    await createTeamInvite(c, "s-1");
+    expect(c.rpcCalls[0]).toEqual({
+      name: "create_scope_invite",
+      params: { p_scope: "s-1", p_role: "editor", p_hint: null },
+    });
+  });
+
+  it("throws on an RPC error (e.g. non-admin / personal scope)", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "create_scope_invite"
+          ? {
+              data: null,
+              error: { message: "only a scope admin may create invites" },
+            }
+          : null,
+    });
+    await expect(createTeamInvite(c, "s-1")).rejects.toThrow(
+      /create_scope_invite: only a scope admin/,
+    );
+  });
+});
+
+describe("acceptTeamInvite", () => {
+  it("redeems the token, publishes identity, pulls, and returns scope+role", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "accept_scope_invite"
+          ? {
+              data: [
+                { out_scope_id: "s-9", out_role: "editor", out_eph_pub: null },
+              ],
+              error: null,
+            }
+          : null,
+    });
+    const res = await acceptTeamInvite(c, "tok-xyz");
+    expect(res).toEqual({ scopeId: "s-9", role: "editor" });
+    expect(c.rpcCalls[0]).toEqual({
+      name: "accept_scope_invite",
+      params: { p_token: "tok-xyz" },
+    });
+    expect(publishIdentityPub).toHaveBeenCalledTimes(1);
+    expect(pullOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles a single-object (non-array) RPC result shape", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "accept_scope_invite"
+          ? {
+              data: {
+                out_scope_id: "s-7",
+                out_role: "viewer",
+                out_eph_pub: null,
+              },
+              error: null,
+            }
+          : null,
+    });
+    expect(await acceptTeamInvite(c, "t")).toEqual({
+      scopeId: "s-7",
+      role: "viewer",
+    });
+  });
+
+  it("throws on an RPC error (invalid/expired token)", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "accept_scope_invite"
+          ? { data: null, error: { message: "invalid or expired invite" } }
+          : null,
+    });
+    await expect(acceptTeamInvite(c, "bad")).rejects.toThrow(
+      /accept_scope_invite: invalid or expired invite/,
+    );
+    expect(publishIdentityPub).not.toHaveBeenCalled();
+  });
+
+  it("throws on an empty result set (no row returned)", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "accept_scope_invite" ? { data: [], error: null } : null,
+    });
+    await expect(acceptTeamInvite(c, "t")).rejects.toThrow(
+      /accept_scope_invite: empty result/,
+    );
   });
 });
