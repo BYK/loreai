@@ -107,6 +107,9 @@ Distillation pipeline tuning (segment size, thresholds, tool-output truncation).
 | `maxSegmentTokens` | number | `16384` | min 256 | Maximum tokens per distillation segment before splitting. Default: 16384. |
 | `metaThreshold` | number | `20` | min 3 | Number of gen-0 segments that triggers meta-distillation. Default: 20. |
 | `toolOutputMaxChars` | number | `4000` | min 0 | Max chars per tool output for distillation input. Set to 0 to disable truncation. Default: 4000. |
+| `userBlobMaxChars` | number | `12000` | min 0 | Trigger threshold (chars) for embedding-based user-blob reduction. Set to 0 to disable. Default: 12000. |
+| `userBlobKeepChars` | number | `6000` | min 0 | Chars kept after reducing an oversized user blob. Default: 6000. |
+| `userBlobMaxSegments` | number | `48` | min 1 | Max blob segments embedded during user-blob reduction. Default: 48. |
 | `recentSegmentsToKeep` | number | `5` | min 0 | Number of most-recent gen-0 segments to keep un-archived when meta-distillation fires. Default: 5. |
 
 
