@@ -319,3 +319,89 @@ export async function acceptTeamInvite(
   }
   return { scopeId, role };
 }
+
+// --- Domain auto-join (E-5-b, Model B) ------------------------------------------------------------
+// Org-level membership only (never a team scope / DEK) — thin wrappers over the SECURITY DEFINER RPCs
+// in migration 0045. Verification (verified-email @domain, freemail blocklist, admin gate) is entirely
+// server-side; the client never asserts eligibility.
+
+export interface DomainJoinRequest {
+  id: string;
+  domain: string;
+  userId: string;
+  status: string;
+  requestedAt: string;
+}
+
+/** Claim an auto-join domain for an org (admin/manager; must own a verified email @domain). */
+export async function claimOrgDomain(
+  client: SupabaseClient,
+  orgId: string,
+  domain: string,
+  joinRole: "manager" | "billing" | "member" = "member",
+): Promise<void> {
+  const { error } = await client.rpc("claim_org_domain", {
+    p_org: orgId,
+    p_domain: domain,
+    p_join_role: joinRole,
+  });
+  if (error) throw new Error(`claim_org_domain: ${error.message}`);
+}
+
+/** Request to join an org whose claimed domain matches the caller's verified email. Returns the
+ * request id (admins approve it via approveDomainJoin). */
+export async function requestDomainJoin(
+  client: SupabaseClient,
+  orgId: string,
+  domain: string,
+): Promise<string> {
+  const { data, error } = await client.rpc("request_domain_join", {
+    p_org: orgId,
+    p_domain: domain,
+  });
+  if (error) throw new Error(`request_domain_join: ${error.message}`);
+  return data as string;
+}
+
+/** List pending domain-join requests for an org (admin/manager; RLS scopes to the caller's orgs). */
+export async function listDomainJoinRequests(
+  client: SupabaseClient,
+  orgId: string,
+): Promise<DomainJoinRequest[]> {
+  const { data, error } = await client
+    .from("domain_join_requests")
+    .select("id, domain, user_id, status, requested_at")
+    .eq("org_id", orgId)
+    .eq("status", "pending")
+    .order("requested_at", { ascending: true });
+  if (error) throw new Error(`domain_join_requests: ${error.message}`);
+  return (data ?? []).map((r) => ({
+    id: r.id as string,
+    domain: r.domain as string,
+    userId: r.user_id as string,
+    status: r.status as string,
+    requestedAt: r.requested_at as string,
+  }));
+}
+
+/** Approve a pending join request (admin/manager). Additive — never downgrades an existing role. */
+export async function approveDomainJoin(
+  client: SupabaseClient,
+  requestId: string,
+): Promise<void> {
+  const { error } = await client.rpc("approve_domain_join", {
+    p_request_id: requestId,
+  });
+  if (error) throw new Error(`approve_domain_join: ${error.message}`);
+}
+
+/** Reject a pending join request (admin/manager). */
+export async function rejectDomainJoin(
+  client: SupabaseClient,
+  requestId: string,
+): Promise<void> {
+  const { error } = await client.rpc("reject_domain_join", {
+    p_request_id: requestId,
+  });
+  if (error) throw new Error(`reject_domain_join: ${error.message}`);
+}

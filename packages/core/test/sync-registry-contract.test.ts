@@ -253,4 +253,17 @@ describe("server-internal tables are intentionally NOT synced", () => {
         `pending_invites must NOT be in SYNCED_TABLES.${tier} — it is a server-internal, RPC-only table (deny-all RLS, no local mirror). Syncing it would wedge the outbox prune floor.`,
       ).toBeUndefined();
   });
+
+  // org_domains / domain_join_requests (E-5-b, #827): same rationale as pending_invites — written/read
+  // only via SECURITY DEFINER RPCs (claim/request/approve/reject_domain_join), no local mirror, and
+  // (for writes) deny-all under RLS. They MUST stay out of SYNCED_TABLES or the client-unpushable
+  // rows would pin the outbox prune floor at 0 for every table (#828 wedge).
+  test("domain auto-join tables are absent from every tier's registry", () => {
+    for (const tier of ["basic", "pro", "max"] as const)
+      for (const table of ["org_domains", "domain_join_requests"])
+        expect(
+          SYNCED_TABLES[tier].find((m) => m.table === table),
+          `${table} must NOT be in SYNCED_TABLES.${tier} — server-internal, RPC-only (no local mirror). Syncing it would wedge the outbox prune floor.`,
+        ).toBeUndefined();
+  });
 });

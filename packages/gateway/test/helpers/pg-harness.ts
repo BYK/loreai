@@ -64,8 +64,9 @@ export interface PgHarness {
   asUser<T>(uid: string, fn: (c: Client) => Promise<T>): Promise<T>;
   asService<T>(fn: (c: Client) => Promise<T>): Promise<T>;
   asAnon<T>(fn: (c: Client) => Promise<T>): Promise<T>;
-  /** Create an auth user (fires handle_new_user → profiles). Returns the uid. */
-  createUser(email?: string): Promise<string>;
+  /** Create an auth user (fires handle_new_user → profiles). Returns the uid. `confirmed` sets
+   * email_confirmed_at (default true — a logged-in Supabase user has a verified email). */
+  createUser(email?: string, confirmed?: boolean): Promise<string>;
   /** PostgREST base URL (only when started with { postgrest: true }). */
   restUrl?: string;
   /** Mint a JWT for a user (role=authenticated, sub=uid). */
@@ -242,10 +243,13 @@ export async function startPgHarness(
         runAs("authenticated", { sub: uid, role: "authenticated" }, fn),
       asService: (fn) => runAs("service_role", { role: "service_role" }, fn),
       asAnon: (fn) => runAs("anon", { role: "anon" }, fn),
-      async createUser(email = `u${randomBytes(4).toString("hex")}@test.dev`) {
+      async createUser(
+        email = `u${randomBytes(4).toString("hex")}@test.dev`,
+        confirmed = true,
+      ) {
         const { rows } = await client.query(
-          "insert into auth.users (email) values ($1) returning id",
-          [email],
+          "insert into auth.users (email, email_confirmed_at) values ($1, $2) returning id",
+          [email, confirmed ? new Date().toISOString() : null],
         );
         return rows[0].id as string;
       },

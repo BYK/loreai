@@ -19,6 +19,11 @@ vi.mock("../src/team", () => ({
   teamMembers: vi.fn(),
   createTeamInvite: vi.fn(),
   acceptTeamInvite: vi.fn(),
+  claimOrgDomain: vi.fn(),
+  requestDomainJoin: vi.fn(),
+  listDomainJoinRequests: vi.fn(),
+  approveDomainJoin: vi.fn(),
+  rejectDomainJoin: vi.fn(),
 }));
 
 import {
@@ -324,6 +329,97 @@ describe("accept (E-5-c)", () => {
       "tok-abc",
     );
     expect(logs.join("\n")).toMatch(/Joined team scope s-9 as editor/);
+  });
+});
+
+describe("domain (E-5-b)", () => {
+  it("claim requires org + domain", async () => {
+    await run("domain", "claim", "org-1");
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("claim rejects an invalid join role", async () => {
+    await commandTeam(["domain", "claim", "org-1", "acme.dev"], {
+      role: "admin",
+    });
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(vi.mocked(team.claimOrgDomain)).not.toHaveBeenCalled();
+  });
+
+  it("claim passes org/domain/default-role through", async () => {
+    await commandTeam(["domain", "claim", "org-1", "acme.dev"], {});
+    expect(vi.mocked(team.claimOrgDomain)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "org-1",
+      "acme.dev",
+      "member",
+    );
+    expect(logs.join("\n")).toMatch(/Claimed acme.dev/);
+  });
+
+  it("request requires org + domain and reports the request id", async () => {
+    vi.mocked(team.requestDomainJoin).mockResolvedValue("req-7");
+    await run("domain", "request", "org-1", "acme.dev");
+    expect(vi.mocked(team.requestDomainJoin)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "org-1",
+      "acme.dev",
+    );
+    expect(logs.join("\n")).toContain("req-7");
+  });
+
+  it("requests lists pending join requests", async () => {
+    vi.mocked(team.listDomainJoinRequests).mockResolvedValue([
+      {
+        id: "req-1",
+        domain: "acme.dev",
+        userId: "u-2",
+        status: "pending",
+        requestedAt: "t",
+      },
+    ]);
+    await run("domain", "requests", "org-1");
+    expect(logs.join("\n")).toContain("req-1");
+    expect(logs.join("\n")).toContain("u-2");
+  });
+
+  it("requests prints a friendly message when there are none", async () => {
+    vi.mocked(team.listDomainJoinRequests).mockResolvedValue([]);
+    await run("domain", "requests", "org-1");
+    expect(logs.join("\n")).toMatch(/No pending join requests/);
+  });
+
+  it("approve requires an id and calls approveDomainJoin", async () => {
+    await run("domain", "approve", "req-9");
+    expect(vi.mocked(team.approveDomainJoin)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "req-9",
+    );
+    expect(logs.join("\n")).toMatch(/Approved join request req-9/);
+  });
+
+  it("reject calls rejectDomainJoin", async () => {
+    await run("domain", "reject", "req-9");
+    expect(vi.mocked(team.rejectDomainJoin)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "req-9",
+    );
+    expect(logs.join("\n")).toMatch(/Rejected join request req-9/);
+  });
+
+  it("an unknown domain verb prints usage", async () => {
+    await run("domain", "bogus");
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("does NOT require encryption/sync (org membership only, no DEK)", async () => {
+    vi.spyOn(keystore, "encryptionState").mockReturnValue("off");
+    vi.spyOn(syncData, "isSyncEnabled").mockReturnValue(false);
+    await run("domain", "requests", "org-1");
+    // No "run `lore sync enable`" guard fired — the RPC path was reached.
+    expect(errs.join("\n")).not.toMatch(/sync enable/);
   });
 });
 

@@ -28,10 +28,14 @@ import { publishIdentityPub, pullOnce, pushOnce } from "../src/sync";
 import {
   acceptTeamInvite,
   addTeamMember,
+  approveDomainJoin,
+  claimOrgDomain,
   createTeam,
   createTeamInvite,
   listTeams,
+  rejectDomainJoin,
   removeTeamMember,
+  requestDomainJoin,
   setTeamRole,
   teamMembers,
 } from "../src/team";
@@ -512,5 +516,80 @@ describe("acceptTeamInvite", () => {
     await expect(acceptTeamInvite(c, "cap123.SECRET")).rejects.toThrow(
       /no matching ephemeral key/,
     );
+  });
+});
+
+describe("domain auto-join RPC wrappers (E-5-b)", () => {
+  it("claimOrgDomain calls claim_org_domain with org/domain/role", async () => {
+    const c = makeClient();
+    await claimOrgDomain(c, "org-1", "Acme.dev", "manager");
+    expect(c.rpcCalls[0]).toEqual({
+      name: "claim_org_domain",
+      params: { p_org: "org-1", p_domain: "Acme.dev", p_join_role: "manager" },
+    });
+  });
+
+  it("claimOrgDomain defaults the role to member", async () => {
+    const c = makeClient();
+    await claimOrgDomain(c, "org-1", "acme.dev");
+    expect(c.rpcCalls[0].params).toEqual({
+      p_org: "org-1",
+      p_domain: "acme.dev",
+      p_join_role: "member",
+    });
+  });
+
+  it("claimOrgDomain surfaces the RPC error", async () => {
+    const c = makeClient({
+      rpc: (n) =>
+        n === "claim_org_domain"
+          ? { data: null, error: { message: "freemail" } }
+          : null,
+    });
+    await expect(claimOrgDomain(c, "o", "gmail.com")).rejects.toThrow(
+      /claim_org_domain: freemail/,
+    );
+  });
+
+  it("requestDomainJoin returns the request id", async () => {
+    const c = makeClient({
+      rpc: (n) =>
+        n === "request_domain_join" ? { data: "req-1", error: null } : null,
+    });
+    expect(await requestDomainJoin(c, "org-1", "acme.dev")).toBe("req-1");
+    expect(c.rpcCalls[0]).toEqual({
+      name: "request_domain_join",
+      params: { p_org: "org-1", p_domain: "acme.dev" },
+    });
+  });
+
+  it("requestDomainJoin surfaces the RPC error", async () => {
+    const c = makeClient({
+      rpc: (n) =>
+        n === "request_domain_join"
+          ? { data: null, error: { message: "no matching claimed domain" } }
+          : null,
+    });
+    await expect(requestDomainJoin(c, "o", "x.dev")).rejects.toThrow(
+      /request_domain_join: no matching claimed domain/,
+    );
+  });
+
+  it("approveDomainJoin calls approve_domain_join with the request id", async () => {
+    const c = makeClient();
+    await approveDomainJoin(c, "req-9");
+    expect(c.rpcCalls[0]).toEqual({
+      name: "approve_domain_join",
+      params: { p_request_id: "req-9" },
+    });
+  });
+
+  it("rejectDomainJoin calls reject_domain_join with the request id", async () => {
+    const c = makeClient();
+    await rejectDomainJoin(c, "req-9");
+    expect(c.rpcCalls[0]).toEqual({
+      name: "reject_domain_join",
+      params: { p_request_id: "req-9" },
+    });
   });
 });

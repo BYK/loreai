@@ -17,16 +17,21 @@ import { getAuthedClient, getCurrentUser } from "../supabase";
 import {
   addTeamMember,
   acceptTeamInvite,
+  approveDomainJoin,
+  claimOrgDomain,
   createTeam,
   createTeamInvite,
+  listDomainJoinRequests,
   listTeams,
+  rejectDomainJoin,
   removeTeamMember,
+  requestDomainJoin,
   setTeamRole,
   teamMembers,
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>]]";
+  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
 
 export async function commandTeam(
   positionals: string[],
@@ -280,6 +285,68 @@ export async function commandTeam(
         }
         setProjectPromotionPolicy(pid, policy);
         console.log(`Set this project's team-promotion policy to ${policy}.`);
+        break;
+      }
+      case "domain": {
+        // Org-level domain auto-join (E-5-b). No DEK/encryption — pure org membership.
+        const verb = positionals[1];
+        switch (verb) {
+          case "claim": {
+            const org = positionals[2];
+            const domain = positionals[3];
+            if (!org || !domain) return usage();
+            const joinRole = (values.role as string) ?? "member";
+            if (
+              joinRole !== "manager" &&
+              joinRole !== "billing" &&
+              joinRole !== "member"
+            )
+              return usage();
+            await claimOrgDomain(client, org, domain, joinRole);
+            console.log(
+              `Claimed ${domain} for org ${org}. Members with a verified @${domain} email can now request to join (role: ${joinRole}).`,
+            );
+            break;
+          }
+          case "request": {
+            const org = positionals[2];
+            const domain = positionals[3];
+            if (!org || !domain) return usage();
+            const id = await requestDomainJoin(client, org, domain);
+            console.log(
+              `Join request submitted (${id}). An org admin must approve it.`,
+            );
+            break;
+          }
+          case "requests": {
+            const org = positionals[2];
+            if (!org) return usage();
+            const reqs = await listDomainJoinRequests(client, org);
+            if (reqs.length === 0) {
+              console.log("No pending join requests.");
+              break;
+            }
+            for (const r of reqs)
+              console.log(`${r.id}  ${r.userId}  @${r.domain}`);
+            break;
+          }
+          case "approve": {
+            const id = positionals[2];
+            if (!id) return usage();
+            await approveDomainJoin(client, id);
+            console.log(`Approved join request ${id}.`);
+            break;
+          }
+          case "reject": {
+            const id = positionals[2];
+            if (!id) return usage();
+            await rejectDomainJoin(client, id);
+            console.log(`Rejected join request ${id}.`);
+            break;
+          }
+          default:
+            return usage();
+        }
         break;
       }
       default:
