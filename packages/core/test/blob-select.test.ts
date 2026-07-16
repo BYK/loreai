@@ -176,6 +176,25 @@ describe("segmentBody", () => {
       "more content",
     ]);
   });
+
+  test("every segment's offsets slice back to its exact text (tricky paths)", () => {
+    // Offset arithmetic is load-bearing for pin overlap detection. Lock it in
+    // across the paths that use variable-width separators / windowing.
+    const bodies = [
+      "para one\n\n\npara two\n\n\n\npara three", // multi-blank-line runs
+      "line a\r\nline b\r\n\r\nline c", // CRLF
+      "   leading ws para\n\ntrailing ws para   ", // leading/trailing whitespace
+      `first tool\n\x1fsecond tool\n\x1fthird tool`, // terminators
+      `${"x".repeat(2000)}\n\x1f${"y".repeat(50)}`, // giant line + terminator
+      `head para\n\n${"z".repeat(2100)}\n\ntail para`, // oversized middle paragraph
+      "a\n\x1f\n\x1fb", // consecutive terminators (empty middle part)
+    ];
+    for (const body of bodies) {
+      for (const seg of segmentBody(body)) {
+        expect(body.slice(seg.start, seg.end)).toBe(seg.text);
+      }
+    }
+  });
 });
 
 // ─── Stage 2 + integration: reduceBlob ─────────────────────────────────────
@@ -424,6 +443,24 @@ describe("reduceBlob", () => {
     // Only the pinned segment is embedded/kept; non-pinned are not all re-admitted.
     expect(result.embedded).toBe(1);
     expect(result.output).toContain(directive);
+  });
+
+  test("keeps a \\n between two adjacent kept paragraphs (no fusion)", async () => {
+    // Two distinct paragraphs both score high and are both kept with NO elision
+    // run between them. They were separated by a blank line in the body (offsets
+    // non-adjacent), so reassembly must restore a "\n" — never fuse them into one
+    // run (which would only be correct for contiguous hard-window pieces).
+    const body = "SIGNAL alpha paragraph\n\nSIGNAL beta paragraph";
+    const result = await reduceBlob(body, {
+      embed: stubEmbed("SIGNAL"), // both paragraphs score [1,0]
+      cosine: dot,
+      query: "SIGNAL",
+      keepChars: 10000, // both fit → both kept, no elision between them
+      maxSegments: 48,
+    });
+    expect(result.kept).toBe(2);
+    expect(result.output).toBe("SIGNAL alpha paragraph\nSIGNAL beta paragraph");
+    expect(result.output).not.toContain("elided");
   });
 
   test("pinned matching tolerates a display-truncated snippet (trailing …)", async () => {
