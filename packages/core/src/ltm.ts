@@ -12,6 +12,7 @@ import {
 import {
   deleteEmbeddings,
   embeddingByIdSource,
+  hasEmbeddingSql,
   readStorageMode,
 } from "./db/vec-store";
 import { config } from "./config";
@@ -3906,13 +3907,18 @@ export function promoteCrossProject(opts?: {
   // 1. Load eligible candidate entries (project-scoped, high-confidence, embedded).
   //    Capped at MAX_PROMOTION_CANDIDATES to keep pairwise comparison bounded.
   //    Query orders by confidence DESC so the best entries survive.
+  //    The embedded-presence predicate MUST be storage-mode-aware: in vec0 mode
+  //    the base `embedding` column is dropped, so a hardcoded `embedding IS NOT
+  //    NULL` throws `no such column: embedding`. hasEmbeddingSql() emits the
+  //    vec0-membership form (`id IN (SELECT id FROM knowledge_vec)`) instead.
+  const candMode = readStorageMode(db());
   const candidates = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
        WHERE project_id IS NOT NULL
        AND cross_project = 0
        AND confidence >= ?
-       AND embedding IS NOT NULL
+       AND ${hasEmbeddingSql("knowledge", candMode)}
        ORDER BY confidence DESC, updated_at DESC
        LIMIT ?`,
     )

@@ -25,6 +25,7 @@
 import type { Database } from "#db/driver";
 import * as sqliteVec from "sqlite-vec";
 import * as log from "../log";
+import { resetVecStorageModeLatch } from "./vec-store";
 
 let vecAvailable = false;
 let attempted = false;
@@ -231,4 +232,9 @@ export function isVecAvailable(): boolean {
 export function resetVecState(): void {
   vecAvailable = false;
   attempted = false;
+  // The storage mode is a per-DB-FILE property; a swapped connection may point
+  // at a different file, so clear the sticky vec0 read latch here too. Keeping
+  // this paired with the loader reset means any caller that resets per-connection
+  // vec state also clears the latch (avoids a fresh blob DB inheriting vec0).
+  resetVecStorageModeLatch();
 }

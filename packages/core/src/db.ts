@@ -3553,7 +3553,9 @@ export function close() {
     instance = undefined;
   }
   // The sqlite-vec extension is loaded per-connection; reset loader state so a
-  // subsequent db() on a fresh connection re-attempts the load.
+  // subsequent db() on a fresh connection re-attempts the load. This also clears
+  // the sticky vec0 storage-mode latch (a fresh connection may point at a
+  // different DB file whose layout must be re-evaluated from scratch).
   resetVecState();
 }
 

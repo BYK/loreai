@@ -33,6 +33,7 @@ import {
   readStorageMode,
   readVecDimension,
   repartitionVec0Project,
+  resetVecStorageModeLatch,
   setStorageMode,
   storeEmbedding,
   storeTemporalChunks,
@@ -104,6 +105,10 @@ function resetToBlob(): void {
     .query("DELETE FROM kv_meta WHERE key IN (?, ?)")
     .run(VEC_STORAGE_MODE_KEY, VEC_DIMENSION_KEY);
   for (const t of BASE) db().query(`DELETE FROM ${t}`).run();
+  // These tests legitimately revert to a blob layout mid-process (production
+  // never does — vec0 is monotonic). Clear the sticky vec0 latch so the next
+  // case's fresh blob fixture is not pinned to vec0 by a prior case's cutover.
+  resetVecStorageModeLatch();
 }
 
 beforeEach(() => {

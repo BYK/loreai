@@ -7,6 +7,7 @@ import {
   VEC_STORAGE_MODE_KEY,
   clearAllEmbeddings,
   readStorageMode,
+  resetVecStorageModeLatch,
   resolveReadMode,
   storeEmbedding,
 } from "../src/db/vec-store";
@@ -42,10 +43,14 @@ describe("readStorageMode", () => {
     ensureProject(PROJECT);
     // Clear any prior mode so each case starts from the default.
     db().query("DELETE FROM kv_meta WHERE key = ?").run(VEC_STORAGE_MODE_KEY);
+    // Clear the sticky vec0 latch so a prior case's vec0 observation does not
+    // bleed into a case that expects the default blob layout.
+    resetVecStorageModeLatch();
   });
 
   afterAll(() => {
     db().query("DELETE FROM kv_meta WHERE key = ?").run(VEC_STORAGE_MODE_KEY);
+    resetVecStorageModeLatch();
     close();
   });
 
@@ -71,6 +76,33 @@ describe("readStorageMode", () => {
       },
     };
     expect(readStorageMode(throwingConn)).toBe("blob");
+  });
+
+  test("STICKY: once vec0 is observed, a later throwing read still returns 'vec0' (cutover race)", () => {
+    // Regression for the vec0 cutover TOCTOU: the cutover flips the mode to
+    // vec0 THEN drops the base `embedding` columns. If a subsequent kv_meta
+    // read throws (SQLITE_BUSY during the cutover checkpoint, or a concurrent
+    // curation pass) and we fell back to "blob", a query would hit the
+    // now-dropped `embedding` column and throw `no such column: embedding`.
+    // The latch pins vec0 once observed.
+    setKV(VEC_STORAGE_MODE_KEY, "vec0");
+    expect(readStorageMode(db())).toBe("vec0"); // observes + latches
+    const throwingConn = {
+      query() {
+        throw new Error("database is locked");
+      },
+    };
+    // Without the latch this would fall back to "blob"; with it, stays "vec0".
+    expect(readStorageMode(throwingConn)).toBe("vec0");
+  });
+
+  test("STICKY latch resets after resetVecStorageModeLatch (fresh blob DB not poisoned)", () => {
+    setKV(VEC_STORAGE_MODE_KEY, "vec0");
+    expect(readStorageMode(db())).toBe("vec0"); // latch armed
+    resetVecStorageModeLatch();
+    db().query("DELETE FROM kv_meta WHERE key = ?").run(VEC_STORAGE_MODE_KEY);
+    // Latch cleared + key absent → a fresh (blob) DB reads blob again.
+    expect(readStorageMode(db())).toBe("blob");
   });
 });
 
@@ -115,6 +147,9 @@ describe("storeEmbedding (blob layout)", () => {
 
   beforeEach(() => {
     pid = ensureProject(PROJECT);
+    // Defense-in-depth: these are blob-layout tests; clear any sticky vec0 latch
+    // a prior describe may have armed so readStorageMode reads blob here.
+    resetVecStorageModeLatch();
     db().query("DELETE FROM knowledge").run();
     db().query("DELETE FROM entities").run();
     db().query("DELETE FROM distillations").run();
@@ -195,6 +230,12 @@ describe("storeEmbedding (blob layout)", () => {
 // ---------------------------------------------------------------------------
 
 describe("clearAllEmbeddings (blob layout)", () => {
+  beforeEach(() => {
+    // Defense-in-depth: blob-layout test; clear any sticky vec0 latch a prior
+    // describe may have armed so readStorageMode reads blob here.
+    resetVecStorageModeLatch();
+  });
+
   afterAll(() => {
     close();
   });

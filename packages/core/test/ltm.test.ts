@@ -14,6 +14,13 @@ import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
 import { config } from "../src/config";
 import {
+  dropEmbeddingColumn,
+  ensureVec0Store,
+  resetVecStorageModeLatch,
+  setStorageMode,
+  storeEmbedding,
+} from "../src/db/vec-store";
+import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
   vectorSearchTimeoutMs,
@@ -2349,6 +2356,10 @@ describe("ltm — cross-project promotion", () => {
   let availableSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    // Ensure blob layout + cleared latch before each case (the vec0 case below
+    // leaves vec0 armed if it fails mid-way; reset so cleanup queries below,
+    // which reference the base `embedding` column, don't throw).
+    resetVecStorageModeLatch();
     // vectorSearch / promotion queries are unscoped — wipe ALL knowledge so
     // embeddings from other suites don't leak in. (Documented gotcha.)
     db().query("DELETE FROM knowledge WHERE embedding IS NOT NULL").run();
@@ -2589,6 +2600,68 @@ describe("ltm — cross-project promotion", () => {
     // Low-confidence entry untouched
     expect(ltm.get(d)?.cross_project).toBe(0);
     expect(ltm.get(d)?.promotion_status).toBeNull();
+  });
+
+  test("vec0 mode: candidate query does not throw 'no such column: embedding' after cutover", () => {
+    // Regression: the candidate SELECT used a hardcoded `embedding IS NOT NULL`
+    // predicate. In vec0 mode the base `embedding` column is dropped, so that
+    // predicate threw `no such column: embedding` during curation-time
+    // cross-project promotion (observed live right after the startup cutover).
+    // hasEmbeddingSql() must emit the vec0-membership form instead.
+    const dim = config().search.embeddings.dimensions;
+
+    function seedVec0Entry(projectPath: string, title: string, seed: number) {
+      const id = ltm.create({
+        id: uuidv7(),
+        projectPath,
+        category: "preference",
+        title,
+        content: `Content for ${title}`,
+        scope: "project",
+        crossProject: false,
+        session: "test-session",
+      });
+      ltm.update(id, { confidence: 0.9 });
+      const vec = new Float32Array(dim);
+      for (let i = 0; i < dim; i++) vec[i] = Math.sin(seed * (i + 1) * 0.1);
+      let norm = 0;
+      for (let i = 0; i < dim; i++) norm += vec[i] * vec[i];
+      norm = Math.sqrt(norm);
+      for (let i = 0; i < dim; i++) vec[i] /= norm;
+      return { id, vec };
+    }
+
+    // Seed 3 entries across distinct projects while still in blob mode.
+    const entries = [
+      seedVec0Entry(PA, "Always run tests before committing code", 5),
+      seedVec0Entry(PB, "Run the test suite prior to any commit", 5),
+      seedVec0Entry(PC, "Tests must pass before commit is made", 5),
+    ];
+
+    // Cut over to vec0: create the vec0 tables, store each vector there, flip
+    // the mode, then DROP the base embedding column (exactly what the real
+    // cutover does). storeEmbedding routes to the vec0 table in vec0 mode.
+    ensureVec0Store(db(), dim);
+    setStorageMode(db(), "vec0");
+    for (const e of entries) storeEmbedding(db(), "knowledge", e.id, e.vec);
+    dropEmbeddingColumn(db(), "knowledge");
+
+    // Before the fix this threw `no such column: embedding`; after it, the
+    // vec0-aware predicate lets promotion run and find the cluster.
+    let res: ReturnType<typeof ltm.promoteCrossProject>;
+    expect(() => {
+      res = ltm.promoteCrossProject({ dryRun: false });
+    }).not.toThrow();
+    expect(res!.promoted).toBe(3);
+
+    // Restore blob layout for subsequent tests in this process.
+    setStorageMode(db(), "blob");
+    resetVecStorageModeLatch();
+    try {
+      db().query("ALTER TABLE knowledge ADD COLUMN embedding BLOB").run();
+    } catch {
+      // column may already exist depending on execution order — ignore.
+    }
   });
 });
 

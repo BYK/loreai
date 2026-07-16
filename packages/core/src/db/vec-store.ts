@@ -126,19 +126,61 @@ export interface EmbeddingWriteConn {
 /**
  * Read this DB file's stored {@link VecStorageMode} from `kv_meta`.
  *
- * Defaults to `"blob"` when the key is absent (every DB today), holds an
- * unrecognized value, or the read throws — i.e. the safe layout that never
- * assumes vec0 tables exist. Cheap: a single indexed `kv_meta` lookup against
- * the caller's own connection (the prepared statement is driver-cached).
+ * Defaults to `"blob"` when the key is absent (every DB today) or holds an
+ * unrecognized value — i.e. the safe layout that never assumes vec0 tables
+ * exist.
+ *
+ * STICKY vec0 LATCH: the storage mode is monotonic — the cutover in
+ * embedding.ts only ever flips blob→vec0 and (per its own invariant comment)
+ * never reverts. Once we have observed `"vec0"` for the active DB connection we
+ * return `"vec0"` unconditionally, even if a later `kv_meta` read throws. This
+ * closes a TOCTOU race: the cutover flips the mode to vec0 and THEN drops the
+ * base `embedding` columns, so once vec0 is live the base columns are gone. A
+ * transient `kv_meta` read error (e.g. SQLITE_BUSY while the cutover is
+ * checkpointing, or a concurrent curation pass) would otherwise fall back to
+ * `"blob"` and route a query at the now-dropped `embedding` column, throwing
+ * `no such column: embedding`. The latch is reset by {@link resetVecStorageModeLatch}
+ * on connection close/swap (wired into `resetVecState`), so a test that swaps
+ * to a fresh blob DB is never poisoned by a prior vec0 observation.
+ *
+ * The throw path still returns `"blob"` when vec0 has NOT yet been observed:
+ * that is the brand-new-DB case (`kv_meta` table missing → THROWS), where the
+ * base columns are guaranteed to still exist and blob is the correct, safe
+ * layout.
+ *
+ * Cheap: a single indexed `kv_meta` lookup against the caller's own connection
+ * (the prepared statement is driver-cached); a hot vec0 DB short-circuits before
+ * touching SQLite at all.
  */
+let observedVec0 = false;
+
+/**
+ * Reset the sticky vec0 storage-mode latch. Call whenever the DB connection is
+ * closed or swapped (wired into `resetVecState`) so a subsequent fresh DB is
+ * evaluated from scratch rather than inheriting a prior file's vec0 state.
+ */
+export function resetVecStorageModeLatch(): void {
+  observedVec0 = false;
+}
+
 export function readStorageMode(conn: StorageModeConn): VecStorageMode {
+  // Monotonic: once vec0 is live for this connection it never reverts, and the
+  // base embedding columns have been dropped — never fall back to blob again.
+  if (observedVec0) return "vec0";
   try {
     const row = conn
       .query("SELECT value FROM kv_meta WHERE key = ?")
       .get(VEC_STORAGE_MODE_KEY) as { value?: string } | null | undefined;
-    return row?.value === "vec0" ? "vec0" : "blob";
+    if (row?.value === "vec0") {
+      observedVec0 = true;
+      return "vec0";
+    }
+    return "blob";
   } catch {
     // A missing kv_meta table or any read error → assume the safe blob layout.
+    // Safe because we only reach here when vec0 has NOT yet been observed, i.e.
+    // the base embedding columns still exist (the cutover drops them strictly
+    // AFTER flipping the mode, and a successful vec0 read latches above).
     return "blob";
   }
 }
@@ -383,6 +425,13 @@ export function setStorageMode(
   mode: VecStorageMode,
 ): void {
   setKv(conn, VEC_STORAGE_MODE_KEY, mode);
+  // Keep the sticky read latch consistent with the authoritative write so a
+  // subsequent throwing `readStorageMode` (SQLITE_BUSY during the cutover
+  // checkpoint, concurrent curation) never disagrees with what we just wrote.
+  // Production only ever writes "vec0" (monotonic cutover); "blob" is written
+  // by tests reverting the layout, and clearing the latch there keeps them honest.
+  if (mode === "vec0") observedVec0 = true;
+  else observedVec0 = false;
 }
 
 /**
