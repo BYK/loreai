@@ -120,9 +120,16 @@ test("looksLikePasteJunk keeps short segments (too short to judge)", () => {
 // ─── segmentBody ───────────────────────────────────────────────────────────
 
 describe("segmentBody", () => {
-  test("splits paragraphs on blank lines", () => {
-    const segs = segmentBody("first para\n\nsecond para\n\nthird para");
-    expect(segs).toEqual(["first para", "second para", "third para"]);
+  test("splits paragraphs on blank lines, carrying offsets", () => {
+    const body = "first para\n\nsecond para\n\nthird para";
+    const segs = segmentBody(body);
+    expect(segs.map((s) => s.text)).toEqual([
+      "first para",
+      "second para",
+      "third para",
+    ]);
+    // Offsets must point back into the original body verbatim.
+    for (const s of segs) expect(body.slice(s.start, s.end)).toBe(s.text);
   });
 
   test("windows a single giant line (one-line megablob)", () => {
@@ -130,18 +137,44 @@ describe("segmentBody", () => {
     const segs = segmentBody(giant, 800);
     // 5000 / 800 = 7 windows (last partial), none exceeding the window size.
     expect(segs.length).toBe(Math.ceil(5000 / 800));
-    for (const s of segs) expect(s.length).toBeLessThanOrEqual(800);
+    for (const s of segs) expect(s.text.length).toBeLessThanOrEqual(800);
+    // Windows are contiguous and cover the whole body.
+    expect(segs.map((s) => s.text).join("")).toBe(giant);
   });
 
-  test("splits on the part terminator (tool envelopes)", () => {
+  test("splits an oversized paragraph on line boundaries (keeps lines intact)", () => {
+    // A 2000-char paragraph made of short lines must split BETWEEN lines, never
+    // mid-line, so a directive on its own line is never cut.
+    const lines = Array.from(
+      { length: 60 },
+      (_, i) => `line ${i} with a good number of real words in it here now`,
+    );
+    const body = lines.join("\n");
+    expect(body.length).toBeGreaterThan(1600); // triggers oversized path
+    const segs = segmentBody(body, 800);
+    // Every produced segment is a whole line (or run of lines), never a partial.
+    for (const s of segs) {
+      expect(body.slice(s.start, s.end)).toBe(s.text);
+    }
+    // Each original line appears verbatim in some segment.
+    for (const line of lines) {
+      expect(segs.some((s) => s.text.includes(line))).toBe(true);
+    }
+  });
+
+  test("splits on the part terminator (tool envelopes), offsets accurate", () => {
     const body = `[tool:read] a.ts\n\x1f[tool:read] b.ts`;
     const segs = segmentBody(body);
     expect(segs.length).toBe(2);
+    for (const s of segs) expect(body.slice(s.start, s.end)).toBe(s.text);
   });
 
   test("drops empty/whitespace-only paragraphs", () => {
     const segs = segmentBody("real content here\n\n   \n\nmore content");
-    expect(segs).toEqual(["real content here", "more content"]);
+    expect(segs.map((s) => s.text)).toEqual([
+      "real content here",
+      "more content",
+    ]);
   });
 });
 
@@ -321,6 +354,76 @@ describe("reduceBlob", () => {
     expect(result.output).toContain(directive);
     // Without the pin this segment would have been counted as junk-dropped.
     expect(result.junkDropped).toBe(0);
+  });
+
+  test("pinned directive survives a hard window-boundary split (#1343 B1)", async () => {
+    // A single unbroken line (no blank lines, no \n) longer than 2×segmentChars
+    // is hard-windowed at char boundaries. A directive that straddles a boundary
+    // is split across two segments — offset-based pin matching must force-keep
+    // BOTH overlapping windows so the directive is never elided.
+    const SEG = 800;
+    const filler = "log noise ".repeat(74); // ~740 chars, no newlines
+    const directive =
+      "always redact tokens from these logs before sharing them with anyone";
+    // Place the directive so it straddles the 800 boundary, then a long tail.
+    const body = filler + directive + " tail " + "x".repeat(3000);
+    // Precondition: the directive is genuinely split (present in no single window).
+    const rawWindows: string[] = [];
+    for (let i = 0; i < body.length; i += SEG)
+      rawWindows.push(body.slice(i, i + SEG));
+    expect(rawWindows.some((w) => w.includes(directive))).toBe(false);
+
+    const result = await reduceBlob(body, {
+      // Everything scores low — only the pin should keep the directive.
+      embed: async (texts) => texts.map(() => new Float32Array([0, 1])),
+      cosine: dot,
+      query: "unrelated query",
+      keepChars: 100, // tight: non-pinned tail cannot fill it
+      pinnedLines: [directive],
+      maxSegments: 48,
+    });
+
+    // The full directive survives byte-exact: contiguous hard-window pieces of
+    // the same line rejoin with no separator, so a mid-word split is seamless.
+    // Strip only the elision markers (which sit between non-contiguous runs).
+    const kept = result.output.replace(/\[… \d+ chars elided[^\]]*…\]/gu, "");
+    expect(kept).toContain(directive);
+  });
+
+  test("caps embedded segments despite duplicate segment text (#1343 S2)", async () => {
+    // 100 IDENTICAL prose paragraphs. A Set<string> would collapse them and
+    // re-admit all copies; index-based capping must hold the maxSegments limit.
+    const body = Array.from(
+      { length: 100 },
+      () => "the exact same repeated prose paragraph with words",
+    ).join("\n\n");
+    const result = await reduceBlob(body, {
+      embed: async (texts) => texts.map(() => new Float32Array([0, 1])),
+      cosine: dot,
+      query: "query",
+      keepChars: 100000,
+      maxSegments: 10,
+    });
+    expect(result.embedded).toBeLessThanOrEqual(10);
+  });
+
+  test("sampleBudget 0 (pins fill the cap) keeps no extra non-pinned (#1343 S3)", async () => {
+    const directive = "always keep this exact directive";
+    const body = [
+      directive,
+      ...Array.from({ length: 50 }, (_, i) => `filler paragraph number ${i}`),
+    ].join("\n\n");
+    const result = await reduceBlob(body, {
+      embed: async (texts) => texts.map(() => new Float32Array([0, 1])),
+      cosine: dot,
+      query: "query",
+      keepChars: 100000,
+      pinnedLines: [directive],
+      maxSegments: 1, // one pin exactly fills the cap → zero non-pinned sampled
+    });
+    // Only the pinned segment is embedded/kept; non-pinned are not all re-admitted.
+    expect(result.embedded).toBe(1);
+    expect(result.output).toContain(directive);
   });
 
   test("pinned matching tolerates a display-truncated snippet (trailing …)", async () => {

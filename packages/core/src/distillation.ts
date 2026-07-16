@@ -431,7 +431,10 @@ export async function messagesToTextReduced(
       if (canReduce && m.content.length > blobTrigger) {
         try {
           const result = await reduceBlob(m.content, {
-            embed: (texts) => embedding.embed(texts, "document"),
+            // Route through the token-area sub-batcher (not raw embed()) so a
+            // batch of segments never posts one oversized padded tensor to the
+            // worker — mirrors every other batch embed path (#1072).
+            embed: (texts) => embedding.embedInTokenBatches(texts, "document"),
             cosine: embedding.cosineSimilarity,
             query,
             keepChars: cfg.userBlobKeepChars,

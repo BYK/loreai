@@ -2201,7 +2201,7 @@ export const MAX_TEMPORAL_CHUNKS_PER_MESSAGE = 64;
  * in any batch rejects before the caller stores, so a partial chunk set is never
  * written (storeTemporalChunks DELETEs-then-INSERTs the complete set).
  */
-async function embedInTokenBatches(
+export async function embedInTokenBatches(
   texts: string[],
   inputType: "document" | "query",
 ): Promise<Float32Array[]> {
