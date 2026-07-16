@@ -172,3 +172,63 @@ describe("keystore — group DEK wrapping (E-4c-2)", () => {
     expect(eq(await keystore.getScopeKey("user-1"), dek)).toBe(true);
   });
 });
+
+describe("keystore — ephemeral invite wrap (E-5-c-2 offline)", () => {
+  const ephRows = (): { m: string }[] =>
+    db()
+      .query(
+        "SELECT member_user_id AS m FROM scope_keys WHERE scope_id=? AND member_user_id LIKE 'eph:%'",
+      )
+      .all(TEAM) as { m: string }[];
+
+  it("mint → adopt round-trips the SAME DEK to the invitee's identity, then delete retires the wrap", async () => {
+    // Admin A mints the team DEK and an ephemeral invite wrap (caller-supplied keypair, as the
+    // client generates it up front to record eph_pub with the invite RPC before storing the wrap).
+    keystore.getAccountIdentity();
+    const dek = await keystore.getScopeKey(TEAM, A);
+    const eph = generateIdentityKeypair();
+    await keystore.mintEphemeralInviteWrap(TEAM, A, eph);
+    const ephPubB64 = Buffer.from(eph.publicKey).toString("base64");
+    expect(ephRows().map((r) => r.m)).toEqual([`eph:${ephPubB64}`]);
+
+    // Invitee B (fresh device) adopts the DEK using ONLY the ephemeral secret from the token.
+    const member = generateIdentityKeypair();
+    installDevice(member);
+    await keystore.adoptEphemeralInviteWrap(TEAM, B, ephPubB64, eph.secretKey);
+    // B now holds a self-wrap of the SAME DEK A minted.
+    expect(eq(await keystore.getScopeKey(TEAM, B, { mint: false }), dek)).toBe(
+      true,
+    );
+
+    // Retire the spent ephemeral wrap locally.
+    keystore.deleteEphemeralInviteWrap(TEAM, ephPubB64);
+    expect(ephRows()).toEqual([]);
+  });
+
+  it("adopt fails on a wrong ephemeral secret (HPKE auth)", async () => {
+    keystore.getAccountIdentity();
+    await keystore.getScopeKey(TEAM, A);
+    const eph = generateIdentityKeypair();
+    await keystore.mintEphemeralInviteWrap(TEAM, A, eph);
+    const ephPubB64 = Buffer.from(eph.publicKey).toString("base64");
+    installDevice(generateIdentityKeypair());
+    const wrongSecret = generateIdentityKeypair().secretKey;
+    await expect(
+      keystore.adoptEphemeralInviteWrap(TEAM, B, ephPubB64, wrongSecret),
+    ).rejects.toBeTruthy();
+  });
+
+  it("adopt throws when the ephemeral wrap is absent (pull hasn't landed)", async () => {
+    keystore.getAccountIdentity();
+    await keystore.getScopeKey(TEAM, A);
+    installDevice(generateIdentityKeypair());
+    await expect(
+      keystore.adoptEphemeralInviteWrap(
+        TEAM,
+        B,
+        "AAAA",
+        generateIdentityKeypair().secretKey,
+      ),
+    ).rejects.toThrow(/not found/);
+  });
+});

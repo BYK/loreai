@@ -367,7 +367,12 @@ describe("createTeamInvite", () => {
     expect(token).toBe("tok-123");
     expect(c.rpcCalls).toContainEqual({
       name: "create_scope_invite",
-      params: { p_scope: "s-1", p_role: "viewer", p_hint: "a@b.dev" },
+      params: {
+        p_scope: "s-1",
+        p_role: "viewer",
+        p_hint: "a@b.dev",
+        p_eph_pub: null,
+      },
     });
   });
 
@@ -379,7 +384,12 @@ describe("createTeamInvite", () => {
     await createTeamInvite(c, "s-1");
     expect(c.rpcCalls[0]).toEqual({
       name: "create_scope_invite",
-      params: { p_scope: "s-1", p_role: "editor", p_hint: null },
+      params: {
+        p_scope: "s-1",
+        p_role: "editor",
+        p_hint: null,
+        p_eph_pub: null,
+      },
     });
   });
 
@@ -396,6 +406,27 @@ describe("createTeamInvite", () => {
     await expect(createTeamInvite(c, "s-1")).rejects.toThrow(
       /create_scope_invite: only a scope admin/,
     );
+  });
+
+  it("offline: mints an eph wrap, appends the secret to the token, sends eph_pub", async () => {
+    const scope = "scope-off";
+    const c = makeClient({
+      rpc: (name) =>
+        name === "create_scope_invite" ? { data: "cap123", error: null } : null,
+    });
+    await keystore.getScopeKey(scope, SELF); // creator holds the team DEK@0
+    const token = await createTeamInvite(c, scope, "editor", undefined, {
+      offline: true,
+    });
+    // Token = <capability>.<base64url(ephSecret)>
+    expect(token.startsWith("cap123.")).toBe(true);
+    expect(token.split(".")[1]).toMatch(/^[A-Za-z0-9_-]+$/);
+    // The RPC received the ephemeral PUBLIC key (base64).
+    const call = c.rpcCalls.find((r) => r.name === "create_scope_invite");
+    expect(typeof call?.params.p_eph_pub).toBe("string");
+    // An eph: scope_keys row was minted locally and the eph push fired.
+    expect(wraps(scope).some((w) => w.member.startsWith("eph:"))).toBe(true);
+    expect(vi.mocked(pushOnce)).toHaveBeenCalled();
   });
 });
 
@@ -462,6 +493,24 @@ describe("acceptTeamInvite", () => {
     });
     await expect(acceptTeamInvite(c, "t")).rejects.toThrow(
       /accept_scope_invite: empty result/,
+    );
+  });
+
+  it("throws when an offline token's secret has no matching server eph_pub (mismatch/corruption)", async () => {
+    const c = makeClient({
+      rpc: (name) =>
+        name === "accept_scope_invite"
+          ? {
+              // Offline-shaped token (has a `.secret` suffix) but the server recorded no eph_pub.
+              data: [
+                { out_scope_id: "s-9", out_role: "editor", out_eph_pub: null },
+              ],
+              error: null,
+            }
+          : null,
+    });
+    await expect(acceptTeamInvite(c, "cap123.SECRET")).rejects.toThrow(
+      /no matching ephemeral key/,
     );
   });
 });

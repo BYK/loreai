@@ -9,7 +9,7 @@
  * keystore calls key on it.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { keystore } from "@loreai/core";
+import { crypto, keystore } from "@loreai/core";
 import { getCurrentUser } from "./supabase";
 import { publishIdentityPub, pullOnce, pushOnce } from "./sync";
 
@@ -198,46 +198,124 @@ export async function removeTeamMember(
  * logged in can `acceptTeamInvite` to JOIN — it grants FETCH only (RLS is_member), never decrypt
  * (the DEK is wrapped to the new member by the admin's next sync, see reconcileScopeWraps).
  * `hint` is a free-text label for the admin's own reference; it is NOT resolved/verified.
+ *
+ * OFFLINE (`opts.offline`, E-5-c-2): the admin-never-returns escape hatch. Additionally mints an
+ * ephemeral X25519 keypair, wraps the scope DEK to it (stored as an `eph:<pub>` scope_keys row,
+ * pushed), and appends the ephemeral SECRET to the token (`<capability>.<base64url(secret)>`). The
+ * invitee can then unwrap + adopt the DEK and RETIRE the ephemeral wrap WITHOUT the admin ever
+ * coming back online. Cost: the token carries a decryption-capable key until the invitee accepts
+ * (single-use) and retires it — hence opt-in, short expiry, private channel.
  */
 export async function createTeamInvite(
   client: SupabaseClient,
   scopeId: string,
   role: "editor" | "viewer" = "editor",
   hint?: string,
+  opts?: { offline?: boolean },
 ): Promise<string> {
+  let ephPubB64: string | null = null;
+  let ephSecretSeg = "";
+  let ephKeypair: { publicKey: Uint8Array; secretKey: Uint8Array } | undefined;
+  if (opts?.offline) {
+    // Generate the ephemeral keypair up front (cheap, no DB write) so the RPC can record eph_pub —
+    // but DO NOT wrap/store/push the DEK yet. If create_scope_invite fails, we must not have left an
+    // orphaned eph scope_keys row on the server (it could never be retired without the token).
+    ephKeypair = crypto.generateIdentityKeypair();
+    ephPubB64 = Buffer.from(ephKeypair.publicKey).toString("base64");
+    // base64url (no padding) so the secret survives as a single token segment.
+    ephSecretSeg = `.${Buffer.from(ephKeypair.secretKey).toString("base64url")}`;
+  }
   const { data, error } = await client.rpc("create_scope_invite", {
     p_scope: scopeId,
     p_role: role,
     p_hint: hint ?? null,
+    p_eph_pub: ephPubB64,
   });
   if (error) throw new Error(`create_scope_invite: ${error.message}`);
-  return data as string;
+  // Only AFTER the invite token exists: wrap the DEK to the ephemeral pubkey, store the eph row, and
+  // push it. An RPC failure above short-circuits before any eph row is created/pushed — no orphan.
+  if (ephKeypair) {
+    await keystore.mintEphemeralInviteWrap(
+      scopeId,
+      await selfUserId(),
+      ephKeypair,
+    );
+    await pushOnce(client); // ship the eph wrap so the invitee can pull it
+  }
+  return `${data as string}${ephSecretSeg}`;
 }
 
 /**
  * Redeem an invite token (E-5-c): self-add to the scope, publish this device's identity key so the
  * admin can wrap the DEK, and pull so the joined team shows in `lore team list`. Returns the scope
- * id + role. Content stays unreadable until the admin's next sync wraps the DEK to this member
- * (reconcileScopeWraps) — which is automatic, no follow-up on either side.
+ * id + role.
+ *
+ * DEFAULT (capability token): content stays unreadable until the admin's next sync wraps the DEK to
+ * this member (reconcileScopeWraps) — automatic, no follow-up on either side.
+ *
+ * OFFLINE (token carries a `.` ephemeral-secret suffix, E-5-c-2): after joining, unwrap the DEK from
+ * the pulled `eph:<pub>` wrap using the token secret, re-wrap it to THIS identity, then RETIRE the
+ * ephemeral wrap (delete the `eph:` row locally + remotely via retire_ephemeral_invite) so the
+ * token's secret has nothing left to unwrap. The invitee can read pre-existing content immediately —
+ * zero admin action, admin may be offline forever. No rotation (that is an admin-only team action);
+ * the token is already single-use + short-lived + member-gated read, so deleting the spent wrap is
+ * the correct, self-service retirement for an editor/viewer invitee.
  */
 export async function acceptTeamInvite(
   client: SupabaseClient,
   token: string,
 ): Promise<{ scopeId: string; role: string }> {
+  // Split an optional ephemeral-secret suffix: `<capability>.<base64url(secret)>`. A capability-only
+  // token has no `.`, so `capability` is the whole string and `ephSecretB64url` is undefined.
+  const dot = token.indexOf(".");
+  const capability = dot >= 0 ? token.slice(0, dot) : token;
+  const ephSecretB64url = dot >= 0 ? token.slice(dot + 1) : undefined;
+
   const { data, error } = await client.rpc("accept_scope_invite", {
-    p_token: token,
+    p_token: capability,
   });
   if (error) throw new Error(`accept_scope_invite: ${error.message}`);
   // The RPC returns a single-row set: [{ out_scope_id, out_role, out_eph_pub }] (OUT columns are
   // prefixed to avoid a name collision with the table columns inside the function body).
   const row = Array.isArray(data) ? data[0] : data;
   if (!row?.out_scope_id) throw new Error("accept_scope_invite: empty result");
+  const scopeId = row.out_scope_id as string;
+  const role = row.out_role as string;
+  const ephPub = row.out_eph_pub as string | null;
+  // A token carrying an ephemeral secret MUST correspond to an offline invite the server recorded an
+  // eph_pub for. If the secret is present but eph_pub is null (token/invite mismatch or corruption),
+  // fail loudly rather than silently returning "joined" while never adopting the DEK — that would
+  // leave the invitee unable to decrypt with no signal that anything went wrong.
+  if (ephSecretB64url && !ephPub) {
+    throw new Error(
+      "invite token carries an offline key but the server has no matching ephemeral key — the token may be corrupt or not an offline invite",
+    );
+  }
   // Publish our identity key so the admin's reconcile can wrap the DEK to us, then pull the
-  // membership mirror so the team is visible locally.
+  // membership mirror (+ the eph wrap, now readable as a member) so the team is visible locally.
   await publishIdentityPub(client);
   await pullOnce(client);
-  return {
-    scopeId: row.out_scope_id as string,
-    role: row.out_role as string,
-  };
+
+  // Offline path: adopt the DEK via the ephemeral secret, then retire the spent ephemeral wrap.
+  if (ephSecretB64url && ephPub) {
+    const self = await selfUserId();
+    const ephSecret = new Uint8Array(Buffer.from(ephSecretB64url, "base64url"));
+    // Unwrap the DEK with the token secret and re-wrap it to our own identity (at the eph epoch).
+    await keystore.adoptEphemeralInviteWrap(scopeId, self, ephPub, ephSecret);
+    // Retire the ephemeral wrap so the token secret can never unwrap it again: delete the remote row
+    // (member-callable definer RPC — the admin-only scope_keys_delete policy doesn't apply to us) and
+    // the local copy (capture-suppressed — a non-admin can't push a scope_keys DELETE).
+    const { error: retErr } = await client.rpc("retire_ephemeral_invite", {
+      p_scope: scopeId,
+      p_eph_pub: ephPub,
+    });
+    if (retErr) throw new Error(`retire_ephemeral_invite: ${retErr.message}`);
+    keystore.deleteEphemeralInviteWrap(scopeId, ephPub);
+    // B's freshly-adopted self-wrap stays LOCAL-ONLY: scope_keys_insert is admin-only, so an
+    // editor/viewer invitee cannot push their own wrap (and must not try — a 42501 would wedge the
+    // scope_keys cursor). B holds the DEK locally to decrypt now; the admin's reconcile writes B's
+    // remote wrap on the admin's next sync. We suppress capture on the local self-wrap so no
+    // un-pushable outbox row lingers.
+  }
+  return { scopeId, role };
 }

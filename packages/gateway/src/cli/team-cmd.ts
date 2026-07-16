@@ -26,7 +26,7 @@ import {
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>]]";
+  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>]]";
 
 export async function commandTeam(
   positionals: string[],
@@ -138,9 +138,15 @@ export async function commandTeam(
         const role = (values.role as string) ?? "editor";
         if (role !== "editor" && role !== "viewer") return usage();
         const hint = values.email as string | undefined;
-        const token = await createTeamInvite(client, scope, role, hint);
+        const offline = values.offline === true;
+        const token = await createTeamInvite(client, scope, role, hint, {
+          offline,
+        });
         console.log(
-          `Invite created (${role}${hint ? `, for ${hint}` : ""}). It expires in 14 days.\n` +
+          `Invite created (${role}${hint ? `, for ${hint}` : ""}${offline ? ", offline" : ""}). It expires in 14 days.\n` +
+            (offline
+              ? "This token carries a one-time decryption key — treat it like a password and prefer a private channel.\n"
+              : "") +
             `Share this with the invitee — they run:\n\n  lore team accept ${token}\n`,
         );
         break;

@@ -374,3 +374,127 @@ describe.skipIf(SKIP)("lore team — direct email invite (E-5-c)", () => {
     expect(selfIns.error).toBeNull();
   });
 });
+
+describe.skipIf(SKIP)("lore team — offline invite (E-5-c-2)", () => {
+  // Highest-scope epoch that exists on the remote for a scope (across all members).
+  async function remoteMaxEpoch(scopeId: string): Promise<number> {
+    return h.client
+      .query(
+        "select coalesce(max(key_epoch),-1)::int e from public.scope_keys where scope_id=$1",
+        [scopeId],
+      )
+      .then((r) => r.rows[0].e as number);
+  }
+  async function remoteEphRows(scopeId: string): Promise<number> {
+    return h.client
+      .query(
+        "select count(*)::int n from public.scope_keys where scope_id=$1 and member_user_id like 'eph:%'",
+        [scopeId],
+      )
+      .then((r) => r.rows[0].n);
+  }
+
+  it("offline invite → fresh device adopts the DEK and retires the ephemeral wrap", async () => {
+    // A creates a team (DEK@0) and mints an OFFLINE invite: an eph wrap of the DEK is pushed and the
+    // token carries the ephemeral secret. Capture A's real DEK@0 to compare after B adopts.
+    const scope = await freshAdminTeam("Offline");
+    const aDek = Buffer.from(await keystore.getScopeKey(scope, admin)).toString(
+      "hex",
+    );
+    const token = await createTeamInvite(
+      clientFor(admin),
+      scope,
+      "editor",
+      undefined,
+      {
+        offline: true,
+      },
+    );
+    expect(token).toMatch(/^[0-9a-f]{64}\.[A-Za-z0-9_-]+$/); // capability.ephSecret
+    expect(await remoteEphRows(scope)).toBe(1); // eph wrap landed on the remote
+
+    // B, a FRESH device (no prior wrap, admin never comes back online), accepts.
+    mockUid = invitee;
+    keystore.setPassphrase("member pass", { params: FAST });
+    const res = await acceptTeamInvite(clientFor(invitee), token);
+    expect(res).toEqual({ scopeId: scope, role: "editor" });
+
+    // B now holds the SAME DEK A minted — proving the ephemeral unwrap delivered the real key
+    // (not a divergent fresh mint), re-wrapped to B's own identity at epoch 0.
+    const bDek = Buffer.from(
+      await keystore.getScopeKey(scope, invitee),
+    ).toString("hex");
+    expect(bDek).toBe(aDek);
+    // B's self-wrap is LOCAL-ONLY (scope_keys_insert is admin-only; the admin's reconcile writes
+    // B's remote wrap later). It exists locally so B can decrypt now.
+    expect(
+      db()
+        .query(
+          "SELECT count(*) AS n FROM scope_keys WHERE scope_id = ? AND member_user_id = ?",
+        )
+        .get(scope, invitee) as { n: number },
+    ).toEqual({ n: 1 });
+
+    // The spent ephemeral wrap is RETIRED: gone from both the remote and B's local store, so the
+    // token's ephemeral secret can never unwrap it again.
+    expect(await remoteEphRows(scope)).toBe(0);
+    expect(
+      db()
+        .query(
+          "SELECT count(*) AS n FROM scope_keys WHERE scope_id = ? AND member_user_id LIKE 'eph:%'",
+        )
+        .get(scope) as { n: number },
+    ).toEqual({ n: 0 });
+  });
+
+  it("retire_ephemeral_invite is member-callable but only deletes eph rows, never a real wrap", async () => {
+    // A member may retire a spent eph capability wrap (self-service), but the RPC is scoped to
+    // 'eph:%' rows — a member can NEVER delete another member's real DEK wrap through it.
+    const scope = await freshAdminTeam("Retire-Scope");
+    await keystore.getScopeKey(scope, admin); // A's real wrap @0
+    await addTeamMember(clientFor(admin), scope, invitee); // B is a real member with a wrap
+    // B (a plain member) retiring a non-existent eph pub deletes nothing and leaves real wraps intact.
+    const { error } = await clientFor(invitee).rpc("retire_ephemeral_invite", {
+      p_scope: scope,
+      p_eph_pub: "no-such-eph",
+    });
+    expect(error).toBeNull();
+    expect(await remoteMaxEpoch(scope)).toBe(0); // real wraps untouched (still present @0)
+    expect(
+      await h.client
+        .query(
+          "select count(*)::int n from public.scope_keys where scope_id=$1 and member_user_id=$2",
+          [scope, admin],
+        )
+        .then((r) => r.rows[0].n),
+    ).toBe(1); // A's real wrap still there
+    // Passing a REAL member's uuid as p_eph_pub retires only `eph:<uuid>` — the bare `<uuid>` real
+    // wrap is never touched (the RPC concatenates the 'eph:' prefix, so it can't address a real row).
+    await clientFor(invitee).rpc("retire_ephemeral_invite", {
+      p_scope: scope,
+      p_eph_pub: admin,
+    });
+    expect(
+      await h.client
+        .query(
+          "select count(*)::int n from public.scope_keys where scope_id=$1 and member_user_id=$2",
+          [scope, admin],
+        )
+        .then((r) => r.rows[0].n),
+    ).toBe(1); // A's real wrap STILL there — only eph:<admin> would have been eligible
+  });
+
+  it("a capability (non-offline) token has no ephemeral suffix and mints no eph wrap", async () => {
+    const scope = await freshAdminTeam("Cap-Only");
+    await keystore.getScopeKey(scope, admin); // A holds DEK@0
+    const token = await createTeamInvite(clientFor(admin), scope, "editor");
+    expect(token).not.toContain("."); // pure capability — no ephemeral secret
+    expect(await remoteEphRows(scope)).toBe(0);
+
+    mockUid = invitee;
+    keystore.setPassphrase("member pass", { params: FAST });
+    await acceptTeamInvite(clientFor(invitee), token);
+    // No eph wrap ever created — the admin's auto-wrap reconcile, not the invitee, delivers the DEK.
+    expect(await remoteEphRows(scope)).toBe(0);
+  });
+});

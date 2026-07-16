@@ -128,6 +128,7 @@ const OPTIONS = {
   // `lore login` / `lore whoami` flags
   email: { type: "string" as const },
   role: { type: "string" as const },
+  offline: { type: "boolean" as const },
   verify: { type: "boolean" as const },
   "no-browser": { type: "boolean" as const },
   // Hidden diagnostic: prints the vendored-model registration set by

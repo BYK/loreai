@@ -273,6 +273,7 @@ describe("invite (E-5-c)", () => {
       "s-1",
       "editor",
       undefined,
+      { offline: false },
     );
     expect(logs.join("\n")).toContain("lore team accept tok-abc");
   });
@@ -285,8 +286,23 @@ describe("invite (E-5-c)", () => {
       "s-2",
       "viewer",
       "a@b.dev",
+      { offline: false },
     );
     expect(logs.join("\n")).toMatch(/for a@b.dev/);
+  });
+
+  it("passes --offline through and warns the token carries a key", async () => {
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-abc.SECRET");
+    await commandTeam(["invite", "s-3"], { offline: true });
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-3",
+      "editor",
+      undefined,
+      { offline: true },
+    );
+    expect(logs.join("\n")).toMatch(/one-time decryption key/i);
+    expect(logs.join("\n")).toContain("lore team accept tok-abc.SECRET");
   });
 });
 
