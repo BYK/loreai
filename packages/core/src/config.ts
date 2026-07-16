@@ -211,6 +211,41 @@ export const LoreConfig = z.object({
         .describe(
           "Max chars per tool output for distillation input. Set to 0 to disable truncation. Default: 4000.",
         ),
+      /** Trigger threshold for embedding-based user-blob reduction (#1343). A user
+       *  message body longer than this is treated as a potential pasted blob
+       *  (logs, dumped files, data exports) and reduced to its query-relevant
+       *  portions before being sent to the distiller worker, instead of being fed
+       *  verbatim. Ordinary prose/directives stay well under this and pass through
+       *  untouched. Set to 0 to disable blob reduction entirely. Default: 12000. */
+      userBlobMaxChars: z
+        .number()
+        .min(0)
+        .default(12_000)
+        .describe(
+          "Trigger threshold (chars) for embedding-based user-blob reduction. Set to 0 to disable. Default: 12000.",
+        ),
+      /** Char budget kept after reducing an oversized user blob. The highest-
+       *  relevance segments (scored against the distillation objective) are kept
+       *  up to this budget; the rest are elided with an annotation. The full raw
+       *  message is always retained in temporal_messages + FTS, so elided bulk
+       *  stays recall-searchable. Default: 6000. */
+      userBlobKeepChars: z
+        .number()
+        .min(0)
+        .default(6_000)
+        .describe(
+          "Chars kept after reducing an oversized user blob. Default: 6000.",
+        ),
+      /** Max blob segments embedded during reduction. Bounds the local-embedding
+       *  cost per oversized message; surviving segments are uniformly sampled down
+       *  to this count so coverage still spans the whole body. Default: 48. */
+      userBlobMaxSegments: z
+        .number()
+        .min(1)
+        .default(48)
+        .describe(
+          "Max blob segments embedded during user-blob reduction. Default: 48.",
+        ),
       /** Number of most-recent gen-0 segments to keep un-archived when
        *  meta-distillation fires. These segments retain full detail in the
        *  context prefix while older segments are consolidated. Default: 5.
@@ -229,6 +264,9 @@ export const LoreConfig = z.object({
       maxSegmentTokens: 16384,
       metaThreshold: 20,
       toolOutputMaxChars: 4_000,
+      userBlobMaxChars: 12_000,
+      userBlobKeepChars: 6_000,
+      userBlobMaxSegments: 48,
       recentSegmentsToKeep: 5,
     })
     .describe(

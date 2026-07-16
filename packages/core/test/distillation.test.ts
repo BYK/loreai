@@ -11,6 +11,7 @@ import {
   maxAllowedExpansion,
   detectAssertions,
   detectToolFailures,
+  messagesToTextReduced,
   run,
   settleBackgroundWork,
 } from "../src/distillation";
@@ -360,7 +361,39 @@ describe("messagesToText", () => {
   });
 });
 
-// ─── Round-trip via partsToText ────────────────────────────────────────
+// ─── messagesToTextReduced (#1343) ─────────────────────────────────────
+//
+// Async sibling that reduces oversized USER blobs via embedding relevance.
+// The reduction logic itself is covered exhaustively by blob-select.test.ts
+// with a stubbed embedder; here we pin the distillation wiring: short bodies
+// and non-user roles behave exactly like messagesToText, and reduction only
+// engages above the size threshold.
+
+describe("messagesToTextReduced", () => {
+  test("passes short user messages through verbatim", async () => {
+    const msgs = [msg("user", "a normal short directive from the user")];
+    const out = await messagesToTextReduced(msgs, "query");
+    expect(out).toContain("a normal short directive from the user");
+    expect(out).not.toContain("elided");
+  });
+
+  test("empty query disables reduction (oversized body verbatim)", async () => {
+    // With no relevance query there's nothing to score against, so even an
+    // oversized body must pass through untouched rather than be reduced.
+    const huge = "x".repeat(20_000);
+    const msgs = [msg("user", huge)];
+    const out = await messagesToTextReduced(msgs, "   ");
+    expect(out).toContain(huge);
+  });
+
+  test("still truncates oversized tool output on non-user roles", async () => {
+    const big = "a".repeat(5_000);
+    const msgs = [msg("assistant", `[tool:grep] ${big}`)];
+    const out = await messagesToTextReduced(msgs, "query");
+    expect(out).toContain("[output omitted — grep:");
+  });
+});
+
 //
 // Pin the producer/consumer contract end-to-end: a LorePart[] containing
 // arbitrary content (including payloads that look like envelopes) flows

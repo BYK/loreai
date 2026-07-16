@@ -22,6 +22,7 @@ import {
   recursiveUser,
 } from "./prompt";
 import { toolStripAnnotation } from "./gradient";
+import { reduceBlob } from "./blob-select";
 import { workerSessionIDs } from "./worker";
 import { distillLimiter } from "./session-limiter";
 import type { LLMClient } from "./types";
@@ -385,6 +386,76 @@ export function messagesToText(
       return `[${m.role}] (${formatTime(m.created_at)}) ${body}`;
     })
     .join("\n\n");
+}
+
+/**
+ * Async sibling of {@link messagesToText} that additionally reduces oversized
+ * USER message bodies via embedding-based relevance selection (#1343).
+ *
+ * User bodies below `userBlobMaxChars` (or when reduction is disabled / the
+ * embedder is unavailable) pass through verbatim — the "always signal" rule
+ * holds for ordinary prose. A body above the threshold is treated as a potential
+ * pasted blob (logs, dumped file, data export): its query-relevant portions are
+ * kept and the bulk is elided, instead of feeding the whole thing to the worker
+ * LLM. The full raw message stays in `temporal_messages` + FTS, so elided bulk
+ * remains recall-searchable.
+ *
+ * Fail-open: any error during reduction (embed rejects, provider gone) leaves the
+ * body verbatim — dropping user signal is worse than paying to distill it once.
+ * Never blunt-truncates.
+ *
+ * @param query  What kept segments are scored against — built by the caller from
+ *               pinned assertions + prior observations + adjacent assistant turn.
+ * @param pinnedLines  High-priority snippets (detected user directives) that must
+ *               survive reduction verbatim — a segment containing one is force-kept.
+ */
+export async function messagesToTextReduced(
+  messages: TemporalMessage[],
+  query: string,
+  pinnedLines?: string[],
+): Promise<string> {
+  const cfg = config().distillation;
+  const cap = cfg.toolOutputMaxChars;
+  const blobTrigger = cfg.userBlobMaxChars;
+  const canReduce =
+    blobTrigger > 0 && embedding.isAvailable() && query.trim().length > 0;
+
+  const rendered = await Promise.all(
+    messages.map(async (m) => {
+      if (m.role !== "user") {
+        const body = truncateToolOutputsInContent(m.content, cap);
+        return `[${m.role}] (${formatTime(m.created_at)}) ${body}`;
+      }
+      // User body: reduce only oversized ones; short prose is always verbatim.
+      let body = m.content;
+      if (canReduce && m.content.length > blobTrigger) {
+        try {
+          const result = await reduceBlob(m.content, {
+            embed: (texts) => embedding.embed(texts, "document"),
+            cosine: embedding.cosineSimilarity,
+            query,
+            keepChars: cfg.userBlobKeepChars,
+            maxSegments: cfg.userBlobMaxSegments,
+            pinnedLines,
+          });
+          body = result.output;
+          log.info(
+            `reduced oversized user blob: ${m.content.length}→${body.length} chars ` +
+              `(${result.junkDropped} junk-dropped, ${result.embedded} embedded, ${result.kept} kept)`,
+          );
+        } catch (err) {
+          // Fail-open: leave the body verbatim rather than risk dropping signal.
+          log.warn(
+            `user-blob reduction failed, keeping verbatim: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+      return `[${m.role}] (${formatTime(m.created_at)}) ${body}`;
+    }),
+  );
+  return rendered.join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,9 +1116,9 @@ async function distillSegment(input: {
   metadata?: KnowledgeMetadata;
 }): Promise<DistillationResult | null> {
   const prior = latestObservations(input.projectPath, input.sessionID);
-  const text = messagesToText(input.messages);
   // Pre-scan for high-priority user assertions that might be lost in a
-  // large segment dominated by routine code or tool output.
+  // large segment dominated by routine code or tool output. Run this BEFORE
+  // rendering so the assertion text can seed the blob-reduction relevance query.
   const assertions = detectAssertions(input.messages);
   const pinnedAssertions =
     assertions.length > 0
@@ -1058,6 +1129,28 @@ async function distillSegment(input: {
       `pinned ${assertions.length} user assertion(s) in segment of ${input.messages.length} msgs`,
     );
   }
+  // Relevance query for embedding-based user-blob reduction (#1343): what the
+  // distiller cares about — the running session narrative (prior observations),
+  // the user's explicit directives (pinned assertions), and what the assistant
+  // did in this segment (adjacent assistant turns). Oversized user blobs are
+  // scored against this so only their relevant portions are kept.
+  const blobQuery = [
+    prior ?? "",
+    assertions.map((a) => a.text).join("\n"),
+    input.messages
+      .filter((m) => m.role === "assistant")
+      .map((m) => m.content)
+      .join("\n")
+      .slice(0, 4000),
+    "user request, directives, decisions, errors, key facts",
+  ]
+    .filter((s) => s.trim().length > 0)
+    .join("\n");
+  const text = await messagesToTextReduced(
+    input.messages,
+    blobQuery,
+    assertions.map((a) => a.text),
+  );
   // Pre-scan structured tool failures in this segment's time window so the
   // observer surfaces recurring obstacles instead of dropping them as noise.
   const toolFailures = detectToolFailures(
