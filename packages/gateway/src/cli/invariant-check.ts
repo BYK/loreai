@@ -122,7 +122,7 @@ export async function commandInvariantCheck(
       hunks,
       range,
       llm,
-      model: modelOverride ?? cfg.model,
+      model: defaultModel,
       sessionID: `invariant-check-${Date.now()}`,
       onJudge: (n, total) => {
         process.stderr.write(`\r[lore]   judging ${n}/${total}...`);
@@ -162,12 +162,17 @@ export async function commandInvariantCheck(
         2,
       ),
     );
-    if (gate.exitCode !== 0) process.exit(gate.exitCode);
+    // Set exitCode and RETURN — never process.exit() here. A synchronous
+    // process.exit() right after a buffered stdout write can truncate the JSON
+    // when stdout is redirected (the GHA does `... > lore-ic.json`), dropping
+    // the very payload the reporter parses to explain a blocked build. Letting
+    // the process drain naturally guarantees the write completes.
+    process.exitCode = gate.exitCode;
     return;
   }
 
   printReport(result, defaultModel, elapsedMs, gate);
-  if (gate.exitCode !== 0) process.exit(gate.exitCode);
+  process.exitCode = gate.exitCode;
 }
 
 function printReport(
