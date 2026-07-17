@@ -1538,6 +1538,73 @@ describe.skipIf(gate())("sync migrations — tombstone reaper (#909)", () => {
   });
 });
 
+describe.skipIf(SKIP)(
+  "sync migrations — ephemeral-invite scope_keys reaper (0046, #1353)",
+  () => {
+    const ANCIENT = "2020-01-01T00:00:00Z";
+    const recentTs = () => new Date(Date.now() - 5 * 86_400_000).toISOString();
+
+    // Insert a scope_keys row as the table owner (superuser h.client, which holds the GRANT that
+    // service_role lacks). Reset the request.jwt.claims GUC first so the maintain_usage trigger's
+    // auth.uid() → current_setting('request.jwt.claims')::json doesn't trip on a stale value left on
+    // the shared connection by an earlier asUser/asService test. Explicit created_at controls age.
+    // `member` is either an 'eph:<pub>' capability id or a real user uuid (a normal member wrap the
+    // reaper must NEVER touch).
+    const insKey = async (scope: string, member: string, createdAt: string) => {
+      // Session-level (is_local=false) so it persists across h.client's autocommit statements.
+      // Use '{}' (valid empty JSON) — auth.uid()/auth.role() do current_setting(...)::json, which
+      // trips on a bare '' left by an earlier asUser/asService test.
+      await h.client.query(
+        "select set_config('request.jwt.claims', '{}', false)",
+      );
+      await h.client.query(
+        `insert into public.scope_keys (scope_id, member_user_id, author_id, wrapped_dek, key_epoch, created_at, updated_at)
+         values ($1, $2, $1, 'd3JhcHBlZERFSw==', 0, $3, $3)`,
+        [scope, member, createdAt],
+      );
+    };
+    const remainingKeys = async (scope: string) =>
+      (
+        await h.client.query(
+          "select member_user_id from public.scope_keys where scope_id=$1 order by member_user_id",
+          [scope],
+        )
+      ).rows.map((r) => r.member_user_id as string);
+
+    it("reaps ONLY 'eph:' rows older than the window; keeps recent eph + all real wraps", async () => {
+      const a = await h.createUser();
+      await insKey(a, a, ANCIENT); // a real member wrap, ancient → MUST survive (never reaped)
+      await insKey(a, "eph:OLDPUB", ANCIENT); // stale eph capability → reaped
+      await insKey(a, "eph:NEWPUB", recentTs()); // eph inside the 14d window → kept
+
+      const { rows: rr } = await h.client.query(
+        "select public.reap_ephemeral_scope_keys(14) as n",
+      );
+      expect(Number(rr[0].n)).toBeGreaterThanOrEqual(1); // >= our 1 stale eph (reap is global)
+
+      // Real wrap survives; recent eph survives; stale eph gone.
+      expect(await remainingKeys(a)).toEqual([a, "eph:NEWPUB"]);
+    });
+
+    it("retention_days=0 reaps every eph row but NEVER a real member wrap", async () => {
+      const a = await h.createUser();
+      await insKey(a, a, recentTs()); // real wrap, even recent → never touched
+      await insKey(a, "eph:P", recentTs()); // recent eph, but window 0 → reaped
+      await h.client.query("select public.reap_ephemeral_scope_keys(0)");
+      expect(await remainingKeys(a)).toEqual([a]); // only the real wrap remains
+    });
+
+    it("is not executable by a normal (authenticated) user — system task only", async () => {
+      const a = await h.createUser();
+      await expect(
+        h.asUser(a, (c) =>
+          c.query("select public.reap_ephemeral_scope_keys(14)"),
+        ),
+      ).rejects.toThrow(/permission denied/i);
+    });
+  },
+);
+
 describe.skipIf(gate())("sync migrations — reaper watermark (#909)", () => {
   const nowIso = () => new Date().toISOString();
   // Relative dates keep the tests robust to wall-clock. The cutoff is
