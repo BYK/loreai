@@ -6671,10 +6671,16 @@ async function handleConversationTurn(
 
     // A credential just landed. If `lore run` deferred a conversation import
     // (no credential existed at startup), run it now — this is the first
-    // authenticated turn. Forward the provider that authenticated so the job
-    // can skip when the credential can't drive its extraction model. One-shot
-    // and self-guarded; a no-op otherwise.
-    trackBackground(flushPendingImport(reqProviderID || undefined));
+    // authenticated turn. Forward the provider the GLOBAL fallback was tagged
+    // with — resolveLastSeenProvider (x-lore-provider ?? URL inference), the
+    // same value setLastSeenAuth used above — because the session-less import
+    // job resolves auth against that global. Using the bare header
+    // (extractProviderHeader) here would pass undefined when the provider was
+    // URL-inferred, re-introducing the silent cross-provider drop. One-shot and
+    // self-guarded; a no-op otherwise.
+    trackBackground(
+      flushPendingImport(resolveLastSeenProvider(req.rawHeaders)),
+    );
   }
 
   // Capture billing header prefix for worker cch computation, scoped to
