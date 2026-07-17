@@ -146,11 +146,19 @@ export async function maybeAutoImport(
     const usable =
       hasWorkerKey || resolveAuth(undefined, defaultModel.providerID) != null;
     if (!usable) {
+      // Never leave a promised import silently dropped: we told the user it
+      // would "start after your first message". Explain the mismatch when we
+      // know the provider; otherwise give a generic, still-actionable notice.
       if (authedProviderID && authedProviderID !== defaultModel.providerID) {
         console.log(
           `[lore] Skipping knowledge import: your session uses ${authedProviderID}, ` +
             `but import is configured for ${defaultModel.providerID}. ` +
             `Run \`lore import\` once authenticated with ${defaultModel.providerID}.`,
+        );
+      } else {
+        console.log(
+          `[lore] Skipping knowledge import: no usable ${defaultModel.providerID} ` +
+            `credential is available. Run \`lore import\` once authenticated.`,
         );
       }
       return Promise.resolve();

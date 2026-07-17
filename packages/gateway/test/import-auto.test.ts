@@ -133,4 +133,21 @@ describe("maybeAutoImport — credential-aware scheduling", () => {
     // The matching-provider path does NOT hit the mismatch skip branch.
     expect(logs.join("\n")).not.toContain("Skipping knowledge import");
   });
+
+  test("deferred → flush with UNKNOWN provider and no usable credential skips loudly (generic notice)", async () => {
+    // The credential can't be resolved for the default (anthropic) model and the
+    // trigger carried no provider info (authedProviderID undefined). The import
+    // must still tell the user it was skipped — never a silent drop.
+    await maybeAutoImport(baseConfig());
+    expect(hasPendingImport()).toBe(true);
+
+    // No credential set for anthropic → resolveAuth(undefined, "anthropic") null.
+    logs.length = 0;
+    await flushPendingImport(undefined);
+
+    expect(hasPendingImport()).toBe(false);
+    const out = logs.join("\n");
+    expect(out).toContain("Skipping knowledge import");
+    expect(out).toContain("no usable anthropic credential");
+  });
 });
