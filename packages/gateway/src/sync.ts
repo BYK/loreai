@@ -755,6 +755,11 @@ export async function pullOnce(
     const touchedFts = new Set<string>();
     let cursor = parseCursor(getKV(pullKey(meta.table)));
 
+    // #1294: registry mirrors (orgs/scopes/members) are NOT keyset-pulled here — they are
+    // authoritatively snapshot-replaced by refreshRegistryMirror after this loop (so a remote
+    // membership removal, which leaves no tombstone, propagates as a local delete). Skip them.
+    if (meta.mirrorSnapshot) continue;
+
     // C-4 (#825): resolve the encryption snapshot for an encrypted table. "locked"
     // (escrow present, not unlocked) → skip the table entirely, leaving its cursor
     // frozen so it re-pulls after unlock (never storing ciphertext as content). The
@@ -1234,6 +1239,51 @@ async function reportDeviceProgress(client: SupabaseClient): Promise<void> {
   }
 }
 
+/**
+ * #1294: refresh the pull-only registry mirrors (orgs/org_members/scopes/scope_members) by
+ * AUTHORITATIVE SNAPSHOT. For each `mirrorSnapshot` table, fetch the member's complete RLS-scoped
+ * set from the remote and replace the local mirror (upsert-all + delete-absent, capture-suppressed).
+ * This is how a remote membership removal (`remove_scope_member` hard-DELETEs → no tombstone → the
+ * keyset delta pull can never see it) propagates to the local mirror, without the forbidden
+ * reconcile-by-absence of an evicted content table (these tiny tables are never evicted, and the RLS
+ * result IS the complete current set). Runs BEFORE reconcileScopeWraps so an admin never re-wraps a
+ * DEK to a member who was just removed. Best-effort: a failure logs and leaves the stale mirror in
+ * place (cosmetic — RLS + DEK rotation remain the real access gate) to retry next tick.
+ */
+export async function refreshRegistryMirror(
+  client: SupabaseClient,
+): Promise<void> {
+  const PAGE = 1000; // registry tables are tiny; a page cap is pure defense-in-depth.
+  for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
+    if (!meta.mirrorSnapshot) continue;
+    try {
+      const rows: Array<Record<string, unknown>> = [];
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await client
+          .from(meta.table)
+          .select("*")
+          .range(from, from + PAGE - 1);
+        if (error) throw new Error(error.message);
+        const page = (data ?? []) as Array<Record<string, unknown>>;
+        // stripSyncCols drops the remote-only tenant columns AND converts the ISO timestamptz
+        // strings to the epoch-ms integers the local schema stores (symmetry with the keyset pull's
+        // applyRemote path). scope_members.scope_id is half the PK → keep it (SCOPE_MEMBER_KEEP).
+        const keep =
+          meta.table === "scope_members" ? SCOPE_MEMBER_KEEP : undefined;
+        for (const r of page) rows.push(stripSyncCols(r, keep));
+        if (page.length < PAGE) break;
+      }
+      syncData.replaceRegistryTable(meta.table, rows);
+    } catch (e) {
+      // A partial/failed fetch must NOT delete the local mirror (we'd lose valid rows). Skip this
+      // table this cycle; the next successful refresh reconciles it.
+      log.info(
+        `sync: registry mirror ${meta.table} refresh skipped: ${(e as Error).message}`,
+      );
+    }
+  }
+}
+
 const IDENTITY_PUB_KV = "sync.identityPub"; // base64 of the last-published public key
 
 /**
@@ -1392,6 +1442,18 @@ export async function syncOnce(
   } catch (e) {
     log.notice(
       `sync: project convergence deferred — ${(e as Error).message ?? e}`,
+    );
+  }
+  // #1294: refresh the org/scope registry mirrors by authoritative snapshot so a remote membership
+  // removal propagates locally. BEFORE reconcileScopeWraps (which reads the local scope_members
+  // mirror to decide who to re-wrap the DEK to) so a just-removed member is never re-wrapped.
+  // Best-effort: the per-table failures are caught inside; this outer guard covers a throw from the
+  // loop header (tier resolution) so it can never abort the rest of the cycle — retried next tick.
+  try {
+    await refreshRegistryMirror(client);
+  } catch (e) {
+    log.notice(
+      `sync: registry mirror refresh deferred — ${(e as Error).message ?? e}`,
     );
   }
   const tierAfter = syncData.currentSyncTier();

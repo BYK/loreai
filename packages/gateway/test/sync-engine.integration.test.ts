@@ -33,7 +33,12 @@ import {
   it,
   vi,
 } from "vitest";
-import { publishIdentityPub, pullOnce, pushOnce } from "../src/sync";
+import {
+  publishIdentityPub,
+  pullOnce,
+  pushOnce,
+  refreshRegistryMirror,
+} from "../src/sync";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 
 // The engine drives real supabase-js clients we pass in explicitly, but the encryption
@@ -436,20 +441,16 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
     expect((await pushOnce(clientFor(uid))).pushed).toBe(0);
   });
 
-  it("mirrors the member's org/scope registry on pull (E-5 foundation, #827)", async () => {
+  it("mirrors the member's org/scope registry on refresh (E-5 foundation, #827)", async () => {
     // A team scope + the caller's admin membership, created server-side by the lifecycle RPC.
     const scopeId = await h.asUser(uid, (c) =>
       c
         .query("select public.create_team($1) as s", ["Rockets"])
         .then((r) => r.rows[0].s),
     );
-    // Opt in to pulling the (pull-only, otherwise parked) registry mirrors.
-    for (const t of ["orgs", "org_members", "scopes", "scope_members"]) {
-      setKV(`sync.pull.${t}`, "0|");
-    }
     syncData.enableSync("basic");
-    const r = await pullOnce(clientFor(uid));
-    expect(r.conflicts).toBe(0);
+    // #1294: the registry mirrors are refreshed by authoritative snapshot, not the keyset pull.
+    await refreshRegistryMirror(clientFor(uid));
 
     // The new team scope + the caller's admin membership are mirrored locally.
     expect(
@@ -468,8 +469,8 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
           .get(scopeId, uid) as { role?: string } | undefined
       )?.role,
     ).toBe("admin");
-    // The WHOLE registry pulls, not just the team: the personal scope (id == user id) too,
-    // plus the org it belongs to — proving the pull is not team-only.
+    // The WHOLE registry mirrors, not just the team: the personal scope (id == user id) too,
+    // plus the org it belongs to — proving the refresh is not team-only.
     expect(
       (
         db().query("SELECT kind FROM scopes WHERE id=?").get(uid) as
@@ -491,9 +492,71 @@ describe.skipIf(SKIP)("sync engine ↔ real Postgres/PostgREST", () => {
       )?.promotion_policy,
     ).toBe("manual");
 
-    // Idempotent + pull-only: a second pull mirrors nothing new, a push is a no-op.
-    expect((await pullOnce(clientFor(uid))).pulled).toBe(0);
+    // The ISO timestamptz strings from PostgREST are normalized to epoch-ms INTEGERs locally
+    // (via stripSyncCols, matching the keyset pull) — not stored as raw ISO text (#1294/#1372 review).
+    const ts = db()
+      .query("SELECT created_at, updated_at FROM scopes WHERE id=?")
+      .get(scopeId) as { created_at?: unknown; updated_at?: unknown };
+    expect(typeof ts.created_at).toBe("number");
+    expect(typeof ts.updated_at).toBe("number");
+    expect(ts.updated_at as number).toBeGreaterThan(1_000_000_000_000); // plausible epoch-ms
+
+    // Idempotent + pull-only: a second refresh keeps the same rows, a push is a no-op.
+    await refreshRegistryMirror(clientFor(uid));
+    expect(
+      (
+        db()
+          .query(
+            "SELECT role FROM scope_members WHERE scope_id=? AND user_id=?",
+          )
+          .get(scopeId, uid) as { role?: string } | undefined
+      )?.role,
+    ).toBe("admin");
     expect((await pushOnce(clientFor(uid))).pushed).toBe(0);
+  });
+
+  it("propagates a remote membership removal to the local mirror on refresh (#1294)", async () => {
+    // Admin (uid) creates a team and adds a second member (other); both mirror locally.
+    const other = await h.createUser("removed-member@test.dev");
+    const scopeId = await h.asUser(uid, (c) =>
+      c
+        .query("select public.create_team($1) as s", ["Comets"])
+        .then((r) => r.rows[0].s),
+    );
+    await h.asUser(uid, (c) =>
+      c.query("select public.add_scope_member($1,$2,'editor')", [
+        scopeId,
+        other,
+      ]),
+    );
+    syncData.enableSync("basic");
+    await refreshRegistryMirror(clientFor(uid));
+    const memberCount = () =>
+      (
+        db()
+          .query("SELECT COUNT(*) n FROM scope_members WHERE scope_id=?")
+          .get(scopeId) as { n: number }
+      ).n;
+    expect(memberCount()).toBe(2); // admin + other
+
+    // Admin removes `other` remotely (hard DELETE, no tombstone — the keyset pull could never see it).
+    await h.asUser(uid, (c) =>
+      c.query("select public.remove_scope_member($1,$2)", [scopeId, other]),
+    );
+    // The next authoritative refresh deletes the now-absent local row.
+    await refreshRegistryMirror(clientFor(uid));
+    expect(memberCount()).toBe(1); // only the admin remains
+    expect(
+      db()
+        .query("SELECT 1 FROM scope_members WHERE scope_id=? AND user_id=?")
+        .get(scopeId, other),
+    ).toBeNull();
+    // The admin's own membership survives (not wrongly reaped by the delete-absent pass).
+    expect(
+      db()
+        .query("SELECT 1 FROM scope_members WHERE scope_id=? AND user_id=?")
+        .get(scopeId, uid),
+    ).toBeDefined();
   });
 
   it("pulls ALL rows when many share one updated_at (>page is internal; correctness here)", async () => {

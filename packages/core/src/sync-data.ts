@@ -140,6 +140,17 @@ export interface SyncTableMeta {
    * hits the existing row (unique_violation 23505) is treated as already-synced. Defaults to false.
    */
   insertOnly?: boolean;
+  /**
+   * #1294: this pull-only mirror is refreshed by an AUTHORITATIVE FULL-SET SNAPSHOT each sync
+   * (`refreshRegistryMirror` in sync.ts → `replaceRegistryTable` here), NOT the keyset delta pull
+   * (which is skipped for it). The remote RLS result IS the member's complete current set for these
+   * tiny org/scope registry tables, so a row ABSENT from the snapshot means the membership was
+   * removed remotely (`remove_scope_member` hard-DELETEs, leaving no tombstone) → the local row is
+   * deleted. This is NOT the forbidden "reconcile-by-absence" of an evicted content table (where
+   * absence is ambiguous with local-cache eviction); here the small table is never evicted and the
+   * server returns the authoritative complete set. Implies pullOnly. Defaults to false.
+   */
+  mirrorSnapshot?: boolean;
 }
 
 /** ASCII Unit Separator — joins composite row ids (mirrors the SQL `char(31)`). */
@@ -432,6 +443,7 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ftsTables: [],
       versioned: false,
       pullOnly: true,
+      mirrorSnapshot: true,
       syncColumns: [
         "id",
         "kind",
@@ -448,6 +460,7 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ftsTables: [],
       versioned: false,
       pullOnly: true,
+      mirrorSnapshot: true,
       syncColumns: ["org_id", "user_id", "role", "created_at", "updated_at"],
     },
     {
@@ -456,6 +469,7 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ftsTables: [],
       versioned: false,
       pullOnly: true,
+      mirrorSnapshot: true,
       syncColumns: [
         "id",
         "org_id",
@@ -472,6 +486,7 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
       ftsTables: [],
       versioned: false,
       pullOnly: true,
+      mirrorSnapshot: true,
       syncColumns: ["scope_id", "user_id", "role", "created_at", "updated_at"],
     },
   ],
@@ -1541,6 +1556,61 @@ export function applyRemoteUpsert(
     db()
       .query(sql)
       .run(...cols.map((c) => row[c] as never));
+  });
+}
+
+/**
+ * #1294: replace a pull-only registry mirror (orgs/org_members/scopes/scope_members) with the
+ * AUTHORITATIVE full set the server returned for this member. Upserts every remote row, then DELETEs
+ * any local row whose PK is not in the remote set — that is how a remote membership removal
+ * (`remove_scope_member` hard-DELETE, no tombstone) propagates to the local mirror WITHOUT client
+ * reconcile-by-absence of an evicted table (these are `mirrorSnapshot` tables: never evicted, and the
+ * RLS result IS the complete current set). Capture-suppressed so nothing is enqueued (pull-only).
+ * The local mirror tables carry NO cross-table FKs (db.ts), so per-table replacement is FK-safe.
+ */
+export function replaceRegistryTable(
+  table: string,
+  remoteRows: Record<string, unknown>[],
+): void {
+  const m = meta(table);
+  if (!m.mirrorSnapshot)
+    throw new Error(
+      `replaceRegistryTable: ${table} is not a mirrorSnapshot table`,
+    );
+  const idCols = m.idColumns;
+  withApplying(() => {
+    const conn = db();
+    // 1. Upsert every authoritative row.
+    for (const row of remoteRows) {
+      const cols = columns(table).filter(
+        (c) => !PAYLOAD_EXCLUDE.has(c) && c in row,
+      );
+      if (cols.length === 0) continue;
+      const placeholders = cols.map(() => "?").join(", ");
+      const nonPk = cols.filter((c) => !idCols.includes(c));
+      const onConflict =
+        nonPk.length > 0
+          ? `DO UPDATE SET ${nonPk.map((c) => `${c}=excluded.${c}`).join(", ")}`
+          : "DO NOTHING";
+      conn
+        .query(
+          `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(${idCols.join(", ")}) ${onConflict}`,
+        )
+        .run(...cols.map((c) => row[c] as never));
+    }
+    // 2. Delete local rows absent from the authoritative set. Build the keep-set of composite ids
+    //    (rowIdOf — the canonical ROW_SEP-joined PK builder) and scan the local table.
+    const keep = new Set(remoteRows.map((r) => rowIdOf(table, r)));
+    const localRows = conn
+      .query(`SELECT ${idCols.join(", ")} FROM ${table}`)
+      .all();
+    const del = conn.query(
+      `DELETE FROM ${table} WHERE ${idCols.map((c) => `${c} = ?`).join(" AND ")}`,
+    );
+    for (const lr of localRows) {
+      if (!keep.has(rowIdOf(table, lr)))
+        del.run(...idCols.map((c) => lr[c] as never));
+    }
   });
 }
 

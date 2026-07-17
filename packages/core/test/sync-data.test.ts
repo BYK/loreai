@@ -34,6 +34,7 @@ import {
   readOutbox,
   rebuildFts,
   reconcile,
+  replaceRegistryTable,
   rowIdOf,
   seedOutbox,
   setSyncState,
@@ -1464,5 +1465,96 @@ describe("tier-aware table selection (D-2, #826)", () => {
   test("metaFor resolves any registered table regardless of tier; throws for unknown", () => {
     expect(metaFor("knowledge").table).toBe("knowledge");
     expect(() => metaFor("not_a_table")).toThrow(/not a synced table/);
+  });
+});
+
+describe("replaceRegistryTable — authoritative snapshot replace (#1294)", () => {
+  const seedMember = (scope: string, user: string, role = "editor") =>
+    db()
+      .query(
+        "INSERT OR REPLACE INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES (?,?,?,?,?)",
+      )
+      .run(scope, user, role, now(), now());
+  const localMembers = () =>
+    (
+      db()
+        .query(
+          "SELECT scope_id, user_id, role FROM scope_members ORDER BY user_id",
+        )
+        .all() as { scope_id: string; user_id: string; role: string }[]
+    ).map((r) => `${r.scope_id}/${r.user_id}/${r.role}`);
+
+  beforeEach(() => {
+    db().exec("DELETE FROM scope_members");
+    db().exec("DELETE FROM sync_outbox");
+  });
+
+  test("deletes local rows absent from the remote set, upserts the rest", () => {
+    seedMember("s1", "u-keep");
+    seedMember("s1", "u-removed"); // will be absent from the authoritative set → deleted
+    replaceRegistryTable("scope_members", [
+      {
+        scope_id: "s1",
+        user_id: "u-keep",
+        role: "admin", // role change is applied (upsert)
+        created_at: now(),
+        updated_at: now(),
+      },
+      {
+        scope_id: "s1",
+        user_id: "u-new", // a newly-added co-member → inserted
+        role: "viewer",
+        created_at: now(),
+        updated_at: now(),
+      },
+    ]);
+    expect(localMembers()).toEqual(["s1/u-keep/admin", "s1/u-new/viewer"]);
+  });
+
+  test("an empty authoritative set clears the whole local mirror", () => {
+    seedMember("s1", "u-a");
+    seedMember("s2", "u-b");
+    replaceRegistryTable("scope_members", []);
+    expect(localMembers()).toEqual([]);
+  });
+
+  test("is capture-suppressed — never enqueues an outbox row", () => {
+    // These registry tables have no production capture trigger (they're pull-only), so a naive
+    // "no outbox after replace" assertion would pass even if withApplying were removed (vacuous).
+    // Install a REAL-shaped capture trigger (gated on an empty _sync_applying, exactly like
+    // installSyncCapture's triggers) so this test is DISCRIMINATING: with withApplying present the
+    // trigger is suppressed (no outbox); drop the wrapper and it fires → the test fails.
+    db().exec(
+      "CREATE TEMP TABLE IF NOT EXISTS _sync_applying (marker INTEGER)",
+    );
+    db().exec(
+      `CREATE TEMP TRIGGER scope_members_test_outbox AFTER INSERT ON scope_members
+       WHEN (NOT EXISTS (SELECT 1 FROM temp._sync_applying))
+       BEGIN
+         INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
+         VALUES ('scope_members', new.scope_id || char(31) || new.user_id, 'upsert', 0);
+       END;`,
+    );
+    try {
+      db().exec("DELETE FROM sync_outbox");
+      replaceRegistryTable("scope_members", [
+        {
+          scope_id: "s1",
+          user_id: "u-new",
+          role: "editor",
+          created_at: now(),
+          updated_at: now(),
+        },
+      ]);
+      expect(readOutbox(0)).toHaveLength(0);
+    } finally {
+      db().exec("DROP TRIGGER IF EXISTS scope_members_test_outbox");
+    }
+  });
+
+  test("refuses a non-mirrorSnapshot table", () => {
+    expect(() => replaceRegistryTable("knowledge", [])).toThrow(
+      /not a mirrorSnapshot table/,
+    );
   });
 });

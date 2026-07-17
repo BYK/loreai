@@ -145,6 +145,15 @@ describe("SYNCED_TABLES registry contract", () => {
         expect(captured).toBe(expectsOwnTrigger);
       });
 
+      if (m.mirrorSnapshot) {
+        test("mirrorSnapshot implies pullOnly (#1294)", () => {
+          // refreshRegistryMirror DELETEs local rows absent from the remote authoritative set — only
+          // safe for a server-authoritative pull-only table. A pushable mirrorSnapshot table would
+          // have its own local writes wiped on the next pull.
+          expect(m.pullOnly).toBe(true);
+        });
+      }
+
       if (m.deleteInvisible) {
         test("a deleteInvisible table has NO DELETE capture trigger", () => {
           // deleteInvisible suppresses reconcile's delete-tombstone pass, but a DELETE
