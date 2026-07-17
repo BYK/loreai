@@ -64,6 +64,14 @@ export type KnowledgeMetadata = {
    *  Format: 7-40 char lowercase hex. Never validated here — the probe guard at
    *  synthetic-tools.ts:621 already rejects malformed SHAs. */
   gitHead?: string;
+  /** Invariant-check enforcement opt-in (semantic linter, invariant-check.ts).
+   *  Controls the ceiling severity of a finding on this entry:
+   *    - `"strict"`/`true` → hard gate (unless clamped by the enumeration rule)
+   *    - `"soft"`          → overridable gate
+   *    - `false`/`"off"`   → never enforced (excluded from the judge entirely)
+   *  Absent → heuristic default (advisory when enforceable). Author intent
+   *  always wins. See `invariant-check.ts` `enforcementLevel`. */
+  enforce?: "strict" | "soft" | "off" | boolean;
 };
 
 /** Parse the raw `metadata` TEXT column into a typed object. Tolerant: a

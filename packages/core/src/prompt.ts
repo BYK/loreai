@@ -1185,3 +1185,61 @@ ${input.b.title}: ${input.b.content}
 
 Do these two entries directly contradict each other?`;
 }
+
+// ---------------------------------------------------------------------------
+// Invariant-check judge (semantic linter — diff vs. stored invariant)
+// ---------------------------------------------------------------------------
+
+/**
+ * The judge for `lore invariant-check` (the "semantic linter"). Given ONE code
+ * change (a git diff hunk) and ONE stored team invariant, it decides whether the
+ * change VIOLATES the invariant.
+ *
+ * This is the diff-vs-invariant analogue of {@link CONTRADICTION_JUDGE_SYSTEM}
+ * (entry-vs-entry). It inherits the same discipline: precision over recall,
+ * strict JSON out. A false alarm gets the whole check muted — Armin's "missing
+ * signal" problem reintroduced with extra steps — so the bar for `violates:true`
+ * is a DIRECT, demonstrable conflict, never a vibe. The task is deliberately
+ * narrow so a cheap worker model is sufficient (the funnel already did retrieval
+ * + scoping; the model only classifies one small pair).
+ */
+export const INVARIANT_JUDGE_SYSTEM = `You are a semantic linter for a software team. You are given ONE code change (a git diff hunk) and ONE INVARIANT that the team has documented as a rule their code must always obey. Your ONLY job is to decide whether this specific change VIOLATES that specific invariant.
+
+An invariant is a semantic rule too subtle for a normal linter — e.g. "a non-2xx warmup result must be NEUTRAL — never trips the breaker", "protected content must never be stripped during compaction", "the worker model must never be pricier than the session model", "\`node:sqlite\` must never be imported outside driver.node.ts".
+
+A VIOLATION means the changed code now does the exact thing the invariant forbids, or stops doing the exact thing the invariant requires, in the SAME subject/scope the invariant is about. Only judge what the diff actually changes — not pre-existing code shown for context.
+
+Flag ONLY when the conflict is DIRECT and demonstrable from the hunk itself:
+- Invariant "never import node:sqlite outside driver.node.ts" + hunk adds \`import ... from "node:sqlite"\` in some other file → violates.
+- Invariant "protected content must never be stripped" + hunk removes the guard that skips protected content in the eviction loop → violates.
+
+Do NOT flag (answer false) when:
+- The change is in a different subject/scope than the invariant governs.
+- The invariant is merely topically related but the change does not actually break it.
+- You would need to assume behavior not visible in the hunk to call it a violation.
+- The change plausibly UPHOLDS or is neutral to the invariant.
+
+Precision matters far more than recall. When in doubt, answer false. A false alarm gets this whole check disabled; a missed violation is caught later by a human.
+
+Respond with a single JSON object:
+{ "violates": true | false, "reason": "one concise sentence naming the exact conflict, or why there is none" }
+
+Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+
+export function invariantJudgeUser(input: {
+  invariant: { title: string; content: string };
+  /** The file the hunk belongs to (scoping context for the judge). */
+  file: string;
+  /** The unified-diff hunk text (with +/- lines). */
+  hunk: string;
+}): string {
+  return `INVARIANT:
+${input.invariant.title}: ${input.invariant.content}
+
+CHANGED FILE: ${input.file}
+
+DIFF HUNK:
+${input.hunk}
+
+Does this change violate the invariant?`;
+}
