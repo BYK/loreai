@@ -223,6 +223,7 @@ import {
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
+import { flushPendingImport } from "./pending-import";
 import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
 import {
@@ -6667,6 +6668,11 @@ async function handleConversationTurn(
     const reqProviderID = extractProviderHeader(req.rawHeaders);
     setSessionAuth(sessionID, cred, reqProviderID || undefined);
     clearWarmupAuthDisabled(sessionID); // Re-enable cache warming on fresh credential
+
+    // A credential just landed. If `lore run` deferred a conversation import
+    // (no credential existed at startup), run it now — this is the first
+    // authenticated turn. One-shot and self-guarded; a no-op otherwise.
+    trackBackground(flushPendingImport());
   }
 
   // Capture billing header prefix for worker cch computation, scoped to
