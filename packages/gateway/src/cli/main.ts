@@ -475,6 +475,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "admin": {
+        const { commandAdmin } = await import("./admin-cmd");
+        await commandAdmin(rest, values);
+        break;
+      }
+
       case "logs": {
         const { commandLogs } = await import("./logs");
         await commandLogs(rest, values);
@@ -531,6 +537,7 @@ export async function _cli(): Promise<void> {
               "whoami",
               "sync",
               "team",
+              "admin",
               "logs",
               "import",
               "entity",

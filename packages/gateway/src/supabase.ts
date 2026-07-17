@@ -164,6 +164,30 @@ export function createSupabaseClient(): SupabaseClient {
 }
 
 /**
+ * Build a SERVICE-ROLE client from the `SUPABASE_SERVICE_ROLE_KEY` env var — an
+ * OPERATOR-ONLY escape hatch (e.g. `lore admin grant`) for privileged writes the
+ * RLS/tier guards deliberately block for normal users. The key bypasses RLS and
+ * is NEVER persisted or shipped: it is read from the environment at call time and
+ * lives only in this in-memory client. Returns null when the env var is unset so
+ * the caller can print a clear "operator-only" message rather than 401.
+ *
+ * SECURITY: this client BYPASSES RLS entirely. It is intentionally scoped to the
+ * operator `lore admin` command (tier writes only). Any NEW caller is a security-
+ * review trigger — do not use it to reach around RLS for ordinary features.
+ */
+export function getServiceRoleClient(): SupabaseClient | null {
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) return null;
+  return createClient(SUPABASE_URL, key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+
+/**
  * Build a client with the persisted session restored (and refreshed if the
  * access token expired). Re-persists the refreshed tokens. Returns null when
  * not logged in or the session could not be restored (expired refresh token,
