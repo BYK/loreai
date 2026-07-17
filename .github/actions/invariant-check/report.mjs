@@ -35,7 +35,10 @@ const funnel =
 function esc(s) {
   // Escape workflow-command MESSAGE data (the part after `::`). Only %, CR, LF
   // are special here.
-  return String(s ?? "").replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  return String(s ?? "")
+    .replace(/%/g, "%25")
+    .replace(/\r/g, "%0D")
+    .replace(/\n/g, "%0A");
 }
 
 function escProp(s) {
@@ -49,7 +52,10 @@ function escProp(s) {
  *  finding with a pipe in its title or a multi-line judge reason can't corrupt
  *  the rendered table. */
 function cell(s) {
-  return String(s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+  return String(s ?? "")
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, " ")
+    .trim();
 }
 
 /** Extract the new-file line span from a unified-diff hunk header so the
@@ -68,7 +74,9 @@ function hunkRange(hunkText) {
 }
 
 if (findings.length === 0) {
-  console.log(`::notice title=Lore invariant-check::✓ no suspected invariant violations (${funnel})`);
+  console.log(
+    `::notice title=Lore invariant-check::✓ no suspected invariant violations (${funnel})`,
+  );
   if (summaryFile) {
     appendFileSync(
       summaryFile,
@@ -128,11 +136,12 @@ if (summaryFile) {
   const rows = findings
     .map((f) => {
       const key = findingKey(f);
-      const state = gated && blockingIds.has(key)
-        ? "🚫 blocking"
-        : overriddenIds.has(key)
-          ? "↪ overridden"
-          : "advisory";
+      const state =
+        gated && blockingIds.has(key)
+          ? "🚫 blocking"
+          : overriddenIds.has(key)
+            ? "↪ overridden"
+            : "advisory";
       return `| \`${cell(f.severity)}\` | ${state} | ${cell(f.invariantTitle)} | \`${cell(f.file)}\` | ${cell(f.reason)} |`;
     })
     .join("\n");
