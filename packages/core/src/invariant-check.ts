@@ -103,7 +103,12 @@ const CODE_SIGNAL_RE =
 /** Categories that describe *code* behavior (vs. `preference`, which is usually
  *  about workflow/session/personal facts). A prescriptive entry in one of these
  *  categories is more likely a real code invariant. */
-const CODE_CATEGORIES = new Set(["gotcha", "architecture", "pattern", "decision"]);
+const CODE_CATEGORIES = new Set([
+  "gotcha",
+  "architecture",
+  "pattern",
+  "decision",
+]);
 
 /**
  * Decide whether a knowledge entry is an ENFORCEABLE code invariant — i.e.
@@ -130,8 +135,10 @@ export function isEnforceableInvariant(entry: {
 }): boolean {
   // 1. Explicit author intent (future-proofing for the `enforce:` opt-in).
   const enforce = entry.metadata?.enforce;
-  if (enforce === false || enforce === "off" || enforce === "false") return false;
-  if (enforce === true || enforce === "strict" || enforce === "soft") return true;
+  if (enforce === false || enforce === "off" || enforce === "false")
+    return false;
+  if (enforce === true || enforce === "strict" || enforce === "soft")
+    return true;
 
   // 2. Heuristic.
   const text = `${entry.title}: ${entry.content}`;
@@ -289,7 +296,11 @@ export function resolveRange(
       gitOrNull(["merge-base", `origin/${ghBase}`, head], cwd) ||
       gitOrNull(["merge-base", ghBase, head], cwd);
     if (mb) return { base: mb, head, source: `GITHUB_BASE_REF (${ghBase})` };
-    return { base: `origin/${ghBase}`, head, source: `GITHUB_BASE_REF (${ghBase})` };
+    return {
+      base: `origin/${ghBase}`,
+      head,
+      source: `GITHUB_BASE_REF (${ghBase})`,
+    };
   }
 
   // Local feature-branch context: merge-base against the default branch.
@@ -403,16 +414,25 @@ export function splitDiff(raw: string): DiffHunk[] {
   const hunks: DiffHunk[] = [];
   const lines = raw.split("\n");
   let file = "";
+  // Fallback path from the `--- a/` line, used for DELETED files whose `+++`
+  // line is `/dev/null` (no `+++ b/` to read). A change that deletes a file can
+  // still contradict an invariant (e.g. removing the only guard), so its hunks
+  // must be judged, not silently dropped.
+  let oldFile = "";
   let cur: string[] | null = null;
   const flush = () => {
-    if (cur && file && cur.length && !isIgnoredFile(file))
-      hunks.push({ file, text: cur.join("\n") });
+    const f = file || oldFile;
+    if (cur && f && cur.length && !isIgnoredFile(f))
+      hunks.push({ file: f, text: cur.join("\n") });
     cur = null;
   };
   for (const line of lines) {
     if (line.startsWith("diff --git ")) {
       flush();
       file = "";
+      oldFile = "";
+    } else if (line.startsWith("--- a/")) {
+      oldFile = line.slice("--- a/".length).trim();
     } else if (line.startsWith("+++ b/")) {
       file = line.slice("+++ b/".length).trim();
     } else if (line.startsWith("@@")) {
@@ -566,7 +586,12 @@ export function selectCandidates(
       let sim = 0;
       if (hv && inv.vec) sim = embedding.cosineSimilarity(hv, inv.vec);
       if (refHit || sim >= floor) {
-        admitted.push({ hunkIdx: hi, invariantIdx: ii, similarity: sim, refHit });
+        admitted.push({
+          hunkIdx: hi,
+          invariantIdx: ii,
+          similarity: sim,
+          refHit,
+        });
       }
     }
     // Rank: ref-hits first, then descending cosine.
@@ -779,8 +804,8 @@ export function parseOverrides(messages: string[]): Override[] {
       if (!key) continue;
       const rest = key[1];
       // Prefer a dash separator; fall back to colon-space only if no dash.
-      const m = OVERRIDE_DASH_SEP_RE.exec(rest) ??
-        OVERRIDE_COLON_SEP_RE.exec(rest);
+      const m =
+        OVERRIDE_DASH_SEP_RE.exec(rest) ?? OVERRIDE_COLON_SEP_RE.exec(rest);
       if (!m) continue;
       const target = m[1].trim();
       const reason = m[2].trim();
@@ -793,7 +818,6 @@ export function parseOverrides(messages: string[]): Override[] {
   }
   return out;
 }
-
 
 export async function checkInvariants(input: {
   projectPath: string;
@@ -843,7 +867,11 @@ export async function checkInvariants(input: {
       // A ref path may be repo-root-relative or a bare filename; match on
       // full-path equality or basename membership against changed files.
       for (const f of files) {
-        if (f === ref.path || f.endsWith(`/${ref.path}`) || basename(f) === basename(ref.path)) {
+        if (
+          f === ref.path ||
+          f.endsWith(`/${ref.path}`) ||
+          basename(f) === basename(ref.path)
+        ) {
           refFiles.add(f);
         }
       }
@@ -958,7 +986,9 @@ function basename(p: string): string {
  *  exact pattern — reuse embeddingByIdSource so storage-mode differences are
  *  handled once). A corrupt/missing blob just omits that invariant from the
  *  cosine prefilter (it can still be admitted by a Stage-0 ref hit). */
-function loadInvariantVecs(entries: KnowledgeEntry[]): Map<string, Float32Array> {
+function loadInvariantVecs(
+  entries: KnowledgeEntry[],
+): Map<string, Float32Array> {
   const out = new Map<string, Float32Array>();
   if (entries.length === 0) return out;
   const ids = entries.map((e) => e.id);

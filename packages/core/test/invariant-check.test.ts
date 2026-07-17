@@ -20,7 +20,6 @@ import {
   type DiffHunk,
   type Finding,
   type InvariantVec,
-  type Override,
   type ResolvedRange,
 } from "../src/invariant-check";
 import type { LLMClient } from "../src/types";
@@ -119,6 +118,27 @@ describe("splitDiff", () => {
     expect(splitDiff("")).toEqual([]);
   });
 
+  it("parses a DELETED file's hunk (+++ /dev/null) via the --- a/ path", () => {
+    // A deletion diff has no `+++ b/` line — only `+++ /dev/null`. The hunk must
+    // still be captured (attributed to the old path) so removing the only guard
+    // for an invariant is judged, not silently dropped.
+    const raw = [
+      "diff --git a/src/guard.ts b/src/guard.ts",
+      "deleted file mode 100644",
+      "index 333..000",
+      "--- a/src/guard.ts",
+      "+++ /dev/null",
+      "@@ -1,3 +0,0 @@",
+      "-if (!token) throw new Error('no auth');",
+      "-doWork();",
+      "-cleanup();",
+    ].join("\n");
+    const hunks = splitDiff(raw);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].file).toBe("src/guard.ts");
+    expect(hunks[0].text).toContain("-if (!token) throw");
+  });
+
   it("drops ignored files (.lore.md, lockfiles, generated) but keeps code", () => {
     const raw = [
       "diff --git a/.lore.md b/.lore.md",
@@ -168,7 +188,9 @@ describe("isIgnoredFile", () => {
     // Real documentation IS judged (a docs change can contradict an invariant).
     expect(isIgnoredFile("README.md")).toBe(false);
     expect(isIgnoredFile("CHANGELOG.md")).toBe(false);
-    expect(isIgnoredFile("docs/src/content/docs/getting-started.mdx")).toBe(false);
+    expect(isIgnoredFile("docs/src/content/docs/getting-started.mdx")).toBe(
+      false,
+    );
     expect(isIgnoredFile("AGENTS.md")).toBe(false);
     expect(isIgnoredFile(".craft.yml")).toBe(false);
   });
@@ -307,7 +329,8 @@ function mkFinding(over: Partial<Finding> = {}): Finding {
   return {
     invariantId: "id-1",
     invariantTitle: "node:sqlite import boundary",
-    invariantContent: "node:sqlite must never be imported outside driver.node.ts",
+    invariantContent:
+      "node:sqlite must never be imported outside driver.node.ts",
     file: "src/a.ts",
     similarity: 0.9,
     refHit: false,
@@ -363,7 +386,9 @@ describe("parseOverrides", () => {
 describe("overrideMatchesFinding", () => {
   const f = mkFinding();
   it("matches on exact id", () => {
-    expect(overrideMatchesFinding({ target: "id-1", reason: "r" }, f)).toBe(true);
+    expect(overrideMatchesFinding({ target: "id-1", reason: "r" }, f)).toBe(
+      true,
+    );
   });
   it("matches on case-insensitive title substring (either direction)", () => {
     expect(
@@ -382,7 +407,9 @@ describe("overrideMatchesFinding", () => {
     ).toBe(false);
   });
   it("empty target never matches", () => {
-    expect(overrideMatchesFinding({ target: "  ", reason: "r" }, f)).toBe(false);
+    expect(overrideMatchesFinding({ target: "  ", reason: "r" }, f)).toBe(
+      false,
+    );
   });
 
   it("rejects a SHORT generic substring target (no accidental blanket clear)", () => {
@@ -410,7 +437,10 @@ describe("overrideMatchesFinding", () => {
 });
 
 describe("gateDecision", () => {
-  const strict = mkFinding({ severity: "strict", invariantTitle: "strict rule" });
+  const strict = mkFinding({
+    severity: "strict",
+    invariantTitle: "strict rule",
+  });
   const soft = mkFinding({ severity: "soft", invariantTitle: "soft rule" });
   const adv = mkFinding({ severity: "advisory", invariantTitle: "adv rule" });
 
@@ -458,7 +488,11 @@ describe("gateDecision", () => {
 
   it("an override with no reason does NOT clear a soft finding", () => {
     // parseOverrides drops these, but gateDecision must be defensive too.
-    const r = gateDecision([soft], [{ target: "soft rule", reason: "  " }], "gate");
+    const r = gateDecision(
+      [soft],
+      [{ target: "soft rule", reason: "  " }],
+      "gate",
+    );
     expect(r.exitCode).toBe(2);
     expect(r.blocking).toHaveLength(1);
   });
@@ -481,7 +515,7 @@ describe("clusterHunks", () => {
     const clusters = clusterHunks(vecs, 0.92);
     expect(clusters).toHaveLength(2);
     const rep0 = clusters.find((c) => c.repIdx === 0)!;
-    expect(rep0.memberIdxs.sort()).toEqual([0, 1]);
+    expect(rep0.memberIdxs.sort((a, b) => a - b)).toEqual([0, 1]);
     const rep2 = clusters.find((c) => c.repIdx === 2)!;
     expect(rep2.memberIdxs).toEqual([2]);
   });
@@ -496,7 +530,11 @@ describe("clusterHunks", () => {
     const clusters = clusterHunks(vecs, 0.92);
     // hunk 1 (null) is its own cluster; 0 and 2 cluster together.
     expect(clusters).toHaveLength(2);
-    expect(clusters.some((c) => c.memberIdxs.includes(1) && c.memberIdxs.length === 1)).toBe(true);
+    expect(
+      clusters.some(
+        (c) => c.memberIdxs.includes(1) && c.memberIdxs.length === 1,
+      ),
+    ).toBe(true);
   });
 });
 
@@ -589,9 +627,10 @@ describe("parseInvariantVerdict", () => {
     });
   });
   it("strips ```json fences", () => {
-    expect(
-      parseInvariantVerdict('```json\n{"violates": false}\n```'),
-    ).toEqual({ violates: false, reason: null });
+    expect(parseInvariantVerdict('```json\n{"violates": false}\n```')).toEqual({
+      violates: false,
+      reason: null,
+    });
   });
   it("returns null for junk / non-JSON / missing field", () => {
     expect(parseInvariantVerdict(null)).toBeNull();
@@ -620,7 +659,10 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     ];
 
     const { llm, prompt } = stubLLM(() =>
-      JSON.stringify({ violates: true, reason: "adds node:sqlite import outside driver.node.ts" }),
+      JSON.stringify({
+        violates: true,
+        reason: "adds node:sqlite import outside driver.node.ts",
+      }),
     );
 
     const result = await checkInvariants({
@@ -640,7 +682,12 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
 
   it("does NOT flag when the judge says no violation", async () => {
     const project = "/tmp/ic-test-proj-2";
-    await seed(project, "tabs rule", "always use tabs for indentation", v(1, 0, 0));
+    await seed(
+      project,
+      "tabs rule",
+      "always use tabs for indentation",
+      v(1, 0, 0),
+    );
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
     const { llm, prompt } = stubLLM(() =>
       JSON.stringify({ violates: false, reason: "docs change, unrelated" }),
@@ -659,7 +706,12 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
   it("makes ZERO judge calls when nothing clears the funnel (cost floor)", async () => {
     const project = "/tmp/ic-test-proj-3";
     // Invariant vector orthogonal to the hunk vector, no ref overlap.
-    await seed(project, "far invariant", "something totally unrelated", v(0, 1, 0));
+    await seed(
+      project,
+      "far invariant",
+      "something totally unrelated",
+      v(0, 1, 0),
+    );
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]); // orthogonal
     const { llm, prompt } = stubLLM(() => "{}");
     const result = await checkInvariants({
@@ -712,7 +764,10 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     );
     // Two near-identical hunks (same import added in two files) + embed maps
     // both to the same vector as the invariant → one cluster, high cosine.
-    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0), v(1, 0, 0)]);
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([
+      v(1, 0, 0),
+      v(1, 0, 0),
+    ]);
     const { llm, prompt } = stubLLM(() =>
       JSON.stringify({ violates: true, reason: "adds node:sqlite import" }),
     );
