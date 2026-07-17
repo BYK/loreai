@@ -234,6 +234,15 @@ export interface ReduceBlobOptions {
    * Empty/whitespace entries are ignored; a trailing display "…" is tolerated.
    */
   pinnedLines?: string[];
+  /**
+   * Chars of the leading prose prefix always kept verbatim, before any scoring.
+   * A user writes their own words (instruction + casual asides / stated facts)
+   * at the head of a message and pastes the bulk blob after; that prose is
+   * signal even when it scores low against the current objective. Leading
+   * segments are force-kept until the first paste-junk segment or this budget is
+   * reached. 0 (or omitted) disables head preservation. #1343 follow-up.
+   */
+  headChars?: number;
 }
 
 export interface ReduceBlobResult {
@@ -293,11 +302,44 @@ export async function reduceBlob(
     pinSpans.some(([s, e]) => seg.start < e && s < seg.end);
   const pinnedFlag = all.map(overlapsPin);
 
+  // Head preservation: force-keep the leading prose prefix — the user's own
+  // words (instruction + any casual asides / stated facts) that precede a pasted
+  // bulk blob. Walk from the top, keeping segments until the first paste-junk
+  // segment (the blob has begun) or the headChars budget is exhausted. Treated
+  // identically to a pin thereafter, so head prose survives relevance scoring,
+  // the segment cap, and the keepChars budget. #1343 follow-up: a low-salience
+  // fact stated at the head of an oversized message must not be elided before
+  // the distiller ever sees it.
+  //
+  // Segment-count clamp: head segments bypass the maxSegments sampling like pins,
+  // but — unlike pins (bounded by MAX_PINNED_ASSERTIONS) — they're bounded only by
+  // headChars, which has no relation to segment size. A misconfigured large
+  // headChars could otherwise force-embed the whole body, reintroducing the
+  // #1343 unbounded-embed cost. Cap the head at half the embed budget so at least
+  // half of maxSegments is always reserved for relevance sampling of the body.
+  const headBudget = opts.headChars ?? 0;
+  const maxHeadSegments = Math.max(1, Math.floor(opts.maxSegments / 2));
+  const headFlag = all.map(() => false);
+  if (headBudget > 0) {
+    let headUsed = 0;
+    let headCount = 0;
+    for (let i = 0; i < all.length; i++) {
+      if (looksLikePasteJunk(all[i].text)) break; // blob started — stop
+      if (headUsed >= headBudget || headCount >= maxHeadSegments) break;
+      headFlag[i] = true;
+      headUsed += all[i].text.length;
+      headCount++;
+    }
+  }
+  // A segment is force-kept if it is a pin OR part of the preserved head.
+  const keptFlag = all.map((_, i) => pinnedFlag[i] || headFlag[i]);
+
   // Stage 1: drop paste-junk before spending any embed — but never drop a pinned
-  // segment (a directive can look "junky" if wrapped in a noisy blob).
+  // or head-preserved segment (a directive/aside can look "junky" if wrapped in a
+  // noisy blob, and the head is always kept).
   const proseIdx: number[] = [];
   for (let i = 0; i < all.length; i++) {
-    if (pinnedFlag[i] || !looksLikePasteJunk(all[i].text)) proseIdx.push(i);
+    if (keptFlag[i] || !looksLikePasteJunk(all[i].text)) proseIdx.push(i);
   }
   const junkDropped = all.length - proseIdx.length;
 
@@ -314,8 +356,8 @@ export async function reduceBlob(
   // whole body.
   let cappedIdx: number[];
   if (proseIdx.length > opts.maxSegments) {
-    const pinnedIdx = proseIdx.filter((i) => pinnedFlag[i]);
-    const nonPinnedIdx = proseIdx.filter((i) => !pinnedFlag[i]);
+    const pinnedIdx = proseIdx.filter((i) => keptFlag[i]);
+    const nonPinnedIdx = proseIdx.filter((i) => !keptFlag[i]);
     const sampleBudget = Math.max(0, opts.maxSegments - pinnedIdx.length);
     // sampleBudget === 0 (pins alone meet/exceed the cap) → keep ZERO non-pinned,
     // never all of them (#1343 S3).
@@ -344,21 +386,22 @@ export async function reduceBlob(
     idx: i,
     text: all[i].text,
     score: opts.cosine(queryVec, segVecs[k]),
-    pinned: pinnedFlag[i],
+    pinned: keptFlag[i],
   }));
 
   const keepIdx = new Set<number>();
   let used = 0;
-  // Pinned segments are kept unconditionally (bypass the budget) so a directive
-  // can never be elided. The number of pins is bounded by the caller
-  // (MAX_PINNED_ASSERTIONS), so this cannot blow the budget unboundedly.
+  // Force-kept segments (pins + preserved head) are kept unconditionally (bypass
+  // the keepChars budget) so a directive/aside can never be elided. Both are
+  // bounded: pins by the caller (MAX_PINNED_ASSERTIONS) and head segments by
+  // maxHeadSegments (≤ maxSegments/2), so this cannot blow the budget unboundedly.
   for (const s of scored) {
     if (s.pinned) {
       keepIdx.add(s.idx);
       used += s.text.length;
     }
   }
-  // Fill the remaining budget with the highest-scoring non-pinned segments.
+  // Fill the remaining budget with the highest-scoring non-forced segments.
   const byScore = scored
     .filter((s) => !s.pinned)
     .sort((a, b) => b.score - a.score);

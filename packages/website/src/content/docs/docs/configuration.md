@@ -110,6 +110,7 @@ Distillation pipeline tuning (segment size, thresholds, tool-output truncation).
 | `userBlobMaxChars` | number | `12000` | min 0 | Trigger threshold (chars) for embedding-based user-blob reduction. Set to 0 to disable. Default: 12000. |
 | `userBlobKeepChars` | number | `6000` | min 0 | Chars kept after reducing an oversized user blob. Default: 6000. |
 | `userBlobMaxSegments` | number | `48` | min 1 | Max blob segments embedded during user-blob reduction. Default: 48. |
+| `userBlobHeadChars` | number | `1500` | min 0 | Chars of the leading user-prose prefix always kept during blob reduction. Set to 0 to disable. Default: 1500. |
 | `recentSegmentsToKeep` | number | `5` | min 0 | Number of most-recent gen-0 segments to keep un-archived when meta-distillation fires. Default: 5. |
 
 

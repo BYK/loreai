@@ -485,4 +485,106 @@ describe("reduceBlob", () => {
 
     expect(result.output).toContain(fullLine);
   });
+
+  test("headChars: leading prose prefix is kept even at zero relevance", async () => {
+    // The user's own words (instruction + a casual aside stating facts) lead the
+    // message; a large low-relevance blob follows. The aside scores 0 against the
+    // coding query, so ONLY head preservation can keep it. #1343 follow-up.
+    const aside =
+      "Starting the orderkit project. (Aside, nothing to act on: our orders " +
+      "ride the WHOLESALE channel out of the EMEA region, ship from WH-07, and " +
+      "we keep status values like SUBMITTED uppercase.) Just the stock_level fn.";
+    const blob = Array.from(
+      { length: 60 },
+      (_, i) => `irrelevant reference spec paragraph number ${i} with filler`,
+    ).join("\n\n");
+    const body = `${aside}\n\n${blob}`;
+
+    const result = await reduceBlob(body, {
+      // Nothing matches "SIGNAL" → every segment (incl. the aside) scores 0.
+      embed: stubEmbed("SIGNAL"),
+      cosine: dot,
+      query: "SIGNAL unrelated coding objective",
+      keepChars: 40, // tiny: relevance budget cannot rescue the aside
+      maxSegments: 48,
+      headChars: 400,
+    });
+
+    for (const fact of ["WHOLESALE", "EMEA", "WH-07", "SUBMITTED"]) {
+      expect(result.output).toContain(fact);
+    }
+  });
+
+  test("headChars=0 disables head preservation (aside is elided at zero relevance)", async () => {
+    // Mutation guard: with head preservation off, the same zero-relevance aside
+    // is dropped — proving the test above is non-vacuous.
+    const aside =
+      "Starting the orderkit project. (Aside: WHOLESALE channel, EMEA region, " +
+      "WH-07 warehouse, SUBMITTED uppercase status.) Just the stock_level fn.";
+    const blob = Array.from(
+      { length: 60 },
+      (_, i) => `irrelevant reference spec paragraph number ${i} with filler`,
+    ).join("\n\n");
+    const body = `${aside}\n\n${blob}`;
+
+    const result = await reduceBlob(body, {
+      embed: stubEmbed("SIGNAL"),
+      cosine: dot,
+      query: "SIGNAL unrelated coding objective",
+      keepChars: 40,
+      maxSegments: 48,
+      headChars: 0,
+    });
+
+    expect(result.output).not.toContain("WHOLESALE");
+  });
+
+  test("headChars: head segments are clamped to maxSegments/2 (cost bound holds)", async () => {
+    // A large headChars must NOT let the head force-embed the whole body — that
+    // would reintroduce the #1343 unbounded-embed cost. The head is clamped to
+    // maxSegments/2 so at least half the embed budget stays for body sampling.
+    // Build a body that is ALL prose (no paste-junk boundary) so nothing stops
+    // the head walk except the clamp.
+    const paras = Array.from(
+      { length: 40 },
+      (_, i) =>
+        `genuine prose paragraph number ${i} with enough words to be a real segment here`,
+    );
+    const body = paras.join("\n\n");
+
+    const result = await reduceBlob(body, {
+      embed: stubEmbed("SIGNAL"),
+      cosine: dot,
+      query: "SIGNAL unrelated",
+      keepChars: 200,
+      maxSegments: 10, // clamp head to floor(10/2) = 5
+      headChars: 1_000_000, // absurdly large: only the segment clamp can bound it
+    });
+
+    // embedded is capped at maxSegments; head cannot exceed maxSegments/2, so the
+    // total embed count never blows past the configured cap.
+    expect(result.embedded).toBeLessThanOrEqual(10);
+  });
+
+  test("headChars: head walk stops at the first paste-junk segment", async () => {
+    // The head prefix ends where the pasted blob begins. A junk segment after the
+    // prose head must terminate the head walk (blob started), so junk is never
+    // force-kept as "head".
+    const prose = "Real instruction prose at the very top of the message here.";
+    const junk = "aGVsbG8=".repeat(400); // base64-like paste junk, one big segment
+    const body = `${prose}\n\n${junk}`;
+
+    const result = await reduceBlob(body, {
+      embed: stubEmbed("SIGNAL"),
+      cosine: dot,
+      query: "SIGNAL unrelated",
+      keepChars: 40,
+      maxSegments: 48,
+      headChars: 1_000_000, // huge — only the junk boundary stops the head walk
+    });
+
+    // The prose head is kept; the junk is NOT force-kept as head (it's elided).
+    expect(result.output).toContain("Real instruction prose");
+    expect(result.output).not.toContain(junk);
+  });
 });

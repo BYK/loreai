@@ -246,6 +246,23 @@ export const LoreConfig = z.object({
         .describe(
           "Max blob segments embedded during user-blob reduction. Default: 48.",
         ),
+      /** Chars of the leading prose prefix of an oversized user message that are
+       *  ALWAYS kept verbatim during reduction, before any relevance scoring. A
+       *  user typically writes their own words (the instruction plus any casual
+       *  asides / stated facts) at the head of the message and then pastes the
+       *  bulk blob after. That leading prose is signal even when it scores low
+       *  against the current coding objective (e.g. "our orders ride the
+       *  WHOLESALE channel…"), so it must survive reduction — otherwise a buried
+       *  fact is lost before the distiller ever sees it. Kept until the first
+       *  paste-junk segment OR this budget is reached, whichever comes first. Set
+       *  to 0 to disable head preservation. Default: 1500. */
+      userBlobHeadChars: z
+        .number()
+        .min(0)
+        .default(1_500)
+        .describe(
+          "Chars of the leading user-prose prefix always kept during blob reduction. Set to 0 to disable. Default: 1500.",
+        ),
       /** Number of most-recent gen-0 segments to keep un-archived when
        *  meta-distillation fires. These segments retain full detail in the
        *  context prefix while older segments are consolidated. Default: 5.
@@ -267,6 +284,7 @@ export const LoreConfig = z.object({
       userBlobMaxChars: 12_000,
       userBlobKeepChars: 6_000,
       userBlobMaxSegments: 48,
+      userBlobHeadChars: 1_500,
       recentSegmentsToKeep: 5,
     })
     .describe(

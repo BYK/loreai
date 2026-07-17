@@ -439,6 +439,7 @@ export async function messagesToTextReduced(
             query,
             keepChars: cfg.userBlobKeepChars,
             maxSegments: cfg.userBlobMaxSegments,
+            headChars: cfg.userBlobHeadChars,
             pinnedLines,
           });
           body = result.output;
