@@ -672,16 +672,42 @@ export interface GateResult {
   advisory: Finding[];
 }
 
-/** Does an override target this finding? Exact id match, or a case-insensitive
- *  substring match on the title (humans write titles, not UUIDs). */
+/** An override target shorter than this is only honored as an EXACT id/title
+ *  match, never as a substring — a 4-char target like `rule` or `auth` would
+ *  otherwise clear unrelated soft findings whose titles happen to contain it. */
+const MIN_OVERRIDE_SUBSTRING_LEN = 12;
+
+/**
+ * Does an override target this finding? Precedence:
+ *   1. exact id match (UUID) — always honored.
+ *   2. exact title match (case-insensitive) — always honored.
+ *   3. substring match — the author quoted a fragment of the title, OR the
+ *      title is a fragment of a longer quoted phrase — but ONLY when the target
+ *      is specific enough (>= MIN_OVERRIDE_SUBSTRING_LEN chars). Short, generic
+ *      targets are rejected for substring matching so one loose trailer can't
+ *      silently clear soft gates it wasn't meant for. An override is a scalpel,
+ *      not a blanket mute.
+ * Errs toward NOT matching: a false non-match just leaves a soft finding
+ * blocking (author re-words the trailer); a false match silently clears a real
+ * gate. In gate mode the latter is the dangerous direction.
+ */
 export function overrideMatchesFinding(o: Override, f: Finding): boolean {
   const t = o.target.trim().toLowerCase();
   if (!t) return false;
-  if (t === f.invariantId.toLowerCase()) return true;
-  const title = f.invariantTitle.toLowerCase();
-  // Substring both ways: the author may quote a fragment of the title, or the
-  // title may be a fragment of a longer quoted phrase.
-  return title.includes(t) || t.includes(title);
+  const id = f.invariantId.toLowerCase();
+  const title = f.invariantTitle.trim().toLowerCase();
+  // Exact matches are always honored regardless of length.
+  if (t === id || t === title) return true;
+  // Substring matching in EITHER direction requires the SHORTER operand (the
+  // one being searched for) to be specific enough. Guarding only the target
+  // isn't enough: a long target like "oauth flow rewrite" reverse-contains a
+  // short title like "auth" ("o<auth>"), clearing an unrelated finding. So each
+  // direction is gated on the length of the needle it searches for.
+  if (t.length >= MIN_OVERRIDE_SUBSTRING_LEN && title.includes(t)) return true;
+  if (title.length >= MIN_OVERRIDE_SUBSTRING_LEN && t.includes(title)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -731,7 +757,13 @@ export function gateDecision(
  *  first rule would split the title, not the target/reason boundary. */
 const OVERRIDE_KEY_RE = /^\s*lore-override\s*:\s*(.+)$/i;
 const OVERRIDE_DASH_SEP_RE = /^(.+?)\s*(?:—|--|\s-\s)\s*(.+?)\s*$/;
-const OVERRIDE_COLON_SEP_RE = /^(.+?):\s+(.+?)\s*$/;
+// Colon fallback: split at the LAST colon-space, not the first. Invariant titles
+// routinely contain colon-space (`sync.ts: per-table cursor isolation`,
+// `gradient.ts: l0cap governs …`); a first-colon split would truncate the title
+// to `sync.ts`. Greedy `(.+):` consumes through the last `": "`, leaving the
+// trailing segment as the reason — the shape a human actually writes
+// (`lore-override: <full title>: <short reason>`).
+const OVERRIDE_COLON_SEP_RE = /^(.+):\s+(.+?)\s*$/;
 
 /**
  * Parse `lore-override:` trailers out of commit messages (or any text lines).
@@ -958,29 +990,24 @@ function loadInvariantVecs(entries: KnowledgeEntry[]): Map<string, Float32Array>
  *  worker's own truncateTexts fallback. */
 export const MAX_EMBED_CHARS_PER_HUNK = 8_000;
 
-/** Hunks embedded per ONNX call. ONNX pads every text in a batch to the longest
- *  sequence, so one long hunk inflates the whole tensor (batch=60 longest≈21K
- *  chars OOM'd — #1072 class). Sub-batching bounds the tensor area. */
-export const EMBED_BATCH_SIZE = 8;
-
-/** Embed all hunks in small sub-batches (local ONNX → free). Each hunk's embed
- *  text is capped ({@link MAX_EMBED_CHARS_PER_HUNK}) AND batches are bounded
- *  ({@link EMBED_BATCH_SIZE}) so one oversized hunk / many hunks can't OOM the
- *  embedder. A failed sub-batch yields nulls for its hunks; those can still be
- *  admitted by Stage-0 ref hits. */
+/** Embed all hunks (local ONNX → free), OOM-safely. Each hunk's embed text is
+ *  first capped ({@link MAX_EMBED_CHARS_PER_HUNK}); the whole set is then routed
+ *  through {@link embedding.embedInTokenBatches}, the project-standard batcher
+ *  that bounds each ONNX call by TOKEN AREA (not just count) — ONNX pads every
+ *  text in a batch to the longest sequence, so area, not count, is what OOMs
+ *  (#1072 class; knowledge 019f1a88). Vectors come back in input order. On any
+ *  embed failure the whole set degrades to nulls; those hunks can still be
+ *  admitted by Stage-0 ref hits, so the funnel stays correct (just less recall
+ *  on the cosine stage for that run). */
 async function embedHunks(hunks: DiffHunk[]): Promise<(Float32Array | null)[]> {
-  const out: (Float32Array | null)[] = [];
-  for (let i = 0; i < hunks.length; i += EMBED_BATCH_SIZE) {
-    const batch = hunks.slice(i, i + EMBED_BATCH_SIZE);
-    const texts = batch.map((h) =>
-      `${h.file}\n${h.text}`.slice(0, MAX_EMBED_CHARS_PER_HUNK),
-    );
-    try {
-      const vecs = await embedding.embed(texts, "document");
-      for (let j = 0; j < batch.length; j++) out.push(vecs[j] ?? null);
-    } catch {
-      for (let j = 0; j < batch.length; j++) out.push(null);
-    }
+  if (hunks.length === 0) return [];
+  const texts = hunks.map((h) =>
+    `${h.file}\n${h.text}`.slice(0, MAX_EMBED_CHARS_PER_HUNK),
+  );
+  try {
+    const vecs = await embedding.embedInTokenBatches(texts, "document");
+    return hunks.map((_, i) => vecs[i] ?? null);
+  } catch {
+    return hunks.map(() => null);
   }
-  return out;
 }

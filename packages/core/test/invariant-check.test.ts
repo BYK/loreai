@@ -348,6 +348,16 @@ describe("parseOverrides", () => {
   it("ignores non-trailer lines", () => {
     expect(parseOverrides(["just a normal commit\nwith a body"])).toEqual([]);
   });
+
+  it("colon fallback splits at the LAST colon-space, preserving titles with colons", () => {
+    // Title itself contains colon-space; the reason is the trailing segment.
+    const o = parseOverrides([
+      "lore-override: sync.ts: per-table cursor isolation: intentional change here",
+    ]);
+    expect(o).toHaveLength(1);
+    expect(o[0].target).toBe("sync.ts: per-table cursor isolation");
+    expect(o[0].reason).toBe("intentional change here");
+  });
 });
 
 describe("overrideMatchesFinding", () => {
@@ -373,6 +383,29 @@ describe("overrideMatchesFinding", () => {
   });
   it("empty target never matches", () => {
     expect(overrideMatchesFinding({ target: "  ", reason: "r" }, f)).toBe(false);
+  });
+
+  it("rejects a SHORT generic substring target (no accidental blanket clear)", () => {
+    // "rule" appears in the title but is too short/generic to be a real target.
+    expect(overrideMatchesFinding({ target: "rule", reason: "r" }, f)).toBe(
+      false,
+    );
+    // "auth" (title of some OTHER short finding) must not be cleared by a long
+    // unrelated target that happens to contain it.
+    const shortTitle = mkFinding({ invariantTitle: "auth" });
+    expect(
+      overrideMatchesFinding(
+        { target: "oauth flow rewrite for the login page", reason: "r" },
+        shortTitle,
+      ),
+    ).toBe(false);
+  });
+
+  it("honors an EXACT short title match regardless of length", () => {
+    const shortTitle = mkFinding({ invariantTitle: "auth" });
+    expect(
+      overrideMatchesFinding({ target: "auth", reason: "r" }, shortTitle),
+    ).toBe(true);
   });
 });
 
@@ -581,7 +614,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
 
     // Diff parse + hunk embedding are the two seams we stub.
     // Hunk embeds to the same vector as the invariant → high cosine.
-    vi.spyOn(embedding, "embed").mockResolvedValue([v(1, 0, 0)]);
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
     const hunks = [
       { file: "src/other.ts", text: '@@\n+import { X } from "node:sqlite"' },
     ];
@@ -608,7 +641,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
   it("does NOT flag when the judge says no violation", async () => {
     const project = "/tmp/ic-test-proj-2";
     await seed(project, "tabs rule", "always use tabs for indentation", v(1, 0, 0));
-    vi.spyOn(embedding, "embed").mockResolvedValue([v(1, 0, 0)]);
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
     const { llm, prompt } = stubLLM(() =>
       JSON.stringify({ violates: false, reason: "docs change, unrelated" }),
     );
@@ -627,7 +660,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     const project = "/tmp/ic-test-proj-3";
     // Invariant vector orthogonal to the hunk vector, no ref overlap.
     await seed(project, "far invariant", "something totally unrelated", v(0, 1, 0));
-    vi.spyOn(embedding, "embed").mockResolvedValue([v(1, 0, 0)]); // orthogonal
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]); // orthogonal
     const { llm, prompt } = stubLLM(() => "{}");
     const result = await checkInvariants({
       projectPath: project,
@@ -651,7 +684,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       "see `packages/core/src/driver.node.ts:42` — never import node:sqlite elsewhere",
       v(0, 1, 0),
     );
-    vi.spyOn(embedding, "embed").mockResolvedValue([v(1, 0, 0)]); // orthogonal
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]); // orthogonal
     const { llm, prompt } = stubLLM(() =>
       JSON.stringify({ violates: false, reason: "ok" }),
     );
@@ -679,7 +712,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     );
     // Two near-identical hunks (same import added in two files) + embed maps
     // both to the same vector as the invariant → one cluster, high cosine.
-    vi.spyOn(embedding, "embed").mockResolvedValue([v(1, 0, 0), v(1, 0, 0)]);
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0), v(1, 0, 0)]);
     const { llm, prompt } = stubLLM(() =>
       JSON.stringify({ violates: true, reason: "adds node:sqlite import" }),
     );
@@ -716,7 +749,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     // but both in the SAME file, both flagged against the same invariant. Both
     // clear the cosine floor vs the invariant (v(1,0,0)) yet are far enough
     // apart (cos ≈ 0.76 < 0.92) to NOT cluster together.
-    vi.spyOn(embedding, "embed").mockResolvedValue([
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([
       v(1, 0.4, 0),
       v(1, 0, 0.7),
     ]);
