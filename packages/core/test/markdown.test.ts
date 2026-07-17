@@ -103,8 +103,10 @@ describe("normalize", () => {
     const R = `* <? ${"\n".repeat(18)}1.\n`;
     const normalized = normalize(R);
     expect(normalize(normalized)).toBe(normalized);
-    // And the runaway blank-line run is actually collapsed, not merely stable.
-    expect(normalized).toBe("* <?\n\n1.\n");
+    // The runaway blank-line run is collapsed, not merely stable. The trailing
+    // space after `<?` is preserved: the trim is newline-only (`/\n+$/`), since
+    // trailing spaces/tabs are never part of the blank-line separator.
+    expect(normalized).toBe("* <? \n\n1.\n");
   });
 
   test("handles empty string", () => {
@@ -123,6 +125,15 @@ describe("normalize", () => {
     const input = "```\nline1\n\n\n\nline2\n```\n";
     const normalized = normalize(input);
     expect(normalized).toContain("line1\n\n\n\nline2");
+    expect(normalize(normalized)).toBe(normalized);
+  });
+
+  test("preserves trailing spaces on an html block (newline-only trim)", () => {
+    // The #1357 trim is newline-only, so significant trailing spaces/tabs on an
+    // HTML block survive; only the runaway blank-line separator is collapsed.
+    const input = "<div>x   </div>\ntext\n";
+    const normalized = normalize(input);
+    expect(normalized).toContain("<div>x   </div>");
     expect(normalize(normalized)).toBe(normalized);
   });
 });

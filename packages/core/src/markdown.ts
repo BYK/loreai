@@ -62,21 +62,28 @@ export function inline(value: string): string {
 // in 4 passes with zero oscillations, so 8 is a generous safety bound.
 const MAX_NORMALIZE_PASSES = 8;
 
-// Strip trailing whitespace from every `html` node's value, in place.
+// Strip trailing newlines from every `html` node's value, in place.
 //
 // An HTML block absorbs the blank line(s) that separate it from the next
 // block into its own `value` on parse; `stringify` then re-supplies that
 // separator, so a plain parse→stringify roundtrip *grows* the trailing
 // newline run by a fixed amount every pass and never reaches a fixpoint
 // (issue #1357: `* <?\n\n1.\n` — a list item whose content is an HTML block,
-// followed by another list). Trailing whitespace on an HTML block is never
-// semantically meaningful markdown content, so trimming it is lossless and
-// breaks the pump, making the roundtrip convergent. Blank lines *inside* a
-// block (fenced code, mid-HTML) are untouched — only the trailing run is
-// removed — so no in-block content is corrupted.
+// followed by another list). Trimming the trailing newline run breaks the
+// pump, making the roundtrip convergent.
+//
+// We trim newlines only (`/\n+$/`), not all whitespace: trailing spaces/tabs
+// are never part of the blank-line separator, so leaving them keeps the trim
+// as narrow as possible. This is lossless for the common case (the separator
+// remark re-supplies). The one construction where it is *not* purely a
+// separator — an HTML block split across a list boundary, so that content
+// belonging inside the block (e.g. `<pre>` internal blank lines) lands at the
+// node's trailing edge — is a rare, already-lossy input; `normalize` is only
+// applied to untrusted text in Layer-4 emergency compression, so collapsing a
+// runaway newline run there is acceptable.
 function stripHtmlTrailingWhitespace(node: Nodes): void {
   if (node.type === "html") {
-    node.value = node.value.replace(/\s+$/, "");
+    node.value = node.value.replace(/\n+$/, "");
     return;
   }
   if ("children" in node) {
