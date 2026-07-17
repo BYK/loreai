@@ -1,0 +1,43 @@
+name: Semantic linter (advisory)
+
+# Advisory-only: surfaces PR changes that contradict a documented invariant.
+# NEVER fails the build — reports findings as annotations + a job summary.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Keep only the latest run per PR.
+concurrency:
+  group: semantic-linter-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  invariant-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory: a failure here must never block a PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so merge-base against the PR base resolves.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: pnpm install --frozen-lockfile
+      - name: Run Lore semantic linter
+        uses: ./.github/actions/invariant-check
+        with:
+          # Un-built checkout → run the CLI via tsx.
+          lore-command: "pnpm tsx packages/gateway/src/cli/bin.ts"
+          # Cheap judge; Haiku had the best recall in eval. Configure the key as
+          # a repo secret. Absent → the check no-ops (no auth) and still passes.
+          model: "anthropic/claude-haiku-4.5"
+          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY }}

@@ -1,0 +1,162 @@
+name: "Lore semantic linter (invariant-check)"
+description: >-
+  Advisory-only: surfaces PR changes that contradict a documented invariant in
+  the repo's `.lore.md`. NEVER fails the build — reports findings as annotations
+  and a job summary; humans decide.
+
+inputs:
+  base:
+    description: "Base ref/SHA. Defaults to the PR base (auto-detected)."
+    required: false
+    default: ""
+  head:
+    description: "Head ref/SHA. Defaults to the PR head (auto-detected)."
+    required: false
+    default: ""
+  model:
+    description: "Judge model (provider/id). Defaults to the configured worker model."
+    required: false
+    default: ""
+  worker-api-key:
+    description: >-
+      Dedicated judge credential (sets LORE_WORKER_API_KEY). Required in CI —
+      the gateway has no client session to borrow auth from.
+    required: false
+    default: ""
+  lore-command:
+    description: >-
+      How to invoke the lore CLI. Default `lore` (built binary on PATH). For an
+      un-built checkout, pass e.g. `pnpm tsx packages/gateway/src/cli/bin.ts`.
+    required: false
+    default: "lore"
+  gate:
+    description: >-
+      Opt into blocking mode. When "true", strict findings and un-overridden
+      soft findings FAIL the job (the CLI exits non-zero). Default "false" —
+      advisory only, never fails. Soft findings are cleared by a
+      `lore-override: <invariant> — <reason>` commit trailer; strict cannot be
+      overridden. Even in gate mode, an invariant only reaches strict/soft via
+      explicit `enforce:` metadata, so a repo with no opt-ins gates on nothing.
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    # ------------------------------------------------------------------
+    # Invariant source (see the coverage note below):
+    #   The check reads invariants from a lore DB at $LORE_DB_PATH. There is no
+    #   local DB in CI, so we DERIVE one from the repo's committed `.lore.md`
+    #   (plaintext title+content) and let the CLI's --import-lore-md embed it
+    #   in-process. That derivation (ONNX embed of ~all entries) is cached via
+    #   actions/cache and only re-runs when the knowledge or the embedding stack
+    #   changes — the cache key is versioned on the model, the onnxruntime-node
+    #   version, AND the .lore.md content hash so a stale embedding space can
+    #   never be silently reused (cosine drift = quiet recall rot).
+    #
+    #   COVERAGE CAVEAT: `.lore.md` omits cross_project=1 entries (global
+    #   invariants that span projects, ~16 in practice). A .lore.md-sourced
+    #   check therefore has slightly narrower coverage than a full local DB.
+    #   Acceptable for the advisory tier; do not rely on it for global rules.
+    # ------------------------------------------------------------------
+    - name: Compute invariant-DB cache key
+      id: key
+      shell: bash
+      env:
+        LORE_IC_MODEL: ${{ inputs.model }}
+      run: |
+        set -euo pipefail
+        ort=$(node -p "require('onnxruntime-node/package.json').version" 2>/dev/null || echo "na")
+        lore_hash=$(git hash-object .lore.md 2>/dev/null || echo "none")
+        model="${LORE_IC_MODEL:-default}"
+        # Slashes in the model id break nothing but read oddly in a key; keep raw.
+        echo "key=lore-invariants-v1-${model}-ort${ort}-${lore_hash}" >> "$GITHUB_OUTPUT"
+        echo "db=${RUNNER_TEMP}/lore-ci/lore.db" >> "$GITHUB_OUTPUT"
+
+    - name: Restore derived invariant DB
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/lore-ci
+        key: ${{ steps.key.outputs.key }}
+
+    - name: Resolve range + run invariant-check
+      id: check
+      shell: bash
+      env:
+        LORE_IC_BASE: ${{ inputs.base }}
+        LORE_IC_HEAD: ${{ inputs.head }}
+        LORE_IC_MODEL: ${{ inputs.model }}
+        LORE_WORKER_API_KEY: ${{ inputs.worker-api-key }}
+        LORE_CMD: ${{ inputs.lore-command }}
+        # Point the whole lore stack (db(), forProject, loadInvariantVecs) at the
+        # cached/derived CI DB instead of ~/.local/share/lore/lore.db.
+        LORE_DB_PATH: ${{ steps.key.outputs.db }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        LORE_IC_GATE: ${{ inputs.gate }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$LORE_DB_PATH")"
+
+        # Need full history for merge-base resolution.
+        git fetch --no-tags --prune --depth=200 origin \
+          "+refs/heads/*:refs/remotes/origin/*" 2>/dev/null || true
+
+        base="${LORE_IC_BASE}"
+        head="${LORE_IC_HEAD}"
+        if [ -z "$base" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+          base="origin/${GITHUB_BASE_REF}"
+        fi
+        if [ -z "$head" ]; then
+          head="${GITHUB_SHA}"
+        fi
+
+        args=(invariant-check --json)
+        [ -n "$base" ] && args+=(--base "$base")
+        [ -n "$head" ] && args+=(--head "$head")
+        [ -n "${LORE_IC_MODEL}" ] && args+=(--model "${LORE_IC_MODEL}")
+        # On a cache MISS, seed the DB from .lore.md (imports + embeds, once).
+        # On a HIT the DB already exists; --import-lore-md fast-paths (mtime/hash
+        # match) and is a cheap no-op, so it is always safe to pass.
+        args+=(--import-lore-md)
+        # Blocking mode is opt-in. In gate mode the CLI exits 2 on a blocking
+        # finding; we let that propagate as a job failure below. In advisory
+        # mode (default) the CLI only ever exits non-zero on a TOOLING error.
+        if [ "${LORE_IC_GATE}" = "true" ]; then
+          args+=(--gate)
+        fi
+
+        # Capture the exit so we can classify it. Exit 2 == a GATE BLOCK (a real,
+        # intended failure in gate mode). Any OTHER non-zero == a TOOLING failure
+        # (e.g. no range) which must NEVER fail the build — we log it and pass.
+        set +e
+        # shellcheck disable=SC2086
+        $LORE_CMD "${args[@]}" > /tmp/lore-ic.json 2> /tmp/lore-ic.err
+        rc=$?
+        set -e
+        if [ $rc -eq 2 ] && [ "${LORE_IC_GATE}" = "true" ]; then
+          # Gate block — report findings, then fail the job on purpose.
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          echo "gate_blocked=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [ $rc -ne 0 ]; then
+          echo "::notice title=Lore invariant-check::skipped (tooling: exit $rc)"
+          cat /tmp/lore-ic.err || true
+          echo "skipped=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "skipped=false" >> "$GITHUB_OUTPUT"
+        echo "gate_blocked=false" >> "$GITHUB_OUTPUT"
+
+    - name: Report findings (annotations + summary)
+      if: steps.check.outputs.skipped == 'false'
+      shell: bash
+      run: node "${{ github.action_path }}/report.mjs" /tmp/lore-ic.json
+
+    - name: Fail on blocking findings (gate mode)
+      if: steps.check.outputs.gate_blocked == 'true'
+      shell: bash
+      run: |
+        echo "::error title=Lore invariant-check::blocking invariant contradiction(s) — see annotations. Override a SOFT finding with a 'lore-override: <invariant> — <reason>' commit trailer; STRICT cannot be overridden."
+        exit 1
