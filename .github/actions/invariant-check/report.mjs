@@ -33,8 +33,16 @@ const funnel =
   (result.model ? ` · ${result.model}` : "");
 
 function esc(s) {
-  // Escape for workflow-command message data.
+  // Escape workflow-command MESSAGE data (the part after `::`). Only %, CR, LF
+  // are special here.
   return String(s ?? "").replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
+function escProp(s) {
+  // Escape a workflow-command PROPERTY value (e.g. file=…, title=…). Properties
+  // are comma-separated and key:value, so `,` and `:` must be escaped too or a
+  // value containing them shifts/splits the annotation's parameters.
+  return esc(s).replace(/,/g, "%2C").replace(/:/g, "%3A");
 }
 
 /** Escape a markdown table cell: neutralize `|` and collapse newlines so a
@@ -110,9 +118,9 @@ for (const f of findings) {
     `Invariant: ${f.invariantContent}`;
   const range = hunkRange(f.hunk);
   const loc = range
-    ? `file=${esc(f.file)},line=${range.line},endLine=${range.endLine}`
-    : `file=${esc(f.file)}`;
-  console.log(`::${level} ${loc},title=${esc(title)}::${esc(msg)}`);
+    ? `file=${escProp(f.file)},line=${range.line},endLine=${range.endLine}`
+    : `file=${escProp(f.file)}`;
+  console.log(`::${level} ${loc},title=${escProp(title)}::${esc(msg)}`);
 }
 
 // Job summary — a readable table + gate status.
