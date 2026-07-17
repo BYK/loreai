@@ -43,6 +43,14 @@ const hostile = fc
       fc.constant("1. "),
       fc.constant("* "),
       fc.constant("> "),
+      // HTML-block triggers. #1357 flaked because the generator had no way to
+      // start a raw-HTML block, so the input class where an HTML block swallows
+      // and re-emits its trailing blank-line separator (growing without bound)
+      // was never sampled. `<?` (processing instruction) and `<!` (declaration /
+      // comment) both open an HTML block in CommonMark.
+      fc.constant("<? "),
+      fc.constant("<!"),
+      fc.constant("<div>"),
       fc.string({ minLength: 1, maxLength: 20 }),
     ),
     { minLength: 1, maxLength: 10 },
@@ -58,13 +66,18 @@ describe("normalize", () => {
           expect(normalize(normalized)).toBe(normalized);
         },
       ),
-      // No pinned seed: this property previously flaked (#959) because the old
-      // two-pass normalize() was not a fixpoint for rare hostile inputs needing
-      // 3+ stabilization passes. The fixpoint iteration makes idempotency hold
-      // for ALL inputs (verified across 300k samples), so a random seed no
-      // longer flakes — keeping it unpinned preserves broad coverage as a wide
-      // net, and fast-check prints the failing seed if a regression ever breaks
-      // it. The deterministic case below guards the specific #959 input class.
+      // No pinned seed: this property has flaked twice (#959, then #1357)
+      // whenever normalize()'s output was not a true fixpoint. #959 was a
+      // fixed-two-pass shortfall (fixed by fixpoint iteration, #970); #1357 was
+      // a genuinely *divergent* roundtrip — an HTML block inside a list kept
+      // swallowing and re-emitting its trailing blank-line separator, growing
+      // ~2 newlines per pass and never converging (fixed by trimming html-node
+      // trailing whitespace in roundtrip). With that pump neutralized the
+      // transform converges for all inputs (re-verified across 200k samples
+      // using the HTML-aware generator above). Keeping the seed unpinned
+      // preserves broad coverage as a wide net; fast-check prints the failing
+      // seed if a regression ever breaks it. The deterministic cases below
+      // guard the specific #959 and #1357 input classes.
       { numRuns: 1000 },
     );
   });
@@ -79,6 +92,21 @@ describe("normalize", () => {
     expect(normalize(normalized)).toBe(normalized);
   });
 
+  test("regression: converges for html-block-in-list separator growth (#1357)", () => {
+    // A list item whose content is a raw-HTML block (`<?`), followed by a run
+    // of blank lines and another list marker. The HTML block absorbs the
+    // blank-line separator into its node value on parse; stringify re-supplies
+    // the separator, so a plain roundtrip grew the trailing newline run by 2
+    // every pass and never reached a fixpoint — iterateToFixpoint hit its cap
+    // and returned a non-idempotent result. Trimming html-node trailing
+    // whitespace in roundtrip breaks the pump so normalize(R) is a fixpoint.
+    const R = `* <? ${"\n".repeat(18)}1.\n`;
+    const normalized = normalize(R);
+    expect(normalize(normalized)).toBe(normalized);
+    // And the runaway blank-line run is actually collapsed, not merely stable.
+    expect(normalized).toBe("* <?\n\n1.\n");
+  });
+
   test("handles empty string", () => {
     expect(normalize("")).toBe("");
   });
@@ -87,12 +115,23 @@ describe("normalize", () => {
     const input = "## Heading\n\n* item 1\n* item 2\n";
     expect(normalize(input)).toBe(input);
   });
+
+  test("preserves blank lines inside fenced code blocks (no separator over-trim)", () => {
+    // The #1357 fix must only strip an HTML block's *trailing* separator, never
+    // blank lines that live inside a block. A fenced code block keeps its
+    // internal blank lines verbatim, and normalize stays a fixpoint.
+    const input = "```\nline1\n\n\n\nline2\n```\n";
+    const normalized = normalize(input);
+    expect(normalized).toContain("line1\n\n\n\nline2");
+    expect(normalize(normalized)).toBe(normalized);
+  });
 });
 
 describe("iterateToFixpoint (#970)", () => {
-  // The real markdown roundtrip is monotone and always converges, so its cycle
-  // and cap branches are unreachable with real inputs. These synthetic steps
-  // drive each of the three exit branches deterministically.
+  // The real markdown roundtrip converges (monotone escaping + the html-node
+  // trailing-whitespace trim that fixed #1357), so its cycle and cap branches
+  // are unreachable with real inputs. These synthetic steps drive each of the
+  // three exit branches deterministically.
 
   test("returns the fixpoint and stops detecting it via the seen-set", () => {
     // step appends "!" until length 3, then is the identity (a fixpoint).
