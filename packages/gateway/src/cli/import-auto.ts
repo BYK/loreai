@@ -137,8 +137,25 @@ export async function maybeAutoImport(
 
   const hasWorkerKey = !!gatewayConfig.workerApiKey;
 
-  const job = () =>
-    runBackgroundImport(
+  const job = (authedProviderID?: string) => {
+    // The extraction runs on the configured default model. If the first turn
+    // authenticated a DIFFERENT provider (e.g. session=openai but default
+    // model=anthropic) and no credential resolves for the model's provider,
+    // the extraction can't authenticate — skip loudly rather than silently
+    // churning no-auth. A matching/agnostic credential (or worker key) proceeds.
+    const usable =
+      hasWorkerKey || resolveAuth(undefined, defaultModel.providerID) != null;
+    if (!usable) {
+      if (authedProviderID && authedProviderID !== defaultModel.providerID) {
+        console.log(
+          `[lore] Skipping knowledge import: your session uses ${authedProviderID}, ` +
+            `but import is configured for ${defaultModel.providerID}. ` +
+            `Run \`lore import\` once authenticated with ${defaultModel.providerID}.`,
+        );
+      }
+      return Promise.resolve();
+    }
+    return runBackgroundImport(
       llm,
       projectPath,
       results,
@@ -147,6 +164,7 @@ export async function maybeAutoImport(
     ).catch(() => {
       // Background import failed — non-fatal, don't alarm the user.
     });
+  };
 
   // A dedicated worker key is always usable, so the import can run right away.
   // Otherwise we must WAIT for a real credential: at `lore run` startup no turn

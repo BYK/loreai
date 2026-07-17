@@ -16,6 +16,7 @@ vi.mock("node:readline", () => ({
 import { maybeAutoImport } from "../src/cli/import-auto";
 import {
   hasPendingImport,
+  flushPendingImport,
   _resetPendingImportForTest,
 } from "../src/pending-import";
 import { setLastSeenAuth, _resetAuthForTest } from "../src/auth";
@@ -52,6 +53,10 @@ describe("maybeAutoImport — credential-aware scheduling", () => {
     _resetPendingImportForTest();
     _resetAuthForTest();
     project = mkdtempSync(join(tmpdir(), "lore-autoimport-"));
+    // The tmp dir is intentionally NOT a git repo: detectAll(..., {worktrees:true})
+    // runs `git worktree list`, which fails open to [projectPath] here — so
+    // detection is scoped to exactly this dir and the copied-in fixture. Keeps
+    // the test deterministic and free of home-dir/repo leakage.
     copyFileSync(AIDER_FIXTURE, join(project, ".aider.chat.history.md"));
     cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(project);
     logs.length = 0;
@@ -94,5 +99,38 @@ describe("maybeAutoImport — credential-aware scheduling", () => {
     await maybeAutoImport(baseConfig());
     expect(hasPendingImport()).toBe(false);
     expect(logs.join("\n")).toContain("Importing knowledge in background");
+  });
+
+  test("deferred → flush with a MISMATCHED provider skips loudly (no silent no-op)", async () => {
+    // Default model provider is anthropic (no cfg.model). Defer, then the first
+    // authenticated turn is openai — the extraction can't use an openai key, so
+    // the job must skip AND tell the user why (not vanish silently).
+    await maybeAutoImport(baseConfig());
+    expect(hasPendingImport()).toBe(true);
+
+    // Simulate the first turn authenticating openai.
+    setLastSeenAuth({ scheme: "api-key", value: "sk-openai" }, "openai");
+    logs.length = 0;
+    await flushPendingImport("openai");
+
+    expect(hasPendingImport()).toBe(false); // one-shot consumed
+    const out = logs.join("\n");
+    expect(out).toContain("Skipping knowledge import");
+    expect(out).toContain("openai");
+    expect(out).toContain("anthropic");
+  });
+
+  test("deferred → flush with a MATCHING provider proceeds to import", async () => {
+    await maybeAutoImport(baseConfig());
+    expect(hasPendingImport()).toBe(true);
+
+    // First turn authenticates anthropic — matches the default model provider.
+    setLastSeenAuth({ scheme: "bearer", value: "sk-ant-oat" }, "anthropic");
+    logs.length = 0;
+    await flushPendingImport("anthropic");
+
+    expect(hasPendingImport()).toBe(false);
+    // The matching-provider path does NOT hit the mismatch skip branch.
+    expect(logs.join("\n")).not.toContain("Skipping knowledge import");
   });
 });

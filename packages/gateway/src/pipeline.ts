@@ -6671,8 +6671,10 @@ async function handleConversationTurn(
 
     // A credential just landed. If `lore run` deferred a conversation import
     // (no credential existed at startup), run it now — this is the first
-    // authenticated turn. One-shot and self-guarded; a no-op otherwise.
-    trackBackground(flushPendingImport());
+    // authenticated turn. Forward the provider that authenticated so the job
+    // can skip when the credential can't drive its extraction model. One-shot
+    // and self-guarded; a no-op otherwise.
+    trackBackground(flushPendingImport(reqProviderID || undefined));
   }
 
   // Capture billing header prefix for worker cch computation, scoped to
