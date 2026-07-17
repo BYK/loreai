@@ -2,7 +2,9 @@ name: "Lore semantic linter (invariant-check)"
 description: >-
   Advisory-only: surfaces PR changes that contradict a documented invariant in
   the repo's `.lore.md`. NEVER fails the build — reports findings as annotations
-  and a job summary; humans decide.
+  and a job summary; humans decide. Requires the caller to checkout with
+  `fetch-depth: 0` so merge-base resolution against the PR base has full history
+  (a shallow clone can force a noisy tip-to-tip diff instead of the fork-point diff).
 
 inputs:
   base:

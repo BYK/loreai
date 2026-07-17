@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
  * Lore invariant-check GHA reporter. Reads the `lore invariant-check --json`
- * output and emits GitHub annotations + a job summary. ADVISORY ONLY: it emits
- * `::warning::` workflow commands (never `::error::`) and ALWAYS exits 0 — the
- * whole point is that this never fails a build. Humans decide.
+ * output and emits GitHub **file annotations** (so findings render in-context on
+ * the PR diff, at the changed line) plus a job summary. The reporter itself
+ * ALWAYS exits 0 — failing a blocked build is a separate action step, never this
+ * script. Annotation level: `::error::` for a gate-blocking finding, `::notice::`
+ * for an overridden one, `::warning::` otherwise (advisory).
  */
 import { readFileSync, appendFileSync } from "node:fs";
 
@@ -13,7 +15,7 @@ if (!path) {
   process.exit(0);
 }
 
-/** @type {{findings: Array<{invariantTitle:string,invariantContent:string,file:string,reason:string|null,severity:string,refHit:boolean,similarity:number}>, hunks:number, invariants:number, candidates:number, judgeCalls:number, model?:string}} */
+/** @type {{findings: Array<{invariantId:string,invariantTitle:string,invariantContent:string,file:string,reason:string|null,severity:string,refHit:boolean,similarity:number,hunk:string}>, hunks:number, invariants:number, candidates:number, judgeCalls:number, model?:string, gate?:object}} */
 let result;
 try {
   result = JSON.parse(readFileSync(path, "utf8"));
@@ -33,6 +35,28 @@ const funnel =
 function esc(s) {
   // Escape for workflow-command message data.
   return String(s ?? "").replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
+/** Escape a markdown table cell: neutralize `|` and collapse newlines so a
+ *  finding with a pipe in its title or a multi-line judge reason can't corrupt
+ *  the rendered table. */
+function cell(s) {
+  return String(s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+}
+
+/** Extract the new-file line span from a unified-diff hunk header so the
+ *  annotation lands on the actual changed lines in the PR diff. Header shape:
+ *  `@@ -a,b +c,d @@ ...` → { line: c, endLine: c + d - 1 }. Returns null when the
+ *  header is absent/unparseable (annotation then falls back to file-level). */
+function hunkRange(hunkText) {
+  const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(hunkText ?? "");
+  if (!m) return null;
+  const start = Number(m[1]);
+  const count = m[2] === undefined ? 1 : Number(m[2]);
+  if (!Number.isFinite(start) || start < 1) return null;
+  // count 0 (pure deletion hunk) → annotate the single anchor line.
+  const endLine = count > 0 ? start + count - 1 : start;
+  return { line: start, endLine };
 }
 
 if (findings.length === 0) {
@@ -64,7 +88,12 @@ function findingKey(f) {
   return `${f.invariantId}\x1f${f.file}`;
 }
 
-// Annotations. Blocking (gate mode) → error; overridden → notice; else warning.
+// File annotations. Blocking (gate mode) → error; overridden → notice; else
+// warning. A `line`/`endLine` derived from the hunk header makes each annotation
+// render at the changed lines in the PR diff (in-context), falling back to a
+// file-level annotation when the header can't be parsed. EVERY interpolated
+// field (including file) is escaped — an unescaped value can inject a second
+// workflow command.
 for (const f of findings) {
   const key = findingKey(f);
   const isBlocking = gated && blockingIds.has(key);
@@ -79,7 +108,11 @@ for (const f of findings) {
   const msg =
     `${f.reason ?? "possible contradiction"}\n\n` +
     `Invariant: ${f.invariantContent}`;
-  console.log(`::${level} file=${f.file},title=${esc(title)}::${esc(msg)}`);
+  const range = hunkRange(f.hunk);
+  const loc = range
+    ? `file=${esc(f.file)},line=${range.line},endLine=${range.endLine}`
+    : `file=${esc(f.file)}`;
+  console.log(`::${level} ${loc},title=${esc(title)}::${esc(msg)}`);
 }
 
 // Job summary — a readable table + gate status.
@@ -92,7 +125,7 @@ if (summaryFile) {
         : overriddenIds.has(key)
           ? "↪ overridden"
           : "advisory";
-      return `| \`${f.severity}\` | ${state} | ${f.invariantTitle} | \`${f.file}\` | ${(f.reason ?? "").replace(/\|/g, "\\|")} |`;
+      return `| \`${cell(f.severity)}\` | ${state} | ${cell(f.invariantTitle)} | \`${cell(f.file)}\` | ${cell(f.reason)} |`;
     })
     .join("\n");
   const header = gated
