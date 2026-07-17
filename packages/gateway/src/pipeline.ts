@@ -224,6 +224,7 @@ import {
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { flushPendingImport } from "./pending-import";
+import { upstreamErrorHint } from "./upstream-error-hint";
 import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
 import {
@@ -8137,8 +8138,14 @@ async function handleConversationTurn(
 
   if (!upstreamResponse.ok) {
     const errorBody = await upstreamResponse.text();
+    const errorHint = upstreamErrorHint({
+      status: upstreamResponse.status,
+      body: errorBody,
+      protocol: effectiveProtocol,
+      credScheme: resolveAuth(sessionID)?.scheme,
+    });
     log.error(
-      `upstream error: ${upstreamResponse.status} ${errorBody.slice(0, 500)}`,
+      `upstream error: ${upstreamResponse.status} ${errorBody.slice(0, 500)}${errorHint}`,
     );
 
     // When the API rejects with a context-length error, escalate the compression
