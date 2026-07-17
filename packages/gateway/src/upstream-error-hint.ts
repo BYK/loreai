@@ -32,6 +32,12 @@ export interface UpstreamErrorContext {
  *
  * Currently covers exactly one case (kept deliberately narrow to avoid noise):
  * an Anthropic `429 rate_limit_error` on a bearer (OAuth) credential.
+ *
+ * NOTE: Bedrock also reports `protocol === "anthropic"` but authenticates with
+ * an `x-api-key` (`api-key` scheme), so it is excluded by the `bearer` check —
+ * NOT by protocol. Known narrow limitation: routing an AWS Bedrock *bearer* API
+ * key (a newer, non-default mantle path) through a 429 could misfire this hint.
+ * That path is undocumented for mantle (which uses `x-api-key`) and low-risk.
  */
 export function upstreamErrorHint(ctx: UpstreamErrorContext): string {
   if (

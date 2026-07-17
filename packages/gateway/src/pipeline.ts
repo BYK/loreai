@@ -8138,6 +8138,12 @@ async function handleConversationTurn(
 
   if (!upstreamResponse.ok) {
     const errorBody = await upstreamResponse.text();
+    // Friendly diagnostic suffix for a pass-through 429 misread as a Lore bug.
+    // 🔴 credScheme is the LOAD-BEARING exclusion for Bedrock: Bedrock also
+    // reports effectiveProtocol === "anthropic", so the protocol gate does NOT
+    // exclude it — only its "api-key" scheme (x-api-key) does. Never drop the
+    // credScheme arg or hardcode it, or Bedrock 429s would misfire the
+    // "your Anthropic subscription's rate limit" hint.
     const errorHint = upstreamErrorHint({
       status: upstreamResponse.status,
       body: errorBody,
