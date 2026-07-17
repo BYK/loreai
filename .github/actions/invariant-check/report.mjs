@@ -20,7 +20,7 @@ let result;
 try {
   result = JSON.parse(readFileSync(path, "utf8"));
 } catch (e) {
-  console.log(`::notice title=Lore invariant-check::unreadable result (${e})`);
+  console.log(`::notice title=Lore invariant-check::unreadable result (${String(e)})`);
   process.exit(0);
 }
 
