@@ -57,13 +57,26 @@ let outputReserved = 32_000;
 // Three quality tiers based on empirical model effectiveness:
 //   Tier 1: 0 – 200K tokens (best quality, preferred operating range)
 //   Tier 2: 200K – 500K tokens (acceptable quality)
-//   Tier 3: 500K – model context limit (degraded, compress when economical)
+//   Tier 3: 500K – model context limit (degraded — quality penalty ramps hard)
 //
-// At each tier boundary, a per-turn economic comparison decides whether to
-// compress (bust the cache) or continue growing:
-//   bustCost    = compressedSize × cacheWriteCostPerToken
-//   continueCost = currentSize   × cacheReadCostPerToken
+// Within tier 1, a per-turn economic comparison decides whether to compress
+// (bust the cache) or continue growing:
+//   bustCost     = compressedSize × cacheWriteCostPerToken
+//   continueCost = currentSize   × cacheReadCostPerToken × qualityCostMultiplier
 // If bustCost ≥ threshold × continueCost, don't compress — reads are cheap.
+//
+// Quality cost multiplier: past the tier-1 boundary, models measurably ignore
+// the middle of the window (lost-in-the-middle), so each additional token of
+// context is worth progressively less. Rather than a hard cliff at a fixed
+// ceiling, `qualityCostMultiplier` inflates the perceived "continue" cost as
+// the window grows — cheap cache reads on a degraded window are a false
+// economy, and the penalty makes that explicit. The multiplier grows without
+// bound, so compression is ALWAYS eventually chosen (a 1M-context model is
+// pulled back toward its effective range instead of running to the raw limit),
+// but a marginally-over session on a very cheap cache may still continue one
+// or two turns — no discontinuity. The QUALITY_HARD_CEILING is retained only as
+// a safety net on the l0cap-disabled / no-pricing pass-through path, where the
+// economic gate never runs.
 //
 // Rolling bust detection: once SUSTAINED_BUST_THRESHOLD consecutive turns bust
 // the cache, stop trying to compress — something structural is causing busts,
@@ -72,6 +85,76 @@ let outputReserved = 32_000;
 
 /** Tier boundary tokens. Configurable for testing. */
 const TIER_BOUNDARIES = [200_000, 500_000] as const;
+
+/**
+ * Quality hard ceiling: the token count past which context quality is
+ * considered degraded (tier-3 boundary). Used as a safety net on the
+ * pass-through path (l0cap disabled or no pricing) where the graduated
+ * `qualityCostMultiplier` economic gate never runs. On the priced path the
+ * multiplier — not this ceiling — governs the compress decision.
+ */
+const QUALITY_HARD_CEILING = TIER_BOUNDARIES[1];
+
+/**
+ * Absolute last-resort passthrough margin: never pass through raw at layer 0
+ * once the input exceeds this fraction of maxInput (leaves headroom for a
+ * mispredicted turn to still fit before the API limit). Module-level so
+ * `layer0Passes()` can be shared by transformInner (the actual decision) and
+ * isLargeColdStart (the pipeline's turn-1 LTM prediction) — the two MUST NOT
+ * diverge (#961 Seer 15319715).
+ */
+const HARD_CEILING_MARGIN = 0.95;
+
+/**
+ * Shared layer-0 passthrough predicate: returns true when a session of size
+ * `layer0Input` may pass through UNCOMPRESSED at layer 0. Compression is forced
+ * when this returns false. Used by BOTH transformInner (the layer decision) and
+ * isLargeColdStart (the turn-1 LTM prediction) so their logic can never drift.
+ * All three ceilings must hold: the cost/API layer-0 ceiling, the quality hard
+ * ceiling (degraded-window safety net), and the absolute maxInput margin.
+ */
+function layer0Passes(
+  layer0Input: number,
+  layer0Ceiling: number,
+  maxInput: number,
+): boolean {
+  return (
+    layer0Input <= layer0Ceiling &&
+    layer0Input <= QUALITY_HARD_CEILING &&
+    layer0Input <= maxInput * HARD_CEILING_MARGIN
+  );
+}
+
+/**
+ * Per-token quality penalty slope. Each `TIER_BOUNDARIES[0]` (200K) of context
+ * ABOVE the tier-1 boundary multiplies the perceived continue cost by this much
+ * more. At the tier-1 boundary the multiplier is 1 (no penalty); it grows
+ * linearly and without bound thereafter. Slope 8 places the worst-case compress
+ * crossover (compressed estimate clamped to a 500K l0cap, warm cache at the
+ * ~12.5× Anthropic write/read ratio) right at the tier-3 boundary (~530K).
+ *
+ * NOTE: the crossover scales with the ACTUAL compressed target, not a fixed
+ * 500K. For a typical priced l0cap (~166K–333K, from targetCacheReadCostPerTurn)
+ * the compressed estimate is smaller, so compression fires earlier — around
+ * 260K–450K, i.e. inside the tier-2 "acceptable" band. That is intentional: the
+ * ramp trades a little cheap-cache headroom for staying nearer the best-quality
+ * range on cheaper-to-compress sessions. A window is only guaranteed to keep its
+ * cheap cache while q≈1 (≤ ~200K); above that the penalty progressively favors
+ * compression.
+ */
+const QUALITY_PENALTY_SLOPE = 8;
+
+/**
+ * Continuous quality penalty applied to the "continue" cost in shouldCompress.
+ * Returns 1.0 within the best-quality tier (≤ TIER_BOUNDARIES[0]); above it,
+ * ramps linearly with the excess normalized by the tier-1 width. Monotonic,
+ * unbounded — guarantees compression is eventually chosen as tokens grow.
+ */
+export function qualityCostMultiplier(tokens: number): number {
+  const excess = tokens - TIER_BOUNDARIES[0];
+  if (excess <= 0) return 1;
+  return 1 + (QUALITY_PENALTY_SLOPE * excess) / TIER_BOUNDARIES[0];
+}
 
 /** Cache pricing per token (USD). Set by host adapter via setCachePricing(). */
 let cacheWriteCostPerToken = 0;
@@ -300,7 +383,14 @@ export function shouldCompress(
   const continuePerToken = sustainedBust
     ? cacheWriteCostPerToken
     : cacheReadCostPerToken;
-  const continueCost = currentTokens * continuePerToken;
+  // Quality penalty: past the best-quality tier, each retained token is worth
+  // progressively less (lost-in-the-middle), so inflate the perceived continue
+  // cost by qualityCostMultiplier. This makes compression win earlier and
+  // earlier as the window grows — a graduated ramp rather than a hard ceiling —
+  // and, because the multiplier is unbounded, guarantees compression is
+  // eventually chosen instead of re-reading a degraded window forever. (#961)
+  const continueCost =
+    currentTokens * continuePerToken * qualityCostMultiplier(currentTokens);
 
   // Compress only if the bust cost is meaningfully less than continuing.
   // Note: we deliberately do NOT short-circuit to "never compress" on a high
@@ -2956,7 +3046,7 @@ function layer0Bounds(
   expectedInput: number,
   calibrated: boolean,
   sid: string | undefined,
-): { layer0Input: number; layer0Ceiling: number } {
+): { layer0Input: number; layer0Ceiling: number; maxInput: number } {
   const maxInput = contextLimit - outputReserved;
   // chars/3 undercounts by ~1.63x on real sessions — without this an
   // uncalibrated session estimated at 146K passes Layer 0 but actually costs
@@ -2980,7 +3070,7 @@ function layer0Bounds(
       Math.floor(maxInput * FREE_WRITE_LAYER0_FRACTION),
     );
   }
-  return { layer0Input, layer0Ceiling };
+  return { layer0Input, layer0Ceiling, maxInput };
 }
 
 /**
@@ -3013,12 +3103,15 @@ export function isLargeColdStart(input: {
     input.ltmTokens ?? (sid ? sessState.ltmTokens : ltmTokensFallback);
   const expectedInput =
     estimateMessages(input.messages) + overhead + sessLtmTokens;
-  const { layer0Input, layer0Ceiling } = layer0Bounds(
+  const { layer0Input, layer0Ceiling, maxInput } = layer0Bounds(
     expectedInput,
     false,
     sid,
   );
-  return layer0Input > layer0Ceiling;
+  // Compression is forced whenever the shared layer-0 passthrough predicate
+  // fails — mirror transformInner exactly so the two never diverge (a divergence
+  // makes the turn-1 LTM injection decision wrong; see #961 Seer 15319715).
+  return !layer0Passes(layer0Input, layer0Ceiling, maxInput);
 }
 
 function transformInner(input: {
@@ -3122,12 +3215,6 @@ function transformInner(input: {
   // from the real tokenizer — so tryFit output must be validated with a safety
   // multiplier before being used.
   const calibrated = sessState.lastKnownInput > 0;
-
-  // Hard ceiling: never allow layer-0 passthrough within 5% of maxInput,
-  // regardless of calibration accuracy or economic analysis.  The estimation
-  // error on calibrated deltas can be 5-10K tokens, and maxInput is a hard
-  // API limit — exceeding it causes an unrecoverable 400.
-  const HARD_CEILING_MARGIN = 0.95;
 
   // Returns true if a rebuilt compression-stage window is safe to ship.
   //
@@ -3337,11 +3424,22 @@ function transformInner(input: {
 
   if (
     effectiveMinLayer === 0 &&
-    layer0Input <= layer0Ceiling &&
-    layer0Input <= maxInput * HARD_CEILING_MARGIN
+    layer0Passes(layer0Input, layer0Ceiling, maxInput)
   ) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
+    // The QUALITY_HARD_CEILING clause is a safety net for the case where
+    // layer0Ceiling > 500K — i.e. l0cap disabled (no pricing / targetCacheRead=0)
+    // or a free-write session whose ceiling is ~0.65×maxInput. There a large
+    // window would otherwise pass through at layer 0 well past the degraded
+    // boundary WITHOUT reaching the economic gate (which needs pricing) or the
+    // graduated multiplier. Above 500K this clause blocks pass-through; the
+    // window then fails the tier-gate condition (layer0Input > layer0Ceiling) and
+    // drops into the compression-stages loop directly — a hard 500K cliff that
+    // deliberately bypasses shouldCompress (and its free-write churn guard) for
+    // this degenerate, no-pricing regime. When l0cap is set (layer0Ceiling small,
+    // the common priced path) this gate only fires well within quality and the
+    // ceiling clause is inert — the graduated multiplier governs instead. (#961)
     const messageTokens = calibrated
       ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm) // approximate raw portion
       : expectedInput - overhead - sessLtmTokens;
@@ -3365,6 +3463,12 @@ function transformInner(input: {
   // If not (bust cost ≥ 85% of continue cost), skip compression and pass
   // through at layer 0 — the cache reads are cheap enough to justify the
   // larger context, and raw messages are better quality than distilled.
+  //
+  // The quality penalty is applied INSIDE shouldCompress (qualityCostMultiplier
+  // inflates the continue cost as the window grows), so this gate needs no
+  // fixed ceiling: shouldCompress returns true progressively earlier past the
+  // tier-1 boundary and always eventually, pulling a large window back down. The
+  // absolute maxInput*HARD_CEILING_MARGIN clause remains as the last-resort stop.
   if (
     effectiveMinLayer === 0 &&
     layer0Input > layer0Ceiling &&

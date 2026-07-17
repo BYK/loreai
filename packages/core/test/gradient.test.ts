@@ -41,6 +41,7 @@ import {
   setMaxLayer0Tokens,
   getCachePricing,
   shouldCompress,
+  qualityCostMultiplier,
   isFreeWriteSession,
   getTier,
   selectDistillations,
@@ -4283,11 +4284,15 @@ describe("tier-based context management", () => {
 
     test("sustained bust still refuses when compression isn't cheaper than rewriting", () => {
       // When compressed size is close to current size, writing the compressed
-      // context is NOT cheaper than continuing — even at the write rate.
-      //   continueCost = 250K × $6.25/M = $1.5625
-      //   bustCost     = 240K × $6.25/M = $1.50
-      //   1.50 < 0.85 × 1.5625 = 1.328 → false (don't compress)
-      expect(shouldCompress(250_000, 240_000, 2)).toBe(false);
+      // context is NOT cheaper than continuing — even at the write rate. Tested
+      // at ≤ tier-1 boundary (200K) so the quality multiplier is 1.0 and does
+      // not tip the decision (above 200K the quality penalty legitimately favors
+      // compression even when sizes are close — see the quality-multiplier test).
+      //   q(190K)      = 1.0 (at/below tier-1 boundary)
+      //   continueCost = 190K × $6.25/M × 1.0 = $1.1875
+      //   bustCost     = 185K × $6.25/M       = $1.15625
+      //   1.15625 < 0.85 × 1.1875 = 1.009 → false (don't compress)
+      expect(shouldCompress(190_000, 185_000, 2)).toBe(false);
     });
 
     test("below the sustained-bust threshold uses the cheap read cost", () => {
@@ -4315,16 +4320,69 @@ describe("tier-based context management", () => {
       // ~620K — but compression actually targets l0cap (~200K). With the
       // INFLATED estimate, even sustained-bust write-rate repricing refuses to
       // compress; with the REAL target it correctly compresses.
-      const current = 635_000; // observed grown context
-      const inflated = 620_000; // distilledBudget+rawBudget ≈ 0.65 * 957K usable
-      const realTarget = 200_000; // layer0Ceiling (what compression yields)
+      //
+      // Tested just ABOVE the tier-1 boundary so the quality multiplier is still
+      // modest (does not by itself force compression), leaving the inflated-vs-
+      // real distinction observable. At much higher token counts the quality
+      // multiplier dominates and forces compression regardless (see the separate
+      // "quality multiplier forces compression on a degraded window" test) — that
+      // is the intended #961 behavior, which subsumes the inflated-estimate bug.
+      const current = 240_000; // just over tier-1 (200K); q(240K) = 2.6
+      const inflated = 235_000; // near-current inflated estimate
+
+      // The clamp distinction is observable only where q≈1 (≤ tier-1 boundary):
+      // there the realistic target compresses but the inflated one does not.
+      const clampCurrent = 190_000; // q(190K) = 1.0
+      const inflatedEst = 185_000; // ~usable-scaled estimate (near current)
+      const realTarget = 60_000; // what compression actually yields (≈ l0cap)
 
       // Sustained-bust regime (>=5): continue is priced at the WRITE rate.
-      //   continueCost = 635K × $6.25/M = $3.969
-      //   inflated  bustCost = 620K × $6.25/M = $3.875  → 3.875 < 0.85*3.969=3.374? NO → don't compress
-      //   real      bustCost = 200K × $6.25/M = $1.25   → 1.25  < 3.374           ? YES → compress
-      expect(shouldCompress(current, inflated, 5)).toBe(false);
-      expect(shouldCompress(current, realTarget, 5)).toBe(true);
+      //   q(240K)      = 1 + 8*(40K/200K) = 2.6
+      //   continueCost = 240K × $6.25/M × 2.6 = $3.90
+      //   inflated  bustCost = 235K × $6.25/M = $1.46875 → 1.469 < 0.85*3.90=3.315 ? YES
+      // The inflated case compresses at 240K because the quality penalty already
+      // tips it — so pin the clamp distinction at q=1 (≤200K), where only the
+      // realistic target compresses.
+      //   continueCost(190K) = 190K × $6.25/M × 1.0 = $1.1875
+      //   inflated bustCost  = 185K × $6.25/M = $1.15625 → 1.156 < 0.85*1.1875=1.009 ? NO
+      //   real     bustCost  = 60K  × $6.25/M = $0.375   → 0.375 < 1.009            ? YES
+      expect(shouldCompress(clampCurrent, inflatedEst, 5)).toBe(false);
+      expect(shouldCompress(clampCurrent, realTarget, 5)).toBe(true);
+
+      // And at a genuinely degraded window the quality multiplier forces
+      // compression regardless of how large the (inflated) estimate is.
+      expect(shouldCompress(current, inflated, 5)).toBe(true);
+    });
+
+    test("quality multiplier forces compression on a degraded window despite cheap reads", () => {
+      // The #961 case: a warm cache (cheap READ rate, NOT sustained-bust) at a
+      // degraded window size. Without the quality penalty this always continues
+      // (reads are ~12.5× cheaper than a write). The multiplier inflates the
+      // perceived continue cost as the window grows, so compression is chosen.
+      //   q(700K)      = 1 + 8*(500K/200K) = 21
+      //   continueCost = 700K × $0.50/M × 21 = $7.35
+      //   bustCost     = 200K × $6.25/M      = $1.25
+      //   1.25 < 0.85 × 7.35 = 6.2475 → compress (quality wins over cheap reads)
+      expect(shouldCompress(700_000, 200_000, 0)).toBe(true);
+
+      // A modestly-grown warm cache (still good-quality range) is NOT force-
+      // compressed — the multiplier is ~1 there, so cheap reads still win.
+      //   q(190K)      = 1.0
+      //   continueCost = 190K × $0.50/M × 1.0 = $0.095
+      //   bustCost     = 150K × $6.25/M       = $0.9375
+      //   0.9375 < 0.85 × 0.095 = 0.0808 → false (keep the cheap cache)
+      expect(shouldCompress(190_000, 150_000, 0)).toBe(false);
+    });
+
+    test("qualityCostMultiplier: 1.0 within tier-1, ramps linearly above", () => {
+      expect(qualityCostMultiplier(0)).toBe(1);
+      expect(qualityCostMultiplier(200_000)).toBe(1); // at boundary → no penalty
+      expect(qualityCostMultiplier(400_000)).toBe(9); // +200K excess → +8
+      expect(qualityCostMultiplier(600_000)).toBe(17); // +400K excess → +16
+      // Monotonic and unbounded → compression is eventually always chosen.
+      expect(qualityCostMultiplier(2_000_000)).toBeGreaterThan(
+        qualityCostMultiplier(1_000_000),
+      );
     });
   });
 
@@ -4380,7 +4438,13 @@ describe("tier-based context management", () => {
       // is exactly the high-context condition that triggers the bug. Passing
       // messageCount = msgs.length means the calibrated path sees zero "new"
       // messages, so expectedInput == lastKnownInput == 635K.
-      calibrate(635_000, SESSION, msgs.length);
+      // Just over the 200K layer-0 cap (tier 2). Deliberately kept low so the
+      // quality multiplier (q≈2.6 at 240K) does NOT by itself force compression
+      // regardless of the estimate — the compressedEstimate CLAMP must be the
+      // deciding factor. At higher token counts the multiplier dominates and both
+      // clamped and unclamped estimates compress, which would make this test
+      // vacuous w.r.t. the clamp it guards.
+      calibrate(240_000, SESSION, msgs.length);
 
       // Drive the cache into a sustained-bust regime (well past
       // SUSTAINED_BUST_THRESHOLD): every turn is ~93% cache write, exactly like
@@ -4412,12 +4476,25 @@ describe("tier-based context management", () => {
         300_000,
       );
 
-      // Before the fix: the gate fed shouldCompress() the un-clamped ~620K
-      // estimate; bustCost (620K×write) dwarfed continueCost even under
-      // sustained-bust write-rate repricing, so it STAYED at layer 0 and grew
-      // unbounded. After clamping compressedEstimate to layer0Ceiling (200K),
-      // the economics flip and the gate compresses (layer >= 1). This assertion
-      // FAILS on revert of the one-line fix (verified).
+      // The tier gate feeds shouldCompress() the compressedEstimate CLAMPED to
+      // layer0Ceiling. The clamp keeps the estimate honest: the raw
+      // distilled+raw budget is scaled off `usable` (~0.65×968K≈620K on a 1M
+      // model) — far larger than what compression actually yields (~l0cap). The
+      // two unit assertions below show the clamp is economically load-bearing:
+      // feeding the un-clamped 620K estimate REFUSES compression, while the
+      // clamped 200K estimate compresses. At 240K sustained-bust (continue at the
+      // write rate, q(240K)=2.6): continueCost = 240K×$6.25/M×2.6 = $3.90,
+      // threshold = 0.85×3.90 = $3.315.
+      //   UN-clamped 620K: bust = 620K×$6.25/M = $3.875 ≥ $3.315 → NO compress
+      //   CLAMPED    200K: bust = 200K×$6.25/M = $1.25  <  $3.315 → compress
+      expect(shouldCompress(240_000, 620_000, 5)).toBe(false); // unclamped: refuses
+      expect(shouldCompress(240_000, 200_000, 5)).toBe(true); // clamped: compresses
+
+      // End-to-end: transform() clamps the estimate, so the real over-cap session
+      // compresses (layer >= 1) rather than growing at layer 0. (Note: the quality
+      // multiplier also independently favors compression above the tier-1
+      // boundary, so this end-to-end assertion is a sanity check; the clamp's
+      // economic role is pinned by the two unit assertions above.)
       expect(result.layer).toBeGreaterThanOrEqual(1);
     });
 
@@ -4446,6 +4523,39 @@ describe("tier-based context management", () => {
       expect(result.layer).toBe(0);
     });
 
+    test("QUALITY_HARD_CEILING blocks layer-0 pass-through when l0cap is disabled (#961)", () => {
+      // Safety-net coverage: with l0cap disabled (0), layer0Ceiling === maxInput
+      // (~968K), so a >500K session would normally satisfy the pass-through gate
+      // (layer0Input <= layer0Ceiling) and stay at layer 0 well into the degraded
+      // tier — WITHOUT ever reaching the economic gate/multiplier. The
+      // QUALITY_HARD_CEILING clause must block that pass-through and force
+      // compression. Removing that clause makes this test fail (mutation-checked).
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setMaxLayer0Tokens(0); // disabled → layer0Ceiling = maxInput
+      setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+
+      const msgs = Array.from({ length: 8 }, (_, i) =>
+        makeMsg(
+          `qhc-${i}`,
+          i % 2 === 0 ? "user" : "assistant",
+          "w".repeat(200),
+          SESSION,
+        ),
+      );
+      transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
+      // 600K: past QUALITY_HARD_CEILING (500K) but under maxInput*0.95 (~920K)
+      // and under layer0Ceiling (=maxInput, since l0cap disabled).
+      calibrate(600_000, SESSION, msgs.length);
+
+      const result = transform({
+        messages: msgs,
+        projectPath: PROJECT,
+        sessionID: SESSION,
+      });
+      // Must NOT pass through at layer 0 — the ceiling forces compression.
+      expect(result.layer).toBeGreaterThanOrEqual(1);
+    });
+
     test("over-cap session that bypasses compression STILL fires the bust-spiral alert (#797)", () => {
       // The tier-gate bypass returns at layer 0 but for a genuinely over-cap
       // conversation (it merely declined to compress because the bust cost
@@ -4463,8 +4573,11 @@ describe("tier-based context management", () => {
         ),
       );
 
-      // Large grown input, over the 200K layer-0 cap (see beforeEach).
-      calibrate(635_000, SESSION, msgs.length);
+      // Grown input over the 200K layer-0 cap but within the tier-2 quality
+      // band (≤ QUALITY_HARD_CEILING = 500K). Above 500K the quality ceiling
+      // now FORCES compression, so the "declined to compress" bypass path only
+      // exists in tier 2 — target it explicitly. (#961)
+      calibrate(350_000, SESSION, msgs.length);
 
       // No pricing data → shouldCompress() conservatively returns false, so the
       // tier gate bypasses compression and returns at layer 0 while over-cap.
@@ -5109,8 +5222,11 @@ describe("tier-based context management", () => {
           SID,
         ),
       );
-      // Large grown input, over the 200K layer-0 cap.
-      calibrate(635_000, SID, msgs.length);
+      // Grown input over the 200K layer-0 cap but within the tier-2 quality band
+      // (≤ QUALITY_HARD_CEILING = 500K): the "declined to compress" bypass only
+      // exists in tier 2 — above 500K the quality ceiling forces compression. The
+      // spiral alert must still fire from this layer-0 bypass return. (#961)
+      calibrate(350_000, SID, msgs.length);
       // No pricing → shouldCompress() conservatively returns false, so the tier
       // gate bypasses compression and returns at layer 0 while over-cap.
       setCachePricing(0, 0);
@@ -5673,8 +5789,16 @@ describe("tier-based context management", () => {
     });
 
     test("threshold option still works", () => {
-      // With very low threshold, even economical compression is rejected
-      expect(shouldCompress(2_000_000, 100_000, 0, { threshold: 0.01 })).toBe(
+      // With a very low threshold, even economical compression is rejected.
+      // Tested at ≤ tier-1 boundary (q = 1) so the quality multiplier does not
+      // inflate the continue cost past the tiny threshold — above the boundary
+      // the quality penalty intentionally overwhelms a low threshold (that's the
+      // #961 force-compression behavior).
+      //   q(190K)      = 1.0
+      //   continueCost = 190K × $0.50/M × 1.0 = $0.095
+      //   bustCost     = 100K × $6.25/M       = $0.625
+      //   0.625 < 0.01 × 0.095 = 0.00095 → false (rejected)
+      expect(shouldCompress(190_000, 100_000, 0, { threshold: 0.01 })).toBe(
         false,
       );
     });
@@ -6628,6 +6752,38 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
       });
       expect(predicted).toBe(result.layer >= 1);
     }
+    resetBaseline();
+  });
+
+  test("isLargeColdStart agrees with transform in the QUALITY_HARD_CEILING regime (#961 Seer 15319715)", () => {
+    // Divergence regime: l0cap disabled → layer0Ceiling === maxInput (large).
+    // A cold session between QUALITY_HARD_CEILING (500K) and layer0Ceiling
+    // passes `layer0Input <= layer0Ceiling` but FAILS `<= QUALITY_HARD_CEILING`,
+    // so transform() compresses it. Before the shared layer0Passes() predicate,
+    // isLargeColdStart returned only `layer0Input > layer0Ceiling` and wrongly
+    // predicted passthrough (false) — mispredicting the turn-1 LTM decision.
+    setModelLimits({ context: 1_000_000, output: 32_000 }); // maxInput = 968K
+    setMaxLayer0Tokens(0); // disabled → layer0Ceiling = maxInput (968K > 500K)
+    setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+    calibrate(0); // zero overhead
+
+    const sid = `cold-qhc-${crypto.randomUUID()}`;
+    // ~560K estimated tokens: between 500K (QUALITY_HARD_CEILING) and 968K
+    // (layer0Ceiling). estimateMessages ≈ chars/3; uncalibrated ×1.5 factor
+    // pushes layer0Input higher, so target ~370K raw estimate → ~560K after ×1.5.
+    const pad = "x".repeat(2000);
+    const messages = Array.from({ length: 560 }, (_, i) =>
+      makeMsg(`${sid}-${i}`, i % 2 === 0 ? "user" : "assistant", pad, sid),
+    );
+    const predicted = isLargeColdStart({ messages, sessionID: sid });
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: sid,
+    });
+    // Must agree: both see compression forced by the QHC clause.
+    expect(predicted).toBe(result.layer >= 1);
+    expect(predicted).toBe(true); // and specifically: this regime DOES compress
     resetBaseline();
   });
 
