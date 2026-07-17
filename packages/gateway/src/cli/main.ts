@@ -108,6 +108,12 @@ const OPTIONS = {
   project: { type: "string" as const },
   limit: { type: "string" as const },
   json: { type: "boolean" as const },
+  // `lore invariant-check` flags
+  base: { type: "string" as const },
+  head: { type: "string" as const },
+  model: { type: "string" as const },
+  "import-lore-md": { type: "boolean" as const },
+  gate: { type: "boolean" as const },
   "dry-run": { type: "boolean" as const },
   "no-children": { type: "boolean" as const },
   // `lore import` flag — restrict detection to the current directory only
@@ -433,6 +439,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "invariant-check": {
+        const { commandInvariantCheck } = await import("./invariant-check");
+        await commandInvariantCheck(rest, values);
+        break;
+      }
+
       case "log": {
         const { commandLog } = await import("./history-cmd");
         await commandLog(rest, values);
@@ -530,6 +542,7 @@ export async function _cli(): Promise<void> {
               "doctor",
               "data",
               "recall",
+              "invariant-check",
               "log",
               "diff",
               "login",
