@@ -36,11 +36,17 @@ jobs:
         with:
           node-version: "24"
       - run: pnpm install --frozen-lockfile
+      # Build the CLI bundle. The CLI cannot run from source via tsx — its entry
+      # (instrument.ts, lib/upgrade.ts, etc.) uses esbuild/Bun CJS `require()`
+      # that throws under tsx's ESM. `bundle` esbuild-inlines @loreai/core + the
+      # gateway into a single CJS binary (dist/bin.cjs) that runs under plain
+      # Node with instrumentation intact — no separate core build needed.
+      - run: pnpm --filter @loreai/gateway run bundle
       - name: Run Lore semantic linter
         uses: ./.github/actions/invariant-check
         with:
-          # Un-built checkout → run the CLI via tsx.
-          lore-command: "pnpm tsx packages/gateway/src/cli/bin.ts"
+          # Run the built CJS binary under Node (see the build step above).
+          lore-command: "node packages/gateway/dist/bin.cjs"
           # Judge model + credential. Two supported setups:
           #  1. Zero-secret (default): GitHub Models via the built-in
           #     GITHUB_TOKEN + `models: read` above. Uses openai/gpt-4o-mini
