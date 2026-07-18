@@ -654,6 +654,20 @@ export function onKnowledgeTeamPromotionChanged(
   teamPromotionChangedCb = cb;
 }
 
+// E-5-F3 (#1312): notified with the entity ids that LOST their last ref to a knowledge entry when
+// that entry is deleted (remove()). The entity graph's team-scope is derived from the APPROVED
+// knowledge that references each entity (entityTeamScope); once the referencing team-knowledge is
+// tombstoned + its refs dropped, a formerly team-scoped entity may no longer belong to any team and
+// must migrate BACK to personal. remove() deletes the refs (no trigger re-resolves the entity), so
+// the entities/aliases/relations are re-enqueued explicitly for the push to re-resolve their scope.
+// A hook (not a direct import) because sync-data.ts already imports ltm.ts (reverse would be a cycle).
+let knowledgeDeletedCb: ((lostEntityIds: string[]) => void) | null = null;
+export function onKnowledgeDeleted(
+  cb: (lostEntityIds: string[]) => void,
+): void {
+  knowledgeDeletedCb = cb;
+}
+
 /**
  * Approve a knowledge entry for team promotion (manual review). Sets 'approved' + reviewer/time on
  * the current version, in place. Idempotent; returns false if no current row matched the id.
@@ -818,6 +832,11 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
     .query("DELETE FROM knowledge_entity_refs WHERE knowledge_id = ?")
     .run(logicalId);
   for (const entityId of entitiesLosingRef) recomputeEntityRank(entityId);
+  // E-5-F3 (#1312): if any entity just lost its last ref to this (possibly team-scoped) entry, its
+  // team-scope may have changed — re-enqueue the affected entity graph so the push re-resolves each
+  // row's scope and migrates back to personal what no longer belongs to a team. No-op when sync is
+  // disabled (the hook guards on it) or nothing lost a ref.
+  if (entitiesLosingRef.length > 0) knowledgeDeletedCb?.(entitiesLosingRef);
   db()
     .query("DELETE FROM knowledge_refs WHERE from_id = ? OR to_id = ?")
     .run(logicalId, logicalId);

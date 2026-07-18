@@ -31,6 +31,7 @@ import {
 } from "./db";
 import { putWrappedScopeKey } from "./crypto/keystore";
 import {
+  onKnowledgeDeleted,
   onKnowledgeTeamPromotionChanged,
   rematerializeConfidence,
 } from "./ltm";
@@ -1347,6 +1348,54 @@ export function reenqueueKnowledgeTeamGraph(logicalId: string): void {
   );
 }
 onKnowledgeTeamPromotionChanged(reenqueueKnowledgeTeamGraph);
+
+/**
+ * #1312: re-enqueue an entity graph after the entities LOST their last ref to a deleted knowledge
+ * entry (remove()). Unlike reenqueueKnowledgeTeamGraph, the knowledge's refs are already gone, so we
+ * key off the affected ENTITY ids directly (captured pre-delete in ltm.remove). Re-enqueues each
+ * entity, its aliases, and any relation touching it — so the push re-resolves each row's scope
+ * (teamScopeForContent) and migrates back to personal what no longer belongs to a team. Idempotent:
+ * an unchanged row (same scope AND content_hash) short-circuits in the push.
+ */
+export function reenqueueDeletedKnowledgeGraph(entityIds: string[]): void {
+  if (getTeamConfig(ENABLED_KEY) !== "1") return;
+  if (entityIds.length === 0) return;
+  const now = Date.now();
+  const placeholders = entityIds.map(() => "?").join(", ");
+  const enqueue = (sql: string, ...params: unknown[]) =>
+    db()
+      .query(
+        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at) ${sql}`,
+      )
+      .run(...params);
+  // The affected entities (their team-scope may have dropped now the referencing knowledge is gone).
+  // NOTE: remove()'s recomputeEntityRank already UPDATEs each entity and trigger-enqueues it, so this
+  // entity clause is redundant; the LOAD-BEARING part is the aliases + relations below (no trigger
+  // fires for them from a ref delete). Kept for self-documenting parity with reenqueueKnowledgeTeamGraph.
+  enqueue(
+    `SELECT 'entities', e.id, 'upsert', ? FROM entities e
+      WHERE e.id IN (${placeholders}) AND ${remoteBackedGate("e.")}`,
+    now,
+    ...entityIds,
+  );
+  // Their aliases (follow the entity).
+  enqueue(
+    `SELECT 'entity_aliases', a.id, 'upsert', ? FROM entity_aliases a
+      WHERE a.entity_id IN (${placeholders}) AND ${entityParentGate("a.entity_id")}`,
+    now,
+    ...entityIds,
+  );
+  // Relations touching an affected entity (both endpoints gated; the push re-resolves each).
+  enqueue(
+    `SELECT 'entity_relations', r.id, 'upsert', ? FROM entity_relations r
+      WHERE (r.entity_a IN (${placeholders}) OR r.entity_b IN (${placeholders}))
+        AND ${entityParentGate("r.entity_a")} AND ${entityParentGate("r.entity_b")}`,
+    now,
+    ...entityIds,
+    ...entityIds,
+  );
+}
+onKnowledgeDeleted(reenqueueDeletedKnowledgeGraph);
 
 // ---------------------------------------------------------------------------
 // Per-row sync state

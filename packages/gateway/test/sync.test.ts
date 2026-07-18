@@ -2630,6 +2630,88 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
     ).toBe(REMOTE_SCOPE);
     expect(tableRows("entities").filter((r) => r.id === "e1")).toHaveLength(1);
   });
+
+  test("deleting a team entry migrates its now-orphaned entity graph back to personal (#1312)", async () => {
+    const pid = ensureProjectCore("/tmp/lore-f3del");
+    db()
+      .query("UPDATE projects SET git_remote='github.com/x/gdel' WHERE id=?")
+      .run(pid);
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('TD','o','team','TD','auto',0,0)",
+      )
+      .run();
+    setProjectScope(pid, "TD");
+    const kid = ltm.create({
+      projectPath: "/tmp/lore-f3del",
+      category: "pattern",
+      title: "K",
+      content: "c",
+      scope: "project",
+    });
+    // e1 is linked ONLY to K (will orphan on delete); e2 is linked to K AND to a SECOND approved
+    // entry K2 (must STAY in the team after K is deleted).
+    const kid2 = ltm.create({
+      projectPath: "/tmp/lore-f3del",
+      category: "pattern",
+      title: "K2",
+      content: "c2",
+      scope: "project",
+    });
+    for (const e of ["e1", "e2"])
+      db()
+        .query(
+          "INSERT INTO entities (id, project_id, entity_type, canonical_name, created_at, updated_at) VALUES (?,?,'tool',?,0,0)",
+        )
+        .run(e, pid, e);
+    db()
+      .query(
+        "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, 'e1'), (?, 'e2')",
+      )
+      .run(kid, kid);
+    db()
+      .query(
+        "INSERT INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, 'e2')",
+      )
+      .run(kid2);
+    db()
+      .query(
+        "INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, created_at) VALUES ('a1','e1','name','X',0)",
+      )
+      .run();
+    // A relation between e1 (orphans on delete) and e2 (stays team) — team while BOTH are team.
+    db()
+      .query(
+        "INSERT INTO entity_relations (id, entity_a, entity_b, relation, created_at, updated_at) VALUES ('r1','e1','e2','rel',0,0)",
+      )
+      .run();
+
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+    const scopeOf = (t: string, pred: (r: RemoteRow) => boolean) =>
+      tableRows(t).find(pred)?.scope_id;
+    // Auto policy → K and K2 approved on create → the whole linked graph is team-scoped.
+    expect(scopeOf("knowledge", (r) => r.id === kid)).toBe("TD");
+    expect(scopeOf("entities", (r) => r.id === "e1")).toBe("TD");
+    expect(scopeOf("entities", (r) => r.id === "e2")).toBe("TD");
+    expect(scopeOf("entity_aliases", (r) => r.id === "a1")).toBe("TD");
+    expect(scopeOf("entity_relations", (r) => r.id === "r1")).toBe("TD"); // both endpoints team
+
+    // Delete K → e1 (now referenced by NO team knowledge) + its alias migrate back to personal.
+    // e2 stays team (still linked to K2). K's own death-cert stays team-scoped so team peers learn
+    // of the deletion (a tombstone is not a scope migration). The r1 relation migrates to personal
+    // (only one endpoint remains team, and a relation is team-scoped only when BOTH endpoints are).
+    ltm.remove(kid);
+    await pushOnce(makeClient() as never);
+    expect(scopeOf("entities", (r) => r.id === "e1")).toBe(REMOTE_SCOPE); // orphaned → personal
+    expect(scopeOf("entity_aliases", (r) => r.id === "a1")).toBe(REMOTE_SCOPE);
+    expect(scopeOf("entity_relations", (r) => r.id === "r1")).toBe(
+      REMOTE_SCOPE,
+    ); // one endpoint left team
+    expect(scopeOf("entities", (r) => r.id === "e2")).toBe("TD"); // still team (linked to K2)
+    // No team leftover for the orphaned entity.
+    expect(tableRows("entities").filter((r) => r.id === "e1")).toHaveLength(1);
+  });
 });
 
 describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
