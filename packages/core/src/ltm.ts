@@ -2505,11 +2505,17 @@ export async function forSession(
   // fairly and inherit the identical stickyIds hysteresis + deterministic
   // packing below — the system[2] cache stays stable. Synthetic entries carry
   // the RECALLED_CONTEXT_CATEGORY tag and recall-id form ids.
-  if (options?.includeContextSources?.length && contextVec) {
+  //
+  // Runs whenever there is a session context to score against — NOT gated on
+  // contextVec. The FTS fallback inside surfaces facts even when embeddings are
+  // unavailable (worker init window, pre-embed race, non-embedding runtime); the
+  // vector pass adds semantic matches when a vector is present. (#961 Gap 2b)
+  if (options?.includeContextSources?.length && sessionContext.trim()) {
     const contextScored = await timer.await(
       loadContextSourceCandidates(
         pid,
         contextVec,
+        sessionContext,
         options.includeContextSources,
         options.contextSourceLimit ?? CONTEXT_SOURCE_LIMIT,
         sessionID,
@@ -2687,7 +2693,18 @@ const RECALLED_TEMPORAL_MAX_CHARS = 2000;
 
 /**
  * Build synthetic, relevance-scored context entries from non-knowledge sources
- * (distillation, temporal) using the SAME cosine context vector as knowledge.
+ * (distillation, temporal).
+ *
+ * Hybrid scoring, mirroring the knowledge path: when a context vector is
+ * available each source is ranked by cosine similarity; independently, a BM25
+ * keyword pass over the source's FTS index (`distillation_fts` / `temporal_fts`)
+ * folds in matches the vector missed OR that exist when the vector index is
+ * empty/unavailable (embeddings down, worker still initializing, or the row not
+ * yet embedded). This is the durable fix for #961 Gap 2b: without an FTS
+ * fallback, distillation facts never surfaced into system[2] whenever embeddings
+ * were unavailable — the knowledge path degraded to FTS, context-sources did
+ * not. `contextVec` is therefore OPTIONAL; with it absent the FTS pass alone
+ * still surfaces relevant facts.
  *
  * Returned entries are shaped as KnowledgeEntry so they flow through the caller's
  * stickyIds hysteresis + deterministic packing (cache-stable). Ids use recall-id
@@ -2698,7 +2715,8 @@ const RECALLED_TEMPORAL_MAX_CHARS = 2000;
  */
 async function loadContextSourceCandidates(
   pid: string,
-  contextVec: Float32Array,
+  contextVec: Float32Array | undefined,
+  sessionContext: string,
   sources: ContextSource[],
   limit: number,
   _sessionID?: string,
@@ -2743,20 +2761,80 @@ async function loadContextSourceCandidates(
     last_reinforced_at: null,
   });
 
+  // Extract keyword terms once for the FTS fallback passes below. Empty when
+  // the session context is too thin — the FTS passes then no-op and the vector
+  // path (if any) still runs.
+  const ftsTerms = extractTopTerms(sessionContext);
+  const ftsMatch = ftsTerms.length
+    ? ftsTerms.map((t) => `${t}*`).join(" OR ")
+    : null;
+
   if (sources.includes("distillation")) {
     try {
-      // vectorSearchDistillations is NOT project-scoped (distillation_vec
-      // partitions by project but the helper takes no pid), so over-fetch and
-      // filter by project_id in hydration — otherwise another project's
-      // distillation could be injected here (cross-project leak). Temporal is
-      // already project-scoped via vectorSearchTemporal(pid). Follow-up: add a
-      // project-scoped distillation vector search to avoid the over-fetch.
-      const hits = await embedding.vectorSearchDistillations(
-        contextVec,
-        limit * 4,
-      );
-      if (hits.length) {
-        const ids = hits.map((h) => h.id);
+      // Candidate id → best normalized score (0–1), merged across the vector and
+      // FTS passes. A doc that both cosine-matches and keyword-matches keeps the
+      // stronger signal (max), mirroring the knowledge path (Seer #1318). FTS
+      // keyword hits qualify regardless of any vector signal, so facts still
+      // surface when the vector index is empty/unavailable.
+      const scoreById = new Map<string, number>();
+
+      // Vector pass (only when a context vector is available).
+      if (contextVec) {
+        // vectorSearchDistillations takes no pid: the vec0 backend partitions
+        // distillation_vec by project (so results are already project-scoped),
+        // but the legacy blob backend is not — so over-fetch and re-filter by
+        // project_id in hydration below to keep another project's distillation
+        // from leaking in regardless of backend. Temporal is already
+        // project-scoped via vectorSearchTemporal(pid).
+        const hits = await embedding.vectorSearchDistillations(
+          contextVec,
+          limit * 4,
+        );
+        for (const h of hits) {
+          // Match the knowledge path's floor semantics: a context source must
+          // be a POSITIVE cosine at or above the floor. The `<= 0` clause keeps
+          // an exactly-orthogonal (or negative) hit out even when minRelevance
+          // is 0, so context sources and knowledge behave identically.
+          if (h.similarity <= 0 || h.similarity < minRelevance) continue;
+          const prev = scoreById.get(h.id) ?? 0;
+          if (h.similarity > prev) scoreById.set(h.id, h.similarity);
+        }
+      }
+
+      // FTS pass: BM25 keyword fallback over distillation_fts (project-scoped
+      // via the join to distillations). Surfaces facts whenever the vector index
+      // is empty/unavailable, or a keyword-relevant row the vector missed.
+      if (ftsMatch) {
+        const ftsRows = (await offloadAll(
+          `SELECT d.id AS id, bm25(distillation_fts) AS rank
+             FROM distillation_fts f
+             CROSS JOIN distillations d ON d.rowid = f.rowid
+            WHERE distillation_fts MATCH ?
+              AND d.archived = 0 AND d.project_id = ?
+            ORDER BY rank
+            LIMIT ?`,
+          [ftsMatch, pid, limit * 4],
+        )) as Array<{ id: string; rank: number }>;
+        // BM25 rank is negative (more negative = better). Min-max normalize to
+        // 0–1 so FTS and cosine live on the same scale before the max-merge. An
+        // FTS keyword hit is inherently relevant → not subject to minRelevance.
+        if (ftsRows.length) {
+          const ranks = ftsRows.map((r) => r.rank);
+          const minRank = Math.min(...ranks);
+          const maxRank = Math.max(...ranks);
+          for (const r of ftsRows) {
+            const norm =
+              minRank === maxRank
+                ? 1
+                : (maxRank - r.rank) / (maxRank - minRank);
+            const prev = scoreById.get(r.id) ?? 0;
+            if (norm > prev) scoreById.set(r.id, norm);
+          }
+        }
+      }
+
+      if (scoreById.size) {
+        const ids = [...scoreById.keys()];
         const rows = db()
           .query(
             `SELECT id, observations, created_at FROM distillations
@@ -2769,15 +2847,12 @@ async function loadContextSourceCandidates(
           created_at: number;
         }>;
         const byId = new Map(rows.map((r) => [r.id, r]));
+        // Highest score first so the per-source `limit` keeps the best matches.
+        const ranked = [...scoreById.entries()].sort((a, b) => b[1] - a[1]);
         let added = 0;
-        for (const h of hits) {
+        for (const [id, score] of ranked) {
           if (added >= limit) break;
-          // Match the knowledge path's floor semantics: a context source must
-          // be a POSITIVE cosine at or above the floor. The `<= 0` clause keeps
-          // an exactly-orthogonal (or negative) hit out even when minRelevance
-          // is 0, so context sources and knowledge behave identically.
-          if (h.similarity <= 0 || h.similarity < minRelevance) continue;
-          const r = byId.get(h.id);
+          const r = byId.get(id);
           if (!r?.observations) continue;
           out.push({
             entry: mkEntry(
@@ -2786,7 +2861,7 @@ async function loadContextSourceCandidates(
               r.observations,
               r.created_at,
             ),
-            score: h.similarity,
+            score,
           });
           added++;
         }
@@ -2801,31 +2876,78 @@ async function loadContextSourceCandidates(
 
   if (sources.includes("temporal")) {
     try {
-      // Project-wide (sessionId omitted) so facts from EARLIER sessions surface.
-      const hits = await embedding.vectorSearchTemporal(contextVec, pid, limit);
-      if (hits.length) {
-        // temporal_vec is chunk-keyed (`<id>#<n>`); map back to message id.
-        const msgIds = [...new Set(hits.map((h) => h.id.split("#")[0]))];
+      // messageId → best normalized score, merged across vector + FTS passes.
+      const scoreByMsg = new Map<string, number>();
+
+      // Vector pass (only when a context vector is available).
+      if (contextVec) {
+        // Project-wide (sessionId omitted) so facts from EARLIER sessions surface.
+        const hits = await embedding.vectorSearchTemporal(
+          contextVec,
+          pid,
+          limit,
+        );
+        for (const h of hits) {
+          if (h.similarity <= 0 || h.similarity < minRelevance) continue;
+          // temporal_vec is chunk-keyed (`<id>#<n>`); map back to message id.
+          const mid = h.id.split("#")[0];
+          const prev = scoreByMsg.get(mid) ?? 0;
+          if (h.similarity > prev) scoreByMsg.set(mid, h.similarity);
+        }
+      }
+
+      // FTS pass: BM25 keyword fallback over temporal_fts (project-scoped via the
+      // join to temporal_messages). Surfaces cross-session facts whenever the
+      // vector index is empty/unavailable.
+      if (ftsMatch) {
+        const ftsRows = (await offloadAll(
+          `SELECT m.id AS id, bm25(temporal_fts) AS rank
+             FROM temporal_fts f
+             CROSS JOIN temporal_messages m ON m.rowid = f.rowid
+            WHERE temporal_fts MATCH ?
+              AND m.project_id = ?
+            ORDER BY rank
+            LIMIT ?`,
+          [ftsMatch, pid, limit * 4],
+        )) as Array<{ id: string; rank: number }>;
+        if (ftsRows.length) {
+          const ranks = ftsRows.map((r) => r.rank);
+          const minRank = Math.min(...ranks);
+          const maxRank = Math.max(...ranks);
+          for (const r of ftsRows) {
+            const norm =
+              minRank === maxRank
+                ? 1
+                : (maxRank - r.rank) / (maxRank - minRank);
+            const prev = scoreByMsg.get(r.id) ?? 0;
+            if (norm > prev) scoreByMsg.set(r.id, norm);
+          }
+        }
+      }
+
+      if (scoreByMsg.size) {
+        const msgIds = [...scoreByMsg.keys()];
         const rows = db()
           .query(
+            // Defense-in-depth: re-filter by project_id at hydration (mirrors the
+            // distillation hydration above). Both passes that populate scoreByMsg
+            // are already project-scoped, but this makes temporal robust to a
+            // future unscoped signal source rather than relying on upstream only.
             `SELECT id, role, content, created_at FROM temporal_messages
-             WHERE id IN (${msgIds.map(() => "?").join(",")})`,
+             WHERE project_id = ?
+               AND id IN (${msgIds.map(() => "?").join(",")})`,
           )
-          .all(...msgIds) as Array<{
+          .all(pid, ...msgIds) as Array<{
           id: string;
           role: string;
           content: string | null;
           created_at: number;
         }>;
         const byId = new Map(rows.map((r) => [r.id, r]));
-        const seen = new Set<string>();
-        for (const h of hits) {
-          // Match the knowledge path's floor semantics (positive cosine at or
-          // above the floor); see the distillation source above.
-          if (h.similarity <= 0 || h.similarity < minRelevance) continue;
-          const mid = h.id.split("#")[0];
-          if (seen.has(mid)) continue;
-          seen.add(mid);
+        const ranked = [...scoreByMsg.entries()].sort((a, b) => b[1] - a[1]);
+        let added = 0;
+        for (const [mid, score] of ranked) {
+          if (added >= limit) break;
           const r = byId.get(mid);
           if (!r?.content) continue;
           const content =
@@ -2839,8 +2961,9 @@ async function loadContextSourceCandidates(
               content,
               r.created_at,
             ),
-            score: h.similarity,
+            score,
           });
+          added++;
         }
       }
     } catch (err) {

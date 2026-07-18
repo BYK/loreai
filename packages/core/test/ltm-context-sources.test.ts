@@ -292,6 +292,11 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     // zero test coverage — a regression there would pass CI. Drive both hits
     // BELOW the default floor (0.35) and assert neither synthetic surfaces,
     // while knowledge (above floor) still does.
+    //
+    // Use a keyword-DISJOINT hint so the FTS fallback pass (which is inherently
+    // relevant and bypasses the cosine floor) does NOT independently match these
+    // facts — otherwise the FTS pass would legitimately surface them and this
+    // test could no longer isolate the vector floor. (#961 Gap 2b)
     vi.spyOn(embedding, "vectorSearchDistillations").mockResolvedValue([
       { id: distId, similarity: 0.1 },
     ]);
@@ -300,7 +305,7 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     ]);
     const result = await ltm.forSession(PROJ, undefined, 4000, {
       excludeCategories: ["preference"],
-      contextHint: HINT,
+      contextHint: "gateway proxy memory injection architecture overview",
       includeContextSources: ["distillation", "temporal"],
     });
     const byId = new Set(result.map((e) => e.id));
@@ -315,6 +320,7 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     // when the floor is disabled, a cosine-0 (orthogonal) or negative hit must
     // still be excluded from the context-source fold — `h.similarity < 0` alone
     // would admit it. Guards the `<= 0` clause on both source guards.
+    // Keyword-disjoint hint so the FTS fallback doesn't independently match.
     const orig = config().knowledge.minRelevance;
     config().knowledge.minRelevance = 0;
     try {
@@ -326,7 +332,7 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
       ]);
       const result = await ltm.forSession(PROJ, undefined, 4000, {
         excludeCategories: ["preference"],
-        contextHint: HINT,
+        contextHint: "gateway proxy memory injection architecture overview",
         includeContextSources: ["distillation", "temporal"],
       });
       const byId = new Set(result.map((e) => e.id));
@@ -335,5 +341,122 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     } finally {
       config().knowledge.minRelevance = orig;
     }
+  });
+
+  test("FTS fallback: facts surface when embeddings are UNAVAILABLE (no vector) via keyword match (#961 Gap 2b)", async () => {
+    // The core Gap 2b fix: with embeddings down, contextVec is never built and
+    // the vector pass is skipped entirely. The FTS keyword pass over
+    // distillation_fts / temporal_fts must still surface the keyword-relevant
+    // facts into system[2]. HINT shares "hex color" (dist) and "tests" (temporal).
+    for (const s of spies) s.mockRestore();
+    spies = [];
+    // Embeddings unavailable → forSession skips embed()/vectorSearch* entirely.
+    spies.push(vi.spyOn(embedding, "isAvailable").mockReturnValue(false));
+    const distSpy = vi.spyOn(embedding, "vectorSearchDistillations");
+    const tempSpy = vi.spyOn(embedding, "vectorSearchTemporal");
+
+    const result = await ltm.forSession(PROJ, undefined, 4000, {
+      excludeCategories: ["preference"],
+      contextHint: HINT,
+      includeContextSources: ["distillation", "temporal"],
+    });
+    const byId = new Set(result.map((e) => e.id));
+    // The vector helpers must NOT have been called (no contextVec).
+    expect(distSpy).not.toHaveBeenCalled();
+    expect(tempSpy).not.toHaveBeenCalled();
+    // Yet both facts surface via the FTS fallback.
+    expect(byId.has(`d:${distId}`)).toBe(true);
+    expect(byId.has(`t:${tempId}`)).toBe(true);
+    distSpy.mockRestore();
+    tempSpy.mockRestore();
+  });
+
+  test("VACUITY: FTS fallback does NOT surface facts whose keywords are absent from the context", async () => {
+    // Guards against the FTS pass folding in EVERY distillation regardless of
+    // relevance. With embeddings unavailable and a keyword-disjoint hint, the
+    // BM25 MATCH finds nothing → no synthetic context sources.
+    for (const s of spies) s.mockRestore();
+    spies = [];
+    spies.push(vi.spyOn(embedding, "isAvailable").mockReturnValue(false));
+
+    const result = await ltm.forSession(PROJ, undefined, 4000, {
+      excludeCategories: ["preference"],
+      contextHint: "completely unrelated zephyr quokka umbrella syzygy",
+      includeContextSources: ["distillation", "temporal"],
+    });
+    const byId = new Set(result.map((e) => e.id));
+    expect(byId.has(`d:${distId}`)).toBe(false);
+    expect(byId.has(`t:${tempId}`)).toBe(false);
+  });
+
+  test("SECURITY: FTS fallback never surfaces distillation/temporal facts from ANOTHER project", async () => {
+    // The FTS pass must be project-scoped (both the MATCH query WHERE clause and
+    // hydration). Plant a foreign-project distillation + temporal message that
+    // share keywords with HINT ("hex color" / "tests"), run forSession on PROJ
+    // with embeddings DOWN (so only the FTS path runs), and assert neither
+    // foreign fact leaks into PROJ's system[2]. Mutation-verified: dropping the
+    // project_id filter from either FTS query surfaces the foreign rows.
+    const otherProj = "/test/ltm/context-sources-OTHER";
+    const otherPid = ensureProject(otherProj);
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(otherPid);
+    db()
+      .query("DELETE FROM temporal_messages WHERE project_id = ?")
+      .run(otherPid);
+
+    const foreignDist = uuidv7();
+    db()
+      .query(
+        `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, archived, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        foreignDist,
+        otherPid,
+        "sess-foreign",
+        "",
+        "",
+        "the OTHER project also used hex color #deadbe in its theme",
+        "[]",
+        0,
+        20,
+        0,
+        Date.now() - 100_000,
+      );
+
+    const foreignTemp = uuidv7();
+    db()
+      .query(
+        `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         VALUES (?, ?, ?, 'assistant', ?, 12, 0, ?, '{}')`,
+      )
+      .run(
+        foreignTemp,
+        otherPid,
+        "sess-foreign",
+        "42 SHA-256 tests pass in the OTHER project",
+        Date.now() - 90_000,
+      );
+
+    for (const s of spies) s.mockRestore();
+    spies = [];
+    spies.push(vi.spyOn(embedding, "isAvailable").mockReturnValue(false));
+
+    const result = await ltm.forSession(PROJ, undefined, 4000, {
+      excludeCategories: ["preference"],
+      contextHint: HINT, // shares "hex color" / "tests" with the foreign rows
+      includeContextSources: ["distillation", "temporal"],
+    });
+    const byId = new Set(result.map((e) => e.id));
+    // PROJ's own facts DO surface (same keywords) — proves the FTS pass ran.
+    expect(byId.has(`d:${distId}`)).toBe(true);
+    expect(byId.has(`t:${tempId}`)).toBe(true);
+    // The foreign project's facts must NOT leak in.
+    expect(byId.has(`d:${foreignDist}`)).toBe(false);
+    expect(byId.has(`t:${foreignTemp}`)).toBe(false);
+
+    db().query("DELETE FROM distillations WHERE project_id = ?").run(otherPid);
+    db()
+      .query("DELETE FROM temporal_messages WHERE project_id = ?")
+      .run(otherPid);
   });
 });
