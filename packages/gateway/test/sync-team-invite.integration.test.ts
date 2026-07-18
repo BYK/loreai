@@ -373,6 +373,44 @@ describe.skipIf(SKIP)("lore team — direct email invite (E-5-c)", () => {
     });
     expect(selfIns.error).toBeNull();
   });
+
+  it("revokes the scope's outstanding invite tokens on member removal (F-2, #1345)", async () => {
+    // A removed member (or anyone holding a live/leaked token) must not be able to re-join via a
+    // still-valid invite. remove_scope_member now wipes ALL of the scope's pending_invites.
+    const scope = await freshAdminTeam("Revoke-On-Remove");
+    await addTeamMember(clientFor(admin), scope, invitee, "editor");
+    // An admin mints an outstanding invite (for some future member) that is still live.
+    const token = await createTeamInvite(clientFor(admin), scope, "editor");
+    expect(
+      await h.client
+        .query(
+          "select count(*)::int n from public.pending_invites where scope_id=$1",
+          [scope],
+        )
+        .then((r) => r.rows[0].n),
+    ).toBe(1);
+    // Admin removes the member → the removal revokes ALL of the scope's outstanding tokens.
+    const { error: rmErr } = await clientFor(admin).rpc("remove_scope_member", {
+      p_scope: scope,
+      p_user: invitee,
+    });
+    expect(rmErr).toBeNull();
+    expect(
+      await h.client
+        .query(
+          "select count(*)::int n from public.pending_invites where scope_id=$1",
+          [scope],
+        )
+        .then((r) => r.rows[0].n),
+    ).toBe(0);
+    // The revoked token can no longer be redeemed (fails identically to an unknown/expired one).
+    mockUid = invitee;
+    await expect(acceptTeamInvite(clientFor(invitee), token)).rejects.toThrow(
+      /invalid or expired invite/,
+    );
+    // And the invitee is NOT a member of the scope (the removal + revoke held).
+    expect(await remoteRole(scope, invitee)).toBeUndefined();
+  });
 });
 
 describe.skipIf(SKIP)("lore team — offline invite (E-5-c-2)", () => {
