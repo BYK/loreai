@@ -15,6 +15,10 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  # Lets the built-in GITHUB_TOKEN call GitHub Models (models.github.ai) as the
+  # zero-secret default judge. Harmless when a dedicated LORE_WORKER_API_KEY is
+  # configured (that path ignores the token).
+  models: read
 
 jobs:
   invariant-check:
@@ -37,7 +41,27 @@ jobs:
         with:
           # Un-built checkout → run the CLI via tsx.
           lore-command: "pnpm tsx packages/gateway/src/cli/bin.ts"
-          # Cheap judge; Haiku had the best recall in eval. Configure the key as
-          # a repo secret. Absent → the check no-ops (no auth) and still passes.
-          model: "anthropic/claude-haiku-4.5"
-          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY }}
+          # Judge model + credential. Two supported setups:
+          #  1. Zero-secret (default): GitHub Models via the built-in
+          #     GITHUB_TOKEN + `models: read` above. Uses openai/gpt-4o-mini
+          #     (20/20 recall in eval; no Haiku on the platform). Note the free
+          #     tier is rate-limited (~150 req/day) — fine for low-traffic repos.
+          #     On fork PRs the token is read-only and may lack model inference;
+          #     the judge then no-ops (advisory → still passes), never breaks CI.
+          #  2. Dedicated key (busy repos): set the LORE_WORKER_API_KEY secret.
+          #     It takes precedence, and the judge model is whatever you set in
+          #     the `LORE_INVARIANT_MODEL` repo variable (e.g.
+          #     anthropic/claude-haiku-4.5); if that variable is unset the CLI
+          #     falls back to the repo's configured default worker model.
+          #
+          # Model precedence (independent of the credential):
+          #   - `LORE_INVARIANT_MODEL` var set     → use it (either credential).
+          #   - else no dedicated key              → github-models/openai/gpt-4o-mini
+          #     (the token is a GitHub token; a github-models id is required so
+          #     the CLI sends it as Bearer to models.github.ai).
+          #   - else (dedicated key, no var)       → empty → CLI's configured
+          #     default worker model, authed with the dedicated key.
+          # This avoids the trap of pairing a dedicated (e.g. Anthropic) key with
+          # a forced github-models id, which would 401 and silently no-op.
+          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-models/openai/gpt-4o-mini' || '') }}
+          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}

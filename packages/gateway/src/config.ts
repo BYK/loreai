@@ -553,6 +553,13 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   // --- OpenAI protocol ---
   deepseek: { url: "https://api.deepseek.com", protocol: "openai" },
   xai: { url: "https://api.x.ai", protocol: "openai" },
+  // GitHub Models (https://models.github.ai) — OpenAI-Chat-shaped, but served
+  // at `/inference/chat/completions` (no `/v1`) and requires two static headers.
+  // The origin is registered here; the non-`/v1` path is applied by
+  // OPENAI_HOST_CHAT_COMPLETIONS_PATHS and the headers by isGitHubModelsHost,
+  // both in translate/openai.ts. Auth is a GitHub token (`GITHUB_TOKEN` in CI)
+  // carried as a Bearer credential.
+  "github-models": { url: "https://models.github.ai", protocol: "openai" },
   groq: { url: "https://api.groq.com/openai", protocol: "openai" },
   cerebras: { url: "https://api.cerebras.ai", protocol: "openai" },
   openrouter: { url: "https://openrouter.ai/api", protocol: "openai" },

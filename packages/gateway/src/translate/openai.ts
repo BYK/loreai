@@ -502,8 +502,43 @@ const DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
  * purely via its `X-Lore-Provider` route with no preserved endpoint path.
  */
 const OPENAI_HOST_CHAT_COMPLETIONS_PATHS: ReadonlyMap<string, string> = new Map(
-  [["generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"]],
+  [
+    ["generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"],
+    // GitHub Models serves Chat Completions at `/inference/chat/completions`
+    // (no `/v1`). Registering the origin `https://models.github.ai` in the
+    // route table + this mapping reconstructs the correct URL on the worker path.
+    ["models.github.ai", "/inference/chat/completions"],
+  ],
 );
+
+/**
+ * GitHub Models (https://models.github.ai) is OpenAI-Chat-shaped but requires
+ * two static headers on every request (in addition to the Bearer token):
+ * `Accept: application/vnd.github+json` and `X-GitHub-Api-Version`. Scoped to
+ * this single host so the headers never ride along on other OpenAI providers
+ * (mirrors how the Copilot/Gemini paths special-case by host). */
+export function isGitHubModelsHost(hostname: string): boolean {
+  return hostname === "models.github.ai";
+}
+
+/** The API version pinned for GitHub Models requests. */
+export const GITHUB_MODELS_API_VERSION = "2026-03-10";
+
+/** Static headers GitHub Models requires beyond auth. Empty for every other
+ *  host, so callers can spread the result unconditionally. */
+export function gitHubModelsHeaders(url: string): Record<string, string> {
+  try {
+    if (isGitHubModelsHost(new URL(url).hostname)) {
+      return {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": GITHUB_MODELS_API_VERSION,
+      };
+    }
+  } catch {
+    // Unparseable URL — add nothing.
+  }
+  return {};
+}
 
 /**
  * GitHub Copilot serves Chat Completions at `/chat/completions` (NO `/v1`) on
@@ -639,6 +674,11 @@ export function buildOpenAIUpstreamRequest(
       body.top_logprobs = req.extras.top_logprobs;
     }
   }
+
+  // GitHub Models needs Accept + X-GitHub-Api-Version (scoped to models.github.ai;
+  // a no-op for every other host). Overlaid last so the pinned api-version wins
+  // over any forwarded client value.
+  Object.assign(headers, gitHubModelsHeaders(upstreamBase));
 
   return {
     url: buildOpenAIChatCompletionsUrl(upstreamBase),

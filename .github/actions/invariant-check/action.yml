@@ -21,8 +21,11 @@ inputs:
     default: ""
   worker-api-key:
     description: >-
-      Dedicated judge credential (sets LORE_WORKER_API_KEY). Required in CI —
-      the gateway has no client session to borrow auth from.
+      Judge credential (sets LORE_WORKER_API_KEY). In CI the gateway has no
+      client session to borrow auth from, so a credential is required to run the
+      judge. The reference workflow defaults this to the built-in GITHUB_TOKEN
+      and uses GitHub Models (models.github.ai) with `github-models/...` model
+      ids — zero-secret onboarding — or a dedicated provider key when set.
     required: false
     default: ""
   lore-command:
