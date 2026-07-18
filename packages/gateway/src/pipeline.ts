@@ -219,6 +219,7 @@ import {
   setSessionAuth,
   resolveAuth,
   isAuthStale,
+  workerKeyScheme,
   type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
@@ -2422,7 +2423,15 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       sessionID?: string,
       providerID?: string,
     ) => AuthCredential | null = workerApiKey
-      ? () => ({ scheme: "api-key", value: workerApiKey })
+      ? (_sessionID, providerID) => ({
+          // Scheme is provider-aware: a GitHub-Models worker needs the key as a
+          // Bearer token; every other provider uses api-key (x-api-key), the
+          // long-standing dedicated-key shape. getAuth is invoked with the
+          // worker MODEL's providerID (see llm-adapter), so this resolves per
+          // worker call, not once at setup.
+          scheme: workerKeyScheme(providerID),
+          value: workerApiKey,
+        })
       : resolveAuth;
 
     // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker

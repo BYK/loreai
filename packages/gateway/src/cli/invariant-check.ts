@@ -22,7 +22,7 @@ import {
   invariantCheck,
 } from "@loreai/core";
 import { createGatewayLLMClient } from "../llm-adapter";
-import { type AuthCredential, resolveAuth } from "../auth";
+import { type AuthCredential, resolveAuth, workerKeyScheme } from "../auth";
 import { startGateway, type StartOptions } from "./start";
 
 type CheckResult = invariantCheck.CheckResult;
@@ -111,17 +111,19 @@ export async function commandInvariantCheck(
   // Judge auth. In CI there is no client session, so bare resolveAuth() returns
   // null and every judge call is skipped as "no-auth". Honor LORE_WORKER_API_KEY
   // (the GHA sets it to the judge credential) the same way the pipeline's
-  // getWorkerAuth does. Scheme is provider-aware: GitHub Models authenticates
-  // with a GitHub token as `Authorization: Bearer` (scheme "bearer"), whereas
-  // the default OpenAI/Anthropic worker key path uses "api-key" (x-api-key).
+  // getWorkerAuth does. Scheme is provider-aware via the shared workerKeyScheme:
+  // GitHub Models needs the key as `Authorization: Bearer`; every other provider
+  // uses api-key (x-api-key). Resolve per call on the worker model's provider,
+  // falling back to the judge's default provider.
   const workerKey = config.workerApiKey;
-  const judgeScheme: AuthCredential["scheme"] =
-    defaultModel.providerID === "github-models" ? "bearer" : "api-key";
   const judgeAuth: (
     sessionID?: string,
     providerID?: string,
   ) => AuthCredential | null = workerKey
-    ? () => ({ scheme: judgeScheme, value: workerKey })
+    ? (_sessionID, providerID) => ({
+        scheme: workerKeyScheme(providerID ?? defaultModel.providerID),
+        value: workerKey,
+      })
     : resolveAuth;
 
   const llm = createGatewayLLMClient(

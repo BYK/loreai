@@ -13,6 +13,7 @@ import {
   markGlobalAuthStale,
   isGlobalAuthStale,
   _resetAuthForTest,
+  workerKeyScheme,
   type AuthCredential,
 } from "../src/auth";
 
@@ -557,5 +558,24 @@ describe("global auth staleness", () => {
 
     _resetAuthForTest();
     expect(isGlobalAuthStale()).toBe(false);
+  });
+});
+
+describe("workerKeyScheme (dedicated-key provider→scheme)", () => {
+  test("github-models needs a Bearer token", () => {
+    expect(workerKeyScheme("github-models")).toBe("bearer");
+  });
+
+  test("every other provider uses api-key (x-api-key)", () => {
+    for (const p of [
+      "anthropic",
+      "openai",
+      "minimax",
+      "deepseek",
+      "openrouter",
+      undefined,
+    ]) {
+      expect(workerKeyScheme(p)).toBe("api-key");
+    }
   });
 });

@@ -20,6 +20,7 @@ import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts } from "../src/cost-tracker";
 import { resetBackgroundLimiter } from "../src/background-limiter";
 import { GITHUB_MODELS_API_VERSION } from "../src/translate/openai";
+import { workerKeyScheme } from "../src/auth";
 
 const mockFetch = vi.mocked(upstreamFetch);
 
@@ -125,5 +126,37 @@ describe("worker GitHub Models routing (#1368)", () => {
     const headers = callHeaders(0);
     expect(headers.Accept).toBeUndefined();
     expect(headers["X-GitHub-Api-Version"]).toBeUndefined();
+  });
+
+  test("a dedicated worker key routed to github-models is sent as Bearer, not x-api-key", async () => {
+    // Reproduces the pipeline/CLI getWorkerAuth wiring: a single dedicated key
+    // whose SCHEME is chosen per worker-model provider via workerKeyScheme.
+    // Regression guard for Seer #1373 CRITICAL — the pipeline previously
+    // hardcoded scheme "api-key", so a github-models worker sent x-api-key and
+    // got 401.
+    const WORKER_KEY = "ghp_dedicated";
+    const getWorkerAuth = (_sid?: string, providerID?: string) => ({
+      scheme: workerKeyScheme(providerID),
+      value: WORKER_KEY,
+    });
+
+    const client = createGatewayLLMClient(UPSTREAMS, getWorkerAuth, {
+      providerID: "github-models",
+      modelID: "openai/gpt-4o-mini",
+    });
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-ghm-dedicated",
+      workerID: "lore-distill",
+      model: { providerID: "github-models", modelID: "openai/gpt-4o-mini" },
+    });
+
+    const headers = callHeaders(0);
+    // Bearer, NOT x-api-key.
+    expect(headers.Authorization).toBe(`Bearer ${WORKER_KEY}`);
+    expect(headers["x-api-key"]).toBeUndefined();
+    // And still carries the required GitHub Models headers.
+    expect(headers.Accept).toBe("application/vnd.github+json");
+    expect(headers["X-GitHub-Api-Version"]).toBe(GITHUB_MODELS_API_VERSION);
   });
 });
