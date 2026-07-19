@@ -283,3 +283,21 @@ describe("load — reads config from .lore.json", () => {
     expect(cfg.agentsFile.path).toBe("auto");
   });
 });
+
+describe("LoreConfig — invariantCheck schema", () => {
+  test("defaults: effort=off when omitted", () => {
+    const cfg = LoreConfig.parse({});
+    expect(cfg.invariantCheck.effort).toBe("off");
+  });
+
+  test("effort can be set to a reasoning level", () => {
+    const cfg = LoreConfig.parse({ invariantCheck: { effort: "high" } });
+    expect(cfg.invariantCheck.effort).toBe("high");
+  });
+
+  test("rejects an unknown effort value", () => {
+    expect(() =>
+      LoreConfig.parse({ invariantCheck: { effort: "ultra" } }),
+    ).toThrow();
+  });
+});

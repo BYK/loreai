@@ -20,6 +20,8 @@ import {
   embedding,
   importLoreFile,
   invariantCheck,
+  parseReasoningEffort,
+  type ReasoningEffort,
 } from "@loreai/core";
 import { createGatewayLLMClient } from "../llm-adapter";
 import { type AuthCredential, resolveAuth, workerKeyScheme } from "../auth";
@@ -48,6 +50,17 @@ export async function commandInvariantCheck(
   const projectPath = resolve((values.project as string) ?? process.cwd());
   const asJson = !!values.json;
   const modelOverride = parseModel(values.model as string | undefined);
+  // Reasoning effort: --effort overrides the `invariantCheck.effort` config,
+  // which defaults to "off". An unrecognized --effort value is a hard error
+  // (fail fast on a typo rather than silently running with the wrong dial).
+  const effortRaw = values.effort as string | undefined;
+  const effortOverride = parseReasoningEffort(effortRaw);
+  if (effortRaw != null && effortOverride == null) {
+    console.error(
+      `[lore] Invalid --effort "${effortRaw}". Use one of: off, low, medium, high, xhigh.`,
+    );
+    process.exit(1);
+  }
   // CI flow: no local lore.db exists, so seed the active DB (LORE_DB_PATH,
   // typically an actions/cache path) from the repo's `.lore.md`. Deriving
   // embeddings is fire-and-forget, so we drain them below before the funnel —
@@ -107,6 +120,8 @@ export async function commandInvariantCheck(
   }
   const defaultModel = modelOverride ??
     cfg.model ?? { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+  const effectiveEffort: ReasoningEffort =
+    effortOverride ?? cfg.invariantCheck.effort;
 
   // Judge auth. In CI there is no client session, so bare resolveAuth() returns
   // null and every judge call is skipped as "no-auth". Honor LORE_WORKER_API_KEY
@@ -143,6 +158,7 @@ export async function commandInvariantCheck(
       range,
       llm,
       model: defaultModel,
+      effort: effectiveEffort,
       sessionID: `invariant-check-${Date.now()}`,
       onJudge: (n, total) => {
         process.stderr.write(`\r[lore]   judging ${n}/${total}...`);
@@ -174,6 +190,7 @@ export async function commandInvariantCheck(
       JSON.stringify(
         {
           model: `${defaultModel.providerID}/${defaultModel.modelID}`,
+          effort: effectiveEffort,
           elapsedMs,
           gate,
           ...result,
@@ -191,7 +208,7 @@ export async function commandInvariantCheck(
     return;
   }
 
-  printReport(result, defaultModel, elapsedMs, gate);
+  printReport(result, defaultModel, elapsedMs, gate, effectiveEffort);
   process.exitCode = gate.exitCode;
 }
 
@@ -200,6 +217,7 @@ function printReport(
   model: { providerID: string; modelID: string },
   elapsedMs: number,
   gate: invariantCheck.GateResult,
+  effort: ReasoningEffort,
 ): void {
   const { findings } = result;
   console.log("");
@@ -209,7 +227,7 @@ function printReport(
       `${result.candidates} candidates → ${result.judgeCalls} judge calls`,
   );
   console.log(
-    `Model: ${model.providerID}/${model.modelID}   Time: ${(elapsedMs / 1000).toFixed(1)}s   Mode: ${gate.mode}`,
+    `Model: ${model.providerID}/${model.modelID}   Effort: ${effort}   Time: ${(elapsedMs / 1000).toFixed(1)}s   Mode: ${gate.mode}`,
   );
   console.log("─".repeat(64));
 

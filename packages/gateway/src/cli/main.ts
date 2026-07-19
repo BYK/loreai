@@ -112,6 +112,7 @@ const OPTIONS = {
   base: { type: "string" as const },
   head: { type: "string" as const },
   model: { type: "string" as const },
+  effort: { type: "string" as const },
   "import-lore-md": { type: "boolean" as const },
   gate: { type: "boolean" as const },
   "dry-run": { type: "boolean" as const },

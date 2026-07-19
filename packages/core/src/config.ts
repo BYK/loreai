@@ -931,6 +931,21 @@ export const LoreConfig = z.object({
     .describe(
       "User identity for the self-entity. Falls back to git config user.name / user.email if omitted.",
     ),
+  invariantCheck: z
+    .object({
+      /** Reasoning effort for the `lore invariant-check` judge. A cost/depth
+       *  dial on reasoning-capable models: `off` (default) sends no reasoning
+       *  param; higher values trade cost for depth. Overridable per-run via
+       *  `--effort`. Ignored by non-reasoning models (e.g. gpt-4o-mini). */
+      effort: z
+        .enum(["off", "low", "medium", "high", "xhigh"])
+        .default("off")
+        .describe(
+          "Reasoning effort for the invariant-check judge (off|low|medium|high|xhigh). Trades cost for depth on reasoning-capable models. Default: off. Override per-run with --effort.",
+        ),
+    })
+    .default({ effort: "off" })
+    .describe("`lore invariant-check` (semantic linter) tuning."),
 });
 
 export type LoreConfig = z.infer<typeof LoreConfig>;

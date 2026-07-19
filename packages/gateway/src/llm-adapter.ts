@@ -21,6 +21,8 @@
 
 import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
+import { anthropicThinkingBudget, openAIReasoningEffort } from "@loreai/core";
+import type { ReasoningEffort } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders, markAuthStale, markGlobalAuthStale } from "./auth";
@@ -384,6 +386,11 @@ const DEFAULT_MAX_RETRIES = 8;
  */
 const DEFAULT_WORKER_MAX_TOKENS = 16384;
 
+// Visible-output headroom added on top of an extended-thinking budget so the
+// model has room for the actual answer after reasoning (Anthropic counts thinking
+// against max_tokens). Mirrors pipeline.ts's THINKING_OUTPUT_HEADROOM.
+const THINKING_OUTPUT_HEADROOM = 8192;
+
 /**
  * Resolve the retry budget. `LORE_MAX_RETRIES` overrides the default; values
  * that are non-numeric, negative, or zero fall back to the default (we never
@@ -729,6 +736,7 @@ function buildAnthropicWorkerRequest(
   sessionID?: string,
   temperature?: number,
   disableThinking = false,
+  reasoningEffort?: ReasoningEffort,
 ): { url: string; headers: Record<string, string>; body: string } {
   // For bearer tokens (Claude Code OAuth), inject the billing header
   // as the first system block with a cch=00000 placeholder that gets
@@ -778,11 +786,31 @@ function buildAnthropicWorkerRequest(
   // accepted (and a no-op) by all current Claude models; a rare model that
   // rejects the param (older claude-3.x) is learned via a one-shot 400 retry in
   // the loop, which then passes `disableThinking=false` here.
+  // Extended thinking, opt-in via reasoning effort. When a budget is set the
+  // caller wants the model to reason — this OVERRIDES the default worker
+  // disable-thinking suppression. Anthropic constraints when thinking is on:
+  //   1. max_tokens MUST exceed budget_tokens — the judge's tiny 256-token cap
+  //      would otherwise 400, so we raise max_tokens to budget + headroom.
+  //   2. temperature must be unset (only the default is allowed) — so we drop it.
+  // Caveat: budget+headroom for `xhigh` is ~41K; a model whose output ceiling is
+  // below that would 400. Not guarded here (we lack the per-model ceiling on the
+  // worker path), but the effort budgets stay well under the common 64K ceiling
+  // and the invariant-check judge — the only effort caller — degrades a judge 400
+  // to a safe "no finding" (advisory: never fails the build).
+  const thinkingBudget = anthropicThinkingBudget(reasoningEffort);
+  const thinkingEnabled = thinkingBudget != null;
+  const effectiveMaxTokens = thinkingEnabled
+    ? Math.max(maxTokens, thinkingBudget + THINKING_OUTPUT_HEADROOM)
+    : maxTokens;
+
   let body = JSON.stringify({
     model: upstreamModelID,
-    max_tokens: maxTokens,
-    ...(temperature != null && { temperature }),
-    ...(disableThinking && { thinking: { type: "disabled" } }),
+    max_tokens: effectiveMaxTokens,
+    // temperature is incompatible with extended thinking — omit when enabled.
+    ...(temperature != null && !thinkingEnabled && { temperature }),
+    ...(thinkingEnabled
+      ? { thinking: { type: "enabled", budget_tokens: thinkingBudget } }
+      : disableThinking && { thinking: { type: "disabled" } }),
     system: systemPayload,
     messages: [{ role: "user", content: user }],
   });
@@ -873,6 +901,7 @@ function buildOpenAIWorkerRequest(
   user: string,
   maxTokens: number,
   temperature?: number,
+  reasoningEffort?: ReasoningEffort,
 ): { url: string; headers: Record<string, string>; body: string } {
   const messages: Array<{ role: string; content: string }> = [];
   if (system) messages.push({ role: "system", content: system });
@@ -895,6 +924,11 @@ function buildOpenAIWorkerRequest(
       ? { provider: { sort: "price" } }
       : undefined;
 
+  // Reasoning models honor `reasoning_effort`; non-reasoning models (gpt-4o-mini,
+  // the CI default) silently ignore it. `off`/undefined → omit. `xhigh` clamps to
+  // `high` (not a standard OpenAI value) inside openAIReasoningEffort.
+  const effort = openAIReasoningEffort(reasoningEffort);
+
   return {
     // Background workers have no original request to forward verbatim, so the
     // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052;
@@ -912,6 +946,7 @@ function buildOpenAIWorkerRequest(
       max_completion_tokens: maxTokens,
       stream: false,
       ...(temperature != null && { temperature }),
+      ...(effort != null && { reasoning_effort: effort }),
       messages,
       ...providerPrefs,
     }),
@@ -1191,6 +1226,7 @@ async function buildVertexWorkerRequest(
   vertexProject?: string,
   temperature?: number,
   disableThinking = false,
+  reasoningEffort?: ReasoningEffort,
 ): Promise<{ url: string; headers: Record<string, string>; body: string }> {
   const region = vertexRegionFromUrl(target.url) ?? "global";
   const project = await resolveVertexProject(vertexProject ?? "");
@@ -1203,6 +1239,8 @@ async function buildVertexWorkerRequest(
   }
   const vertexModel = toVertexModelId(model.modelID);
   const token = await getVertexAccessToken();
+  const vertexThinkingBudget = anthropicThinkingBudget(reasoningEffort) ?? 0;
+  const vertexThinkingEnabled = vertexThinkingBudget > 0;
   // Worker system prompt is static across bursts → cache it. Use bare ephemeral
   // (5m) rather than the 1h extended-ttl beta of uncertain Vertex support.
   const systemBlocks = system
@@ -1216,13 +1254,18 @@ async function buildVertexWorkerRequest(
     : undefined;
   const body = JSON.stringify(
     toVertexBody({
-      max_tokens: maxTokens,
-      ...(temperature != null && { temperature }),
+      max_tokens: vertexThinkingEnabled
+        ? Math.max(maxTokens, vertexThinkingBudget + THINKING_OUTPUT_HEADROOM)
+        : maxTokens,
+      // temperature is incompatible with extended thinking — omit when enabled.
+      ...(temperature != null && !vertexThinkingEnabled && { temperature }),
       // Vertex serves Claude over the Anthropic Messages body shape, so the same
-      // adaptive-thinking-on-by-default applies (sonnet-5). `thinking:{type:
-      // "disabled"}` passes through toVertexBody and turns it off. See
-      // buildAnthropicWorkerRequest for the full rationale.
-      ...(disableThinking && { thinking: { type: "disabled" } }),
+      // adaptive-thinking-on-by-default applies (sonnet-5). A reasoning-effort
+      // budget enables thinking (overriding the default disable); otherwise
+      // `thinking:{type:"disabled"}` turns it off. See buildAnthropicWorkerRequest.
+      ...(vertexThinkingEnabled
+        ? { thinking: { type: "enabled", budget_tokens: vertexThinkingBudget } }
+        : disableThinking && { thinking: { type: "disabled" } }),
       system: systemBlocks,
       messages: [{ role: "user", content: user }],
     }),
@@ -1260,6 +1303,7 @@ async function buildWorkerRequest(
   temperature?: number,
   vertexProject?: string,
   disableThinking = false,
+  reasoningEffort?: ReasoningEffort,
 ): Promise<{ url: string; headers: Record<string, string>; body: string }> {
   switch (target.protocol) {
     case "openai-codex-responses":
@@ -1282,6 +1326,7 @@ async function buildWorkerRequest(
         user,
         maxTokens,
         temperature,
+        reasoningEffort,
       );
     case "vertex":
       return buildVertexWorkerRequest(
@@ -1293,6 +1338,7 @@ async function buildWorkerRequest(
         vertexProject,
         temperature,
         disableThinking,
+        reasoningEffort,
       );
     case "gemini":
       return buildGeminiWorkerRequest(
@@ -1315,6 +1361,7 @@ async function buildWorkerRequest(
         sessionID,
         temperature,
         disableThinking,
+        reasoningEffort,
       );
   }
 }
@@ -1686,6 +1733,12 @@ export function createGatewayLLMClient(
         workerThinkingOnByDefault(model) &&
         !isThinkingUnsupportedModel(model);
 
+      // Reasoning effort (a cost/depth dial). When set to a non-`off` value the
+      // builders enable native reasoning (OpenAI reasoning_effort / Anthropic
+      // thinking budget) — and the Anthropic/Vertex builders let it override
+      // effectiveDisableThinking. `off`/undefined preserves prior behavior.
+      const reasoningEffort = opts?.reasoningEffort;
+
       // The credential in effect for the CURRENT attempt. Starts as `cred`; an
       // auth-error refresh reassigns it so every later rebuild in the retry loop
       // (e.g. the temperature-strip rebuild) signs with the fresh key rather
@@ -1705,6 +1758,7 @@ export function createGatewayLLMClient(
         effectiveTemperature,
         factoryVertexProject,
         effectiveDisableThinking,
+        reasoningEffort,
       );
 
       // Track this call so temporal capture can skip it
@@ -2078,6 +2132,7 @@ export function createGatewayLLMClient(
                     effectiveTemperature,
                     factoryVertexProject,
                     effectiveDisableThinking,
+                    reasoningEffort,
                   );
                   retryCount++;
                   continue;
@@ -2217,6 +2272,7 @@ export function createGatewayLLMClient(
                     effectiveTemperature,
                     factoryVertexProject,
                     effectiveDisableThinking,
+                    reasoningEffort,
                   );
                   // Rebuilding restores the freshly-built header set, which
                   // resurrects a beta we may have already stripped at runtime
@@ -2264,6 +2320,7 @@ export function createGatewayLLMClient(
                     effectiveTemperature,
                     factoryVertexProject,
                     effectiveDisableThinking,
+                    reasoningEffort,
                   );
                   // Preserve a runtime beta strip across this rebuild (same
                   // reasoning as the temperature-strip path above).

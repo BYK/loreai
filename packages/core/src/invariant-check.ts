@@ -32,6 +32,7 @@
 import { execFileSync } from "node:child_process";
 import { db } from "./db";
 import { embeddingByIdSource, readStorageMode } from "./db/vec-store";
+import { anthropicThinkingBudget, type ReasoningEffort } from "./effort";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import type { KnowledgeEntry } from "./ltm";
@@ -70,6 +71,20 @@ export const MIN_CONFIDENCE = 0.2;
 /** Cap the invariant set scanned (forProject is confidence DESC) so a huge
  *  knowledge base can't blow up the O(hunks×invariants) prefilter. */
 const MAX_INVARIANTS_SCAN = 300;
+
+// Output budget for the judge's verdict JSON. Tiny without reasoning; with effort
+// ON, reasoning tokens are billed against the output budget. For OpenAI reasoning
+// models this max_completion_tokens IS the effective ceiling (the gateway does not
+// bump it), so it must cover reasoning + the verdict. For Anthropic the gateway
+// independently raises max_tokens above the thinking budget; we still send a
+// generous value here so the two paths agree. Headroom matches the gateway's
+// THINKING_OUTPUT_HEADROOM (8192) so the numbers don't diverge confusingly.
+const JUDGE_VERDICT_TOKENS = 256;
+const JUDGE_VERDICT_HEADROOM = 8192;
+function judgeMaxTokens(effort: ReasoningEffort | undefined): number {
+  const budget = anthropicThinkingBudget(effort) ?? 0;
+  return budget > 0 ? budget + JUDGE_VERDICT_HEADROOM : JUDGE_VERDICT_TOKENS;
+}
 
 // If more than this fraction of judge calls come back unparseable, warn: the
 // judge model is likely failing the JSON output contract, so a "clean" result is
@@ -884,6 +899,10 @@ export async function checkInvariants(input: {
   range: ResolvedRange;
   llm: LLMClient;
   model?: { providerID: string; modelID: string };
+  /** Reasoning effort for the judge call. `off`/undefined leaves reasoning off
+   *  (the default). Higher effort trades cost for depth on reasoning-capable
+   *  models — a knob for tuning recall vs. spend. */
+  effort?: ReasoningEffort;
   sessionID: string;
   /** onProgress for CLI heartbeat. */
   onJudge?: (n: number, total: number) => void;
@@ -978,10 +997,14 @@ export async function checkInvariants(input: {
           model: input.model,
           workerID: "lore-invariant-check",
           thinking: false,
+          reasoningEffort: input.effort,
           // Interactive CLI: must return this turn, not defer to the batch queue.
           urgent: true,
           sessionID: input.sessionID,
-          maxTokens: 256,
+          // The verdict JSON is tiny (256 is ample without reasoning). With
+          // effort ON, reasoning tokens count against the output budget, so the
+          // model would exhaust 256 before emitting the verdict — give it room.
+          maxTokens: judgeMaxTokens(input.effort),
           temperature: 0,
         },
       );

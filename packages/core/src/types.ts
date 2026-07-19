@@ -11,6 +11,8 @@
  * the host's UI or for features Lore doesn't touch are omitted.
  */
 
+import type { ReasoningEffort } from "./effort";
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
@@ -299,6 +301,20 @@ export interface LLMClient {
        *   the field is silently ignored
        */
       temperature?: number;
+      /**
+       * Reasoning effort for this call — a cost/depth dial on reasoning-capable
+       * models. `off` (or absent) sends no reasoning param (pre-effort
+       * behavior). The gateway adapter maps it per protocol: OpenAI Chat
+       * Completions → `reasoning_effort` (ignored by non-reasoning models like
+       * gpt-4o-mini); Anthropic Messages / Vertex → extended-thinking
+       * `budget_tokens` (which also overrides the default worker
+       * disable-thinking suppression when set).
+       *
+       * Adapter behavior:
+       * - Gateway: honored (per-protocol mapping above)
+       * - Pi / OpenCode: ignored (no equivalent on their prompt surface)
+       */
+      reasoningEffort?: ReasoningEffort;
       /**
        * Override the upstream URL for this call. When set, the adapter
        * routes the request to this URL instead of the default provider
