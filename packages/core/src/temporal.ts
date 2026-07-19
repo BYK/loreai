@@ -163,37 +163,86 @@ export function recordToolCalls(input: {
   const pid = ensureProject(input.projectPath);
   const createdAt = input.info.time.created;
 
-  // Phase A: assistant tool_use parts — seed name + status. May already be
-  // resolved (e.g. host delivers completed state directly). On conflict, only
-  // overwrite outcome fields when the existing row is still `pending` — never
-  // revert a resolved row back to pending on a re-seed (retry / re-delivery).
-  const seedStmt = db().query(
-    `INSERT INTO tool_calls
-       (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(call_id) DO UPDATE SET
-       status = CASE WHEN tool_calls.status = 'pending' THEN excluded.status ELSE tool_calls.status END,
-       error_type = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_type ELSE tool_calls.error_type END,
-       error_message = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_message ELSE tool_calls.error_message END,
-       duration_ms = COALESCE(excluded.duration_ms, tool_calls.duration_ms),
-       -- verifier is derived from the tool_use input (stable across re-seeds);
-       -- keep the first non-null classification.
-       verifier = COALESCE(tool_calls.verifier, excluded.verifier)`,
-  );
+  // Split into the two phases up front so the seed (tool_use) phase can be
+  // flattened into ONE multi-row upsert instead of one INSERT per part. The
+  // per-part loop was flagged as an N+1 (LOREAI-GATEWAY-3G, #1178): each tool_use
+  // part emitted its own db.query.run span. tool_result parts stay per-part
+  // UPDATEs — each carries distinct outcome values keyed by its own call_id, so
+  // batching them buys little and complicates the INSERT-vs-UPDATE branching.
+  //
+  // INVARIANT the phase-split relies on: a single `parts` array never contains a
+  // tool_result AND the tool_use seed for the SAME call_id. tool_use blocks land
+  // only on assistant messages; tool_result blocks only on user messages (see
+  // contentBlockToPart), and each caller passes exactly one message's parts. So
+  // reordering "all seeds, then all results" can never move a result ahead of
+  // its own seed — the outcome is identical to the old in-order loop. If a future
+  // caller ever passes a mixed array, restore in-order processing.
+  const seeds = toolParts.filter((p) => p.tool !== "result");
+  const resultParts = toolParts.filter((p) => p.tool === "result");
+
+  // Phase A: assistant tool_use parts — seed name + status in a single
+  // multi-row INSERT (chunked). May already be resolved (e.g. host delivers
+  // completed state directly). On conflict, only overwrite outcome fields when
+  // the existing row is still `pending` — never revert a resolved row back to
+  // pending on a re-seed (retry / re-delivery). SQLite applies the VALUES rows
+  // in order and fires ON CONFLICT row-by-row, so a duplicate call_id within one
+  // batch resolves identically to the old sequential loop.
+  if (seeds.length) {
+    const COLS_PER_ROW = 11;
+    // Chunk the multi-row INSERT so a pathological batch can never exceed
+    // SQLite's bound-variable ceiling. We use the conservative ~900-param budget
+    // from the #796 chunking convention in db.ts (portable across SQLite builds,
+    // whose historical minimum ceiling is 999) — well under the ≥3.32 default of
+    // 32766. 81 rows × 11 cols = 891 params. A real turn has far fewer tool_use
+    // parts; this only matters for a pathological batch.
+    const CHUNK = Math.floor(900 / COLS_PER_ROW); // 81
+    const rowSql = `(${Array.from({ length: COLS_PER_ROW }, () => "?").join(", ")})`;
+    for (let i = 0; i < seeds.length; i += CHUNK) {
+      const batch = seeds.slice(i, i + CHUNK);
+      const seedStmt = db().query(
+        `INSERT INTO tool_calls
+           (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier)
+         VALUES ${Array.from({ length: batch.length }, () => rowSql).join(", ")}
+         ON CONFLICT(call_id) DO UPDATE SET
+           status = CASE WHEN tool_calls.status = 'pending' THEN excluded.status ELSE tool_calls.status END,
+           error_type = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_type ELSE tool_calls.error_type END,
+           error_message = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_message ELSE tool_calls.error_message END,
+           duration_ms = COALESCE(excluded.duration_ms, tool_calls.duration_ms),
+           -- verifier is derived from the tool_use input (stable across re-seeds);
+           -- keep the first non-null classification.
+           verifier = COALESCE(tool_calls.verifier, excluded.verifier)`,
+      );
+      const params: Array<string | number | null> = [];
+      for (const p of batch) {
+        const outcome = toolOutcome(p.tool, p.state);
+        params.push(
+          p.callID,
+          input.info.id,
+          pid,
+          input.info.sessionID,
+          p.tool,
+          outcome.status,
+          outcome.errorType,
+          outcome.errorMessage,
+          outcome.duration,
+          createdAt,
+          isVerifierCall(p.state.input) ? 1 : 0,
+        );
+      }
+      seedStmt.run(...params);
+    }
+  }
+
   // Phase B: user tool_result parts — update outcome by call_id, preserving
   // the previously-seeded tool name and message_id.
-  const updateStmt = db().query(
-    `UPDATE tool_calls
-       SET status = ?, error_type = ?, error_message = ?, duration_ms = ?
-     WHERE call_id = ?`,
-  );
-
-  for (const p of toolParts) {
-    const st = p.state;
-    const outcome = toolOutcome(p.tool, st);
-
-    if (p.tool === "result") {
-      // Outcome-only update; the tool name was seeded by the tool_use phase.
+  if (resultParts.length) {
+    const updateStmt = db().query(
+      `UPDATE tool_calls
+         SET status = ?, error_type = ?, error_message = ?, duration_ms = ?
+       WHERE call_id = ?`,
+    );
+    for (const p of resultParts) {
+      const outcome = toolOutcome(p.tool, p.state);
       updateStmt.run(
         outcome.status,
         outcome.errorType,
@@ -201,22 +250,7 @@ export function recordToolCalls(input: {
         outcome.duration,
         p.callID,
       );
-      continue;
     }
-
-    seedStmt.run(
-      p.callID,
-      input.info.id,
-      pid,
-      input.info.sessionID,
-      p.tool,
-      outcome.status,
-      outcome.errorType,
-      outcome.errorMessage,
-      outcome.duration,
-      createdAt,
-      isVerifierCall(st.input) ? 1 : 0,
-    );
   }
 }
 

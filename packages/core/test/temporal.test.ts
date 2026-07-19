@@ -427,15 +427,17 @@ describe("temporal", () => {
     function rows(pid: string) {
       return db()
         .query(
-          "SELECT call_id, tool, status, error_type, error_message, duration_ms FROM tool_calls WHERE project_id = ? ORDER BY call_id",
+          "SELECT call_id, message_id, tool, status, error_type, error_message, duration_ms, verifier FROM tool_calls WHERE project_id = ? ORDER BY call_id",
         )
         .all(pid) as Array<{
         call_id: string;
+        message_id: string;
         tool: string;
         status: string;
         error_type: string | null;
         error_message: string | null;
         duration_ms: number | null;
+        verifier: number;
       }>;
     }
 
@@ -569,6 +571,214 @@ describe("temporal", () => {
       const r = rows(pid);
       expect(r[0].error_type).toBe("unknown");
       expect(r[0].error_message).toBeNull();
+    });
+
+    // --- Batching (LOREAI-GATEWAY-3G, #1178) -------------------------------
+    // The seed phase is now ONE multi-row INSERT for all tool_use parts. These
+    // tests pin the behavior that must survive the batch: many seeds in one
+    // call, mixed use+result parts in one call, the pending-guard on conflict,
+    // and duplicate call_ids within a single batch.
+
+    test("batches many tool_use seeds from one call into distinct rows", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      const info = makeMessage("tm-batch", "assistant", "sess-tool");
+      const parts: LorePart[] = [
+        toolPart("tm-batch", "b0", "read", { status: "pending", input: {} }),
+        toolPart("tm-batch", "b1", "bash", { status: "pending", input: {} }),
+        toolPart("tm-batch", "b2", "edit", { status: "pending", input: {} }),
+        toolPart("tm-batch", "b3", "grep", { status: "pending", input: {} }),
+        toolPart("tm-batch", "b4", "glob", { status: "pending", input: {} }),
+      ];
+      temporal.recordToolCalls({ projectPath: TOOL_PROJECT, info, parts });
+
+      const r = rows(pid);
+      expect(r.length).toBe(5);
+      expect(r.map((x) => x.tool)).toEqual([
+        "read",
+        "bash",
+        "edit",
+        "grep",
+        "glob",
+      ]);
+      expect(r.every((x) => x.status === "pending")).toBe(true);
+    });
+
+    test("handles mixed tool_use + result parts in a single call", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      // Seed one call first (prior turn).
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-mix-a", "assistant", "sess-tool"),
+        parts: [
+          toolPart("tm-mix-a", "m0", "read", { status: "pending", input: {} }),
+        ],
+      });
+      // Now a single call that BOTH resolves m0 (result) AND seeds a new use m1.
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-mix-b", "assistant", "sess-tool"),
+        parts: [
+          toolPart("tm-mix-b", "m0", "result", {
+            status: "completed",
+            input: null,
+            output: "ok",
+            time: { start: 10, end: 40 },
+          }),
+          toolPart("tm-mix-b", "m1", "bash", { status: "pending", input: {} }),
+        ],
+      });
+
+      const r = rows(pid);
+      expect(r.length).toBe(2);
+      const m0 = r.find((x) => x.call_id === "m0");
+      expect(m0?.tool).toBe("read"); // seeded name preserved through result
+      expect(m0?.status).toBe("completed");
+      expect(m0?.duration_ms).toBe(30);
+      const m1 = r.find((x) => x.call_id === "m1");
+      expect(m1?.tool).toBe("bash");
+      expect(m1?.status).toBe("pending");
+    });
+
+    test("re-seed does NOT revert a resolved row to pending (pending-guard)", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      // Seed + resolve.
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-g-a", "assistant", "sess-tool"),
+        parts: [
+          toolPart("tm-g-a", "g0", "read", { status: "pending", input: {} }),
+        ],
+      });
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-g-b", "user", "sess-tool"),
+        parts: [
+          toolPart("tm-g-b", "g0", "result", {
+            status: "completed",
+            input: null,
+            output: "done",
+            time: { start: 1, end: 5 },
+          }),
+        ],
+      });
+      // A duplicate tool_use re-seed (retry / stream re-delivery) alongside a new
+      // seed — the batched INSERT must keep g0 completed, not revert to pending.
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-g-c", "assistant", "sess-tool"),
+        parts: [
+          toolPart("tm-g-c", "g0", "read", { status: "pending", input: {} }),
+          toolPart("tm-g-c", "g1", "bash", { status: "pending", input: {} }),
+        ],
+      });
+
+      const r = rows(pid);
+      expect(r.find((x) => x.call_id === "g0")?.status).toBe("completed");
+      expect(r.find((x) => x.call_id === "g1")?.status).toBe("pending");
+    });
+
+    test("batches the verifier flag and message_id per row", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      // One batch with a verifier call (leading `npm test`) and a non-verifier
+      // call — the per-row verifier classification must survive batching.
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-vf", "assistant", "sess-tool"),
+        parts: [
+          toolPart("tm-vf", "v0", "bash", {
+            status: "pending",
+            input: { command: "npm test" },
+          }),
+          toolPart("tm-vf", "v1", "bash", {
+            status: "pending",
+            input: { command: "ls -la" },
+          }),
+        ],
+      });
+      const r = rows(pid);
+      expect(r.find((x) => x.call_id === "v0")?.verifier).toBe(1);
+      expect(r.find((x) => x.call_id === "v1")?.verifier).toBe(0);
+      // message_id seeded from the assistant message on every batched row.
+      expect(r.every((x) => x.message_id === "tm-vf")).toBe(true);
+    });
+
+    test("result update preserves the batched seed's message_id", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-mid-asst", "assistant", "sess-tool"),
+        parts: [
+          toolPart("tm-mid-asst", "p0", "read", {
+            status: "pending",
+            input: {},
+          }),
+        ],
+      });
+      // Result comes on a DIFFERENT (user) message; the seeded message_id must
+      // be preserved (the UPDATE does not touch message_id).
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info: makeMessage("tm-mid-user", "user", "sess-tool"),
+        parts: [
+          toolPart("tm-mid-user", "p0", "result", {
+            status: "completed",
+            input: null,
+            output: "ok",
+            time: { start: 1, end: 3 },
+          }),
+        ],
+      });
+      const r = rows(pid);
+      expect(r.length).toBe(1);
+      expect(r[0].message_id).toBe("tm-mid-asst"); // seed's id, not the result's
+      expect(r[0].status).toBe("completed");
+    });
+
+    test("inserts every row when the seed batch spans multiple chunks", () => {
+      // The seed INSERT is chunked (CHUNK=81) so a pathological batch can never
+      // exceed SQLite's conservative ~999 bound-variable ceiling (the #796
+      // convention). This asserts the chunk LOOP is correct: a batch larger than
+      // one chunk still inserts every distinct row across the boundary.
+      const pid = ensureProject(TOOL_PROJECT);
+      const info = makeMessage("tm-chunk", "assistant", "sess-tool");
+      const N = 200; // > 2 chunks
+      const parts: LorePart[] = Array.from({ length: N }, (_, i) =>
+        toolPart("tm-chunk", `c${i}`, "read", {
+          status: "pending",
+          input: {},
+        }),
+      );
+      temporal.recordToolCalls({ projectPath: TOOL_PROJECT, info, parts });
+
+      const r = rows(pid);
+      expect(r.length).toBe(N);
+      // Every call_id present exactly once, all seeded pending.
+      const ids = new Set(r.map((x) => x.call_id));
+      expect(ids.size).toBe(N);
+      expect(r.every((x) => x.status === "pending" && x.tool === "read")).toBe(
+        true,
+      );
+    });
+
+    test("duplicate call_id within one batch resolves like the sequential loop", () => {
+      const pid = ensureProject(TOOL_PROJECT);
+      // Same call_id twice in a single seed batch: first inserts pending, second
+      // hits ON CONFLICT — since the row is pending, the (identical) values apply
+      // and the net result is a single pending row (last-writer within batch).
+      const info = makeMessage("tm-dup", "assistant", "sess-tool");
+      temporal.recordToolCalls({
+        projectPath: TOOL_PROJECT,
+        info,
+        parts: [
+          toolPart("tm-dup", "d0", "read", { status: "pending", input: {} }),
+          toolPart("tm-dup", "d0", "read", { status: "pending", input: {} }),
+        ],
+      });
+      const r = rows(pid);
+      expect(r.length).toBe(1);
+      expect(r[0].call_id).toBe("d0");
+      expect(r[0].tool).toBe("read");
+      expect(r[0].status).toBe("pending");
     });
   });
 });
