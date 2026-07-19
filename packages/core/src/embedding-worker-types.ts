@@ -246,6 +246,30 @@ export function shouldRequestWasmRespawn(
 }
 
 /**
+ * Whether `processEmbed`'s catch block should post a per-request `error` back to
+ * the main thread for a failed embed request (#1379/#1387-B2).
+ *
+ * Two cases must stay SILENT:
+ *  - `initFailed` — `ensurePipeline()` already posted `init-error`; re-posting a
+ *    per-request error would double-report the same failure.
+ *  - `wasmRespawnRequested` — the worker asked the main thread to respawn it
+ *    forcing WASM, so `ensurePipeline()` rejected this request with "awaiting
+ *    WASM respawn". Posting a per-request `error` here would make the main thread
+ *    reject+drop the pending request BEFORE `respawnForWasm()` re-submits it to
+ *    the fresh WASM worker — silently losing the caller's embed. The respawn
+ *    re-submits it instead, so this worker must not report it.
+ *
+ * Pure predicate, extracted so the B2 suppression is directly unit-testable
+ * without importing the worker module (which self-executes on import).
+ */
+export function shouldPostPerRequestError(
+  initFailed: boolean,
+  wasmRespawnRequested: boolean,
+): boolean {
+  return !initFailed && !wasmRespawnRequested;
+}
+
+/**
  * The two leading strings transformers.js' `sessionRun()` (models.js) passes to
  * `console.error` when `session.run` throws, before it re-throws: the error
  * message, and a dump of every input tensor's metadata AND `.data`. For our

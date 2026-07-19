@@ -14,6 +14,7 @@ import {
   syncData,
 } from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "../supabase";
+import { acquireGitHubProviderToken } from "./login";
 import {
   addTeamMember,
   acceptTeamInvite,
@@ -21,6 +22,7 @@ import {
   claimOrgDomain,
   createTeam,
   createTeamInvite,
+  discoverGitHubCollaborators,
   listDomainJoinRequests,
   listTeams,
   rejectDomainJoin,
@@ -31,7 +33,7 @@ import {
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
+  "Usage: lore team [list | members <scope> | discover [repo...] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
 
 export async function commandTeam(
   positionals: string[],
@@ -89,6 +91,51 @@ export async function commandTeam(
         if (!scope) return usage();
         for (const m of await teamMembers(client, scope))
           console.log(`${m.userId}  ${m.role}`);
+        break;
+      }
+      case "discover": {
+        // E-5-d (#630): find which of the caller's GitHub repo collaborators are already on Lore.
+        // Needs a FRESH provider_token (short-lived, not persisted) → re-run GitHub OAuth.
+        const repos = positionals.slice(1).filter((p) => !p.startsWith("--"));
+        let providerToken: string;
+        // Use the FRESH client bound to the just-refreshed session — the outer `client` from
+        // getAuthedClient() may hold a token that expired during the interactive OAuth flow.
+        let freshClient = client;
+        try {
+          const acquired = await acquireGitHubProviderToken();
+          freshClient = acquired.client;
+          providerToken = acquired.providerToken;
+        } catch (e) {
+          console.error(`GitHub authorization failed: ${(e as Error).message}`);
+          process.exitCode = 1;
+          return;
+        }
+        const found = await discoverGitHubCollaborators(
+          freshClient,
+          providerToken,
+          repos.length > 0 ? repos : undefined,
+        );
+        if (!found || found.length === 0) {
+          console.log("No accessible repos with collaborators found.");
+          break;
+        }
+        let onLoreTotal = 0;
+        let offLoreTotal = 0;
+        for (const r of found) {
+          if (r.collaborators.length === 0) continue;
+          console.log(`\n${r.repo}`);
+          for (const c of r.collaborators) {
+            if (c.onLore) onLoreTotal++;
+            else offLoreTotal++;
+            console.log(
+              `  ${c.onLore ? "✓ on Lore  " : "· not yet  "} ${c.login}`,
+            );
+          }
+        }
+        console.log(
+          `\n${onLoreTotal} collaborator${onLoreTotal === 1 ? "" : "s"} already on Lore, ` +
+            `${offLoreTotal} not yet. Invite them with \`lore team invite <scope>\` (share the link).`,
+        );
         break;
       }
       case "create": {

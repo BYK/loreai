@@ -23,6 +23,58 @@ export interface MemberSummary {
   role: string;
 }
 
+/** A repo's collaborator roster with a Lore-membership flag per collaborator (E-5-d, #630). */
+export interface DiscoveredCollaborator {
+  login: string;
+  githubId: number;
+  onLore: boolean;
+}
+export interface DiscoveredRepo {
+  repo: string; // "owner/name"
+  collaborators: DiscoveredCollaborator[];
+}
+
+/**
+ * E-5-d (#630, Slice 1): discover which of the caller's GitHub repo collaborators already have a Lore
+ * account, so the caller can invite the rest to a team they admin. Server-side-verified via the
+ * `github-discover` Edge Function using the caller's OWN `provider_token` (a fresh one from GitHub
+ * OAuth) — the client never asserts collaborators or membership. Returns null when there is no
+ * `read:org`/repo grant (e.g. an email-only login).
+ *
+ * `repos` is an optional explicit list ("owner/name" or a GitHub URL); when omitted the Edge Function
+ * scans the caller's own repos (first page). Membership is disclosed only for collaborators of repos
+ * the caller can actually read on GitHub, and only as an `onLore` boolean (never a Lore user id).
+ */
+export async function discoverGitHubCollaborators(
+  client: SupabaseClient,
+  providerToken: string | null | undefined,
+  repos?: string[],
+): Promise<DiscoveredRepo[] | null> {
+  if (!providerToken) return null; // no read:org/repo grant (older session / non-github login)
+  const { data, error } = await client.functions.invoke("github-discover", {
+    body: { provider_token: providerToken, repos },
+  });
+  if (error) throw new Error(`github-discover: ${error.message}`);
+  const payload = data as {
+    repos?: Array<{
+      repo: string;
+      collaborators: Array<{
+        login: string;
+        github_id: number;
+        on_lore: boolean;
+      }>;
+    }>;
+  };
+  return (payload.repos ?? []).map((r) => ({
+    repo: r.repo,
+    collaborators: r.collaborators.map((c) => ({
+      login: c.login,
+      githubId: c.github_id,
+      onLore: c.on_lore,
+    })),
+  }));
+}
+
 async function selfUserId(): Promise<string> {
   const u = await getCurrentUser();
   if (!u) throw new Error("not logged in — run `lore login` first");

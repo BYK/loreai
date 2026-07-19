@@ -187,6 +187,49 @@ async function loginWithGitHub(): Promise<void> {
   await provisionGitHubTeams(client, sess.session.provider_token);
 }
 
+/**
+ * E-5-d (#630): obtain a FRESH GitHub `provider_token` via a one-shot loopback OAuth, for a
+ * capability that needs to read from GitHub after login (e.g. `lore team discover`). The
+ * `provider_token` is short-lived and NOT persisted/refreshed (see provisionGitHubTeams), so it must
+ * be re-acquired on demand. Returns the fresh token plus the authed client bound to the refreshed
+ * session. Requires an interactive browser (loopback); throws if the grant yields no provider_token
+ * (e.g. an email-only account). Also refreshes the persisted session as a side effect.
+ */
+export async function acquireGitHubProviderToken(): Promise<{
+  client: SupabaseClient;
+  providerToken: string;
+}> {
+  const client = createSupabaseClient();
+  const { code, redirectTo, done } = await startLoopbackCallback();
+  const { data, error } = await client.auth.signInWithOAuth({
+    provider: "github",
+    options: { skipBrowserRedirect: true, redirectTo, scopes: "read:org" },
+  });
+  if (error || !data.url) {
+    done.close();
+    throw new Error(error?.message ?? "Could not start GitHub OAuth.");
+  }
+  console.log("Opening your browser to authorize GitHub access…");
+  console.log("If it doesn't open, scan this or visit the URL below:\n");
+  await showAuthUrl(data.url);
+  openBrowser(data.url);
+
+  const oauthCode = await code;
+  const { data: sess, error: exchErr } =
+    await client.auth.exchangeCodeForSession(oauthCode);
+  if (exchErr) throw new Error(exchErr.message);
+  if (!sess.session) throw new Error("No session returned after OAuth.");
+  // Keep the persisted session fresh (this OAuth refreshed the access token).
+  await finalizeLogin(client, sessionToPersisted(sess.session));
+  const providerToken = sess.session.provider_token;
+  if (!providerToken) {
+    throw new Error(
+      "GitHub did not return an access token — this account may not be linked to GitHub.",
+    );
+  }
+  return { client, providerToken };
+}
+
 // --- GitHub OAuth, headless (manual code paste, no loopback) ----------------
 
 /**
