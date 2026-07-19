@@ -452,14 +452,18 @@ export async function startGateway(
         // replaying queued background prompts through retries is what made
         // Ctrl+C hang for minutes. They resume next session.
         await resetPipelineState({ fast: true });
-        // Drain any in-flight fire-and-forget document embed (esp. a
-        // distillation embed created this session that would otherwise never
-        // write its `distillation_vec` row before the worker is torn down —
-        // #1331). BOUNDED so a slow/stuck embed can't reintroduce the Ctrl+C
-        // hang `fast: true` exists to avoid; must run while the worker is still
-        // alive (resetProvider below kills it) and after resetPipelineState so
-        // no new background work is scheduled mid-drain. Anything left pending
-        // at the deadline is re-indexed by runStartupBackfill on the next boot.
+        // Drain any document embed ALREADY in flight (esp. a distillation
+        // embed created this session that would otherwise never write its
+        // `distillation_vec` row before the worker is torn down — #1331).
+        // BOUNDED so a slow/stuck embed can't reintroduce the Ctrl+C hang
+        // `fast: true` exists to avoid; must run while the worker is still alive
+        // (resetProvider below kills it) and after resetPipelineState so no new
+        // background work is scheduled mid-drain. NOTE: this covers embeds that
+        // have already been dispatched — it does NOT wait on a distillation
+        // whose LLM call is still in flight (fast-path shutdown deliberately
+        // skips that background drain), so that embed is never enqueued here.
+        // Both the mid-distillation case and anything still pending at the
+        // deadline are re-indexed by runStartupBackfill on the next boot.
         await embedding.settleDocumentEmbeds(EMBED_DRAIN_DEADLINE_MS);
         // Shut down the embedding worker thread gracefully. Done after
         // resetPipelineState (which clears sessions/timers) but before

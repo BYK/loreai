@@ -2113,16 +2113,21 @@ export async function settleDocumentEmbeds(timeoutMs?: number): Promise<void> {
     return;
   }
 
-  const deadline = Date.now() + timeoutMs;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, timeoutMs);
+  const EXPIRED = Symbol("expired");
+  const expired = new Promise<typeof EXPIRED>((resolve) => {
+    timer = setTimeout(() => resolve(EXPIRED), timeoutMs);
   });
   try {
-    while (_docEmbedsInFlight.size > 0 && Date.now() < deadline) {
-      // Race the current in-flight set against the shared deadline. Loop so
-      // embeds spawned mid-drain are picked up, but never past the deadline.
-      await Promise.race([Promise.allSettled(_docEmbedsInFlight), expired]);
+    while (_docEmbedsInFlight.size > 0) {
+      // Race the current in-flight set against the deadline. Loop so embeds
+      // spawned mid-drain are picked up; break the instant the deadline wins so
+      // we never wait — nor busy-spin — past it.
+      const winner = await Promise.race([
+        Promise.allSettled(_docEmbedsInFlight).then(() => undefined),
+        expired,
+      ]);
+      if (winner === EXPIRED) break;
     }
   } finally {
     if (timer) clearTimeout(timer);
