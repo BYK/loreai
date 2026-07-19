@@ -10,6 +10,7 @@ import {
   MIN_ONNX_FILE_BYTES,
   resolveModelCacheDir,
   shouldHealCorruptModel,
+  shouldPostPerRequestError,
   shouldRequestWasmRespawn,
   TRANSFORMERS_INFERENCE_DUMP_PREFIXES,
 } from "../src/embedding-worker-types";
@@ -304,5 +305,53 @@ describe("shouldRequestWasmRespawn (#1379)", () => {
         true,
       ),
     ).toBe(false);
+  });
+});
+
+describe("shouldPostPerRequestError (#1379 B2)", () => {
+  test("posts a per-request error for an ordinary embed failure", () => {
+    // Normal per-request failure (no init failure, no pending respawn) → the
+    // worker reports it so the main thread rejects just that request.
+    expect(shouldPostPerRequestError(false, false)).toBe(true);
+  });
+
+  test("stays silent while a WASM respawn is pending (B2)", () => {
+    // The request that tripped `init-needs-wasm` is rejected by ensurePipeline
+    // with "awaiting WASM respawn". Posting a per-request error here would make
+    // the main thread reject+drop the pending BEFORE respawnForWasm re-submits
+    // it → the caller's embed is silently lost. Must NOT post.
+    expect(shouldPostPerRequestError(false, true)).toBe(false);
+  });
+
+  test("stays silent after init already failed (init-error already posted)", () => {
+    expect(shouldPostPerRequestError(true, false)).toBe(false);
+  });
+
+  test("stays silent when both flags are set", () => {
+    expect(shouldPostPerRequestError(true, true)).toBe(false);
+  });
+});
+
+describe("processEmbed catch condition stays in sync with shouldPostPerRequestError (#1379 B2)", () => {
+  // shouldPostPerRequestError is the canonical, unit-tested B2 gate, but the
+  // worker (raw .ts, self-executing on import — can't be imported here) inlines
+  // the equivalent expression in processEmbed's catch. Parse the worker source
+  // and assert that expression is exactly `!initFailed && !wasmRespawnRequested`
+  // so the two can't silently drift (mirrors the isCorruptModelError inline-copy
+  // guard above). If they drift, this fails CI and points at the worker.
+  const workerSrc = readFileSync(
+    fileURLToPath(new URL("../src/embedding-worker.ts", import.meta.url)),
+    "utf8",
+  );
+
+  test("worker gates the per-request error post on both suppression flags", () => {
+    // The catch opens with the B2 guard; match the exact boolean expression,
+    // whitespace-normalized (robust to formatting/line wraps).
+    const guard = workerSrc.match(
+      /catch \(err\) \{[\s\S]*?if \(([^)]*initFailed[^)]*)\)/,
+    );
+    expect(guard, "processEmbed catch guard not found").not.toBeNull();
+    const expr = (guard?.[1] ?? "").replace(/\s+/g, " ").trim();
+    expect(expr).toBe("!initFailed && !wasmRespawnRequested");
   });
 });

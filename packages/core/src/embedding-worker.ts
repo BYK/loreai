@@ -744,6 +744,8 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
     // "awaiting WASM respawn", but posting a per-request `error` here would make
     // the main thread reject+drop the pending BEFORE respawnForWasm() can
     // re-submit it to the fresh WASM worker. The respawn re-submits it instead.
+    // Canonical gate: shouldPostPerRequestError() in embedding-worker-types.ts
+    // (unit-tested); a drift guard pins this inline expression to it.
     if (!initFailed && !wasmRespawnRequested) {
       const raw = err instanceof Error ? err.message : String(err);
       const longest = Math.max(...req.texts.map((t) => t.length));
