@@ -68,4 +68,59 @@ describe("accumulateOpenAISSEStream", () => {
     );
     expect(resp.content).toEqual([{ type: "text", text: "ok" }]);
   });
+
+  test("accumulates `reasoning` deltas into a thinking block when content is empty (#1334)", async () => {
+    // MiniMax-M3 via OpenRouter streams its whole answer as `reasoning` deltas and
+    // leaves `content` empty — previously dropped entirely → empty completion.
+    const resp = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"id":"c1","model":"minimax/minimax-m3","choices":[{"delta":{"reasoning":"the "}}]}',
+        'data: {"choices":[{"delta":{"reasoning":"answer"}}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+        "",
+      ]),
+    );
+    expect(resp.content).toEqual([
+      { type: "thinking", thinking: "the answer" },
+    ]);
+  });
+
+  test("accumulates `reasoning_content` deltas (DeepSeek/Qwen shape)", async () => {
+    const resp = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"choices":[{"delta":{"reasoning_content":"deep "}}]}',
+        'data: {"choices":[{"delta":{"reasoning_content":"seek"}}]}',
+        "data: [DONE]",
+        "",
+      ]),
+    );
+    expect(resp.content).toEqual([{ type: "thinking", thinking: "deep seek" }]);
+  });
+
+  test("emits thinking BEFORE text when a model streams both", async () => {
+    const resp = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"choices":[{"delta":{"reasoning":"pondering"}}]}',
+        'data: {"choices":[{"delta":{"content":"final answer"}}]}',
+        "data: [DONE]",
+        "",
+      ]),
+    );
+    expect(resp.content).toEqual([
+      { type: "thinking", thinking: "pondering" },
+      { type: "text", text: "final answer" },
+    ]);
+  });
+
+  test("no reasoning field → no thinking block (normal path unchanged)", async () => {
+    const resp = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"choices":[{"delta":{"content":"plain"}}]}',
+        "data: [DONE]",
+        "",
+      ]),
+    );
+    expect(resp.content).toEqual([{ type: "text", text: "plain" }]);
+  });
 });

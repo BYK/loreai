@@ -369,6 +369,11 @@ export async function accumulateOpenAISSEStream(
   let model = "";
   let stopReason = "end_turn";
   let textContent = "";
+  // Some reasoning models (e.g. MiniMax-M3 via OpenRouter) stream their entire
+  // answer as reasoning deltas and leave `content` empty. Capture it so a
+  // reasoning-only response is not mistaken for an empty completion (#1334) —
+  // mirrors the non-streaming parseOpenAIResponse content→reasoning fallback.
+  let reasoningContent = "";
   const toolCalls = new Map<
     number,
     { id: string; name: string; args: string }
@@ -405,6 +410,17 @@ export async function accumulateOpenAISSEStream(
       if (delta) {
         if (typeof delta.content === "string") {
           textContent += delta.content;
+        }
+        // Reasoning deltas: `reasoning` (OpenRouter/others) or `reasoning_content`
+        // (DeepSeek/Qwen). Accumulated separately and surfaced as a thinking block
+        // only when there is no visible text (#1334). No provider emits BOTH fields
+        // in one delta, so the else-if precedence here (reasoning first) is
+        // per-provider identical to parseOpenAIResponse (which prefers
+        // reasoning_content) — the order only diverges in the impossible both-set case.
+        if (typeof delta.reasoning === "string") {
+          reasoningContent += delta.reasoning;
+        } else if (typeof delta.reasoning_content === "string") {
+          reasoningContent += delta.reasoning_content;
         }
         const tcs = delta.tool_calls as
           | Array<Record<string, unknown>>
@@ -452,6 +468,12 @@ export async function accumulateOpenAISSEStream(
   }
 
   const content: GatewayContentBlock[] = [];
+  // Thinking precedes text (Anthropic ordering). Previously reasoning deltas were
+  // dropped entirely on this path; surfacing them lets a reasoning-only response
+  // (empty content) still yield usable text downstream (#1334).
+  if (reasoningContent) {
+    content.push({ type: "thinking", thinking: reasoningContent });
+  }
   if (textContent) {
     content.push({ type: "text", text: textContent });
   }

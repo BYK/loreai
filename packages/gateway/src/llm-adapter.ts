@@ -1385,6 +1385,19 @@ export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
     )
     .map((b) => b.text)
     .join("");
+  // Reasoning models (e.g. MiniMax-M3 via OpenRouter) can emit their entire answer
+  // as reasoning/thinking with an empty text block. Never treat a present thinking
+  // body as no-response — fall back to it when there is no visible text, mirroring
+  // parseOpenAIResponse (content→reasoning) and parseAnthropicResponse (text→thinking). (#1334)
+  const workerText =
+    text ||
+    resp.content
+      .filter(
+        (b): b is Extract<GatewayContentBlock, { type: "thinking" }> =>
+          b.type === "thinking",
+      )
+      .map((b) => b.thinking)
+      .join("");
   const usage: AnthropicUsage | null = resp.usage
     ? {
         input_tokens: resp.usage.inputTokens,
@@ -1393,7 +1406,7 @@ export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
         cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
       }
     : null;
-  return { text: text || null, usage, model: resp.model || null };
+  return { text: workerText || null, usage, model: resp.model || null };
 }
 
 /**

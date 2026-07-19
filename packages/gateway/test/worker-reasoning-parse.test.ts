@@ -8,11 +8,21 @@
  * `no-response`, blocking background distillation/curation. These tests lock in
  * the reasoning-field fallback AND assert the normal path is unchanged.
  */
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+
+vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
+
 import {
+  createGatewayLLMClient,
+  gatewayResponseToWorkerResult,
   parseOpenAIResponse,
   parseAnthropicResponse,
 } from "../src/llm-adapter";
+import { upstreamFetch } from "../src/fetch";
+import { clearAllCosts } from "../src/cost-tracker";
+import { resetBackgroundLimiter } from "../src/background-limiter";
+
+const mockFetch = vi.mocked(upstreamFetch);
 
 describe("parseOpenAIResponse — reasoning-model fallback", () => {
   test("positive: normal content body still parses unchanged", () => {
@@ -138,5 +148,124 @@ describe("parseAnthropicResponse — thinking-block fallback", () => {
   test("negative: missing content returns null", () => {
     const r = parseAnthropicResponse({});
     expect(r.text).toBeNull();
+  });
+});
+
+describe("gatewayResponseToWorkerResult — streaming thinking-block fallback (#1334)", () => {
+  const base = { id: "x", model: "m", stopReason: "end_turn" } as const;
+
+  test("positive: a text block is returned unchanged", () => {
+    const r = gatewayResponseToWorkerResult({
+      ...base,
+      content: [{ type: "text", text: "the real answer" }],
+    });
+    expect(r.text).toBe("the real answer");
+  });
+
+  test("falls back to a thinking block when there is no text (reasoning-only stream)", () => {
+    // MiniMax-M3 via OpenRouter streams reasoning deltas and leaves content empty →
+    // the accumulator emits only a thinking block. It must still yield usable text.
+    const r = gatewayResponseToWorkerResult({
+      ...base,
+      content: [{ type: "thinking", thinking: "answer in reasoning" }],
+    });
+    expect(r.text).toBe("answer in reasoning");
+  });
+
+  test("prefers text over thinking when both present", () => {
+    const r = gatewayResponseToWorkerResult({
+      ...base,
+      content: [
+        { type: "thinking", thinking: "secondary" },
+        { type: "text", text: "primary" },
+      ],
+    });
+    expect(r.text).toBe("primary");
+  });
+
+  test("joins multiple thinking blocks when no text block exists", () => {
+    const r = gatewayResponseToWorkerResult({
+      ...base,
+      content: [
+        { type: "thinking", thinking: "part1 " },
+        { type: "thinking", thinking: "part2" },
+      ],
+    });
+    expect(r.text).toBe("part1 part2");
+  });
+
+  test("negative: a tool_use-only response is still empty (workers consume text)", () => {
+    const r = gatewayResponseToWorkerResult({
+      ...base,
+      content: [{ type: "tool_use", id: "t1", name: "f", input: {} }],
+    });
+    expect(r.text).toBeNull();
+  });
+
+  test("negative: an empty content array returns null", () => {
+    const r = gatewayResponseToWorkerResult({
+      ...base,
+      content: [],
+    });
+    expect(r.text).toBeNull();
+  });
+});
+
+describe("worker end-to-end: reasoning-only SSE body → usable text (#1334 seam)", () => {
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    resetBackgroundLimiter();
+  });
+
+  // The exact wire that regressed in #1334: a worker sends stream:false, but the
+  // provider (OpenRouter/MiniMax-M3) returns an SSE body whose deltas carry only
+  // `reasoning` (empty `content`). This drives the real seam
+  // isSSE → accumulateWorkerSSE(openai) → gatewayResponseToWorkerResult, which the
+  // two unit suites above only cover in halves.
+  test("a reasoning-only OpenAI SSE worker response yields the reasoning as text", async () => {
+    const sseBody = [
+      'data: {"id":"c1","model":"minimax/minimax-m3","choices":[{"delta":{"reasoning":"extracted "}}]}',
+      'data: {"choices":[{"delta":{"reasoning":"knowledge"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}',
+      "data: [DONE]",
+      "",
+    ].join("\n\n");
+    // Note: content-type is application/json (a mislabeled stream) — the worker
+    // sniffs the body for SSE regardless, exercising the looksLikeSSE path too.
+    mockFetch.mockResolvedValue(
+      new Response(sseBody, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "openrouter"
+          ? { scheme: "bearer", value: "or_worker" }
+          : null,
+      { providerID: "openrouter", modelID: "minimax/minimax-m3" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-m3",
+      workerID: "lore-distill",
+      model: { providerID: "openrouter", modelID: "minimax/minimax-m3" },
+      upstreamUrl: "https://openrouter.ai/api/v1",
+      upstreamProviderID: "openrouter",
+    });
+
+    // Pre-fix this returned null (reasoning dropped) → distillation parse-error.
+    expect(text).toBe("extracted knowledge");
   });
 });
