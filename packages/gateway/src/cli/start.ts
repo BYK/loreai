@@ -13,7 +13,19 @@ import { writePortFile, removePortFile, readPortFile } from "../portfile";
 import { writePidFile, removePidFile } from "../pidfile";
 import { dataDir, embedding, log } from "@loreai/core";
 import { safeExit } from "./exit";
-import { installSignalShutdown } from "./shutdown";
+import { installSignalShutdown, SHUTDOWN_DEADLINE_MS } from "./shutdown";
+
+/**
+ * Bound for the in-flight document-embed drain on graceful shutdown (#1331).
+ * Kept comfortably under {@link SHUTDOWN_DEADLINE_MS} so the drain plus the
+ * subsequent worker `resetProvider()` both finish inside the hard shutdown
+ * deadline — a slow/stuck embed can never reintroduce the Ctrl+C hang. Whatever
+ * doesn't complete in time is re-indexed by `runStartupBackfill` on next boot.
+ */
+const EMBED_DRAIN_DEADLINE_MS = Math.max(
+  500,
+  Math.floor(SHUTDOWN_DEADLINE_MS * 0.6),
+);
 
 export interface StartOptions {
   port?: number;
@@ -440,6 +452,15 @@ export async function startGateway(
         // replaying queued background prompts through retries is what made
         // Ctrl+C hang for minutes. They resume next session.
         await resetPipelineState({ fast: true });
+        // Drain any in-flight fire-and-forget document embed (esp. a
+        // distillation embed created this session that would otherwise never
+        // write its `distillation_vec` row before the worker is torn down —
+        // #1331). BOUNDED so a slow/stuck embed can't reintroduce the Ctrl+C
+        // hang `fast: true` exists to avoid; must run while the worker is still
+        // alive (resetProvider below kills it) and after resetPipelineState so
+        // no new background work is scheduled mid-drain. Anything left pending
+        // at the deadline is re-indexed by runStartupBackfill on the next boot.
+        await embedding.settleDocumentEmbeds(EMBED_DRAIN_DEADLINE_MS);
         // Shut down the embedding worker thread gracefully. Done after
         // resetPipelineState (which clears sessions/timers) but before
         // safeExit — gives the worker time to exit cleanly via its

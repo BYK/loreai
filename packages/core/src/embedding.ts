@@ -2082,10 +2082,12 @@ export async function vectorSearchAllDistillations(
  */
 // Fire-and-forget document embeds (knowledge, distillation, entity) must not
 // block the write path, so callers don't await them. They are tracked here so
-// tests can drain them at the test boundary via settleDocumentEmbeds(): a
-// promise that resolves AFTER the harness closes/swaps the DB would otherwise
-// write to the wrong DB or log spurious errors (issue #885). No-op in
-// production, which never calls the drain.
+// callers can drain them: at the test boundary (a promise that resolves AFTER
+// the harness closes/swaps the DB would otherwise write to the wrong DB or log
+// spurious errors — issue #885), and on graceful gateway shutdown (a
+// distillation embed still mid-flight when the worker is torn down never writes
+// its `distillation_vec` row → silent recall degradation on short/fast
+// sessions — issue #1331).
 const _docEmbedsInFlight = new Set<Promise<unknown>>();
 function trackDocEmbed(p: Promise<unknown>): void {
   _docEmbedsInFlight.add(p);
@@ -2094,12 +2096,36 @@ function trackDocEmbed(p: Promise<unknown>): void {
 
 /**
  * Await all in-flight fire-and-forget document embeds (knowledge / distillation
- * / entity). Test-only drain hook — production never calls it. Loops so embeds
- * spawned while draining (rare) are also awaited.
+ * / entity). Loops so embeds spawned while draining (rare) are also awaited.
+ *
+ * `timeoutMs` bounds the wait: when the deadline elapses the drain resolves
+ * even if embeds are still pending. The production shutdown path (#1331) passes
+ * a bound comfortably under `SHUTDOWN_DEADLINE_MS` so a slow/stuck embed can
+ * never reintroduce the Ctrl+C hang; anything left unfinished is re-indexed by
+ * `runStartupBackfill` on the next boot. Tests call it with no argument for a
+ * full (unbounded) drain.
  */
-export async function settleDocumentEmbeds(): Promise<void> {
-  while (_docEmbedsInFlight.size > 0) {
-    await Promise.allSettled(_docEmbedsInFlight);
+export async function settleDocumentEmbeds(timeoutMs?: number): Promise<void> {
+  if (timeoutMs == null) {
+    while (_docEmbedsInFlight.size > 0) {
+      await Promise.allSettled(_docEmbedsInFlight);
+    }
+    return;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  try {
+    while (_docEmbedsInFlight.size > 0 && Date.now() < deadline) {
+      // Race the current in-flight set against the shared deadline. Loop so
+      // embeds spawned mid-drain are picked up, but never past the deadline.
+      await Promise.race([Promise.allSettled(_docEmbedsInFlight), expired]);
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -2177,6 +2203,28 @@ export function embedDistillation(id: string, observations: string): void {
         log.error("embedding failed for distillation", id, ":", err);
       }),
   );
+}
+
+/**
+ * Pay the local ONNX model's cold-load cost (~21s measured) up front by firing
+ * one throwaway embed at gateway startup, so the FIRST real distillation embed
+ * of the session is already warm and finishes within the turn instead of racing
+ * teardown (#1331). Fire-and-forget: never blocks startup, never throws.
+ *
+ * Local-only: remote providers (Voyage/OpenAI) have no cold-load cost and a
+ * warmup would only burn API quota, so this is a no-op for them and when
+ * embeddings are disabled. Uses `"document"` inputType so it is NOT counted as
+ * a recall embed (see {@link embed}) and cannot self-gate the temporal backfill.
+ * Not tracked via `trackDocEmbed` — it stores nothing, so there is no
+ * write-to-wrong-DB / mid-flight-on-teardown concern to drain.
+ */
+export function warmupEmbedding(): void {
+  if (!isAvailable()) return;
+  if (config().search.embeddings.provider !== "local") return;
+  void embed(["warmup"], "document").catch((err) => {
+    if (err instanceof LocalProviderUnavailableError) return;
+    log.error("embedding warmup failed:", err);
+  });
 }
 
 /**

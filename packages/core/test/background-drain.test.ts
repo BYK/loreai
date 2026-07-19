@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
   embedKnowledgeEntry,
   isAvailable,
+  recallEmbedsInFlight,
   settleDocumentEmbeds,
+  warmupEmbedding,
   _persistEmbedCap,
   _resetLocalProviderProbe,
   _restoreProvider,
@@ -12,6 +14,7 @@ import {
   _setTestWorkerFactory,
 } from "../src/embedding";
 import { settleBackgroundWork } from "../src/distillation";
+import { config, load } from "../src/config";
 
 // Guards the issue #885 fix: fire-and-forget document embeds (embedKnowledgeEntry
 // / embedDistillation / embedEntity) and non-urgent pattern-echo work must be
@@ -136,5 +139,182 @@ describe("background-work drain (issue #885)", () => {
   it("drains are no-ops when nothing is in flight", async () => {
     await expect(settleDocumentEmbeds()).resolves.toBeUndefined();
     await expect(settleBackgroundWork()).resolves.toBeUndefined();
+  });
+});
+
+// Guards the issue #1331 fix: a distillation embed still in flight when the
+// gateway is torn down must be drained BEFORE the worker is shut down, or its
+// `distillation_vec` row is never written → silent recall degradation on
+// short/fast sessions. The drain is BOUNDED so a slow/stuck embed can't
+// reintroduce the Ctrl+C hang; and the worker is warm-started at gateway
+// startup so the first real embed is fast enough to finish within the turn.
+describe("bounded document-embed drain (issue #1331)", () => {
+  let savedProvider: unknown;
+  let savedVoyage: string | undefined;
+  let savedOpenAI: string | undefined;
+
+  beforeEach(() => {
+    savedVoyage = process.env.VOYAGE_API_KEY;
+    savedOpenAI = process.env.OPENAI_API_KEY;
+    delete process.env.VOYAGE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    _resetLocalProviderProbe();
+    savedProvider = _saveAndClearProvider();
+  });
+
+  afterEach(async () => {
+    _setTestWorkerFactory(null);
+    _resetLocalProviderProbe();
+    _restoreProvider(savedProvider);
+    if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
+    else delete process.env.VOYAGE_API_KEY;
+    if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
+    else delete process.env.OPENAI_API_KEY;
+    // Restore default (local) config for any suite that runs after us.
+    await load(process.cwd());
+  });
+
+  it("settleDocumentEmbeds(timeoutMs) resolves at the deadline even with a pending embed", async () => {
+    _persistEmbedCap(8192, 0);
+    const fakes = installFakeWorkers();
+    expect(isAvailable()).toBe(true);
+
+    // Fire an embed and never let the (fake) worker reply — it stays pending.
+    embedKnowledgeEntry("k-1331", "title", "content");
+    await flush();
+    expect(fakes).toHaveLength(1);
+
+    // A bounded drain must RESOLVE at the deadline rather than hang on the
+    // never-completing embed (this is what keeps Ctrl+C snappy).
+    const start = Date.now();
+    await settleDocumentEmbeds(50);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(45);
+    expect(elapsed).toBeLessThan(1000);
+
+    // Complete the embed so it doesn't leak into the shared in-flight set and
+    // stall a later test's drain (the module-level set persists across tests).
+    fakes[0].emit("message", {
+      type: "result",
+      id: fakes[0].lastPosted().id,
+      vectors: [new Float32Array([0.1, 0.2, 0.3])],
+    });
+    await settleDocumentEmbeds();
+  });
+
+  it("settleDocumentEmbeds(timeoutMs) returns immediately once the embed completes", async () => {
+    _persistEmbedCap(8192, 0);
+    const fakes = installFakeWorkers();
+
+    embedKnowledgeEntry("k-1331-b", "title", "content");
+    await flush();
+    expect(fakes).toHaveLength(1);
+
+    // Worker replies → embed resolves → a generous-deadline drain returns fast.
+    fakes[0].emit("message", {
+      type: "result",
+      id: fakes[0].lastPosted().id,
+      vectors: [new Float32Array([0.1, 0.2, 0.3])],
+    });
+    await flush();
+    const start = Date.now();
+    await settleDocumentEmbeds(5000);
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe("warmupEmbedding (issue #1331)", () => {
+  let savedProvider: unknown;
+  let savedVoyage: string | undefined;
+  let savedOpenAI: string | undefined;
+
+  beforeEach(() => {
+    savedVoyage = process.env.VOYAGE_API_KEY;
+    savedOpenAI = process.env.OPENAI_API_KEY;
+    delete process.env.VOYAGE_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    _resetLocalProviderProbe();
+    savedProvider = _saveAndClearProvider();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    _setTestWorkerFactory(null);
+    _resetLocalProviderProbe();
+    _restoreProvider(savedProvider);
+    if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
+    else delete process.env.VOYAGE_API_KEY;
+    if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
+    else delete process.env.OPENAI_API_KEY;
+    await load(process.cwd());
+  });
+
+  it("fires exactly one 'document' embed on a local provider", async () => {
+    _persistEmbedCap(8192, 0);
+    const fakes = installFakeWorkers();
+    expect(isAvailable()).toBe(true);
+    expect(config().search.embeddings.provider).toBe("local");
+
+    warmupEmbedding();
+    await flush();
+
+    // The warmup posted exactly one embed to the local worker.
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0].posted.filter((m) => m.type === "embed")).toHaveLength(1);
+
+    // Drain the in-flight warmup so it doesn't leak into the shared set.
+    fakes[0].emit("message", {
+      type: "result",
+      id: fakes[0].lastPosted().id,
+      vectors: [new Float32Array([0.1, 0.2, 0.3])],
+    });
+    await settleDocumentEmbeds();
+  });
+
+  it("does NOT count the warmup as a recall embed (no self-gating of backfill)", async () => {
+    _persistEmbedCap(8192, 0);
+    const fakes = installFakeWorkers();
+
+    // Drive the real embed path (no spy) so the recall counter is exercised;
+    // the fake worker won't reply until we tell it to, keeping the embed in
+    // flight while we check the counter.
+    warmupEmbedding();
+    await flush();
+
+    // A 'document' embed must never touch the recall-in-flight counter, or it
+    // would park the temporal backfill on itself.
+    expect(recallEmbedsInFlight()).toBe(0);
+
+    // Complete + drain so nothing leaks into the shared in-flight set.
+    fakes[0].emit("message", {
+      type: "result",
+      id: fakes[0].lastPosted().id,
+      vectors: [new Float32Array([0.1, 0.2, 0.3])],
+    });
+    await settleDocumentEmbeds();
+  });
+
+  it("is a no-op for a remote provider — never hits the network (no quota burn)", async () => {
+    // Voyage WITH a key → provider is available but NOT local. Removing the
+    // local-only guard would make warmup call VoyageProvider.embed → a real
+    // fetch to the Voyage API. Spy on fetch to prove warmup never does that.
+    process.env.VOYAGE_API_KEY = "test-voyage-key-abcdefghijklmnop";
+    await load(process.cwd());
+    (config().search.embeddings as { provider: string }).provider = "voyage";
+    _resetLocalProviderProbe();
+    _saveAndClearProvider();
+    expect(isAvailable()).toBe(true); // remote provider is available…
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ embedding: [0.1] }] }), {
+        status: 200,
+      }),
+    );
+
+    warmupEmbedding();
+    await flush();
+
+    // …but warmup must skip it — no HTTP request, so no remote quota burned.
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

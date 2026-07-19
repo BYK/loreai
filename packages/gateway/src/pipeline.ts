@@ -2321,6 +2321,12 @@ async function initIfNeeded(
     log.info("metric backfill failed:", e);
   }
   if (process.env.NODE_ENV !== "test") {
+    // Warm the local embedding worker NOW (throwaway embed) so the ~21s ONNX
+    // cold-load is paid at startup instead of on the first real distillation
+    // embed — which on a short/fast session would otherwise race gateway
+    // teardown and never write its `distillation_vec` row (#1331). Local-only,
+    // fire-and-forget; the model loads during the backfill's startup delay.
+    embedding.warmupEmbedding();
     // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
     // pool to live traffic: park while the breaker is tripped or a live recall
     // embed is in flight, resume the instant the worker drains.
