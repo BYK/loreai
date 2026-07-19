@@ -53,6 +53,7 @@ The cleanest way to override a single field is via env var if Lore reads it, or 
 - [`agentsFile`](#agentsFile) — AGENTS.md/CLAUDE.md export/import configuration.
 - [`loreFile`](#loreFile) — `.lore.md` export/import configuration.
 - [`user`](#user) — User identity for the self-entity. Falls back to git config user.name / user.email if omitted.
+- [`invariantCheck`](#invariantCheck) — `lore invariant-check` (semantic linter) tuning.
 
 ## `model`
 
@@ -265,4 +266,13 @@ User identity for the self-entity. Falls back to git config user.name / user.ema
 | `email` | string | — |  | Email address. Overrides git config user.email. |
 | `aliases` | array<{ type, value }> | `[]` |  | Additional aliases for the self entity. |
 | `metadata` | Record<string, unknown> | — |  | Metadata for the self entity (description, role, notes, etc.). |
+
+
+## `invariantCheck`
+
+`lore invariant-check` (semantic linter) tuning.
+
+| Field | Type | Default | Constraints | Description |
+|---|---|---|---|---|
+| `effort` | enum | `"off"` |  | Reasoning effort for the invariant-check judge (off\|low\|medium\|high\|xhigh). Trades cost for depth on reasoning-capable models. Default: off. Override per-run with --effort. |
 

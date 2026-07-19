@@ -19,6 +19,13 @@ inputs:
     description: "Judge model (provider/id). Defaults to the configured worker model."
     required: false
     default: ""
+  effort:
+    description: >-
+      Reasoning effort for the judge (off|low|medium|high|xhigh). A cost/depth
+      dial on reasoning-capable models; ignored by non-reasoning models like
+      gpt-4o-mini. Defaults to the `invariantCheck.effort` config value (off).
+    required: false
+    default: ""
   worker-api-key:
     description: >-
       Judge credential (sets LORE_WORKER_API_KEY). In CI the gateway has no
@@ -92,6 +99,7 @@ runs:
         LORE_IC_BASE: ${{ inputs.base }}
         LORE_IC_HEAD: ${{ inputs.head }}
         LORE_IC_MODEL: ${{ inputs.model }}
+        LORE_IC_EFFORT: ${{ inputs.effort }}
         LORE_WORKER_API_KEY: ${{ inputs.worker-api-key }}
         LORE_CMD: ${{ inputs.lore-command }}
         # Point the whole lore stack (db(), forProject, loadInvariantVecs) at the
@@ -120,6 +128,7 @@ runs:
         [ -n "$base" ] && args+=(--base "$base")
         [ -n "$head" ] && args+=(--head "$head")
         [ -n "${LORE_IC_MODEL}" ] && args+=(--model "${LORE_IC_MODEL}")
+        [ -n "${LORE_IC_EFFORT}" ] && args+=(--effort "${LORE_IC_EFFORT}")
         # On a cache MISS, seed the DB from .lore.md (imports + embeds, once).
         # On a HIT the DB already exists; --import-lore-md fast-paths (mtime/hash
         # match) and is a cheap no-op, so it is always safe to pass.
