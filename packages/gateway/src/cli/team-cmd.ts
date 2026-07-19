@@ -23,11 +23,13 @@ import {
   createTeam,
   createTeamInvite,
   discoverGitHubCollaborators,
+  isEmailAddress,
   listDomainJoinRequests,
   listTeams,
   rejectDomainJoin,
   removeTeamMember,
   requestDomainJoin,
+  sendInviteEmail,
   setTeamRole,
   teamMembers,
 } from "../team";
@@ -194,11 +196,22 @@ export async function commandTeam(
         const token = await createTeamInvite(client, scope, role, hint, {
           offline,
         });
+        // E-5-e: if --email is a real address, email the join link. A send failure NEVER loses the
+        // invite — the token/link is always still printed.
+        const willEmail = !!hint && isEmailAddress(hint);
+        const emailed = willEmail
+          ? await sendInviteEmail(client, token, hint)
+          : false;
         console.log(
           `Invite created (${role}${hint ? `, for ${hint}` : ""}${offline ? ", offline" : ""}). It expires in 14 days.\n` +
             (offline
               ? "This token carries a one-time decryption key — treat it like a password and prefer a private channel.\n"
               : "") +
+            (willEmail && emailed
+              ? `Emailed the join link to ${hint}.\n`
+              : willEmail
+                ? "Could not send the email — share the link manually below.\n"
+                : "") +
             `Share this with the invitee — they run:\n\n  lore team accept ${token}\n`,
         );
         break;

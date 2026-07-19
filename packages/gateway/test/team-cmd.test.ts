@@ -24,6 +24,10 @@ vi.mock("../src/team", () => ({
   listDomainJoinRequests: vi.fn(),
   approveDomainJoin: vi.fn(),
   rejectDomainJoin: vi.fn(),
+  discoverGitHubCollaborators: vi.fn(),
+  sendInviteEmail: vi.fn(),
+  // Pure predicate — use the real implementation so --email routing behaves in tests.
+  isEmailAddress: (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim()),
 }));
 
 import {

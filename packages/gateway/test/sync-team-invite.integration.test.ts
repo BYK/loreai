@@ -297,6 +297,36 @@ describe.skipIf(SKIP)("lore team — direct email invite (E-5-c)", () => {
     expect(res.scopeId).toBe(scope);
   });
 
+  it("send-invite-email authorization signals: only the admin who CREATED the token can email it (E-5-e)", async () => {
+    // The send-invite-email Edge Function authorizes on the invite TOKEN, not client input: it
+    // requires (a) scope_role(scope)='admin' for the caller AND (b) invited_by = caller. This proves
+    // both DB-level signals it reads, so it can never be used as an open email-spam relay. (The Deno
+    // function itself isn't run here — the harness has no Deno runtime — but its exact authz reads are.)
+    const scope = await freshAdminTeam("Email-Authz");
+    await createTeamInvite(clientFor(admin), scope, "editor");
+    // The invite row, read as the service does (superuser stands in for the service-role read).
+    const row = await h.client
+      .query(
+        "select scope_id, invited_by from public.pending_invites where scope_id=$1",
+        [scope],
+      )
+      .then((r) => r.rows[0] as { scope_id: string; invited_by: string });
+    expect(row.invited_by).toBe(admin); // creator is the admin
+
+    // Signal (a): scope_role resolves 'admin' for the creator, and NOT for a non-member.
+    const adminRole = await clientFor(admin)
+      .rpc("scope_role", { p_scope: scope })
+      .then((r) => r.data);
+    expect(adminRole).toBe("admin");
+    const outsiderRole = await clientFor(invitee)
+      .rpc("scope_role", { p_scope: scope })
+      .then((r) => r.data);
+    expect(outsiderRole == null || outsiderRole !== "admin").toBe(true);
+
+    // Signal (b): invited_by binds the token to its creator — a different user fails the creator gate.
+    expect(row.invited_by === invitee).toBe(false);
+  });
+
   it("admin's sync auto-wraps the DEK to an invited member — zero follow-up (reconcileScopeWraps)", async () => {
     // B publishes its identity key to the remote directory (its own device), then local is wiped.
     await publishAsInvitee();

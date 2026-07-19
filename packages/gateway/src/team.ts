@@ -297,6 +297,31 @@ export async function createTeamInvite(
   return `${data as string}${ephSecretSeg}`;
 }
 
+/** Conservative "looks like an email" check — decides whether `--email` is a real address to send to. */
+export function isEmailAddress(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
+}
+
+/**
+ * E-5-e (#630/#827): email a team invitee their join link via the `send-invite-email` Edge Function
+ * (SMTP2GO). Best-effort — returns false (never throws) on any failure so the caller can fall back to
+ * printing the token link; the invite itself already exists server-side.
+ */
+export async function sendInviteEmail(
+  client: SupabaseClient,
+  token: string,
+  email: string,
+): Promise<boolean> {
+  try {
+    const { error } = await client.functions.invoke("send-invite-email", {
+      body: { token, email },
+    });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Redeem an invite token (E-5-c): self-add to the scope, publish this device's identity key so the
  * admin can wrap the DEK, and pull so the joined team shows in `lore team list`. Returns the scope
