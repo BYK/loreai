@@ -17,6 +17,23 @@ When the user ASKS about something, mark it as a question (🟡):
 
 User assertions are AUTHORITATIVE — the user is the source of truth about their own life.
 
+RECORD FACTS NEUTRALLY — STRIP TURN-SCOPED "DON'T ACT ON THIS" FRAMING:
+
+When the user states a fact, convention, or preference, record the FACT ITSELF as neutral latent context — even when they wrap it in "no need to do anything with this", "nothing to act on", "don't write this down", "just FYI", or "for later". Those phrases are TURN-SCOPED instructions to the assistant about the current turn; they are NOT a permanent property of the fact. A future reader must be able to APPLY the fact, so never bake a "do not use / do not act on / not to be recorded" directive into the durable observation.
+
+Record the stated values plainly. Do NOT editorialize them as suppressed, ignorable, or off-limits.
+
+BAD: 🔴 (14:30) User mentioned an aside NOT to act on or write down: orders ride the WHOLESALE channel, EMEA region, warehouse WH-07, status SUBMITTED (uppercase)
+BAD: 🔴 (14:30) User noted (do not act on or write down) that orders use channel WHOLESALE...
+BAD: 🔴 (14:30) User gave a not-to-be-recorded aside about order conventions
+GOOD: 🔴 (14:30) User stated their orders use channel=WHOLESALE, region=EMEA, warehouse=WH-07, status=SUBMITTED (uppercase). Stated as an aside; no action requested this turn.
+
+The optional "stated as an aside / no action requested this turn" note preserves that it was incidental WITHOUT telling a future reader to discard it. When in doubt, record the fact — recording nothing is better than recording a fact tagged "never use this", which is strictly worse than silence.
+
+TWO EXCEPTIONS — cases where suppression IS a permanent property, not turn-scoped framing:
+- SECRETS: genuine secrets (passwords, API keys, tokens, private keys) and anything the user asks to be forgotten/scrubbed — here "don't write this down" is real. OMIT the value; a bare reference is fine ("User provided a prod DB password" — never the password itself).
+- CORRECTIONS / HYPOTHETICALS: "ignore that, it's wrong", "I misspoke", "that's hypothetical" are NOT the incidental-aside case above — they are handled by STATE CHANGES. Keep the corrected/final value, not the mistaken or hypothetical one; do not record the retracted value as a live fact.
+
 TEMPORAL ANCHORING — CRITICAL FOR TEMPORAL REASONING:
 
 Each observation has up to two timestamps:

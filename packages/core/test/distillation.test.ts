@@ -28,7 +28,7 @@ import {
 afterEach(async () => {
   await settleBackgroundWork();
 });
-import { distillationUser } from "../src/prompt";
+import { distillationUser, DISTILLATION_SYSTEM } from "../src/prompt";
 import * as ltm from "../src/ltm";
 import type * as temporal from "../src/temporal";
 import { CHUNK_TERMINATOR, partsToText } from "../src/temporal";
@@ -2020,6 +2020,68 @@ describe("detectAssertions", () => {
 });
 
 // ─── distillationUser with pinned assertions ──────────────────────────
+
+describe("DISTILLATION_SYSTEM — neutral fact recording (#1383)", () => {
+  // Cheaper worker distillers (e.g. MiniMax-M3) over-literally propagate a
+  // user's turn-scoped "no need to act on this" framing into DURABLE memory,
+  // recording facts tagged "do not act on / do not write down". When recalled,
+  // that anti-instruction actively discourages a future agent from applying the
+  // fact. The observer prompt must instruct recording the FACT NEUTRALLY and
+  // treating suppression phrasing as turn-scoped, not a permanent property.
+  test("instructs recording facts neutrally and stripping turn-scoped suppression", () => {
+    expect(DISTILLATION_SYSTEM).toContain("RECORD FACTS NEUTRALLY");
+    expect(DISTILLATION_SYSTEM).toContain("TURN-SCOPED");
+    // Names the exact suppression phrases the observer must NOT propagate.
+    expect(DISTILLATION_SYSTEM).toMatch(/nothing to act on/i);
+    expect(DISTILLATION_SYSTEM).toMatch(/don't write this down|do not use/i);
+  });
+
+  test("teaches that recording nothing beats recording a 'never use this' fact", () => {
+    expect(DISTILLATION_SYSTEM).toMatch(
+      /recording nothing is better|strictly worse than silence/i,
+    );
+  });
+
+  test("the WHOLESALE-aside example is shown as GOOD without a suppression directive", () => {
+    // The GOOD example records the values plainly with an optional incidental
+    // note; it must NOT carry "do not act on / not to be recorded" framing.
+    const goodIdx = DISTILLATION_SYSTEM.indexOf(
+      "GOOD: 🔴 (14:30) User stated their orders use channel=WHOLESALE",
+    );
+    expect(goodIdx).toBeGreaterThan(-1);
+    const goodLine = DISTILLATION_SYSTEM.slice(goodIdx).split("\n")[0];
+    expect(goodLine).toContain("channel=WHOLESALE");
+    expect(goodLine).toContain("no action requested this turn");
+    expect(goodLine).not.toMatch(/not to be recorded|do not act on/i);
+  });
+
+  test("shows the poisoned framing as a BAD example to avoid", () => {
+    expect(DISTILLATION_SYSTEM).toMatch(
+      /BAD:.*NOT to act on or write down.*WHOLESALE/i,
+    );
+  });
+
+  test("carves out genuine secrets: omit the value, keep a bare reference", () => {
+    // "don't write this down" for a password/key IS a permanent property — the
+    // neutral-recording rule must NOT push the observer to durably store secret
+    // VALUES. Guards against the reviewer-flagged secret-recording risk.
+    expect(DISTILLATION_SYSTEM).toMatch(/SECRETS/);
+    expect(DISTILLATION_SYSTEM).toMatch(
+      /passwords|API keys|tokens|private keys/i,
+    );
+    expect(DISTILLATION_SYSTEM).toMatch(/OMIT the value|never the password/i);
+  });
+
+  test("carves out corrections/hypotheticals: keep the final value, not the retracted one", () => {
+    // Over-reach guard: "ignore that, it's wrong" / "I misspoke" / hypotheticals
+    // are supersession, NOT incidental-aside framing to be stripped.
+    expect(DISTILLATION_SYSTEM).toMatch(/CORRECTIONS|HYPOTHETICALS/);
+    expect(DISTILLATION_SYSTEM).toMatch(/I misspoke|hypothetical/i);
+    expect(DISTILLATION_SYSTEM).toMatch(
+      /keep the corrected\/final value|not the mistaken/i,
+    );
+  });
+});
 
 describe("distillationUser — pinned assertions", () => {
   test("no assertions — output unchanged from baseline", () => {
