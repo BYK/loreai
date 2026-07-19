@@ -87,7 +87,7 @@ runs:
 
     - name: Restore derived invariant DB
       id: cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ${{ runner.temp }}/lore-ci
         key: ${{ steps.key.outputs.key }}
