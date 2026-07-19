@@ -136,6 +136,8 @@ const OPTIONS = {
   email: { type: "string" as const },
   role: { type: "string" as const },
   offline: { type: "boolean" as const },
+  // `lore team discover --invite <scope>` (E-5-d-2): mint invites for discovered collaborators.
+  invite: { type: "string" as const },
   verify: { type: "boolean" as const },
   "no-browser": { type: "boolean" as const },
   // Hidden diagnostic: prints the vendored-model registration set by

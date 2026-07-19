@@ -1,0 +1,49 @@
+name: Deploy Supabase Functions
+
+# Auto-deploy the Edge Functions on merge to main so we never rely on someone remembering to run
+# `supabase functions deploy` from a local branch (unsafe + unsustainable). Migrations already deploy
+# via the Supabase↔GitHub integration; this covers the functions, which that integration does NOT.
+#
+# One-time setup (required): add a repo secret SUPABASE_ACCESS_TOKEN
+#   (Supabase dashboard → Account → Access Tokens → generate; then
+#    `gh secret set SUPABASE_ACCESS_TOKEN`). Function SECRETS (e.g. SMTP2GO_API_KEY) are set
+#   separately via `supabase secrets set` and are NOT managed here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/functions/**"
+      - "supabase/config.toml"
+      - ".github/workflows/deploy-functions.yml"
+  # Manual re-deploy escape hatch.
+  workflow_dispatch:
+
+# Never let two deploys race; the newest merge wins.
+concurrency:
+  group: deploy-functions
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Edge Functions
+    runs-on: ubuntu-latest
+    # The project ref is not a secret (it's in supabase/config.toml); the access token is.
+    env:
+      SUPABASE_PROJECT_REF: jlwxsrmvomocgngbxmcf
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Fail fast if the access token is missing
+        run: |
+          if [ -z "${SUPABASE_ACCESS_TOKEN}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set. Add it as a repo secret (Supabase → Account → Access Tokens)."
+            exit 1
+          fi
+      # Deploy every function under supabase/functions. `deploy` with no function name deploys all of
+      # them; --project-ref avoids needing an interactive `supabase link`.
+      - name: Deploy all Edge Functions
+        run: supabase functions deploy --project-ref "${SUPABASE_PROJECT_REF}"

@@ -26,3 +26,15 @@ enable_signup = true
 # E-5-a (#827): mirrors GitHub org/team memberships into Lore teams. verify_jwt=true so only a
 # signed-in user can invoke it; it then uses their provider_token to read memberships from GitHub.
 verify_jwt = true
+
+[functions.github-discover]
+# E-5-d (#630): discovers which of the caller's GitHub repo collaborators already have a Lore
+# account. verify_jwt=true so only a signed-in user can invoke it; it binds their provider_token to
+# their identity and reads collaborators with the caller's own GitHub access.
+verify_jwt = true
+
+[functions.send-invite-email]
+# E-5-e (#630/#827): emails a team invitee their join link via SMTP2GO. verify_jwt=true; the function
+# authorizes on the invite token (caller must be the scope admin who created it). Requires the
+# SMTP2GO_API_KEY function secret.
+verify_jwt = true

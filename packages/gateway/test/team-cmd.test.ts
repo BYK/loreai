@@ -28,6 +28,24 @@ vi.mock("../src/team", () => ({
   sendInviteEmail: vi.fn(),
   // Pure predicate — use the real implementation so --email routing behaves in tests.
   isEmailAddress: (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim()),
+  // Pure dedupe helper — real impl so the discover --invite path yields the expected people.
+  distinctCollaborators: (
+    repos: Array<{ collaborators: Array<{ login: string }> }>,
+  ) => {
+    const seen = new Map<string, { login: string }>();
+    for (const r of repos)
+      for (const c of r.collaborators)
+        if (!seen.has(c.login)) seen.set(c.login, c);
+    return Array.from(seen.values()).sort((a, b) =>
+      a.login.localeCompare(b.login),
+    );
+  },
+}));
+
+// `lore team discover` re-runs GitHub OAuth for a fresh provider_token; mock it so the CLI test can
+// exercise the discover/--invite flow without a real OAuth dance.
+vi.mock("../src/cli/login", () => ({
+  acquireGitHubProviderToken: vi.fn(),
 }));
 
 import {
@@ -40,6 +58,7 @@ import {
 } from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "../src/supabase";
 import { commandTeam } from "../src/cli/team-cmd";
+import { acquireGitHubProviderToken } from "../src/cli/login";
 import * as team from "../src/team";
 
 const FAKE_CLIENT = { id: "client" } as never;
@@ -584,5 +603,101 @@ describe("review / approve / reject / policy (E-5-F3-2)", () => {
     await commandTeam(["policy", "bogus"], { project: PROJECT });
     expect(process.exitCode).toBe(1);
     expect(errs.join("\n")).toMatch(/Usage: lore team/);
+  });
+});
+
+describe("discover --invite (E-5-d-2)", () => {
+  beforeEach(() => {
+    db().exec("DELETE FROM scopes");
+    db().exec("DELETE FROM scope_members");
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('s9','o1','team','Rockets','manual',0,0)",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES ('s9','u1','admin',0,0)",
+      )
+      .run();
+    vi.mocked(getCurrentUser).mockResolvedValue({ user_id: "u1" } as never);
+    vi.mocked(acquireGitHubProviderToken).mockResolvedValue({
+      client: FAKE_CLIENT,
+      providerToken: "gho_x",
+    });
+    vi.mocked(team.discoverGitHubCollaborators).mockResolvedValue([
+      {
+        repo: "o/a",
+        collaborators: [
+          { login: "alice", githubId: 1, onLore: true },
+          { login: "bob", githubId: 2, onLore: false },
+        ],
+      },
+      {
+        repo: "o/b",
+        collaborators: [{ login: "bob", githubId: 2, onLore: false }],
+      },
+    ] as never);
+  });
+
+  it("mints ONE invite per distinct collaborator and prints accept links", async () => {
+    vi.mocked(team.createTeamInvite)
+      .mockResolvedValueOnce("tok-alice")
+      .mockResolvedValueOnce("tok-bob");
+    await commandTeam(["discover", "--invite", "Rockets"], {
+      invite: "Rockets",
+    });
+    // bob appears on two repos → deduped to a single invite (2 people, not 3).
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledTimes(2);
+    // resolved to the team scope id + default editor role.
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s9",
+      "editor",
+    );
+    const out = logs.join("\n");
+    expect(out).toMatch(/lore team accept tok-alice/);
+    expect(out).toMatch(/lore team accept tok-bob/);
+    expect(out).toMatch(/alice \(on Lore\)/);
+  });
+
+  it("honors --role viewer", async () => {
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok");
+    await commandTeam(["discover", "--invite", "Rockets"], {
+      invite: "Rockets",
+      role: "viewer",
+    });
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s9",
+      "viewer",
+    );
+  });
+
+  it("refuses when the scope can't be resolved (no team, no linked project) → exit 1", async () => {
+    await commandTeam(["discover", "--invite", "Nonexistent"], {
+      invite: "Nonexistent",
+    });
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toMatch(/No team "Nonexistent"/);
+    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+  });
+
+  it("refuses an editor caller (only admins may invite) before firing any RPC → exit 1", async () => {
+    db()
+      .query("UPDATE scope_members SET role='editor' WHERE scope_id='s9'")
+      .run();
+    await commandTeam(["discover", "--invite", "Rockets"], {
+      invite: "Rockets",
+    });
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toMatch(/must be an admin/);
+    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+  });
+
+  it("without --invite, only lists (no invites minted)", async () => {
+    await commandTeam(["discover"], {});
+    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+    expect(logs.join("\n")).toMatch(/already on Lore/);
   });
 });

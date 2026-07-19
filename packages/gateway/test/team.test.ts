@@ -32,6 +32,7 @@ import {
   claimOrgDomain,
   createTeam,
   createTeamInvite,
+  distinctCollaborators,
   listTeams,
   rejectDomainJoin,
   removeTeamMember,
@@ -591,5 +592,54 @@ describe("domain auto-join RPC wrappers (E-5-b)", () => {
       name: "reject_domain_join",
       params: { p_request_id: "req-9" },
     });
+  });
+});
+
+describe("distinctCollaborators (E-5-d-2)", () => {
+  const repo = (name: string, cols: Array<[string, boolean]>) => ({
+    repo: name,
+    collaborators: cols.map(([login, onLore]) => ({
+      login,
+      githubId: login.length,
+      onLore,
+    })),
+  });
+
+  it("dedupes a person appearing on multiple repos by login", () => {
+    const out = distinctCollaborators([
+      repo("o/a", [
+        ["alice", true],
+        ["bob", false],
+      ]),
+      repo("o/b", [
+        ["bob", false],
+        ["carol", false],
+      ]),
+    ]);
+    expect(out.map((c) => c.login)).toEqual(["alice", "bob", "carol"]);
+  });
+
+  it("keeps the FIRST occurrence's data on a login collision (stable dedupe)", () => {
+    const out = distinctCollaborators([
+      repo("o/a", [["bob", true]]),
+      repo("o/b", [["bob", false]]),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].onLore).toBe(true); // first-seen wins
+  });
+
+  it("sorts by login for stable output", () => {
+    const out = distinctCollaborators([
+      repo("o/a", [
+        ["zed", false],
+        ["amy", false],
+      ]),
+    ]);
+    expect(out.map((c) => c.login)).toEqual(["amy", "zed"]);
+  });
+
+  it("returns [] for no repos / no collaborators", () => {
+    expect(distinctCollaborators([])).toEqual([]);
+    expect(distinctCollaborators([repo("o/empty", [])])).toEqual([]);
   });
 });

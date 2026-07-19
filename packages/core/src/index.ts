@@ -116,6 +116,7 @@ export {
   setProjectPromotionPolicy,
   effectivePromotionPolicy,
   resolveWritableScope,
+  scopeMemberRole,
   resolveProjectByRemoteOrPath,
   mergeProjectInternal,
   convergeProjectsByRemote,

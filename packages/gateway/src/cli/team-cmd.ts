@@ -8,7 +8,9 @@ import {
   keystore,
   ltm,
   projectId,
+  projectScope,
   resolveWritableScope,
+  scopeMemberRole,
   setProjectPromotionPolicy,
   setProjectScope,
   syncData,
@@ -23,6 +25,7 @@ import {
   createTeam,
   createTeamInvite,
   discoverGitHubCollaborators,
+  distinctCollaborators,
   isEmailAddress,
   listDomainJoinRequests,
   listTeams,
@@ -35,7 +38,7 @@ import {
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | discover [repo...] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
+  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <scope>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
 
 export async function commandTeam(
   positionals: string[],
@@ -134,9 +137,84 @@ export async function commandTeam(
             );
           }
         }
+
+        // E-5-d-2: --invite <scope> mints an invite per DISTINCT collaborator so the admin can hand
+        // out join links. Invite-only for everyone (on-Lore or not) — we never expose Lore user_ids,
+        // so there is no direct auto-add; an on-Lore invitee just gets a frictionless `accept`.
+        // GitHub's API returns no collaborator emails, so links are printed rather than auto-emailed.
+        const inviteRef = values.invite as string | undefined;
+        if (inviteRef !== undefined) {
+          // A trailing `--invite` with no value parses as `true` under strict:false — reject it
+          // clearly instead of letting a non-string reach the scope lookup.
+          if (typeof inviteRef !== "string") {
+            console.error("`--invite` requires a team name or id.");
+            process.exitCode = 1;
+            return;
+          }
+          const user = await getCurrentUser();
+          if (!user) {
+            console.error("Not logged in — run `lore login` first.");
+            process.exitCode = 1;
+            return;
+          }
+          // Resolve the target scope: an explicit team name/id, or — when the value doesn't resolve
+          // and the cwd is a project already linked to a team — that linked scope (repo→scope corr.).
+          let scope = resolveWritableScope(inviteRef, user.user_id);
+          if (!scope) {
+            const pid = projectId(process.cwd());
+            const linked = pid ? projectScope(pid) : null;
+            if (linked) scope = resolveWritableScope(linked, user.user_id);
+          }
+          if (!scope) {
+            console.error(
+              `\nNo team "${inviteRef}" you can invite to. Pass a team name/id you administer ` +
+                "(see `lore team list`), or run this from a project linked with `lore team link`.",
+            );
+            process.exitCode = 1;
+            return;
+          }
+          // Only admins may mint invites (server enforces this too). Pre-check the local mirror so an
+          // editor gets ONE clear message instead of N identical per-collaborator RPC rejections.
+          if (scopeMemberRole(scope.id, user.user_id) !== "admin") {
+            console.error(
+              `\nYou must be an admin of "${scope.name ?? scope.id}" to invite members.`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+          const inviteRole =
+            (values.role as string) === "viewer" ? "viewer" : "editor";
+          const people = distinctCollaborators(found);
+          console.log(
+            `\nMinting ${inviteRole} invites to "${scope.name ?? scope.id}" for ${people.length} collaborator${people.length === 1 ? "" : "s"}:`,
+          );
+          for (const c of people) {
+            try {
+              const token = await createTeamInvite(
+                client,
+                scope.id,
+                inviteRole,
+              );
+              console.log(
+                `  ${c.login}${c.onLore ? " (on Lore)" : ""}:\n    lore team accept ${token}`,
+              );
+            } catch (e) {
+              console.error(
+                `  ${c.login}: invite failed — ${(e as Error).message}`,
+              );
+            }
+          }
+          console.log(
+            "\nShare each link with the matching collaborator (GitHub doesn't expose their email). " +
+              "To email an address directly, use `lore team invite <scope> --email <addr>`.",
+          );
+          break;
+        }
+
         console.log(
           `\n${onLoreTotal} collaborator${onLoreTotal === 1 ? "" : "s"} already on Lore, ` +
-            `${offLoreTotal} not yet. Invite them with \`lore team invite <scope>\` (share the link).`,
+            `${offLoreTotal} not yet. Invite them with \`lore team discover --invite <scope>\` ` +
+            "or `lore team invite <scope> --email <addr>`.",
         );
         break;
       }

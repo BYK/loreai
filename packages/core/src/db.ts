@@ -4205,6 +4205,21 @@ export function resolveWritableScope(
   return scope;
 }
 
+/**
+ * The caller's role in a scope from the local registry mirror, or null if they are not a member.
+ * A read-only convenience over the mirror — the authoritative role check is always server-side (RLS
+ * / RPC). Used e.g. to pre-check "only admins may invite" client-side before firing per-member RPCs.
+ */
+export function scopeMemberRole(
+  scopeId: string,
+  userId: string,
+): string | null {
+  const m = db()
+    .query("SELECT role FROM scope_members WHERE scope_id = ? AND user_id = ?")
+    .get(scopeId, userId) as { role: string } | null;
+  return m?.role ?? null;
+}
+
 /** Look up a project's display name by its internal ID. */
 export function projectName(id: string): string | null {
   const row = db().query("SELECT name FROM projects WHERE id = ?").get(id) as {

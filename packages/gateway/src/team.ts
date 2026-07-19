@@ -75,6 +75,23 @@ export async function discoverGitHubCollaborators(
   }));
 }
 
+/**
+ * The DISTINCT collaborators across all discovered repos, deduped by GitHub login (a person on
+ * several repos should get one invite, not one per repo). Sorted for stable output. Used by
+ * `lore team discover --invite` to mint one invite per person (E-5-d-2).
+ */
+export function distinctCollaborators(
+  repos: DiscoveredRepo[],
+): DiscoveredCollaborator[] {
+  const byLogin = new Map<string, DiscoveredCollaborator>();
+  for (const r of repos)
+    for (const c of r.collaborators)
+      if (!byLogin.has(c.login)) byLogin.set(c.login, c);
+  return Array.from(byLogin.values()).sort((a, b) =>
+    a.login.localeCompare(b.login),
+  );
+}
+
 async function selfUserId(): Promise<string> {
   const u = await getCurrentUser();
   if (!u) throw new Error("not logged in — run `lore login` first");
