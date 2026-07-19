@@ -688,6 +688,15 @@ class LocalProvider implements EmbeddingProvider {
    *  full `EMBED_MEM_FRACTION` share and sum past the host's RAM (BUG: native
    *  OOM is an uncatchable SIGKILL, so this must be prevented, not recovered). */
   private readonly memDivisor: number;
+  /** Force the worker onto the bundled WASM ONNX Runtime, set after a native
+   *  worker reported it couldn't parse an intact model (`init-needs-wasm`, the
+   *  Bun ↔ onnxruntime-node incompatibility, #1379). Threaded into every
+   *  subsequent `workerData` so respawns (incl. OOM backoff) stay on WASM. */
+  private forceWasm = false;
+  /** One-shot latch: we respawn once onto WASM after `init-needs-wasm`. A second
+   *  `init-needs-wasm` (WASM also failing, which shouldn't happen) is treated as
+   *  a genuine init failure instead of looping respawns. */
+  private wasmFallbackTried = false;
 
   constructor(modelId: string, dimensions: number, memDivisor = 1) {
     this.modelId = modelId;
@@ -765,6 +774,9 @@ class LocalProvider implements EmbeddingProvider {
         // Snapshot the host's silence state — the worker's own `globalThis`
         // can't see the main thread's flag (re-read on every OOM respawn).
         stderrSilenced: log.isStderrSilenced(),
+        // Force WASM once a native worker proved it couldn't parse the model
+        // (#1379). Sticky across respawns so we don't bounce back to native.
+        forceWasm: this.forceWasm,
       };
 
       if (testWorkerFactory) {
@@ -821,8 +833,16 @@ class LocalProvider implements EmbeddingProvider {
       // Don't let the worker prevent process exit.
       this.worker.unref();
 
+      // Capture the worker THIS init spawned. Every event handler below is bound
+      // to `spawned` and early-returns if `this.worker !== spawned` — a stale
+      // worker's late events (e.g. the `exit(1)` that `terminate()` emits during
+      // a WASM fallback respawn, #1379/#1387-B1) must never clobber the fresh
+      // worker's state, reject its resubmitted requests, or latch the provider.
+      const spawned = this.worker;
+
       // Wire up response handler.
       this.worker.on("message", (msg: WorkerOutbound) => {
+        if (this.worker !== spawned) return; // superseded worker — ignore
         switch (msg.type) {
           case "result": {
             const pending = this.pendingRequests.get(msg.id);
@@ -866,64 +886,34 @@ class LocalProvider implements EmbeddingProvider {
             }
             break;
           }
+          case "init-needs-wasm": {
+            // The native ONNX backend loaded but couldn't parse an intact model
+            // (#1379 — Bun ↔ onnxruntime-node). Respawn a FRESH worker forcing
+            // WASM; the backend is committed per module-graph, so only a new
+            // worker can switch. One-shot: if WASM ALSO reports this (shouldn't
+            // happen — it means genuine corruption on both backends), fall
+            // through to the init-error path so we don't loop respawns.
+            if (!this.wasmFallbackTried) {
+              this.wasmFallbackTried = true;
+              this.forceWasm = true;
+              this.workerReady = false;
+              // Clear any transient init debt so the deliberate respawn isn't
+              // fast-failed, mirroring the OOM backoff path.
+              this.workerInitError = null;
+              log.info(
+                "native ONNX runtime could not load the embedding model " +
+                  `(${msg.error}); retrying with the bundled WASM runtime`,
+              );
+              void this.respawnForWasm();
+              break;
+            }
+            // Already tried WASM and it also failed — treat as a real init
+            // failure (genuine corruption on both backends, or a non-Bun cause).
+            this.handleInitError(msg.error);
+            break;
+          }
           case "init-error": {
-            // Model init failed inside the worker — surface as
-            // LocalProviderUnavailableError on all pending + future requests.
-            this.workerInitError = msg.error;
-            this.workerReady = false;
-            if (isMissingLocalStackError(msg.error)) {
-              // Optional local-embedding stack not installed (#1026 — an
-              // expected, actionable degraded state that will NOT self-heal on
-              // its own). Latch permanently; recall degrades to FTS-only. Flag
-              // it so the self-heal re-probe skips it (a reinstall, not a retry,
-              // is what recovers this).
-              localProviderKnownBroken = true;
-              localStackMissing = true;
-              if (!localProviderErrorLogged) {
-                localProviderErrorLogged = true;
-                log.warn(
-                  "local embedding dependencies not installed " +
-                    "(optional '@huggingface/transformers' / 'onnxruntime-node' absent) — " +
-                    "recall will use FTS-only search. Reinstall without --omit=optional to " +
-                    "enable local embeddings, or set search.embeddings.provider in .lore.json " +
-                    "to a remote provider (voyage/openai) with the matching API key.",
-                );
-              }
-            } else {
-              // A potentially transient failure (e.g. a model read that raced a
-              // concurrent writer during a multi-instance restart, momentary
-              // memory pressure). Retry a FRESH worker after a cooldown rather
-              // than disabling local embeddings for the whole process lifetime;
-              // only give up (latch) once the retry budget is exhausted.
-              localInitFailures++;
-              if (localInitFailures >= LOCAL_INIT_MAX_ATTEMPTS) {
-                localProviderKnownBroken = true;
-                localInitRetryAt = 0;
-                if (!localProviderErrorLogged) {
-                  localProviderErrorLogged = true;
-                  log.error(
-                    `local embedding provider failed to init after ${localInitFailures} attempts: ${msg.error}. ` +
-                      `Set search.embeddings.provider in .lore.json to use a remote provider.`,
-                    new Error(`embedding worker init failed: ${msg.error}`),
-                  );
-                }
-              } else {
-                const retryDelayMs = computeInitRetryDelayMs(
-                  localInitFailures,
-                  localInitCooldownMs,
-                );
-                localInitRetryAt = Date.now() + retryDelayMs;
-                log.warn(
-                  `local embedding init failed (attempt ${localInitFailures}/${LOCAL_INIT_MAX_ATTEMPTS}): ${msg.error}. ` +
-                    `Retrying with a fresh worker in ~${Math.round(retryDelayMs / 1000)}s; recall is FTS-only until then.`,
-                );
-              }
-            }
-            for (const [, p] of this.pendingRequests) {
-              p.reject(new LocalProviderUnavailableError(msg.error));
-            }
-            this.pendingRequests.clear();
-            this.updateWorkerRef();
+            this.handleInitError(msg.error);
             break;
           }
         }
@@ -933,6 +923,7 @@ class LocalProvider implements EmbeddingProvider {
       // Null out `this.worker` in both handlers so the `?.` optional chaining
       // in embed() prevents postMessage on a terminated Worker (LOREAI-GATEWAY-1T).
       this.worker.on("error", (err: Error) => {
+        if (this.worker !== spawned) return; // superseded worker — ignore
         this.workerInitError = err.message;
         this.workerReady = false;
         this.worker = null;
@@ -945,6 +936,7 @@ class LocalProvider implements EmbeddingProvider {
       });
 
       this.worker.on("exit", (code) => {
+        if (this.worker !== spawned) return; // superseded worker — ignore
         this.workerReady = false;
         this.worker = null;
         this.initPromise = null;
@@ -1158,6 +1150,131 @@ class LocalProvider implements EmbeddingProvider {
       } catch {
         // Worker died again between ensureWorker() and here — its exit handler
         // drives the next backoff/latch. Leave pending in place.
+      }
+    }
+    this.updateWorkerRef();
+  }
+
+  /**
+   * Shared handler for a fatal worker init failure. Surfaces
+   * `LocalProviderUnavailableError` on all pending + future requests, either
+   * latching FTS-only (missing stack / retry budget exhausted) or scheduling a
+   * cooldown retry with a fresh worker. Called from the `init-error` message and
+   * from `init-needs-wasm` once the one-shot WASM fallback has already been used
+   * (a WASM init that also fails is a genuine failure, #1379).
+   */
+  private handleInitError(errorMsg: string): void {
+    this.workerInitError = errorMsg;
+    this.workerReady = false;
+    if (isMissingLocalStackError(errorMsg)) {
+      // Optional local-embedding stack not installed (#1026 — an expected,
+      // actionable degraded state that will NOT self-heal on its own). Latch
+      // permanently; recall degrades to FTS-only. Flag it so the self-heal
+      // re-probe skips it (a reinstall, not a retry, is what recovers this).
+      localProviderKnownBroken = true;
+      localStackMissing = true;
+      if (!localProviderErrorLogged) {
+        localProviderErrorLogged = true;
+        log.warn(
+          "local embedding dependencies not installed " +
+            "(optional '@huggingface/transformers' / 'onnxruntime-node' absent) — " +
+            "recall will use FTS-only search. Reinstall without --omit=optional to " +
+            "enable local embeddings, or set search.embeddings.provider in .lore.json " +
+            "to a remote provider (voyage/openai) with the matching API key.",
+        );
+      }
+    } else {
+      // A potentially transient failure (e.g. a model read that raced a
+      // concurrent writer during a multi-instance restart, momentary memory
+      // pressure). Retry a FRESH worker after a cooldown rather than disabling
+      // local embeddings for the whole process lifetime; only give up (latch)
+      // once the retry budget is exhausted.
+      localInitFailures++;
+      if (localInitFailures >= LOCAL_INIT_MAX_ATTEMPTS) {
+        localProviderKnownBroken = true;
+        localInitRetryAt = 0;
+        if (!localProviderErrorLogged) {
+          localProviderErrorLogged = true;
+          log.error(
+            `local embedding provider failed to init after ${localInitFailures} attempts: ${errorMsg}. ` +
+              `Set search.embeddings.provider in .lore.json to use a remote provider.`,
+            new Error(`embedding worker init failed: ${errorMsg}`),
+          );
+        }
+      } else {
+        const retryDelayMs = computeInitRetryDelayMs(
+          localInitFailures,
+          localInitCooldownMs,
+        );
+        localInitRetryAt = Date.now() + retryDelayMs;
+        log.warn(
+          `local embedding init failed (attempt ${localInitFailures}/${LOCAL_INIT_MAX_ATTEMPTS}): ${errorMsg}. ` +
+            `Retrying with a fresh worker in ~${Math.round(retryDelayMs / 1000)}s; recall is FTS-only until then.`,
+        );
+      }
+    }
+    for (const [, p] of this.pendingRequests) {
+      p.reject(new LocalProviderUnavailableError(errorMsg));
+    }
+    this.pendingRequests.clear();
+    this.updateWorkerRef();
+  }
+
+  /**
+   * Respawn a FRESH worker forcing the bundled WASM ONNX Runtime after a native
+   * worker reported `init-needs-wasm` (#1379). The native worker is still alive
+   * (it returned from init without exiting), so terminate it first, then let
+   * `ensureWorker()` build a new one — `this.forceWasm` (set by the caller) makes
+   * its `workerData` skip native. Any request that triggered the failed init is
+   * re-posted to the WASM worker so the fallback is transparent to callers.
+   */
+  private async respawnForWasm(): Promise<void> {
+    const dead = this.worker;
+    this.worker = null;
+    this.initPromise = null;
+    // Belt-and-suspenders: ensureWorker() early-returns when `workerReady` is
+    // true, so it MUST be false here or the WASM worker would never spawn and
+    // pending requests would be lost. The `init-needs-wasm` caller already
+    // clears it, but re-clear locally so this invariant holds for any caller and
+    // survives refactors (defense against the workerReady race Seer flagged).
+    this.workerReady = false;
+    if (dead) {
+      // Fire-and-forget: we don't await termination (the fresh worker is
+      // independent). terminate() never rejects in practice; swallow to be safe.
+      // NOTE: terminate() DOES emit an async `exit(1)` on the dead worker. That
+      // event is harmless here only because each handler is bound to its own
+      // `spawned` worker and early-returns when `this.worker` has moved on (see
+      // ensureWorker) — otherwise the stale exit would latch the provider broken
+      // and clobber the fresh WASM worker (#1387-B1).
+      void dead.terminate().catch(() => {});
+    }
+    try {
+      await this.ensureWorker();
+    } catch {
+      // Synchronous respawn failure — nothing else will settle these requests
+      // (the local embed path has no timeout). Reject them here.
+      for (const [, p] of this.pendingRequests) {
+        p.reject(
+          new LocalProviderUnavailableError(
+            "embedding worker respawn failed after WASM fallback",
+          ),
+        );
+      }
+      this.pendingRequests.clear();
+      return;
+    }
+    // Re-read through a cast: TS still has `this.worker` narrowed to null from
+    // the `this.worker = null` above (it can't see that ensureWorker() reassigns
+    // it across the await), so a direct read would be typed `never`.
+    const worker = this.worker as import("node:worker_threads").Worker | null;
+    if (worker == null) return; // raced with an exit — that handler owns pending
+    for (const [, p] of this.pendingRequests) {
+      p.payload.maxTokens = this.effectiveMaxTokens();
+      try {
+        worker.postMessage(p.payload satisfies WorkerInbound);
+      } catch {
+        // Worker died between ensureWorker() and here — its exit handler drives
+        // the next step. Leave pending in place.
       }
     }
     this.updateWorkerRef();

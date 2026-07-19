@@ -70,7 +70,35 @@ export interface InitError {
   error: string;
 }
 
-export type WorkerOutbound = EmbedResult | EmbedError | InitError;
+/**
+ * The worker's native ONNX Runtime backend could not load the model (an
+ * `isCorruptModelError` parse/deserialize failure) even though the on-disk model
+ * files look structurally intact — the hallmark of a native-runtime
+ * incompatibility rather than a corrupt download. The canonical case is running
+ * the npm bundle under **Bun**: `onnxruntime-node`'s NAPI addon resolves and
+ * loads, but `InferenceSession.create()` fails with "protobuf parsing failed"
+ * (Bun ↔ onnxruntime-node worker-thread native-addon incompatibility, #1379).
+ *
+ * The backend choice (native vs WASM) is committed at the FIRST
+ * `require("onnxruntime-node")` (the bundle's runtime shim reads
+ * `globalThis.__LORE_ORT_BINDING_PATH__` once and caches the module), so an
+ * in-process retry can't switch to WASM. The main thread respawns a FRESH worker
+ * with `WorkerInitData.forceWasm=true` — a new module graph that skips native and
+ * uses the bundled, Bun-hardened WASM runtime. Distinct from `init-error` so the
+ * main thread takes the respawn-once path instead of the purge / cooldown-retry
+ * path (the model is NOT corrupt, so purging it would be destructive).
+ */
+export interface InitNeedsWasm {
+  type: "init-needs-wasm";
+  /** The underlying native model-load error, for diagnostics. */
+  error: string;
+}
+
+export type WorkerOutbound =
+  | EmbedResult
+  | EmbedError
+  | InitError
+  | InitNeedsWasm;
 
 // ---------------------------------------------------------------------------
 // Worker exit codes
@@ -183,6 +211,38 @@ export function isMissingLocalStackError(msg: string): boolean {
     );
   if (!moduleNotFound) return false;
   return /@huggingface\/transformers|onnxruntime|\bsharp\b/i.test(msg);
+}
+
+/**
+ * Decide whether a failed pipeline init should ask the main thread to respawn
+ * the worker forcing the WASM ONNX Runtime (#1379) rather than purge/retry.
+ *
+ * True only when ALL hold:
+ *  - the NATIVE backend was in use (`usedNative`) — WASM can't fall back to
+ *    itself, so a WASM parse failure is a genuine problem, not a backend issue;
+ *  - the model is NOT vendored (`isVendored`) — the SEA binary ships its own
+ *    native runtime and has no WASM sibling to fall back to;
+ *  - the error is an `isCorruptModelError` parse/deserialize failure; AND
+ *  - the on-disk model looks structurally intact (`fileLooksIntact`) — an
+ *    actually-truncated download is real corruption (purge + re-download), not a
+ *    backend incompatibility.
+ *
+ * The canonical trigger is the npm bundle under Bun: native `onnxruntime-node`
+ * loads but `InferenceSession.create()` fails with "protobuf parsing failed"
+ * despite an intact ~137 MB model. Pure predicate, extracted for testability.
+ */
+export function shouldRequestWasmRespawn(
+  usedNative: boolean,
+  isVendored: boolean,
+  errorMessage: string,
+  fileLooksIntact: boolean,
+): boolean {
+  return (
+    usedNative &&
+    !isVendored &&
+    fileLooksIntact &&
+    isCorruptModelError(errorMessage)
+  );
 }
 
 /**
@@ -373,4 +433,12 @@ export interface WorkerInitData {
    *  The worker gates its `console.warn` diagnostics on this flag inline (it runs
    *  as raw .ts and can't value-import siblings — see embedding-worker.ts). */
   stderrSilenced?: boolean;
+  /** Force the bundled WASM ONNX Runtime, skipping native-addon resolution
+   *  entirely. Set by the main thread ONLY when respawning after the previous
+   *  (native) worker posted `init-needs-wasm` — i.e. native loaded the addon but
+   *  couldn't parse the model despite intact on-disk files (the Bun ↔
+   *  onnxruntime-node incompatibility, #1379). A no-op in vendored/SEA mode (that
+   *  path is native via `__LORE_ORT_BINDING_PATH__` and never sets this) and in
+   *  dev/test (raw .ts, no sibling WASM). Default/undefined = prefer native. */
+  forceWasm?: boolean;
 }

@@ -42,6 +42,10 @@ const port = parentPort;
 
 const init = workerData as WorkerInitData;
 const { modelId, dimensions, vendorModel } = init;
+// Force the bundled WASM ONNX Runtime, skipping native-addon resolution (see
+// WorkerInitData.forceWasm). Set by the main thread only when respawning after a
+// native worker posted `init-needs-wasm` (#1379). Default false = prefer native.
+const forceWasm = init.forceWasm ?? false;
 // Snapshot of the host's stderr-silence state (see WorkerInitData). When true,
 // every diagnostic below stays off stderr so it can't corrupt the host's TUI.
 const stderrSilenced = init.stderrSilenced ?? false;
@@ -163,6 +167,14 @@ type FeatureExtractionPipeline = {
 };
 
 let pipe: FeatureExtractionPipeline | null = null;
+/** True once `loadPipeline` commits the NATIVE ONNX Runtime backend (false only
+ *  on the npm-bundle WASM fallback). Read by `ensurePipeline` to decide whether
+ *  a model-parse failure warrants an `init-needs-wasm` respawn (#1379). */
+let usedNativeBinding = false;
+/** Set once this (native) worker has asked the main thread to respawn it forcing
+ *  WASM (#1379). Suppresses the "pipe is null" hard error on the awaiting init
+ *  caller — the worker is about to be terminated and replaced. */
+let wasmRespawnRequested = false;
 let tokenizer: {
   encode(text: string, options?: Record<string, unknown>): number[];
   decode(ids: number[] | bigint[], options?: Record<string, unknown>): string;
@@ -226,6 +238,26 @@ async function ensurePipeline(): Promise<void> {
           // because the worker runs as raw .ts and can't value-import siblings.
           const intact = await cachedModelLooksIntact();
           if (intact) {
+            // Native backend loaded the addon but couldn't parse a
+            // structurally-intact model — the signature of a native-runtime
+            // incompatibility (Bun ↔ onnxruntime-node, #1379), NOT a corrupt
+            // download. An in-process retry can't help: the backend is already
+            // committed for this worker's module graph. Ask the main thread to
+            // respawn a FRESH worker forcing WASM (a new graph). WASM-path
+            // parse-failures of an intact file fall through to the retry below
+            // (respawn wouldn't change the already-WASM backend). Do NOT post
+            // init-error — that's the main thread's break signal.
+            if (usedNativeBinding) {
+              if (!stderrSilenced) {
+                console.warn(
+                  `[embedding-worker] native ONNX could not parse an intact model (${msg}); ` +
+                    `requesting WASM respawn`,
+                );
+              }
+              post({ type: "init-needs-wasm", error: msg });
+              wasmRespawnRequested = true;
+              return;
+            }
             if (!stderrSilenced) {
               console.warn(
                 `[embedding-worker] model parse failed but on-disk files look intact (${msg}); retrying load without purging`,
@@ -264,7 +296,15 @@ async function ensurePipeline(): Promise<void> {
   }
 
   await initPromise;
-  if (!pipe) throw new Error("pipeline init completed but pipe is null");
+  if (!pipe) {
+    // We asked the main thread to respawn us with WASM (#1379); it will
+    // terminate this worker imminently. Reject this init caller with a plain
+    // error (NOT init-error, already handled by the message above) so the
+    // triggering embed settles instead of hanging on a pipe that will never load.
+    if (wasmRespawnRequested)
+      throw new Error("embedding worker awaiting WASM respawn");
+    throw new Error("pipeline init completed but pipe is null");
+  }
 }
 
 /**
@@ -307,8 +347,16 @@ async function loadPipeline(): Promise<void> {
       !globals.__LORE_ORT_BINDING_PATH__ &&
       !globals.__LORE_NPM_WASM_PATHS__
     ) {
-      const { resolveNativeOrtBindingPath } = await import("./ort-native");
-      const nativePath = resolveNativeOrtBindingPath(__filename);
+      // forceWasm (#1379): a prior native worker loaded the addon but couldn't
+      // parse the model (Bun ↔ onnxruntime-node). Skip native outright and use
+      // the shipped WASM so the retry actually changes backend — resolving
+      // native again would just repeat the failure. `nativePath` is only
+      // consulted when not forcing WASM.
+      const nativePath = forceWasm
+        ? null
+        : (await import("./ort-native")).resolveNativeOrtBindingPath(
+            __filename,
+          );
       if (nativePath) {
         globals.__LORE_ORT_BINDING_PATH__ = nativePath;
       } else {
@@ -319,6 +367,14 @@ async function loadPipeline(): Promise<void> {
       }
     }
   }
+
+  // The ONLY code path that runs on the WASM backend is the npm-bundle fallback
+  // that set `__LORE_NPM_WASM_PATHS__` above (dist-only / unsupported platform /
+  // forceWasm). Every other path — dev/test (real onnxruntime-node), the SEA
+  // vendored binary, and the npm bundle's native branch — runs native. So a
+  // model-parse failure is "native couldn't parse it" iff WASM was NOT selected.
+  // This drives the init-needs-wasm respawn decision in ensurePipeline (#1379).
+  usedNativeBinding = !globals.__LORE_NPM_WASM_PATHS__;
 
   const transformers = await import("@huggingface/transformers");
   const { pipeline, env, layer_norm } = transformers;
@@ -683,7 +739,12 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
     post({ type: "result", id: req.id, vectors });
   } catch (err) {
     // Don't re-post init-error — it was already sent in ensurePipeline().
-    if (!initFailed) {
+    // Also stay silent when we've asked the main thread to respawn us forcing
+    // WASM (#1379/#1387-B2): ensurePipeline() rejected this request with
+    // "awaiting WASM respawn", but posting a per-request `error` here would make
+    // the main thread reject+drop the pending BEFORE respawnForWasm() can
+    // re-submit it to the fresh WASM worker. The respawn re-submits it instead.
+    if (!initFailed && !wasmRespawnRequested) {
       const raw = err instanceof Error ? err.message : String(err);
       const longest = Math.max(...req.texts.map((t) => t.length));
       const effectiveMax = req.maxTokens ?? maxTokens;

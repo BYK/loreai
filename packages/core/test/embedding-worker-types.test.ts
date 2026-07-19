@@ -10,6 +10,7 @@ import {
   MIN_ONNX_FILE_BYTES,
   resolveModelCacheDir,
   shouldHealCorruptModel,
+  shouldRequestWasmRespawn,
   TRANSFORMERS_INFERENCE_DUMP_PREFIXES,
 } from "../src/embedding-worker-types";
 
@@ -192,6 +193,33 @@ describe("TRANSFORMERS_INFERENCE_DUMP_PREFIXES inline copy stays in sync", () =>
     expect(workerBody.length).toBeGreaterThan(0);
     expect(workerBody).toBe(bodyOf(typesSrc));
   });
+
+  test("worker inline isCorruptModelError body matches the canonical function", () => {
+    // embedding-worker.ts inlines isCorruptModelError (same raw-.ts constraint).
+    // It is the load-bearing component of the native→WASM respawn decision
+    // (#1379): the worker's inline check `!vendorModel && isCorruptModelError &&
+    // intact && usedNativeBinding` mirrors shouldRequestWasmRespawn(). If the
+    // corruption classifier drifts, that decision silently drifts too — so guard
+    // the inline copy against the canonical. Strip line comments first so this
+    // asserts LOGIC parity only (the two copies carry different explanatory
+    // comments by design).
+    const bodyOf = (src: string): string => {
+      const m = src.match(
+        /function isCorruptModelError\(msg: string\): boolean \{([\s\S]*?)\n\}/,
+      );
+      expect(
+        m,
+        "isCorruptModelError not found (worker or canonical)",
+      ).not.toBeNull();
+      return (m?.[1] ?? "")
+        .replace(/^\s*\/\/.*$/gm, "") // drop full-line // comments
+        .replace(/\s+/g, " ")
+        .trim();
+    };
+    const workerBody = bodyOf(workerSrc);
+    expect(workerBody.length).toBeGreaterThan(0);
+    expect(workerBody).toBe(bodyOf(typesSrc));
+  });
 });
 
 describe("looksLikeIntactOnnxFile", () => {
@@ -234,6 +262,47 @@ describe("shouldHealCorruptModel", () => {
     expect(shouldHealCorruptModel(false, "out of memory")).toBe(false);
     expect(
       shouldHealCorruptModel(false, "401 Unauthorized: failed to load model"),
+    ).toBe(false);
+  });
+});
+
+describe("shouldRequestWasmRespawn (#1379)", () => {
+  const PARSE = "Failed to load model because protobuf parsing failed";
+
+  test("requests WASM respawn: native backend, intact file, parse error", () => {
+    // The canonical Bun ↔ onnxruntime-node case — native loaded but couldn't
+    // parse an intact model.
+    expect(shouldRequestWasmRespawn(true, false, PARSE, true)).toBe(true);
+  });
+
+  test("does NOT request respawn when already on WASM", () => {
+    // WASM can't fall back to itself; an intact-file parse failure there is the
+    // existing retry-without-purge case, not a backend switch.
+    expect(shouldRequestWasmRespawn(false, false, PARSE, true)).toBe(false);
+  });
+
+  test("does NOT request respawn for a vendored (SEA) binary", () => {
+    // SEA ships its own native runtime and has no WASM sibling to fall back to.
+    expect(shouldRequestWasmRespawn(true, true, PARSE, true)).toBe(false);
+  });
+
+  test("does NOT request respawn when the on-disk file is truncated", () => {
+    // A genuinely corrupt/partial download is real corruption → purge path,
+    // not a backend incompatibility.
+    expect(shouldRequestWasmRespawn(true, false, PARSE, false)).toBe(false);
+  });
+
+  test("does NOT request respawn on a non-corruption error", () => {
+    expect(shouldRequestWasmRespawn(true, false, "out of memory", true)).toBe(
+      false,
+    );
+    expect(
+      shouldRequestWasmRespawn(
+        true,
+        false,
+        "401 Unauthorized: failed to load model",
+        true,
+      ),
     ).toBe(false);
   });
 });
