@@ -71,6 +71,13 @@ export const MIN_CONFIDENCE = 0.2;
  *  knowledge base can't blow up the O(hunks×invariants) prefilter. */
 const MAX_INVARIANTS_SCAN = 300;
 
+// If more than this fraction of judge calls come back unparseable, warn: the
+// judge model is likely failing the JSON output contract, so a "clean" result is
+// untrustworthy. High on purpose — a single stray malformed response on an
+// otherwise-healthy run must not cry wolf. Exported so the CLI report and the
+// GHA reporter share one threshold (the reporter mirrors it as a literal).
+export const UNPARSEABLE_WARN_RATIO = 0.5;
+
 /** Never send more than this many pairs to the judge in one run. Surviving
  *  pairs are judged most-similar-first; the cap is the cost ceiling per PR. */
 export const MAX_JUDGE_CALLS = 20;
@@ -460,6 +467,41 @@ export interface InvariantVerdict {
   reason: string | null;
 }
 
+/**
+ * Extract the first balanced top-level `{...}` object from a string, or null.
+ *
+ * Cheap/instruction-light models sometimes wrap the required JSON in prose
+ * ("Sure! Here's my analysis: {\"violates\": false}") — see the GLM 5.2 finding
+ * in Warden's benchmark where clean chunks returned prose instead of the
+ * required JSON and were mis-counted as parser failures. Rather than drop those
+ * (which is indistinguishable from a genuine no-finding), we pull the embedded
+ * object out. String-aware brace matching so braces inside string literals do
+ * not throw off the balance.
+ */
+export function extractFirstJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null; // unbalanced — no complete object
+}
+
 export function parseInvariantVerdict(
   text: string | null,
 ): InvariantVerdict | null {
@@ -468,19 +510,27 @@ export function parseInvariantVerdict(
     .trim()
     .replace(/^```json?\s*/i, "")
     .replace(/\s*```$/i, "");
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      typeof parsed.violates === "boolean"
-    ) {
-      const reason =
-        typeof parsed.reason === "string" ? parsed.reason.slice(0, 400) : null;
-      return { violates: parsed.violates, reason };
+  // Try the whole (fenced-stripped) payload first — the common clean-JSON path.
+  // Fall back to the first embedded {...} object for chatty models that wrap the
+  // verdict in prose. Both feed the same shape validation.
+  for (const candidate of [cleaned, extractFirstJsonObject(cleaned)]) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        typeof parsed.violates === "boolean"
+      ) {
+        const reason =
+          typeof parsed.reason === "string"
+            ? parsed.reason.slice(0, 400)
+            : null;
+        return { violates: parsed.violates, reason };
+      }
+    } catch {
+      // not valid JSON — try the next candidate
     }
-  } catch {
-    // not valid JSON
   }
   return null;
 }
@@ -636,6 +686,12 @@ export interface CheckResult {
   findings: Finding[];
   /** Judge calls actually made (== cost units). */
   judgeCalls: number;
+  /** Judge calls whose response could not be parsed into a verdict (prose
+   *  instead of JSON, etc.). These degrade safely to "no finding", but a HIGH
+   *  rate means the judge model is systemically failing the output contract and
+   *  the clean result is not trustworthy — surfaced so it is not silent
+   *  recall-rot (cf. the GLM 5.2 prose-not-JSON failure in Warden's benchmark). */
+  unparseable: number;
 }
 
 export interface Finding {
@@ -843,6 +899,7 @@ export async function checkInvariants(input: {
     judged: 0,
     findings: [],
     judgeCalls: 0,
+    unparseable: 0,
   };
   if (hunks.length === 0) return empty;
 
@@ -901,6 +958,7 @@ export async function checkInvariants(input: {
   const seenFindings = new Set<string>();
   let judged = 0;
   let judgeCalls = 0;
+  let unparseable = 0;
   const toJudge = selected;
   for (const c of toJudge) {
     const inv = invariants[c.invariantIdx];
@@ -935,7 +993,15 @@ export async function checkInvariants(input: {
     }
     judgeCalls++;
     const verdict = parseInvariantVerdict(responseText);
-    if (!verdict || !verdict.violates) continue;
+    if (!verdict) {
+      // Response was not parseable into a verdict (prose instead of JSON, a
+      // truncated object, etc.). Degrade safely to "no finding" — but COUNT it,
+      // so a systemically-broken judge is visible rather than silently
+      // indistinguishable from a genuine clean run.
+      unparseable++;
+      continue;
+    }
+    if (!verdict.violates) continue;
     // Fan out the verdict to every hunk in the representative's cluster: a
     // repeated change (e.g. one rename across N files) is flagged in all N.
     // Dedup per (invariant, file): the same invariant flagged against several
@@ -962,6 +1028,20 @@ export async function checkInvariants(input: {
     }
   }
 
+  // Visibility for the GLM-style failure mode: if a large share of judge calls
+  // came back unparseable, the "clean" result is not trustworthy — the model is
+  // failing the output contract, not finding nothing. Warn loudly (still never
+  // fails the build; the caller decides). Threshold is deliberately high so a
+  // stray malformed response on an otherwise-healthy run stays quiet.
+  if (judgeCalls > 0 && unparseable / judgeCalls > UNPARSEABLE_WARN_RATIO) {
+    log.warn(
+      `invariant-check: ${unparseable}/${judgeCalls} judge responses were unparseable ` +
+        `(model=${input.model?.providerID ?? "?"}/${input.model?.modelID ?? "?"}). ` +
+        `The "no violation" result may be unreliable — the judge model is likely ` +
+        `returning prose instead of the required JSON verdict.`,
+    );
+  }
+
   return {
     range: input.range,
     hunks: hunks.length,
@@ -970,6 +1050,7 @@ export async function checkInvariants(input: {
     judged,
     findings,
     judgeCalls,
+    unparseable,
   };
 }
 

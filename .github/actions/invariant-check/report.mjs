@@ -15,7 +15,7 @@ if (!path) {
   process.exit(0);
 }
 
-/** @type {{findings: Array<{invariantId:string,invariantTitle:string,invariantContent:string,file:string,reason:string|null,severity:string,refHit:boolean,similarity:number,hunk:string}>, hunks:number, invariants:number, candidates:number, judgeCalls:number, model?:string, gate?:object}} */
+/** @type {{findings: Array<{invariantId:string,invariantTitle:string,invariantContent:string,file:string,reason:string|null,severity:string,refHit:boolean,similarity:number,hunk:string}>, hunks:number, invariants:number, candidates:number, judgeCalls:number, unparseable?:number, model?:string, gate?:object}} */
 let result;
 try {
   result = JSON.parse(readFileSync(path, "utf8"));
@@ -29,10 +29,29 @@ try {
 const findings = result.findings ?? [];
 const summaryFile = process.env.GITHUB_STEP_SUMMARY;
 
+// Keep in sync with UNPARSEABLE_WARN_RATIO in packages/core/src/invariant-check.ts.
+const UNPARSEABLE_WARN_RATIO = 0.5;
+
 const funnel =
   `${result.hunks} hunks × ${result.invariants} invariants → ` +
   `${result.candidates} candidates → ${result.judgeCalls} judge calls` +
   (result.model ? ` · ${result.model}` : "");
+
+// A high unparseable rate means the judge failed the JSON output contract — the
+// result (clean OR with findings) is untrustworthy. Emit unconditionally, before
+// the findings branch, so the mixed case (some findings + flaky judge) is not
+// silent. Advisory: a `::warning::` never fails the build.
+{
+  const judgeCalls = result.judgeCalls ?? 0;
+  const unparseable = result.unparseable ?? 0;
+  if (judgeCalls > 0 && unparseable / judgeCalls > UNPARSEABLE_WARN_RATIO) {
+    console.log(
+      `::warning title=Lore invariant-check::${unparseable}/${judgeCalls} judge responses were unparseable — ` +
+        `results may be unreliable (the judge model is likely returning prose, not JSON). ` +
+        `Consider a more capable model via the action's \`model\` input.`,
+    );
+  }
+}
 
 function esc(s) {
   // Escape workflow-command MESSAGE data (the part after `::`). Only %, CR, LF

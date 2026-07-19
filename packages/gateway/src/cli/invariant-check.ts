@@ -213,6 +213,21 @@ function printReport(
   );
   console.log("─".repeat(64));
 
+  // Judge-health warning: a high unparseable rate means the model is failing the
+  // JSON contract, so results (clean OR with findings) are unreliable. Printed
+  // regardless of the findings branch so the mixed case isn't silent.
+  if (
+    result.judgeCalls > 0 &&
+    result.unparseable / result.judgeCalls >
+      invariantCheck.UNPARSEABLE_WARN_RATIO
+  ) {
+    console.log(
+      `\n⚠ ${result.unparseable}/${result.judgeCalls} judge responses were unparseable — ` +
+        `results may be unreliable. The judge model is likely returning prose ` +
+        `instead of the required JSON verdict; try a more capable --model.`,
+    );
+  }
+
   if (findings.length === 0) {
     console.log("\n✓ No suspected invariant violations.\n");
     console.log(

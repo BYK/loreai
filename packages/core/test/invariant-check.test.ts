@@ -8,6 +8,7 @@ import {
   checkInvariants,
   clusterHunks,
   enforcementLevel,
+  extractFirstJsonObject,
   gateDecision,
   isEnforceableInvariant,
   isEnumerationInvariant,
@@ -637,6 +638,57 @@ describe("parseInvariantVerdict", () => {
     expect(parseInvariantVerdict("not json")).toBeNull();
     expect(parseInvariantVerdict('{"reason": "no verdict field"}')).toBeNull();
   });
+  it("extracts a verdict embedded in prose (GLM prose-not-JSON failure mode)", () => {
+    expect(
+      parseInvariantVerdict(
+        'Sure! Here is my analysis: {"violates": false, "reason": "unrelated"}',
+      ),
+    ).toEqual({ violates: false, reason: "unrelated" });
+  });
+  it("extracts a verdict with trailing prose after the object", () => {
+    expect(
+      parseInvariantVerdict(
+        '{"violates": true, "reason": "y"}\n\nHope this helps!',
+      ),
+    ).toEqual({ violates: true, reason: "y" });
+  });
+  it("is not fooled by braces inside string values", () => {
+    expect(
+      parseInvariantVerdict(
+        'The verdict: {"violates": true, "reason": "found a { in the code"}',
+      ),
+    ).toEqual({ violates: true, reason: "found a { in the code" });
+  });
+  it("still returns null when prose contains no JSON object at all", () => {
+    expect(
+      parseInvariantVerdict("I think this looks fine, no violation here."),
+    ).toBeNull();
+  });
+});
+
+describe("extractFirstJsonObject", () => {
+  it("returns the first balanced object", () => {
+    expect(extractFirstJsonObject('x {"a":1} y {"b":2}')).toBe('{"a":1}');
+  });
+  it("handles nested objects", () => {
+    expect(extractFirstJsonObject('pre {"a":{"b":2}} post')).toBe(
+      '{"a":{"b":2}}',
+    );
+  });
+  it("ignores braces inside strings", () => {
+    expect(extractFirstJsonObject('{"s":"a } b"}')).toBe('{"s":"a } b"}');
+  });
+  it("ignores an escaped quote inside a string", () => {
+    expect(extractFirstJsonObject('{"s":"a \\" } b"}')).toBe(
+      '{"s":"a \\" } b"}',
+    );
+  });
+  it("returns null when there is no object", () => {
+    expect(extractFirstJsonObject("no braces here")).toBeNull();
+  });
+  it("returns null for an unbalanced/truncated object", () => {
+    expect(extractFirstJsonObject('{"violates": true')).toBeNull();
+  });
 });
 
 describe("checkInvariants (funnel, stubbed LLM)", () => {
@@ -701,6 +753,57 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     });
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(result.findings).toHaveLength(0);
+  });
+
+  it("counts unparseable (prose) judge responses and degrades to no-finding", async () => {
+    const project = "/tmp/ic-test-proj-unparseable";
+    await seed(
+      project,
+      "sqlite boundary",
+      "node:sqlite must never be imported outside driver.node.ts",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    // Judge returns prose with no JSON object at all → unparseable.
+    const { llm, prompt } = stubLLM(
+      () => "I don't think this violates anything, looks fine to me.",
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [{ file: "src/other.ts", text: '@@\n+import "node:sqlite"' }],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-unparseable",
+    });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(result.judgeCalls).toBe(1);
+    expect(result.unparseable).toBe(1);
+    expect(result.findings).toHaveLength(0); // safe degrade, no crash
+  });
+
+  it("prose-wrapped JSON verdict still flags (prose-tolerant parse)", async () => {
+    const project = "/tmp/ic-test-proj-prosejson";
+    await seed(
+      project,
+      "sqlite boundary",
+      "node:sqlite must never be imported outside driver.node.ts",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    const { llm } = stubLLM(
+      () =>
+        'Sure, here is the verdict: {"violates": true, "reason": "adds node:sqlite import"}',
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [{ file: "src/other.ts", text: '@@\n+import "node:sqlite"' }],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-prosejson",
+    });
+    expect(result.unparseable).toBe(0);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].reason).toContain("node:sqlite");
   });
 
   it("makes ZERO judge calls when nothing clears the funnel (cost floor)", async () => {
