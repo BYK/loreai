@@ -75,6 +75,10 @@ export default defineConfig({
             { label: "Codex", slug: "docs/guides/with-codex" },
             { label: "Custom upstreams", slug: "docs/guides/custom-upstreams" },
             { label: "Local inference", slug: "docs/guides/local-inference" },
+            {
+              label: "Semantic linter (CI)",
+              slug: "docs/guides/semantic-linter",
+            },
           ],
         },
         {
