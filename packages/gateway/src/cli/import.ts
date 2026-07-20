@@ -20,7 +20,7 @@ import {
 type DetectionResult =
   import("@loreai/core").conversationImport.DetectionResult;
 import { createGatewayLLMClient } from "../llm-adapter";
-import { resolveAuth } from "../auth";
+import { resolveAuth, workerKeyScheme, type AuthCredential } from "../auth";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
 import {
@@ -403,9 +403,45 @@ export async function commandImport(
     providerID: "anthropic",
     modelID: "claude-sonnet-4-6",
   };
+
+  // Extraction needs a usable credential. `lore import` is a standalone CLI
+  // process: it never proxies a conversation turn, so no client credential is
+  // ever captured under a session. The ONLY credential it can use is a
+  // dedicated worker key (LORE_WORKER_API_KEY). Without one, every extraction
+  // call resolves no-auth and `llm.prompt` returns null — the import would
+  // silently create ZERO knowledge while reporting success (the exact trap a
+  // user hit). Fail loudly with actionable guidance instead.
+  const workerApiKey = config.workerApiKey;
+  const getImportAuth: (
+    sessionID?: string,
+    providerID?: string,
+  ) => AuthCredential | null = workerApiKey
+    ? (_sessionID, providerID) => ({
+        scheme: workerKeyScheme(providerID),
+        value: workerApiKey,
+      })
+    : resolveAuth;
+
+  if (
+    !workerApiKey &&
+    getImportAuth(undefined, defaultModel.providerID) == null
+  ) {
+    console.error(
+      `\n[lore] Can't import: no ${defaultModel.providerID} credential available.\n` +
+        `[lore] \`lore import\` runs as a standalone command with no conversation\n` +
+        `[lore] to borrow a credential from, so it needs a dedicated worker key.\n` +
+        `[lore] Set one and retry:\n` +
+        `[lore]   export LORE_WORKER_API_KEY=<your ${defaultModel.providerID} key>\n` +
+        `[lore]   lore import\n` +
+        `[lore] Or skip manual import: \`lore run\` auto-imports after your first message.`,
+    );
+    if (owned) await shutdown();
+    return;
+  }
+
   const llm = createGatewayLLMClient(
     { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
-    resolveAuth,
+    getImportAuth,
     defaultModel,
   );
 
@@ -449,6 +485,20 @@ export async function commandImport(
 
       // Clear the progress line
       process.stderr.write("\n");
+
+      // Only mark sessions imported if the LLM actually answered a chunk. A
+      // no-auth run returns null per chunk (0 answered) without throwing — the
+      // pre-flight guard above catches the common case, but a credential can go
+      // stale mid-run. Recording a never-answered run would permanently
+      // suppress a real re-import via hasAgentImportRecord().
+      if (extractResult.chunksAnswered === 0) {
+        console.log(
+          `[lore] No response from the model for ${result.agentDisplayName} — ` +
+            `skipping (will retry on next import).`,
+        );
+        totalFailed += extractResult.chunksFailed;
+        continue;
+      }
 
       // Record imports for each session
       for (const sess of result.sessions) {

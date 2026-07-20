@@ -51,6 +51,16 @@ export type ExtractionResult = {
   chunksProcessed: number;
   /** Chunks that failed (LLM error) */
   chunksFailed: number;
+  /**
+   * Chunks for which the LLM actually returned a response (non-null). A no-auth
+   * call returns null WITHOUT throwing, so it counts as neither processed-error
+   * nor answered. Callers use this to distinguish "the model answered but found
+   * nothing worth keeping" (safe to mark the source imported) from "the model
+   * never answered — auth/capability failure" (do NOT mark imported, so a later
+   * run retries). `chunksAnswered === 0` on a non-empty chunk set means the
+   * extraction never authenticated / never ran for real.
+   */
+  chunksAnswered: number;
 };
 
 /**
@@ -74,6 +84,7 @@ export async function extractKnowledge(input: {
     deleted: 0,
     chunksProcessed: 0,
     chunksFailed: 0,
+    chunksAnswered: 0,
   };
 
   // Sort chunks chronologically so knowledge builds up naturally
@@ -111,6 +122,7 @@ export async function extractKnowledge(input: {
       );
 
       if (response) {
+        result.chunksAnswered++;
         const ops = parseOps(response);
         const applied = applyOps(ops, {
           projectPath: input.projectPath,

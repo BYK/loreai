@@ -54,6 +54,7 @@ describe("extractKnowledge", () => {
     expect(result.updated).toBe(0);
     expect(result.chunksProcessed).toBe(1);
     expect(result.chunksFailed).toBe(0);
+    expect(result.chunksAnswered).toBe(1);
 
     // Verify entry was actually created
     const entries = ltm.forProject(PROJECT_PATH, false);
@@ -74,6 +75,9 @@ describe("extractKnowledge", () => {
     expect(result.created).toBe(0);
     expect(result.chunksProcessed).toBe(1);
     expect(result.chunksFailed).toBe(0);
+    // The model answered (with an empty list) — this counts as answered, so a
+    // caller may safely mark the source imported (nothing worth keeping).
+    expect(result.chunksAnswered).toBe(1);
   });
 
   test("handles null LLM response", async () => {
@@ -88,6 +92,10 @@ describe("extractKnowledge", () => {
     expect(result.created).toBe(0);
     expect(result.chunksProcessed).toBe(1);
     expect(result.chunksFailed).toBe(0);
+    // A null response is the no-auth signal (prompt returns null without
+    // throwing). chunksAnswered stays 0 so callers do NOT mark the source
+    // imported — a later run with a credential retries.
+    expect(result.chunksAnswered).toBe(0);
   });
 
   test("handles LLM errors gracefully", async () => {
@@ -104,6 +112,7 @@ describe("extractKnowledge", () => {
     expect(result.created).toBe(0);
     expect(result.chunksProcessed).toBe(0);
     expect(result.chunksFailed).toBe(1);
+    expect(result.chunksAnswered).toBe(0);
   });
 
   test("processes multiple chunks sequentially", async () => {

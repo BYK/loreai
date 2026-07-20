@@ -109,17 +109,23 @@ export async function maybeAutoImport(
       "[lore] Import knowledge from them?",
   );
 
-  // Record decline sentinels BEFORE any background work — prevents a second
-  // `lore run` from re-prompting while the background import is still running.
-  // On accept, the sentinels are harmless: real recordImport() rows (with actual
-  // session source_ids) are written later and hasAgentImportRecord() returns true
-  // regardless. This mirrors the old per-project setLastImportAt() which also
-  // ran before checking the user's answer.
-  for (const result of results) {
-    recordDecline(projectPath, result.agentName);
+  // On DECLINE: record per-agent decline sentinels so we don't re-prompt.
+  //
+  // On ACCEPT: do NOT pre-record anything here. The import is now DEFERRED until
+  // the first authenticated turn (#1366) and may not run in this invocation at
+  // all (e.g. the agent never proxies a turn through this gateway). Recording a
+  // sentinel up-front would set hasAgentImportRecord()=true and permanently
+  // suppress the offer even though nothing was ever imported — the exact trap a
+  // user hit (accepted, import never fired, project stayed empty forever).
+  // Instead, only a completed extraction records the agent (recordImport in
+  // runBackgroundImport), so an unfinished/never-fired import is re-offered on
+  // the next `lore run`.
+  if (!ok) {
+    for (const result of results) {
+      recordDecline(projectPath, result.agentName);
+    }
+    return;
   }
-
-  if (!ok) return;
 
   const cfg = loreConfig();
   const defaultModel = cfg.model ?? {
@@ -225,6 +231,14 @@ async function runBackgroundImport(
       chunks,
       model,
     });
+
+    // Only mark these sessions imported if the LLM actually answered at least
+    // one chunk. A no-auth run returns null per chunk without throwing (0
+    // answered) — recording it would set hasAgentImportRecord()=true and
+    // permanently suppress a real import on the next run. Skip recording so it
+    // is retried. (created/updated can legitimately be 0 when the model
+    // answered but found nothing worth keeping — that DOES record.)
+    if (extractResult.chunksAnswered === 0) continue;
 
     // Record imports
     for (const sess of result.sessions) {

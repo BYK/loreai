@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Auto-accept the Y/n prompt without touching real stdin: stub readline's
-// createInterface so question() immediately answers "y" and close() is a no-op.
+// Auto-answer the Y/n prompt without touching real stdin. `promptAnswer` lets
+// individual tests choose accept ("y") vs decline ("n").
+let promptAnswer = "y";
 vi.mock("node:readline", () => ({
   createInterface: () => ({
-    question: (_q: string, cb: (answer: string) => void) => cb("y"),
+    question: (_q: string, cb: (answer: string) => void) => cb(promptAnswer),
     close: () => {},
   }),
 }));
@@ -20,7 +21,10 @@ import {
   _resetPendingImportForTest,
 } from "../src/pending-import";
 import { setLastSeenAuth, _resetAuthForTest } from "../src/auth";
+import { conversationImport } from "@loreai/core";
 import type { GatewayConfig } from "../src/config";
+
+const { hasAgentImportRecord } = conversationImport;
 
 const AIDER_FIXTURE = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -52,6 +56,7 @@ describe("maybeAutoImport — credential-aware scheduling", () => {
   beforeEach(() => {
     _resetPendingImportForTest();
     _resetAuthForTest();
+    promptAnswer = "y";
     project = mkdtempSync(join(tmpdir(), "lore-autoimport-"));
     // The tmp dir is intentionally NOT a git repo: detectAll(..., {worktrees:true})
     // runs `git worktree list`, which fails open to [projectPath] here — so
@@ -149,5 +154,20 @@ describe("maybeAutoImport — credential-aware scheduling", () => {
     const out = logs.join("\n");
     expect(out).toContain("Skipping knowledge import");
     expect(out).toContain("no usable anthropic credential");
+  });
+
+  test("ACCEPT with deferred import does NOT pre-record the agent (no permanent suppression)", async () => {
+    // No credential → import defers. The agent must NOT be marked handled yet,
+    // or a never-fired import would suppress the offer forever (the user trap).
+    await maybeAutoImport(baseConfig());
+    expect(hasPendingImport()).toBe(true);
+    expect(hasAgentImportRecord(project, "aider")).toBe(false);
+  });
+
+  test("DECLINE records the agent so it is not re-offered", async () => {
+    promptAnswer = "n";
+    await maybeAutoImport(baseConfig());
+    expect(hasPendingImport()).toBe(false);
+    expect(hasAgentImportRecord(project, "aider")).toBe(true);
   });
 });
