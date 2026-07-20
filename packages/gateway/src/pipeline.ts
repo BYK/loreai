@@ -44,6 +44,8 @@ import {
   setForceMinLayer,
   computeLayer0Cap,
   setCachePricing,
+  setQualityKnee,
+  DEFAULT_QUALITY_KNEE_FRACTION,
   distillLimiter,
   curatorLimiter,
   recordCacheUsage,
@@ -1908,6 +1910,15 @@ type ModelSpec = {
   cacheWriteCost?: number;
   /** Input cost per million tokens (for cost-tier decisions). */
   inputCostPerMillion?: number;
+  /**
+   * Per-model quality knee: the context fill fraction (tokens / context) past
+   * which lost-in-the-middle degradation is treated as material and the
+   * compression quality penalty begins to ramp. Undefined → gradient uses its
+   * literature-grounded default (0.4). Reserved for empirically-measured
+   * per-model knees (via the eval harness); no reliable per-model signal exists
+   * in models.dev today, so this is currently left undefined for all models.
+   */
+  qualityKneeFraction?: number;
 };
 
 const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
@@ -6887,6 +6898,7 @@ async function handleConversationTurn(
     layer0Cap = computeLayer0Cap(
       cfg.budget.targetCacheReadCostPerTurn,
       modelSpec.cacheReadCost,
+      modelSpec.context,
     );
   }
 
@@ -6910,6 +6922,7 @@ async function handleConversationTurn(
     maxLayer0Tokens: layer0Cap,
     cacheWriteCostPerToken,
     cacheReadCostPerToken,
+    qualityKneeFraction: modelSpec.qualityKneeFraction,
   };
 
   // Also apply to the module globals now, so any gradient helper invoked
@@ -6918,6 +6931,9 @@ async function handleConversationTurn(
   setModelLimits({ context: modelSpec.context, output: modelSpec.output });
   setMaxLayer0Tokens(layer0Cap);
   setCachePricing(cacheWriteCostPerToken, cacheReadCostPerToken);
+  setQualityKnee(
+    modelSpec.qualityKneeFraction ?? DEFAULT_QUALITY_KNEE_FRACTION,
+  );
 
   // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
   // Claude Code manages its own max_tokens (32K for modern models). Other

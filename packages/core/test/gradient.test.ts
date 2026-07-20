@@ -42,6 +42,9 @@ import {
   getCachePricing,
   shouldCompress,
   qualityCostMultiplier,
+  setQualityKnee,
+  getQualityKnee,
+  DEFAULT_QUALITY_KNEE_FRACTION,
   isFreeWriteSession,
   getTier,
   selectDistillations,
@@ -932,8 +935,12 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
   });
 
   test("exact tracking prevents overflow: near-limit session stays layer 0", () => {
-    // maxInput = 10000 - 2000 = 8000, hard ceiling = 8000 * 0.95 = 7600
-    // Set lastKnownInput close to limit but within the hard ceiling margin
+    // maxInput = 10000 - 2000 = 8000, hard-ceiling margin = 8000 * 0.95 = 7600.
+    // The fill-relative quality hard ceiling (0.8 × 10000 = 8000) only binds
+    // when it is the tightest ceiling; here the maxInput margin (7600) is
+    // tighter, so a ~7.4K session (< margin, < quality ceiling) still passes
+    // through at layer 0 — verifying exact token tracking prevents
+    // overflow-driven compression for a session that genuinely fits.
     calibrate(7_400, SESSION, 10);
     // New message: very short (~25 tokens × 1.3 safety = ~33 tokens)
     const messages = Array.from({ length: 10 }, (_, i) =>
@@ -945,7 +952,7 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
       ),
     );
     const withNew = [...messages, makeMsg("near-new", "user", "hi", SESSION)];
-    // expectedInput ≈ 7400 + 33 = 7433 ≤ 7600 → layer 0
+    // expectedInput ≈ 7400 + 33 = 7433 ≤ 7600 margin, ≤ 8000 quality → layer 0
     const result = transform({
       messages: withNew,
       projectPath: PROJECT,
@@ -4244,6 +4251,16 @@ describe("tier-based context management", () => {
     beforeEach(() => {
       // Opus 4.6 pricing: write=$6.25/M, read=$0.50/M
       setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+      // Quality is fill-relative (tokens / contextLimit). Pin a 1M window +
+      // default 0.4 knee so the fill fractions in these cases are well-defined.
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setQualityKnee(0.4);
+    });
+
+    afterAll(() => {
+      setModelLimits({ context: 10_000, output: 2_000 });
+      setQualityKnee(undefined);
+      setCachePricing(0, 0);
     });
 
     test("compresses when bust cost is much less than continue cost", () => {
@@ -4321,68 +4338,124 @@ describe("tier-based context management", () => {
       // INFLATED estimate, even sustained-bust write-rate repricing refuses to
       // compress; with the REAL target it correctly compresses.
       //
-      // Tested just ABOVE the tier-1 boundary so the quality multiplier is still
-      // modest (does not by itself force compression), leaving the inflated-vs-
-      // real distinction observable. At much higher token counts the quality
-      // multiplier dominates and forces compression regardless (see the separate
+      // The clamp distinction is observable only where the quality multiplier is
+      // ≈1 (fill ≤ knee = 0.4 → ≤400K on a 1M window): there the realistic target
+      // compresses but the inflated one does not. Above the knee the multiplier
+      // dominates and forces compression regardless (see the separate
       // "quality multiplier forces compression on a degraded window" test) — that
       // is the intended #961 behavior, which subsumes the inflated-estimate bug.
-      const current = 240_000; // just over tier-1 (200K); q(240K) = 2.6
-      const inflated = 235_000; // near-current inflated estimate
-
-      // The clamp distinction is observable only where q≈1 (≤ tier-1 boundary):
-      // there the realistic target compresses but the inflated one does not.
-      const clampCurrent = 190_000; // q(190K) = 1.0
+      const clampCurrent = 190_000; // fill 0.19 ≤ knee → q = 1.0
       const inflatedEst = 185_000; // ~usable-scaled estimate (near current)
       const realTarget = 60_000; // what compression actually yields (≈ l0cap)
 
-      // Sustained-bust regime (>=5): continue is priced at the WRITE rate.
-      //   q(240K)      = 1 + 8*(40K/200K) = 2.6
-      //   continueCost = 240K × $6.25/M × 2.6 = $3.90
-      //   inflated  bustCost = 235K × $6.25/M = $1.46875 → 1.469 < 0.85*3.90=3.315 ? YES
-      // The inflated case compresses at 240K because the quality penalty already
-      // tips it — so pin the clamp distinction at q=1 (≤200K), where only the
-      // realistic target compresses.
+      // Sustained-bust regime (>=2): continue is priced at the WRITE rate.
       //   continueCost(190K) = 190K × $6.25/M × 1.0 = $1.1875
       //   inflated bustCost  = 185K × $6.25/M = $1.15625 → 1.156 < 0.85*1.1875=1.009 ? NO
       //   real     bustCost  = 60K  × $6.25/M = $0.375   → 0.375 < 1.009            ? YES
       expect(shouldCompress(clampCurrent, inflatedEst, 5)).toBe(false);
       expect(shouldCompress(clampCurrent, realTarget, 5)).toBe(true);
 
-      // And at a genuinely degraded window the quality multiplier forces
+      // And at a genuinely degraded FILL the quality multiplier forces
       // compression regardless of how large the (inflated) estimate is.
-      expect(shouldCompress(current, inflated, 5)).toBe(true);
+      //   q(700K on 1M) = 6 → continueCost 700K×$6.25/M×6 (sustained) dominates.
+      expect(shouldCompress(700_000, 690_000, 5)).toBe(true);
     });
 
     test("quality multiplier forces compression on a degraded window despite cheap reads", () => {
       // The #961 case: a warm cache (cheap READ rate, NOT sustained-bust) at a
-      // degraded window size. Without the quality penalty this always continues
+      // degraded FILL fraction. Without the quality penalty this always continues
       // (reads are ~12.5× cheaper than a write). The multiplier inflates the
-      // perceived continue cost as the window grows, so compression is chosen.
-      //   q(700K)      = 1 + 8*(500K/200K) = 21
-      //   continueCost = 700K × $0.50/M × 21 = $7.35
-      //   bustCost     = 200K × $6.25/M      = $1.25
-      //   1.25 < 0.85 × 7.35 = 6.2475 → compress (quality wins over cheap reads)
+      // perceived continue cost as the window fills, so compression is chosen.
+      // Fill-relative (1M window, 0.4 knee):
+      //   q(700K)      = 1 + 20*((0.7-0.4)/0.6)^2 = 1 + 20*0.25 = 6
+      //   continueCost = 700K × $0.50/M × 6 = $2.10
+      //   bustCost     = 200K × $6.25/M     = $1.25
+      //   1.25 < 0.85 × 2.10 = 1.785 → compress (quality wins over cheap reads)
       expect(shouldCompress(700_000, 200_000, 0)).toBe(true);
 
-      // A modestly-grown warm cache (still good-quality range) is NOT force-
-      // compressed — the multiplier is ~1 there, so cheap reads still win.
-      //   q(190K)      = 1.0
+      // A window still inside the pristine range (≤ knee) is NOT force-
+      // compressed — the multiplier is 1 there, so cheap reads still win.
+      //   q(190K on 1M) = 1.0 (fill 0.19 ≤ knee)
       //   continueCost = 190K × $0.50/M × 1.0 = $0.095
       //   bustCost     = 150K × $6.25/M       = $0.9375
       //   0.9375 < 0.85 × 0.095 = 0.0808 → false (keep the cheap cache)
       expect(shouldCompress(190_000, 150_000, 0)).toBe(false);
     });
 
-    test("qualityCostMultiplier: 1.0 within tier-1, ramps linearly above", () => {
-      expect(qualityCostMultiplier(0)).toBe(1);
-      expect(qualityCostMultiplier(200_000)).toBe(1); // at boundary → no penalty
-      expect(qualityCostMultiplier(400_000)).toBe(9); // +200K excess → +8
-      expect(qualityCostMultiplier(600_000)).toBe(17); // +400K excess → +16
-      // Monotonic and unbounded → compression is eventually always chosen.
-      expect(qualityCostMultiplier(2_000_000)).toBeGreaterThan(
-        qualityCostMultiplier(1_000_000),
-      );
+    test("qualityCostMultiplier: fill-fraction based, per-model knee, convex ramp", () => {
+      // Fill-relative: the penalty keys on tokens / contextLimit, not absolute
+      // tokens, so it scales across window sizes. Pin a 1M window and the
+      // default 0.4 knee.
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setQualityKnee(0.4);
+      try {
+        // At/below the knee (40% fill = 400K on a 1M window) → no penalty.
+        expect(qualityCostMultiplier(0)).toBe(1);
+        expect(qualityCostMultiplier(400_000)).toBe(1);
+        // Above the knee: 1 + SLOPE(20) * excess^2, excess=(fill-0.4)/0.6.
+        // 700K → fill 0.7 → excess 0.5 → 1 + 20*0.25 = 6.
+        expect(qualityCostMultiplier(700_000)).toBeCloseTo(6, 5);
+        // 1M → fill 1.0 → excess 1.0 → 1 + 20 = 21 (bounded at full window).
+        expect(qualityCostMultiplier(1_000_000)).toBeCloseTo(21, 5);
+        // Convex: the jump from 0.7→0.85 fill exceeds the jump from 0.55→0.7.
+        const dLow =
+          qualityCostMultiplier(700_000) - qualityCostMultiplier(550_000);
+        const dHigh =
+          qualityCostMultiplier(850_000) - qualityCostMultiplier(700_000);
+        expect(dHigh).toBeGreaterThan(dLow);
+        // Monotonic across the whole range.
+        expect(qualityCostMultiplier(900_000)).toBeGreaterThan(
+          qualityCostMultiplier(800_000),
+        );
+      } finally {
+        setModelLimits({ context: 10_000, output: 2_000 });
+        setQualityKnee(undefined);
+      }
+    });
+
+    test("qualityCostMultiplier: SAME absolute tokens penalized more on a smaller window (fill-relative)", () => {
+      // 200K tokens is pristine in a 1M window (fill 0.2 ≤ knee) but degraded
+      // in a 250K window (fill 0.8 ≫ knee) — the core reason the model must be
+      // fill-based, not absolute.
+      setQualityKnee(0.4);
+      try {
+        setModelLimits({ context: 1_000_000, output: 32_000 });
+        expect(qualityCostMultiplier(200_000)).toBe(1);
+        setModelLimits({ context: 250_000, output: 32_000 });
+        expect(qualityCostMultiplier(200_000)).toBeGreaterThan(1);
+      } finally {
+        setModelLimits({ context: 10_000, output: 2_000 });
+        setQualityKnee(undefined);
+      }
+    });
+
+    test("setQualityKnee: out-of-range / undefined resets to default", () => {
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      try {
+        setQualityKnee(0.6);
+        expect(getQualityKnee()).toBe(0.6);
+        setQualityKnee(undefined);
+        expect(getQualityKnee()).toBe(DEFAULT_QUALITY_KNEE_FRACTION);
+        setQualityKnee(0); // out of (0,1)
+        expect(getQualityKnee()).toBe(DEFAULT_QUALITY_KNEE_FRACTION);
+        setQualityKnee(1.5);
+        expect(getQualityKnee()).toBe(DEFAULT_QUALITY_KNEE_FRACTION);
+        setQualityKnee(Number.NaN);
+        expect(getQualityKnee()).toBe(DEFAULT_QUALITY_KNEE_FRACTION);
+      } finally {
+        setModelLimits({ context: 10_000, output: 2_000 });
+        setQualityKnee(undefined);
+      }
+    });
+
+    test("resetCalibration restores the default quality knee (no cross-test leak)", () => {
+      // Guards against the state-leak flakiness Seer flagged: resetCalibration
+      // must reset qualityKneeFraction like the other module-level globals so a
+      // knee set in one test cannot bleed into the next.
+      setQualityKnee(0.7);
+      expect(getQualityKnee()).toBe(0.7);
+      resetCalibration();
+      expect(getQualityKnee()).toBe(DEFAULT_QUALITY_KNEE_FRACTION);
     });
   });
 
@@ -4525,11 +4598,12 @@ describe("tier-based context management", () => {
 
     test("QUALITY_HARD_CEILING blocks layer-0 pass-through when l0cap is disabled (#961)", () => {
       // Safety-net coverage: with l0cap disabled (0), layer0Ceiling === maxInput
-      // (~968K), so a >500K session would normally satisfy the pass-through gate
-      // (layer0Input <= layer0Ceiling) and stay at layer 0 well into the degraded
-      // tier — WITHOUT ever reaching the economic gate/multiplier. The
-      // QUALITY_HARD_CEILING clause must block that pass-through and force
-      // compression. Removing that clause makes this test fail (mutation-checked).
+      // (~968K), so a degraded-fill session would normally satisfy the
+      // pass-through gate (layer0Input <= layer0Ceiling) and stay at layer 0 well
+      // into the degraded tier — WITHOUT ever reaching the economic
+      // gate/multiplier. The fill-relative quality hard ceiling (0.8 × context)
+      // must block that pass-through and force compression. Removing that clause
+      // makes this test fail (mutation-checked).
       setModelLimits({ context: 1_000_000, output: 32_000 });
       setMaxLayer0Tokens(0); // disabled → layer0Ceiling = maxInput
       setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
@@ -4543,9 +4617,9 @@ describe("tier-based context management", () => {
         ),
       );
       transform({ messages: msgs, projectPath: PROJECT, sessionID: SESSION });
-      // 600K: past QUALITY_HARD_CEILING (500K) but under maxInput*0.95 (~920K)
-      // and under layer0Ceiling (=maxInput, since l0cap disabled).
-      calibrate(600_000, SESSION, msgs.length);
+      // 850K: past the quality hard ceiling (0.8 × 1M = 800K) but under
+      // maxInput*0.95 (~920K) and under layer0Ceiling (=maxInput, l0cap disabled).
+      calibrate(850_000, SESSION, msgs.length);
 
       const result = transform({
         messages: msgs,
@@ -5754,6 +5828,15 @@ describe("tier-based context management", () => {
     beforeEach(() => {
       // Opus 4.6 pricing where bust is expensive
       setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
+      // Fill-relative quality: pin a 1M window + default knee.
+      setModelLimits({ context: 1_000_000, output: 32_000 });
+      setQualityKnee(0.4);
+    });
+
+    afterAll(() => {
+      setModelLimits({ context: 10_000, output: 2_000 });
+      setQualityKnee(undefined);
+      setCachePricing(0, 0);
     });
 
     test("returns true with freeWrite even when bust cost exceeds continue cost", () => {
@@ -6757,22 +6840,23 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
 
   test("isLargeColdStart agrees with transform in the QUALITY_HARD_CEILING regime (#961 Seer 15319715)", () => {
     // Divergence regime: l0cap disabled → layer0Ceiling === maxInput (large).
-    // A cold session between QUALITY_HARD_CEILING (500K) and layer0Ceiling
-    // passes `layer0Input <= layer0Ceiling` but FAILS `<= QUALITY_HARD_CEILING`,
-    // so transform() compresses it. Before the shared layer0Passes() predicate,
-    // isLargeColdStart returned only `layer0Input > layer0Ceiling` and wrongly
-    // predicted passthrough (false) — mispredicting the turn-1 LTM decision.
+    // A cold session between the quality hard ceiling (0.8 × context = 800K) and
+    // layer0Ceiling passes `layer0Input <= layer0Ceiling` but FAILS the quality
+    // ceiling clause, so transform() compresses it. Before the shared
+    // layer0Passes() predicate, isLargeColdStart returned only
+    // `layer0Input > layer0Ceiling` and wrongly predicted passthrough (false) —
+    // mispredicting the turn-1 LTM decision.
     setModelLimits({ context: 1_000_000, output: 32_000 }); // maxInput = 968K
-    setMaxLayer0Tokens(0); // disabled → layer0Ceiling = maxInput (968K > 500K)
+    setMaxLayer0Tokens(0); // disabled → layer0Ceiling = maxInput (968K > 800K)
     setCachePricing(6.25 / 1_000_000, 0.5 / 1_000_000);
     calibrate(0); // zero overhead
 
     const sid = `cold-qhc-${crypto.randomUUID()}`;
-    // ~560K estimated tokens: between 500K (QUALITY_HARD_CEILING) and 968K
-    // (layer0Ceiling). estimateMessages ≈ chars/3; uncalibrated ×1.5 factor
-    // pushes layer0Input higher, so target ~370K raw estimate → ~560K after ×1.5.
+    // ~875K estimated tokens: between the 800K quality ceiling and the ~920K
+    // maxInput*0.95 margin. estimateMessages ≈ chars/3; uncalibrated ×1.5 factor
+    // pushes layer0Input higher (~850 msgs × 2000 chars → ~875K after ×1.5).
     const pad = "x".repeat(2000);
-    const messages = Array.from({ length: 560 }, (_, i) =>
+    const messages = Array.from({ length: 850 }, (_, i) =>
       makeMsg(`${sid}-${i}`, i % 2 === 0 ? "user" : "assistant", pad, sid),
     );
     const predicted = isLargeColdStart({ messages, sessionID: sid });

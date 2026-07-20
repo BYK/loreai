@@ -92,6 +92,29 @@ describe("computeLayer0Cap", () => {
     const cap = computeLayer0Cap(0.15, 0.5 / 1e6);
     expect(cap).toBe(300_000);
   });
+
+  test("clamps the cost-derived cap to the context window (cheap-cache fix, #961)", () => {
+    // DeepSeek-style cheap cache reads ($0.0028/MTok) would otherwise produce a
+    // ~35M-token cap that silently disables layer-0 capping. With the window
+    // passed, the cap is clamped to the real context window instead.
+    const cheapRead = 0.0028 / 1e6;
+    const rawCap = computeLayer0Cap(0.1, cheapRead); // no window → unclamped
+    expect(rawCap).toBeGreaterThan(30_000_000);
+    const clamped = computeLayer0Cap(0.1, cheapRead, 1_000_000);
+    expect(clamped).toBe(1_000_000);
+  });
+
+  test("clamp never tightens a cost cap that is already below the window", () => {
+    // Opus $0.10 / $0.50 MTok → 200K cost cap; a 1M window must NOT loosen it.
+    const cap = computeLayer0Cap(0.1, 0.5 / 1e6, 1_000_000);
+    expect(cap).toBe(200_000);
+  });
+
+  test("clamp still honors the 40K floor for expensive models", () => {
+    // Expensive model with a tiny window: floor wins over both cost and clamp.
+    const cap = computeLayer0Cap(0.01, 10 / 1e6, 1_000_000);
+    expect(cap).toBe(40_000);
+  });
 });
 
 // ---------------------------------------------------------------------------

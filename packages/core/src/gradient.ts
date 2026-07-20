@@ -87,13 +87,32 @@ let outputReserved = 32_000;
 const TIER_BOUNDARIES = [200_000, 500_000] as const;
 
 /**
- * Quality hard ceiling: the token count past which context quality is
- * considered degraded (tier-3 boundary). Used as a safety net on the
- * pass-through path (l0cap disabled or no pricing) where the graduated
- * `qualityCostMultiplier` economic gate never runs. On the priced path the
- * multiplier — not this ceiling — governs the compress decision.
+ * Quality hard-ceiling fill fraction: the fraction of the model's context
+ * window past which raw layer-0 pass-through is never allowed. Fill-relative
+ * (like `qualityCostMultiplier`) so it scales across window sizes: 0.8 is
+ * ~160K on a 200K model and ~800K on a 1M model.
+ *
+ * This is a last-resort SAFETY NET on the pass-through path where the graduated
+ * `qualityCostMultiplier` economic gate never runs — l0cap disabled (no pricing
+ * / targetCacheRead=0) or a free-write session (ceiling ~0.65×maxInput). It is
+ * intentionally set ABOVE the free-write operating fraction (0.65) so it never
+ * pre-empts the free-write early-compression path; it only fires deep in the
+ * degraded regime. `layer0Passes` enforces it only when it is the binding
+ * (tightest) ceiling — i.e. when `layer0Ceiling >= this`.
+ *
+ * NOTE on scope: because `computeLayer0Cap` now clamps its output to the context
+ * window, a cheap-cache model (large cost-derived cap → clamped to the window →
+ * `layer0Ceiling ≈ maxInput ≈ 0.97×window ≥ 0.8×window`) DOES let this clause
+ * bind. So on the cheap-cache priced path this is a routine gate, not a purely
+ * degenerate fallback. That is intentional (it forces compression on a
+ * genuinely degraded cheap-cache window at ~0.8 fill, where the graduated
+ * multiplier would also compress). It stays inert only when a tighter
+ * cost-derived `layer0Ceiling` binds first (expensive-cache / small target$).
+ *
+ * NOTE: replaces the former fixed 500K constant, which was unreachable below a
+ * 500K window and so silently never fired on smaller windows.
  */
-const QUALITY_HARD_CEILING = TIER_BOUNDARIES[1];
+const QUALITY_HARD_CEILING_FRACTION = 0.8;
 
 /**
  * Absolute last-resort passthrough margin: never pass through raw at layer 0
@@ -110,50 +129,135 @@ const HARD_CEILING_MARGIN = 0.95;
  * `layer0Input` may pass through UNCOMPRESSED at layer 0. Compression is forced
  * when this returns false. Used by BOTH transformInner (the layer decision) and
  * isLargeColdStart (the turn-1 LTM prediction) so their logic can never drift.
- * All three ceilings must hold: the cost/API layer-0 ceiling, the quality hard
- * ceiling (degraded-window safety net), and the absolute maxInput margin.
+ *
+ * Three ceilings must hold: the cost/API layer-0 ceiling, the absolute maxInput
+ * margin, and a fill-relative quality hard ceiling.
+ *
+ * The quality hard ceiling is applied ONLY when it is the binding (tightest)
+ * ceiling — i.e. `layer0Ceiling >= QUALITY_HARD_CEILING_FRACTION × window`.
+ * It stays inert when a tighter cost-derived `layer0Ceiling` binds first
+ * (expensive-cache / small target$), exactly as the former fixed 500K constant
+ * was inert whenever a tighter l0cap was set. It DOES bind on the cheap-cache
+ * priced path, where `computeLayer0Cap` clamps the (huge) cost cap to the window
+ * so `layer0Ceiling ≈ maxInput ≥ the quality ceiling` — see the scope note on
+ * `QUALITY_HARD_CEILING_FRACTION`. Making it fill-relative extends the net to
+ * smaller windows without perturbing the free-write operating band (0.65).
  */
 function layer0Passes(
   layer0Input: number,
   layer0Ceiling: number,
   maxInput: number,
 ): boolean {
+  const window = contextLimit > 0 ? contextLimit : 200_000;
+  const qualityHardCeiling = window * QUALITY_HARD_CEILING_FRACTION;
+  // Only enforce the quality hard ceiling when it is the binding constraint,
+  // i.e. the cost/free-write ceiling is looser than it. This preserves the
+  // historical "inert on the priced path" behavior (fixed 500K was unreachable
+  // whenever a tighter l0cap or free-write ceiling was set).
+  const qualityCeilingBinds = layer0Ceiling >= qualityHardCeiling;
   return (
     layer0Input <= layer0Ceiling &&
-    layer0Input <= QUALITY_HARD_CEILING &&
+    (!qualityCeilingBinds || layer0Input <= qualityHardCeiling) &&
     layer0Input <= maxInput * HARD_CEILING_MARGIN
   );
 }
 
 /**
- * Per-token quality penalty slope. Each `TIER_BOUNDARIES[0]` (200K) of context
- * ABOVE the tier-1 boundary multiplies the perceived continue cost by this much
- * more. At the tier-1 boundary the multiplier is 1 (no penalty); it grows
- * linearly and without bound thereafter. Slope 8 places the worst-case compress
- * crossover (compressed estimate clamped to a 500K l0cap, warm cache at the
- * ~12.5× Anthropic write/read ratio) right at the tier-3 boundary (~530K).
+ * Quality penalty slope for the fill-fraction ramp. Past the per-model quality
+ * knee, the perceived "continue" cost is inflated by `1 + SLOPE * excess^2`,
+ * where `excess ∈ [0,1]` is how far the fill fraction has travelled from the
+ * knee toward a full window (see `qualityCostMultiplier`). At the knee the
+ * multiplier is 1 (no penalty); at a completely full window it is `1 + SLOPE`.
  *
- * NOTE: the crossover scales with the ACTUAL compressed target, not a fixed
- * 500K. For a typical priced l0cap (~166K–333K, from targetCacheReadCostPerTurn)
- * the compressed estimate is smaller, so compression fires earlier — around
- * 260K–450K, i.e. inside the tier-2 "acceptable" band. That is intentional: the
- * ramp trades a little cheap-cache headroom for staying nearer the best-quality
- * range on cheaper-to-compress sessions. A window is only guaranteed to keep its
- * cheap cache while q≈1 (≤ ~200K); above that the penalty progressively favors
- * compression.
+ * The gate compresses when `bustCost < threshold × continueCost`. For a ~30%
+ * compression ratio that crossover is reached at a multiplier of roughly the
+ * model's write/read ratio × 0.3 / 0.85 — about 2–4.4× for our focus models
+ * (DeepSeek-via-OpenRouter, MiniMax-M3, Gemini, Anthropic). SLOPE=20 places
+ * that crossover around 55–65% fill, i.e. inside the tier-2 "acceptable" band,
+ * so compression fires well before the window is degraded while leaving cheap
+ * models a little more headroom than expensive ones (which cross earlier).
+ *
+ * This is fill-relative, so it scales across window sizes automatically: 60%
+ * fill is ~120K on a 200K model and ~600K on a 1M model — both the empirically
+ * good operating range for that model.
  */
-const QUALITY_PENALTY_SLOPE = 8;
+const QUALITY_PENALTY_SLOPE = 20;
+
+/**
+ * Quality penalty curve exponent. >1 makes the ramp convex: quality holds flat
+ * until the knee, then degrades with an accelerating curve — matching the
+ * empirical "holds, then collapses" shape of lost-in-the-middle degradation
+ * (as opposed to a concave log curve, which would drop sharply then flatten).
+ */
+const QUALITY_PENALTY_EXPONENT = 2;
+
+/**
+ * Default quality knee as a fraction of the model's context window, used when
+ * no per-model knee has been measured. Below this fill the window is treated as
+ * pristine (no penalty); above it the penalty ramps.
+ *
+ * Grounded in the long-context degradation literature — "Lost in the Middle"
+ * (Liu et al., TACL 2023, arXiv:2307.03172) and Chroma's "Context Rot" (Hong et
+ * al., 2025, 18 models incl. Claude 4 / GPT-4.1 / Gemini 2.5) — which show
+ * degradation is continuous, model-specific, and materially present well before
+ * a window is full, but publish no universal knee constant. 0.4 (40% fill) is a
+ * conservative single default; per-model knees are expected to be measured
+ * empirically (via the eval harness) and supplied through `setQualityKnee`.
+ */
+export const DEFAULT_QUALITY_KNEE_FRACTION = 0.4;
+
+/**
+ * Per-model quality knee as a fraction of the context window. Set by the host
+ * adapter from models.dev data (via `setQualityKnee`); falls back to
+ * DEFAULT_QUALITY_KNEE_FRACTION when unset or out of range.
+ */
+let qualityKneeFraction = DEFAULT_QUALITY_KNEE_FRACTION;
+
+/**
+ * Set the per-model quality knee (fill fraction where degradation begins).
+ * Clamped to (0, 1); undefined, out-of-range, or non-finite values reset to
+ * the literature-grounded default (DEFAULT_QUALITY_KNEE_FRACTION).
+ */
+export function setQualityKnee(fraction: number | undefined): void {
+  qualityKneeFraction =
+    fraction != null &&
+    Number.isFinite(fraction) &&
+    fraction > 0 &&
+    fraction < 1
+      ? fraction
+      : DEFAULT_QUALITY_KNEE_FRACTION;
+}
+
+/** Returns the current per-model quality knee fraction (for tests). */
+export function getQualityKnee(): number {
+  return qualityKneeFraction;
+}
 
 /**
  * Continuous quality penalty applied to the "continue" cost in shouldCompress.
- * Returns 1.0 within the best-quality tier (≤ TIER_BOUNDARIES[0]); above it,
- * ramps linearly with the excess normalized by the tier-1 width. Monotonic,
- * unbounded — guarantees compression is eventually chosen as tokens grow.
+ *
+ * Quality degradation ("lost in the middle") is a function of how FULL the
+ * context is relative to the model's window, not an absolute token count — a
+ * 200K session is pristine in a 1M-window model but degraded in a 200K model.
+ * So the penalty keys on the fill fraction `f = tokens / contextLimit`:
+ *
+ *   f ≤ knee            → 1 (pristine regime, no penalty)
+ *   f > knee            → 1 + SLOPE × excess^EXP,
+ *                         excess = (f - knee) / (1 - knee)  ∈ (0, 1]
+ *
+ * Monotonic and bounded by `1 + SLOPE` at a full window; because the crossover
+ * for realistic write/read ratios is well below the full window, compression is
+ * always eventually chosen as the window fills — regardless of how cheap the
+ * model's cache reads are (which is what made the old cost-only cap explode to
+ * tens of millions of tokens for cheap models and never compress).
  */
 export function qualityCostMultiplier(tokens: number): number {
-  const excess = tokens - TIER_BOUNDARIES[0];
-  if (excess <= 0) return 1;
-  return 1 + (QUALITY_PENALTY_SLOPE * excess) / TIER_BOUNDARIES[0];
+  const window = contextLimit > 0 ? contextLimit : 200_000;
+  const knee = qualityKneeFraction;
+  const fill = tokens / window;
+  if (fill <= knee) return 1;
+  const excess = (fill - knee) / (1 - knee);
+  return 1 + QUALITY_PENALTY_SLOPE * excess ** QUALITY_PENALTY_EXPONENT;
 }
 
 /** Cache pricing per token (USD). Set by host adapter via setCachePricing(). */
@@ -369,9 +473,12 @@ export function shouldCompress(
     return consecutiveBusts < SUSTAINED_BUST_THRESHOLD;
   }
 
-  // If no pricing data, fall back to conservative: do NOT compress.
-  // Compression busts the cache, which is expensive. Without pricing data
-  // we can't prove it's worthwhile, so err on the side of keeping the cache.
+  // If no pricing data at all, fall back to conservative: do NOT compress.
+  // (Models with cache_read but no cache_write still reach the priced path
+  // below, because getModelSpec derives cache_write from input cost — so this
+  // branch only fires when models.dev has NO cost entry whatsoever. The
+  // fill-based qualityCostMultiplier on the priced path is what fixes the
+  // cheap-cache "never compress" bug; see computeLayer0Cap + qualityCostMultiplier.)
   if (cacheWriteCostPerToken <= 0 || cacheReadCostPerToken <= 0) return false;
 
   const sustainedBust = consecutiveBusts >= SUSTAINED_BUST_THRESHOLD;
@@ -1108,6 +1215,11 @@ export type ModelBudget = {
   maxLayer0Tokens: number;
   cacheWriteCostPerToken: number;
   cacheReadCostPerToken: number;
+  /**
+   * Optional per-model quality knee (fill fraction where degradation begins).
+   * When omitted, the module default (DEFAULT_QUALITY_KNEE_FRACTION) is used.
+   */
+  qualityKneeFraction?: number;
 };
 
 /**
@@ -1122,6 +1234,7 @@ function applyModelBudget(budget: ModelBudget): void {
   });
   setMaxLayer0Tokens(budget.maxLayer0Tokens);
   setCachePricing(budget.cacheWriteCostPerToken, budget.cacheReadCostPerToken);
+  setQualityKnee(budget.qualityKneeFraction ?? DEFAULT_QUALITY_KNEE_FRACTION);
 }
 
 export function setModelLimits(limits: { context: number; output: number }) {
@@ -1146,14 +1259,31 @@ export function setMaxLayer0Tokens(tokens: number) {
   maxLayer0Tokens = Math.max(0, Math.floor(tokens));
 }
 
-/** Compute the layer-0 token cap from a per-turn cost target and cache-read price. */
+/**
+ * Compute the layer-0 token cap from a per-turn cost target and cache-read
+ * price.
+ *
+ * The raw formula `target$ / readCost` answers "how many tokens can I re-read
+ * per turn for $target". For a cheap-cache model (readCost near zero) that is
+ * an astronomically large number (tens of millions of tokens) with no physical
+ * meaning — it silently disables the cap (which is then min()'d against the
+ * real window and discarded). Clamp the result to the model's context window so
+ * the cost cap can only ever make layer 0 *tighter* than the window, never
+ * larger. Proactive compression for cheap models is driven by the fill-based
+ * `qualityCostMultiplier`, not this cap.
+ */
 export function computeLayer0Cap(
   targetCostPerTurn: number,
   cacheReadCostPerToken: number,
+  contextWindow?: number,
 ): number {
   if (targetCostPerTurn <= 0 || cacheReadCostPerToken <= 0) return 0;
   const rawCap = Math.floor(targetCostPerTurn / cacheReadCostPerToken);
-  return Math.max(rawCap, MIN_LAYER0_FLOOR);
+  const ceiling =
+    contextWindow && contextWindow > 0
+      ? contextWindow
+      : Number.POSITIVE_INFINITY;
+  return Math.max(Math.min(rawCap, ceiling), MIN_LAYER0_FLOOR);
 }
 
 /** Called by the system transform hook after formatting LTM knowledge.
@@ -1422,6 +1552,7 @@ export function resetCalibration(sessionID?: string) {
   calibratedOverhead = null;
   cacheWriteCostPerToken = 0;
   cacheReadCostPerToken = 0;
+  qualityKneeFraction = DEFAULT_QUALITY_KNEE_FRACTION;
   urgentDistillationEnabled = true;
   urgentDistillationMap.clear();
   if (sessionID) {
@@ -3428,18 +3559,19 @@ function transformInner(input: {
   ) {
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
-    // The QUALITY_HARD_CEILING clause is a safety net for the case where
-    // layer0Ceiling > 500K — i.e. l0cap disabled (no pricing / targetCacheRead=0)
-    // or a free-write session whose ceiling is ~0.65×maxInput. There a large
-    // window would otherwise pass through at layer 0 well past the degraded
-    // boundary WITHOUT reaching the economic gate (which needs pricing) or the
-    // graduated multiplier. Above 500K this clause blocks pass-through; the
-    // window then fails the tier-gate condition (layer0Input > layer0Ceiling) and
-    // drops into the compression-stages loop directly — a hard 500K cliff that
-    // deliberately bypasses shouldCompress (and its free-write churn guard) for
-    // this degenerate, no-pricing regime. When l0cap is set (layer0Ceiling small,
-    // the common priced path) this gate only fires well within quality and the
-    // ceiling clause is inert — the graduated multiplier governs instead. (#961)
+    // The quality-hard-ceiling clause (fill > QUALITY_HARD_CEILING_FRACTION of
+    // the window) blocks pass-through when it is the binding ceiling: l0cap
+    // disabled (no pricing / targetCacheRead=0), a free-write session
+    // (~0.65×maxInput), OR the cheap-cache priced path (cost cap clamped to the
+    // window → layer0Ceiling ≈ maxInput ≥ 0.8×window). There a large window
+    // would otherwise pass through at layer 0 well past the degraded boundary.
+    // Past that fill the clause forces compression: the window fails the
+    // tier-gate condition and drops into the compression-stages loop directly —
+    // a fill-relative cliff that deliberately bypasses shouldCompress (and its
+    // free-write churn guard). When a tighter cost-derived layer0Ceiling binds
+    // first (expensive-cache / small target$) this clause is inert and the
+    // graduated multiplier governs instead. Re-compression cannot loop: after
+    // one compression layer0Input drops below 0.8 fill. (#961)
     const messageTokens = calibrated
       ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm) // approximate raw portion
       : expectedInput - overhead - sessLtmTokens;
