@@ -185,6 +185,12 @@ export async function commandTeam(
           const inviteRole =
             (values.role as string) === "viewer" ? "viewer" : "editor";
           const people = distinctCollaborators(found);
+          if (people.length === 0) {
+            console.log(
+              "\nNo collaborators to invite (the accessible repos have none). Nothing minted.",
+            );
+            break;
+          }
           console.log(
             `\nMinting ${inviteRole} invites to "${scope.name ?? scope.id}" for ${people.length} collaborator${people.length === 1 ? "" : "s"}:`,
           );

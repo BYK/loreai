@@ -4,10 +4,11 @@ name: Deploy Supabase Functions
 # `supabase functions deploy` from a local branch (unsafe + unsustainable). Migrations already deploy
 # via the Supabase↔GitHub integration; this covers the functions, which that integration does NOT.
 #
-# One-time setup (required): add a repo secret SUPABASE_ACCESS_TOKEN
-#   (Supabase dashboard → Account → Access Tokens → generate; then
-#    `gh secret set SUPABASE_ACCESS_TOKEN`). Function SECRETS (e.g. SMTP2GO_API_KEY) are set
-#   separately via `supabase secrets set` and are NOT managed here.
+# One-time setup (required): add SUPABASE_ACCESS_TOKEN as a secret on the `production` GitHub
+#   Environment (Settings → Environments → production → Secrets), NOT as a plain repo secret — this
+#   job runs with `environment: production` so the token is only exposed to it.
+#   (Supabase dashboard → Account → Access Tokens → generate the value.) Function SECRETS
+#   (e.g. SMTP2GO_API_KEY) are set separately via `supabase secrets set` and are NOT managed here.
 
 on:
   push:
@@ -28,6 +29,9 @@ jobs:
   deploy:
     name: Deploy Edge Functions
     runs-on: ubuntu-latest
+    # Run in the `production` environment so the SUPABASE_ACCESS_TOKEN secret — scoped to that
+    # environment for security (not a plain repo secret) — is available to this job only.
+    environment: production
     # The project ref is not a secret (it's in supabase/config.toml); the access token is.
     env:
       SUPABASE_PROJECT_REF: jlwxsrmvomocgngbxmcf

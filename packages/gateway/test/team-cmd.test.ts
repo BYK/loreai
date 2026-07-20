@@ -700,4 +700,17 @@ describe("discover --invite (E-5-d-2)", () => {
     expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
     expect(logs.join("\n")).toMatch(/already on Lore/);
   });
+
+  it("with --invite but repos have no collaborators: mints nothing, says so (no confusing '0 collaborators')", async () => {
+    vi.mocked(team.discoverGitHubCollaborators).mockResolvedValue([
+      { repo: "o/empty", collaborators: [] },
+    ] as never);
+    await commandTeam(["discover", "--invite", "Rockets"], {
+      invite: "Rockets",
+    });
+    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+    const out = logs.join("\n");
+    expect(out).toMatch(/No collaborators to invite/);
+    expect(out).not.toMatch(/for 0 collaborators/);
+  });
 });

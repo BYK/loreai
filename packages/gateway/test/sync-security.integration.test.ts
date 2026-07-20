@@ -1582,8 +1582,12 @@ describe.skipIf(SKIP)(
       );
       expect(Number(rr[0].n)).toBeGreaterThanOrEqual(1); // >= our 1 stale eph (reap is global)
 
-      // Real wrap survives; recent eph survives; stale eph gone.
-      expect(await remainingKeys(a)).toEqual([a, "eph:NEWPUB"]);
+      // Real wrap survives; recent eph survives; stale eph gone. Compare as a SET — `remainingKeys`
+      // orders by member_user_id, and a random user UUID can sort before OR after the "eph:" literal,
+      // which previously made this assertion flaky (#1397).
+      expect(new Set(await remainingKeys(a))).toEqual(
+        new Set([a, "eph:NEWPUB"]),
+      );
     });
 
     it("retention_days=0 reaps every eph row but NEVER a real member wrap", async () => {
@@ -1591,7 +1595,7 @@ describe.skipIf(SKIP)(
       await insKey(a, a, recentTs()); // real wrap, even recent → never touched
       await insKey(a, "eph:P", recentTs()); // recent eph, but window 0 → reaped
       await h.client.query("select public.reap_ephemeral_scope_keys(0)");
-      expect(await remainingKeys(a)).toEqual([a]); // only the real wrap remains
+      expect(new Set(await remainingKeys(a))).toEqual(new Set([a])); // only the real wrap remains
     });
 
     it("is not executable by a normal (authenticated) user — system task only", async () => {
