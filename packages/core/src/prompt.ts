@@ -356,6 +356,24 @@ INCLUDE THE "WHY" — decisions and gotchas without rationale get undone:
 - Any standard or rule without its rationale is vulnerable to being optimized away by
   a session that doesn't know what problem it was solving.
 
+DISCOVERABLE TITLES — the title is the entry's search key, weight it accordingly:
+- A future session finds this entry by SEARCHING its title (the title is the highest-
+  weighted field in recall, ~3x the content). Put the SPECIFIC, discriminative terms a
+  future session will actually type into the title: the symbol / file / error code /
+  config key / tool / proper noun — not a generic noun. A generic title buries the entry
+  in a haystack the same way grepping "create" returns hundreds of hits; a specific one
+  lands in a single hop.
+- Aim for a title that names its subject in 2-4 words, at least one of them a concrete
+  domain term (an exact identifier, filename, or error code beats a category word).
+- The title is ALSO the dedup identity — a vague title risks silently merging with an
+  unrelated entry. Distinctive titles keep distinct facts distinct.
+  BAD:  "Client creation bug"
+  GOOD: "createStripeClient drops Authorization header on retry"
+  BAD:  "Migration gotcha"
+  GOOD: "v55 knowledge_meta migration boot-loops if DROP COLUMN precedes backfill"
+  BAD:  "Caching improvement"
+  GOOD: "gradient.ts l0cap governs compression trigger, not layer-1 window size"
+
 PROCEDURAL PATTERNS — recurring procedures get a runbook shape, not a flat fact:
 - When the captured pattern is a recurring *procedure* (deploy, release, review,
   debug-X, setup, migration, hand-off), structure the content as:
@@ -566,7 +584,11 @@ IMPORTANT:
 8. Resolve ambiguous references (pronouns, nicknames, abbreviations) to canonical names from
    the entity list. If you detect new recurring entities, include them in the "entities" field.
 9. If the conversation reveals relationships between entities (friend, colleague, manager, etc.),
-   include them in the "relations" field. Only explicit statements — not inferred from context.`;
+   include them in the "relations" field. Only explicit statements — not inferred from context.
+10. Title every create with the SPECIFIC terms a future session will search — the exact
+    symbol / file / error code / tool, not a generic noun (the title is the top-weighted
+    recall field AND the dedup key). "createStripeClient drops auth header on retry", not
+    "Client bug".`;
 }
 
 /**

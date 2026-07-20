@@ -803,6 +803,7 @@ export function update(
 export const LOGICAL_ID_BOOKKEEPING_TABLES = [
   "knowledge_ref_validity",
   "knowledge_symbol_presence",
+  "knowledge_ref_anchor",
 ] as const;
 
 export function remove(id: string, metadata?: KnowledgeMetadata) {
@@ -1545,6 +1546,23 @@ export async function validateProjectReferences(
   const wasSymbolPresent = db().query(
     `SELECT 1 FROM knowledge_symbol_presence WHERE logical_id = ? AND symbol = ?`,
   );
+  // Code anchors (#627 follow-on / Modem "how coding agents read your code"):
+  // the file:line / symbol refs that resolve OK this pass are persisted so recall
+  // can point the agent straight at the code instead of making it grep. Rewritten
+  // in full per entry each pass (DELETE + re-INSERT) so a removed/renamed ref
+  // drops out and can never become a stale jump target. Only entries we actually
+  // resolved this pass (total > 0) are rewritten — an all-"unknown" entry keeps
+  // its prior anchors (cannot verify ≠ broken applies to anchors too: a probe
+  // that couldn't reach the FS must not wipe a good jump target). Commands are
+  // never anchors (not a code location).
+  const clearAnchors = db().query(
+    `DELETE FROM knowledge_ref_anchor WHERE logical_id = ?`,
+  );
+  const insertAnchor = db().query(
+    `INSERT INTO knowledge_ref_anchor (logical_id, kind, anchor, updated_at)
+       VALUES (?, ?, ?, ?)
+     ON CONFLICT(logical_id, kind, anchor) DO UPDATE SET updated_at = excluded.updated_at`,
+  );
   // Stamp the 24h gate in a `finally`, OUTSIDE the penalty transaction. If a
   // write inside the transaction throws, `withTransaction` rolls back the whole
   // batch — but the gate MUST still advance, otherwise the next idle tick re-runs
@@ -1556,6 +1574,10 @@ export async function validateProjectReferences(
       for (const [logicalId, refs] of perEntry) {
         let broken = 0;
         let total = 0; // refs with a DEFINITIVE status (ok|missing); excludes unknown
+        // OK code anchors gathered this pass (file:line / symbol), deduped by
+        // "kind\x1fanchor" so a `foo.ts` and `foo.ts:10` are distinct entries but
+        // an exact repeat collapses.
+        const anchors = new Map<string, { kind: string; anchor: string }>();
         for (const ref of refs) {
           const st = statusMap.get(ref.raw);
           if (ref.kind === "symbol") {
@@ -1564,6 +1586,10 @@ export async function validateProjectReferences(
               // drift. Counts as a definitive (verifiable) ref, never broken.
               recordSymbolPresent.run(logicalId, ref.name, now);
               total++;
+              anchors.set(`symbol\x1f${ref.name}`, {
+                kind: "symbol",
+                anchor: ref.name,
+              });
             } else if (st === "missing") {
               // Confirmed ABSENT. Only drift (broken) if we have proof it was
               // present before; otherwise a strict no-op (never-present mention).
@@ -1581,11 +1607,23 @@ export async function validateProjectReferences(
             total++;
           } else if (st === "ok") {
             total++;
+            // Only file refs are code anchors (commands are not a location).
+            if (ref.kind === "file") {
+              const anchor =
+                ref.line != null ? `${ref.path}:${ref.line}` : ref.path;
+              anchors.set(`file\x1f${anchor}`, { kind: "file", anchor });
+            }
           }
           // "unknown" / absent → neutral, not counted
         }
         if (total === 0) continue; // every ref unverifiable for this entry — neutral
         checked++;
+        // Rewrite this entry's anchors in full: a removed/renamed ref drops out,
+        // never leaving a stale jump target. Runs for every resolved entry (incl.
+        // those with zero OK anchors, which clears any prior anchors).
+        clearAnchors.run(logicalId);
+        for (const { kind, anchor } of anchors.values())
+          insertAnchor.run(logicalId, kind, anchor, now);
         db()
           .query(
             `INSERT INTO knowledge_ref_validity (logical_id, broken, total, checked_at)
@@ -1920,6 +1958,55 @@ export function refValidity(logicalId: string): RefValidity | null {
     | undefined;
   if (!row) return null;
   return { broken: row.broken, total: row.total, checkedAt: row.checked_at };
+}
+
+/** A resolved code anchor cited by a knowledge entry (persisted by the
+ *  reference-validity pass when it resolved OK). `file` anchors carry an optional
+ *  `:line`; `symbol` anchors are a bare identifier. */
+export type KnowledgeRefAnchor = { kind: "file" | "symbol"; anchor: string };
+
+/** Max anchors surfaced per entry in recall — enough to point at the code
+ *  without bloating the result line. File anchors are preferred over symbols. */
+export const MAX_RECALL_ANCHORS_PER_ENTRY = 3;
+
+/**
+ * Batch-load the resolved code anchors (file:line / symbol) for a set of entries
+ * by logical_id, so recall can point the agent straight at the code instead of
+ * making it grep (Modem "how coding agents read your code"). Returns a Map from
+ * logical_id to its anchors, file anchors first (the more useful jump target),
+ * capped at MAX_RECALL_ANCHORS_PER_ENTRY. Entries with no resolved anchors are
+ * absent from the map. Read-only. Empty input → empty map (no query).
+ */
+export function knowledgeRefAnchors(
+  logicalIds: string[],
+): Map<string, KnowledgeRefAnchor[]> {
+  const out = new Map<string, KnowledgeRefAnchor[]>();
+  if (logicalIds.length === 0) return out;
+  const placeholders = logicalIds.map(() => "?").join(",");
+  // 'file' < 'symbol' lexically, so ORDER BY kind puts file anchors first; a
+  // stable secondary sort by anchor keeps output deterministic (cache-friendly).
+  const rows = db()
+    .query(
+      `SELECT logical_id, kind, anchor FROM knowledge_ref_anchor
+        WHERE logical_id IN (${placeholders})
+        ORDER BY logical_id, kind, anchor`,
+    )
+    .all(...logicalIds) as Array<{
+    logical_id: string;
+    kind: string;
+    anchor: string;
+  }>;
+  for (const r of rows) {
+    if (r.kind !== "file" && r.kind !== "symbol") continue;
+    let arr = out.get(r.logical_id);
+    if (!arr) {
+      arr = [];
+      out.set(r.logical_id, arr);
+    }
+    if (arr.length >= MAX_RECALL_ANCHORS_PER_ENTRY) continue;
+    arr.push({ kind: r.kind, anchor: r.anchor });
+  }
+  return out;
 }
 
 /**

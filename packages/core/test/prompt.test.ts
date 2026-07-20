@@ -335,6 +335,23 @@ describe("consolidationUser — value annotation (#497)", () => {
   });
 });
 
+describe("CURATOR_SYSTEM — discoverable titles (Modem)", () => {
+  test("declares a DISCOVERABLE TITLES section", () => {
+    expect(CURATOR_SYSTEM).toContain("DISCOVERABLE TITLES");
+  });
+
+  test("tells the curator the title is the search key / dedup identity", () => {
+    // The load-bearing rationale: a specific title is what makes an entry
+    // retrievable (top-weighted recall field) and keeps distinct facts distinct
+    // (dedup key). Pin both so the guidance can't silently drop back to a bare
+    // "Short descriptive title".
+    expect(CURATOR_SYSTEM).toMatch(
+      /search key|highest-weighted|dedup identity/i,
+    );
+    expect(CURATOR_SYSTEM).toMatch(/BAD:[\s\S]{0,200}GOOD:/);
+  });
+});
+
 describe("CURATOR_SYSTEM — procedural pattern runbooks (#914)", () => {
   test("declares a PROCEDURAL PATTERNS section heading", () => {
     expect(CURATOR_SYSTEM).toContain("PROCEDURAL PATTERNS");

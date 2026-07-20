@@ -414,6 +414,20 @@ function formatFusedResults(
   const lowScore = kept[kept.length - 1].score;
   const lines: string[] = [];
 
+  // Batch-load the resolved code anchors (file:line / symbol) for every knowledge
+  // hit ONCE, so recall can point the agent straight at the code instead of
+  // making it grep (Modem "how coding agents read your code"). One query for the
+  // whole result set; entries with no resolved anchors are simply absent.
+  const knowledgeLogicalIds: string[] = [];
+  for (const r of tiered) {
+    if (r.item.source === "knowledge" || r.item.source === "cross-knowledge")
+      knowledgeLogicalIds.push(r.item.item.logical_id);
+  }
+  const anchorsByLogicalId =
+    knowledgeLogicalIds.length > 0
+      ? ltm.knowledgeRefAnchors(knowledgeLogicalIds)
+      : undefined;
+
   lines.push(`## Recall Results`);
   lines.push(``);
   lines.push(
@@ -442,7 +456,7 @@ function formatFusedResults(
         lines.push(`#### ${SOURCE_LABELS[currentSource]}`);
       }
 
-      const line = renderResultLine(r.item, r.charBudget);
+      const line = renderResultLine(r.item, r.charBudget, anchorsByLogicalId);
       lines.push(line);
     }
   }
@@ -552,7 +566,22 @@ function getDistillationSourceIds(distillId: string): string[] {
   }
 }
 
-function renderResultLine(tagged: TaggedResult, charBudget: number): string {
+/** Render an entry's resolved code anchors as a compact ` \u21b3 a, b` suffix the
+ *  agent can jump to instead of grepping. Empty/absent → "". Symbol anchors get a
+ *  trailing `()` so they read as identifiers. */
+function renderAnchors(anchors?: ltm.KnowledgeRefAnchor[]): string {
+  if (!anchors || anchors.length === 0) return "";
+  const parts = anchors.map((a) =>
+    a.kind === "symbol" ? `${a.anchor}()` : a.anchor,
+  );
+  return ` \u21b3 ${parts.join(", ")}`;
+}
+
+function renderResultLine(
+  tagged: TaggedResult,
+  charBudget: number,
+  anchorsByLogicalId?: Map<string, ltm.KnowledgeRefAnchor[]>,
+): string {
   const id = taggedResultKey(tagged);
 
   switch (tagged.source) {
@@ -560,19 +589,27 @@ function renderResultLine(tagged: TaggedResult, charBudget: number): string {
       const k = tagged.item;
       const age = relativeAge(k.updated_at);
       const titlePart = `**${inline(k.title)}** (${age}): `;
-      const contentBudget = Math.max(40, charBudget - titlePart.length);
+      const anchors = renderAnchors(anchorsByLogicalId?.get(k.logical_id));
+      const contentBudget = Math.max(
+        40,
+        charBudget - titlePart.length - anchors.length,
+      );
       const content = truncateAtSentence(inline(k.content), contentBudget);
       const wasTruncated = inline(k.content).length > contentBudget;
-      return `- ${titlePart}${content}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${titlePart}${content}${anchors}${wasTruncated ? ` (${id})` : ""}`;
     }
     case "cross-knowledge": {
       const k = tagged.item;
       const age = relativeAge(k.updated_at);
       const titlePart = `**${inline(k.title)}** (${age}, from: ${tagged.projectLabel}): `;
-      const contentBudget = Math.max(40, charBudget - titlePart.length);
+      const anchors = renderAnchors(anchorsByLogicalId?.get(k.logical_id));
+      const contentBudget = Math.max(
+        40,
+        charBudget - titlePart.length - anchors.length,
+      );
       const content = truncateAtSentence(inline(k.content), contentBudget);
       const wasTruncated = inline(k.content).length > contentBudget;
-      return `- ${titlePart}${content}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${titlePart}${content}${anchors}${wasTruncated ? ` (${id})` : ""}`;
     }
     case "distillation": {
       const d = tagged.item;
@@ -1446,11 +1483,14 @@ export function recallById(id: string): string {
       // entry (A2, #823) — a recalled id may be the stable logical_id.
       const entry = ltm.get(rawId) ?? ltm.getByLogical(ltm.logicalIdOf(rawId));
       if (!entry) return `No entry found for id: ${id}`;
+      const detailAnchors = renderAnchors(
+        ltm.knowledgeRefAnchors([entry.logical_id]).get(entry.logical_id),
+      );
       return [
         `## Recall Detail: ${id}`,
         ``,
         `#### Knowledge`,
-        `- **${inline(entry.title)}** (${entry.category}): ${inline(entry.content)}`,
+        `- **${inline(entry.title)}** (${entry.category}): ${inline(entry.content)}${detailAnchors}`,
       ].join("\n");
     }
     case "d": {

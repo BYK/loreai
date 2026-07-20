@@ -119,7 +119,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(73);
+    expect(row.version).toBe(74);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -176,7 +176,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(73);
+    expect(ver.version).toBe(74);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -216,6 +216,21 @@ describe("db", () => {
       name: string;
     }>;
     expect(pcols.some((c) => c.name === "last_refcheck_at")).toBe(true);
+  });
+
+  test("v74: knowledge_ref_anchor table exists / is restored after recovery", () => {
+    // Drop the sidecar table, reopen, confirm recoverMissingObjects restores it
+    // idempotently (same self-heal contract as knowledge_ref_validity /
+    // knowledge_symbol_presence).
+    db().exec("DROP TABLE IF EXISTS knowledge_ref_anchor");
+    close();
+    const fresh = db();
+    const cols = fresh
+      .query("PRAGMA table_info(knowledge_ref_anchor)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["logical_id", "kind", "anchor", "updated_at"]),
+    );
   });
 
   test("session_prompt_deltas persist ordered selector/content rows (v42)", () => {

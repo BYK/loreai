@@ -188,6 +188,110 @@ describe("validateProjectReferences (#627 Phase 0)", () => {
   });
 });
 
+// Code-anchor persistence (Modem "how coding agents read your code"): the
+// reference-validity pass persists the file:line refs that resolve OK into
+// knowledge_ref_anchor so recall can point the agent straight at the code
+// instead of making it grep. (Symbol anchors are covered in the git-backed
+// symbol describe below.)
+describe("knowledge_ref_anchor persistence (recall code anchors)", () => {
+  const anchorsOf = (id: string) =>
+    ltm
+      .knowledgeRefAnchors([ltm.get(id)!.logical_id])
+      .get(ltm.get(id)!.logical_id) ?? [];
+
+  test("an OK file:line ref is persisted as a jump anchor", async () => {
+    const id = seed("see src/real.ts:3 for the impl");
+    await ltm.validateProjectReferences(root, resolver());
+    expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/real.ts:3" }]);
+  });
+
+  test("an OK file ref with NO line is persisted without a line suffix", async () => {
+    const id = seed("logic lives in src/real.ts (no line cited)");
+    await ltm.validateProjectReferences(root, resolver());
+    expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/real.ts" }]);
+  });
+
+  test("a MISSING file ref is NOT persisted as an anchor", async () => {
+    const id = seed("the fix is in src/gone.ts:10");
+    await ltm.validateProjectReferences(root, resolver());
+    expect(anchorsOf(id)).toEqual([]);
+  });
+
+  test("an out-of-range line (missing) is NOT persisted as an anchor", async () => {
+    const id = seed("see src/real.ts:999 (past EOF)");
+    await ltm.validateProjectReferences(root, resolver());
+    expect(anchorsOf(id)).toEqual([]);
+  });
+
+  test("commands are never anchors (not a code location)", async () => {
+    const id = seed("run `pnpm run lint` to format"); // resolves OK, but not an anchor
+    await ltm.validateProjectReferences(root, resolver());
+    expect(anchorsOf(id)).toEqual([]);
+  });
+
+  test("an unverifiable batch (null resolver) does NOT wipe prior anchors", async () => {
+    const id = seed("see src/real.ts:3 for the impl");
+    const now = Date.now();
+    await ltm.validateProjectReferences(root, resolver(), now);
+    expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/real.ts:3" }]);
+    // A later pass where the whole batch is unverifiable must be a strict no-op —
+    // "cannot verify ≠ broken" applies to anchors too (don't drop a good jump
+    // target just because a probe couldn't reach the FS this time).
+    await ltm.validateProjectReferences(
+      root,
+      new NoopResolver(),
+      now + ltm.REFCHECK_INTERVAL_MS + 1,
+    );
+    expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/real.ts:3" }]);
+  });
+
+  test("a removed ref drops out on the next pass (anchors rewritten in full)", async () => {
+    // Seed content citing two files; only real.ts exists.
+    const id = seed("see src/real.ts:1 and src/second.ts:1");
+    writeFileSync(join(root, "src", "second.ts"), "x\ny\n");
+    const now = Date.now();
+    await ltm.validateProjectReferences(root, resolver(), now);
+    expect(anchorsOf(id)).toEqual([
+      { kind: "file", anchor: "src/real.ts:1" },
+      { kind: "file", anchor: "src/second.ts:1" },
+    ]);
+    // second.ts is deleted; the next pass must drop its anchor (not leave a stale
+    // jump target). A fresh resolver so the file walk is re-read.
+    rmSync(join(root, "src", "second.ts"));
+    await ltm.validateProjectReferences(
+      root,
+      new DirectFsResolver(root),
+      now + ltm.REFCHECK_INTERVAL_MS + 1,
+    );
+    expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/real.ts:1" }]);
+  });
+
+  test("anchors are capped per entry at MAX_RECALL_ANCHORS_PER_ENTRY", async () => {
+    for (let i = 1; i <= 5; i++)
+      writeFileSync(join(root, "src", `f${i}.ts`), "x\n");
+    const id = seed(
+      "src/f1.ts:1 src/f2.ts:1 src/f3.ts:1 src/f4.ts:1 src/f5.ts:1",
+    );
+    await ltm.validateProjectReferences(root, resolver());
+    expect(anchorsOf(id).length).toBe(ltm.MAX_RECALL_ANCHORS_PER_ENTRY);
+  });
+
+  test("deleting an entry purges its anchors (no orphan)", async () => {
+    const id = seed("see src/real.ts:3 for the impl");
+    const lid = ltm.get(id)!.logical_id;
+    await ltm.validateProjectReferences(root, resolver());
+    expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/real.ts:3" }]);
+    // remove() must sweep knowledge_ref_anchor via LOGICAL_ID_BOOKKEEPING_TABLES.
+    ltm.remove(id);
+    const orphans = db()
+      .query(
+        "SELECT COUNT(*) AS n FROM knowledge_ref_anchor WHERE logical_id = ?",
+      )
+      .get(lid) as { n: number };
+    expect(orphans.n).toBe(0);
+  });
+});
+
 // Cited-symbol validation end-to-end (#911): symbols use a presence HISTORY. A
 // symbol only decays confidence when it was PREVIOUSLY confirmed present and is
 // now absent (genuine rename/removal drift). A never-present mention (external
@@ -269,6 +373,35 @@ describe.skipIf(process.platform === "win32")(
       const res = await ltm.validateProjectReferences(root, resolver());
       expect(res.penalized).toBe(0);
       expect(conf(id)).toBe(1.0);
+    });
+
+    test("a present symbol is persisted as a symbol anchor (after the file anchor)", async () => {
+      writeFileSync(
+        join(root, "src", "real.ts"),
+        "export const keptHelper = 1;\n",
+      );
+      const id = seed("`keptHelper` lives in src/real.ts:1");
+      gitInit();
+      await ltm.validateProjectReferences(root, resolver());
+      const lid = ltm.get(id)!.logical_id;
+      const anchors = ltm.knowledgeRefAnchors([lid]).get(lid) ?? [];
+      // File anchor is ordered first (the more useful jump target), symbol next.
+      expect(anchors).toEqual([
+        { kind: "file", anchor: "src/real.ts:1" },
+        { kind: "symbol", anchor: "keptHelper" },
+      ]);
+    });
+
+    test("a symbol confirmed ABSENT is NOT persisted as an anchor", async () => {
+      // real.ts exists (file anchor OK) but the cited symbol is absent from the
+      // tree → symbol "missing" → no symbol anchor (only the file anchor).
+      writeFileSync(join(root, "src", "real.ts"), "a\nb\nc\n");
+      const id = seed("`goneSymbol` lives in src/real.ts:1");
+      gitInit();
+      await ltm.validateProjectReferences(root, resolver());
+      const lid = ltm.get(id)!.logical_id;
+      const anchors = ltm.knowledgeRefAnchors([lid]).get(lid) ?? [];
+      expect(anchors).toEqual([{ kind: "file", anchor: "src/real.ts:1" }]);
     });
   },
 );

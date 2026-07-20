@@ -1854,6 +1854,29 @@ const MIGRATIONS: string[] = [
    ALTER TABLE session_state ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE session_state ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
    `,
+
+  `
+  -- Version 74: knowledge_ref_anchor — the currently-RESOLVABLE code anchors
+  -- (file:line / symbol) cited by a knowledge entry, so recall can point the
+  -- agent straight at the code instead of making it grep (#627 follow-on;
+  -- Modem "how coding agents read your code"). The reference-validity pass
+  -- (validateProjectReferences) already resolves every cited ref to ok/missing/
+  -- unknown; this table PERSISTS the resolved-ok file/symbol anchors (previously
+  -- discarded — only broken/total counts survived in knowledge_ref_validity).
+  -- Rewritten in full for an entry on each check pass, so a removed/renamed ref
+  -- naturally drops out (never a stale jump target). Commands are NOT anchors
+  -- (not a code location). Keyed by the stable logical_id (matches
+  -- knowledge_ref_validity / knowledge_symbol_presence / knowledge_meta) so it
+  -- survives version edits between checks. A sidecar table — never touches the
+  -- frozen append-only knowledge table.
+  CREATE TABLE IF NOT EXISTS knowledge_ref_anchor (
+    logical_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    anchor     TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (logical_id, kind, anchor)
+  );
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3059,6 +3082,13 @@ function recoverMissingObjects(database: Database) {
       symbol          TEXT NOT NULL,
       last_present_at INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (logical_id, symbol)
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_ref_anchor (
+      logical_id TEXT NOT NULL,
+      kind       TEXT NOT NULL,
+      anchor     TEXT NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (logical_id, kind, anchor)
     );
     CREATE TABLE IF NOT EXISTS knowledge_contradictions (
       logical_id_a TEXT NOT NULL,
