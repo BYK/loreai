@@ -90,6 +90,7 @@ Context-window budget fractions. Sum plus LTM ≈ 1.0.
 | `maxLayer0Tokens` | number | — | min 0 | Direct override for the layer-0 token cap. 0 = disabled (use full context). Default: undefined (use cost-aware auto). |
 | `targetBustCost` | number | `1` | min 0 | @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. |
 | `maxContextTokens` | number | — | min 0 | @deprecated Ignored. Tier-based bust-vs-continue replaces static cap. |
+| `qualityKnee` | number | — | min 0, max 1 | Manual override for the per-model quality knee (fill fraction where compression ramps). (0,1). Default: undefined (use the built-in per-model-family seed table, fallback 0.4). |
 
 
 ## `idleResumeMinutes`

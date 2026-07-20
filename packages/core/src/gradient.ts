@@ -234,6 +234,79 @@ export function getQualityKnee(): number {
 }
 
 /**
+ * Literature-seeded per-model-family quality knees (fill fraction where
+ * lost-in-the-middle degradation becomes material). These are NOT empirically
+ * measured on our own eval yet (#1404-B / #1402 will replace them with measured
+ * values); they are conservative priors read off the public long-context
+ * degradation literature so per-model compression is at least directionally
+ * right instead of a flat 0.4 for everyone:
+ *
+ *   - "Lost in the Middle" (Liu et al., TACL 2023, arXiv:2307.03172)
+ *   - Chroma "Context Rot" (Hong et al., 2025, 18 models incl. Claude 4 /
+ *     GPT-4.1 / Gemini 2.5) — degradation is continuous, model-specific, and
+ *     begins well before a window is full; frontier models hold quality longer.
+ *
+ * Keyed by a lowercased family stem matched as a PREFIX of the bare model id
+ * (the last `/`-segment). LONGEST matching prefix wins, so entries may be listed
+ * in any order — a broad stem (`claude-`) and a more specific one
+ * (`claude-opus`) can coexist and the specific one is chosen. Frontier families
+ * get a higher knee (degrade later); cheaper/smaller models a lower one.
+ * Anything unmatched falls back to the default. Deliberately listed
+ * broad-before-specific so the longest-prefix logic is load-bearing (a plain
+ * first-match would return the broad entry).
+ */
+const QUALITY_KNEE_BY_FAMILY: ReadonlyArray<readonly [string, number]> = [
+  // Broad family stems (older / non-frontier members degrade earlier).
+  ["claude-", 0.45],
+  ["gpt-", 0.45],
+  ["gemini-", 0.45],
+  // Frontier long-context members — hold quality furthest into the window.
+  ["claude-opus", 0.5],
+  ["claude-sonnet", 0.5],
+  ["gpt-5", 0.5],
+  ["gemini-2.5", 0.5],
+  ["gemini-3", 0.5],
+  // Cheaper / smaller "everyday" models — degrade earlier under context load.
+  ["deepseek", 0.35],
+  ["minimax", 0.35],
+  ["qwen", 0.35],
+  ["mistral", 0.35],
+  ["llama", 0.35],
+];
+
+/**
+ * Resolve the quality knee for a model: an explicit config override wins;
+ * otherwise the literature-seeded family table (longest prefix match); otherwise
+ * the literature-grounded default. The override and table entries are validated
+ * the same way `setQualityKnee` validates — out-of-range / non-finite falls
+ * through to the next source. Pure; safe to call on the hot path.
+ *
+ * NOTE: the returned value is a PRIOR, not a measured knee (#1404-A). #1402's
+ * rot-curve A/B is expected to replace the table with empirical per-model values
+ * (#1404-B). Keeping the seed table here (core, next to the default and the
+ * multiplier that consumes it) keeps the prior testable without the gateway.
+ */
+export function resolveQualityKnee(modelID: string, override?: number): number {
+  const valid = (v: number | undefined): v is number =>
+    v != null && Number.isFinite(v) && v > 0 && v < 1;
+  if (valid(override)) return override;
+  // req.model is often provider-qualified (e.g. "anthropic/claude-opus-4.8",
+  // "openrouter/deepseek/deepseek-v4-flash"). Match the family stem against the
+  // LAST path segment (the bare model id) so a leading provider/aggregator
+  // prefix never hides the family.
+  const bare = modelID.toLowerCase().split("/").pop() ?? modelID.toLowerCase();
+  let best: number | null = null;
+  let bestLen = -1;
+  for (const [stem, knee] of QUALITY_KNEE_BY_FAMILY) {
+    if (bare.startsWith(stem) && stem.length > bestLen) {
+      best = knee;
+      bestLen = stem.length;
+    }
+  }
+  return best ?? DEFAULT_QUALITY_KNEE_FRACTION;
+}
+
+/**
  * Continuous quality penalty applied to the "continue" cost in shouldCompress.
  *
  * Quality degradation ("lost in the middle") is a function of how FULL the

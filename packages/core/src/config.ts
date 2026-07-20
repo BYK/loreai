@@ -125,6 +125,21 @@ export const LoreConfig = z.object({
         .describe(
           "@deprecated Ignored. Tier-based bust-vs-continue replaces static cap.",
         ),
+      /** Manual override for the per-model quality knee: the context fill
+       *  fraction (tokens / context window) past which lost-in-the-middle
+       *  degradation is treated as material and compression ramps up. When set,
+       *  it overrides the built-in literature-seeded per-model-family table for
+       *  ALL models. Lower = compress earlier (safer quality, higher cost);
+       *  higher = hold raw context longer. Must be in (0, 1). Default: undefined
+       *  (use the per-family seed table, falling back to 0.4). */
+      qualityKnee: z
+        .number()
+        .gt(0)
+        .lt(1)
+        .optional()
+        .describe(
+          "Manual override for the per-model quality knee (fill fraction where compression ramps). (0,1). Default: undefined (use the built-in per-model-family seed table, fallback 0.4).",
+        ),
     })
     .default({
       distilled: 0.25,
