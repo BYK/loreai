@@ -44,6 +44,7 @@ import {
   qualityCostMultiplier,
   setQualityKnee,
   getQualityKnee,
+  resolveQualityKnee,
   DEFAULT_QUALITY_KNEE_FRACTION,
   isFreeWriteSession,
   getTier,
@@ -4456,6 +4457,58 @@ describe("tier-based context management", () => {
       expect(getQualityKnee()).toBe(0.7);
       resetCalibration();
       expect(getQualityKnee()).toBe(DEFAULT_QUALITY_KNEE_FRACTION);
+    });
+
+    describe("resolveQualityKnee — per-model seeded knees (#1404-A)", () => {
+      test("frontier families get a higher knee (degrade later)", () => {
+        expect(resolveQualityKnee("claude-opus-4-8")).toBe(0.5);
+        expect(resolveQualityKnee("claude-sonnet-5")).toBe(0.5);
+        expect(resolveQualityKnee("gpt-5.2")).toBe(0.5);
+        expect(resolveQualityKnee("gemini-3-pro")).toBe(0.5);
+      });
+
+      test("cheaper/smaller families get a lower knee (degrade earlier)", () => {
+        expect(resolveQualityKnee("deepseek-v4-flash")).toBe(0.35);
+        expect(resolveQualityKnee("minimax-m3")).toBe(0.35);
+        expect(resolveQualityKnee("qwen3.5-9b")).toBe(0.35);
+      });
+
+      test("provider-qualified ids match on the bare last segment", () => {
+        expect(resolveQualityKnee("anthropic/claude-opus-4.8")).toBe(0.5);
+        expect(
+          resolveQualityKnee("openrouter/deepseek/deepseek-v4-flash"),
+        ).toBe(0.35);
+      });
+
+      test("longest-prefix wins (specific family stem beats broad)", () => {
+        // "claude-opus" (0.5) is more specific than the broad "claude-" (0.45).
+        expect(resolveQualityKnee("claude-opus-4-8")).toBe(0.5);
+        // A claude model NOT matching a frontier stem falls to the broad "claude-".
+        expect(resolveQualityKnee("claude-haiku-4")).toBe(0.45);
+      });
+
+      test("unknown family falls back to the default", () => {
+        expect(resolveQualityKnee("some-unknown-model-xyz")).toBe(
+          DEFAULT_QUALITY_KNEE_FRACTION,
+        );
+      });
+
+      test("valid config override wins over the seed table", () => {
+        // deepseek would seed 0.35; an explicit override takes precedence.
+        expect(resolveQualityKnee("deepseek-v4-flash", 0.6)).toBe(0.6);
+      });
+
+      test("invalid override is ignored, falls through to the table", () => {
+        // Out-of-range / non-finite overrides must not win.
+        expect(resolveQualityKnee("deepseek-v4-flash", 0)).toBe(0.35);
+        expect(resolveQualityKnee("deepseek-v4-flash", 1)).toBe(0.35);
+        expect(resolveQualityKnee("deepseek-v4-flash", 1.5)).toBe(0.35);
+        expect(resolveQualityKnee("deepseek-v4-flash", Number.NaN)).toBe(0.35);
+        // Invalid override + unknown family → default.
+        expect(resolveQualityKnee("unknown-xyz", 2)).toBe(
+          DEFAULT_QUALITY_KNEE_FRACTION,
+        );
+      });
     });
   });
 

@@ -198,6 +198,7 @@ export {
   getCachePricing,
   setQualityKnee,
   getQualityKnee,
+  resolveQualityKnee,
   DEFAULT_QUALITY_KNEE_FRACTION,
   shouldCompress,
   getTier,

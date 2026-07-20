@@ -45,6 +45,7 @@ import {
   computeLayer0Cap,
   setCachePricing,
   setQualityKnee,
+  resolveQualityKnee,
   DEFAULT_QUALITY_KNEE_FRACTION,
   distillLimiter,
   curatorLimiter,
@@ -1914,10 +1915,11 @@ type ModelSpec = {
   /**
    * Per-model quality knee: the context fill fraction (tokens / context) past
    * which lost-in-the-middle degradation is treated as material and the
-   * compression quality penalty begins to ramp. Undefined → gradient uses its
-   * literature-grounded default (0.4). Reserved for empirically-measured
-   * per-model knees (via the eval harness); no reliable per-model signal exists
-   * in models.dev today, so this is currently left undefined for all models.
+   * compression quality penalty begins to ramp. Resolved by `getModelSpec` via
+   * `resolveQualityKnee(model, cfg.budget.qualityKnee)`: config override →
+   * literature-seeded per-family table → 0.4 default. These are priors;
+   * empirically-measured per-model knees (via the eval harness / #1402) will
+   * replace the seed table (#1404-B). Undefined only when explicitly unset.
    */
   qualityKneeFraction?: number;
 };
@@ -1953,6 +1955,14 @@ export function getModelSpec(model: string, providerID?: string): ModelSpec {
           ? (entry.cost.input * 1.25) / 1_000_000 // Anthropic: cache_write = 1.25× input
           : undefined,
     inputCostPerMillion: entry.cost?.input ?? undefined,
+    // Per-model quality knee: config override wins, else the literature-seeded
+    // per-family table (frontier models degrade later, cheaper models earlier),
+    // else the 0.4 default. These are priors, not yet empirically measured
+    // (#1404-A); #1402's rot-curve A/B will replace the table (#1404-B).
+    qualityKneeFraction: resolveQualityKnee(
+      model,
+      loreConfig().budget.qualityKnee,
+    ),
   };
 }
 
