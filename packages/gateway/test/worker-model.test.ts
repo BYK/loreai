@@ -2002,6 +2002,52 @@ describe("lineage-aware worker selection (aggregator providers)", () => {
     expect(result?.modelID).not.toBe("cohere/north-mini-code:free");
   });
 
+  test("deterministic id tie-break: two same-lineage families with equal tierCost AND equal newestDate resolve to the numeric-aware id winner regardless of JSON order", async () => {
+    // Two DIFFERENT families in the same lineage, same tier cost, same newest
+    // release date. Insertion order is deliberately reversed (lower id first)
+    // so a Map-insertion-order tie-break would pick the wrong one. The
+    // localeCompare(numeric) tie-break must pick the higher id deterministically.
+    // Mutation: drop the newestId localeCompare tie-break clause → the answer
+    // becomes Map-insertion-order dependent and this asserts the wrong winner → RED.
+    await warm({
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      openrouter: {
+        api: "https://openrouter.ai/api/v1",
+        models: {
+          "anthropic/claude-opus-4.8": {
+            id: "anthropic/claude-opus-4.8",
+            family: "claude-opus",
+            release_date: "2026-05-28",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          // Seeded FIRST but is the LOWER id — must lose the tie-break.
+          "anthropic/claude-sonnet-2": {
+            id: "anthropic/claude-sonnet-2",
+            family: "claude-sonnet-a",
+            release_date: "2026-06-30",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+          // Seeded SECOND, HIGHER id, SAME tier cost ($2) AND SAME date.
+          "anthropic/claude-sonnet-10": {
+            id: "anthropic/claude-sonnet-10",
+            family: "claude-sonnet-b",
+            release_date: "2026-06-30",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+    // "claude-sonnet-10" > "claude-sonnet-2" under numeric-aware compare.
+    expect(result?.modelID).toBe("anthropic/claude-sonnet-10");
+  });
+
   test("memo invalidation: resolve → blocklist → resolve returns a DIFFERENT model", async () => {
     await warm(openrouterResponse());
     const first = getWorkerModel({

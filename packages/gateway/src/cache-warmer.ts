@@ -65,7 +65,11 @@ import {
   vertexRegionFromUrl,
 } from "./translate/vertex";
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
-import { getModelEntrySync, getWorkerModel } from "./worker-model";
+import {
+  getModelEntrySync,
+  getModelEntrySyncForProvider,
+  getWorkerModel,
+} from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
 import { emitWarmupCircuitBreakerMetric } from "./sentry";
@@ -1054,13 +1058,17 @@ export function buildAnthropicProfile(
   ttl: "5m" | "1h",
   upstreamBase?: string,
   prefixTokens = 0,
+  providerID?: string,
 ): CacheWarmingProfile {
   const route = resolveUpstreamRoute(model);
   // || (not ??): an empty-string upstreamBase (header-less Anthropic sessions)
   // must coalesce to the model route, not produce a base of "".
   const base = upstreamBase || route?.url || "https://api.anthropic.com";
 
-  const entry = getModelEntrySync(model);
+  // Price from the provider the session is routed to when known (aggregators
+  // publish the same bare id at different cache prices); falls back to the flat
+  // last-write-wins entry when the provider is unknown/undefined.
+  const entry = getModelEntrySyncForProvider(providerID, model);
   const cacheReadCost =
     entry.cost?.cache_read ?? (entry.cost?.input ?? 3) * 0.1;
   // Base cache_write is the 5m TTL price. Anthropic charges 2× for 1h TTL writes.
@@ -1216,6 +1224,7 @@ export function resolveProfile(
       ttl ?? "5m",
       upstreamBase,
       prefixTokens,
+      providerID,
     );
   }
 
@@ -1224,7 +1233,13 @@ export function resolveProfile(
     (!!warmupHost && isAnthropicFirstPartyHost(warmupHost));
   if (!isAnthropic) return null;
 
-  return buildAnthropicProfile(model, ttl ?? "5m", upstreamBase, prefixTokens);
+  return buildAnthropicProfile(
+    model,
+    ttl ?? "5m",
+    upstreamBase,
+    prefixTokens,
+    providerID,
+  );
 }
 
 /**

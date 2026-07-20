@@ -1937,7 +1937,7 @@ const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
  * flat map is last-write-wins across providers and would otherwise corrupt
  * `cacheReadCost` → `computeLayer0Cap`.
  */
-function getModelSpec(model: string, providerID?: string): ModelSpec {
+export function getModelSpec(model: string, providerID?: string): ModelSpec {
   const entry = getModelEntrySyncForProvider(providerID, model);
   return {
     context: entry.limit?.context ?? DEFAULT_MODEL_SPEC.context,
