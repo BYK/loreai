@@ -1197,6 +1197,59 @@ describe("worker data-policy 404: blocklist + re-resolve, not an outage", () => 
     );
     expect(mockMarkPaused).not.toHaveBeenCalled();
   });
+
+  test("a NORMAL 200 completion whose text mentions the data-policy phrase is NOT blocklisted (no embedded error code)", async () => {
+    // Seer #1407 false-positive guard: a successful reply (bodyErrCode === null)
+    // that happens to contain "No endpoints … data policy" — e.g. the model
+    // explaining OpenRouter's own error to the user — must be returned normally,
+    // NEVER blocklisted. Mutation: revert the gate to `bodyErrCode ?? 404` →
+    // this reply is treated as a data-policy failure → RED.
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "cmpl-normal",
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content:
+                    "OpenRouter returns 'No endpoints available matching your guardrail restrictions and data policy' when your account has not opted into prompt logging.",
+                },
+                finish_reason: "stop",
+              },
+            ],
+            usage: { prompt_tokens: 20, completion_tokens: 30 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+        openrouter: "https://openrouter.ai/api",
+      } as unknown as { anthropic: string; openai: string },
+      () => ({ scheme: "bearer", value: "sk-or-test" }),
+      { providerID: "openrouter", modelID: "cohere/north-mini-code:free" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      sessionID: "sess-dp-falsepos",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+    });
+
+    // The completion text is returned; nothing is blocklisted or recorded.
+    expect(result).toContain("OpenRouter returns");
+    expect(mockMarkIncapable).not.toHaveBeenCalled();
+    expect(mockMarkFreeBlocked).not.toHaveBeenCalled();
+    expect(mockRecordFailure).not.toHaveBeenCalled();
+    expect(mockMarkPaused).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

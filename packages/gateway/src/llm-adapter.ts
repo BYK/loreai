@@ -1996,15 +1996,21 @@ export function createGatewayLLMClient(
                 // (some aggregators return the upstream 404 body with a 200 wire
                 // status — see the transient-envelope handling above). The
                 // status-keyed 4xx branch never sees these, so mirror the
-                // data-policy handling here: a body that carries the
-                // data-policy/guardrail marker AND an embedded 404 is the same
-                // per-account availability fact. Blocklist + re-resolve; classify
-                // data-policy (no outage ladder, no credit-pause). We pass the
-                // embedded code (or 404 when the phrase is present but no code is
-                // parseable) so the strict detector's status gate is satisfied.
+                // data-policy handling here.
+                //
+                // 🔴 Gate on a REAL embedded error code (`bodyErrCode === 404`),
+                // NOT `bodyErrCode ?? 404`. A normal successful completion has
+                // `bodyErrCode === null`; the `?? 404` fallback would then run
+                // the phrase check against ordinary assistant text and
+                // FALSE-POSITIVE blocklist a model whenever the reply happened
+                // to mention "no endpoints … data policy" (e.g. the model
+                // explaining OpenRouter's own error). An HTTP-200 envelope is
+                // only a data-policy failure when it actually carries the 404
+                // error code AND the data-policy phrase. (Seer #1407.)
                 if (
                   !isSSE &&
-                  isDataPolicyBlocked404(bodyErrCode ?? 404, bodyText)
+                  bodyErrCode === 404 &&
+                  isDataPolicyBlocked404(bodyErrCode, bodyText)
                 ) {
                   log.warn(
                     `worker model ${model.providerID}/${model.modelID} blocked by account data policy ` +
