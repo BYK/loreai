@@ -245,6 +245,30 @@ describe("knowledge_ref_anchor persistence (recall code anchors)", () => {
     expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/real.ts:3" }]);
   });
 
+  test("an all-UNKNOWN entry (total===0, non-null resolver) keeps its prior anchors", async () => {
+    // Distinct from the null-resolver case above: here the resolver runs but
+    // every ref resolves to "unknown" (an absolute, out-of-tree path), so the
+    // entry reaches the transaction with total===0. The `total===0 continue`
+    // guard must fire BEFORE clearAnchors — otherwise a probe that merely can't
+    // verify a ref this pass would wipe a good jump target. Regression guard for
+    // the exact ordering of that guard vs the anchor rewrite.
+    const id = seed("logic lives at /opt/out-of-tree/gone.ts:1 (absolute)");
+    const lid = ltm.get(id)!.logical_id;
+    // Pre-seed an anchor as if a prior pass had resolved one.
+    db()
+      .query(
+        `INSERT INTO knowledge_ref_anchor (logical_id, kind, anchor, updated_at)
+           VALUES (?, 'file', 'src/prior.ts:7', ?)`,
+      )
+      .run(lid, Date.now());
+    const res = await ltm.validateProjectReferences(root, resolver());
+    // The absolute ref is unverifiable → total===0 → entry not checked, not
+    // penalized, and the pre-existing anchor survives untouched.
+    expect(res.checked).toBe(0);
+    expect(res.penalized).toBe(0);
+    expect(anchorsOf(id)).toEqual([{ kind: "file", anchor: "src/prior.ts:7" }]);
+  });
+
   test("a removed ref drops out on the next pass (anchors rewritten in full)", async () => {
     // Seed content citing two files; only real.ts exists.
     const id = seed("see src/real.ts:1 and src/second.ts:1");
