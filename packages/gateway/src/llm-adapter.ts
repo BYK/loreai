@@ -1520,17 +1520,30 @@ export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
  */
 /**
  * Best-effort extraction of the upstream finish/stop reason from a worker
- * response body (OpenAI `choices[0].finish_reason` or Anthropic `stop_reason`).
+ * response body. Reads, in order: OpenAI `choices[0].finish_reason`, the
+ * aggregator-specific `choices[0].native_finish_reason` (OpenRouter surfaces the
+ * true upstream reason here — e.g. `MAX_TOKENS` — while sometimes leaving
+ * `finish_reason` normalized or absent), then Anthropic top-level `stop_reason`.
  * Used to distinguish a *complete* empty response (model capability issue) from
- * a *truncated* one (`length` — a budget problem, not a capability one).
+ * a *truncated* one (`length`/`max_tokens` — a budget problem, not a capability
+ * one). `isLengthTruncation` lower-cases the result so provider casing
+ * (`MAX_TOKENS`) still matches.
  */
 function extractFinishReason(rawData: unknown): string | undefined {
   try {
     const d = rawData as {
-      choices?: Array<{ finish_reason?: string }>;
+      choices?: Array<{
+        finish_reason?: string;
+        native_finish_reason?: string;
+      }>;
       stop_reason?: string;
     };
-    return d.choices?.[0]?.finish_reason ?? d.stop_reason ?? undefined;
+    return (
+      d.choices?.[0]?.finish_reason ??
+      d.choices?.[0]?.native_finish_reason ??
+      d.stop_reason ??
+      undefined
+    );
   } catch {
     return undefined;
   }
@@ -1539,9 +1552,12 @@ function extractFinishReason(rawData: unknown): string | undefined {
 /**
  * True when a finish/stop reason indicates the model hit its OUTPUT BUDGET
  * (rather than finishing, being content-filtered, or making a tool call).
- * Covers the OpenAI (`length`), Anthropic (`max_tokens`), and OpenRouter
- * `native_finish_reason` spellings. A budget truncation is retryable with a
- * larger budget; a genuine `stop`/`end_turn` empty is a capability signal.
+ * Matches the OpenAI (`length`), Anthropic (`max_tokens`), and Gemini-style
+ * (`max_output_tokens` / `MAX_TOKENS`) spellings surfaced by
+ * `extractFinishReason` (which reads `finish_reason`, then the aggregator
+ * `native_finish_reason`, then `stop_reason`). Case-insensitive so a provider's
+ * upstream casing still matches. A budget truncation is retryable with a larger
+ * budget; a genuine `stop`/`end_turn` empty is a capability signal.
  */
 function isLengthTruncation(finishReason: string | undefined): boolean {
   if (!finishReason) return false;
@@ -2097,16 +2113,31 @@ export function createGatewayLLMClient(
 
                 // Parse response based on protocol
                 // SSE → accumulate the full stream; JSON → parse the body.
-                const parsed = isSSE
-                  ? gatewayResponseToWorkerResult(
-                      await accumulateWorkerSSE(
-                        target.protocol,
-                        new Response(bodyText, {
-                          headers: { "content-type": "text/event-stream" },
-                        }),
-                      ),
-                    )
-                  : parseWorkerResponse(target.protocol, rawData);
+                // Capture the SSE stop reason: for a streamed body `rawData` is
+                // `{}`, so extractFinishReason(rawData) can't see the truncation
+                // — the accumulated GatewayResponse.stopReason is the only place
+                // the finish reason survives (OpenAI SSE maps `length` →
+                // `max_tokens`). Without this the length-retry below is
+                // unreachable for providers that stream even when stream:false
+                // was requested (ChatGPT/Copilot/Codex, DeepSeek). (Seer #1413.)
+                let sseStopReason: string | undefined;
+                let parsed: {
+                  text: string | null;
+                  usage: AnthropicUsage | null;
+                  model: string | null;
+                };
+                if (isSSE) {
+                  const gwResp = await accumulateWorkerSSE(
+                    target.protocol,
+                    new Response(bodyText, {
+                      headers: { "content-type": "text/event-stream" },
+                    }),
+                  );
+                  sseStopReason = gwResp.stopReason;
+                  parsed = gatewayResponseToWorkerResult(gwResp);
+                } else {
+                  parsed = parseWorkerResponse(target.protocol, rawData);
+                }
 
                 // Set usage attributes on the span
                 if (parsed.usage) {
@@ -2162,8 +2193,11 @@ export function createGatewayLLMClient(
                 // Log WHAT came back so an empty no-response can be classified
                 // (genuinely empty vs an unread field shape vs a length
                 // truncation) instead of being opaque. The raw body is
-                // otherwise discarded here.
-                const finishReason = extractFinishReason(rawData);
+                // otherwise discarded here. For SSE the finish reason lives on
+                // the accumulated stream (rawData is `{}`), so prefer it.
+                const finishReason = isSSE
+                  ? sseStopReason
+                  : extractFinishReason(rawData);
                 log.warn(
                   `worker empty response (HTTP ${response.status}, ct=${ct || "?"}) ` +
                     `— model=${model.providerID}/${model.modelID} ` +
