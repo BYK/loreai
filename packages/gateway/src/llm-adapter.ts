@@ -417,6 +417,18 @@ const DEFAULT_WORKER_MAX_TOKENS = 16384;
 // against max_tokens). Mirrors pipeline.ts's THINKING_OUTPUT_HEADROOM.
 const THINKING_OUTPUT_HEADROOM = 8192;
 
+// When a worker truncates on the output budget (`finish_reason:"length"` /
+// `stop_reason:"max_tokens"`) and emits NO visible text, the model spent the
+// entire allowance on hidden reasoning. Common when the worker model is a
+// reasoning model reached over a protocol that does not expose an explicit
+// thinking budget (e.g. Claude routed through OpenRouter's OpenAI-compatible
+// endpoint). We retry ONCE with the budget multiplied, clamped to the model's
+// own output limit. Bounded to a single retry per call.
+const WORKER_LENGTH_RETRY_MULTIPLIER = 4;
+// Absolute ceiling for the retried budget when the model's output limit is
+// unknown (fallback entry). Bounds cost/latency.
+const WORKER_LENGTH_RETRY_CAP = 64_000;
+
 /**
  * Resolve the retry budget. `LORE_MAX_RETRIES` overrides the default; values
  * that are non-numeric, negative, or zero fall back to the default (we never
@@ -955,6 +967,21 @@ function buildOpenAIWorkerRequest(
   // `high` (not a standard OpenAI value) inside openAIReasoningEffort.
   const effort = openAIReasoningEffort(reasoningEffort);
 
+  // Reasoning headroom (mirrors the native Anthropic/Vertex builders). When
+  // reasoning is active the model spends hidden tokens against
+  // `max_completion_tokens` BEFORE emitting any visible text; without headroom a
+  // reasoning model reached over the OpenAI protocol (e.g. Claude via
+  // OpenRouter) can exhaust the whole budget on reasoning and return an EMPTY
+  // completion with `finish_reason:"length"`. `anthropicThinkingBudget` maps the
+  // effort dial to a token budget; we ensure the output cap exceeds it by
+  // THINKING_OUTPUT_HEADROOM so the answer still fits. Non-reasoning models
+  // (effort omitted) keep the caller's budget unchanged.
+  const reasoningTokenBudget = anthropicThinkingBudget(reasoningEffort);
+  const effectiveMaxTokens =
+    effort != null && reasoningTokenBudget != null
+      ? Math.max(maxTokens, reasoningTokenBudget + THINKING_OUTPUT_HEADROOM)
+      : maxTokens;
+
   return {
     // Background workers have no original request to forward verbatim, so the
     // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052;
@@ -969,7 +996,7 @@ function buildOpenAIWorkerRequest(
     },
     body: JSON.stringify({
       model: model.modelID,
-      max_completion_tokens: maxTokens,
+      max_completion_tokens: effectiveMaxTokens,
       stream: false,
       ...(temperature != null && { temperature }),
       ...(effort != null && { reasoning_effort: effort }),
@@ -1510,6 +1537,32 @@ function extractFinishReason(rawData: unknown): string | undefined {
 }
 
 /**
+ * True when a finish/stop reason indicates the model hit its OUTPUT BUDGET
+ * (rather than finishing, being content-filtered, or making a tool call).
+ * Covers the OpenAI (`length`), Anthropic (`max_tokens`), and OpenRouter
+ * `native_finish_reason` spellings. A budget truncation is retryable with a
+ * larger budget; a genuine `stop`/`end_turn` empty is a capability signal.
+ */
+function isLengthTruncation(finishReason: string | undefined): boolean {
+  if (!finishReason) return false;
+  const r = finishReason.toLowerCase();
+  return r === "length" || r === "max_tokens" || r === "max_output_tokens";
+}
+
+/**
+ * The largest output budget a `finish_reason:"length"` retry may request for a
+ * given model: the model's own `limit.output` when known, else a conservative
+ * absolute cap. Bounds cost/latency and guarantees the retry never exceeds what
+ * the model can actually emit (which would just truncate again).
+ */
+function workerLengthRetryCeiling(modelID: string): number {
+  const out = getModelEntrySync(modelID).limit?.output;
+  return out && out > 0
+    ? Math.min(out, WORKER_LENGTH_RETRY_CAP)
+    : WORKER_LENGTH_RETRY_CAP;
+}
+
+/**
  * Detect a provider error envelope embedded in an otherwise-2xx body and return
  * its numeric status code, if any. Gateways such as OpenRouter surface an
  * UPSTREAM failure as an HTTP 200 whose body is `{"error":{"code":504,...}}`
@@ -1658,7 +1711,10 @@ export function createGatewayLLMClient(
         model.providerID,
         opts?.upstreamProviderID,
       );
-      const maxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
+      // Mutable across the retry loop: a `finish_reason:"length"` empty
+      // completion bumps this and rebuilds the request once (see the empty-
+      // response block). Starts at the caller's budget or the worker default.
+      let maxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
 
       // Cross-provider fail-closed: the worker model's provider has no route
       // URL (unknown provider, or a local provider missing its explicit
@@ -1827,6 +1883,11 @@ export function createGatewayLLMClient(
             // Strip the thinking param at most once per call (runtime fallback
             // for a "thinking is unsupported" 400 — see below).
             let thinkingStripped = false;
+            // Raise the output budget at most once per call after an empty
+            // `finish_reason:"length"` truncation (a reasoning model that spent
+            // its whole allowance on hidden reasoning). See the empty-response
+            // block below.
+            let lengthRetried = false;
             // Resolve the retry budget once per call (not per attempt) — the
             // value can't change mid-loop and re-reading the env each iteration
             // is wasteful.
@@ -2110,6 +2171,56 @@ export function createGatewayLLMClient(
                     `session=${opts?.sessionID?.slice(0, 16) ?? "none"} ` +
                     `— ${describeEmptyWorkerResponse(rawData)}`,
                 );
+
+                // Empty completion truncated on the OUTPUT BUDGET
+                // (`finish_reason:"length"` / `stop_reason:"max_tokens"`): the
+                // model spent its entire allowance on hidden reasoning and never
+                // reached visible text. This is a budget problem, not a
+                // capability one — retry ONCE with the budget multiplied
+                // (clamped to the model's own output limit) so a capable
+                // reasoning model gets room for both the reasoning pass and the
+                // answer. Rebuild via buildWorkerRequest (not string-editing the
+                // body) so the OAuth billing signature is recomputed. Bounded to
+                // a single retry per call: a model that truncates even at its max
+                // output falls through to the normal empty-response handling.
+                if (
+                  !lengthRetried &&
+                  isLengthTruncation(finishReason) &&
+                  maxTokens < workerLengthRetryCeiling(model.modelID)
+                ) {
+                  lengthRetried = true;
+                  const bumped = Math.min(
+                    maxTokens * WORKER_LENGTH_RETRY_MULTIPLIER,
+                    workerLengthRetryCeiling(model.modelID),
+                  );
+                  log.warn(
+                    `worker empty response was a budget truncation (finish_reason=${finishReason}) ` +
+                      `— retrying once with max_tokens ${maxTokens} → ${bumped} ` +
+                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+                  );
+                  maxTokens = bumped;
+                  req = await buildWorkerRequest(
+                    target,
+                    activeCred,
+                    model,
+                    system,
+                    user,
+                    maxTokens,
+                    opts?.sessionID,
+                    effectiveTemperature,
+                    factoryVertexProject,
+                    effectiveDisableThinking,
+                    reasoningEffort,
+                  );
+                  // Re-apply a runtime beta strip if one already happened this
+                  // call (rebuilding restores the freshly-built header set) —
+                  // mirrors the temperature-strip rebuild below.
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
+                  retryCount++;
+                  continue;
+                }
 
                 // Classify: a COMPLETE response (finish/stop reason indicates
                 // the model finished producing — not a truncation, content
