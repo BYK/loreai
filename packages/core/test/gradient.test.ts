@@ -6871,6 +6871,36 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
     resetBaseline();
   });
 
+  test("isLargeColdStart budget snapshot overrides raced module globals (#1401)", () => {
+    // Simulate a concurrent request for a DIFFERENT (huge-window) model having
+    // clobbered the module globals between this request setting its budget and
+    // calling isLargeColdStart: globals say 1M context / no cap, so this ~30-msg
+    // session would be judged NOT large (well under a 968K ceiling).
+    setModelLimits({ context: 1_000_000, output: 32_000 });
+    setMaxLayer0Tokens(0);
+    setCachePricing(0, 0);
+    calibrate(0);
+
+    const sid = `cold-race-${crypto.randomUUID()}`;
+    const messages = bulk(sid, 30, "padding text to take up token space here");
+
+    // Without a budget snapshot: reads the raced globals → not large.
+    expect(isLargeColdStart({ messages, sessionID: sid })).toBe(false);
+
+    // With THIS request's budget snapshot (small window + tight l0cap), the
+    // predicate applies it atomically and correctly judges the session large —
+    // independent of whatever the globals currently hold.
+    const budget = {
+      contextLimit: 6_000,
+      outputReserved: 1_000,
+      maxLayer0Tokens: 500,
+      cacheWriteCostPerToken: 0,
+      cacheReadCostPerToken: 0,
+    };
+    expect(isLargeColdStart({ messages, sessionID: sid, budget })).toBe(true);
+    resetBaseline();
+  });
+
   describe("effectiveMetaThreshold — bust-pressure meta-threshold override", () => {
     // Regression for the ses_10f932a26ffe… (lore 0XrHNdlsWwgVkX4MH) false
     // "unsustainable" warning: bust pressure (consecutiveBusts >= 3) crossed

@@ -3225,7 +3225,18 @@ export function isLargeColdStart(input: {
   sessionID?: string;
   /** Override the session's in-flight LTM token count (see docstring). */
   ltmTokens?: number;
+  /**
+   * Per-request model budget snapshot. When provided it is applied atomically
+   * (synchronously, same as transform()) BEFORE the layer-0 computation, so the
+   * module globals this predicate reads (contextLimit, outputReserved,
+   * maxLayer0Tokens, qualityKnee) cannot be clobbered by a concurrent request
+   * for a different model during the pipeline's intervening awaits between
+   * setting the budget and calling this. Omit only in tests that set the
+   * globals directly. (#1401)
+   */
+  budget?: ModelBudget;
 }): boolean {
+  if (input.budget) applyModelBudget(input.budget);
   const sid = input.sessionID ?? input.messages[0]?.info.sessionID;
   const sessState = sid ? getSessionState(sid) : makeSessionState();
   if (sessState.lastKnownInput > 0) return false;

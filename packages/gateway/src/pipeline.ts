@@ -7282,6 +7282,10 @@ async function handleConversationTurn(
           messages: loreMessages,
           sessionID,
           ltmTokens: stable?.tokenCount ?? 0,
+          // Re-apply this request's budget atomically: intervening awaits since
+          // the module globals were set (ltm/entity fetches above) could have
+          // let a concurrent request for a different model clobber them. (#1401)
+          budget: modelBudget,
         });
 
       // --- system[2]: Context-bound LTM (non-preference entries) ---
