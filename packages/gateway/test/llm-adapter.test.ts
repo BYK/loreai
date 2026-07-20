@@ -12,6 +12,8 @@ vi.mock("../src/worker-health", async (importOriginal) => {
     ...actual,
     recordWorkerFailure: vi.fn(actual.recordWorkerFailure),
     markWorkerPaused: vi.fn(actual.markWorkerPaused),
+    markWorkerIncapable: vi.fn(actual.markWorkerIncapable),
+    markFreeModelsDataBlocked: vi.fn(actual.markFreeModelsDataBlocked),
   };
 });
 
@@ -24,6 +26,7 @@ import {
   AUTH_ERROR_CODES,
   isTemperatureUnsupportedModel,
   isAnthropicClaudeModel,
+  isDataPolicyBlocked404,
   isThinkingUnsupportedModel,
   markThinkingUnsupported,
   workerThinkingOnByDefault,
@@ -39,6 +42,10 @@ import {
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 import { recordWorkerFailure, markWorkerPaused } from "../src/worker-health";
+import {
+  markWorkerIncapable,
+  markFreeModelsDataBlocked,
+} from "../src/worker-health";
 import { captureSessionHeaders, captureBillingPrefix } from "../src/cch";
 import { _setTestVertexTokenProvider } from "../src/vertex-auth";
 
@@ -937,6 +944,204 @@ describe("worker 402 insufficient credit handling", () => {
     expect(result).toBeNull();
     expect(mockMarkPaused).not.toHaveBeenCalled();
     expect(mockRecordFailure).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Data-policy 404 detection + :free auto-recovery
+//
+// REGRESSION: an OpenRouter session auto-selected a $0 `:free` worker model,
+// which OpenRouter 404s for accounts that haven't opted into its data policy
+// ("No endpoints available matching your guardrail restrictions and data
+// policy"). The old code classified it as retriable `upstream-error`, causing a
+// tight retry storm + a misleading "upstream failing" degradation warning. The
+// fix blocklists the model + :free tier and classifies it as `data-policy`.
+// ---------------------------------------------------------------------------
+
+describe("isDataPolicyBlocked404 detector", () => {
+  const OR_BODY = JSON.stringify({
+    error: {
+      message:
+        "No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy",
+      code: 404,
+    },
+  });
+
+  test("true for OpenRouter data-policy 404", () => {
+    expect(isDataPolicyBlocked404(404, OR_BODY)).toBe(true);
+  });
+
+  test("matches on guardrail / privacy phrasing too", () => {
+    expect(
+      isDataPolicyBlocked404(404, "no endpoints matching your guardrail rules"),
+    ).toBe(true);
+    expect(
+      isDataPolicyBlocked404(404, "No endpoints; see /settings/privacy"),
+    ).toBe(true);
+  });
+
+  test("false for an ordinary 404 (wrong URL / unknown model)", () => {
+    expect(isDataPolicyBlocked404(404, "model not found")).toBe(false);
+    expect(isDataPolicyBlocked404(404, "404 page not found")).toBe(false);
+  });
+
+  test("false for the same body on a non-404 status", () => {
+    expect(isDataPolicyBlocked404(429, OR_BODY)).toBe(false);
+    expect(isDataPolicyBlocked404(400, OR_BODY)).toBe(false);
+  });
+});
+
+describe("worker data-policy 404: blocklist + re-resolve, not an outage", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const mockRecordFailure = vi.mocked(recordWorkerFailure);
+  const mockMarkPaused = vi.mocked(markWorkerPaused);
+  const mockMarkIncapable = vi.mocked(markWorkerIncapable);
+  const mockMarkFreeBlocked = vi.mocked(markFreeModelsDataBlocked);
+
+  const DATA_POLICY_404 = JSON.stringify({
+    error: {
+      message:
+        "No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy",
+      code: 404,
+    },
+  });
+
+  beforeEach(() => {
+    mockRecordFailure.mockClear();
+    mockMarkPaused.mockClear();
+    mockMarkIncapable.mockClear();
+    mockMarkFreeBlocked.mockClear();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+  });
+
+  test("a :free model data-policy 404 blocklists the model + provider :free tier, records data-policy (NOT upstream-error), and does NOT credit-pause", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(DATA_POLICY_404, { status: 404, statusText: "Not Found" }),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+        openrouter: "https://openrouter.ai/api",
+      } as unknown as { anthropic: string; openai: string },
+      () => ({ scheme: "bearer", value: "sk-or-test" }),
+      { providerID: "openrouter", modelID: "cohere/north-mini-code:free" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      sessionID: "sess-dp-test",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+    });
+
+    expect(result).toBeNull();
+    // Not retried — a data-policy 404 is permanent for this model.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // Specific model blocklisted.
+    expect(mockMarkIncapable).toHaveBeenCalledWith(
+      "openrouter",
+      "cohere/north-mini-code:free",
+    );
+    // Whole :free tier blocked for the provider (it IS a :free model).
+    expect(mockMarkFreeBlocked).toHaveBeenCalledWith("openrouter");
+    // Classified as data-policy, NOT upstream-error.
+    // Mutation: classify as upstream-error → this assertion RED.
+    expect(mockRecordFailure).toHaveBeenCalledWith(
+      "sess-dp-test",
+      "lore-distill",
+      "data-policy",
+    );
+    expect(mockRecordFailure).not.toHaveBeenCalledWith(
+      "sess-dp-test",
+      "lore-distill",
+      "upstream-error",
+    );
+    // The fix is re-resolution, not pausing the session.
+    expect(mockMarkPaused).not.toHaveBeenCalled();
+  });
+
+  test("a NON-:free model data-policy 404 blocklists the model but NOT the :free tier", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(DATA_POLICY_404, { status: 404, statusText: "Not Found" }),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+        openrouter: "https://openrouter.ai/api",
+      } as unknown as { anthropic: string; openai: string },
+      () => ({ scheme: "bearer", value: "sk-or-test" }),
+      { providerID: "openrouter", modelID: "some/paid-model" },
+    );
+
+    await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      sessionID: "sess-dp-paid",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+    });
+
+    expect(mockMarkIncapable).toHaveBeenCalledWith(
+      "openrouter",
+      "some/paid-model",
+    );
+    expect(mockMarkFreeBlocked).not.toHaveBeenCalled();
+    expect(mockRecordFailure).toHaveBeenCalledWith(
+      "sess-dp-paid",
+      "lore-distill",
+      "data-policy",
+    );
+  });
+
+  test("an ordinary 404 (not data-policy) stays upstream-error + credit-pause", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({ error: { message: "model not found" } }),
+          {
+            status: 404,
+            statusText: "Not Found",
+          },
+        ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+        openrouter: "https://openrouter.ai/api",
+      } as unknown as { anthropic: string; openai: string },
+      () => ({ scheme: "bearer", value: "sk-or-test" }),
+      { providerID: "openrouter", modelID: "some/model" },
+    );
+
+    await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      sessionID: "sess-plain-404",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+    });
+
+    // Ordinary 404 keeps the legacy behavior: upstream-error + soft-pause.
+    expect(mockMarkIncapable).not.toHaveBeenCalled();
+    expect(mockMarkFreeBlocked).not.toHaveBeenCalled();
+    expect(mockRecordFailure).toHaveBeenCalledWith(
+      "sess-plain-404",
+      "lore-distill",
+      "upstream-error",
+    );
+    expect(mockMarkPaused).toHaveBeenCalledWith("sess-plain-404");
   });
 });
 

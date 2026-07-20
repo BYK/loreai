@@ -27,6 +27,11 @@ import {
   modelRejectsTemperatureByData,
   workerThinkingOnByDefault,
 } from "../src/llm-adapter";
+import {
+  markWorkerIncapable,
+  markFreeModelsDataBlocked,
+  _resetForTest as resetWorkerHealth,
+} from "../src/worker-health";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1449,10 +1454,13 @@ describe("family-based worker resolution", () => {
     expect(result?.modelID).toBe("claude-sonnet-5");
   });
 
-  test("unknown provider: family-aware pick favors the NEWEST member of the cheapest family", async () => {
+  test("unknown provider: lineage-aware pick favors the closest cheaper tier, newest member", async () => {
     // google isn't in WORKER_DEFAULTS → findCheaperSameProviderModel path.
-    // The absolute-cheapest is an OLD flash-lite; a NEWER flash-lite is still
-    // cheaper than the session. Family-aware resolution must pick the newer one.
+    // All candidates share the `gemini` lineage. "Closest cheaper tier" picks
+    // the most-expensive family still cheaper than the session (gemini-flash,
+    // $1), NOT the absolute-cheapest flash-lite tier ($0.15) — a higher-quality
+    // worker that is still cheaper than the session model. Within the chosen
+    // tier the newest member wins.
     await warmCache({
       anthropic: { api: "https://api.anthropic.com/v1", models: {} },
       google: {
@@ -1465,7 +1473,7 @@ describe("family-based worker resolution", () => {
             cost: { input: 4, output: 20 },
             limit: LIMIT,
           },
-          // Cheapest model overall, but an OLD generation.
+          // Absolute-cheapest family — NOT chosen under closest-cheaper-tier.
           "gemini-2.5-flash-lite": {
             id: "gemini-2.5-flash-lite",
             family: "gemini-flash-lite",
@@ -1473,7 +1481,6 @@ describe("family-based worker resolution", () => {
             cost: { input: 0.1, output: 0.4 },
             limit: LIMIT,
           },
-          // Same (cheapest) family, NEWER, still far cheaper than the session.
           "gemini-3-flash-lite": {
             id: "gemini-3-flash-lite",
             family: "gemini-flash-lite",
@@ -1481,8 +1488,15 @@ describe("family-based worker resolution", () => {
             cost: { input: 0.15, output: 0.6 },
             limit: LIMIT,
           },
-          // Cheaper than session but a DIFFERENT (pricier) family — must lose
-          // to the flash-lite family chosen by lowest cost.
+          // Older member of the closest cheaper tier (gemini-flash).
+          "gemini-2.5-flash": {
+            id: "gemini-2.5-flash",
+            family: "gemini-flash",
+            release_date: "2025-06-15",
+            cost: { input: 1, output: 5 },
+            limit: LIMIT,
+          },
+          // Newest member of the closest cheaper tier — the winner.
           "gemini-3-flash": {
             id: "gemini-3-flash",
             family: "gemini-flash",
@@ -1500,9 +1514,9 @@ describe("family-based worker resolution", () => {
     });
 
     expect(result?.providerID).toBe("google");
-    // Newest in the cheapest (flash-lite) family — NOT the older
-    // gemini-2.5-flash-lite, NOT the pricier gemini-3-flash family.
-    expect(result?.modelID).toBe("gemini-3-flash-lite");
+    // Closest cheaper tier is gemini-flash ($1, not flash-lite $0.15); newest
+    // member is gemini-3-flash (not the older gemini-2.5-flash).
+    expect(result?.modelID).toBe("gemini-3-flash");
   });
 
   test("unknown provider: without family metadata, falls back to absolute cheapest", async () => {
@@ -1782,5 +1796,350 @@ describe("resetWorkerModelState", () => {
     const beforeReset = callCount;
     await fetchModelData();
     expect(callCount).toBeGreaterThanOrEqual(beforeReset + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lineage-aware selection + data-policy :free auto-recovery
+//
+// Reproduces the production bug: an OpenRouter session
+// (anthropic/claude-opus-4.8) resolved the globally-cheapest model in the
+// provider — a $0 `cohere/...:free` model from an unrelated vendor — which
+// OpenRouter 404s on accounts that haven't opted into its data policy. The fix
+// keeps selection inside the session model's own vendor lineage and picks the
+// "closest cheaper tier" (opus → sonnet), and blocklists a :free model +
+// re-resolves once a data-policy 404 is observed.
+// ---------------------------------------------------------------------------
+
+describe("lineage-aware worker selection (aggregator providers)", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  const LIMIT = { context: 1_000_000, output: 128_000 };
+
+  /** models.dev response mirroring OpenRouter's mixed-vendor provider index. */
+  function openrouterResponse() {
+    return {
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      openrouter: {
+        api: "https://openrouter.ai/api/v1",
+        npm: "@openrouter/ai-sdk-provider",
+        models: {
+          "anthropic/claude-opus-4.8": {
+            id: "anthropic/claude-opus-4.8",
+            family: "claude-opus",
+            release_date: "2026-05-28",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "anthropic/claude-sonnet-5": {
+            id: "anthropic/claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-06-30",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+          "anthropic/claude-sonnet-4.6": {
+            id: "anthropic/claude-sonnet-4.6",
+            family: "claude-sonnet",
+            release_date: "2026-02-17",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+          "anthropic/claude-haiku-4.5": {
+            id: "anthropic/claude-haiku-4.5",
+            family: "claude-haiku",
+            release_date: "2025-10-15",
+            cost: { input: 1, output: 5, cache_read: 0.1 },
+            limit: LIMIT,
+          },
+          // Unrelated vendor, globally cheapest ($0 :free). The OLD code picked
+          // this; the lineage filter must exclude it (different namespace).
+          "cohere/north-mini-code:free": {
+            id: "cohere/north-mini-code:free",
+            family: "north",
+            release_date: "2026-05-01",
+            cost: { input: 0, output: 0, cache_read: 0 },
+            limit: { context: 200_000, output: 8_192 },
+          },
+          // Unrelated vendor priced BETWEEN opus ($5) and sonnet ($2) — $4.
+          // Without the namespace/lineage filter this would win "closest
+          // cheaper tier" (it's the most expensive model still < $5) and be
+          // selected, sending an anthropic session to a mistral worker. The
+          // lineage filter must exclude it so sonnet-5 still wins. This makes
+          // the namespace/lineage filter NON-VACUOUS.
+          "mistralai/mistral-large": {
+            id: "mistralai/mistral-large",
+            family: "mistral-large",
+            release_date: "2026-05-15",
+            cost: { input: 4, output: 12, cache_read: 0.4 },
+            limit: LIMIT,
+          },
+        },
+      },
+    };
+  }
+
+  async function warm(response: unknown): Promise<void> {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify(response), { status: 200 })),
+    ) as unknown as typeof fetch;
+    resetWorkerModelState();
+    resetWorkerHealth();
+    await fetchModelData();
+  }
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    resetWorkerModelState();
+    resetWorkerHealth();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+    resetWorkerHealth();
+  });
+
+  test("Opus 4.8 OpenRouter session resolves to Sonnet 5 (same vendor, closest cheaper tier), NOT the cross-vendor :free model", async () => {
+    await warm(openrouterResponse());
+
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+
+    expect(result?.providerID).toBe("openrouter");
+    // Closest cheaper tier within the claude lineage is sonnet ($2), NOT the
+    // cheaper haiku ($1) and NOT the cross-vendor cohere:free ($0).
+    // Mutation: reverting the lineage filter → picks cohere/...:free → RED.
+    expect(result?.modelID).toBe("anthropic/claude-sonnet-5");
+  });
+
+  test("closest cheaper tier picks sonnet ($2) over the absolute-cheapest sibling haiku ($1)", async () => {
+    await warm(openrouterResponse());
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+    // Mutation: switching to "cheapest tier" → haiku-4.5 → RED.
+    expect(result?.modelID).toBe("anthropic/claude-sonnet-5");
+    expect(result?.modelID).not.toBe("anthropic/claude-haiku-4.5");
+  });
+
+  test("newest member wins within the chosen tier (sonnet-5 over older sonnet-4.6)", async () => {
+    await warm(openrouterResponse());
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+    expect(result?.modelID).toBe("anthropic/claude-sonnet-5");
+    expect(result?.modelID).not.toBe("anthropic/claude-sonnet-4.6");
+  });
+
+  test("after a data-policy block on the :free tier, selection still returns a paid same-lineage sibling", async () => {
+    await warm(openrouterResponse());
+    markFreeModelsDataBlocked("openrouter");
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+    // Lineage selection is unaffected (sonnet is paid), and the :free model is
+    // never reachable anyway now.
+    expect(result?.modelID).toBe("anthropic/claude-sonnet-5");
+  });
+
+  test("after Sonnet 5 is marked incapable, selection advances to the next cheaper sibling (not the same model)", async () => {
+    await warm(openrouterResponse());
+    // First resolution → sonnet-5.
+    expect(
+      getWorkerModel({
+        providerID: "openrouter",
+        model: "anthropic/claude-opus-4.8",
+      })?.modelID,
+    ).toBe("anthropic/claude-sonnet-5");
+
+    // Sonnet 5 turns out incapable → blocklist it.
+    markWorkerIncapable("openrouter", "anthropic/claude-sonnet-5");
+
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+    // sonnet-4.6 is the next-newest sonnet still cheaper than opus.
+    // Mutation: dropping the blocklist generation from the memo key → stale
+    // sonnet-5 returned → RED. Dropping isSelectableWorkerModel → sonnet-5 → RED.
+    expect(result?.modelID).toBe("anthropic/claude-sonnet-4.6");
+    expect(result?.modelID).not.toBe("anthropic/claude-sonnet-5");
+  });
+
+  test("when the entire sonnet tier is incapable, closest cheaper tier falls to haiku", async () => {
+    await warm(openrouterResponse());
+    markWorkerIncapable("openrouter", "anthropic/claude-sonnet-5");
+    markWorkerIncapable("openrouter", "anthropic/claude-sonnet-4.6");
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+    expect(result?.modelID).toBe("anthropic/claude-haiku-4.5");
+  });
+
+  test("memo invalidation: resolve → blocklist → resolve returns a DIFFERENT model", async () => {
+    await warm(openrouterResponse());
+    const first = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    })?.modelID;
+    expect(first).toBeDefined();
+    markWorkerIncapable("openrouter", first as string);
+    const second = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    })?.modelID;
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+  });
+
+  test("direct anthropic (WORKER_DEFAULTS family path): a blocklisted newest sonnet advances to the older sonnet", async () => {
+    // Exercises the isSelectableWorkerModel guard inside resolveNewestInFamily
+    // (the WORKER_DEFAULTS path used by direct providers), which is DISTINCT
+    // from the aggregator lineage path. Mutation: remove that guard → the
+    // incapable claude-sonnet-5 is still returned → RED.
+    await warm({
+      anthropic: {
+        api: "https://api.anthropic.com/v1",
+        models: {
+          "claude-opus-4-8": {
+            id: "claude-opus-4-8",
+            family: "claude-opus",
+            release_date: "2026-05-28",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-06-30",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-4.6": {
+            id: "claude-sonnet-4.6",
+            family: "claude-sonnet",
+            release_date: "2026-02-17",
+            cost: { input: 3, output: 15, cache_read: 0.3 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+    markWorkerIncapable("anthropic", "claude-sonnet-5");
+    const result = getWorkerModel({
+      providerID: "anthropic",
+      model: "claude-opus-4-8",
+    });
+    expect(result?.modelID).toBe("claude-sonnet-4.6");
+    expect(result?.modelID).not.toBe("claude-sonnet-5");
+  });
+
+  test("direct (non-namespaced) anthropic session still resolves to sonnet via the family path (no regression)", async () => {
+    await warm({
+      anthropic: {
+        api: "https://api.anthropic.com/v1",
+        models: {
+          "claude-opus-4-8": {
+            id: "claude-opus-4-8",
+            family: "claude-opus",
+            release_date: "2026-05-28",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-06-30",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+    const result = getWorkerModel({
+      providerID: "anthropic",
+      model: "claude-opus-4-8",
+    });
+    expect(result?.modelID).toBe("claude-sonnet-5");
+  });
+
+  test("lineage filter excludes a cheaper different-lineage sibling when the namespace cannot (non-namespaced ids)", async () => {
+    // Direct provider (empty namespace ⇒ namespace filter is a no-op), so ONLY
+    // the lineageKey check keeps selection inside the claude lineage. A cheaper,
+    // higher-tier NON-claude model (`grok-fast` $4, lineage "grok") sits between
+    // opus ($5) and sonnet ($2); under closest-cheaper-tier it would win if the
+    // lineage filter were removed. It must be excluded so sonnet-5 wins.
+    // Mutation: drop the `lineageKey(...) !== sessionLineage` guard → grok-fast
+    // is selected → RED.
+    await warm({
+      "custom-agg": {
+        api: "https://api.custom-agg.com/v1",
+        models: {
+          "claude-opus-4-8": {
+            id: "claude-opus-4-8",
+            family: "claude-opus",
+            release_date: "2026-05-28",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "claude-sonnet-5": {
+            id: "claude-sonnet-5",
+            family: "claude-sonnet",
+            release_date: "2026-06-30",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+          // Different lineage, cheaper than opus but pricier than sonnet.
+          "grok-fast": {
+            id: "grok-fast",
+            family: "grok-fast",
+            release_date: "2026-06-01",
+            cost: { input: 4, output: 12, cache_read: 0.4 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+    const result = getWorkerModel({
+      providerID: "custom-agg",
+      model: "claude-opus-4-8",
+    });
+    expect(result?.modelID).toBe("claude-sonnet-5");
+    expect(result?.modelID).not.toBe("grok-fast");
+  });
+
+  test("unknown-provider session whose model has no family metadata falls back to global-cheapest (legacy path, no regression)", async () => {
+    await warm({
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      "custom-provider": {
+        api: "https://api.custom.com/v1",
+        models: {
+          "expensive-model": {
+            id: "expensive-model",
+            // no family
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "cheap-model": {
+            id: "cheap-model",
+            // no family
+            cost: { input: 1, output: 5, cache_read: 0.1 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+    const result = getWorkerModel({
+      providerID: "custom-provider",
+      model: "expensive-model",
+    });
+    expect(result?.modelID).toBe("cheap-model");
   });
 });

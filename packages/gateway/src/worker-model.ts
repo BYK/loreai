@@ -11,6 +11,11 @@
 import { workerModel, config as loreConfig, log } from "@loreai/core";
 import type { ProviderRoute } from "./config";
 import { upstreamFetch } from "./fetch";
+import {
+  isWorkerIncapable,
+  areFreeModelsDataBlocked,
+  blocklistGeneration,
+} from "./worker-health";
 
 // ---------------------------------------------------------------------------
 // Cost lookup — models.dev
@@ -54,15 +59,29 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
  */
 let resolutionMemo = new Map<string, string | undefined>();
 let resolutionMemoVersion = -1;
+let resolutionMemoBlocklistGen = -1;
 
 /**
  * Return the resolution memo valid for the current models.dev snapshot,
- * rebuilding it when the snapshot version (`cachedModelDataAt`) has advanced.
+ * rebuilding it when the snapshot version (`cachedModelDataAt`) OR the
+ * worker-health blocklist generation has advanced.
+ *
+ * The blocklist generation is load-bearing: a resolution is a pure function of
+ * the models.dev snapshot AND the set of usable (non-blocklisted) models. When
+ * a model is marked worker-incapable or a provider's `:free` tier is
+ * data-policy-blocked, the correct answer changes even though the snapshot did
+ * not — so the memo must be invalidated or a just-blocklisted model would keep
+ * being served from a stale entry, defeating auto-recovery.
  */
 function currentResolutionMemo(): Map<string, string | undefined> {
-  if (resolutionMemoVersion !== cachedModelDataAt) {
+  const gen = blocklistGeneration();
+  if (
+    resolutionMemoVersion !== cachedModelDataAt ||
+    resolutionMemoBlocklistGen !== gen
+  ) {
     resolutionMemo = new Map();
     resolutionMemoVersion = cachedModelDataAt;
+    resolutionMemoBlocklistGen = gen;
   }
   return resolutionMemo;
 }
@@ -538,6 +557,7 @@ export function clearModelDataCache(): void {
   lastReadyAttemptAt = 0;
   resolutionMemo = new Map();
   resolutionMemoVersion = -1;
+  resolutionMemoBlocklistGen = -1;
 }
 
 /**
@@ -552,6 +572,7 @@ export function _setModelDataForTest(
   cachedModelDataAt = Date.now();
   resolutionMemo = new Map();
   resolutionMemoVersion = -1;
+  resolutionMemoBlocklistGen = -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -559,23 +580,75 @@ export function _setModelDataForTest(
 // ---------------------------------------------------------------------------
 
 /**
- * Find a cheaper model from the same provider using models.dev pricing data.
+ * The vendor "namespace" of a model id — the segment before the first `/`.
  *
- * For providers without hardcoded WORKER_DEFAULTS (Google, MiniMax, xAI, etc.),
- * this is family-aware so a discovered worker tracks new generations the same
- * way the hardcoded WORKER_DEFAULTS do (via `resolveNewestInFamily`):
+ * Aggregators like OpenRouter namespace every model by vendor
+ * (`anthropic/claude-opus-4.8`, `cohere/north-mini-code:free`). Direct
+ * providers use bare ids (`claude-opus-4.8`) → empty namespace. Used to keep
+ * worker selection inside the session model's OWN vendor on an aggregator, so
+ * an Opus session never resolves a Cohere worker.
+ */
+function modelNamespace(modelID: string): string {
+  const slash = modelID.indexOf("/");
+  return slash > 0 ? modelID.slice(0, slash) : "";
+}
+
+/**
+ * The "lineage key" of a models.dev family — the family string up to its first
+ * `-`. Groups sibling tiers of one vendor lineage:
+ *   claude-opus / claude-sonnet / claude-haiku → "claude"
+ *   gpt-mini / gpt-codex / gpt-nano            → "gpt"
+ *   gemini-2.5-pro / gemini-3-flash            → "gemini"
+ * Derived purely from models.dev data — no hardcoded vendor names.
+ */
+function lineageKey(family: string): string {
+  const dash = family.indexOf("-");
+  return dash > 0 ? family.slice(0, dash) : family;
+}
+
+/**
+ * True when a candidate worker model id is currently usable for selection:
+ * not marked worker-incapable, and — when the provider's `:free` tier is
+ * data-policy-blocked — not a `:free` model. Both signals come from
+ * worker-health and only ever tighten AFTER an observed failure, so this never
+ * statically excludes `:free` (a different account may have opted in).
+ */
+function isSelectableWorkerModel(providerID: string, modelID: string): boolean {
+  if (isWorkerIncapable(providerID, modelID)) return false;
+  if (modelID.endsWith(":free") && areFreeModelsDataBlocked(providerID)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Find a cheaper same-provider worker model, staying inside the session model's
+ * OWN vendor lineage and choosing the "closest cheaper tier".
  *
- *   1. Pass 1 — find the absolute cheapest same-provider model strictly cheaper
- *      than the session (input price). Its family identifies the cheapest TIER.
- *   2. Pass 2 — within that cheapest family, return the NEWEST member that is
- *      still cheaper than the session. This avoids pinning an obsolete model
- *      just because it's a few cents cheaper than its modern sibling (e.g.
- *      gemini-2.5-flash-lite over a newer gemini-3-flash-lite), while staying
- *      in the same cost tier and never exceeding the session price.
+ * This matters for aggregators (OpenRouter, etc.) whose provider index mixes
+ * many vendors: the old "globally cheapest model in the provider" rule crossed
+ * lineages, picking e.g. a `$0` `cohere/...:free` model for an
+ * `anthropic/claude-opus-4.8` session. That free model is then data-policy
+ * blocked on accounts that haven't opted into prompt logging.
  *
- * Falls back to the Pass-1 cheapest when the cheapest model has no family
- * metadata (preserving the original cheapest-by-cost behavior offline).
- * Returns undefined if no cheaper model exists.
+ * Algorithm (all data-driven, no hardcoded vendor names):
+ *   1. Resolve the session model's own models.dev entry → its `family` and id
+ *      `namespace`. Derive the vendor `lineageKey` (family up to first `-`).
+ *   2. Candidate set = same-provider, SELECTABLE (see
+ *      {@link isSelectableWorkerModel}) models that match the session's
+ *      namespace (when namespaced) AND whose family shares the lineage key AND
+ *      that are strictly cheaper than the session.
+ *   3. Group candidates by family; judge each family's tier by its NEWEST
+ *      member's input cost. Pick the family with the MAXIMUM tier cost still
+ *      `< sessionInputCost` — the "closest cheaper tier" (opus → sonnet, not
+ *      haiku). Ties broken toward the family whose newest member is newest.
+ *   4. Within that family return the newest member still cheaper than the
+ *      session (release_date desc, then numeric-aware id desc).
+ *
+ * Falls back to the legacy global-cheapest-in-provider behavior when the
+ * session model has no family/namespace metadata OR the lineage candidate set
+ * is empty, so unknown/edge providers are never regressed. Returns undefined
+ * when no cheaper selectable model exists.
  */
 function findCheaperSameProviderModel(
   providerID: string,
@@ -589,7 +662,84 @@ function findCheaperSameProviderModel(
   const memoKey = `cheaper\x1f${providerID}\x1f${sessionModelID}\x1f${sessionInputCost}`;
   if (memo.has(memoKey)) return memo.get(memoKey);
 
-  // Pass 1: cheapest same-provider model cheaper than the session.
+  const sessionEntry = matchModelEntry(cachedModelData, sessionModelID);
+  const sessionNamespace = modelNamespace(sessionModelID);
+  const sessionLineage = sessionEntry?.family
+    ? lineageKey(sessionEntry.family)
+    : undefined;
+
+  // ----- Lineage-aware path: same vendor, closest cheaper tier. -----
+  if (sessionLineage) {
+    // Group cheaper same-lineage selectable candidates by family, tracking each
+    // family's newest member (by date, then numeric-aware id) and that member's
+    // cost as the family's tier cost.
+    type Fam = { newestId: string; newestDate: string; tierCost: number };
+    const families = new Map<string, Fam>();
+    for (const modelId of providerModelIds) {
+      if (modelId === sessionModelID) continue;
+      if (sessionNamespace && modelNamespace(modelId) !== sessionNamespace) {
+        continue;
+      }
+      const entry = cachedModelData.get(modelId);
+      if (!entry?.family || lineageKey(entry.family) !== sessionLineage) {
+        continue;
+      }
+      const cost = entry.cost?.input;
+      if (cost == null || cost >= sessionInputCost) continue;
+      if (!isSelectableWorkerModel(providerID, modelId)) continue;
+
+      const date = entry.release_date ?? "";
+      const fam = families.get(entry.family);
+      if (
+        !fam ||
+        date > fam.newestDate ||
+        (date === fam.newestDate &&
+          modelId.localeCompare(fam.newestId, "en", { numeric: true }) > 0)
+      ) {
+        families.set(entry.family, {
+          newestId: modelId,
+          newestDate: date,
+          tierCost: cost,
+        });
+      }
+    }
+
+    if (families.size > 0) {
+      // Closest cheaper tier: the family whose newest member is the most
+      // expensive while still cheaper than the session. Tie-break toward the
+      // newer family tier so a fresh generation wins a cost tie.
+      let best: (Fam & { family: string }) | undefined;
+      for (const [family, fam] of families) {
+        if (
+          !best ||
+          fam.tierCost > best.tierCost ||
+          (fam.tierCost === best.tierCost && fam.newestDate > best.newestDate)
+        ) {
+          best = { ...fam, family };
+        }
+      }
+      // families.size > 0 guarantees `best` is assigned; the guard also
+      // narrows the type without a non-null assertion.
+      if (best) {
+        const resolvedId = best.newestId;
+        log.info(
+          `dynamic worker model: ${providerID}/${resolvedId} ($${best.tierCost}/M, ` +
+            `lineage ${sessionLineage}, family ${best.family}, closest cheaper tier) ` +
+            `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
+        );
+        memo.set(memoKey, resolvedId);
+        return resolvedId;
+      }
+    }
+    // No usable same-lineage candidate — fall through to the legacy path below
+    // (e.g. all lineage siblings blocklisted, or lineage has no cheaper tier).
+  }
+
+  // ----- Legacy fallback path: global cheapest selectable in the provider. ---
+  // Preserves original behavior for sessions whose model has no family metadata
+  // (unknown providers) or whose lineage yielded no cheaper selectable sibling.
+
+  // Pass 1: cheapest same-provider selectable model cheaper than the session.
   let cheapestId: string | undefined;
   let cheapestCost = sessionInputCost;
   let cheapestFamily: string | undefined;
@@ -597,11 +747,11 @@ function findCheaperSameProviderModel(
     if (modelId === sessionModelID) continue;
     const entry = cachedModelData.get(modelId);
     if (entry?.cost?.input == null) continue;
-    if (entry.cost.input < cheapestCost) {
-      cheapestCost = entry.cost.input;
-      cheapestId = modelId;
-      cheapestFamily = entry.family;
-    }
+    if (entry.cost.input >= cheapestCost) continue;
+    if (!isSelectableWorkerModel(providerID, modelId)) continue;
+    cheapestCost = entry.cost.input;
+    cheapestId = modelId;
+    cheapestFamily = entry.family;
   }
   if (!cheapestId) {
     memo.set(memoKey, undefined);
@@ -621,6 +771,7 @@ function findCheaperSameProviderModel(
       if (entry.cost?.input == null || entry.cost.input >= sessionInputCost) {
         continue;
       }
+      if (!isSelectableWorkerModel(providerID, modelId)) continue;
       const date = entry.release_date ?? "";
       if (
         date > bestDate ||
@@ -690,6 +841,10 @@ function resolveNewestInFamily(
     const entry = cachedModelData.get(id);
     if (!entry || entry.family !== family) continue;
     if (!isCheapVariant(id)) continue;
+    // Skip models blocklisted this process (worker-incapable, or a
+    // data-policy-blocked :free tier) so a bad model isn't re-picked and
+    // selection advances to the next candidate on re-resolution.
+    if (!isSelectableWorkerModel(providerID, id)) continue;
     // Cost guard: skip family members priced at/above the session model, and
     // members with unknown pricing — we cannot prove they clear the cap, so we
     // fall back to the known-cheap hardcoded default instead of guessing.

@@ -68,7 +68,16 @@ export type FailureReason =
   // capability limitation of the model, NOT an outage — it must not drive the
   // degraded/critical Sentry ladder or the circuit breaker. We record it for
   // visibility and cache the verdict so we stop calling that model.
-  | "worker-incapable";
+  | "worker-incapable"
+  // Non-escalating: the selected worker model is rejected by the account's
+  // data policy (e.g. an OpenRouter `:free` model returns a 404 "No endpoints
+  // available matching your guardrail restrictions and data policy" for an
+  // account that has not opted into prompt logging). This is a per-account
+  // config/availability fact, NOT an outage — the model is blocklisted and
+  // selection re-resolves to a usable same-family sibling on the next pass, so
+  // it must not drive the degraded/critical Sentry ladder or the circuit
+  // breaker. Recorded (warn) for visibility.
+  | "data-policy";
 
 /**
  * Failure reasons that are credential/config conditions rather than upstream
@@ -194,6 +203,44 @@ const creditPaused: Map<string, { lastProbe: number }> = new Map();
  */
 const incapableModels: Set<string> = new Set();
 
+/**
+ * Providers whose OpenRouter-style `:free` worker models are blocked by the
+ * account's data policy. Populated when {@link markFreeModelsDataBlocked} is
+ * called after a data-policy 404 (see `isDataPolicyBlocked404` in llm-adapter).
+ *
+ * User directive: once we observe ONE data-policy 404 on a `:free` model, we
+ * assume ALL `:free` models on that provider are data-collection-gated and
+ * therefore unusable on this account, so worker-model selection skips the
+ * entire `:free` tier for that provider. This is provider-scoped (not global)
+ * and only ever LEARNED from an actual 404 — we never statically exclude
+ * `:free`, since a different account may have opted in.
+ *
+ * In-memory only: resets on process restart and is re-learned on the first
+ * data-policy 404 after a restart. This self-heals if the account later opts
+ * into the provider's data policy (a restart clears the block; the newly-usable
+ * `:free` model simply stops 404ing).
+ */
+const freeModelsDataBlocked: Set<string> = new Set();
+
+/**
+ * Monotonic counter bumped whenever the model blocklist changes
+ * ({@link markWorkerIncapable} adds a new verdict, or
+ * {@link markFreeModelsDataBlocked} adds a new provider). Worker-model
+ * selection memoizes resolutions keyed on the models.dev snapshot version; it
+ * must ALSO key on this generation so a freshly-blocklisted model is not served
+ * from a stale memo entry. Read via {@link blocklistGeneration}.
+ */
+let blocklistGen = 0;
+
+/**
+ * Current blocklist generation. Bumped by {@link markWorkerIncapable} and
+ * {@link markFreeModelsDataBlocked}. Consumed by worker-model.ts to invalidate
+ * its resolution memo when the set of usable models changes.
+ */
+export function blocklistGeneration(): number {
+  return blocklistGen;
+}
+
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Injectable time source — tests can override. */
@@ -209,6 +256,8 @@ export function _resetForTest(): void {
   state.clear();
   creditPaused.clear();
   incapableModels.clear();
+  freeModelsDataBlocked.clear();
+  blocklistGen = 0;
   consecutiveEmpty.clear();
   if (sweepTimer) {
     clearInterval(sweepTimer);
@@ -332,6 +381,7 @@ export function markWorkerIncapable(
   const key = modelKey(providerID, modelID, workerID);
   if (incapableModels.has(key)) return;
   incapableModels.add(key);
+  blocklistGen++;
   log.warn(
     `[worker-health] model ${providerID}/${modelID} marked worker-incapable ` +
       `for worker=${workerID} — it returned no usable text after the ` +
@@ -347,6 +397,35 @@ export function isWorkerIncapable(
   workerID: WorkerID | (string & {}) = ANY_WORKER,
 ): boolean {
   return incapableModels.has(modelKey(providerID, modelID, workerID));
+}
+
+/**
+ * Record that the given provider's `:free` worker models are blocked by the
+ * account's data policy (learned from a data-policy 404 — see
+ * `isDataPolicyBlocked404`). Idempotent per provider; bumps the blocklist
+ * generation on the first observation so memoized resolutions re-resolve.
+ *
+ * User directive: assume ALL `:free` models on the provider collect data once
+ * we see this error, so the whole `:free` tier is skipped for that provider.
+ */
+export function markFreeModelsDataBlocked(providerID: string): void {
+  if (freeModelsDataBlocked.has(providerID)) return;
+  freeModelsDataBlocked.add(providerID);
+  blocklistGen++;
+  log.warn(
+    `[worker-health] provider ${providerID} :free worker models blocked by ` +
+      `account data policy — skipping the :free tier for this provider and ` +
+      `re-resolving to a paid same-family sibling (in-memory; re-learned after ` +
+      `restart)`,
+  );
+}
+
+/**
+ * True when the given provider's `:free` worker models have been observed to be
+ * data-policy-blocked for this account this process.
+ */
+export function areFreeModelsDataBlocked(providerID: string): boolean {
+  return freeModelsDataBlocked.has(providerID);
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +498,20 @@ export function recordWorkerFailure(
   if (reason === "worker-incapable") {
     log.warn(
       `[worker-health] ${workerID} skipped (worker-incapable) for session=${sessionID.slice(0, 16)}`,
+    );
+    return;
+  }
+
+  // data-policy is a per-account availability fact (a :free model gated by the
+  // account's data policy), not an outage. Like worker-incapable, it must never
+  // drive the degraded/critical Sentry ladder or the circuit breaker: the model
+  // is blocklisted (markFreeModelsDataBlocked / markWorkerIncapable at the call
+  // site) and selection re-resolves to a usable same-family sibling on the next
+  // pass, so a sustained-failure warning would be both alarming and wrong.
+  // Recorded (warn) for visibility.
+  if (reason === "data-policy") {
+    log.warn(
+      `[worker-health] ${workerID} skipped (data-policy) for session=${sessionID.slice(0, 16)} — worker model re-resolving`,
     );
     return;
   }

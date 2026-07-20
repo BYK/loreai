@@ -13,6 +13,9 @@ import {
   clearWorkerPaused,
   markWorkerIncapable,
   isWorkerIncapable,
+  markFreeModelsDataBlocked,
+  areFreeModelsDataBlocked,
+  blocklistGeneration,
   isCapabilityEmpty,
   recordEmptyWorkerResponse,
   clearEmptyWorkerStreak,
@@ -539,6 +542,53 @@ describe("worker-health", () => {
       markWorkerIncapable("opencode", "mimo-v2.5-free");
       _resetForTest();
       expect(isWorkerIncapable("opencode", "mimo-v2.5-free")).toBe(false);
+    });
+  });
+
+  describe("data-policy :free block", () => {
+    test("mark + query a provider's :free tier as data-policy-blocked", () => {
+      expect(areFreeModelsDataBlocked("openrouter")).toBe(false);
+      markFreeModelsDataBlocked("openrouter");
+      expect(areFreeModelsDataBlocked("openrouter")).toBe(true);
+      // Scoped per provider.
+      expect(areFreeModelsDataBlocked("opencode")).toBe(false);
+    });
+
+    test("data-policy failure does NOT escalate the failure ladder or Sentry", () => {
+      // A per-account availability fact, not an outage — like worker-incapable.
+      for (let i = 0; i < 10; i++) {
+        recordWorkerFailure("s1", "lore-distill", "data-policy");
+      }
+      expect(getStatus("s1")).toBe("healthy");
+      expect(allowWorkerProbe("s1")).toBe(true);
+      expect(getDegradationWarning("s1")).toBeNull();
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      expect(Sentry.captureException).not.toHaveBeenCalled();
+    });
+
+    test("blocklistGeneration bumps on first incapable mark and first free-block, and is idempotent", () => {
+      const g0 = blocklistGeneration();
+      markWorkerIncapable("openrouter", "anthropic/claude-sonnet-5");
+      const g1 = blocklistGeneration();
+      expect(g1).toBeGreaterThan(g0);
+      // Idempotent — re-marking the same verdict does not bump.
+      markWorkerIncapable("openrouter", "anthropic/claude-sonnet-5");
+      expect(blocklistGeneration()).toBe(g1);
+
+      markFreeModelsDataBlocked("openrouter");
+      const g2 = blocklistGeneration();
+      expect(g2).toBeGreaterThan(g1);
+      markFreeModelsDataBlocked("openrouter");
+      expect(blocklistGeneration()).toBe(g2);
+    });
+
+    test("_resetForTest clears the free-block and resets the generation", () => {
+      markFreeModelsDataBlocked("openrouter");
+      markWorkerIncapable("openrouter", "x");
+      expect(blocklistGeneration()).toBeGreaterThan(0);
+      _resetForTest();
+      expect(areFreeModelsDataBlocked("openrouter")).toBe(false);
+      expect(blocklistGeneration()).toBe(0);
     });
   });
 

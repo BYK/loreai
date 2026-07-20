@@ -67,6 +67,8 @@ import {
   recordWorkerFailure,
   markWorkerPaused,
   isWorkerIncapable,
+  markWorkerIncapable,
+  markFreeModelsDataBlocked,
   recordEmptyWorkerResponse,
   clearEmptyWorkerStreak,
 } from "./worker-health";
@@ -227,6 +229,30 @@ export function isTemperatureUnsupported400(body: string): boolean {
     /\b(deprecated|unsupported|no\s+longer\s+supported|not\s+(?:a\s+)?support(?:ed)?|removed|not\s+allowed|cannot\s+be\s+(?:set|used|specified))\b/i.test(
       body,
     )
+  );
+}
+
+/**
+ * True when an upstream response indicates the worker MODEL is unavailable
+ * because it is gated by the account's data policy — specifically OpenRouter's
+ *   404 "No endpoints available matching your guardrail restrictions and data
+ *   policy. Configure: https://openrouter.ai/settings/privacy"
+ * returned for `:free` models when the account has not opted into prompt
+ * logging/training.
+ *
+ * This is a per-account availability fact about THIS model, not a transient
+ * outage: retrying is futile and the fix is to blocklist the model and
+ * re-resolve worker selection to a usable same-family sibling. Kept strict
+ * (status 404 AND a "no endpoints" phrase AND a data-policy/guardrail/privacy
+ * marker) so an ordinary 404 (wrong URL, unknown model) cannot trigger it.
+ */
+export function isDataPolicyBlocked404(status: number, body: string): boolean {
+  if (status !== 404) return false;
+  if (!/no\s+endpoints/i.test(body)) return false;
+  return (
+    /data\s+policy/i.test(body) ||
+    /guardrail/i.test(body) ||
+    /settings\/privacy/i.test(body)
   );
 }
 
@@ -2333,6 +2359,41 @@ export function createGatewayLLMClient(
                   );
                   retryCount++;
                   continue;
+                }
+
+                // Data-policy 404: the selected worker model (typically an
+                // OpenRouter `:free` model) is unavailable because the account
+                // has not opted into the provider's data-collection policy.
+                // This is a per-account availability fact about THIS model, not
+                // an outage — retrying is futile. Blocklist the model (and, for
+                // a `:free` model, the whole `:free` tier on this provider per
+                // the "assume all :free collect data" directive) and classify
+                // as `data-policy` so it does NOT feed the Sentry outage ladder
+                // or credit-pause the session. Worker-model selection re-resolves
+                // to a usable same-family sibling on the next pass; the next real
+                // worker call against that sibling is the recovery probe.
+                if (isDataPolicyBlocked404(response.status, text)) {
+                  log.warn(
+                    `worker model ${model.providerID}/${model.modelID} blocked by account data policy (404) — ` +
+                      `blocklisting and re-resolving (worker=${opts?.workerID ?? "unknown"}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}): ${text.slice(0, 160)}`,
+                  );
+                  markWorkerIncapable(model.providerID, model.modelID);
+                  if (model.modelID.endsWith(":free")) {
+                    markFreeModelsDataBlocked(model.providerID);
+                  }
+                  span.setStatus({
+                    code: 2,
+                    message: `HTTP ${response.status} (data-policy)`,
+                  });
+                  recordWorkerFailure(
+                    opts?.sessionID ?? "_unknown",
+                    opts?.workerID ?? "unknown",
+                    "data-policy",
+                  );
+                  // Do NOT markWorkerPaused: the fix is re-resolution to a
+                  // different model, not pausing the session's workers.
+                  return null;
                 }
 
                 log.error(
