@@ -728,6 +728,82 @@ async function handleImportRecord(req: Request): Promise<Response> {
   return jsonResponse({ recorded: true });
 }
 
+/**
+ * POST /api/v1/import/structured — write already-structured memory (Engram /
+ * mem0) directly to the knowledge store. The client produces + validates the
+ * `LoreImportDoc` (it has filesystem access; the gateway does not), but the
+ * gateway re-validates defensively before touching the DB — never trust the
+ * client. After writing, embeddings are backfilled so entries are searchable.
+ */
+async function handleImportStructured(req: Request): Promise<Response> {
+  // Blocked in hosted mode. This writes attacker-supplied content verbatim into
+  // the knowledge store and triggers a DB-wide embeddings backfill — it must
+  // only run on the operator's own gateway, never from an untrusted network
+  // caller (mirrors handleEntityRebuild). Migration is a local, one-time CLI
+  // action; the CLI always produces the doc locally and posts it to *its own*
+  // gateway, so a legitimate `lore import` never needs the hosted path.
+  if (isHostedMode()) {
+    return errorResponse(
+      403,
+      "forbidden",
+      "Structured import is not available in hosted mode (writes knowledge and triggers embedding cost).",
+    );
+  }
+
+  const body = await parseBody<{
+    git_remote?: string;
+    path?: string;
+    global?: boolean;
+    dry_run?: boolean;
+    doc: unknown;
+  }>(req);
+
+  // Resolve the target project. Hosted mode is already refused above, so this
+  // only ever runs on the operator's own single-tenant gateway — there is no
+  // cross-tenant boundary to cross here, so a first-time import may register a
+  // new project from `path` (mirrors handleImportExtract). The hosted guard,
+  // not project-resolution, is what prevents cross-tenant writes.
+  const projectId = resolveProjectByRemoteOrPath(body.git_remote, body.path);
+  const projectPath = projectId ? getProjectPathById(projectId) : body.path;
+  if (!projectPath) {
+    return errorResponse(
+      404,
+      "not_found",
+      "Project not found. Provide git_remote or path.",
+    );
+  }
+
+  // Re-validate the document server-side — the trust boundary.
+  const parsed = conversationImport.safeParseImportDoc(body.doc);
+  if (!parsed.success) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      `Invalid import document: ${parsed.error.message}`,
+    );
+  }
+
+  const dryRun = body.dry_run === true;
+  const result = conversationImport.importStructuredEntries(parsed.data, {
+    defaultProjectPath: projectPath,
+    global: body.global === true,
+    dryRun,
+  });
+
+  // A dry run computes counts against this (the target) DB without writing —
+  // skip the embeddings backfill too.
+  if (!dryRun) {
+    // Make imported entries searchable (best-effort; retried on next boot).
+    try {
+      await embedding.backfillEmbeddings();
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  return jsonResponse(result);
+}
+
 // ---------------------------------------------------------------------------
 // Main request dispatcher
 // ---------------------------------------------------------------------------
@@ -871,6 +947,11 @@ export async function handleAPIRequest(
     // POST /api/v1/import/record
     if (pathname === "/api/v1/import/record") {
       return await handleImportRecord(req);
+    }
+
+    // POST /api/v1/import/structured
+    if (pathname === "/api/v1/import/structured") {
+      return await handleImportStructured(req);
     }
 
     // POST /api/v1/sessions/move — move sessions between projects

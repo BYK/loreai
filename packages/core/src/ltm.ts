@@ -885,6 +885,56 @@ export function isTombstoned(id: string): boolean {
 }
 
 /**
+ * True when an entry with this exact title (case-insensitive), visible to the
+ * given scope, was deleted (tombstoned) and has NO live current version.
+ *
+ * Structured import (Engram/mem0) carries no logical_id, so it can't call
+ * {@link isTombstoned} by id. This lets that lane honor the "never resurrect a
+ * tombstoned entry" invariant by title: if the only same-title match in scope is
+ * a death-cert (is_current=1 AND is_deleted=1) and there is no live row with that
+ * title, the entry must NOT be re-created.
+ *
+ * Scope mirrors the importer's dedup scope: the project pool (or the global
+ * `project_id IS NULL` pool) PLUS cross-project entries. Reads the base
+ * `knowledge` table (NOT `knowledge_current`) so it can see death-cert rows —
+ * which `knowledge_current` excludes by definition.
+ */
+export function findTombstonedByTitle(input: {
+  title: string;
+  projectId: string | null;
+}): boolean {
+  // A live current version with this title takes precedence — it is an update
+  // target, not a resurrection. Only report "tombstoned" when NO live row exists.
+  const live =
+    input.projectId !== null
+      ? (db()
+          .query(
+            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 0 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+          )
+          .get(input.projectId, input.title) as { 1: number } | null)
+      : (db()
+          .query(
+            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 0 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+          )
+          .get(input.title) as { 1: number } | null);
+  if (live) return false;
+
+  const deathCert =
+    input.projectId !== null
+      ? (db()
+          .query(
+            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 1 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+          )
+          .get(input.projectId, input.title) as { 1: number } | null)
+      : (db()
+          .query(
+            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 1 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+          )
+          .get(input.title) as { 1: number } | null);
+  return deathCert != null;
+}
+
+/**
  * Clear a tombstone for the given UUID — called when an entry is legitimately
  * (re-)created with that exact UUID, so a future delete can tombstone it again.
  */

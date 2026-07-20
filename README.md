@@ -329,6 +329,26 @@ When more than one agent has history, `lore import` shows a numbered list and le
 
 **Worktrees & monorepos:** agent history is keyed by the directory the agent ran in, so a repo's conversations are spread across its main checkout and every git worktree. `lore import` finds them all by default (via `git worktree list`) — pass `--no-worktrees` to restrict to the current directory.
 
+### Migrating from another memory system (Engram, mem0)
+
+Already using a dedicated memory tool? `lore import` also migrates **already-curated** memories directly into Lore's knowledge store (no LLM pass — the entries are already structured):
+
+```bash
+# Auto-detect and import Engram memory (runs `engram export` for you)
+lore import --source engram
+
+# Or import from an explicit export file
+engram export engram.json
+lore import --source engram --file engram.json
+
+# Import everything as global (cross-project) knowledge
+lore import --source engram --global
+```
+
+Engram observation types map onto Lore categories (`bugfix`/`discovery` → `gotcha`, `config` → `architecture`, etc.), and each observation's project is recovered from its session directory. Idempotent — re-running dedups by title and only updates entries whose content changed.
+
+> mem0 migration is coming in a follow-up release.
+
 ### Web dashboard
 
 When the gateway is running, visit **http://localhost:3207/ui** for a web-based dashboard that lets you:

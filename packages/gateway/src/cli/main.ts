@@ -120,6 +120,14 @@ const OPTIONS = {
   // `lore import` flag — restrict detection to the current directory only
   // (skip sibling git worktrees / clone paths of the same repo).
   "no-worktrees": { type: "boolean" as const },
+  // `lore import` — filter to a single source/agent (e.g. --agent engram).
+  agent: { type: "string" as const },
+  // `lore import` — structured-memory flags (Engram / mem0 migration).
+  // `--file` points at an explicit export dump; `--source` forces the source
+  // type; `--global` imports every entry as cross-project.
+  file: { type: "string" as const },
+  source: { type: "string" as const },
+  global: { type: "boolean" as const },
   "min-confidence": { type: "string" as const },
   "no-backup": { type: "boolean" as const },
   // `lore data clear` flags

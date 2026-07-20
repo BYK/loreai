@@ -37,7 +37,13 @@ const {
   isImported,
   recordImport,
   computeHash,
+  getStructuredSource,
+  getStructuredSources,
+  detectStructuredSources,
+  importStructuredEntries,
+  safeParseImportDoc,
 } = conversationImport;
+type StructuredSourceName = conversationImport.StructuredSourceName;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -232,6 +238,204 @@ export function filterAlreadyImported(
 // Command entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Structured-memory import (Engram / mem0)
+// ---------------------------------------------------------------------------
+
+const STRUCTURED_SOURCE_NAMES: readonly StructuredSourceName[] = [
+  "engram",
+  "mem0",
+];
+
+function isStructuredName(name: string): name is StructuredSourceName {
+  return (STRUCTURED_SOURCE_NAMES as readonly string[]).includes(name);
+}
+
+/**
+ * Decide whether this `lore import` invocation targets a structured-memory
+ * source, and which one. Precedence:
+ *   1. explicit `--source <name>`,
+ *   2. `--agent <name>` naming a structured source,
+ *   3. `--file` with no source, when exactly one structured source is detected.
+ *
+ * A bare `lore import` (no flags) does NOT auto-route to a structured source
+ * even if one is installed — it stays on the conversation-import lane so a user
+ * who merely has the `engram` binary on PATH isn't surprised. Structured import
+ * requires an explicit signal (`--source`, `--agent <structured>`, or `--file`).
+ *
+ * Returns null to fall through to the conversation-import lane.
+ */
+export function resolveStructuredSourceName(opts: {
+  sourceFlag: string | null;
+  agentFilter: string | null;
+  fileFlag: string | null;
+}): StructuredSourceName | null {
+  const { sourceFlag, agentFilter, fileFlag } = opts;
+  if (sourceFlag && isStructuredName(sourceFlag)) return sourceFlag;
+  if (agentFilter && isStructuredName(agentFilter)) return agentFilter;
+  // A --file with no source: auto-route to a detected structured source when
+  // exactly one is present (a file is an explicit migration intent).
+  if (fileFlag && !sourceFlag && !agentFilter) {
+    const detected = detectStructuredSources();
+    if (detected.length === 1) return detected[0].name;
+  }
+  return null;
+}
+
+async function importStructured(opts: {
+  remote: string | undefined;
+  projectPath: string;
+  sourceName: StructuredSourceName;
+  filePath: string | null;
+  dryRun: boolean;
+  yes: boolean;
+  global: boolean;
+}): Promise<void> {
+  const { projectPath, sourceName, filePath, dryRun, global } = opts;
+
+  const source = getStructuredSource(sourceName);
+  if (!source) {
+    const supported = getStructuredSources()
+      .map((s) => s.name)
+      .join(", ");
+    console.error(
+      `[lore] Import source "${sourceName}" is not available yet. Supported: ${supported}.`,
+    );
+    return;
+  }
+
+  console.log(
+    `[lore] Importing structured memory from ${source.displayName}...`,
+  );
+
+  // Produce the normalized document (runs the source's export CLI / reads
+  // --file). This always happens client-side — the remote gateway has no shared
+  // filesystem with the client.
+  let doc: conversationImport.LoreImportDoc;
+  try {
+    doc = source.produceDoc({ filePath: filePath ?? undefined });
+  } catch (err) {
+    console.error(
+      `[lore] Could not read ${source.displayName} memory: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+
+  if (doc.entries.length === 0) {
+    console.log(`[lore] No entries found in ${source.displayName} memory.`);
+    return;
+  }
+
+  console.log(`[lore] Found ${doc.entries.length} entries.`);
+
+  if (dryRun) {
+    const preview = importStructuredEntries(doc, {
+      defaultProjectPath: projectPath,
+      global,
+      dryRun: true,
+    });
+    console.log(
+      `[lore] Dry run — would create ${preview.created}, update ${preview.updated}, skip ${preview.skipped}.`,
+    );
+    return;
+  }
+
+  if (!opts.yes) {
+    const ok = await confirm(
+      `[lore] Import ${doc.entries.length} entries from ${source.displayName}?`,
+    );
+    if (!ok) {
+      console.log("[lore] Import cancelled.");
+      return;
+    }
+  }
+
+  // Remote mode: send the validated doc to the gateway for the actual write.
+  if (opts.remote) {
+    await importStructuredRemote(opts.remote, projectPath, doc, global);
+    return;
+  }
+
+  // Local mode: write directly.
+  const result = importStructuredEntries(doc, {
+    defaultProjectPath: projectPath,
+    global,
+  });
+
+  setLastImportAt(projectPath, Date.now());
+  try {
+    // Ensure imported entries become searchable even in a short-lived CLI.
+    const { embedding } = await import("@loreai/core");
+    await embedding.backfillEmbeddings();
+  } catch {
+    // Non-fatal — embeddings backfill on next gateway boot.
+  }
+  try {
+    exportLoreFile(projectPath);
+  } catch {
+    // Non-fatal
+  }
+
+  console.log(
+    `[lore] Import complete: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped.`,
+  );
+  console.log("[lore] Run `lore data list knowledge` to review.");
+}
+
+async function importStructuredRemote(
+  remote: string,
+  projectPath: string,
+  doc: conversationImport.LoreImportDoc,
+  global: boolean,
+): Promise<void> {
+  const { getGitRemote, normalizeRemoteUrl } = await import("@loreai/core");
+  const raw = getGitRemote(projectPath);
+  const normalized = raw ? normalizeRemoteUrl(raw) : undefined;
+
+  console.log(`\n[lore] Using remote gateway at ${remote}`);
+
+  // Re-validate before sending (defensive; the server re-validates too).
+  const check = safeParseImportDoc(doc);
+  if (!check.success) {
+    console.error(
+      "[lore] Internal error: produced an invalid import document.",
+    );
+    return;
+  }
+
+  let result: { created: number; updated: number; skipped: number };
+  try {
+    result = await remotePost(
+      remote,
+      "/api/v1/import/structured",
+      {
+        git_remote: normalized,
+        path: projectPath,
+        global,
+        doc,
+      },
+      { compress: true },
+    );
+  } catch (err) {
+    console.error(
+      `[lore] Structured import failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+
+  setLastImportAt(projectPath, Date.now());
+  try {
+    exportLoreFile(projectPath);
+  } catch {
+    // Non-fatal
+  }
+
+  console.log(
+    `[lore] Import complete: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped.`,
+  );
+  console.log("[lore] Run `lore data list knowledge` to review.");
+}
+
 export async function commandImport(
   _args: string[],
   flags: Record<string, unknown>,
@@ -240,6 +444,9 @@ export async function commandImport(
   const dryRun = flags["dry-run"] === true || flags.dryRun === true;
   const yes = flags.yes === true || flags.y === true;
   const agentFilter = (flags.agent as string) ?? null;
+  const sourceFlag = (flags.source as string) ?? null;
+  const fileFlag = (flags.file as string) ?? null;
+  const global = flags.global === true;
   const noWorktrees =
     flags["no-worktrees"] === true || flags.noWorktrees === true;
   const projectFlag = flags.project as string | undefined;
@@ -255,6 +462,37 @@ export async function commandImport(
   await load(projectPath);
   if (!remote) {
     ensureProject(projectPath);
+  }
+
+  // Structured-memory import lane (Engram / mem0). Routed by --source/--file
+  // (or --agent naming a structured source). This reads ALREADY structured
+  // memory and writes it directly to the knowledge store (no curator LLM).
+  // Conversation-history import (below) is the other lane.
+  if (sourceFlag && !getStructuredSource(sourceFlag)) {
+    const supported = getStructuredSources()
+      .map((s) => s.name)
+      .join(", ");
+    console.error(
+      `[lore] Import source "${sourceFlag}" is not available. Supported: ${supported}.`,
+    );
+    return;
+  }
+  const structuredName = resolveStructuredSourceName({
+    sourceFlag,
+    agentFilter,
+    fileFlag,
+  });
+  if (structuredName) {
+    await importStructured({
+      remote,
+      projectPath,
+      sourceName: structuredName,
+      filePath: fileFlag,
+      dryRun,
+      yes,
+      global,
+    });
+    return;
   }
 
   // Detect conversation history (local filesystem scan — always local)

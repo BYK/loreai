@@ -28,6 +28,8 @@ lore import --project <path>     # Import for a specific project (default: cwd)
 lore import --yes                # Skip prompts and import everything
 ```
 
+To migrate from a dedicated memory tool (Engram, mem0) instead of conversation history, use `--source` — see [Migrating from another memory system](#migrating-from-another-memory-system).
+
 ## Supported agents
 
 | Agent | Where history is read from |
@@ -67,6 +69,39 @@ Each agent records conversations under the **directory it ran in**. Since git wo
 `lore import` resolves the full set of paths that belong to the same repository — using `git worktree list` plus the paths Lore already associates with the project — and finds sessions recorded under **any** of them. So running `lore import` from the main checkout also picks up conversations you had in a worktree, and vice-versa.
 
 Pass `--no-worktrees` to restrict detection to the current directory only.
+
+## Migrating from another memory system
+
+`lore import` also migrates **already-curated** memory from dedicated memory tools directly into Lore's knowledge store. Unlike conversation import, this does **not** run the curator LLM — the entries are already structured, so they are mapped and written directly (fast and free).
+
+### Engram
+
+```bash
+lore import --source engram                       # runs `engram export` for you
+lore import --source engram --file engram.json    # or import an explicit export
+lore import --source engram --global              # import as cross-project knowledge
+lore import --source engram --dry-run             # preview counts without writing
+```
+
+Produce an export file manually with `engram export engram.json` if the `engram` binary isn't on your `PATH`.
+
+**Mapping.** Engram observation `type` values map onto Lore categories:
+
+| Engram `type` | Lore category |
+| --- | --- |
+| `decision` | `decision` |
+| `architecture` | `architecture` |
+| `config` | `architecture` |
+| `pattern` | `pattern` |
+| `preference` | `preference` |
+| `bugfix`, `discovery` | `gotcha` |
+| (anything else) | `pattern` |
+
+Each observation's project is recovered from its Engram session `directory`; observations scoped `personal`/`global` are imported as cross-project knowledge. Soft-deleted observations are skipped. The import is **idempotent** — re-running dedups by title and updates only entries whose content changed.
+
+### mem0
+
+mem0 migration is coming in a follow-up release. It will read mem0's local store natively (server, OpenMemory, and embedded-default deployments) with no Python required.
 
 ## Next steps
 

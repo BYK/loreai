@@ -482,3 +482,106 @@ describe("POST /api/v1/import/record", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("POST /api/v1/import/structured", () => {
+  const doc = (entries: unknown[]) => ({
+    lore_import_version: 1,
+    source: "generic",
+    entries,
+  });
+
+  async function knowledgeCount(path: string): Promise<number> {
+    const { ltm } = await import("@loreai/core");
+    return ltm.forProject(path, false).length;
+  }
+
+  it("writes entries and reports counts", async () => {
+    const { projectPath } = await seedProject();
+    const before = await knowledgeCount(projectPath);
+    const res = await api("/api/v1/import/structured", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: projectPath,
+        doc: doc([
+          { title: "Struct import A", content: "body a", category: "pattern" },
+        ]),
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      created: number;
+      updated: number;
+      skipped: number;
+    };
+    expect(body.created).toBe(1);
+    expect(await knowledgeCount(projectPath)).toBe(before + 1);
+  });
+
+  it("dry_run reports counts without writing", async () => {
+    const { projectPath } = await seedProject();
+    const before = await knowledgeCount(projectPath);
+    const res = await api("/api/v1/import/structured", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: projectPath,
+        dry_run: true,
+        doc: doc([
+          {
+            title: "Dry struct entry",
+            content: "must not persist",
+            category: "pattern",
+          },
+        ]),
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { created: number };
+    expect(body.created).toBe(1);
+    expect(await knowledgeCount(projectPath)).toBe(before);
+  });
+
+  it("returns 400 for an invalid document", async () => {
+    const { projectPath } = await seedProject();
+    const res = await api("/api/v1/import/structured", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: projectPath,
+        doc: { lore_import_version: 1, source: "generic", entries: [{}] },
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 when the project cannot be resolved", async () => {
+    const res = await api("/api/v1/import/structured", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        doc: doc([{ title: "x", content: "y", category: "pattern" }]),
+      }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 403 in hosted mode", async () => {
+    const { projectPath } = await seedProject();
+    const core = await import("@loreai/core");
+    core.enableHostedMode();
+    try {
+      const res = await api("/api/v1/import/structured", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: projectPath,
+          doc: doc([{ title: "Blocked", content: "no", category: "pattern" }]),
+        }),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      core._resetHostedModeForTest();
+    }
+  });
+});
