@@ -1143,6 +1143,60 @@ describe("worker data-policy 404: blocklist + re-resolve, not an outage", () => 
     );
     expect(mockMarkPaused).toHaveBeenCalledWith("sess-plain-404");
   });
+
+  test("a data-policy error surfaced as HTTP 200 + {error:{code:404}} envelope is blocklisted as data-policy (not miscounted as empty/incapable)", async () => {
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy",
+              code: 404,
+            },
+          }),
+          {
+            // Misleading 200 wire status — the real signal is the embedded code.
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+        openrouter: "https://openrouter.ai/api",
+      } as unknown as { anthropic: string; openai: string },
+      () => ({ scheme: "bearer", value: "sk-or-test" }),
+      { providerID: "openrouter", modelID: "cohere/north-mini-code:free" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      workerID: "lore-distill",
+      sessionID: "sess-dp-200",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+    });
+
+    expect(result).toBeNull();
+    // Mutation: remove the HTTP-200-envelope data-policy branch → this is
+    // recorded via the empty-response path (worker-incapable eventually), NOT
+    // data-policy, and the :free tier is never blocked → RED.
+    expect(mockMarkIncapable).toHaveBeenCalledWith(
+      "openrouter",
+      "cohere/north-mini-code:free",
+    );
+    expect(mockMarkFreeBlocked).toHaveBeenCalledWith("openrouter");
+    expect(mockRecordFailure).toHaveBeenCalledWith(
+      "sess-dp-200",
+      "lore-distill",
+      "data-policy",
+    );
+    expect(mockMarkPaused).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -32,6 +32,16 @@ const MODELS_DEV_API = "https://models.dev/api.json";
 
 /** Cached models.dev data: model entries keyed by modelID (all providers). */
 let cachedModelData: Map<string, ModelsDevEntry> | null = null;
+/**
+ * Cached models.dev data keyed by `${providerID}/${modelID}` so a bare id that
+ * many providers publish at DIFFERENT prices (e.g. `deepseek/deepseek-v4-flash`
+ * on openrouter vs zenmux vs alibaba-cn, each with a different `cache_read`) can
+ * be priced from the provider the session is actually routed to. The flat
+ * {@link cachedModelData} map is last-write-wins across providers, so a session
+ * on openrouter would otherwise be priced with whichever provider appeared last
+ * in the JSON — corrupting `cacheReadCostPerToken` → `computeLayer0Cap`.
+ */
+let cachedModelDataByProvider: Map<string, ModelsDevEntry> | null = null;
 /** Cached provider → model IDs index for same-provider cheaper-model lookup. */
 let cachedProviderModels: Map<string, string[]> | null = null;
 /** Cached provider routing data extracted from the models.dev response. */
@@ -358,6 +368,7 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
 
       const data = (await response.json()) as ModelsDevResponse;
       const modelData = new Map<string, ModelsDevEntry>();
+      const modelDataByProvider = new Map<string, ModelsDevEntry>();
       const providerModelsIndex = new Map<string, string[]>();
       const providerRoutes = new Map<string, ProviderRoute>();
       const loadedProviders: string[] = [];
@@ -374,7 +385,11 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
         if (providerModels && typeof providerModels === "object") {
           const modelIds: string[] = [];
           for (const [modelId, entry] of Object.entries(providerModels)) {
-            modelData.set(modelId, normalizeModelEntry(modelId, entry));
+            const normalized = normalizeModelEntry(modelId, entry);
+            modelData.set(modelId, normalized);
+            // Provider-qualified entry: never last-write-wins across providers,
+            // so a session's cost is read from the provider it is routed to.
+            modelDataByProvider.set(`${providerID}/${modelId}`, normalized);
             modelIds.push(modelId);
           }
           providerModelsIndex.set(providerID, modelIds);
@@ -403,7 +418,9 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
         const providerModels = data[providerID]?.models;
         if (!providerModels || typeof providerModels !== "object") continue;
         for (const [modelId, entry] of Object.entries(providerModels)) {
-          modelData.set(modelId, normalizeModelEntry(modelId, entry));
+          const normalized = normalizeModelEntry(modelId, entry);
+          modelData.set(modelId, normalized);
+          modelDataByProvider.set(`${providerID}/${modelId}`, normalized);
         }
       }
 
@@ -417,6 +434,7 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       cachedProviderRoutes = providerRoutes;
       cachedProviderModels = providerModelsIndex;
       cachedModelData = modelData;
+      cachedModelDataByProvider = modelDataByProvider;
       cachedModelDataAt = Date.now();
 
       log.info(
@@ -496,6 +514,29 @@ export function getModelEntrySync(modelID: string): ModelsDevEntry {
   return matchModelEntry(cachedModelData, modelID) ?? fallbackEntry(modelID);
 }
 
+/**
+ * Provider-aware synchronous model entry lookup. Prefers the provider-qualified
+ * entry (`${providerID}/${modelID}`) so a bare id published by multiple
+ * providers at different prices is read from the provider the session is
+ * actually routed to — NOT the last-write-wins flat entry. Falls back to the
+ * bare {@link getModelEntrySync} lookup when the provider is unknown/undefined
+ * or has no matching entry, so it is fully backward-compatible.
+ *
+ * Only an EXACT `${providerID}/${modelID}` hit uses the qualified map; prefix/
+ * family matching stays on the flat map (the qualified map is a pure pricing
+ * override for exactly-known routes, never a new matcher).
+ */
+export function getModelEntrySyncForProvider(
+  providerID: string | undefined,
+  modelID: string,
+): ModelsDevEntry {
+  if (providerID && cachedModelDataByProvider) {
+    const qualified = cachedModelDataByProvider.get(`${providerID}/${modelID}`);
+    if (qualified) return qualified;
+  }
+  return getModelEntrySync(modelID);
+}
+
 /** True when models.dev data has been loaded into the in-memory cache. */
 export function isModelDataLoaded(): boolean {
   return cachedModelData !== null;
@@ -550,6 +591,7 @@ export async function ensureModelDataReady(timeoutMs = 2_000): Promise<void> {
 /** Clear cached data (for testing). */
 export function clearModelDataCache(): void {
   cachedModelData = null;
+  cachedModelDataByProvider = null;
   cachedProviderModels = null;
   cachedProviderRoutes = null;
   cachedModelDataAt = 0;
@@ -564,11 +606,18 @@ export function clearModelDataCache(): void {
  * Test-only: seed the models.dev cache directly (no network) so
  * `getModelEntrySync` returns known capability entries. Bumps the snapshot
  * version so any resolution memo is invalidated.
+ *
+ * `byProvider` optionally seeds the provider-qualified map (keys are
+ * `${providerID}/${modelID}`) consumed by {@link getModelEntrySyncForProvider}.
  */
 export function _setModelDataForTest(
   entries: Record<string, ModelsDevEntry>,
+  byProvider?: Record<string, ModelsDevEntry>,
 ): void {
   cachedModelData = new Map(Object.entries(entries));
+  cachedModelDataByProvider = byProvider
+    ? new Map(Object.entries(byProvider))
+    : null;
   cachedModelDataAt = Date.now();
   resolutionMemo = new Map();
   resolutionMemoVersion = -1;
@@ -713,7 +762,12 @@ function findCheaperSameProviderModel(
         if (
           !best ||
           fam.tierCost > best.tierCost ||
-          (fam.tierCost === best.tierCost && fam.newestDate > best.newestDate)
+          (fam.tierCost === best.tierCost &&
+            (fam.newestDate > best.newestDate ||
+              (fam.newestDate === best.newestDate &&
+                fam.newestId.localeCompare(best.newestId, "en", {
+                  numeric: true,
+                }) > 0)))
         ) {
           best = { ...fam, family };
         }
@@ -731,13 +785,19 @@ function findCheaperSameProviderModel(
         return resolvedId;
       }
     }
-    // No usable same-lineage candidate — fall through to the legacy path below
-    // (e.g. all lineage siblings blocklisted, or lineage has no cheaper tier).
+    // The session model HAS a known vendor lineage but no usable cheaper
+    // same-vendor sibling exists (all siblings blocklisted, or the lineage has
+    // no cheaper tier). Do NOT fall through to the cross-vendor legacy path — a
+    // worker must stay inside the session model's own vendor. Return undefined
+    // so the caller falls back to the session model itself (safe, just pricier)
+    // rather than silently routing to an unrelated vendor's model.
+    memo.set(memoKey, undefined);
+    return undefined;
   }
 
   // ----- Legacy fallback path: global cheapest selectable in the provider. ---
-  // Preserves original behavior for sessions whose model has no family metadata
-  // (unknown providers) or whose lineage yielded no cheaper selectable sibling.
+  // Reached ONLY when the session model has no family/lineage metadata (unknown
+  // or edge providers). Preserves the original cheapest-by-cost behavior.
 
   // Pass 1: cheapest same-provider selectable model cheaper than the session.
   let cheapestId: string | undefined;

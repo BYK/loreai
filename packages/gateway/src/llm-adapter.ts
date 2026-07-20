@@ -1992,6 +1992,42 @@ export function createGatewayLLMClient(
                   return null;
                 }
 
+                // Data-policy error surfaced as an HTTP 200 error-envelope
+                // (some aggregators return the upstream 404 body with a 200 wire
+                // status — see the transient-envelope handling above). The
+                // status-keyed 4xx branch never sees these, so mirror the
+                // data-policy handling here: a body that carries the
+                // data-policy/guardrail marker AND an embedded 404 is the same
+                // per-account availability fact. Blocklist + re-resolve; classify
+                // data-policy (no outage ladder, no credit-pause). We pass the
+                // embedded code (or 404 when the phrase is present but no code is
+                // parseable) so the strict detector's status gate is satisfied.
+                if (
+                  !isSSE &&
+                  isDataPolicyBlocked404(bodyErrCode ?? 404, bodyText)
+                ) {
+                  log.warn(
+                    `worker model ${model.providerID}/${model.modelID} blocked by account data policy ` +
+                      `(HTTP 200 error-envelope) — blocklisting and re-resolving ` +
+                      `(worker=${opts?.workerID ?? "unknown"}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}): ${bodyText.slice(0, 160)}`,
+                  );
+                  markWorkerIncapable(model.providerID, model.modelID);
+                  if (model.modelID.endsWith(":free")) {
+                    markFreeModelsDataBlocked(model.providerID);
+                  }
+                  span.setStatus({
+                    code: 2,
+                    message: "data-policy (HTTP 200 envelope)",
+                  });
+                  recordWorkerFailure(
+                    opts?.sessionID ?? "_unknown",
+                    opts?.workerID ?? "unknown",
+                    "data-policy",
+                  );
+                  return null;
+                }
+
                 // Parse response based on protocol
                 // SSE → accumulate the full stream; JSON → parse the body.
                 const parsed = isSSE

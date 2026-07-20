@@ -243,6 +243,7 @@ import {
   fetchModelData,
   ensureModelDataReady,
   getModelEntrySync,
+  getModelEntrySyncForProvider,
   isModelDataLoaded,
   lookupProviderRoute,
 } from "./worker-model";
@@ -1928,9 +1929,16 @@ const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
  *
  * Uses the sync cache populated by `fetchModelData()` during init.
  * Falls back to sensible defaults if the cache isn't warm yet.
+ *
+ * `providerID` (when known from the request route) selects the
+ * provider-qualified pricing entry so a bare id published by many providers at
+ * different cache prices (e.g. `deepseek/deepseek-v4-flash` on openrouter vs
+ * zenmux) is priced from the provider the session is ACTUALLY routed to — the
+ * flat map is last-write-wins across providers and would otherwise corrupt
+ * `cacheReadCost` → `computeLayer0Cap`.
  */
-function getModelSpec(model: string): ModelSpec {
-  const entry = getModelEntrySync(model);
+function getModelSpec(model: string, providerID?: string): ModelSpec {
+  const entry = getModelEntrySyncForProvider(providerID, model);
   return {
     context: entry.limit?.context ?? DEFAULT_MODEL_SPEC.context,
     output: entry.limit?.output ?? DEFAULT_MODEL_SPEC.output,
@@ -6881,7 +6889,14 @@ async function handleConversationTurn(
   // getModelEntrySync sites — worker selection, cost metrics — intentionally
   // keep using the sync fallback on the very first turn; they self-correct.)
   await ensureModelDataReady();
-  const modelSpec = getModelSpec(req.model);
+  // Price the session model from the provider it is actually routed to (the
+  // X-Lore-Provider header), not the flat last-write-wins entry — a bare id
+  // published by several providers at different cache prices would otherwise
+  // corrupt cacheReadCost → computeLayer0Cap.
+  const modelSpec = getModelSpec(
+    req.model,
+    extractProviderHeader(req.rawHeaders),
+  );
   const cfg = loreConfig();
 
   // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.

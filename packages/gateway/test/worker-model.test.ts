@@ -14,6 +14,7 @@ import {
   isModelDataLoaded,
   getModelEntry,
   getModelEntrySync,
+  getModelEntrySyncForProvider,
   getWorkerModel,
   resetWorkerModelState,
   clearModelDataCache,
@@ -1983,6 +1984,24 @@ describe("lineage-aware worker selection (aggregator providers)", () => {
     expect(result?.modelID).toBe("anthropic/claude-haiku-4.5");
   });
 
+  test("when the ENTIRE claude lineage is blocklisted, echoes the session model — never crosses to a different vendor", async () => {
+    await warm(openrouterResponse());
+    markWorkerIncapable("openrouter", "anthropic/claude-sonnet-5");
+    markWorkerIncapable("openrouter", "anthropic/claude-sonnet-4.6");
+    markWorkerIncapable("openrouter", "anthropic/claude-haiku-4.5");
+    const result = getWorkerModel({
+      providerID: "openrouter",
+      model: "anthropic/claude-opus-4.8",
+    });
+    // A session WITH a known vendor lineage must NOT fall through to the legacy
+    // global-cheapest path (which could pick mistralai/... or a cohere:free);
+    // it echoes the session model instead. Mutation: fall through to legacy on
+    // lineage exhaustion → picks a non-claude vendor → RED.
+    expect(result?.modelID).toBe("anthropic/claude-opus-4.8");
+    expect(result?.modelID).not.toBe("mistralai/mistral-large");
+    expect(result?.modelID).not.toBe("cohere/north-mini-code:free");
+  });
+
   test("memo invalidation: resolve → blocklist → resolve returns a DIFFERENT model", async () => {
     await warm(openrouterResponse());
     const first = getWorkerModel({
@@ -2141,5 +2160,108 @@ describe("lineage-aware worker selection (aggregator providers)", () => {
       model: "expensive-model",
     });
     expect(result?.modelID).toBe("cheap-model");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Provider-qualified pricing: same bare id at different prices per provider
+//
+// REGRESSION: getModelEntrySync reads a flat last-write-wins map, so a bare id
+// (e.g. `deepseek/deepseek-v4-flash`) published by openrouter, zenmux, and
+// alibaba-cn at different cache_read prices gets priced with whichever provider
+// appeared LAST in the models.dev JSON — corrupting a session's
+// cacheReadCostPerToken -> computeLayer0Cap. getModelEntrySyncForProvider reads
+// the routed provider's real price.
+// ---------------------------------------------------------------------------
+
+describe("provider-qualified pricing (getModelEntrySyncForProvider)", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  const LIMIT = { context: 200_000, output: 64_000 };
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    resetWorkerModelState();
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    resetWorkerModelState();
+  });
+
+  async function warm(): Promise<void> {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+            openrouter: {
+              api: "https://openrouter.ai/api/v1",
+              models: {
+                "deepseek/deepseek-v4-flash": {
+                  id: "deepseek/deepseek-v4-flash",
+                  cost: { input: 0.098, output: 0.4, cache_read: 0.0196 },
+                  limit: LIMIT,
+                },
+              },
+            },
+            // Published LAST -> wins the flat last-write-wins map.
+            zenmux: {
+              api: "https://zenmux.example.com/v1",
+              models: {
+                "deepseek/deepseek-v4-flash": {
+                  id: "deepseek/deepseek-v4-flash",
+                  cost: { input: 0.14, output: 0.6, cache_read: 0.0028 },
+                  limit: LIMIT,
+                },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+    resetWorkerModelState();
+    await fetchModelData();
+  }
+
+  test("provider-qualified lookup returns the ROUTED provider's price, not last-write-wins", async () => {
+    await warm();
+    // Mutation: revert getModelSpec to bare getModelEntrySync / drop the
+    // qualified branch -> this returns zenmux's 0.0028 -> RED.
+    const or = getModelEntrySyncForProvider(
+      "openrouter",
+      "deepseek/deepseek-v4-flash",
+    );
+    expect(or.cost?.cache_read).toBe(0.0196);
+
+    const zm = getModelEntrySyncForProvider(
+      "zenmux",
+      "deepseek/deepseek-v4-flash",
+    );
+    expect(zm.cost?.cache_read).toBe(0.0028);
+  });
+
+  test("bare getModelEntrySync is unchanged (last-write-wins across providers)", async () => {
+    await warm();
+    // zenmux appears last -> its price wins the flat map. Documents that the
+    // fix is additive and does not alter the legacy bare lookup.
+    expect(
+      getModelEntrySync("deepseek/deepseek-v4-flash").cost?.cache_read,
+    ).toBe(0.0028);
+  });
+
+  test("falls back to the bare lookup when provider is undefined or unknown", async () => {
+    await warm();
+    expect(
+      getModelEntrySyncForProvider(undefined, "deepseek/deepseek-v4-flash").cost
+        ?.cache_read,
+    ).toBe(0.0028);
+    // Unknown provider -> no qualified entry -> bare fallback (last-write-wins).
+    expect(
+      getModelEntrySyncForProvider(
+        "no-such-provider",
+        "deepseek/deepseek-v4-flash",
+      ).cost?.cache_read,
+    ).toBe(0.0028);
   });
 });
