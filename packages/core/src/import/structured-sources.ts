@@ -8,8 +8,8 @@
  * written directly to the knowledge store via `importStructuredEntries`.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEngramExport } from "./sources/engram";
 import {
@@ -93,12 +93,24 @@ export const engramSource: StructuredSource = {
     if (opts?.filePath) {
       raw = readJson(opts.filePath);
     } else if (hasBinary("engram")) {
-      // `engram export` writes the ExportData JSON to stdout.
-      const out = execFileSync("engram", ["export"], {
-        encoding: "utf8",
-        maxBuffer: 256 * 1024 * 1024,
-      });
-      raw = JSON.parse(out);
+      // `engram export [file]` writes the ExportData JSON to a FILE (default
+      // `engram-export.json`) and prints a human-readable summary ("Exported to
+      // …", possibly preceded by an "Update available" banner) to stdout — it
+      // does NOT emit JSON on stdout. So we hand it an explicit temp file, then
+      // read and parse that file. Parsing stdout fails with e.g.
+      // `Unexpected token 'E', "Exported t"... is not valid JSON` — or, when the
+      // update banner precedes the summary, `"Update ava"...` (issue #1398).
+      const dir = mkdtempSync(join(tmpdir(), "lore-engram-"));
+      const exportFile = join(dir, "engram-export.json");
+      try {
+        execFileSync("engram", ["export", exportFile], {
+          stdio: "ignore",
+          maxBuffer: 256 * 1024 * 1024,
+        });
+        raw = readJson(exportFile);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     } else {
       throw new Error(
         "Engram not found. Install the `engram` binary or pass --file <export.json> " +
