@@ -295,6 +295,36 @@ export function workerThinkingOnByDefault(model: { modelID: string }): boolean {
 }
 
 /**
+ * Decide whether a worker model MAY spend hidden reasoning tokens against its
+ * output budget on a plain (no-effort) call — the signal that gates the
+ * reasoning-headroom floor (`workerReasoningHeadroomFloor`).
+ *
+ * This is DELIBERATELY BROADER than `workerThinkingOnByDefault`. That predicate
+ * answers "must we send `thinking:{type:"disabled"}`?" and is intentionally
+ * narrow (only `toggle`-typed reasoning is on-by-default on the Anthropic wire).
+ * But budget headroom is about whether the model reasons AT ALL by default when
+ * reached over a protocol with no suppression lever (OpenAI/Gemini) — which is
+ * true for `effort`-typed and `budget_tokens`-typed reasoning models too.
+ *
+ * Real regression this fixes: models.dev lists OpenRouter's
+ * `anthropic/claude-sonnet-5` with `reasoning_options:[{type:"effort",…}]` (NO
+ * `toggle`). `workerThinkingOnByDefault` returns false for it (no toggle), so the
+ * floor never applied — and the curator's tiny 2048 budget was burned on hidden
+ * reasoning, returning empty `finish_reason:"length"` (observed in production
+ * after the #1418 deploy). ANY non-empty `reasoning_options` → the model can
+ * reason → floor applies. Empty/absent `reasoning_options` falls back to the
+ * Claude-id heuristic (offline-safe, same as `workerThinkingOnByDefault`).
+ *
+ * A floor, never a charge: a non-reasoning model still bills only what it emits,
+ * so an over-broad true here costs nothing; a false NEGATIVE re-breaks workers.
+ */
+export function workerModelReasons(model: { modelID: string }): boolean {
+  const opts = getModelEntrySync(model.modelID).reasoning_options;
+  if (Array.isArray(opts) && opts.length > 0) return true;
+  return isAnthropicClaudeModel(model.modelID);
+}
+
+/**
  * models.dev-driven check: does this model reject a non-default sampling
  * `temperature`? True for the deprecated-sampling generation (claude-sonnet-5,
  * claude-opus-4-7/4-8, gpt-5, o3, …) where `temperature` is `false`. Used to
@@ -444,9 +474,9 @@ const DEFAULT_REASONING_MODEL_BUDGET = 8192;
  *
  * - Explicit reasoning effort set → `anthropicThinkingBudget(effort) +
  *   THINKING_OUTPUT_HEADROOM` (the caller asked the model to reason; make room).
- * - No effort, but the model reasons on by default (models.dev
- *   `reasoning_options` toggle, or the Claude fallback heuristic via
- *   `workerThinkingOnByDefault`) → `DEFAULT_REASONING_MODEL_BUDGET +
+ * - No effort, but the model reasons by default (`workerModelReasons` — ANY
+ *   non-empty models.dev `reasoning_options`, i.e. toggle/effort/budget_tokens,
+ *   or the Claude-id fallback) → `DEFAULT_REASONING_MODEL_BUDGET +
  *   THINKING_OUTPUT_HEADROOM`. This is the case the length-retry alone could not
  *   solve: the workers pass tiny budgets (~1–8K) and a reasoning model burns
  *   most of it on reasoning, so the FIRST attempt must already carry headroom.
@@ -461,7 +491,7 @@ function workerReasoningHeadroomFloor(
 ): number {
   const explicitBudget = anthropicThinkingBudget(reasoningEffort);
   if (explicitBudget != null) return explicitBudget + THINKING_OUTPUT_HEADROOM;
-  if (workerThinkingOnByDefault(model)) {
+  if (workerModelReasons(model)) {
     return DEFAULT_REASONING_MODEL_BUDGET + THINKING_OUTPUT_HEADROOM;
   }
   return 0;

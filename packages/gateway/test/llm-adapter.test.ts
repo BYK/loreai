@@ -30,6 +30,7 @@ import {
   isThinkingUnsupportedModel,
   markThinkingUnsupported,
   workerThinkingOnByDefault,
+  workerModelReasons,
   modelRejectsTemperatureByData,
   _resetTemperatureUnsupportedModels,
   _resetThinkingUnsupportedModels,
@@ -2299,6 +2300,44 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       );
     });
 
+    test("workerModelReasons: ANY reasoning_options → true (broader than the toggle-only thinking predicate)", () => {
+      _setModelDataForTest({
+        "toggle-model": {
+          id: "toggle-model",
+          reasoning_options: [{ type: "toggle" }],
+        },
+        "effort-model": {
+          id: "effort-model",
+          reasoning_options: [{ type: "effort" }],
+        },
+        "budget-model": {
+          id: "budget-model",
+          reasoning_options: [{ type: "budget_tokens" }],
+        },
+        "plain-model": { id: "plain-model", reasoning: false },
+      });
+      // The reasoning-headroom floor must fire for EVERY reasoning shape, not
+      // just toggle — an effort-typed model (OpenRouter's claude-sonnet-5) still
+      // burns hidden tokens by default. This is the divergence from
+      // workerThinkingOnByDefault (toggle-only) that the production bug exposed.
+      expect(workerModelReasons({ modelID: "toggle-model" })).toBe(true);
+      expect(workerModelReasons({ modelID: "effort-model" })).toBe(true);
+      expect(workerModelReasons({ modelID: "budget-model" })).toBe(true);
+      expect(workerModelReasons({ modelID: "plain-model" })).toBe(false);
+      // Explicit divergence: effort-typed is NOT thinking-on-by-default (no
+      // opt-out param) but DOES reason (needs the budget floor).
+      expect(workerThinkingOnByDefault({ modelID: "effort-model" })).toBe(
+        false,
+      );
+      expect(workerModelReasons({ modelID: "effort-model" })).toBe(true);
+    });
+
+    test("workerModelReasons: falls back to the Claude-id heuristic when models.dev has no data", () => {
+      clearModelDataCache();
+      expect(workerModelReasons({ modelID: "claude-sonnet-5" })).toBe(true);
+      expect(workerModelReasons({ modelID: "MiniMax-M1" })).toBe(false);
+    });
+
     test("workerThinkingOnByDefault: falls back to the Claude-id heuristic when models.dev has no data (offline safety)", () => {
       clearModelDataCache(); // no models.dev data available
       // A models.dev outage must NOT stop us disabling thinking on Claude models.
@@ -2832,6 +2871,45 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
     // No explicit effort → reasoning_effort must NOT be sent (the model reasons
     // on its own; we only give it room).
+    expect(bodyOf(0)).not.toHaveProperty("reasoning_effort");
+  });
+
+  test("floor applies to an EFFORT-typed reasoning model with no toggle and no 'claude' id (regression: production curator truncation storm)", async () => {
+    // The exact production regression that survived #1418: models.dev lists
+    // OpenRouter's anthropic/claude-sonnet-5 with reasoning_options:[{effort}]
+    // (NO toggle). workerThinkingOnByDefault returns false (toggle-only), so the
+    // floor never applied and the curator's 2048 budget was burned on hidden
+    // reasoning → empty finish_reason:"length". The floor must key off the
+    // broader workerModelReasons (ANY reasoning_options), NOT the toggle-only
+    // predicate. Uses a NON-"claude" id so the Claude fallback CANNOT mask the
+    // bug — the ONLY signal is the effort-typed reasoning_options.
+    // Mutation: revert the floor gate to workerThinkingOnByDefault → false for
+    // this effort-only entry → first call sends raw 2048 → RED.
+    _setModelDataForTest({
+      "acme/reasoner-x": {
+        id: "acme/reasoner-x",
+        cost: { input: 1, output: 3 },
+        limit: { context: 200_000, output: 64_000 },
+        reasoning_options: [{ type: "effort" }],
+      },
+    });
+    mockFetch.mockResolvedValueOnce(openAISuccess("ok"));
+
+    await createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "sk-or-test" }),
+      { providerID: "openrouter", modelID: "acme/reasoner-x" },
+    ).prompt("system", "user", {
+      sessionID: "sess-effort-typed-floor",
+      workerID: "lore-curator",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+      maxTokens: 2048,
+    });
+
+    expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
+    // Model reasons by default but we set no effort → do NOT force reasoning_effort.
     expect(bodyOf(0)).not.toHaveProperty("reasoning_effort");
   });
 
