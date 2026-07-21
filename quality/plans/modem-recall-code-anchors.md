@@ -40,6 +40,14 @@ Source: https://modem.dev/blog/how-coding-agents-read-your-code (Ben Vinegar, Mo
   `curator-retitle.test.ts` (apply-path threading, collision via curator, backward-compat).
   Collision guard mutation-verified.
 - ⬜ Remaining (follow-ups): D2c (entry↔file association), D3 (blog post).
+- 🔨 **D2c split into 3 sub-PRs** (matches #627 phasing):
+  - PR-1 (foundation, no behavior change): `tool_calls.input_path` (migration v75 + recovery def),
+    `extractFilePath()` helper in tool-trace.ts (string+object+plaintext shapes), populated in
+    `recordToolCalls` seed insert via COALESCE (re-seed never clobbers). Tests:
+    `tool-file-provenance.test.ts` (extractFilePath unit + input_path integration, mutation-verified).
+  - PR-2 (core): `knowledge_file_refs` table + curator "files touched" context block + create-path
+    population + recall rendering. (open design decision: heuristic all-touched vs curator-selected.)
+  - PR-3 (optional/deferred): git-diff `gitHead..HEAD` file-change staleness → confidence decay.
 
 ---
 

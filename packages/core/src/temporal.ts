@@ -7,6 +7,7 @@ import * as log from "./log";
 import * as embedding from "./embedding";
 import {
   classifyToolError,
+  extractFilePath,
   isVerifierCall,
   MAX_ERROR_MESSAGE_LEN,
 } from "./tool-trace";
@@ -188,20 +189,20 @@ export function recordToolCalls(input: {
   // in order and fires ON CONFLICT row-by-row, so a duplicate call_id within one
   // batch resolves identically to the old sequential loop.
   if (seeds.length) {
-    const COLS_PER_ROW = 11;
+    const COLS_PER_ROW = 12;
     // Chunk the multi-row INSERT so a pathological batch can never exceed
     // SQLite's bound-variable ceiling. We use the conservative ~900-param budget
     // from the #796 chunking convention in db.ts (portable across SQLite builds,
     // whose historical minimum ceiling is 999) — well under the ≥3.32 default of
-    // 32766. 81 rows × 11 cols = 891 params. A real turn has far fewer tool_use
+    // 32766. 75 rows × 12 cols = 900 params. A real turn has far fewer tool_use
     // parts; this only matters for a pathological batch.
-    const CHUNK = Math.floor(900 / COLS_PER_ROW); // 81
+    const CHUNK = Math.floor(900 / COLS_PER_ROW); // 75
     const rowSql = `(${Array.from({ length: COLS_PER_ROW }, () => "?").join(", ")})`;
     for (let i = 0; i < seeds.length; i += CHUNK) {
       const batch = seeds.slice(i, i + CHUNK);
       const seedStmt = db().query(
         `INSERT INTO tool_calls
-           (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier)
+           (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier, input_path)
          VALUES ${Array.from({ length: batch.length }, () => rowSql).join(", ")}
          ON CONFLICT(call_id) DO UPDATE SET
            status = CASE WHEN tool_calls.status = 'pending' THEN excluded.status ELSE tool_calls.status END,
@@ -210,7 +211,10 @@ export function recordToolCalls(input: {
            duration_ms = COALESCE(excluded.duration_ms, tool_calls.duration_ms),
            -- verifier is derived from the tool_use input (stable across re-seeds);
            -- keep the first non-null classification.
-           verifier = COALESCE(tool_calls.verifier, excluded.verifier)`,
+           verifier = COALESCE(tool_calls.verifier, excluded.verifier),
+           -- input_path is likewise derived from the (stable) tool_use input;
+           -- keep the first non-null path so a re-seed never clobbers it.
+           input_path = COALESCE(tool_calls.input_path, excluded.input_path)`,
       );
       const params: Array<string | number | null> = [];
       for (const p of batch) {
@@ -227,6 +231,7 @@ export function recordToolCalls(input: {
           outcome.duration,
           createdAt,
           isVerifierCall(p.state.input) ? 1 : 0,
+          extractFilePath(p.state.input) ?? null,
         );
       }
       seedStmt.run(...params);

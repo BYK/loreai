@@ -165,6 +165,80 @@ export function extractCommand(input: unknown): string | null {
   return null;
 }
 
+// A path-like token: one or more slash-separated segments ending in a
+// dotted extension of 1-5 chars (e.g. `src/auth/jwt.ts`, `db.ts` won't match
+// without a slash — the plain-text fallback needs at least one dir segment to
+// avoid grabbing prose words). Used only as a fallback when the input isn't
+// structured JSON.
+const PATH_FALLBACK_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w{1,5}/;
+
+// ReDoS mitigation. The plain-text fallback runs on a RAW string input — which
+// happens when a tool call's arguments failed to JSON-parse (streaming
+// truncation / malformed blob) and the host stored the raw string in
+// `state.input`. PATH_FALLBACK_RE's nested quantifiers backtrack super-linearly
+// on a long run of slash-separated tokens with no matching extension (measured
+// ~8s on a crafted 64KB `a/a/a/…` blob — a 64KB slice cap alone does NOT help,
+// since the whole blob is one pathological token). recordToolCalls runs
+// synchronously inside a SQLite savepoint on the hot request path, so an
+// unguarded match would stall the event loop AND hold the write lock. Defenses,
+// all O(n): (1) skip when there is no `/` at all; (2) scan only the first few KB
+// (a real path appears early and is short); (3) split on whitespace and only run
+// the regex on individual short tokens — a pathological no-whitespace blob is
+// one giant token that exceeds PATH_TOKEN_MAX and is skipped, so the backtracking
+// regex never sees adversarial input. A real path is a short, whitespace-bounded
+// token, so this never drops a legitimate match.
+const PATH_SCAN_LIMIT = 8192;
+const PATH_TOKEN_MAX = 260; // generous vs the 255-char component limit on most FSes
+
+/**
+ * Best-effort extraction of the source-file path a tool call acted on, from its
+ * `input` (host-shaped, hence `unknown`). Handles the common file-tool shapes
+ * (`{ path }` / `{ filePath }` / `{ file }` — the keys used by Read/Edit/Write/
+ * read_file/edit_file/write_to_file across hosts), a JSON string of the same,
+ * and a plain-text path fallback. Returns undefined when no path is recoverable
+ * (bash/grep/task/etc.), so the caller stores NULL. This is provenance only —
+ * a best-effort signal, never load-bearing, so a miss is always safe.
+ */
+export function extractFilePath(input: unknown): string | undefined {
+  const fromObject = (o: Record<string, unknown>): string | undefined => {
+    for (const key of ["path", "filePath", "file"] as const) {
+      const v = o[key];
+      if (typeof v === "string" && v.length > 0) return v;
+    }
+    return undefined;
+  };
+  if (input && typeof input === "object") {
+    return fromObject(input as Record<string, unknown>);
+  }
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input);
+      if (parsed && typeof parsed === "object") {
+        return fromObject(parsed as Record<string, unknown>);
+      }
+    } catch {
+      // not JSON — fall through to the plain-text path heuristic
+    }
+    // The fallback regex requires a `/`; a `/`-free string can never match.
+    if (input.indexOf("/") === -1) return undefined;
+    // Bound the scan, then run the backtracking regex only on short,
+    // whitespace-bounded tokens (see PATH_SCAN_LIMIT/PATH_TOKEN_MAX notes).
+    for (const token of input.slice(0, PATH_SCAN_LIMIT).split(/\s+/)) {
+      if (
+        token.length === 0 ||
+        token.length > PATH_TOKEN_MAX ||
+        token.indexOf("/") === -1
+      ) {
+        continue;
+      }
+      const match = token.match(PATH_FALLBACK_RE)?.[0];
+      if (match) return match;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 /**
  * True when a tool call's `input` invokes a recognized verifier. The command is
  * split into segments on the shell chaining/pipe operators (`&&`, `||`, `;`,

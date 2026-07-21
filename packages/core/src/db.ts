@@ -1877,6 +1877,18 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (logical_id, kind, anchor)
   );
   `,
+
+  `
+  -- Version 75: tool_calls.input_path — the source-file path a file-operation
+  -- tool acted on (Read/Edit/Write/etc.), extracted from the tool_use input at
+  -- record time (#627 Step 1; Modem "how coding agents read your code"). This is
+  -- session→file PROVENANCE: which files a session actually touched, distinct
+  -- from the file:line anchors a knowledge entry's PROSE cites (knowledge_ref_
+  -- anchor, v74). NULL for non-file tools (bash, grep, task, …) and when no path
+  -- is recoverable from the input. Foundation for associating knowledge entries
+  -- with the files that produced them (D2c).
+  ALTER TABLE tool_calls ADD COLUMN input_path TEXT;
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3377,6 +3389,12 @@ function recoverMissingObjects(database: Database) {
       .all() as Array<{ name: string }>;
     if (!tcols.some((c) => c.name === "verifier")) {
       database.exec("ALTER TABLE tool_calls ADD COLUMN verifier INTEGER;");
+    }
+    // Version 75: tool_calls.input_path (file provenance, #627 Step 1 / D2c).
+    // Same recovery rationale as verifier — CREATE TABLE IF NOT EXISTS cannot
+    // add a missing column to a pre-existing table.
+    if (!tcols.some((c) => c.name === "input_path")) {
+      database.exec("ALTER TABLE tool_calls ADD COLUMN input_path TEXT;");
     }
   }
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
