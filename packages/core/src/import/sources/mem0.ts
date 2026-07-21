@@ -16,6 +16,7 @@
  * the mem0 point id kept as `external_id` for idempotency.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   parseImportDoc,
@@ -349,9 +350,12 @@ async function defaultProbe(
 }
 
 /** Default embedded-store base dir (`~/.mem0` sibling `/tmp/qdrant`, or cwd). */
-function defaultEmbeddedDirs(): string[] {
+export function defaultEmbeddedDirs(): string[] {
   const dirs = ["/tmp/qdrant"];
-  const home = process.env.HOME;
+  // Use os.homedir() (cross-platform) — process.env.HOME is undefined on
+  // Windows, which would make this resolver miss the ~/.mem0 store that
+  // mem0Source.detect() (also os.homedir()) successfully found.
+  const home = homedir();
   if (home) dirs.push(join(home, ".mem0"));
   return dirs;
 }

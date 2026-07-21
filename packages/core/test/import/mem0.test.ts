@@ -1,6 +1,7 @@
 import { describe, test, expect, afterAll } from "vitest";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -10,6 +11,7 @@ import {
   fetchMem0ServerMemories,
   readEmbeddedStorage,
   embeddedStorageCandidates,
+  defaultEmbeddedDirs,
   parseMem0File,
   resolveMem0Doc,
 } from "../../src/import/sources/mem0";
@@ -287,6 +289,21 @@ describe("readEmbeddedStorage (native pickle reader)", () => {
     const cands = embeddedStorageCandidates("/base");
     expect(cands).toContain("/base/collection/mem0/storage.sqlite");
     expect(cands).toContain("/base/collection/openmemory/storage.sqlite");
+  });
+
+  test("defaultEmbeddedDirs resolves ~/.mem0 via os.homedir even when $HOME is unset (Windows)", () => {
+    // Regression (Seer): the resolver used process.env.HOME (undefined on
+    // Windows) while detect() used os.homedir(), so a detected ~/.mem0 store
+    // was then missed → false "No mem0 data found". defaultEmbeddedDirs must
+    // use os.homedir() and not depend on $HOME.
+    const prev = process.env.HOME;
+    try {
+      delete process.env.HOME;
+      const dirs = defaultEmbeddedDirs();
+      expect(dirs).toContain(join(homedir(), ".mem0"));
+    } finally {
+      if (prev !== undefined) process.env.HOME = prev;
+    }
   });
 
   test("uses the point's decoded UUID, NOT the base64-pickled id column (real mem0 2.0.12)", async () => {

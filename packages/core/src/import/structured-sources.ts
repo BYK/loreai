@@ -12,7 +12,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseEngramExport } from "./sources/engram";
-import { resolveMem0Doc } from "./sources/mem0";
+import {
+  defaultEmbeddedDirs,
+  embeddedStorageCandidates,
+  resolveMem0Doc,
+} from "./sources/mem0";
 import { safeParseImportDoc, type LoreImportDoc } from "./schema";
 
 export type StructuredSourceName = "engram" | "mem0";
@@ -121,15 +125,11 @@ export const mem0Source: StructuredSource = {
     // Embedded-default store artifacts (cheap, synchronous existence checks).
     // A running Qdrant/mem0 server is detected at produceDoc time (async probe);
     // detection here just surfaces the source when a local store is present.
-    const dirs = ["/tmp/qdrant"];
-    const home = homedir();
-    if (home) dirs.push(join(home, ".mem0"));
-    for (const dir of dirs) {
-      if (
-        existsSync(join(dir, "collection", "mem0", "storage.sqlite")) ||
-        existsSync(join(dir, "collection", "openmemory", "storage.sqlite"))
-      ) {
-        return true;
+    // Reuse the resolver's dir list + candidate paths so detect() and
+    // resolveMem0Doc can never drift on where the embedded store lives.
+    for (const dir of defaultEmbeddedDirs()) {
+      for (const storagePath of embeddedStorageCandidates(dir)) {
+        if (existsSync(storagePath)) return true;
       }
     }
     return false;

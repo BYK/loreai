@@ -67,6 +67,7 @@ export {
   fetchMem0ServerMemories,
   readEmbeddedStorage,
   embeddedStorageCandidates,
+  defaultEmbeddedDirs,
   type Mem0Record,
   type Mem0ResolveOptions,
 } from "./sources/mem0";
