@@ -51,6 +51,17 @@ function offtout(value: number): Buffer {
   return buf;
 }
 
+/**
+ * Encode a negative value in zig-bsdiff sign-magnitude form: magnitude in the
+ * lower 63 bits, sign in bit 63 (matches `offtin`, which is NOT two's
+ * complement). `offtoutNeg(5)` decodes to -5.
+ */
+function offtoutNeg(magnitude: number): Buffer {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(BigInt(magnitude) | (1n << 63n), 0);
+  return buf;
+}
+
 /** Build a single 24-byte control tuple. */
 function ctrl(readDiffBy: number, readExtraBy: number, seekBy: number): Buffer {
   return Buffer.concat([
@@ -311,6 +322,107 @@ describe("applyPatch", () => {
 
     const oldPath = writeTemp("old.bin", old);
     const destPath = join(WORK_DIR, "new.bin");
+    const hash = await applyPatch(oldPath, patch, destPath);
+
+    const written = await readFile(destPath);
+    expect(written).toEqual(expected);
+    expect(hash).toBe(sha256(expected));
+  });
+
+  it("zero-fills a window that starts before the file (negative oldpos)", async () => {
+    // Drive oldpos negative via a negative seek larger than the bytes consumed,
+    // then a diff-read whose window straddles the start-of-file boundary. The
+    // leading out-of-range bytes must read as zero (FileOldReader.read outOffset
+    // = start - pos path). offtin uses sign-magnitude, so encode -N explicitly.
+    const old = Buffer.from([100, 101, 102, 103]);
+    // tuple 1: read 2 diff bytes at oldpos 0 -> oldpos=2; seek -5 -> oldpos=-3.
+    // tuple 2: read 4 diff bytes at oldpos -3 -> old[-3..0] are zero, old[0]=100.
+    const control = Buffer.concat([
+      ctrl(2, 0, 0),
+      Buffer.concat([offtout(0), offtout(0), offtoutNeg(5)]), // seek -5
+      ctrl(4, 0, 0),
+    ]);
+    const diff = Buffer.from([1, 1, 10, 20, 30, 40]);
+    // Output: [100+1,101+1] then [0+10,0+20,0+30,100+40] (oldpos -3,-2,-1,0)
+    const expected = Buffer.from([101, 102, 10, 20, 30, 140]);
+    const patch = buildPatch({
+      control,
+      diff,
+      extra: Buffer.alloc(0),
+      newSize: 6,
+    });
+
+    const oldPath = writeTemp("neg-old.bin", old);
+    const destPath = join(WORK_DIR, "neg-new.bin");
+    const hash = await applyPatch(oldPath, patch, destPath);
+
+    const written = await readFile(destPath);
+    expect(written).toEqual(expected);
+    expect(hash).toBe(sha256(expected));
+  });
+
+  it("serves a base larger than the 1 MiB read-ahead block across straddles and a backward seek", async () => {
+    // Base spans 3 read-ahead blocks (1 MiB each). Read in SMALL windows so the
+    // FileOldReader cache is actually used (windows <= block size), forcing:
+    //  - a refill when a window crosses a 1 MiB boundary,
+    //  - a refill when a window jumps into a later block,
+    //  - a BACKWARD jump into an already-evicted earlier block (stale-cache trap).
+    // A broken cache (never refills / ignores block bounds) serves wrong bytes
+    // for the later/backward reads and fails the hash.
+    const BLOCK = 1024 * 1024;
+    const size = 3 * BLOCK + 512; // 3 full blocks + a tail
+    const old = Buffer.alloc(size);
+    for (let i = 0; i < size; i++) old[i] = (i * 2654435761) & 0xff;
+
+    // Windows (each a diff-read of `len` at the current oldpos), with seeks to
+    // move oldpos between them. offtin seek is applied AFTER advancing oldpos by
+    // the diff length, so seek = targetNextPos - (posAfterThisRead).
+    type Win = { pos: number; len: number };
+    const wins: Win[] = [
+      { pos: 0, len: 64 }, // block 0
+      { pos: BLOCK - 16, len: 32 }, // straddle block 0/1 -> refill
+      { pos: 2 * BLOCK + 100, len: 64 }, // jump to block 2 -> refill
+      { pos: 10, len: 64 }, // BACKWARD to block 0 (evicted) -> refill
+      { pos: BLOCK + 5, len: 64 }, // block 1 -> refill
+    ];
+
+    // Emit seek-first semantics: a zero-read seek tuple to the window start,
+    // then the diff-read tuple. The control loop applies the diff read at the
+    // current oldpos, then applies the seek — so the seek must precede the read.
+    const control2: Buffer[] = [];
+    const diffParts: Buffer[] = [];
+    const expectedParts: number[] = [];
+    let cur = 0;
+    for (const w of wins) {
+      const seekTo = w.pos - cur;
+      control2.push(
+        Buffer.concat([
+          offtout(0),
+          offtout(0),
+          seekTo >= 0 ? offtout(seekTo) : offtoutNeg(-seekTo),
+        ]),
+      );
+      control2.push(ctrl(w.len, 0, 0));
+      const d = Buffer.alloc(w.len);
+      for (let i = 0; i < w.len; i++) {
+        d[i] = (w.pos * 3 + i * 7) & 0xff;
+        expectedParts.push((old[w.pos + i] + d[i]) % 256);
+      }
+      diffParts.push(d);
+      cur = w.pos + w.len;
+    }
+
+    const totalLen = wins.reduce((s, w) => s + w.len, 0);
+    const patch = buildPatch({
+      control: Buffer.concat(control2),
+      diff: Buffer.concat(diffParts),
+      extra: Buffer.alloc(0),
+      newSize: totalLen,
+    });
+    const expected = Buffer.from(expectedParts);
+
+    const oldPath = writeTemp("big-old.bin", old);
+    const destPath = join(WORK_DIR, "big-new.bin");
     const hash = await applyPatch(oldPath, patch, destPath);
 
     const written = await readFile(destPath);
