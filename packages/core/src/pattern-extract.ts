@@ -140,6 +140,46 @@ const PATTERNS: PatternDef[] = [
 ];
 
 /**
+ * A pattern-extracted title is `prefix + raw capture group` bounded only by
+ * `(.+?)(?:\.|,|$)`, so a capture that runs to the first comma/period/EOL can
+ * drag in long multi-clause prose — producing junk titles like
+ * "Always the same: the agent never called the save step in the first" or
+ * "Chose checkout under different path, NULL git_remote); 4) converge…".
+ *
+ * A discoverable title (the article's thesis, applied to Lore's own memory) is a
+ * short, specific term a future session will actually search — not a sentence.
+ * So a produced title is rejected as NOISE when it is too long to be a
+ * name/short phrase, or carries sentence-structure punctuation that only appears
+ * when prose leaked past the intended boundary. Rejecting is safe: pattern-
+ * extract is a best-effort seed, and skipping a bad mint is always better than
+ * creating a low-discoverability entry the curator later has to clean up (and
+ * whose delete busts the prompt cache).
+ *
+ * The gate is applied to the FINAL title, not individual captures, because some
+ * patterns capture a trailing clause they never put in the title (e.g. the
+ * "because Y" tail of "going with X because Y") — gating that tail would wrongly
+ * drop a perfectly good "Going with X".
+ */
+const MAX_TITLE_WORDS = 10;
+const MAX_TITLE_CHARS = 72;
+// Structure punctuation that a clean title never contains, but multi-clause
+// prose leaked past the `,`/`.` boundary does: clause separators (; :) and
+// parentheses. (An enumerated-list marker like "4)" is already caught by the
+// bare `)`, so no separate digit-paren alternative is needed.)
+const TITLE_NOISE_RE = /[;:()]/;
+// The ONLY title-prefix a titleFn adds that legitimately carries punctuation is
+// the `Convention: ` label — strip it before the noise scan so its colon isn't
+// mistaken for leaked prose. (Everything after it is still scanned.)
+const SAFE_TITLE_PREFIX_RE = /^Convention: /;
+
+function isNoisyTitle(title: string): boolean {
+  if (title.length > MAX_TITLE_CHARS) return true;
+  if (title.split(/\s+/).length > MAX_TITLE_WORDS) return true;
+  if (TITLE_NOISE_RE.test(title.replace(SAFE_TITLE_PREFIX_RE, ""))) return true;
+  return false;
+}
+
+/**
  * Extract decision/preference patterns from distillation observations text.
  *
  * Returns structured entries suitable for `ltm.create()`. Deduplicates by
@@ -174,6 +214,10 @@ export function extractPatterns(observations: string): ExtractedPattern[] {
         continue;
 
       const title = titleFn(current);
+      // Skip noisy titles: prose that leaked past the `,`/`.` boundary makes a
+      // long, unsearchable title. A discoverable title names its subject in a few
+      // words — not a full clause. Better to not mint than to mint junk.
+      if (isNoisyTitle(title)) continue;
       const key = title.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);

@@ -595,6 +595,85 @@ describe("extractPatterns", () => {
       expect(results).toHaveLength(0);
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Noisy-title gating (D1c): a capture bounded by `,`/`.`/EOL can drag in
+  // multi-clause prose, producing an unsearchable title. Discoverability =
+  // short, specific terms; a bad mint is worse than no mint (the curator would
+  // otherwise have to clean it up, and its delete busts the prompt cache).
+  // -----------------------------------------------------------------------
+  describe("noisy-title rejection", () => {
+    test("rejects a title with clause punctuation (colon) — real junk example", () => {
+      // Verbatim shape of a real junk entry: an "always X" match where X ran on
+      // into a colon-joined clause.
+      const results = extractPatterns(
+        "User stated always the same: the agent never called the save step.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("rejects a title with parenthesis / enumerated-list leakage", () => {
+      // Shape of "Chose ... path, NULL git_remote); 4) converge…" junk.
+      const results = extractPatterns(
+        "Chose checkout under different path over the old one); 4) converge later.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("rejects a title with a semicolon clause separator", () => {
+      const results = extractPatterns(
+        "Decided to use a custom scheduler; it runs every tick and never blocks.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("rejects an over-long prose capture (no early comma/period)", () => {
+      const results = extractPatterns(
+        "User stated always run the entire integration and unit suite locally " +
+          "before opening any pull request against the main development branch",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("rejects a title over the CHAR cap even with few words", () => {
+      // A single very long hyphenated token → title >72 chars but only ~4 words,
+      // so this is caught by the char cap, NOT the word cap. Isolates MAX_TITLE_CHARS.
+      const results = extractPatterns(
+        "Decided to use a-very-long-hyphenated-configuration-and-secrets-management-subsystem here.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("rejects a title over the WORD cap even when short", () => {
+      // Many tiny words → title >10 words but well under 72 chars and with no
+      // clause punctuation, so this is caught by the word cap, NOT the char cap
+      // or the noise regex. Isolates MAX_TITLE_WORDS.
+      const results = extractPatterns(
+        "User stated always add one two three four five six seven eight nine ten.",
+      );
+      expect(results).toHaveLength(0);
+    });
+
+    test("still mints a clean short title (gate does not over-reject)", () => {
+      const results = extractPatterns(
+        "Chose PostgreSQL over MySQL for JSONB support.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].title).toBe(
+        "Chose PostgreSQL over MySQL for JSONB support",
+      );
+    });
+
+    test("a trailing 'because' clause does not trigger the gate (title uses X only)", () => {
+      // "going with X because Y" captures Y but never titles it — a long/ punctuated
+      // Y must NOT drop the otherwise-clean "Going with X" title.
+      const results = extractPatterns(
+        "Going with Bun because it ships a native SQLite driver; zero deps needed.",
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].title).toBe("Going with Bun");
+    });
+  });
 });
 
 describe("extractActionTags", () => {

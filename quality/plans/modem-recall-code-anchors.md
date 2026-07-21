@@ -21,9 +21,16 @@ Source: https://modem.dev/blog/how-coding-agents-read-your-code (Ben Vinegar, Mo
     neutral-on-unknown) + new `recall-code-anchors.test.ts` (rendering). 34 passing.
 - ✅ **Direction 1a (curator title guidance)** — IMPLEMENTED. `prompt.ts`: DISCOVERABLE
   TITLES section in `CURATOR_SYSTEM` + item 10 in `curatorUser` IMPORTANT list. Test in
-  `prompt.test.ts`.
-- ⬜ Remaining (follow-ups): D1b (re-titleable updates), D1c (pattern-extract titles),
-  D2c (entry↔file association), D3 (blog post).
+  `prompt.test.ts`. **Shipped in PR #1414 (merged).**
+- ✅ **Direction 1c (pattern-extract title cleanup)** — IMPLEMENTED. `pattern-extract.ts`:
+  `isNoisyTitle()` gate rejects a minted title when it exceeds a word/char cap or carries
+  clause-punctuation (`; : ( )` / `N)` enumerator) that only appears when prose leaked past
+  the `,`/`.` capture boundary. Gate is on the FINAL title (not per-capture) so a trailing
+  `because Y` clause doesn't drop a clean "Going with X"; `Convention:` prefix colon is
+  exempted. Tests in `pattern-extract.test.ts` (noisy-title rejection + no-over-reject),
+  mutation-verified.
+- ⬜ Remaining (follow-ups): D1b (re-titleable updates), D2c (entry↔file association),
+  D3 (blog post).
 
 ---
 
