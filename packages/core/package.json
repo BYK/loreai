@@ -31,6 +31,7 @@
     "@noble/hashes": "^2.2.0",
     "micromark": "^4.0.0",
     "p-limit": "7",
+    "pickleparser": "0.2.1",
     "remark": "^15.0.1",
     "sqlite-vec": "0.1.9",
     "uuidv7": "^1.1.0",

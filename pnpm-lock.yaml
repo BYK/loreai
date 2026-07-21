@@ -96,6 +96,9 @@ importers:
       p-limit:
         specifier: '7'
         version: 7.3.0
+      pickleparser:
+        specifier: 0.2.1
+        version: 0.2.1
       remark:
         specifier: ^15.0.1
         version: 15.0.1
@@ -3491,6 +3494,10 @@ packages:
 
   piccolore@0.1.3:
     resolution: {integrity: sha512-o8bTeDWjE086iwKrROaDf31K0qC/BENdm15/uH9usSC/uZjJOKb2YGiVHfLY4GhwsERiPI1jmwI2XrA7ACOxVw==}
+
+  pickleparser@0.2.1:
+    resolution: {integrity: sha512-kMzY3uFYcR6OjOqr7nV2nkaXaBsUEOafu3zgPxeD6s/2ueMfVQH8lrymcDWBPGx0OkVxGMikxQit6jgByXjwBg==}
+    hasBin: true
 
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
@@ -8379,6 +8386,8 @@ snapshots:
       split2: 4.2.0
 
   piccolore@0.1.3: {}
+
+  pickleparser@0.2.1: {}
 
   picocolors@1.1.1: {}
 

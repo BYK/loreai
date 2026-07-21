@@ -59,12 +59,26 @@ export {
 } from "./structured";
 export { parseEngramExport } from "./sources/engram";
 export {
+  resolveMem0Doc,
+  parseMem0File,
+  mem0RecordsToDoc,
+  mem0RecordToEntry,
+  scrollQdrantCollection,
+  fetchMem0ServerMemories,
+  readEmbeddedStorage,
+  embeddedStorageCandidates,
+  type Mem0Record,
+  type Mem0ResolveOptions,
+} from "./sources/mem0";
+export {
   engramSource,
+  mem0Source,
   getStructuredSources,
   getStructuredSource,
   detectStructuredSources,
   type StructuredSource,
   type StructuredSourceName,
+  type ProduceDocOptions,
 } from "./structured-sources";
 
 // Register built-in providers on first import.

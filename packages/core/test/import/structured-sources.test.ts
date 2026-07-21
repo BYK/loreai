@@ -35,7 +35,7 @@ describe("structured sources registry", () => {
 });
 
 describe("engramSource.produceDoc", () => {
-  test("converts a native Engram export file", () => {
+  test("converts a native Engram export file", async () => {
     const file = writeFixture("engram.json", {
       version: "1.0",
       exported_at: "2026-07-20 14:05:00",
@@ -51,20 +51,20 @@ describe("engramSource.produceDoc", () => {
       ],
       prompts: [],
     });
-    const doc = engramSource.produceDoc({ filePath: file });
+    const doc = await engramSource.produceDoc({ filePath: file });
     expect(doc.source).toBe("engram");
     expect(doc.entries).toHaveLength(1);
     expect(doc.entries[0].category).toBe("gotcha");
     expect(doc.entries[0].project).toBe("/repo");
   });
 
-  test("passes through an already-generic LoreImportDoc file", () => {
+  test("passes through an already-generic LoreImportDoc file", async () => {
     const file = writeFixture("generic.json", {
       lore_import_version: LORE_IMPORT_VERSION,
       source: "generic",
       entries: [{ content: "already normalized", category: "pattern" }],
     });
-    const doc = engramSource.produceDoc({ filePath: file });
+    const doc = await engramSource.produceDoc({ filePath: file });
     expect(doc.source).toBe("generic");
     expect(doc.entries[0].content).toBe("already normalized");
   });

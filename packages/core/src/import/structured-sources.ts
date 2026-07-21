@@ -12,9 +12,25 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseEngramExport } from "./sources/engram";
+import { resolveMem0Doc } from "./sources/mem0";
 import { safeParseImportDoc, type LoreImportDoc } from "./schema";
 
 export type StructuredSourceName = "engram" | "mem0";
+
+/**
+ * Options passed to `produceDoc`. `filePath` and `project` are generic; the
+ * `mem0*` fields are mem0-specific deployment overrides (ignored by Engram).
+ */
+export type ProduceDocOptions = {
+  filePath?: string;
+  project?: string;
+  mem0QdrantUrl?: string;
+  mem0Collection?: string;
+  mem0ServerUrl?: string;
+  mem0Token?: string;
+  mem0Path?: string;
+  mem0User?: string;
+};
 
 export type StructuredSource = {
   /** Internal name (matches LoreImportDoc.source and --agent filter). */
@@ -29,9 +45,10 @@ export type StructuredSource = {
   /**
    * Produce a validated LoreImportDoc from this source. When `filePath` is
    * provided, read/convert that file; otherwise auto-discover (e.g. run the
-   * source's own export CLI). Throws with an actionable message on failure.
+   * source's own export CLI, or probe a running server). Throws with an
+   * actionable message on failure. May be async (network probes).
    */
-  produceDoc(opts?: { filePath?: string }): LoreImportDoc;
+  produceDoc(opts?: ProduceDocOptions): LoreImportDoc | Promise<LoreImportDoc>;
 };
 
 /** True when `bin` is resolvable on PATH (best-effort, never throws). */
@@ -67,7 +84,7 @@ export const engramSource: StructuredSource = {
     return existsSync(dbPath);
   },
 
-  produceDoc(opts?: { filePath?: string }): LoreImportDoc {
+  produceDoc(opts?: ProduceDocOptions): LoreImportDoc {
     let raw: unknown;
     if (opts?.filePath) {
       raw = readJson(opts.filePath);
@@ -93,10 +110,50 @@ export const engramSource: StructuredSource = {
 };
 
 // ---------------------------------------------------------------------------
+// mem0
+// ---------------------------------------------------------------------------
+
+export const mem0Source: StructuredSource = {
+  name: "mem0",
+  displayName: "mem0",
+
+  detect(): boolean {
+    // Embedded-default store artifacts (cheap, synchronous existence checks).
+    // A running Qdrant/mem0 server is detected at produceDoc time (async probe);
+    // detection here just surfaces the source when a local store is present.
+    const dirs = ["/tmp/qdrant"];
+    const home = homedir();
+    if (home) dirs.push(join(home, ".mem0"));
+    for (const dir of dirs) {
+      if (
+        existsSync(join(dir, "collection", "mem0", "storage.sqlite")) ||
+        existsSync(join(dir, "collection", "openmemory", "storage.sqlite"))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  },
+
+  produceDoc(opts?: ProduceDocOptions): Promise<LoreImportDoc> {
+    return resolveMem0Doc({
+      filePath: opts?.filePath,
+      project: opts?.project,
+      qdrantUrl: opts?.mem0QdrantUrl,
+      collection: opts?.mem0Collection,
+      serverUrl: opts?.mem0ServerUrl,
+      token: opts?.mem0Token,
+      embeddedPath: opts?.mem0Path,
+      userId: opts?.mem0User,
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
-const sources: StructuredSource[] = [engramSource];
+const sources: StructuredSource[] = [engramSource, mem0Source];
 
 /** All registered structured sources. */
 export function getStructuredSources(): readonly StructuredSource[] {

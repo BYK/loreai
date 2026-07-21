@@ -128,6 +128,13 @@ const OPTIONS = {
   file: { type: "string" as const },
   source: { type: "string" as const },
   global: { type: "boolean" as const },
+  // `lore import --source mem0` deployment-shape overrides.
+  "mem0-qdrant": { type: "string" as const },
+  "mem0-collection": { type: "string" as const },
+  "mem0-server": { type: "string" as const },
+  "mem0-token": { type: "string" as const },
+  "mem0-path": { type: "string" as const },
+  "mem0-user": { type: "string" as const },
   "min-confidence": { type: "string" as const },
   "no-backup": { type: "boolean" as const },
   // `lore data clear` flags

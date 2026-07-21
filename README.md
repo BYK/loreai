@@ -347,7 +347,7 @@ lore import --source engram --global
 
 Engram observation types map onto Lore categories (`bugfix`/`discovery` → `gotcha`, `config` → `architecture`, etc.), and each observation's project is recovered from its session directory. Idempotent — re-running dedups by title and only updates entries whose content changed.
 
-> mem0 migration is coming in a follow-up release.
+**mem0** is imported natively too — `lore import --source mem0` auto-detects your deployment (Qdrant/OpenMemory server, mem0 self-hosted server, or the embedded default store) and reads it with no Python required. Imported memories default to the `pattern` category. Use `--file <dump.json>` or the `--mem0-*` flags to point at a specific store.
 
 ### Web dashboard
 

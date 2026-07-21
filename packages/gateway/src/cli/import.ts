@@ -290,6 +290,14 @@ async function importStructured(opts: {
   dryRun: boolean;
   yes: boolean;
   global: boolean;
+  mem0?: {
+    qdrantUrl?: string;
+    collection?: string;
+    serverUrl?: string;
+    token?: string;
+    path?: string;
+    user?: string;
+  };
 }): Promise<void> {
   const { projectPath, sourceName, filePath, dryRun, global } = opts;
 
@@ -308,12 +316,21 @@ async function importStructured(opts: {
     `[lore] Importing structured memory from ${source.displayName}...`,
   );
 
-  // Produce the normalized document (runs the source's export CLI / reads
-  // --file). This always happens client-side — the remote gateway has no shared
-  // filesystem with the client.
+  // Produce the normalized document (runs the source's export CLI, reads
+  // --file, or probes a running server). This always happens client-side — the
+  // remote gateway has no shared filesystem with the client. May be async.
   let doc: conversationImport.LoreImportDoc;
   try {
-    doc = source.produceDoc({ filePath: filePath ?? undefined });
+    doc = await source.produceDoc({
+      filePath: filePath ?? undefined,
+      project: projectPath,
+      mem0QdrantUrl: opts.mem0?.qdrantUrl,
+      mem0Collection: opts.mem0?.collection,
+      mem0ServerUrl: opts.mem0?.serverUrl,
+      mem0Token: opts.mem0?.token,
+      mem0Path: opts.mem0?.path,
+      mem0User: opts.mem0?.user,
+    });
   } catch (err) {
     console.error(
       `[lore] Could not read ${source.displayName} memory: ${err instanceof Error ? err.message : String(err)}`,
@@ -447,6 +464,14 @@ export async function commandImport(
   const sourceFlag = (flags.source as string) ?? null;
   const fileFlag = (flags.file as string) ?? null;
   const global = flags.global === true;
+  const mem0Opts = {
+    qdrantUrl: (flags["mem0-qdrant"] as string) ?? undefined,
+    collection: (flags["mem0-collection"] as string) ?? undefined,
+    serverUrl: (flags["mem0-server"] as string) ?? undefined,
+    token: (flags["mem0-token"] as string) ?? undefined,
+    path: (flags["mem0-path"] as string) ?? undefined,
+    user: (flags["mem0-user"] as string) ?? undefined,
+  };
   const noWorktrees =
     flags["no-worktrees"] === true || flags.noWorktrees === true;
   const projectFlag = flags.project as string | undefined;
@@ -491,6 +516,7 @@ export async function commandImport(
       dryRun,
       yes,
       global,
+      mem0: mem0Opts,
     });
     return;
   }

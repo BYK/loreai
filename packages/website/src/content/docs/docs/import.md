@@ -101,7 +101,34 @@ Each observation's project is recovered from its Engram session `directory`; obs
 
 ### mem0
 
-mem0 migration is coming in a follow-up release. It will read mem0's local store natively (server, OpenMemory, and embedded-default deployments) with no Python required.
+mem0 is imported **natively — no Python required** for any common deployment. `lore import --source mem0` auto-detects your deployment shape:
+
+```bash
+lore import --source mem0                       # auto-detect (Qdrant / server / embedded)
+lore import --source mem0 --file mem0.json      # explicit export dump
+lore import --source mem0 --global              # import as cross-project knowledge
+lore import --source mem0 --dry-run             # preview counts
+```
+
+**Deployment shapes** (detected in order):
+
+| Shape | How Lore reads it | Notes |
+| --- | --- | --- |
+| **Qdrant server** (OpenMemory / raw Qdrant) | HTTP `points/scroll` on `:6333` | Collections `openmemory` then `mem0`. `--mem0-token` if the server sets an api-key. |
+| **mem0 self-hosted server** (FastAPI) | HTTP `GET /memories` on `:8888` | Needs `--mem0-user <id>` and usually `--mem0-token`. |
+| **Embedded default** (`Memory()`) | Reads `storage.sqlite` + decodes pickled Qdrant points | Fully native (SQLite + a pure-TS pickle reader). No server, no Python. |
+
+**Overrides:** `--mem0-qdrant <url>`, `--mem0-collection <name>`, `--mem0-server <url>`, `--mem0-token <t>`, `--mem0-path <dir>` (embedded store base dir), `--mem0-user <id>`.
+
+mem0 OSS has no category taxonomy, so imported memories default to the `pattern` category. Each memory's `metadata.repo` (when present) sets its project; otherwise `--project`/cwd applies.
+
+**Fallback.** If native read ever fails (e.g. a future change to mem0's internal pickle format), export manually and pass `--file`:
+
+```bash
+pip install mem0ai
+python -c "import json;from mem0 import Memory;m=Memory();print(json.dumps(m.get_all(user_id='YOUR_USER')))" > mem0.json
+lore import --source mem0 --file mem0.json
+```
 
 ## Next steps
 
