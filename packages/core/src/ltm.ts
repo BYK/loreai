@@ -2485,12 +2485,29 @@ export async function forSession(
     hydrateKnowledgeEntry,
   ) as KnowledgeEntry[];
 
-  if (!crossEntries.length && !projectEntries.length) {
-    // Empty-knowledge fast path (new project, or all entries below the
-    // confidence floor). Emit before returning so the FASTEST path is
-    // represented in the read-path metrics — otherwise the distribution is
-    // skewed toward slower, non-empty turns and #966 B is decided on biased
-    // data. Mirrors the timeout early return above (Seer, PR #993).
+  // Empty-knowledge fast path (new project, or all entries below the
+  // confidence floor). Emit before returning so the FASTEST path is
+  // represented in the read-path metrics — otherwise the distribution is
+  // skewed toward slower, non-empty turns and #966 B is decided on biased
+  // data. Mirrors the timeout early return above (Seer, PR #993).
+  //
+  // BUT: when the caller asked to fold in passive context sources
+  // (distillation/temporal, #1228/#1293) and there is a session/hint context to
+  // score against, an empty knowledge table must NOT short-circuit — the whole
+  // point of context sources is to surface captured facts that were never
+  // promoted to knowledge (the common fresh-project / distillation-only case).
+  // Returning [] here silently disabled passive injection whenever knowledge was
+  // empty (found via #961 eval: captured+embedded facts never reached the model).
+  // Fall through so the context-source fold below runs; the scoring path handles
+  // empty knowledge pools fine (allScored simply starts empty).
+  const wantsContextSourceFold =
+    !!options?.includeContextSources?.length &&
+    (!!options.contextHint?.trim() || !!sessionID);
+  if (
+    !crossEntries.length &&
+    !projectEntries.length &&
+    !wantsContextSourceFold
+  ) {
     timer.emit("forSession", 0);
     return [];
   }
@@ -2501,7 +2518,15 @@ export async function forSession(
   // then recency. Confidence carries real meaning now: 1.0 = unconditional
   // directive, 0.9 = strong preference, 0.8 = moderate, 0.6 = mild.
   const isPreferenceOnly =
-    categoryFilter?.length === 1 && categoryFilter[0] === "preference";
+    categoryFilter?.length === 1 &&
+    categoryFilter[0] === "preference" &&
+    // A caller that also asked to fold in context sources must not take this
+    // cheap preference-only path — it returns before the fold. No production
+    // caller combines the two today (preference reads use categories:
+    // ["preference"] without includeContextSources; context reads use
+    // excludeCategories: ["preference"]), but keep the API honest: if both are
+    // set, fall through to the full path so the fold still runs (Seer #1432).
+    !wantsContextSourceFold;
   if (isPreferenceOnly) {
     // Blanket-inject only the user's own directives: project-local prefs
     // (Pool 1), true globals (`project_id IS NULL`), and this project's own

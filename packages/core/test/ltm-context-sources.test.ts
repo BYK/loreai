@@ -128,6 +128,58 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     expect(ids.has(knowledgeId)).toBe(true);
   });
 
+  // Regression (#961): the empty-knowledge fast path (forSession returns [] when
+  // both knowledge pools are empty) used to fire BEFORE the context-source fold,
+  // silently disabling passive distillation/temporal injection whenever the
+  // knowledge table was empty — the common fresh-project / distillation-only
+  // case. Found via the live eval: facts were captured + embedded + FTS-matchable
+  // yet never reached the model. This test seeds NO knowledge and asserts the
+  // fold still runs. Mutation: restore the unconditional early return and this
+  // goes red.
+  test("REGRESSION: context sources still surface when the knowledge table is EMPTY", async () => {
+    // Remove the only knowledge entry so both pools are empty (fast-path trigger).
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    expect(
+      db()
+        .query("SELECT COUNT(*) AS n FROM knowledge WHERE project_id = ?")
+        .get(pid) as { n: number },
+    ).toEqual({ n: 0 });
+
+    const withFold = await ltm.forSession(PROJ, undefined, 4000, {
+      excludeCategories: ["preference"],
+      contextHint: HINT,
+      includeContextSources: ["distillation", "temporal"],
+    });
+    const foldIds = new Set(withFold.map((e) => e.id));
+    // The captured facts surface even with zero knowledge entries.
+    expect(foldIds.has(`d:${distId}`)).toBe(true);
+    expect(foldIds.has(`t:${tempId}`)).toBe(true);
+
+    // And the empty-knowledge fast path is PRESERVED when the fold isn't asked
+    // for: no context sources + empty knowledge => nothing surfaced.
+    const noFold = await ltm.forSession(PROJ, undefined, 4000, {
+      excludeCategories: ["preference"],
+      contextHint: HINT,
+    });
+    expect(noFold).toHaveLength(0);
+  });
+
+  // Seer #1432: the isPreferenceOnly fast path also returns before the fold. No
+  // production caller combines categories:["preference"] WITH
+  // includeContextSources, but the API must stay honest — if both are set, the
+  // fold must still run. Mutation: drop the `!wantsContextSourceFold` clause on
+  // isPreferenceOnly and this goes red.
+  test("REGRESSION: preference-category filter + context sources still folds", async () => {
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    const result = await ltm.forSession(PROJ, undefined, 4000, {
+      categories: ["preference"],
+      contextHint: HINT,
+      includeContextSources: ["distillation"],
+    });
+    const ids = new Set(result.map((e) => e.id));
+    expect(ids.has(`d:${distId}`)).toBe(true);
+  });
+
   test("cache-stable: stickyIds keeps a folded synthetic selected when a knowledge entry would otherwise displace it", async () => {
     // Budget fits exactly ONE non-arch entry, so a distillation synthetic
     // (d:distId) and a knowledge entry (k2) compete for that single slot.
