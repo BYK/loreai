@@ -10,11 +10,11 @@
     "publish:standard-site": "node scripts/publish-standard-site.mjs"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.4",
-    "@astrojs/mdx": "^5.0.6",
-    "@astrojs/rss": "^4.0.18",
-    "@astrojs/starlight": "^0.39.3",
-    "astro": "^6.4.6",
+    "@astrojs/check": "^0.9.9",
+    "@astrojs/mdx": "^7.0.3",
+    "@astrojs/rss": "^4.0.19",
+    "@astrojs/starlight": "^0.41.3",
+    "astro": "^7.1.3",
     "sharp": "^0.34.0",
     "svgo": "^3.3.2",
     "typescript": "^5.8.0"
