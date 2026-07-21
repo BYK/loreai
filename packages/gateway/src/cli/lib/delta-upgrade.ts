@@ -20,8 +20,6 @@
  * All Sentry SDK telemetry removed — uses plain logging.
  */
 
-import { unlinkSync } from "node:fs";
-
 import {
   compareVersions,
   GITHUB_RELEASES_URL,
@@ -30,7 +28,7 @@ import {
   isDowngrade,
   isNightlyVersion,
 } from "./binary";
-import { applyPatch } from "./bspatch";
+import { applyPatchChainInMemory } from "./bspatch";
 import { VERSION } from "../version";
 import {
   downloadLayerBlob,
@@ -679,59 +677,25 @@ async function resolveNightlyChainWithContext(
 // Patch application
 // ---------------------------------------------------------------------------
 
-function cleanupIntermediates(destPath: string): void {
-  for (const suffix of [".patching.a", ".patching.b"]) {
-    try {
-      unlinkSync(`${destPath}${suffix}`);
-    } catch {
-      // Ignore cleanup errors
-    }
-  }
-}
-
-async function applyPatchesSequentially(
-  chain: PatchChain,
-  oldBinaryPath: string,
-  destPath: string,
-): Promise<string> {
-  let currentOldPath = oldBinaryPath;
-  let sha256 = "";
-
-  const intermediateA = `${destPath}.patching.a`;
-  const intermediateB = `${destPath}.patching.b`;
-
-  try {
-    for (let i = 0; i < chain.patches.length; i++) {
-      const patch = chain.patches[i];
-      if (!patch) throw new Error(`Missing patch at index ${i}`);
-      const isLast = i === chain.patches.length - 1;
-      const intermediate = i % 2 === 0 ? intermediateA : intermediateB;
-      const outputPath = isLast ? destPath : intermediate;
-
-      sha256 = await applyPatch(currentOldPath, patch.data, outputPath);
-
-      if (!isLast) {
-        currentOldPath = outputPath;
-      }
-    }
-  } finally {
-    if (chain.patches.length > 1) {
-      cleanupIntermediates(destPath);
-    }
-  }
-
-  return sha256;
-}
-
 /**
- * Apply a resolved patch chain sequentially and verify the result.
+ * Apply a resolved patch chain and verify the result.
+ *
+ * Delegates to {@link applyPatchChainInMemory}, which loads the base binary
+ * once, keeps every intermediate hop in memory (no per-hop disk writes,
+ * temp-copies, or SHA-256 passes), and streams only the final binary to
+ * `destPath`. Because reads and writes never target the same path, there is
+ * no read/write truncation hazard.
  */
 export async function applyPatchChain(
   chain: PatchChain,
   oldBinaryPath: string,
   destPath: string,
 ): Promise<string> {
-  const sha256 = await applyPatchesSequentially(chain, oldBinaryPath, destPath);
+  const sha256 = await applyPatchChainInMemory(
+    oldBinaryPath,
+    chain.patches.map((p) => p.data),
+    destPath,
+  );
 
   if (sha256 !== chain.expectedSha256) {
     throw new Error(

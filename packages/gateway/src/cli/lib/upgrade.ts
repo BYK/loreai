@@ -430,6 +430,7 @@ export async function downloadBinaryToTemp(
     }
 
     // Try delta upgrade first
+    const deltaStart = Date.now();
     const deltaResult = await attemptDeltaUpgrade(
       version,
       process.execPath,
@@ -440,8 +441,9 @@ export async function downloadBinaryToTemp(
     let patchBytes: number | undefined;
     if (deltaResult) {
       patchBytes = deltaResult.patchBytes;
+      const elapsed = ((Date.now() - deltaStart) / 1000).toFixed(1);
       console.error(
-        `[lore] Applied delta patch (${formatBytes(patchBytes)} downloaded)`,
+        `[lore] Applied delta patch (${formatBytes(patchBytes)} downloaded, ${deltaResult.chainLength} link(s)) in ${elapsed}s`,
       );
     } else if (offline) {
       throw new UpgradeError(
@@ -454,11 +456,14 @@ export async function downloadBinaryToTemp(
       );
     } else {
       // Full download
+      const fullStart = Date.now();
       if (isNightlyVersion(version)) {
         await downloadNightlyToPath(tempPath, version);
       } else {
         await downloadStableToPath(downloadTag ?? version, tempPath);
       }
+      const elapsed = ((Date.now() - fullStart) / 1000).toFixed(1);
+      console.error(`[lore] Downloaded full binary in ${elapsed}s`);
     }
 
     const verifiedSize = await waitForBinaryVisible(tempPath);
