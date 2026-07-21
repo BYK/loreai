@@ -2754,9 +2754,10 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     expect(text).toBe("distilled summary");
     expect(mockFetch).toHaveBeenCalledTimes(2);
 
-    // First attempt used the default budget; the retry raised it (4× = 65536,
-    // clamped to the model's 64000 output limit).
-    expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
+    // First attempt floored to the reasoning budget (24576 for the reasoning
+    // client model); the retry raised it (4× = 98304, clamped to the model's
+    // 64000 output limit).
+    expect(bodyOf(0)?.max_completion_tokens).toBe(24576);
     expect(bodyOf(1)?.max_completion_tokens).toBe(64000);
 
     // A successful retry is NOT a failure.
@@ -2851,10 +2852,10 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     // (~1-8K) and NO reasoning effort, but OpenRouter routes reasoning models
     // (anthropic/claude-sonnet-5) that reason regardless — burning the whole
     // budget on hidden reasoning and returning empty finish_reason:"length".
-    // The builder must floor the budget to DEFAULT_REASONING_MODEL_BUDGET (8192)
-    // + THINKING_OUTPUT_HEADROOM (8192) = 16384 on the FIRST attempt, so the
+    // The builder must floor the budget to DEFAULT_REASONING_MODEL_BUDGET (16384)
+    // + THINKING_OUTPUT_HEADROOM (8192) = 24576 on the FIRST attempt, so the
     // answer survives without relying on the length-retry.
-    // Mutation: drop the workerReasoningHeadroomFloor / workerThinkingOnByDefault
+    // Mutation: drop the workerReasoningHeadroomFloor / workerModelReasons
     // branch → first call sends the raw 1035 → RED.
     mockFetch.mockResolvedValueOnce(openAISuccess("ok"));
 
@@ -2868,7 +2869,7 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     });
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
+    expect(bodyOf(0)?.max_completion_tokens).toBe(24576);
     // No explicit effort → reasoning_effort must NOT be sent (the model reasons
     // on its own; we only give it room).
     expect(bodyOf(0)).not.toHaveProperty("reasoning_effort");
@@ -2908,7 +2909,7 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
       maxTokens: 2048,
     });
 
-    expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
+    expect(bodyOf(0)?.max_completion_tokens).toBe(24576);
     // Model reasons by default but we set no effort → do NOT force reasoning_effort.
     expect(bodyOf(0)).not.toHaveProperty("reasoning_effort");
   });
@@ -3041,10 +3042,10 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
 
   test("length-retry multiplies from the FLOORED effective budget, not the tiny raw budget", async () => {
     // A reasoning-on-by-default model truncates on a tiny raw budget (1035). The
-    // loop floors it to the reasoning floor (16384) BEFORE the first attempt, so
-    // the retry multiplies from 16384 (→ min(16384*4, ceiling 64000) = 64000),
+    // loop floors it to the reasoning floor (24576) BEFORE the first attempt, so
+    // the retry multiplies from 24576 (→ min(24576*4, ceiling 64000) = 64000),
     // NOT from 1035 (which would give a useless 4140).
-    // Mutation: remove the openAIReasoningFloor from the loop `maxTokens` init →
+    // Mutation: remove the reasoningFloor from the loop `maxTokens` init →
     // first attempt sends 1035, retry sends 4140 → bodyOf assertions RED.
     mockFetch
       .mockResolvedValueOnce(lengthTruncated())
@@ -3061,8 +3062,8 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
 
     expect(text).toBe("recovered at floor");
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    // First attempt floored to 16384; retry multiplied from that → 64000.
-    expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
+    // First attempt floored to 24576; retry multiplied from that → 64000.
+    expect(bodyOf(0)?.max_completion_tokens).toBe(24576);
     expect(bodyOf(1)?.max_completion_tokens).toBe(64000);
   });
 
@@ -3141,10 +3142,10 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     });
 
     expect(text).toBe("ok");
-    // Gemini path: floored to the reasoning budget (8192 + 8192 = 16384).
+    // Gemini path: floored to the reasoning budget (16384 + 8192 = 24576).
     expect(
       (bodyOf(0)?.generationConfig as { maxOutputTokens?: number } | undefined)
         ?.maxOutputTokens,
-    ).toBe(16384);
+    ).toBe(24576);
   });
 });

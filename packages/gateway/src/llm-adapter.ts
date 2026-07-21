@@ -464,9 +464,15 @@ const WORKER_LENGTH_RETRY_CAP = 64_000;
 // workers pass `thinking:false` / no effort, but OpenRouter (and other
 // aggregators) route reasoning models like `anthropic/claude-sonnet-5` that
 // reason REGARDLESS — burning hidden tokens against the output budget before any
-// visible text. Equal to `anthropicThinkingBudget("medium")` (8192): enough for
-// a bounded distillation/curation reasoning pass without over-provisioning.
-const DEFAULT_REASONING_MODEL_BUDGET = 8192;
+// visible text. Equal to `anthropicThinkingBudget("high")` (16384): a heavy
+// curator/distillation reasoning pass on claude-sonnet-5 was observed burning
+// past the previous 8192 default and truncating on the FIRST attempt, forcing a
+// wasted call + retry-to-64000 (production logs 2026-07-21, session
+// 1eMRchBV7Ajs0dds: `retrying once with max_tokens 16384 → 64000`). 16384 lands
+// the common case in one round-trip; the length-retry remains the backstop for
+// the rare pass that still exceeds it. A floor, never a charge — a higher
+// ceiling costs nothing for models that emit fewer tokens.
+const DEFAULT_REASONING_MODEL_BUDGET = 16_384;
 
 /**
  * The minimum output budget a worker call needs so the model can complete its
