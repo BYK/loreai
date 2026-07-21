@@ -26,7 +26,7 @@ import { discoverWorkspaceRoot } from "@loreai/core";
 // ---------------------------------------------------------------------------
 
 async function promptAgent(agents: DetectedAgent[]): Promise<DetectedAgent> {
-  console.log("\n[lore] Multiple AI agents detected:\n");
+  console.log("\n[lore] Multiple AI agents detected. Which one to launch?\n");
   for (let i = 0; i < agents.length; i++) {
     console.log(`  ${i + 1}) ${agents[i].def.displayName} (${agents[i].path})`);
   }
@@ -36,7 +36,7 @@ async function promptAgent(agents: DetectedAgent[]): Promise<DetectedAgent> {
 
   return new Promise<DetectedAgent>((resolve) => {
     const ask = () => {
-      rl.question("Choose an agent [1]: ", (answer) => {
+      rl.question("Launch which agent? [1]: ", (answer) => {
         const trimmed = answer.trim();
         const idx = trimmed === "" ? 0 : Number.parseInt(trimmed, 10) - 1;
         if (Number.isInteger(idx) && idx >= 0 && idx < agents.length) {

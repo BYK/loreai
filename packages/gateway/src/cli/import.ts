@@ -137,7 +137,7 @@ export async function selectIndices(
 
   for (let attempt = 0; attempt < maxTries; attempt++) {
     const answer = await reader(
-      "[lore] Select agents (comma-separated numbers, or 'a' for all): ",
+      "[lore] Which histories to import? (comma-separated numbers, or 'a' for all): ",
     );
     const parsed = parseIndexSelection(answer, count);
     if (parsed) return parsed;
@@ -663,6 +663,12 @@ export async function commandImport(
   const startOpts: StartOptions = { quiet: true, local: true };
   const { config, owned, shutdown } = await startGateway(startOpts);
   const cfg = loreConfig();
+  // `cfg.model` is normally unset — Lore takes the model from the first client
+  // request. Standalone `lore import` has no request, so it falls back to a
+  // built-in default. Track whether the provider was *explicitly* configured so
+  // the no-credential message below doesn't tell a Copilot/OpenRouter user to
+  // set an "anthropic key" they don't have.
+  const modelExplicit = cfg.model != null;
   const defaultModel = cfg.model ?? {
     providerID: "anthropic",
     modelID: "claude-sonnet-4-6",
@@ -690,14 +696,26 @@ export async function commandImport(
     !workerApiKey &&
     getImportAuth(undefined, defaultModel.providerID) == null
   ) {
+    // Only name a specific provider when the user explicitly configured one.
+    // Otherwise stay neutral: many users authenticate via a subscription
+    // (GitHub Copilot, Claude/ChatGPT OAuth) and have no API key to export at
+    // all, so leading with LORE_WORKER_API_KEY sends them down a dead end. The
+    // universal path is `lore run` + one message, which captures whatever
+    // credential the agent already uses.
+    const keyHint = modelExplicit
+      ? `<your ${defaultModel.providerID} key>`
+      : "<key for your provider>";
     console.error(
-      `\n[lore] Can't import: no ${defaultModel.providerID} credential available.\n` +
-        `[lore] \`lore import\` runs as a standalone command with no conversation\n` +
-        `[lore] to borrow a credential from, so it needs a dedicated worker key.\n` +
-        `[lore] Set one and retry:\n` +
-        `[lore]   export LORE_WORKER_API_KEY=<your ${defaultModel.providerID} key>\n` +
-        `[lore]   lore import\n` +
-        `[lore] Or skip manual import: \`lore run\` auto-imports after your first message.`,
+      `\n[lore] Can't import: no credential is available for background extraction.\n` +
+        `[lore] \`lore import\` runs standalone with no conversation to borrow a\n` +
+        `[lore] credential from. Two ways forward:\n` +
+        `[lore]\n` +
+        `[lore]   1. Easiest — run \`lore run\`, send one message, and the import\n` +
+        `[lore]      happens automatically once your credential is captured.\n` +
+        `[lore]\n` +
+        `[lore]   2. Give \`lore import\` a dedicated worker key and retry:\n` +
+        `[lore]        export LORE_WORKER_API_KEY=${keyHint}\n` +
+        `[lore]        lore import`,
     );
     if (owned) await shutdown();
     return;

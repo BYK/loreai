@@ -128,6 +128,7 @@ export async function maybeAutoImport(
   }
 
   const cfg = loreConfig();
+  const modelExplicit = cfg.model != null;
   const defaultModel = cfg.model ?? {
     providerID: "anthropic",
     modelID: "claude-sonnet-4-6",
@@ -152,19 +153,33 @@ export async function maybeAutoImport(
     const usable =
       hasWorkerKey || resolveAuth(undefined, defaultModel.providerID) != null;
     if (!usable) {
-      // Never leave a promised import silently dropped: we told the user it
-      // would "start after your first message". Explain the mismatch when we
-      // know the provider; otherwise give a generic, still-actionable notice.
-      if (authedProviderID && authedProviderID !== defaultModel.providerID) {
+      // Re-register so a LATER authenticated turn retries. flushPendingImport
+      // is one-shot (it clears `pending` before calling us), so without this a
+      // single unusable-credential turn would permanently drop the import and
+      // make the "send one message and it will import automatically" promise
+      // below a lie (Seer #15392788). Re-registering keeps the offer alive; a
+      // turn that finally binds a usable credential runs the extraction.
+      registerPendingImport(job);
+      // Never leave the user without a signal: explain the mismatch when we
+      // know the provider AND the user explicitly configured a model (naming a
+      // provider they never chose would be misleading — a Copilot/OpenRouter
+      // user shouldn't be told to authenticate "anthropic"). Otherwise give a
+      // generic, still-truthful "send one message" notice (now backed by the
+      // re-registration above).
+      if (
+        modelExplicit &&
+        authedProviderID &&
+        authedProviderID !== defaultModel.providerID
+      ) {
         console.log(
-          `[lore] Skipping knowledge import: your session uses ${authedProviderID}, ` +
+          `[lore] Skipping knowledge import for now: your session uses ${authedProviderID}, ` +
             `but import is configured for ${defaultModel.providerID}. ` +
-            `Run \`lore import\` once authenticated with ${defaultModel.providerID}.`,
+            `Send a message with ${defaultModel.providerID} and it will import automatically.`,
         );
       } else {
         console.log(
-          `[lore] Skipping knowledge import: no usable ${defaultModel.providerID} ` +
-            `credential is available. Run \`lore import\` once authenticated.`,
+          "[lore] Skipping knowledge import for now: no usable credential is available yet. " +
+            "Send one message and the import will start automatically.",
         );
       }
       return Promise.resolve();

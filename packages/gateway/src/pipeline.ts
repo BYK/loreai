@@ -598,6 +598,7 @@ export async function resetPipelineState(opts?: {
     stopSyncScheduler = null;
   }
   _lastSeenSessionModel = null;
+  _firstTurnConfirmed = false;
   resetWorkerModelState();
   resetBackgroundLimiter();
 }
@@ -1899,6 +1900,15 @@ let stopFileWatcher: (() => void) | null = null;
 
 /** Last seen session model ID — used for worker model discovery context. */
 let _lastSeenSessionModel: string | null = null;
+
+/**
+ * Whether we've logged the one-time "traffic is flowing" confirmation. New
+ * users (Erica, Kjaer) had no clear signal that their agent was actually
+ * routed through Lore — they'd run turns and wonder if anything was happening.
+ * We emit a single friendly confirmation the first time a credentialed turn is
+ * proxied, then stay quiet. Reset with the rest of pipeline state.
+ */
+let _firstTurnConfirmed = false;
 
 // ---------------------------------------------------------------------------
 // Model limits — fetched from models.dev, fallback for unknown
@@ -6714,6 +6724,16 @@ async function handleConversationTurn(
     const reqProviderID = extractProviderHeader(req.rawHeaders);
     setSessionAuth(sessionID, cred, reqProviderID || undefined);
     clearWarmupAuthDisabled(sessionID); // Re-enable cache warming on fresh credential
+
+    // One-time "it's working" signal. A fresh user has no easy way to tell
+    // their agent is actually routed through Lore; this confirms it the first
+    // time a credentialed turn is proxied, then stays quiet for the process.
+    if (!_firstTurnConfirmed) {
+      _firstTurnConfirmed = true;
+      log.info(
+        "\u2713 Connected — your agent's traffic is now flowing through Lore.",
+      );
+    }
 
     // A credential just landed. If `lore run` deferred a conversation import
     // (no credential existed at startup), run it now — this is the first

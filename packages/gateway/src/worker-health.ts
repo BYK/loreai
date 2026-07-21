@@ -110,6 +110,12 @@ export type SessionHealth = {
   failureCount: number; // in current sliding window
   reasons: Set<FailureReason>;
   workerIDs: Set<WorkerID | (string & {})>;
+  // True once ANY non-credential-class (genuine outage) reason has been seen
+  // during this outage. Unlike `reasons` (reset per sliding window), this
+  // latches for the entry's lifetime — so a genuine failure that ages out of
+  // the active window can't be silently reclassified as first-run credential
+  // noise by getDegradationWarning's suppression gate.
+  sawGenuineReason: boolean;
   alertSentAt?: number; // last Sentry message timestamp (debounce)
   exceptionSentAt?: number; // last Sentry exception timestamp (per-hour cap)
 };
@@ -178,6 +184,25 @@ const state: Map<string, SessionHealth> = new Map();
  * credit top-up recovers automatically without spamming the upstream.
  */
 const creditPaused: Map<string, { lastProbe: number }> = new Map();
+
+/**
+ * Sessions that have had at least one SUCCESSFUL worker call, with the
+ * timestamp of the most recent success. Used to distinguish a first-run
+ * "never authenticated yet" state from a genuine "was working, now broken"
+ * degradation.
+ *
+ * The user-facing degradation banner ({@link getDegradationWarning}) tells the
+ * user their memory is being "harmed" — accurate once a working session breaks,
+ * but alarming and wrong on a brand-new install where the only failures so far
+ * are `no-auth` because no turn has authenticated yet (the normal warm-up
+ * window every fresh session passes through). Suppressing the banner for
+ * never-succeeded credential-class-only failures avoids scaring new users; the
+ * banner still fires the moment a real credential lands and later breaks, or
+ * when the failures are a genuine outage rather than a missing credential.
+ *
+ * Bounded like {@link state}: swept on the same TTL so it can't grow unbounded.
+ */
+const succeededSessions: Map<string, { lastSuccessAt: number }> = new Map();
 
 /**
  * Provider+model+worker verdicts for models that consistently return no usable
@@ -255,6 +280,7 @@ export function _setNowForTest(fn: () => number): void {
 export function _resetForTest(): void {
   state.clear();
   creditPaused.clear();
+  succeededSessions.clear();
   incapableModels.clear();
   freeModelsDataBlocked.clear();
   blocklistGen = 0;
@@ -539,6 +565,7 @@ export function recordWorkerFailure(
       failureCount: 0,
       reasons: new Set(),
       workerIDs: new Set(),
+      sawGenuineReason: false,
     };
     state.set(sessionID, entry);
   } else if (t - entry.lastFailureAt > SESSION_TTL_MS) {
@@ -551,12 +578,14 @@ export function recordWorkerFailure(
       failureCount: 0,
       reasons: new Set(),
       workerIDs: new Set(),
+      sawGenuineReason: false,
     };
     state.set(sessionID, entry);
   } else if (t - entry.lastFailureAt > FAILURE_WINDOW_MS) {
     // New sliding window within the same sustained outage: reset the counter
     // and reason/worker sets, but KEEP firstFailureAt so the 30m/60m
-    // sustained thresholds continue to accumulate.
+    // sustained thresholds continue to accumulate. `sawGenuineReason` also
+    // persists — it latches for the whole outage, not per window.
     entry.failureCount = 0;
     entry.reasons = new Set();
     entry.workerIDs = new Set();
@@ -566,6 +595,12 @@ export function recordWorkerFailure(
   entry.lastFailureAt = t;
   entry.reasons.add(reason);
   entry.workerIDs.add(workerID);
+  // Latch once a genuine (non-credential-class) reason is seen. This survives
+  // window rotation so getDegradationWarning can't later mistake a real outage
+  // for first-run credential noise after the genuine reason ages out.
+  if (!CREDENTIAL_CLASS_REASONS.has(reason)) {
+    entry.sawGenuineReason = true;
+  }
 
   // First 1-2 failures: silent at the warn level. This preserves the
   // existing behavior for transient errors (OAuth refresh, momentary 429).
@@ -678,6 +713,16 @@ export function recordWorkerSuccess(sessionID: string): void {
   // ladder `state` entry (402 never calls recordWorkerFailure).
   creditPaused.delete(sessionID);
 
+  // Mark that this session has authenticated and produced usable worker output
+  // at least once. Any later degradation is then a genuine "was working, now
+  // broken" event worth warning the user about (see {@link succeededSessions}).
+  succeededSessions.set(sessionID, { lastSuccessAt: now() });
+  // Arm the TTL sweep here too: this map is populated on the SUCCESS path, but
+  // the sweep that bounds it was otherwise only armed by recordWorkerFailure.
+  // A process that never records a failure would otherwise grow this map
+  // unbounded (one entry per unique session).
+  ensureSweepTimer();
+
   const entry = state.get(sessionID);
   if (!entry) return;
 
@@ -786,6 +831,18 @@ export function getDegradationWarning(sessionID: string): string | null {
   if (!entry) return null;
   const sustainedMs = now() - entry.firstFailureAt;
   if (sustainedMs < RESPONSE_MESSAGE_THRESHOLD_MS) return null;
+  // First-run suppression: if this session has NEVER had a successful worker
+  // call and has NEVER seen a genuine (non-credential-class) outage reason for
+  // this outage, every failure is credential-class (no-auth / cross-provider) —
+  // the normal "not authenticated yet" warm-up state on a fresh install, not a
+  // working session that broke. Telling the user their memory is being "harmed"
+  // here is alarming and wrong (Kjaer/Erica both hit this). Stay quiet until
+  // either a real credential lands (recordWorkerSuccess flips neverSucceeded)
+  // or a genuine outage reason is seen (sawGenuineReason latches, surviving
+  // window rotation so a real failure that ages out isn't reclassified as
+  // first-run noise).
+  const neverSucceeded = !succeededSessions.has(sessionID);
+  if (neverSucceeded && !entry.sawGenuineReason) return null;
   return (
     `[Lore: Background workers (distillation, curation, cache warming) for this session ` +
     `have been failing for ${formatDuration(sustainedMs)}. This is harmful — your ` +
@@ -919,6 +976,7 @@ export function makeWorkerHealth(
 export function clearAll(): void {
   state.clear();
   creditPaused.clear();
+  succeededSessions.clear();
   if (sweepTimer) {
     clearInterval(sweepTimer);
     sweepTimer = null;
@@ -956,6 +1014,19 @@ function ensureSweepTimer(): void {
     for (const [sessionID, entry] of state) {
       if (t - entry.lastFailureAt > SESSION_TTL_MS) {
         state.delete(sessionID);
+      }
+    }
+    // Bound the ever-succeeded map on the same TTL so it can't grow unbounded
+    // across a long-lived gateway process. BUT never evict a session that still
+    // has an active failure entry: a session that was working and then hits
+    // persistent credential-class failures (e.g. auth went stale) keeps failing
+    // past 1h, and dropping its "was working" history here would flip
+    // neverSucceeded back to true and wrongly suppress its degradation banner
+    // (Seer #15390225). Only evict once the failure entry is gone (session
+    // recovered or fully aged out).
+    for (const [sessionID, s] of succeededSessions) {
+      if (t - s.lastSuccessAt > SESSION_TTL_MS && !state.has(sessionID)) {
+        succeededSessions.delete(sessionID);
       }
     }
   }, SWEEP_INTERVAL_MS);

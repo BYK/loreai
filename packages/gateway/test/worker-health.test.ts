@@ -64,6 +64,10 @@ describe("worker-health", () => {
     test("sustained 30+ min: degraded status and warning", () => {
       let t = 1_000_000;
       _setNowForTest(() => t);
+      // Session authenticated and worked at least once, so a later sustained
+      // failure is a genuine "was working, now broken" degradation (not the
+      // first-run no-auth warm-up state, which is suppressed).
+      recordWorkerSuccess("s1");
       for (let i = 0; i < 3; i++) {
         recordWorkerFailure("s1", "lore-distill", "no-auth");
         t += 5 * 60 * 1000; // 5 min between failures — outside the 5-min window
@@ -104,6 +108,7 @@ describe("worker-health", () => {
       // command is worse than useless when their workers are already failing.
       let t = 1_000_000;
       _setNowForTest(() => t);
+      recordWorkerSuccess("s1"); // authenticated once; later failure is real
       for (let i = 0; i < 3; i++) {
         recordWorkerFailure("s1", "lore-distill", "no-auth");
         t += 5 * 60 * 1000;
@@ -205,6 +210,92 @@ describe("worker-health", () => {
     });
   });
 
+  describe("first-run suppression (never authenticated)", () => {
+    test("never-succeeded session with only no-auth failures: NO warning", () => {
+      // Fresh install: the only failures so far are no-auth because no turn has
+      // authenticated yet. This is the normal warm-up state, not a broken
+      // working session — the alarming banner must stay quiet.
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      for (let i = 0; i < 3; i++) {
+        recordWorkerFailure("s-fresh", "lore-import", "no-auth");
+        t += 5 * 60 * 1000;
+      }
+      t = 1_000_000 + 31 * 60 * 1000;
+      _setNowForTest(() => t);
+      // Status still reflects the sustained failure (used by doctor/summary)...
+      expect(getStatus("s-fresh")).toBe("degraded");
+      // ...but the user-facing banner is suppressed for a never-authenticated
+      // session with only credential-class failures.
+      expect(getDegradationWarning("s-fresh")).toBeNull();
+    });
+
+    test("never-succeeded session with cross-provider only: NO warning", () => {
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      for (let i = 0; i < 3; i++) {
+        recordWorkerFailure("s-fresh", "lore-distill", "cross-provider");
+        t += 5 * 60 * 1000;
+      }
+      t = 1_000_000 + 31 * 60 * 1000;
+      _setNowForTest(() => t);
+      expect(getDegradationWarning("s-fresh")).toBeNull();
+    });
+
+    test("after a success, a later no-auth streak DOES warn", () => {
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      // Session authenticated and produced usable output once.
+      recordWorkerSuccess("s-was-ok");
+      // Later its credential goes stale.
+      for (let i = 0; i < 3; i++) {
+        recordWorkerFailure("s-was-ok", "lore-distill", "no-auth");
+        t += 5 * 60 * 1000;
+      }
+      t = 1_000_000 + 31 * 60 * 1000;
+      _setNowForTest(() => t);
+      expect(getDegradationWarning("s-was-ok")).not.toBeNull();
+    });
+
+    test("never-succeeded but a NON-credential reason present DOES warn", () => {
+      // A genuine outage reason (e.g. upstream-error) is not first-run noise —
+      // it should surface even without a prior success.
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s-fresh", "lore-distill", "no-auth");
+      recordWorkerFailure("s-fresh", "lore-distill", "upstream-error");
+      t = 1_000_000 + 31 * 60 * 1000;
+      _setNowForTest(() => t);
+      expect(getDegradationWarning("s-fresh")).not.toBeNull();
+    });
+
+    test("genuine reason that AGED OUT of the window still warns (latched)", () => {
+      // Adversarial-order (REVIEW.md §2): a genuine outage begins with
+      // upstream-error, but by the time the 30m threshold is crossed only
+      // credential-class failures remain in the active 5-min window. The
+      // banner must still fire — sawGenuineReason latches for the whole outage
+      // and survives window rotation, so a real outage on a never-succeeded
+      // session is NOT reclassified as first-run credential noise.
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      // Window 1: a genuine outage reason.
+      recordWorkerFailure("s-outage", "lore-distill", "upstream-error");
+      // Two later windows (>5 min apart) with only credential-class failures,
+      // which reset entry.reasons but keep firstFailureAt and sawGenuineReason.
+      t += 6 * 60 * 1000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s-outage", "lore-distill", "no-auth");
+      t += 6 * 60 * 1000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s-outage", "lore-distill", "no-auth");
+      // Cross the 30m sustained threshold; active window now holds only no-auth.
+      t = 1_000_000 + 31 * 60 * 1000;
+      _setNowForTest(() => t);
+      expect(getStatus("s-outage")).toBe("degraded");
+      expect(getDegradationWarning("s-outage")).not.toBeNull();
+    });
+  });
+
   describe("multi-session isolation", () => {
     test("failures in one session do not affect another", () => {
       recordWorkerFailure("s1", "lore-distill", "no-auth");
@@ -290,6 +381,10 @@ describe("worker-health", () => {
   // are preserved. A window mixing in any genuine outage reason still escalates.
   describe("credential-class reasons do not escalate to Sentry (#3J)", () => {
     test("no-auth-only window: degrades locally but sends NO Sentry issue", () => {
+      // Session worked once, so a later stale-auth failure is a real
+      // degradation with a user-facing local warning (first-run no-auth, which
+      // has no prior success, is suppressed separately).
+      recordWorkerSuccess("s1");
       // 3 rapid no-auth failures reach the degraded threshold in one window.
       recordWorkerFailure("s1", "lore-contradiction", "no-auth");
       recordWorkerFailure("s1", "lore-contradiction", "no-auth");

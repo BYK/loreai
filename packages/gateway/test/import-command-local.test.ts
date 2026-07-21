@@ -91,6 +91,22 @@ describe("commandImport (local mode) — auth pre-flight", () => {
     expect(shutdownMock).toHaveBeenCalled();
   });
 
+  test("no explicit model configured → message is provider-neutral (no hardcoded 'anthropic')", async () => {
+    // Regression (Kjaer #1398, Erica): with no `cfg.model` set the provider
+    // falls back to a built-in default. The message must NOT tell a
+    // Copilot/OpenRouter user to export an "anthropic key" they don't have, and
+    // must lead with the universal `lore run` path.
+    await commandImport([], { project, agent: "aider", yes: true });
+
+    const out = errs.join("\n");
+    expect(out).toContain("Can't import");
+    // Neutral wording: no provider name baked into the key hint.
+    expect(out).not.toContain("anthropic key");
+    expect(out).toContain("<key for your provider>");
+    // Leads with the universal path.
+    expect(out).toContain("lore run");
+  });
+
   test("worker key set → passes the guard and proceeds to read/extract", async () => {
     startConfig.workerApiKey = "sk-worker-test";
 
