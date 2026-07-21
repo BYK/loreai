@@ -50,6 +50,19 @@ const TRDIFF10_MAGIC = "TRDIFF10";
 /** Header size in bytes (magic + 3 x i64) */
 const HEADER_SIZE = 32;
 
+/**
+ * Hard ceiling on the declared output size (`newSize`) of a patch, in bytes.
+ *
+ * `newSize` comes straight from the (untrusted) patch header and is used to
+ * preallocate `new Uint8Array(newSize)` for in-memory chain hops — BEFORE the
+ * output is produced and BEFORE the final SHA-256 is verified. Without a bound,
+ * a few-KB patch that passes chain resolution could declare a multi-gigabyte
+ * `newSize` and force an OOM-DoS on the upgrading host. The gateway binary is
+ * ~310 MB; 2 GiB is a generous ceiling that no legitimate release approaches
+ * while staying well under the point where the allocation itself would crash.
+ */
+const MAX_OUTPUT_SIZE = 2 * 1024 * 1024 * 1024;
+
 /** Parsed TRDIFF10 header fields */
 export type PatchHeader = {
   controlLen: number;
@@ -98,6 +111,16 @@ export function parsePatchHeader(patch: Uint8Array): PatchHeader {
 
   if (controlLen < 0 || diffLen < 0 || newSize < 0) {
     throw new Error("Corrupt patch: negative length in header");
+  }
+
+  // `newSize` is untrusted and drives a pre-verification `new Uint8Array(newSize)`
+  // allocation in the in-memory chain path. Reject an implausibly large declared
+  // output before any allocation happens, so a malicious tiny patch can't force
+  // an OOM (the SHA-256 gate only runs AFTER the output is materialized).
+  if (newSize > MAX_OUTPUT_SIZE) {
+    throw new Error(
+      `Corrupt patch: declared output size ${newSize} exceeds maximum ${MAX_OUTPUT_SIZE}`,
+    );
   }
 
   const totalCompressed = HEADER_SIZE + controlLen + diffLen;

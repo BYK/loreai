@@ -129,6 +129,44 @@ describe("parsePatchHeader", () => {
   it("rejects truncated patch", () => {
     expect(() => parsePatchHeader(Buffer.alloc(8))).toThrow(/too small/);
   });
+
+  it("rejects an implausibly large declared output size (OOM guard)", () => {
+    // A malicious tiny patch declaring a multi-gigabyte newSize must be
+    // rejected BEFORE any `new Uint8Array(newSize)` allocation. Build a valid
+    // header/blocks but with newSize far above the 2 GiB ceiling.
+    const control = zstdCompressSync(ctrl(2, 0, 0));
+    const diff = zstdCompressSync(Buffer.from([0, 0]));
+    const extra = zstdCompressSync(Buffer.alloc(0));
+    const hugeNewSize = 8 * 1024 * 1024 * 1024; // 8 GiB
+    const header = Buffer.concat([
+      Buffer.from("TRDIFF10", "utf8"),
+      offtout(control.length),
+      offtout(diff.length),
+      offtout(hugeNewSize),
+    ]);
+    const patch = Buffer.concat([header, control, diff, extra]);
+    expect(() => parsePatchHeader(patch)).toThrow(/exceeds maximum/);
+  });
+
+  it("does not attempt to allocate the huge output before rejecting", async () => {
+    // End-to-end: applyPatchToMemory must throw the header guard, never reach
+    // `new Uint8Array(newSize)`. If the guard were absent this would OOM/RangeError
+    // rather than throw the "exceeds maximum" message.
+    const control = zstdCompressSync(ctrl(2, 0, 0));
+    const diff = zstdCompressSync(Buffer.from([0, 0]));
+    const extra = zstdCompressSync(Buffer.alloc(0));
+    const hugeNewSize = 8 * 1024 * 1024 * 1024;
+    const header = Buffer.concat([
+      Buffer.from("TRDIFF10", "utf8"),
+      offtout(control.length),
+      offtout(diff.length),
+      offtout(hugeNewSize),
+    ]);
+    const patch = Buffer.concat([header, control, diff, extra]);
+    await expect(
+      applyPatchToMemory(Buffer.from([1, 2]), patch),
+    ).rejects.toThrow(/exceeds maximum/);
+  });
 });
 
 // ---------------------------------------------------------------------------
