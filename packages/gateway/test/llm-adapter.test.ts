@@ -2866,14 +2866,14 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
   });
 
   test("does NOT length-retry when the model's output limit is at or below the current budget (no shrink, no wasted call)", async () => {
-    // Guards the retry's raise-check (`min(bumpedCandidate, ceiling) > maxTokens`).
+    // Guards the retry's raise-check (`maxTokens < lengthRetryCeiling`).
     // A model whose output limit (8192) is below the default budget (16384) can
     // never be given MORE room — retrying would either shrink the budget or waste
     // a call. Uses a NON-reasoning, non-"claude" id so the reasoning floor is 0
     // and the ceiling clamp is the only thing preventing the retry.
-    // Mutation: revert the guard to `maxTokens < ceiling` AND bump to
-    // min(maxTokens*4, ceiling) → the retry fires and rebuilds with a NON-larger
-    // budget (a shrink to 8192) → 2 calls → RED.
+    // Mutation: delete the `maxTokens < lengthRetryCeiling` guard → the retry
+    // fires and rebuilds with a NON-larger budget (a shrink to min(16384*4,
+    // 8192)=8192) → 2 calls → RED.
     _setModelDataForTest({
       "openai/mini-8k": {
         id: "openai/mini-8k",
@@ -2986,5 +2986,87 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     // First attempt floored to 16384; retry multiplied from that → 64000.
     expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
     expect(bodyOf(1)?.max_completion_tokens).toBe(64000);
+  });
+
+  test("does NOT apply the reasoning floor on the ANTHROPIC protocol (thinking is suppressed there, not budgeted)", async () => {
+    // Protocol-gate guard. A reasoning-on-by-default Claude model on the native
+    // Anthropic protocol must NOT get the loop floor: that path sends
+    // `thinking:{type:"disabled"}` (effectiveDisableThinking) so it never burns
+    // the budget on reasoning. The floor is for protocols with NO suppression
+    // lever (openai, gemini). The worker must send the raw small budget as-is.
+    // Mutation: drop the `target.protocol === "openai" || "gemini"` gate → the
+    // floor inflates max_tokens to 16384 → RED.
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          model: "claude-sonnet-5",
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const text = await createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    ).prompt("system", "user", {
+      sessionID: "sess-anthropic-nofloor",
+      workerID: "lore-distill",
+      protocol: "anthropic",
+      maxTokens: 1035,
+    });
+
+    expect(text).toBe("ok");
+    // Anthropic path: raw budget passed through unchanged (no reasoning floor).
+    expect(bodyOf(0)?.max_tokens).toBe(1035);
+  });
+
+  test("applies the reasoning floor on the native GEMINI protocol (no thinking-disable lever there either)", async () => {
+    // Gemini 2.5 reasons by default and counts thinking against
+    // `maxOutputTokens`, and the native Gemini worker builder has no
+    // thinking-disable lever — so it needs the same floor as the OpenAI path.
+    // Mutation: drop `|| target.protocol === "gemini"` from the gate → the raw
+    // 1035 is sent as maxOutputTokens → RED.
+    _setModelDataForTest({
+      "gemini-2.5-flash": {
+        id: "gemini-2.5-flash",
+        cost: { input: 1, output: 3 },
+        limit: { context: 1_000_000, output: 64_000 },
+        reasoning_options: [{ type: "toggle" }],
+      },
+    });
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "ok" }] } }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+          modelVersion: "gemini-2.5-flash",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const text = await createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "goog-key" }),
+      { providerID: "google", modelID: "gemini-2.5-flash" },
+    ).prompt("system", "user", {
+      sessionID: "sess-gemini-floor",
+      workerID: "lore-distill",
+      protocol: "gemini",
+      upstreamProviderID: "google",
+      upstreamUrl: "https://generativelanguage.googleapis.com",
+      maxTokens: 1035,
+    });
+
+    expect(text).toBe("ok");
+    // Gemini path: floored to the reasoning budget (8192 + 8192 = 16384).
+    expect(
+      (bodyOf(0)?.generationConfig as { maxOutputTokens?: number } | undefined)
+        ?.maxOutputTokens,
+    ).toBe(16384);
   });
 });

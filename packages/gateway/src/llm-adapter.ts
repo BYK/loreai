@@ -1754,28 +1754,31 @@ export function createGatewayLLMClient(
       // completion bumps this and rebuilds the request once (see the empty-
       // response block). Starts at the caller's budget or the worker default.
       //
-      // Reasoning-headroom floor (OpenAI protocol only): distillation/curation
-      // workers pass tiny raw budgets (~1–8K) and no explicit effort, but
-      // aggregators (OpenRouter) route reasoning models (anthropic/claude-sonnet-5)
-      // that reason REGARDLESS — burning the budget on hidden reasoning and
-      // returning empty `finish_reason:"length"`. The Anthropic/Vertex builders
-      // suppress this by sending `thinking:{type:"disabled"}` (see
-      // `effectiveDisableThinking`), so they need no floor; the OpenAI protocol
-      // has no such lever, so we raise the budget to the reasoning floor here.
+      // Reasoning-headroom floor (protocols with NO thinking-suppression lever):
+      // distillation/curation workers pass tiny raw budgets (~1–8K) and no
+      // explicit effort, but aggregators (OpenRouter) route reasoning models
+      // (anthropic/claude-sonnet-5) that reason REGARDLESS — burning the budget
+      // on hidden reasoning and returning empty `finish_reason:"length"`. The
+      // Anthropic/Vertex builders suppress this by sending
+      // `thinking:{type:"disabled"}` (see `effectiveDisableThinking`), so they
+      // need no floor; the OpenAI and native-Gemini builders have no such lever
+      // (Gemini 2.5 reasons by default and counts thinking against
+      // `maxOutputTokens`), so we raise the budget to the reasoning floor here.
       // Applied to the LOOP variable (not just the builder) so the floored value
       // is the retry's baseline — a subsequent `finish_reason:"length"` bumps
       // from the effective budget, never from the tiny raw one. Clamped to the
       // model's output limit. `off`/undefined effort + non-reasoning model → 0
       // floor → caller budget unchanged.
+      const floorsReasoningBudget =
+        target.protocol === "openai" || target.protocol === "gemini";
       const rawMaxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
-      const openAIReasoningFloor =
-        target.protocol === "openai"
-          ? Math.min(
-              workerReasoningHeadroomFloor(model, opts?.reasoningEffort),
-              workerLengthRetryCeiling(model.modelID),
-            )
-          : 0;
-      let maxTokens = Math.max(rawMaxTokens, openAIReasoningFloor);
+      const reasoningFloor = floorsReasoningBudget
+        ? Math.min(
+            workerReasoningHeadroomFloor(model, opts?.reasoningEffort),
+            workerLengthRetryCeiling(model.modelID),
+          )
+        : 0;
+      let maxTokens = Math.max(rawMaxTokens, reasoningFloor);
 
       // Cross-provider fail-closed: the worker model's provider has no route
       // URL (unknown provider, or a local provider missing its explicit
