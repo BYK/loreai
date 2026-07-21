@@ -24,28 +24,22 @@ import {
 import { parseSSEStream, createStreamAccumulator } from "./anthropic";
 
 // ---------------------------------------------------------------------------
-// Stream accumulator
+// Stream accumulator — shared per-event core
 // ---------------------------------------------------------------------------
 
 /**
- * Accumulate an OpenAI Responses API SSE stream into a GatewayResponse.
- *
- * Consumes the upstream Response body and returns the accumulated result.
+ * Mutable accumulation state for an OpenAI Responses API SSE stream. Shared by
+ * the buffered accumulator (`accumulateResponsesSSEStream`) and the live
+ * pass-through streamer (`streamResponsesPassthrough`) so both derive an
+ * identical `GatewayResponse` from the same event-handling logic.
  */
-export async function accumulateResponsesSSEStream(
-  response: Response,
-): Promise<GatewayResponse> {
-  let id = "";
-  let model = "";
-  let stopReason = "end_turn";
-
-  const usage: GatewayUsage = {
-    inputTokens: 0,
-    outputTokens: 0,
-  };
-
+interface ResponsesAccState {
+  id: string;
+  model: string;
+  stopReason: string;
+  usage: GatewayUsage;
   /** Accumulating output items indexed by output_index. */
-  const items = new Map<
+  items: Map<
     number,
     | { type: "text"; text: string }
     | {
@@ -55,163 +49,168 @@ export async function accumulateResponsesSSEStream(
         name: string;
         args: string;
       }
-  >();
+  >;
+}
 
-  if (!response.body) {
-    throw new Error("Response has no body");
-  }
-  const reader = response.body.getReader();
+function makeResponsesAccState(): ResponsesAccState {
+  return {
+    id: "",
+    model: "",
+    stopReason: "end_turn",
+    usage: { inputTokens: 0, outputTokens: 0 },
+    items: new Map(),
+  };
+}
 
-  for await (const { event, data } of parseSSEStream(reader)) {
-    // Some Responses API implementations send untyped `data:` lines
-    // without `event:` — skip those.
-    if (!data || data === "[DONE]") continue;
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(data) as Record<string, unknown>;
-    } catch {
-      continue;
+/**
+ * Apply one parsed Responses SSE event to the accumulation state. Never touches
+ * I/O — safe to call while forwarding the same event verbatim to the client.
+ */
+function applyResponsesEvent(
+  state: ResponsesAccState,
+  event: string,
+  parsed: Record<string, unknown>,
+): void {
+  switch (event) {
+    case "response.created":
+    case "response.in_progress": {
+      const resp = parsed.response as Record<string, unknown> | undefined;
+      if (resp) {
+        if (typeof resp.id === "string") state.id = resp.id;
+        if (typeof resp.model === "string") state.model = resp.model;
+      }
+      break;
     }
 
-    switch (event) {
-      case "response.created":
-      case "response.in_progress": {
-        const resp = parsed.response as Record<string, unknown> | undefined;
-        if (resp) {
-          if (typeof resp.id === "string") id = resp.id;
-          if (typeof resp.model === "string") model = resp.model;
-        }
-        break;
+    case "response.output_item.added": {
+      const outputIndex = parsed.output_index as number;
+      const item = parsed.item as Record<string, unknown> | undefined;
+      if (typeof outputIndex !== "number" || !item) break;
+
+      if (item.type === "message") {
+        state.items.set(outputIndex, { type: "text", text: "" });
+      } else if (item.type === "function_call") {
+        state.items.set(outputIndex, {
+          type: "tool_use",
+          id: asString(item.id),
+          callId: asString(item.call_id),
+          name: asString(item.name),
+          args: "",
+        });
       }
-
-      case "response.output_item.added": {
-        const outputIndex = parsed.output_index as number;
-        const item = parsed.item as Record<string, unknown> | undefined;
-        if (typeof outputIndex !== "number" || !item) break;
-
-        if (item.type === "message") {
-          items.set(outputIndex, { type: "text", text: "" });
-        } else if (item.type === "function_call") {
-          items.set(outputIndex, {
-            type: "tool_use",
-            id: asString(item.id),
-            callId: asString(item.call_id),
-            name: asString(item.name),
-            args: "",
-          });
-        }
-        break;
-      }
-
-      case "response.output_text.delta": {
-        const outputIndex = parsed.output_index as number;
-        const delta = parsed.delta as string | undefined;
-        if (typeof outputIndex !== "number" || typeof delta !== "string") break;
-
-        const item = items.get(outputIndex);
-        if (item?.type === "text") {
-          item.text += delta;
-        }
-        break;
-      }
-
-      case "response.output_text.done": {
-        const outputIndex = parsed.output_index as number;
-        const text = parsed.text as string | undefined;
-        if (typeof outputIndex !== "number") break;
-
-        const item = items.get(outputIndex);
-        if (item?.type === "text" && typeof text === "string") {
-          // Replace accumulated text with the final version (more reliable)
-          item.text = text;
-        }
-        break;
-      }
-
-      case "response.function_call_arguments.delta": {
-        const outputIndex = parsed.output_index as number;
-        const delta = parsed.delta as string | undefined;
-        if (typeof outputIndex !== "number" || typeof delta !== "string") break;
-
-        const item = items.get(outputIndex);
-        if (item?.type === "tool_use") {
-          item.args += delta;
-        }
-        break;
-      }
-
-      case "response.function_call_arguments.done": {
-        const outputIndex = parsed.output_index as number;
-        const args = parsed.arguments as string | undefined;
-        if (typeof outputIndex !== "number") break;
-
-        const item = items.get(outputIndex);
-        if (item?.type === "tool_use" && typeof args === "string") {
-          item.args = args;
-        }
-        break;
-      }
-
-      // `response.done` / `response.incomplete` are Codex (ChatGPT) terminal
-      // variants. Pi's client normalizes them to `response.completed`, but the
-      // gateway sees the RAW upstream stream, so finalize on them here too.
-      // `resp.status` ("incomplete"/"completed"/…) drives the stop reason via
-      // `mapStatusToStopReason`.
-      case "response.done":
-      case "response.incomplete":
-      case "response.completed": {
-        const resp = parsed.response as Record<string, unknown> | undefined;
-        if (resp) {
-          if (typeof resp.id === "string") id = resp.id;
-          if (typeof resp.model === "string") model = resp.model;
-          if (typeof resp.status === "string") {
-            stopReason = mapStatusToStopReason(resp.status);
-          }
-
-          const respUsage = resp.usage as Record<string, unknown> | undefined;
-          if (respUsage) {
-            if (typeof respUsage.output_tokens === "number") {
-              usage.outputTokens = respUsage.output_tokens;
-            }
-            // Responses API reports cache details under `input_tokens_details`;
-            // fall back to `prompt_tokens_details` for OpenAI-compatible providers.
-            const promptDetails = (respUsage.input_tokens_details ??
-              respUsage.prompt_tokens_details) as
-              | Record<string, number>
-              | undefined;
-            if (promptDetails?.cached_tokens !== undefined) {
-              usage.cacheReadInputTokens = promptDetails.cached_tokens;
-            }
-            if (promptDetails?.cache_write_tokens !== undefined) {
-              usage.cacheCreationInputTokens = promptDetails.cache_write_tokens;
-            }
-            if (typeof respUsage.input_tokens === "number") {
-              // input_tokens is inclusive of cache reads/writes; subtract them
-              // to match the gateway's disjoint token convention.
-              usage.inputTokens = Math.max(
-                0,
-                respUsage.input_tokens -
-                  (promptDetails?.cached_tokens ?? 0) -
-                  (promptDetails?.cache_write_tokens ?? 0),
-              );
-            }
-          }
-        }
-        break;
-      }
-
-      // Other events (response.output_item.done, response.content_part.*,
-      // response.reasoning_summary_*, etc.) — ignored for accumulation
+      break;
     }
-  }
 
-  // Build content blocks from accumulated items, sorted by output_index
+    case "response.output_text.delta": {
+      const outputIndex = parsed.output_index as number;
+      const delta = parsed.delta as string | undefined;
+      if (typeof outputIndex !== "number" || typeof delta !== "string") break;
+
+      const item = state.items.get(outputIndex);
+      if (item?.type === "text") {
+        item.text += delta;
+      }
+      break;
+    }
+
+    case "response.output_text.done": {
+      const outputIndex = parsed.output_index as number;
+      const text = parsed.text as string | undefined;
+      if (typeof outputIndex !== "number") break;
+
+      const item = state.items.get(outputIndex);
+      if (item?.type === "text" && typeof text === "string") {
+        // Replace accumulated text with the final version (more reliable)
+        item.text = text;
+      }
+      break;
+    }
+
+    case "response.function_call_arguments.delta": {
+      const outputIndex = parsed.output_index as number;
+      const delta = parsed.delta as string | undefined;
+      if (typeof outputIndex !== "number" || typeof delta !== "string") break;
+
+      const item = state.items.get(outputIndex);
+      if (item?.type === "tool_use") {
+        item.args += delta;
+      }
+      break;
+    }
+
+    case "response.function_call_arguments.done": {
+      const outputIndex = parsed.output_index as number;
+      const args = parsed.arguments as string | undefined;
+      if (typeof outputIndex !== "number") break;
+
+      const item = state.items.get(outputIndex);
+      if (item?.type === "tool_use" && typeof args === "string") {
+        item.args = args;
+      }
+      break;
+    }
+
+    // `response.done` / `response.incomplete` are Codex (ChatGPT) terminal
+    // variants. Pi's client normalizes them to `response.completed`, but the
+    // gateway sees the RAW upstream stream, so finalize on them here too.
+    // `resp.status` ("incomplete"/"completed"/…) drives the stop reason via
+    // `mapStatusToStopReason`.
+    case "response.done":
+    case "response.incomplete":
+    case "response.completed": {
+      const resp = parsed.response as Record<string, unknown> | undefined;
+      if (resp) {
+        if (typeof resp.id === "string") state.id = resp.id;
+        if (typeof resp.model === "string") state.model = resp.model;
+        if (typeof resp.status === "string") {
+          state.stopReason = mapStatusToStopReason(resp.status);
+        }
+
+        const respUsage = resp.usage as Record<string, unknown> | undefined;
+        if (respUsage) {
+          if (typeof respUsage.output_tokens === "number") {
+            state.usage.outputTokens = respUsage.output_tokens;
+          }
+          // Responses API reports cache details under `input_tokens_details`;
+          // fall back to `prompt_tokens_details` for OpenAI-compatible providers.
+          const promptDetails = (respUsage.input_tokens_details ??
+            respUsage.prompt_tokens_details) as
+            | Record<string, number>
+            | undefined;
+          if (promptDetails?.cached_tokens !== undefined) {
+            state.usage.cacheReadInputTokens = promptDetails.cached_tokens;
+          }
+          if (promptDetails?.cache_write_tokens !== undefined) {
+            state.usage.cacheCreationInputTokens =
+              promptDetails.cache_write_tokens;
+          }
+          if (typeof respUsage.input_tokens === "number") {
+            // input_tokens is inclusive of cache reads/writes; subtract them
+            // to match the gateway's disjoint token convention.
+            state.usage.inputTokens = Math.max(
+              0,
+              respUsage.input_tokens -
+                (promptDetails?.cached_tokens ?? 0) -
+                (promptDetails?.cache_write_tokens ?? 0),
+            );
+          }
+        }
+      }
+      break;
+    }
+
+    // Other events (response.output_item.done, response.content_part.*,
+    // response.reasoning_summary_*, etc.) — ignored for accumulation
+  }
+}
+
+/** Build the final GatewayResponse from accumulated state. */
+function finalizeResponsesAcc(state: ResponsesAccState): GatewayResponse {
   const content: GatewayContentBlock[] = [];
-  const sortedIndices = Array.from(items.keys()).sort((a, b) => a - b);
+  const sortedIndices = Array.from(state.items.keys()).sort((a, b) => a - b);
 
   for (const index of sortedIndices) {
-    const item = items.get(index);
+    const item = state.items.get(index);
     if (!item) continue;
     if (item.type === "text") {
       if (item.text) {
@@ -235,12 +234,257 @@ export async function accumulateResponsesSSEStream(
     }
   }
 
+  let stopReason = state.stopReason;
   // If we saw tool_use, map stop reason accordingly
   if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
     stopReason = "tool_use";
   }
 
-  return { id, model, content, stopReason, usage };
+  return {
+    id: state.id,
+    model: state.model,
+    content,
+    stopReason,
+    usage: state.usage,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Stream accumulator (buffered)
+// ---------------------------------------------------------------------------
+
+/**
+ * Accumulate an OpenAI Responses API SSE stream into a GatewayResponse.
+ *
+ * Consumes the upstream Response body and returns the accumulated result.
+ */
+export async function accumulateResponsesSSEStream(
+  response: Response,
+): Promise<GatewayResponse> {
+  const state = makeResponsesAccState();
+
+  if (!response.body) {
+    throw new Error("Response has no body");
+  }
+  const reader = response.body.getReader();
+
+  for await (const { event, data } of parseSSEStream(reader)) {
+    // Some Responses API implementations send untyped `data:` lines
+    // without `event:` — skip those.
+    if (!data || data === "[DONE]") continue;
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    applyResponsesEvent(state, event, parsed);
+  }
+
+  return finalizeResponsesAcc(state);
+}
+
+// ---------------------------------------------------------------------------
+// True pass-through streamer (Responses upstream → Responses client)
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize a parsed SSE event back to wire form, preserving the original data
+ * payload (multi-line `data:` payloads are re-prefixed per line so nothing is
+ * dropped or re-serialized — `reasoning_summary`, content_part annotations,
+ * etc. survive intact because we forward the original `data` string).
+ */
+function reserializeSSE(event: string, data: string): string {
+  const dataLines = data
+    .split("\n")
+    .map((line) => `data: ${line}`)
+    .join("\n");
+  return `event: ${event}\n${dataLines}\n\n`;
+}
+
+/**
+ * Stream an OpenAI Responses API upstream straight through to a Responses-API
+ * client, forwarding each SSE event as it arrives while accumulating a complete
+ * `GatewayResponse` in parallel.
+ *
+ * True-streaming counterpart to `accumulateResponsesSSEStream` (which buffers
+ * the ENTIRE upstream before the client sees a byte — the cause of the
+ * codex/ChatGPT "waiting for response headers" hang, since ChatGPT's
+ * `/backend-api/codex/responses` reasoning turns are slow-to-first-token).
+ *
+ * Safe ONLY when no `recall` tool_use can appear in the stream (the caller
+ * gates on recall-tool absence): recall interception requires buffering so the
+ * injected tool_use never leaks to the client. When the recall tool is present
+ * the caller keeps the buffered `accumulateResponsesSSEStream` path.
+ *
+ * `onComplete` is invoked exactly once with the accumulated response when the
+ * upstream stream ends, mirroring the Anthropic `buildStreamingResponse`
+ * contract so `postResponse` (cost/calibration/temporal) runs identically.
+ */
+export function streamResponsesPassthrough(
+  upstreamResponse: Response,
+  onComplete: (response: GatewayResponse) => void,
+  sessionID?: string,
+): Response {
+  const state = makeResponsesAccState();
+  const encoder = new TextEncoder();
+
+  let cancelled = false;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  // --- Keepalive ---
+  // The Responses API has no first-class `ping` event (unlike Anthropic), so we
+  // emit an SSE comment line (`: keepalive`), which is spec-compliant and MUST
+  // be ignored by any conformant SSE client. Keeps the client↔gateway
+  // connection alive during long reasoning pauses (Bun's ~5-min fetch timeout,
+  // oven-sh/bun#16682). True streaming emits real bytes frequently, so this
+  // only fires during genuine upstream silence.
+  const KEEPALIVE_INACTIVITY_MS = 30_000;
+  const keepaliveComment = encoder.encode(`: keepalive\n\n`);
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+  let completed = false;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const safeEnqueue = (chunk: Uint8Array): boolean => {
+        if (cancelled) return false;
+        try {
+          controller.enqueue(chunk);
+          return true;
+        } catch {
+          cancelled = true;
+          return false;
+        }
+      };
+      const safeClose = (): void => {
+        if (cancelled) return;
+        try {
+          controller.close();
+        } catch {
+          // Already closed/cancelled
+        }
+      };
+
+      const resetKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = setTimeout(function tick() {
+          if (cancelled) return;
+          safeEnqueue(keepaliveComment);
+          keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+        }, KEEPALIVE_INACTIVITY_MS);
+      };
+      const clearKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = null;
+      };
+
+      const finish = (): void => {
+        if (completed) return;
+        completed = true;
+        try {
+          onComplete(finalizeResponsesAcc(state));
+        } catch (err) {
+          log.error("openai-responses passthrough onComplete error:", err);
+        }
+      };
+
+      try {
+        if (!upstreamResponse.body) {
+          throw new Error("Upstream response has no body");
+        }
+        const reader = upstreamResponse.body.getReader();
+        activeReader = reader;
+
+        resetKeepalive();
+        for await (const { event, data } of parseSSEStream(reader)) {
+          resetKeepalive(); // upstream alive — reset inactivity timer
+
+          // Forward the event to the client as it arrives, preserving the
+          // original data payload (no re-parse/re-serialize → no field loss).
+          if (!safeEnqueue(encoder.encode(reserializeSSE(event, data)))) break;
+
+          // Accumulate in parallel for postResponse / calibration.
+          if (!data || data === "[DONE]") continue;
+          let parsed: Record<string, unknown>;
+          try {
+            parsed = JSON.parse(data) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          applyResponsesEvent(state, event, parsed);
+        }
+        clearKeepalive();
+        finish();
+        safeClose();
+      } catch (err) {
+        clearKeepalive();
+        log.error(
+          `openai-responses passthrough stream error${
+            sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""
+          }:`,
+          err,
+        );
+        // Emit response.failed so the client doesn't hang waiting for a
+        // terminal event, then still run onComplete with what we accumulated.
+        safeEnqueue(
+          encoder.encode(
+            reserializeSSE(
+              "response.failed",
+              JSON.stringify({
+                type: "response.failed",
+                response: {
+                  id: state.id || "resp_error",
+                  object: "response",
+                  created_at: Math.floor(Date.now() / 1000),
+                  model: state.model,
+                  status: "failed",
+                  output: [],
+                  usage: null,
+                  error: {
+                    type: "server_error",
+                    message:
+                      err instanceof Error
+                        ? err.message
+                        : "upstream stream error",
+                  },
+                },
+              }),
+            ),
+          ),
+        );
+        finish();
+        safeClose();
+      }
+    },
+
+    cancel() {
+      // Client disconnected — cancel the upstream reader to stop wasting bandwidth
+      cancelled = true;
+      if (keepaliveTimer) clearTimeout(keepaliveTimer);
+      try {
+        // Cancel via the active reader (it holds the body lock); fall back to
+        // the body if the loop hasn't acquired a reader yet.
+        if (activeReader) {
+          void activeReader.cancel();
+        } else {
+          void upstreamResponse.body?.cancel();
+        }
+      } catch {
+        // Best-effort cancellation
+      }
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

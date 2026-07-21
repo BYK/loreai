@@ -170,6 +170,7 @@ import {
 } from "./translate/openai-responses";
 import {
   accumulateResponsesSSEStream,
+  streamResponsesPassthrough,
   translateAnthropicStreamToResponses,
 } from "./stream/openai-responses";
 import {
@@ -8528,6 +8529,37 @@ async function handleConversationTurn(
     // run the SAME recall interception loop as the non-streaming path —
     // otherwise an injected `recall` tool_use would leak straight to the client.
     if (effectiveProtocol === "openai-responses") {
+      // True streaming fast path: when the client also speaks the Responses API
+      // (the codex/ChatGPT case), no `recall` tool can appear (so no
+      // interception is needed), and there's no warning to layer in, forward
+      // each upstream SSE event to the client AS IT ARRIVES. This fixes the
+      // codex "waiting for response headers" hang — the buffered path below
+      // withholds all client bytes until the (slow, reasoning-heavy) upstream
+      // fully completes.
+      const hasRecallTool = modifiedReq.tools.some(
+        (t) => t.name === RECALL_TOOL_NAME,
+      );
+      if (
+        req.protocol === "openai-responses" &&
+        !hasRecallTool &&
+        !shouldInjectWarning
+      ) {
+        return streamResponsesPassthrough(
+          upstreamResponse,
+          (resp) =>
+            postResponse(
+              req,
+              resp,
+              sessionState,
+              config,
+              requestBody,
+              genAiSpan,
+            ),
+          sessionState.sessionID,
+        );
+      }
+      // Recall tool present, warning to inject, or a non-Responses client:
+      // buffer the full upstream, run recall interception, then re-emit.
       const resp = await accumulateResponsesSSEStream(upstreamResponse);
       return finalizeWithRecall(resp);
     }

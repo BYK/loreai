@@ -9,7 +9,11 @@
  *  - Mixed text + function_call output
  */
 import { describe, test, expect } from "vitest";
-import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
+import {
+  accumulateResponsesSSEStream,
+  streamResponsesPassthrough,
+} from "../src/stream/openai-responses";
+import type { GatewayResponse } from "../src/translate/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -558,5 +562,214 @@ describe("accumulateResponsesSSEStream", () => {
     const result = await accumulateResponsesSSEStream(response);
     expect(result.stopReason).toBe("max_tokens");
     expect(result.usage?.outputTokens).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// streamResponsesPassthrough — true streaming (Responses → Responses client)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a controllable upstream SSE Response whose events are released one at a
+ * time via the returned `push`/`close` handles, so a test can assert that the
+ * client sees early events BEFORE the upstream terminal event arrives.
+ */
+function controllableSSE(): {
+  response: Response;
+  push: (event: string, data: Record<string, unknown>) => void;
+  close: () => void;
+  error: (err: Error) => void;
+} {
+  const encoder = new TextEncoder();
+  let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      ctrl = c;
+    },
+  });
+  return {
+    response: new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    }),
+    push: (event, data) =>
+      ctrl.enqueue(
+        encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+      ),
+    close: () => ctrl.close(),
+    error: (err) => ctrl.error(err),
+  };
+}
+
+/** Read the client-facing SSE stream fully into a decoded string. */
+async function drainToString(resp: Response): Promise<string> {
+  const reader = resp.body!.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) out += decoder.decode(value, { stream: true });
+    if (done) break;
+  }
+  return out;
+}
+
+describe("streamResponsesPassthrough", () => {
+  test("forwards events to the client BEFORE the upstream completes (true streaming)", async () => {
+    const upstream = controllableSSE();
+    let completed: GatewayResponse | null = null;
+
+    const clientResp = streamResponsesPassthrough(upstream.response, (r) => {
+      completed = r;
+    });
+    const reader = clientResp.body!.getReader();
+    const decoder = new TextDecoder();
+
+    // Push the opening events; the terminal event is deliberately withheld.
+    upstream.push("response.created", {
+      type: "response.created",
+      response: {
+        id: "resp_live",
+        model: "gpt-5.6-sol",
+        status: "in_progress",
+      },
+    });
+    upstream.push("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "message", id: "msg_1", role: "assistant" },
+    });
+    upstream.push("response.output_text.delta", {
+      type: "response.output_text.delta",
+      output_index: 0,
+      content_index: 0,
+      delta: "streaming ",
+    });
+
+    // The client MUST be able to read those bytes now — while the upstream is
+    // still open (no response.completed yet). This is the core anti-hang
+    // property: a buffered accumulator would block here forever.
+    const first = await reader.read();
+    const firstText = decoder.decode(first.value);
+    expect(firstText).toContain("response.created");
+    expect(firstText).toContain("gpt-5.6-sol");
+
+    // onComplete must NOT have fired yet — stream isn't done.
+    expect(completed).toBeNull();
+
+    // Now finish the upstream.
+    upstream.push("response.output_text.done", {
+      type: "response.output_text.done",
+      output_index: 0,
+      content_index: 0,
+      text: "streaming done",
+    });
+    upstream.push("response.completed", {
+      type: "response.completed",
+      response: {
+        id: "resp_live",
+        model: "gpt-5.6-sol",
+        status: "completed",
+        usage: { input_tokens: 12, output_tokens: 3 },
+      },
+    });
+    upstream.close();
+
+    // Drain the rest.
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+
+    // onComplete fired exactly once with the fully accumulated response.
+    expect(completed).not.toBeNull();
+    const done = completed as unknown as GatewayResponse;
+    expect(done.id).toBe("resp_live");
+    expect(done.model).toBe("gpt-5.6-sol");
+    expect(done.content).toEqual([{ type: "text", text: "streaming done" }]);
+    expect(done.usage?.inputTokens).toBe(12);
+    expect(done.usage?.outputTokens).toBe(3);
+    expect(done.stopReason).toBe("end_turn");
+  });
+
+  test("forwards every upstream event verbatim, preserving non-accumulated fields", async () => {
+    const upstream = controllableSSE();
+    const clientResp = streamResponsesPassthrough(upstream.response, () => {});
+
+    // reasoning_summary events are not accumulated into GatewayResponse, but
+    // MUST still reach the client byte-for-byte (a re-serialize from the
+    // accumulator would drop them → codex reasoning UI breaks).
+    upstream.push("response.reasoning_summary_text.delta", {
+      type: "response.reasoning_summary_text.delta",
+      output_index: 0,
+      delta: "thinking about it",
+    });
+    upstream.push("response.completed", {
+      type: "response.completed",
+      response: {
+        id: "resp_r",
+        model: "gpt-5.6-sol",
+        status: "completed",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      },
+    });
+    upstream.close();
+
+    const out = await drainToString(clientResp);
+    expect(out).toContain("response.reasoning_summary_text.delta");
+    expect(out).toContain("thinking about it");
+    expect(out).toContain("response.completed");
+  });
+
+  test("emits response.failed and still calls onComplete when the upstream errors mid-stream", async () => {
+    const upstream = controllableSSE();
+    let completed: GatewayResponse | null = null;
+    const clientResp = streamResponsesPassthrough(upstream.response, (r) => {
+      completed = r;
+    });
+
+    upstream.push("response.created", {
+      type: "response.created",
+      response: { id: "resp_err", model: "gpt-5.6-sol", status: "in_progress" },
+    });
+    upstream.error(new Error("upstream exploded"));
+
+    const out = await drainToString(clientResp);
+    // Client is told the turn failed rather than hanging on a missing terminal.
+    expect(out).toContain("response.failed");
+    // onComplete still ran (so postResponse/cost tracking is not skipped).
+    expect(completed).not.toBeNull();
+  });
+
+  test("cancels the upstream reader when the client disconnects", async () => {
+    let upstreamCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        const enc = new TextEncoder();
+        c.enqueue(
+          enc.encode(
+            `event: response.created\ndata: ${JSON.stringify({
+              type: "response.created",
+              response: { id: "r", model: "m", status: "in_progress" },
+            })}\n\n`,
+          ),
+        );
+        // never closes on its own
+      },
+      cancel() {
+        upstreamCancelled = true;
+      },
+    });
+    const upstreamResp = new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    });
+
+    const clientResp = streamResponsesPassthrough(upstreamResp, () => {});
+    const reader = clientResp.body!.getReader();
+    await reader.read(); // pull the first event through
+    await reader.cancel(); // client disconnects
+
+    // Give the microtask queue a tick for the cancel to propagate.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(upstreamCancelled).toBe(true);
   });
 });
