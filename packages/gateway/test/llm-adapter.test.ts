@@ -2807,37 +2807,76 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     expect(bodyOf(0)?.reasoning_effort).toBe("high");
   });
 
-  test("OpenAI worker builder leaves the default budget unchanged when no reasoning effort is set", async () => {
-    // Non-reasoning workers must not pay inflated budgets, and reasoning_effort
-    // must be omitted. The budget assertion (16384) is guaranteed by the default
-    // exceeding the headroom floor (8192); the load-bearing assertion here is
-    // that reasoning_effort is NOT sent when effort is unset (openAIReasoningEffort
-    // → null). Mutation: unconditionally emit reasoning_effort → RED.
+  test("OpenAI worker builder applies the reasoning floor for a reasoning-on-by-default model even with NO effort and a small raw budget (regression: live truncation storm)", async () => {
+    // The core regression: distillation/curation workers pass tiny raw budgets
+    // (~1-8K) and NO reasoning effort, but OpenRouter routes reasoning models
+    // (anthropic/claude-sonnet-5) that reason regardless — burning the whole
+    // budget on hidden reasoning and returning empty finish_reason:"length".
+    // The builder must floor the budget to DEFAULT_REASONING_MODEL_BUDGET (8192)
+    // + THINKING_OUTPUT_HEADROOM (8192) = 16384 on the FIRST attempt, so the
+    // answer survives without relying on the length-retry.
+    // Mutation: drop the workerReasoningHeadroomFloor / workerThinkingOnByDefault
+    // branch → first call sends the raw 1035 → RED.
     mockFetch.mockResolvedValueOnce(openAISuccess("ok"));
 
     await client().prompt("system", "user", {
-      sessionID: "sess-no-effort",
+      sessionID: "sess-reasoning-floor",
       workerID: "lore-distill",
       protocol: "openai",
       upstreamProviderID: "openrouter",
       upstreamUrl: "https://openrouter.ai/api",
+      maxTokens: 1035,
     });
 
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
+    // No explicit effort → reasoning_effort must NOT be sent (the model reasons
+    // on its own; we only give it room).
+    expect(bodyOf(0)).not.toHaveProperty("reasoning_effort");
+  });
+
+  test("OpenAI worker builder does NOT floor a NON-reasoning model with no effort (no wasted budget)", async () => {
+    // A plain non-reasoning model keeps the caller's small raw budget — the floor
+    // must not inflate it. Mutation: apply the floor unconditionally → 16384 → RED.
+    _setModelDataForTest({
+      "openai/gpt-4o-mini": {
+        id: "openai/gpt-4o-mini",
+        cost: { input: 1, output: 2 },
+        limit: { context: 128_000, output: 16_384 },
+        // no reasoning_options → not reasoning-on-by-default; id has no "claude".
+      },
+    });
+    mockFetch.mockResolvedValueOnce(openAISuccess("ok"));
+
+    await createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "sk-or-test" }),
+      { providerID: "openrouter", modelID: "openai/gpt-4o-mini" },
+    ).prompt("system", "user", {
+      sessionID: "sess-nonreasoning",
+      workerID: "lore-distill",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+      maxTokens: 1035,
+    });
+
+    expect(bodyOf(0)?.max_completion_tokens).toBe(1035);
     expect(bodyOf(0)).not.toHaveProperty("reasoning_effort");
   });
 
   test("does NOT length-retry when the model's output limit is at or below the current budget (no shrink, no wasted call)", async () => {
-    // Guards the `maxTokens < workerLengthRetryCeiling` clause. A model whose
-    // output limit (8192) is below the default budget (16384) can never be given
-    // MORE room — retrying would either shrink the budget or waste a call. The
-    // guard must skip the retry entirely.
-    // Mutation: delete the `maxTokens < ceiling` clause → the retry fires and
-    // rebuilds with a NON-larger budget (a shrink to min(16384*4, 8192)=8192) →
-    // 2 calls → RED.
+    // Guards the retry's raise-check (`min(bumpedCandidate, ceiling) > maxTokens`).
+    // A model whose output limit (8192) is below the default budget (16384) can
+    // never be given MORE room — retrying would either shrink the budget or waste
+    // a call. Uses a NON-reasoning, non-"claude" id so the reasoning floor is 0
+    // and the ceiling clamp is the only thing preventing the retry.
+    // Mutation: revert the guard to `maxTokens < ceiling` AND bump to
+    // min(maxTokens*4, ceiling) → the retry fires and rebuilds with a NON-larger
+    // budget (a shrink to 8192) → 2 calls → RED.
     _setModelDataForTest({
-      "anthropic/claude-mini-8k": {
-        id: "anthropic/claude-mini-8k",
+      "openai/mini-8k": {
+        id: "openai/mini-8k",
         cost: { input: 1, output: 5 },
         limit: { context: 100_000, output: 8_192 },
       },
@@ -2848,7 +2887,7 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
           JSON.stringify({
             id: "gen-small",
             object: "chat.completion",
-            model: "anthropic/claude-mini-8k",
+            model: "openai/mini-8k",
             choices: [
               {
                 index: 0,
@@ -2865,7 +2904,7 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     const text = await createGatewayLLMClient(
       UPSTREAMS,
       () => ({ scheme: "bearer", value: "sk-or-test" }),
-      { providerID: "openrouter", modelID: "anthropic/claude-mini-8k" },
+      { providerID: "openrouter", modelID: "openai/mini-8k" },
     ).prompt("system", "user", {
       sessionID: "sess-small-limit",
       workerID: "lore-distill",
@@ -2920,5 +2959,32 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     // retry → RED.
     expect(text).toBe("recovered via native reason");
     expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("length-retry multiplies from the FLOORED effective budget, not the tiny raw budget", async () => {
+    // A reasoning-on-by-default model truncates on a tiny raw budget (1035). The
+    // loop floors it to the reasoning floor (16384) BEFORE the first attempt, so
+    // the retry multiplies from 16384 (→ min(16384*4, ceiling 64000) = 64000),
+    // NOT from 1035 (which would give a useless 4140).
+    // Mutation: remove the openAIReasoningFloor from the loop `maxTokens` init →
+    // first attempt sends 1035, retry sends 4140 → bodyOf assertions RED.
+    mockFetch
+      .mockResolvedValueOnce(lengthTruncated())
+      .mockResolvedValueOnce(openAISuccess("recovered at floor"));
+
+    const text = await client().prompt("system", "user", {
+      sessionID: "sess-retry-floor",
+      workerID: "lore-distill",
+      protocol: "openai",
+      upstreamProviderID: "openrouter",
+      upstreamUrl: "https://openrouter.ai/api",
+      maxTokens: 1035,
+    });
+
+    expect(text).toBe("recovered at floor");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // First attempt floored to 16384; retry multiplied from that → 64000.
+    expect(bodyOf(0)?.max_completion_tokens).toBe(16384);
+    expect(bodyOf(1)?.max_completion_tokens).toBe(64000);
   });
 });

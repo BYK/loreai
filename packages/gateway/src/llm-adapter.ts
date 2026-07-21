@@ -429,6 +429,44 @@ const WORKER_LENGTH_RETRY_MULTIPLIER = 4;
 // unknown (fallback entry). Bounds cost/latency.
 const WORKER_LENGTH_RETRY_CAP = 64_000;
 
+// Default hidden-reasoning budget assumed for a reasoning-on-by-default worker
+// model when the caller set NO explicit reasoning effort. Distillation/curation
+// workers pass `thinking:false` / no effort, but OpenRouter (and other
+// aggregators) route reasoning models like `anthropic/claude-sonnet-5` that
+// reason REGARDLESS — burning hidden tokens against the output budget before any
+// visible text. Equal to `anthropicThinkingBudget("medium")` (8192): enough for
+// a bounded distillation/curation reasoning pass without over-provisioning.
+const DEFAULT_REASONING_MODEL_BUDGET = 8192;
+
+/**
+ * The minimum output budget a worker call needs so the model can complete its
+ * VISIBLE answer after any hidden reasoning pass, or 0 when no floor applies.
+ *
+ * - Explicit reasoning effort set → `anthropicThinkingBudget(effort) +
+ *   THINKING_OUTPUT_HEADROOM` (the caller asked the model to reason; make room).
+ * - No effort, but the model reasons on by default (models.dev
+ *   `reasoning_options` toggle, or the Claude fallback heuristic via
+ *   `workerThinkingOnByDefault`) → `DEFAULT_REASONING_MODEL_BUDGET +
+ *   THINKING_OUTPUT_HEADROOM`. This is the case the length-retry alone could not
+ *   solve: the workers pass tiny budgets (~1–8K) and a reasoning model burns
+ *   most of it on reasoning, so the FIRST attempt must already carry headroom.
+ * - Otherwise → 0 (non-reasoning model with no effort keeps its caller budget).
+ *
+ * A floor, never a charge: a model that doesn't reason still bills only the
+ * tokens it actually emits.
+ */
+function workerReasoningHeadroomFloor(
+  model: { modelID: string },
+  reasoningEffort: ReasoningEffort | undefined,
+): number {
+  const explicitBudget = anthropicThinkingBudget(reasoningEffort);
+  if (explicitBudget != null) return explicitBudget + THINKING_OUTPUT_HEADROOM;
+  if (workerThinkingOnByDefault(model)) {
+    return DEFAULT_REASONING_MODEL_BUDGET + THINKING_OUTPUT_HEADROOM;
+  }
+  return 0;
+}
+
 /**
  * Resolve the retry budget. `LORE_MAX_RETRIES` overrides the default; values
  * that are non-numeric, negative, or zero fall back to the default (we never
@@ -967,21 +1005,6 @@ function buildOpenAIWorkerRequest(
   // `high` (not a standard OpenAI value) inside openAIReasoningEffort.
   const effort = openAIReasoningEffort(reasoningEffort);
 
-  // Reasoning headroom (mirrors the native Anthropic/Vertex builders). When
-  // reasoning is active the model spends hidden tokens against
-  // `max_completion_tokens` BEFORE emitting any visible text; without headroom a
-  // reasoning model reached over the OpenAI protocol (e.g. Claude via
-  // OpenRouter) can exhaust the whole budget on reasoning and return an EMPTY
-  // completion with `finish_reason:"length"`. `anthropicThinkingBudget` maps the
-  // effort dial to a token budget; we ensure the output cap exceeds it by
-  // THINKING_OUTPUT_HEADROOM so the answer still fits. Non-reasoning models
-  // (effort omitted) keep the caller's budget unchanged.
-  const reasoningTokenBudget = anthropicThinkingBudget(reasoningEffort);
-  const effectiveMaxTokens =
-    effort != null && reasoningTokenBudget != null
-      ? Math.max(maxTokens, reasoningTokenBudget + THINKING_OUTPUT_HEADROOM)
-      : maxTokens;
-
   return {
     // Background workers have no original request to forward verbatim, so the
     // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052;
@@ -996,7 +1019,7 @@ function buildOpenAIWorkerRequest(
     },
     body: JSON.stringify({
       model: model.modelID,
-      max_completion_tokens: effectiveMaxTokens,
+      max_completion_tokens: maxTokens,
       stream: false,
       ...(temperature != null && { temperature }),
       ...(effort != null && { reasoning_effort: effort }),
@@ -1730,7 +1753,29 @@ export function createGatewayLLMClient(
       // Mutable across the retry loop: a `finish_reason:"length"` empty
       // completion bumps this and rebuilds the request once (see the empty-
       // response block). Starts at the caller's budget or the worker default.
-      let maxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
+      //
+      // Reasoning-headroom floor (OpenAI protocol only): distillation/curation
+      // workers pass tiny raw budgets (~1–8K) and no explicit effort, but
+      // aggregators (OpenRouter) route reasoning models (anthropic/claude-sonnet-5)
+      // that reason REGARDLESS — burning the budget on hidden reasoning and
+      // returning empty `finish_reason:"length"`. The Anthropic/Vertex builders
+      // suppress this by sending `thinking:{type:"disabled"}` (see
+      // `effectiveDisableThinking`), so they need no floor; the OpenAI protocol
+      // has no such lever, so we raise the budget to the reasoning floor here.
+      // Applied to the LOOP variable (not just the builder) so the floored value
+      // is the retry's baseline — a subsequent `finish_reason:"length"` bumps
+      // from the effective budget, never from the tiny raw one. Clamped to the
+      // model's output limit. `off`/undefined effort + non-reasoning model → 0
+      // floor → caller budget unchanged.
+      const rawMaxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
+      const openAIReasoningFloor =
+        target.protocol === "openai"
+          ? Math.min(
+              workerReasoningHeadroomFloor(model, opts?.reasoningEffort),
+              workerLengthRetryCeiling(model.modelID),
+            )
+          : 0;
+      let maxTokens = Math.max(rawMaxTokens, openAIReasoningFloor);
 
       // Cross-provider fail-closed: the worker model's provider has no route
       // URL (unknown provider, or a local provider missing its explicit
@@ -2210,22 +2255,28 @@ export function createGatewayLLMClient(
                 // (`finish_reason:"length"` / `stop_reason:"max_tokens"`): the
                 // model spent its entire allowance on hidden reasoning and never
                 // reached visible text. This is a budget problem, not a
-                // capability one — retry ONCE with the budget multiplied
-                // (clamped to the model's own output limit) so a capable
-                // reasoning model gets room for both the reasoning pass and the
-                // answer. Rebuild via buildWorkerRequest (not string-editing the
-                // body) so the OAuth billing signature is recomputed. Bounded to
-                // a single retry per call: a model that truncates even at its max
-                // output falls through to the normal empty-response handling.
+                // capability one — retry ONCE with the budget multiplied (clamped
+                // to the model's own output limit) so a capable reasoning model
+                // gets room for both the reasoning pass and the answer. `maxTokens`
+                // here is already the effective budget (the OpenAI reasoning floor
+                // was applied at loop entry), so the multiply raises from the real
+                // baseline, not the tiny raw budget. Rebuild via buildWorkerRequest
+                // (not string-editing the body) so the OAuth billing signature is
+                // recomputed. Bounded to a single retry per call: a model that
+                // truncates even at its max output falls through to the normal
+                // empty-response handling.
+                const lengthRetryCeiling = workerLengthRetryCeiling(
+                  model.modelID,
+                );
                 if (
                   !lengthRetried &&
                   isLengthTruncation(finishReason) &&
-                  maxTokens < workerLengthRetryCeiling(model.modelID)
+                  maxTokens < lengthRetryCeiling
                 ) {
                   lengthRetried = true;
                   const bumped = Math.min(
                     maxTokens * WORKER_LENGTH_RETRY_MULTIPLIER,
-                    workerLengthRetryCeiling(model.modelID),
+                    lengthRetryCeiling,
                   );
                   log.warn(
                     `worker empty response was a budget truncation (finish_reason=${finishReason}) ` +
