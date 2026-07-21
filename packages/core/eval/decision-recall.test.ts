@@ -1,16 +1,26 @@
 import { describe, expect, test } from "vitest";
 import { scoreRetrieval } from "./recall-score";
 import { scenarios } from "./scenarios/decision-recall";
+import { ALL_BASELINES } from "./types";
 
 const scenario = scenarios[0];
 const byId = new Map(scenario.questions.map((q) => [q.id, q]));
 
 describe("DEC-1 decision-recall scenario (#1403)", () => {
-  test("registers one scenario with 3 evolving sessions and the no-memory control arm", () => {
+  test("registers one scenario with 3 evolving sessions and the raw no-memory control arm", () => {
     expect(scenario.id).toBe("dec-1-decision-evolution");
     expect(scenario.sessions).toHaveLength(3);
-    expect(scenario.applicableBaselines).toContain("no-memory");
+    // The negative-control arm must be `raw` (full history, no memory layer):
+    // "no-memory" is NOT a valid BaselineMode, so the harness would silently
+    // filter it out and the control would never run (regression guard for the
+    // Seer-flagged bug in #1431).
+    expect(scenario.applicableBaselines).toContain("raw");
     expect(scenario.applicableBaselines).toContain("lore");
+    // Every listed baseline must be a REAL BaselineMode — else harness.ts's
+    // `.includes(b)` intersection silently drops it and the arm never executes.
+    for (const b of scenario.applicableBaselines) {
+      expect(ALL_BASELINES).toContain(b);
+    }
   });
 
   test("every question carries deterministic anchors (expected or forbidden facts)", () => {

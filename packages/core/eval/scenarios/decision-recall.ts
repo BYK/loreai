@@ -16,8 +16,9 @@
  *
  * Scored two ways, kept separate (no justifier): deterministic retrieval via
  * expectedFacts/forbiddenFacts, and the currency-weighted `preferenceEvolution`
- * rubric for end-task quality. Runs on the lore arms AND the `no-memory`
- * negative-control baseline so a "memory does nothing" arm is measured too.
+ * rubric for end-task quality. Runs on the lore arms AND the `raw` (full history,
+ * no memory layer) negative-control baseline so a "memory does nothing" arm is
+ * measured too.
  */
 
 import type {
@@ -35,7 +36,7 @@ const APPLICABLE_BASELINES: BaselineMode[] = [
   "lore-memory-only",
   "tail-window",
   "compaction",
-  "no-memory",
+  "raw",
 ];
 
 let toolId = 0;
