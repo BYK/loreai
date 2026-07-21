@@ -715,15 +715,71 @@ describe("streamResponsesPassthrough", () => {
     upstream.close();
 
     const out = await drainToString(clientResp);
-    expect(out).toContain("response.reasoning_summary_text.delta");
+    // Assert the WIRE FORM (named event line + data line), not just the string —
+    // a bare `data:` (dropped `event:`) would still contain the type inside the
+    // JSON payload, so `toContain("...delta")` alone is vacuous.
+    expect(out).toContain(
+      "event: response.reasoning_summary_text.delta\ndata:",
+    );
     expect(out).toContain("thinking about it");
-    expect(out).toContain("response.completed");
+    expect(out).toContain("event: response.completed\ndata:");
   });
 
-  test("emits response.failed and still calls onComplete when the upstream errors mid-stream", async () => {
+  test("does not forward untyped `message` frames or the [DONE] sentinel to the client", async () => {
+    // Some Responses-compatible upstreams emit untyped `data:` lines (parsed as
+    // event `message`) and a trailing `data: [DONE]`. Neither carries Responses
+    // semantics; forwarding them would corrupt a genuine Responses wire stream.
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(
+          encoder.encode(
+            `event: response.created\ndata: ${JSON.stringify({
+              type: "response.created",
+              response: { id: "resp_u", model: "m", status: "in_progress" },
+            })}\n\n`,
+          ),
+        );
+        // Untyped data line → parsed as event "message".
+        c.enqueue(encoder.encode(`data: {"stray":true}\n\n`));
+        c.enqueue(
+          encoder.encode(
+            `event: response.completed\ndata: ${JSON.stringify({
+              type: "response.completed",
+              response: {
+                id: "resp_u",
+                model: "m",
+                status: "completed",
+                usage: { input_tokens: 1, output_tokens: 1 },
+              },
+            })}\n\n`,
+          ),
+        );
+        c.enqueue(encoder.encode(`data: [DONE]\n\n`));
+        c.close();
+      },
+    });
+    const upstreamResp = new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    });
+
+    const clientResp = streamResponsesPassthrough(upstreamResp, () => {});
+    const out = await drainToString(clientResp);
+
+    expect(out).toContain("event: response.created");
+    expect(out).toContain("event: response.completed");
+    // The synthetic `message` frame and `[DONE]` must NOT be forwarded.
+    expect(out).not.toContain("event: message");
+    expect(out).not.toContain("[DONE]");
+    expect(out).not.toContain("stray");
+  });
+
+  test("emits response.failed and still calls onComplete (exactly once) when the upstream errors mid-stream", async () => {
     const upstream = controllableSSE();
     let completed: GatewayResponse | null = null;
+    let completeCalls = 0;
     const clientResp = streamResponsesPassthrough(upstream.response, (r) => {
+      completeCalls++;
       completed = r;
     });
 
@@ -736,8 +792,10 @@ describe("streamResponsesPassthrough", () => {
     const out = await drainToString(clientResp);
     // Client is told the turn failed rather than hanging on a missing terminal.
     expect(out).toContain("response.failed");
-    // onComplete still ran (so postResponse/cost tracking is not skipped).
+    // onComplete still ran (so postResponse/cost tracking is not skipped)…
     expect(completed).not.toBeNull();
+    // …and exactly once (the `completed` guard must not double-fire).
+    expect(completeCalls).toBe(1);
   });
 
   test("cancels the upstream reader when the client disconnects", async () => {

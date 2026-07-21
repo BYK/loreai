@@ -401,9 +401,21 @@ export function streamResponsesPassthrough(
         for await (const { event, data } of parseSSEStream(reader)) {
           resetKeepalive(); // upstream alive — reset inactivity timer
 
-          // Forward the event to the client as it arrives, preserving the
-          // original data payload (no re-parse/re-serialize → no field loss).
-          if (!safeEnqueue(encoder.encode(reserializeSSE(event, data)))) break;
+          // Forward real Responses events to the client as they arrive,
+          // preserving the original data payload (no re-parse/re-serialize →
+          // no field loss). `parseSSEStream` synthesizes `event: "message"` for
+          // untyped `data:` lines and yields the `[DONE]` sentinel — neither
+          // carries Responses semantics, and the buffered path never re-emitted
+          // them, so skip both from client forwarding to keep the wire truly
+          // faithful to a genuine Responses stream.
+          const forwardable =
+            event !== "message" && !!data && data !== "[DONE]";
+          if (
+            forwardable &&
+            !safeEnqueue(encoder.encode(reserializeSSE(event, data)))
+          ) {
+            break;
+          }
 
           // Accumulate in parallel for postResponse / calibration.
           if (!data || data === "[DONE]") continue;
