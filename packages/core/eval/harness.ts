@@ -1139,6 +1139,8 @@ async function loadScenarios(
       case "recall": {
         const mod = await import("./scenarios/multi-session-recall");
         scenarios.push(...mod.scenarios);
+        const decision = await import("./scenarios/decision-recall");
+        scenarios.push(...decision.scenarios);
         break;
       }
       case "preferences": {
