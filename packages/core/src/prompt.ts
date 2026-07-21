@@ -484,6 +484,7 @@ Produce a JSON array of operations:
   {
     "op": "update",
     "id": "existing-entry-id",
+    "title": "New title — ONLY when the entry's scope genuinely broadened (optional)",
     "content": "Updated content — under 150 words",
     "confidence": 0.0-1.0
   },
@@ -664,6 +665,9 @@ CONSOLIDATION STRATEGY (apply in order):
 1. MERGE related entries — if multiple entries describe the same system, module, or concept
    from different angles (e.g. several bug fixes in the same component), merge them into
    ONE concise entry. Use an "update" op for the surviving entry and "delete" ops for the rest.
+   When the merged entry's scope is broader than the survivor's original title, also set a
+   "title" on the update op so the title still names what the entry now covers (the title is
+   the top-weighted search key — a stale narrow title hides the merged knowledge).
 2. TRIM verbose entries — any entry over 150 words must be trimmed to its essential insight.
    Use an "update" op with the rewritten content.
 3. DELETE low-value entries:
@@ -688,7 +692,7 @@ PRESERVE (highest priority — delete these last):
 OUTPUT: A JSON array of "update" and "delete" ops only. No "create" ops — you are not
 extracting new knowledge, only consolidating existing knowledge.
 
-- "update": Replace content with a concise rewrite (under 150 words). Use to merge survivors or trim verbose entries.
+- "update": Replace content with a concise rewrite (under 150 words). Use to merge survivors or trim verbose entries. Optionally set "title" to re-name a survivor whose scope broadened after a merge (omit it to keep the current title).
 - "delete": Remove entries that are merged, stale, or low-value.
 
 Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
@@ -712,7 +716,7 @@ RULES:
 4. Never invent new knowledge; only "update" survivors and "delete" true duplicates.
 
 OUTPUT: A JSON array of "update" and "delete" ops only (may be empty). No "create" ops.
-- "update": { "op": "update", "id": "...", "content": "concise merged wording" }
+- "update": { "op": "update", "id": "...", "content": "concise merged wording", "title": "optional — set only if the survivor's scope broadened" }
 - "delete": { "op": "delete", "id": "...", "reason": "duplicate of <survivor id>" }
 
 Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;

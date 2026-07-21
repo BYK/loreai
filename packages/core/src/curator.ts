@@ -34,6 +34,14 @@ import type { EntityType, AliasType, RelationType } from "./entities";
  */
 export const MAX_ENTRY_CONTENT_LENGTH = 1200;
 
+/**
+ * Safety cap on a re-titled entry's title length (D1b). A title is the
+ * top-weighted search key and is meant to be a short, discoverable phrase — this
+ * is only a last-resort bound on pathological curator output, not the intended
+ * length (the prompt asks for a few discriminative words).
+ */
+export const MAX_ENTRY_TITLE_LENGTH = 120;
+
 /** Entity detected by the curator from conversation context. */
 export type DetectedEntity = {
   type: EntityType;
@@ -68,7 +76,13 @@ export type CuratorOp =
       /** Initial confidence (0.0–1.0). Controls injection priority for preferences. */
       confidence?: number;
     }
-  | { op: "update"; id: string; content?: string; confidence?: number }
+  | {
+      op: "update";
+      id: string;
+      title?: string;
+      content?: string;
+      confidence?: number;
+    }
   | { op: "delete"; id: string; reason: string };
 
 /**
@@ -409,22 +423,40 @@ export function applyOps(
             ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
               " [truncated — entry too long]"
             : op.content;
+        // D1b: allow the curator to re-title an entry whose scope broadened after
+        // a merge. Cap the length (titles are the top-weighted search key, meant
+        // to be short/discoverable) and ignore an empty/whitespace title. ltm.update
+        // internally drops a re-title that would collide with another live entry's
+        // title in the same scope, so a bad re-title can never create a duplicate.
+        const title =
+          typeof op.title === "string" && op.title.trim().length > 0
+            ? op.title.trim().slice(0, MAX_ENTRY_TITLE_LENGTH)
+            : undefined;
         // #627 Phase 2: stamp the edit with the session's commit anchor so a
         // content change refreshes provenance (a no-op when metadata is absent).
         ltm.update(op.id, {
+          title,
           content,
           confidence: op.confidence,
           metadata: input.metadata,
         });
-        // Key on the stable logical_id: a content change appends a new version, so
-        // op.id is now a superseded version id. idsToSync + the delta channel must
-        // reference the logical_id to resolve the current version downstream.
-        if (op.content !== undefined) idsToSync.push(entry.logical_id);
+        // Re-read so we report — and sync — the EFFECTIVE state: a colliding
+        // re-title is dropped inside ltm.update, so `after.title` may still equal
+        // the old title even though `title` was requested.
+        const after = ltm.getByLogical(entry.logical_id) ?? entry;
+        // Key on the stable logical_id: a content or (accepted) title change appends
+        // a new version, so op.id is now a superseded version id. idsToSync + the
+        // delta channel must reference the logical_id to resolve the current version.
+        // Gate on the EFFECTIVE title change (not the requested one) so a dropped
+        // collision doesn't enqueue a redundant no-op push.
+        const titleAccepted = after.title !== entry.title;
+        if (op.content !== undefined || titleAccepted)
+          idsToSync.push(entry.logical_id);
         changedEntries.push({
           op: "updated",
           id: entry.logical_id,
           category: entry.category,
-          title: entry.title,
+          title: after.title,
           content: content ?? prevContent,
           prevContent,
         });

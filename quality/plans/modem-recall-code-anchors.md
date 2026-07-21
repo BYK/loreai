@@ -29,8 +29,17 @@ Source: https://modem.dev/blog/how-coding-agents-read-your-code (Ben Vinegar, Mo
   `because Y` clause doesn't drop a clean "Going with X"; `Convention:` prefix colon is
   exempted. Tests in `pattern-extract.test.ts` (noisy-title rejection + no-over-reject),
   mutation-verified.
-- ⬜ Remaining (follow-ups): D1b (re-titleable updates), D2c (entry↔file association),
-  D3 (blog post).
+- ✅ **Direction 1b (re-titleable update op)** — IMPLEMENTED. `ltm.update()` gains an optional
+  `title`; a title (or content) change appends a new version, re-indexes FTS, and re-embeds.
+  Collision guard `titleCollides()` mirrors create()'s scope logic and DROPS a re-title that
+  would duplicate another live entry's title in the same scope (project + cross pool, or
+  global/cross pool) — never creates a silent duplicate. Curator `update` op gains optional
+  `title` (type-guarded, length-capped `MAX_ENTRY_TITLE_LENGTH`); prompt + consolidation
+  guidance updated to re-title survivors whose scope broadened. Tests: `ltm-retitle.test.ts`
+  (version append, FTS reindex, collision-drop, case-only self, content+title, idempotent) +
+  `curator-retitle.test.ts` (apply-path threading, collision via curator, backward-compat).
+  Collision guard mutation-verified.
+- ⬜ Remaining (follow-ups): D2c (entry↔file association), D3 (blog post).
 
 ---
 

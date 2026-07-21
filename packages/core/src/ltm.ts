@@ -703,9 +703,50 @@ export function rejectForTeam(logicalId: string): boolean {
   return res.changes > 0;
 }
 
+/**
+ * Whether re-titling the entry identified by `logicalId` to `newTitle` would
+ * collide with a DIFFERENT live entry sharing the same case-insensitive title in
+ * the same dedup scope. Mirrors (and is a superset of) create()'s dedup guard:
+ * - a plain project entry checks its own project AND the cross/global pool;
+ * - a PROMOTED entry (project_id set, cross_project=1) checks BOTH its origin
+ *   project AND the cross/global pool — a promoted entry is visible in its home
+ *   project, so a same-project sibling with that title is still a real duplicate;
+ * - a global entry (project_id IS NULL) checks the cross/global pool.
+ * The entry's own `logical_id` is excluded so a no-op or case-only re-title never
+ * counts as a collision, and `confidence > 0` matches create()'s "live" filter
+ * (a dead/zeroed entry never blocks a re-title). Used ONLY by the re-title path
+ * — create() has its own inline guard.
+ */
+function titleCollides(
+  logicalId: string,
+  entry: KnowledgeEntry,
+  newTitle: string,
+): boolean {
+  const pid = entry.project_id;
+  // Pool = the cross/global pool, PLUS the entry's own project when it has one
+  // (true for both plain project entries and promoted entries — a promoted entry
+  // is still surfaced in its home project, so a same-project collision is real).
+  const scopeClause =
+    pid !== null
+      ? "(project_id IS NULL OR cross_project = 1 OR project_id = ?)"
+      : "(project_id IS NULL OR cross_project = 1)";
+  const params: unknown[] =
+    pid !== null ? [logicalId, newTitle, pid] : [logicalId, newTitle];
+  const hit = db()
+    .query(
+      `SELECT 1 FROM knowledge_current
+         WHERE logical_id != ? AND confidence > 0 AND LOWER(title) = LOWER(?)
+           AND ${scopeClause}
+         LIMIT 1`,
+    )
+    .get(...(params as [string, ...unknown[]]));
+  return hit != null;
+}
+
 export function update(
   id: string,
   input: {
+    title?: string;
     content?: string;
     confidence?: number;
     updatedBy?: string;
@@ -723,19 +764,40 @@ export function update(
   // sensitivity are MUTABLE metadata applied to the current version in place.
   // `id` may be a current OR superseded version id — resolve to the logical_id.
   const logicalId = logicalIdOf(id);
-  // Append a new version only when the content actually changed — a byte-identical
-  // "update" (e.g. the curator re-observing an unchanged entry) must NOT append, or
-  // frequently re-observed entries grow the table unbounded until compaction.
-  let appended = false;
-  if (input.content !== undefined) {
-    const cur = getByLogical(logicalId);
-    if (cur && cur.content !== input.content) {
-      appendVersion(logicalId, {
-        content: input.content,
-        metadata: input.metadata,
-      });
-      appended = true;
+  const cur = getByLogical(logicalId);
+
+  // Re-title guard (D1b): `title` is BOTH the top-weighted FTS field AND the
+  // exact-match dedup identity key. `appendVersion` will happily write any title,
+  // but a re-title is the ONLY mutation that changes the dedup key WITHOUT going
+  // through create()'s dedup guard — so a careless re-title could silently create
+  // two live entries with the same LOWER(title) in one scope. Mirror create()'s
+  // scope-aware probe here and DROP the title change (keeping content/metric
+  // updates) if it would collide with a DIFFERENT live entry. Dropping is safe:
+  // the entry keeps its prior valid title; the alternative (a silent duplicate)
+  // is the exact state the dedup guard exists to prevent.
+  let effectiveTitle: string | undefined;
+  if (input.title !== undefined && cur && input.title !== cur.title) {
+    if (!titleCollides(logicalId, cur, input.title)) {
+      effectiveTitle = input.title;
     }
+    // else: collision — silently keep the current title (no-op the re-title).
+  }
+
+  // Append a new version when the content OR the (non-colliding) title actually
+  // changed — a byte-identical "update" (e.g. the curator re-observing an
+  // unchanged entry) must NOT append, or frequently re-observed entries grow the
+  // table unbounded until compaction.
+  let appended = false;
+  const contentChanged =
+    input.content !== undefined && cur != null && cur.content !== input.content;
+  const titleChanged = effectiveTitle !== undefined;
+  if (contentChanged || titleChanged) {
+    appendVersion(logicalId, {
+      ...(effectiveTitle !== undefined ? { title: effectiveTitle } : {}),
+      ...(input.content !== undefined ? { content: input.content } : {}),
+      metadata: input.metadata,
+    });
+    appended = true;
   }
 
   const now = Date.now();
