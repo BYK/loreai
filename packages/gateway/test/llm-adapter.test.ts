@@ -2828,9 +2828,10 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
     // the reasoning token budget + headroom when reasoning is active, so a
     // reasoning model gets room for the answer AFTER thinking on the FIRST
     // attempt (not only via the length-retry). effort=high → thinking budget
-    // 16384 + HEADROOM 8192 = 24576 > the 16384 default.
+    // 16384 + HEADROOM 8192 = 24576, above the DEFAULT_WORKER_MAX_TOKENS (16384)
+    // raw budget.
     // Mutation: drop the effectiveMaxTokens headroom in buildOpenAIWorkerRequest
-    // → first call sends 16384 → RED.
+    // → first call sends the raw 16384 instead of 24576 → RED.
     mockFetch.mockResolvedValueOnce(openAISuccess("ok"));
 
     await client().prompt("system", "user", {
