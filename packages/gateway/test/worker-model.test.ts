@@ -1561,6 +1561,176 @@ describe("family-based worker resolution", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ChatGPT-backend model reuse + OpenAI luna preference
+// ---------------------------------------------------------------------------
+
+describe("openai worker selection: ChatGPT-backend reuse + luna preference", () => {
+  const LIMIT = { context: 400_000, output: 128_000 };
+
+  async function warmCache(response: unknown): Promise<void> {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response(JSON.stringify(response), { status: 200 })),
+    ) as unknown as typeof fetch;
+    resetWorkerModelState();
+    await fetchModelData();
+  }
+
+  /** models.dev-shaped OpenAI catalog mirroring real gpt-5.6 tier families. */
+  function openaiCatalog(): unknown {
+    return {
+      anthropic: { api: "https://api.anthropic.com/v1", models: {} },
+      openai: {
+        api: "https://api.openai.com/v1",
+        models: {
+          "gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            family: "gpt-sol",
+            release_date: "2026-06-01",
+            cost: { input: 5, output: 30, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "gpt-5.6-terra": {
+            id: "gpt-5.6-terra",
+            family: "gpt-terra",
+            release_date: "2026-06-01",
+            cost: { input: 2.5, output: 15, cache_read: 0.25 },
+            limit: LIMIT,
+          },
+          "gpt-5.6-luna": {
+            id: "gpt-5.6-luna",
+            family: "gpt-luna",
+            release_date: "2026-06-01",
+            cost: { input: 1, output: 6, cache_read: 0.1 },
+            limit: LIMIT,
+          },
+          "gpt-5.4-mini": {
+            id: "gpt-5.4-mini",
+            family: "gpt-mini",
+            release_date: "2026-03-01",
+            cost: { input: 0.75, output: 4.5, cache_read: 0.075 },
+            limit: LIMIT,
+          },
+        },
+      },
+      // Same catalog registered under the ChatGPT-backend provider so the
+      // codex-exemption test can resolve a cheaper codex sibling.
+      "openai-codex": {
+        api: "https://chatgpt.com/backend-api",
+        models: {
+          "gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            family: "gpt-sol",
+            release_date: "2026-06-01",
+            cost: { input: 5, output: 30, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+          "gpt-5.1-codex-mini": {
+            id: "gpt-5.1-codex-mini",
+            family: "gpt-codex",
+            release_date: "2025-11-13",
+            cost: { input: 0.25, output: 2, cache_read: 0.025 },
+            limit: LIMIT,
+          },
+        },
+      },
+    };
+  }
+
+  test("ChatGPT-backend session reuses its OWN model (never a cheaper sibling → 404)", async () => {
+    await warmCache(openaiCatalog());
+
+    // A ChatGPT-backend session: providerID "openai", protocol openai-responses,
+    // url chatgpt.com/backend-api. The endpoint serves ONLY gpt-5.6-sol.
+    const result = getWorkerModel({
+      providerID: "openai",
+      model: "gpt-5.6-sol",
+      url: "https://chatgpt.com/backend-api",
+    });
+
+    // MUST reuse the session model — NOT luna/mini (which would 404 there).
+    expect(result?.providerID).toBe("openai");
+    expect(result?.modelID).toBe("gpt-5.6-sol");
+  });
+
+  test("ChatGPT-backend detected via /backend-api path even on a different host", async () => {
+    await warmCache(openaiCatalog());
+    const result = getWorkerModel({
+      providerID: "openai",
+      model: "gpt-5.6-sol",
+      url: "https://proxy.internal/backend-api",
+    });
+    expect(result?.modelID).toBe("gpt-5.6-sol");
+  });
+
+  test("real api.openai.com session prefers gpt-5.6-luna (not terra, not mini)", async () => {
+    await warmCache(openaiCatalog());
+
+    // Real OpenAI API-key session: same providerID/protocol, but api.openai.com.
+    const result = getWorkerModel({
+      providerID: "openai",
+      model: "gpt-5.6-sol",
+      url: "https://api.openai.com",
+    });
+
+    expect(result?.providerID).toBe("openai");
+    // luna ($1) is the explicit worker preference — NOT the closest-cheaper tier
+    // terra ($2.5), NOT the cheapest mini ($0.75), NOT the session sol.
+    expect(result?.modelID).toBe("gpt-5.6-luna");
+  });
+
+  test("openai-codex providerID is EXEMPT from reuse: still downgrades to codex-mini on chatgpt.com", async () => {
+    await warmCache(openaiCatalog());
+
+    // The dedicated codex path: the ChatGPT backend DOES serve codex-mini for
+    // codex sessions, so the validated downgrade must survive.
+    const result = getWorkerModel({
+      providerID: "openai-codex",
+      model: "gpt-5.6-sol",
+      url: "https://chatgpt.com/backend-api",
+    });
+
+    expect(result?.providerID).toBe("openai-codex");
+    expect(result?.modelID).toBe("gpt-5.1-codex-mini");
+  });
+
+  test("ChatGPT-backend session on a pricier tier reuses it, never downgrading to luna", async () => {
+    await warmCache(openaiCatalog());
+    // A terra ($2.5) session on chatgpt.com: WITHOUT the short-circuit the
+    // cost-aware path would downgrade to luna ($1) — which 404s on that
+    // single-model endpoint. The guard must reuse terra. (Non-vacuous: terra is
+    // NOT alreadyCheap, so the fallback path would NOT coincidentally return it.)
+    const result = getWorkerModel({
+      providerID: "openai",
+      model: "gpt-5.6-terra",
+      url: "https://chatgpt.com/backend-api",
+    });
+    expect(result?.providerID).toBe("openai");
+    expect(result?.modelID).toBe("gpt-5.6-terra");
+  });
+
+  test("real openai session already on luna is NOT downgraded (alreadyCheap)", async () => {
+    await warmCache(openaiCatalog());
+    const result = getWorkerModel({
+      providerID: "openai",
+      model: "gpt-5.6-luna",
+      url: "https://api.openai.com",
+    });
+    // alreadyCheap(luna) → no cost-aware downgrade; reuse session model.
+    expect(result?.modelID).toBe("gpt-5.6-luna");
+  });
+
+  test("no url present → normal family selection (fail-safe, not reuse-forced)", async () => {
+    await warmCache(openaiCatalog());
+    // Missing url must NOT force reuse; a real openai session still prefers luna.
+    const result = getWorkerModel({
+      providerID: "openai",
+      model: "gpt-5.6-sol",
+    });
+    expect(result?.modelID).toBe("gpt-5.6-luna");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // resolution memoization (skip rescan + collapse the per-call INFO log)
 // ---------------------------------------------------------------------------
 

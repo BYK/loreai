@@ -656,6 +656,29 @@ function lineageKey(family: string): string {
 }
 
 /**
+ * True when the session's upstream URL points at ChatGPT's backend
+ * (`chatgpt.com`, path `/backend-api`). That endpoint authenticates via a
+ * ChatGPT OAuth JWT and serves ONLY the session's own model — any sibling model
+ * (e.g. a cheaper `gpt-5.4-mini` picked by family selection) 404s. A worker for
+ * such a session MUST reuse the session's exact model.
+ *
+ * This is the only robust discriminator: a ChatGPT-backend session reports the
+ * same `providerID` ("openai") and `protocol` ("openai-responses") as a real
+ * `api.openai.com` API-key session (config.ts PROVIDER_ROUTES) — only the host
+ * differs.
+ */
+function isChatGPTBackend(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return u.hostname === "chatgpt.com" || u.pathname.includes("/backend-api");
+  } catch {
+    // Scheme-less or malformed URL — fall back to a substring check.
+    return url.includes("chatgpt.com") || url.includes("/backend-api");
+  }
+}
+
+/**
  * True when a candidate worker model id is currently usable for selection:
  * not marked worker-incapable, and — when the provider's `:free` tier is
  * data-policy-blocked — not a `:free` model. Both signals come from
@@ -982,13 +1005,21 @@ const WORKER_DEFAULTS: Record<
     family: "claude-sonnet",
     alreadyCheap: (id) => id.includes("sonnet") || id.includes("haiku"),
   },
-  // OpenAI: gpt-5.4-mini matched gpt-5.4 exactly (24 obs each) at 70% lower cost.
-  // family "gpt-mini" tracks the newest mini (gpt-5.x-mini, gpt-4.1-mini, ...).
+  // OpenAI (real api.openai.com API-key sessions): prefer gpt-5.6-luna as the
+  // worker. Luna ($1/M in) is ~5x cheaper than the premium sol tier ($5/M) yet
+  // materially higher quality than the mini tier ($0.75/M) — the right
+  // cost/quality point for distillation & curation. family "gpt-luna" tracks
+  // the newest luna generation from models.dev; the modelID is the OFFLINE
+  // fallback. NOTE: this path is reached ONLY for real api.openai.com sessions;
+  // ChatGPT-backend (chatgpt.com) sessions short-circuit earlier in
+  // getWorkerModel and reuse the session's own model (that endpoint serves ONLY
+  // the session's exact model — any sibling 404s).
   openai: {
     providerID: "openai",
-    modelID: "gpt-5.4-mini",
-    family: "gpt-mini",
-    alreadyCheap: (id) => id.includes("mini") || id.includes("nano"),
+    modelID: "gpt-5.6-luna",
+    family: "gpt-luna",
+    alreadyCheap: (id) =>
+      id.includes("luna") || id.includes("mini") || id.includes("nano"),
   },
   // Codex (ChatGPT): the backend serves cheaper models on the same endpoint.
   // gpt-5.1-codex-mini ($0.25/$2) vs gpt-5.5 ($5/$30) — ~20x cheaper input,
@@ -1071,6 +1102,14 @@ export function getWorkerModel(session?: {
   providerID?: string;
   /** Session model ID (UpstreamSnapshot uses `model`, callers may use `modelID`). */
   model?: string;
+  /**
+   * Resolved upstream base URL for the session (from `UpstreamSnapshot.url`).
+   * Used to detect ChatGPT-backend sessions, whose endpoint serves only the
+   * session's own model. Callers pass the full `UpstreamSnapshot`, so this is
+   * populated automatically; the no-arg / no-url case falls back to the normal
+   * provider-family selection.
+   */
+  url?: string;
 }): { providerID: string; modelID: string } | undefined {
   // Env var override — highest priority. Useful for global worker model
   // configuration without per-project .lore.json (e.g. routing all workers
@@ -1110,6 +1149,35 @@ export function getWorkerModel(session?: {
 
   // Effective session model: config > session snapshot > provider default.
   const effectiveModelID = cfg.model?.modelID ?? sessionModelID ?? undefined;
+
+  // ChatGPT-backend short-circuit (correctness, not cost). A session routed to
+  // chatgpt.com/backend-api authenticates via a ChatGPT OAuth JWT and its
+  // endpoint serves ONLY the session's own LIVE model. Selecting a cheaper
+  // sibling (family/cost-aware selection below) would send e.g. gpt-5.4-mini to
+  // chatgpt.com → 404, poisoning background work. The worker MUST reuse the
+  // session's exact live model.
+  //
+  //  - Reuses the LIVE session provider+model (sessionProviderID/sessionModelID),
+  //    NOT effectiveProvider/effectiveModelID: a `.lore.json` cfg.model override
+  //    naming a DIFFERENT model would also 404 against this single-model endpoint,
+  //    so the config override cannot apply here. cfg.workerModel is overridden
+  //    for the same reason; LORE_WORKER_MODEL (handled above) stays the escape
+  //    hatch.
+  //  - Requires a known live session model to reuse (none → fall through; the
+  //    normal fallback picks the safest available target).
+  //  - Exempts sessionProviderID "openai-codex": that path legitimately
+  //    downgrades to gpt-5.1-codex-mini on the SAME chatgpt.com endpoint (the
+  //    ChatGPT backend does serve codex-mini for codex sessions), validated
+  //    separately. Keying on sessionProviderID (not effectiveProvider) prevents
+  //    a cfg.model.providerID="openai" override from masking a real codex session.
+  if (
+    isChatGPTBackend(session?.url) &&
+    sessionProviderID !== "openai-codex" &&
+    sessionProviderID &&
+    sessionModelID
+  ) {
+    return { providerID: sessionProviderID, modelID: sessionModelID };
+  }
 
   // Determine if the session model is expensive enough to warrant a cheaper
   // worker from the SAME provider. Never cross-provider.
