@@ -106,10 +106,13 @@ results that were, frankly, too good for us: the memory tools scored a flat zero
 everywhere. That looked wrong, so we ran an independent audit of our own harness and
 found the cause was ours, not theirs, the competitor backends had been launched with
 empty API keys and a broken binary path, so they were never actually storing anything.
-We fixed it, added a guard that refuses to score a memory tool that made zero calls, and
-re-ran everything. The numbers below are the corrected ones. We are telling you this
-because a benchmark you cannot trust to catch its own bias is not worth reading, and the
-version of these results that flattered us the most was the version that was broken.&lt;/p&gt;
+We fixed it and, so it cannot happen silently again, we now health-probe every memory
+backend before each run: if the backend fails to come up we throw the run out as a harness
+artifact, and if it comes up fine but the model never calls it, we count that as the real
+zero it is. We re-ran everything. The numbers below are the corrected ones. We are telling
+you this because a benchmark you cannot trust to catch its own bias is not worth reading,
+and the version of these results that flattered us the most was the version that was
+broken.&lt;/p&gt;
 &lt;p&gt;For the record, so you can reproduce it or pick it apart: we ran this in July 2026 with
 &lt;strong&gt;Lore 0.37.0&lt;/strong&gt; driving &lt;strong&gt;OpenCode 1.17.12&lt;/strong&gt;. The models were MiniMax-M3, DeepSeek V4
 Flash, and Claude Sonnet-5 (&lt;code&gt;claude-sonnet-4-6&lt;/code&gt;). The memory competitors were
@@ -124,13 +127,15 @@ lossy summary and dropping the originals. That is the moment the facts you menti
 hour ago quietly fall out.&lt;/p&gt;
 &lt;p&gt;One thing to be upfront about, because it shapes every token number in this post: we do
 not wait for a real workload to slowly fill the window. We force it, by piping a large
-reference blob (roughly 40K tokens here, more in the cross-session task) into most turns.
-Left to its own devices an agent keeps its context small, so a natural session might take
-a very long time to overflow, or never. Compressing that into a benchmark means
-manufacturing the pressure. The consequence is that the absolute token and cost figures
-below are a product of that artificial fill, not a measurement of what a typical session
-costs, and you should read them as &lt;em&gt;relative&lt;/em&gt; comparisons between arms under identical
-pressure, not as a bill you would see in normal use.&lt;/p&gt;
+reference blob into most turns, roughly 90K tokens a turn in this single-long task and a
+somewhat smaller 64K a turn in the cross-session one (where it is the accumulation across
+sessions, not the per-turn size, that fills the window). Left to its own devices an agent
+keeps its context small, so a natural session might take a very long time to overflow, or
+never. Compressing that into a benchmark means manufacturing the pressure. The consequence
+is that the absolute token and cost figures below are a product of that artificial fill,
+not a measurement of what a typical session costs, and you should read them as &lt;em&gt;relative&lt;/em&gt;
+comparisons between arms under identical pressure, not as a bill you would see in normal
+use.&lt;/p&gt;
 &lt;p&gt;Here is that session, sixteen turns, with the four facts mentioned once near the start,
 on the frontier model:&lt;/p&gt;
 &lt;table&gt;
@@ -176,6 +181,13 @@ succeed, it is a more expensive way to fail. We were careful, in an earlier draf
 claim Lore was cheaper, because on the numbers we had then it was not. On the corrected
 numbers it is, on this run, and we would rather show you the reversal than quietly keep
 the cautious old framing.&lt;/p&gt;
+&lt;p&gt;&lt;small&gt;One measurement caveat, since it matters for a dollar comparison: OpenCode reports
+per-turn token usage from the upstream response, and on the Lore arm that traffic is
+proxied through Lore’s gateway, so OpenCode records zero tokens for those turns. Lore’s
+dollar figure therefore comes from Lore’s own cost ledger, while the vanilla figure comes
+from OpenCode’s. Both compute cost the same way, token counts times the same models.dev
+prices, so they are comparable, but they are two different meters and we would rather you
+know that than assume one number.&lt;/small&gt;&lt;/p&gt;
 &lt;p&gt;The pattern holds on a cheaper model, where the dollars are small enough to see the shape
 plainly:&lt;/p&gt;
 &lt;table&gt;
@@ -265,7 +277,7 @@ scale:&lt;/p&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mnemonic (DeepSeek Flash)&lt;/td&gt;
-&lt;td&gt;n/a*&lt;/td&gt;
+&lt;td&gt;0%&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mem0 (DeepSeek Flash)&lt;/td&gt;
@@ -285,9 +297,15 @@ scale:&lt;/p&gt;
 &lt;/tr&gt;
 &lt;/tbody&gt;
 &lt;/table&gt;
-&lt;p&gt;&lt;small&gt;*mnemonic on DeepSeek Flash is left out: every run in that cell errored out before
-producing a scorable result, so we have no honest number to report rather than a zero we
-cannot stand behind.&lt;/small&gt;&lt;/p&gt;
+&lt;p&gt;&lt;small&gt;A note on the competitor zeros, because our first instinct was that they had
+to be a harness bug. They are not. We health-probe each memory backend before every
+run, and every backend here came up fine: mnemonic’s local database initialized with
+its full schema, mem0’s cloud connected and stored on other runs. The zeros are
+behavioral. On DeepSeek the model mostly never called the store at all, in either
+direction; on M3, mnemonic was invoked (three to four calls a run) and still returned
+nothing usable at recall time. We count these as the real 0% they are rather than
+excluding them, because “the cheaper model didn’t reliably drive the store” is the
+finding, not an artifact to discard.&lt;/small&gt;&lt;/p&gt;
 &lt;p&gt;The gap is not about storage quality, we just saw the stores hold the same facts. It is
 about who has to remember to use it. A store the agent drives only works if the agent
 decides, on its own, to save the offhand value when it is mentioned, and then to go
@@ -404,11 +422,12 @@ clean failure. Lore’s cells came in at a flat 100% across every model and cap 
 we read as the task being within reach once the facts are actually in front of the model,
 not as proof no ceiling exists. A model can still ignore a value sitting in plain sight,
 the same way it can ignore any instruction; that is a ceiling no memory layer lifts. We
-kept every valid run in the averages rather than trim them. We also excluded, on every
-arm, runs where a memory tool made zero calls or errored out before producing a scorable
-result, because a tool that was never invoked tells you nothing about the tool. And we
-could not evaluate Lore on an anonymous free endpoint, because its background worker needs
-a real key to run.&lt;/p&gt;
+kept every valid run in the averages rather than trim them. The only runs we excluded were
+ones where a memory backend failed its pre-run health probe, a dead server the model could
+not have called even if it tried; a healthy backend the model simply never reached for is
+kept and scored as the zero it is, because that behavior is the finding, not an artifact.
+And we could not evaluate Lore on an anonymous free endpoint, because its background worker
+needs a real key to run.&lt;/p&gt;
 &lt;p&gt;And, as said above, the window pressure is manufactured: we pipe large reference blobs
 into most turns to force compaction on a benchmark timescale. That makes the token and
 cost totals artifacts of the harness, not a forecast of your bill. It is why we lean on
