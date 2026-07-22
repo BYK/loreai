@@ -35,6 +35,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -316,74 +317,83 @@ const fossilizeTarget = (t: CompileTarget): string =>
 async function runFossilize(
   targets: CompileTarget[],
   bundlePath: string,
-  manifestPath: string,
+  manifestByTarget: Map<CompileTarget, string>,
   _stagingDirPath: string,
 ): Promise<void> {
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-
-  console.log(
-    `→ fossilize: ${targets.length} platform(s), ${Object.keys(manifest).length} asset(s)`,
-  );
-  try {
-    await fossilize(
-      {
-        nodeVersion: "lts",
-        platforms: targets.map(fossilizeTarget),
-        noBundle: true,
-        holePunch: true,
-        // Make the binary ignore NODE_OPTIONS so user V8 flags (e.g.
-        // `NODE_OPTIONS=--max-old-space-size=8192`, common for Claude Code)
-        // don't change V8's flag-hash and reject our embedded code cache
-        // ("Code cache data rejected"). process.env is untouched, so the
-        // user's flags still reach the agent lore launches.
-        ignoreNodeOptions: true,
-        outputName: "lore",
-        outDir: distBinDir,
-        cacheDir: join(packageDir, ".node-cache"),
-        assetManifest: manifestPath,
-        sign: false,
-        // Serialize the per-platform builds. fossilize injects the SEA blob
-        // via postject@1.0.0-alpha.6, which spins up a fresh WASM instance for
-        // each inject() call. Each instance loads the whole ~350 MB binary into
-        // its own heap plus the rebuilt output and the resource blob, peaking
-        // near ~1 GB. Running several platforms at once (as `Promise.all` with
-        // concurrency > 1 does) stacks those heaps until the runner runs out of
-        // memory and postject aborts with a bare `Aborted()` (a C-side abort()
-        // from the WASM, not a JS error we can catch here). The abort is
-        // non-deterministic — it hit the linux-x64 code-cache inject in the
-        // 0.38.0 release build but passed on identical local runs. Serializing
-        // keeps only one ~1 GB heap live at a time; the release build is a few
-        // minutes slower, which is an acceptable trade for a deterministic build.
-        concurrencyLimit: 1,
-      },
-      bundlePath,
-    );
-  } catch (err) {
-    console.error("✗ fossilize failed:", err);
-    process.exit(1);
-  }
-
-  // fossilize creates output files with its own platform naming
-  // (e.g. lore-win-x64 for our windows-x64). Verify the expected
-  // paths exist, then rename to our naming convention for CI
-  // compatibility (CI expects lore-windows-x64.exe).
+  // Fossilize embeds a manifest's whole asset set into every binary it builds,
+  // so to keep each binary's SEA blob small (only its own platform's native
+  // libs — see the manifest-building comment) we invoke fossilize once per
+  // target with that target's manifest. This also serializes the postject
+  // inject() calls, keeping only one large WASM heap live at a time.
+  //
+  // Fossilize wipes its outDir at the start of every run, so each target gets
+  // its own subdir; we move the produced binary up to distBinDir afterwards.
+  // Without the per-target outDir, the 2nd..Nth run would delete the binaries
+  // the earlier runs produced.
   for (const target of targets) {
     const fTarget = fossilizeTarget(target);
     const ext = fTarget.startsWith("win") ? ".exe" : "";
-    const fossilizePath = join(distBinDir, `lore-${fTarget}${ext}`);
+    const manifestPath = manifestByTarget.get(target);
+    if (!manifestPath) {
+      console.error(`✗ no asset manifest for target ${target}`);
+      process.exit(1);
+    }
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    console.log(
+      `→ fossilize: ${target}, ${Object.keys(manifest).length} asset(s)`,
+    );
+    // fossilize reads the "ort-manifest.json" asset by that literal filename
+    // from the manifest's directory (it ignores the manifest's `src` field).
+    // All targets share that one runtime key but need target-specific content,
+    // so copy this target's persisted ort-manifest-<target>.json onto the
+    // shared ort-manifest.json path right before its (serial) fossilize run.
+    const stagingDir = dirname(manifestPath);
+    copyFileSync(
+      join(stagingDir, `ort-manifest-${target}.json`),
+      join(stagingDir, "ort-manifest.json"),
+    );
+    const targetOutDir = join(distBinDir, target);
+    try {
+      await fossilize(
+        {
+          nodeVersion: "lts",
+          platforms: [fTarget],
+          noBundle: true,
+          holePunch: true,
+          // Make the binary ignore NODE_OPTIONS so user V8 flags (e.g.
+          // `NODE_OPTIONS=--max-old-space-size=8192`, common for Claude Code)
+          // don't change V8's flag-hash and reject our embedded code cache
+          // ("Code cache data rejected"). process.env is untouched, so the
+          // user's flags still reach the agent lore launches.
+          ignoreNodeOptions: true,
+          outputName: "lore",
+          outDir: targetOutDir,
+          cacheDir: join(packageDir, ".node-cache"),
+          assetManifest: manifestPath,
+          sign: false,
+          concurrencyLimit: 1,
+        },
+        bundlePath,
+      );
+    } catch (err) {
+      console.error(`✗ fossilize failed for ${target}:`, err);
+      process.exit(1);
+    }
+
+    // Move fossilize's output (named lore-<fTarget>[.exe]) up to distBinDir
+    // under our naming convention (CI expects lore-windows-x64.exe), then
+    // drop the now-empty per-target subdir.
+    const fossilizePath = join(targetOutDir, `lore-${fTarget}${ext}`);
     if (!existsSync(fossilizePath)) {
       console.error(
         `✗ expected output not found: ${fossilizePath}. Check fossilize logs.`,
       );
       process.exit(1);
     }
-    if (fTarget !== target) {
-      const ourPath = join(distBinDir, `lore-${target}${ext}`);
-      renameSync(fossilizePath, ourPath);
-      console.log(`✓ Binary: ${ourPath} (was ${fossilizePath})`);
-    } else {
-      console.log(`✓ Binary: ${fossilizePath}`);
-    }
+    const ourPath = join(distBinDir, `lore-${target}${ext}`);
+    renameSync(fossilizePath, ourPath);
+    rmSync(targetOutDir, { recursive: true, force: true });
+    console.log(`✓ Binary: ${ourPath}`);
   }
 
   // gzip (if --release)
@@ -422,12 +432,21 @@ async function buildBinary() {
       console.error(`✗ --from-staging dir not found: ${externalStaging}`);
       process.exit(1);
     }
-    const manifestPath = join(externalStaging, "asset-manifest.json");
-    if (!existsSync(manifestPath)) {
-      console.error(
-        `✗ asset-manifest.json not found in staging dir: ${externalStaging}`,
+    // A --prepare-only run writes one manifest per target
+    // (asset-manifest-<target>.json).
+    const manifestByTarget = new Map<CompileTarget, string>();
+    for (const target of targets) {
+      const manifestPath = join(
+        externalStaging,
+        `asset-manifest-${target}.json`,
       );
-      process.exit(1);
+      if (!existsSync(manifestPath)) {
+        console.error(
+          `✗ asset-manifest-${target}.json not found in staging dir: ${externalStaging}`,
+        );
+        process.exit(1);
+      }
+      manifestByTarget.set(target, manifestPath);
     }
     const bundlePath = join(externalStaging, "sea-entry.cjs");
     if (!existsSync(bundlePath)) {
@@ -438,7 +457,7 @@ async function buildBinary() {
     }
     console.log(`→ Using pre-built staging: ${externalStaging}`);
     mkdirSync(distBinDir, { recursive: true });
-    await runFossilize(targets, bundlePath, manifestPath, externalStaging);
+    await runFossilize(targets, bundlePath, manifestByTarget, externalStaging);
     return;
   }
 
@@ -479,6 +498,11 @@ async function buildBinary() {
   }
 
   mkdirSync(distBinDir, { recursive: true });
+  // Wipe staging first so a stale artifact from a previous build (e.g. an
+  // old all-platforms ort-manifest.json) can never be picked up and mask a
+  // regression. Everything below regenerates the staging dir from scratch.
+  // (The --from-staging path returns earlier and never reaches here.)
+  rmSync(stagingDir, { recursive: true, force: true });
   mkdirSync(stagingDir, { recursive: true });
 
   // -------------------------------------------------------------------------
@@ -727,24 +751,32 @@ async function buildBinary() {
   // reads it to learn the (version-specific, e.g. libonnxruntime.<version>.dylib)
   // filenames to extract for the running platform — so filenames live in ONE
   // place (vendor-ort-native.ts) instead of being duplicated in the loader.
+  // Written per-target below (aliased to the runtime "ort-manifest.json" key
+  // inside each target's own asset manifest).
   const ortFileManifest: Record<string, string[]> = {};
   for (const [target, files] of ortAssets) {
     ortFileManifest[target] = files.map((f) => f.file);
   }
-  writeFileSync(
-    join(stagingDir, "ort-manifest.json"),
-    JSON.stringify(ortFileManifest),
-  );
 
-  // Write a Vite-style manifest. Fossilize uses `entry.file` as the
-  // SEA asset key and joins the manifest's dir to locate the file.
+  // Build one Vite-style asset manifest PER TARGET. Fossilize embeds a
+  // manifest's entire asset set into every binary it produces, so a single
+  // combined manifest would pack all four platforms' native ORT + vec0 libs
+  // (~200 MB) into each binary. postject@1.0.0-alpha.6's ELF injection aborts
+  // once the SEA blob grows past ~300 MB (a 32-bit-WASM/LIEF memory ceiling in
+  // its native-section rebuild), which is exactly what broke the 0.38.0 release
+  // build after the onnxruntime-node 1.27 bump grew every platform's lib.
+  //
+  // Instead we embed only the running platform's native assets in each binary
+  // (shared model + workers stay in all of them). That drops the blob from
+  // ~305 MB to ~163 MB — comfortably under the ELF limit — and shrinks every
+  // shipped binary by ~140 MB. Fossilize is then invoked once per target.
   interface ManifestEntry {
     file: string;
     src: string;
     isEntry?: boolean;
     name?: string;
   }
-  const manifest: Record<string, ManifestEntry> = {
+  const sharedManifest: Record<string, ManifestEntry> = {
     "worker.cjs": { file: "worker.cjs", src: "worker.cjs" },
     "vector-worker.cjs": {
       file: "vector-worker.cjs",
@@ -754,31 +786,51 @@ async function buildBinary() {
   if (vendorModelDir) {
     for (const rel of MODEL_FILES) {
       const key = `model/${rel}`;
-      manifest[key] = { file: key, src: key };
+      sharedManifest[key] = { file: key, src: key };
     }
   }
-  for (const target of vecBinaries.keys()) {
-    const key = vecAssetKey(target);
-    manifest[key] = { file: key, src: key };
-  }
-  for (const files of ortAssets.values()) {
-    for (const { assetKey } of files) {
+
+  // Sentry sourcemap upload (runs before fossilize — the .map file lives
+  // in stagingDir, not the final binary dir).
+  uploadSentrySourcemap(stagingDir, mapPath);
+
+  // Write each target's manifest = shared assets + that target's native libs
+  // (vec0 + ORT set) + the shared "ort-manifest.json" runtime key. Returns
+  // target → manifest path so runFossilize can build each binary from its own
+  // manifest. NOTE: fossilize keys every asset by its `file` field and reads
+  // the bytes from `<manifestDir>/<file>` — it ignores `src`. Since all targets
+  // must use the identical runtime asset key "ort-manifest.json" but need
+  // different content, we persist each target's content as
+  // "ort-manifest-<target>.json" and runFossilize (which runs fossilize
+  // serially, once per target) copies the right one onto the shared
+  // "ort-manifest.json" path immediately before each target's build. This also
+  // keeps the staging dir self-contained for --from-staging.
+  const manifestByTarget = new Map<CompileTarget, string>();
+  for (const target of targets) {
+    const manifest: Record<string, ManifestEntry> = { ...sharedManifest };
+
+    const vecKey = vecAssetKey(target);
+    manifest[vecKey] = { file: vecKey, src: vecKey };
+
+    for (const { assetKey } of ortAssets.get(target) ?? []) {
       manifest[assetKey] = { file: assetKey, src: assetKey };
     }
+
+    // native-loader.cjs only ever reads the running platform's entry, so a
+    // single-target manifest suffices.
+    writeFileSync(
+      join(stagingDir, `ort-manifest-${target}.json`),
+      JSON.stringify({ [target]: ortFileManifest[target] ?? [] }),
+    );
+    manifest["ort-manifest.json"] = {
+      file: "ort-manifest.json",
+      src: "ort-manifest.json",
+    };
+
+    const manifestPath = join(stagingDir, `asset-manifest-${target}.json`);
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    manifestByTarget.set(target, manifestPath);
   }
-  manifest["ort-manifest.json"] = {
-    file: "ort-manifest.json",
-    src: "ort-manifest.json",
-  };
-
-  const manifestPath = join(stagingDir, "asset-manifest.json");
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-
-  // -------------------------------------------------------------------------
-  // Sentry sourcemap upload (runs before fossilize — the .map file lives
-  // in stagingDir, not the final binary dir)
-  // -------------------------------------------------------------------------
-  uploadSentrySourcemap(stagingDir, mapPath);
 
   // --prepare-only: stop here. The staging dir is the output artifact
   // for transfer to another machine (e.g. macOS for native fossilize).
@@ -793,7 +845,7 @@ async function buildBinary() {
   // -------------------------------------------------------------------------
   // Steps 4-5: fossilize + gzip + rename
   // -------------------------------------------------------------------------
-  await runFossilize(targets, bundlePath, manifestPath, stagingDir);
+  await runFossilize(targets, bundlePath, manifestByTarget, stagingDir);
 }
 
 await buildBinary();
