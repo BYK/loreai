@@ -485,25 +485,43 @@ async function loadOldBinary(oldPath: string): Promise<OldReader> {
  * The old bytes are read as raw bytes (no `?? 0` per element) because the
  * OldReader already zero-fills out-of-range positions.
  */
-function addDiffChunk(
+export function addDiffChunk(
   output: Uint8Array,
   oldChunk: Uint8Array,
   diffChunk: Uint8Array,
   n: number,
 ): void {
-  const words = n >> 2; // floor(n / 4)
-  const oldWords = new Uint32Array(oldChunk.buffer, oldChunk.byteOffset, words);
-  const diffWords = new Uint32Array(
-    diffChunk.buffer,
-    diffChunk.byteOffset,
-    words,
-  );
-  const outWords = new Uint32Array(output.buffer, output.byteOffset, words);
-  for (let i = 0; i < words; i++) {
-    const a = oldWords[i] ?? 0;
-    const b = diffWords[i] ?? 0;
-    outWords[i] =
-      (((a & 0x7f7f7f7f) + (b & 0x7f7f7f7f)) ^ ((a ^ b) & 0x80808080)) >>> 0;
+  // The SWAR fast path reinterprets each buffer as a Uint32Array, which
+  // requires a 4-byte-aligned byteOffset — `new Uint32Array(buf.buffer,
+  // byteOffset)` throws RangeError otherwise. Today all callers pass fresh,
+  // offset-0 buffers (`new Uint8Array(len)` / `Buffer.alloc(len)`), but a
+  // future caller could hand us a pooled or subarray view. Rather than throw
+  // (this is a perf detail that must never break patch application), fall back
+  // to the byte loop when any buffer is misaligned. Correct for all inputs;
+  // the vectorized path stays a pure optimization.
+  const aligned =
+    output.byteOffset % 4 === 0 &&
+    oldChunk.byteOffset % 4 === 0 &&
+    diffChunk.byteOffset % 4 === 0;
+  const words = aligned ? n >> 2 : 0; // floor(n / 4), or 0 to skip SWAR
+  if (words > 0) {
+    const oldWords = new Uint32Array(
+      oldChunk.buffer,
+      oldChunk.byteOffset,
+      words,
+    );
+    const diffWords = new Uint32Array(
+      diffChunk.buffer,
+      diffChunk.byteOffset,
+      words,
+    );
+    const outWords = new Uint32Array(output.buffer, output.byteOffset, words);
+    for (let i = 0; i < words; i++) {
+      const a = oldWords[i] ?? 0;
+      const b = diffWords[i] ?? 0;
+      outWords[i] =
+        (((a & 0x7f7f7f7f) + (b & 0x7f7f7f7f)) ^ ((a ^ b) & 0x80808080)) >>> 0;
+    }
   }
   for (let i = words << 2; i < n; i++) {
     output[i] = ((oldChunk[i] ?? 0) + (diffChunk[i] ?? 0)) % 256;
