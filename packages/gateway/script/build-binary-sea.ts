@@ -342,7 +342,17 @@ async function runFossilize(
         cacheDir: join(packageDir, ".node-cache"),
         assetManifest: manifestPath,
         sign: false,
-        concurrencyLimit: 3,
+        // Serialize the per-platform builds. fossilize injects the SEA blob
+        // via postject@1.0.0-alpha.6, whose WASM module is a process-global
+        // singleton with a shared heap. Running `inject()` on several
+        // platforms at once (as `Promise.all` with concurrency > 1 does)
+        // races on that heap and intermittently aborts with a bare
+        // `Aborted()` (RuntimeError from the postject WASM). The abort is
+        // non-deterministic — it surfaced on the linux-x64 code-cache inject
+        // in the 0.38.0 release build but passed on identical local runs.
+        // Serializing removes the race; the release build is a few minutes
+        // slower, which is an acceptable trade for a deterministic build.
+        concurrencyLimit: 1,
       },
       bundlePath,
     );
