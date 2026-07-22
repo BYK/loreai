@@ -1,0 +1,595 @@
+[
+  {
+    "scenario": "long-deepseek-cap200",
+    "axis": "tokens",
+    "freshMax": 84684,
+    "deepMin": 162426,
+    "bucketWidth": 29335,
+    "arms": [
+      {
+        "arm": "lore",
+        "n": 189,
+        "runs": 5,
+        "freshRate": 0.015873015873015872,
+        "deepRate": null,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 1,
+          "edit_failure": 1,
+          "retry": 0,
+          "reread": 2,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "nolore",
+        "n": 262,
+        "runs": 5,
+        "freshRate": 0.06796116504854369,
+        "deepRate": 0,
+        "degradationRatio": 0,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 1,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 6,
+          "self_correction": 0
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "arm": "nolore",
+        "n": 262,
+        "loreFreshRate": 0.015873015873015872,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0.06796116504854369,
+        "armDeepRate": 0,
+        "armDegradationRatio": 0,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      }
+    ],
+    "armsBalanced": false
+  },
+  {
+    "scenario": "long-m3-cap200",
+    "axis": "tokens",
+    "freshMax": 80389,
+    "deepMin": 150174,
+    "bucketWidth": 28097,
+    "arms": [
+      {
+        "arm": "lore",
+        "n": 192,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": 0,
+        "degradationRatio": 1,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 0,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "nolore",
+        "n": 323,
+        "runs": 5,
+        "freshRate": 0.04878048780487805,
+        "deepRate": 0,
+        "degradationRatio": 0,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 4,
+          "edit_failure": 2,
+          "retry": 0,
+          "reread": 4,
+          "self_correction": 0
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "arm": "nolore",
+        "n": 323,
+        "loreFreshRate": 0,
+        "loreDeepRate": 0,
+        "loreDegradationRatio": 1,
+        "loreKnee": null,
+        "armFreshRate": 0.04878048780487805,
+        "armDeepRate": 0,
+        "armDegradationRatio": 0,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      }
+    ],
+    "armsBalanced": false
+  },
+  {
+    "scenario": "long-sonnet-cap200",
+    "axis": "tokens",
+    "freshMax": 11922,
+    "deepMin": 92086,
+    "bucketWidth": 20796,
+    "arms": [
+      {
+        "arm": "lore",
+        "n": 163,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": null,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 0,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "nolore",
+        "n": 433,
+        "runs": 5,
+        "freshRate": 0.005988023952095809,
+        "deepRate": 0.007462686567164179,
+        "degradationRatio": 1.2462686567164178,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 2,
+          "self_correction": 0
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "arm": "nolore",
+        "n": 433,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0.005988023952095809,
+        "armDeepRate": 0.007462686567164179,
+        "armDegradationRatio": 1.2462686567164178,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      }
+    ],
+    "armsBalanced": false
+  },
+  {
+    "scenario": "long-sonnet-cap500",
+    "axis": "tokens",
+    "freshMax": 171669,
+    "deepMin": 255622,
+    "bucketWidth": 61225,
+    "arms": [
+      {
+        "arm": "lore",
+        "n": 165,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": null,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 0,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "nolore",
+        "n": 211,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": 0,
+        "degradationRatio": 1,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 1,
+          "self_correction": 0
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "arm": "nolore",
+        "n": 211,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0,
+        "armDegradationRatio": 1,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      }
+    ],
+    "armsBalanced": false
+  },
+  {
+    "scenario": "xs-deepseek",
+    "axis": "tokens",
+    "freshMax": 119724,
+    "deepMin": 227839,
+    "bucketWidth": 27884,
+    "arms": [
+      {
+        "arm": "lore",
+        "n": 103,
+        "runs": 5,
+        "freshRate": 0.019417475728155338,
+        "deepRate": null,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 2,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "nolore",
+        "n": 117,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": 0,
+        "degradationRatio": 1,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 5,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "mcp-mem0",
+        "n": 82,
+        "runs": 3,
+        "freshRate": 0,
+        "deepRate": 0.029411764705882353,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 1,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "mcp-mnemonic",
+        "n": 82,
+        "runs": 3,
+        "freshRate": 0,
+        "deepRate": 0.05128205128205128,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 2,
+          "self_correction": 0
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "arm": "nolore",
+        "n": 117,
+        "loreFreshRate": 0.019417475728155338,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0,
+        "armDegradationRatio": 1,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      },
+      {
+        "arm": "mcp-mem0",
+        "n": 82,
+        "loreFreshRate": 0.019417475728155338,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0.029411764705882353,
+        "armDegradationRatio": null,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      },
+      {
+        "arm": "mcp-mnemonic",
+        "n": 82,
+        "loreFreshRate": 0.019417475728155338,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0.05128205128205128,
+        "armDegradationRatio": null,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      }
+    ],
+    "armsBalanced": false
+  },
+  {
+    "scenario": "xs-m3",
+    "axis": "tokens",
+    "freshMax": 112478,
+    "deepMin": 212035,
+    "bucketWidth": 27160,
+    "arms": [
+      {
+        "arm": "lore",
+        "n": 139,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": null,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 1,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "nolore",
+        "n": 179,
+        "runs": 5,
+        "freshRate": 0.02631578947368421,
+        "deepRate": 0.05555555555555555,
+        "degradationRatio": 2.111111111111111,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 7,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "mcp-mem0",
+        "n": 132,
+        "runs": 3,
+        "freshRate": 0.08333333333333333,
+        "deepRate": 0.06349206349206349,
+        "degradationRatio": 0.7619047619047619,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 8,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "mcp-mnemonic",
+        "n": 112,
+        "runs": 3,
+        "freshRate": 0,
+        "deepRate": 0.019230769230769232,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 1,
+          "self_correction": 0
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "arm": "nolore",
+        "n": 179,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0.02631578947368421,
+        "armDeepRate": 0.05555555555555555,
+        "armDegradationRatio": 2.111111111111111,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      },
+      {
+        "arm": "mcp-mem0",
+        "n": 132,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0.08333333333333333,
+        "armDeepRate": 0.06349206349206349,
+        "armDegradationRatio": 0.7619047619047619,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      },
+      {
+        "arm": "mcp-mnemonic",
+        "n": 112,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0.019230769230769232,
+        "armDegradationRatio": null,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      }
+    ],
+    "armsBalanced": false
+  },
+  {
+    "scenario": "xs-sonnet",
+    "axis": "tokens",
+    "freshMax": 127134,
+    "deepMin": 240872,
+    "bucketWidth": 29638,
+    "arms": [
+      {
+        "arm": "lore",
+        "n": 108,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": null,
+        "degradationRatio": null,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 0,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "nolore",
+        "n": 121,
+        "runs": 5,
+        "freshRate": 0,
+        "deepRate": 0,
+        "degradationRatio": 1,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 0,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "mcp-mem0",
+        "n": 84,
+        "runs": 3,
+        "freshRate": 0,
+        "deepRate": 0,
+        "degradationRatio": 1,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 0,
+          "self_correction": 0
+        }
+      },
+      {
+        "arm": "mcp-mnemonic",
+        "n": 84,
+        "runs": 3,
+        "freshRate": 0,
+        "deepRate": 0,
+        "degradationRatio": 1,
+        "ratioSignificant": false,
+        "knee": null,
+        "totals": {
+          "tool_error": 0,
+          "edit_failure": 0,
+          "retry": 0,
+          "reread": 0,
+          "self_correction": 0
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "arm": "nolore",
+        "n": 121,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0,
+        "armDegradationRatio": 1,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      },
+      {
+        "arm": "mcp-mem0",
+        "n": 84,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0,
+        "armDegradationRatio": 1,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      },
+      {
+        "arm": "mcp-mnemonic",
+        "n": 84,
+        "loreFreshRate": 0,
+        "loreDeepRate": null,
+        "loreDegradationRatio": null,
+        "loreKnee": null,
+        "armFreshRate": 0,
+        "armDeepRate": 0,
+        "armDegradationRatio": 1,
+        "armKnee": null,
+        "loreDeepAdvantageSignificant": false
+      }
+    ],
+    "armsBalanced": false
+  }
+]

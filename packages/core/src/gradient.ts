@@ -235,16 +235,30 @@ export function getQualityKnee(): number {
 
 /**
  * Literature-seeded per-model-family quality knees (fill fraction where
- * lost-in-the-middle degradation becomes material). These are NOT empirically
- * measured on our own eval yet (#1404-B / #1402 will replace them with measured
- * values); they are conservative priors read off the public long-context
- * degradation literature so per-model compression is at least directionally
- * right instead of a flat 0.4 for everyone:
+ * lost-in-the-middle degradation becomes material). They are conservative priors
+ * read off the public long-context degradation literature so per-model
+ * compression is at least directionally right instead of a flat 0.4 for everyone:
  *
  *   - "Lost in the Middle" (Liu et al., TACL 2023, arXiv:2307.03172)
  *   - Chroma "Context Rot" (Hong et al., 2025, 18 models incl. Claude 4 /
  *     GPT-4.1 / Gemini 2.5) — degradation is continuous, model-specific, and
  *     begins well before a window is full; frontier models hold quality longer.
+ *
+ * We ATTEMPTED to replace these with values measured on our own eval (#1404-B,
+ * using #1402's behavioral rot A/B over the MATRIX-V5 single-long cells:
+ * deepseek/m3 @ cap200, sonnet @ cap200+cap500, both arms, N=5). The result was
+ * a documented NEGATIVE: the 5 contextrot behavioral signals (tool_error,
+ * edit_failure, retry, reread, self_correction) fired only ~24 times across
+ * ~1,958 steps (1.2% density), so NO scenario reached a fittable / Wilson-
+ * significant degradation knee (every arm returned knee=null,
+ * ratioSignificant=false). Clean, structured coding-agent transcripts simply do
+ * not generate enough behavioral degradation to trace a per-model rot curve —
+ * consistent with METHODOLOGY.md's caveat that contextrot needs ~150+
+ * degradation-bearing steps. Per the gating rule (adopt a measured knee only
+ * when Wilson-significant with adequate n; otherwise keep the literature prior),
+ * ALL priors below are retained unchanged. Raw analysis:
+ * quality/eval-artifacts/rot-behavioral-matrix-v5.json. Revisit only if a
+ * higher-signal (longer, more error-prone) eval produces a measurable knee.
  *
  * Keyed by a lowercased family stem matched as a PREFIX of the bare model id
  * (the last `/`-segment). LONGEST matching prefix wins, so entries may be listed
@@ -281,10 +295,12 @@ const QUALITY_KNEE_BY_FAMILY: ReadonlyArray<readonly [string, number]> = [
  * the same way `setQualityKnee` validates — out-of-range / non-finite falls
  * through to the next source. Pure; safe to call on the hot path.
  *
- * NOTE: the returned value is a PRIOR, not a measured knee (#1404-A). #1402's
- * rot-curve A/B is expected to replace the table with empirical per-model values
- * (#1404-B). Keeping the seed table here (core, next to the default and the
- * multiplier that consumes it) keeps the prior testable without the gateway.
+ * NOTE: the returned value is a literature PRIOR, not a measured knee. #1404-B
+ * attempted to replace the table with values measured via #1402's behavioral rot
+ * A/B but found no statistically-significant per-model knee (signal too sparse on
+ * coding-agent transcripts — see the QUALITY_KNEE_BY_FAMILY comment above), so
+ * the priors stand. Keeping the seed table here (core, next to the default and
+ * the multiplier that consumes it) keeps the prior testable without the gateway.
  */
 export function resolveQualityKnee(modelID: string, override?: number): number {
   const valid = (v: number | undefined): v is number =>
