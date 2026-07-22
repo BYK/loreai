@@ -498,6 +498,11 @@ async function buildBinary() {
   }
 
   mkdirSync(distBinDir, { recursive: true });
+  // Wipe staging first so a stale artifact from a previous build (e.g. an
+  // old all-platforms ort-manifest.json) can never be picked up and mask a
+  // regression. Everything below regenerates the staging dir from scratch.
+  // (The --from-staging path returns earlier and never reaches here.)
+  rmSync(stagingDir, { recursive: true, force: true });
   mkdirSync(stagingDir, { recursive: true });
 
   // -------------------------------------------------------------------------
