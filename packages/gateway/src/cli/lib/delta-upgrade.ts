@@ -689,23 +689,25 @@ async function applyChainAndReturn(
   oldBinaryPath: string,
   destPath: string,
 ): Promise<DeltaResult> {
-  // Progress bar for the apply phase: total is the final binary size (the last
-  // patch's declared `newSize`), so the number shown is the real output the
-  // user gets — not the sum of intermediate hop writes. The bar advances per
-  // byte written across all hops, so it stays smooth through the chain.
-  let finalSize: number | null = null;
+  // Progress bar for the apply phase. `onBytes` fires for the output bytes of
+  // EVERY hop — the in-memory intermediates AND the final disk write — so the
+  // bar's total must be the SUM of all hops' output sizes (each patch's
+  // declared `newSize`), not just the final binary size. Using only the last
+  // patch's `newSize` makes a multi-hop bar reach 100% before the final hop and
+  // then clamp (freeze). The bar advances per byte written across all hops, so
+  // it stays smooth through the chain.
+  let totalBytes: number | null = 0;
   try {
-    const last = chain.patches.at(-1);
-    if (last) {
-      finalSize = parsePatchHeader(last.data).newSize;
+    for (const patch of chain.patches) {
+      totalBytes += parsePatchHeader(patch.data).newSize;
     }
   } catch {
     // Header parse is best-effort for the bar; a corrupt header is rejected
     // properly downstream. Leave the bar indeterminate in that case.
-    finalSize = null;
+    totalBytes = null;
   }
   const label = `Applying ${chain.patches.length} patch(es)`;
-  const progress = makeByteProgress(label, finalSize);
+  const progress = makeByteProgress(label, totalBytes);
   try {
     const sha256 = await applyPatchChain(
       chain,

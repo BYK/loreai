@@ -27,6 +27,7 @@ import { zstdCompressSync } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
 
 import {
+  addDiffChunk,
   applyPatch,
   applyPatchChainInMemory,
   applyPatchToMemory,
@@ -289,6 +290,35 @@ describe("applyPatchToMemory", () => {
     });
   });
 
+  it("produces correct output when a buffer view is misaligned (SWAR fallback)", () => {
+    // The SWAR fast path needs a 4-byte-aligned byteOffset; addDiffChunk falls
+    // back to the byte loop otherwise. No current caller passes a misaligned
+    // view (the readers and the output chunk are all fresh, offset-0
+    // allocations), so this directly unit-tests the guard against a future
+    // caller that might hand in a pooled/subarray view. Every offset combo
+    // (0-3 on each of old/diff/output) must match the per-byte reference.
+    const n = 4096 + 3; // exercises a 3-byte tail too
+    for (const oldOff of [0, 1, 2, 3]) {
+      for (const diffOff of [0, 3]) {
+        for (const outOff of [0, 2]) {
+          const oldBuf = new Uint8Array(n + oldOff).subarray(oldOff);
+          const diffBuf = new Uint8Array(n + diffOff).subarray(diffOff);
+          const outBuf = new Uint8Array(n + outOff).subarray(outOff);
+          for (let i = 0; i < n; i++) {
+            oldBuf[i] = (i * 37) % 256;
+            diffBuf[i] = (i * 53 + 3) % 256;
+          }
+          const expected = new Uint8Array(n);
+          for (let i = 0; i < n; i++) {
+            expected[i] = ((oldBuf[i] ?? 0) + (diffBuf[i] ?? 0)) % 256;
+          }
+          addDiffChunk(outBuf, oldBuf, diffBuf, n);
+          expect(outBuf).toEqual(expected);
+        }
+      }
+    }
+  });
+
   it("throws on output size mismatch", () => {
     const patch = buildPatch({
       control: ctrl(2, 0, 0),
@@ -465,6 +495,36 @@ describe("applyPatchChainInMemory", () => {
     const written = await readFile(destPath);
     expect(written).toEqual(expected);
     expect(hash).toBe(sha256(expected));
+  });
+
+  it("onBytes reports every hop's output — total = sum of all newSizes", async () => {
+    // The progress callback fires for the output bytes of EVERY hop (the
+    // in-memory intermediate AND the final disk write), so a multi-hop total
+    // is the sum of all hops' newSize, not just the final binary's. This is
+    // the invariant the apply progress-bar total relies on; a last-hop-only
+    // total would make the bar reach 100% before the final hop and freeze.
+    const old = Buffer.from([1, 2, 3, 4]);
+    const patch1 = buildPatch({
+      control: ctrl(4, 0, 0),
+      diff: Buffer.from([10, 10, 10, 10]),
+      extra: Buffer.alloc(0),
+      newSize: 4,
+    });
+    const patch2 = buildPatch({
+      control: ctrl(4, 1, 0),
+      diff: Buffer.from([1, 1, 1, 1]),
+      extra: Buffer.from([42]),
+      newSize: 5,
+    });
+
+    const oldPath = writeTemp("chain-onbytes-old.bin", old);
+    const destPath = join(WORK_DIR, "chain-onbytes-new.bin");
+    let reported = 0;
+    await applyPatchChainInMemory(oldPath, [patch1, patch2], destPath, (n) => {
+      reported += n;
+    });
+    // hop1 emits 4 bytes (newSize 4), hop2 emits 5 bytes (newSize 5).
+    expect(reported).toBe(9);
   });
 
   it("rejects an empty chain", async () => {
