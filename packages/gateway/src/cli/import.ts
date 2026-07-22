@@ -20,7 +20,14 @@ import {
 type DetectionResult =
   import("@loreai/core").conversationImport.DetectionResult;
 import { createGatewayLLMClient } from "../llm-adapter";
-import { resolveAuth, workerKeyScheme, type AuthCredential } from "../auth";
+import {
+  resolveAuth,
+  workerKeyScheme,
+  getLastSeenAuthProvider,
+  type AuthCredential,
+} from "../auth";
+import { defaultModelForProvider } from "../worker-model";
+import { resolveProviderRoute } from "../config";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
 import {
@@ -42,8 +49,85 @@ const {
   detectStructuredSources,
   importStructuredEntries,
   safeParseImportDoc,
+  readUsableAuth,
 } = conversationImport;
 type StructuredSourceName = conversationImport.StructuredSourceName;
+type AgentResolvedAuth =
+  import("@loreai/core").conversationImport.AgentResolvedAuth;
+
+/**
+ * Resolve the extraction credential + model for a given detected agent, in
+ * priority order:
+ *   1. `LORE_WORKER_API_KEY` explicit override (provider from `cfg.model`).
+ *   2. The harness's OWN on-disk auth (routable + unexpired) — the automatic
+ *      "use my existing credentials" path.
+ *   3. A live session / last-seen credential captured in THIS process (e.g.
+ *      `lore import` invoked after a session, or a warmed global fallback).
+ *   4. `cfg.model` explicit override (falls to `resolveAuth`, may be null).
+ * Returns null when nothing usable is found for this agent.
+ */
+export function resolveAgentImportAuth(
+  agentName: string,
+  workerApiKey: string | undefined,
+  cfgModel: { providerID: string; modelID: string } | undefined,
+): {
+  getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null;
+  model: { providerID: string; modelID: string };
+} | null {
+  // 1. Explicit dedicated worker key wins. Provider comes from cfg.model when
+  //    set, else anthropic (historical default for the raw-key path).
+  if (workerApiKey) {
+    const providerID = cfgModel?.providerID ?? "anthropic";
+    const model = cfgModel ?? defaultModelForProvider(providerID);
+    return {
+      getAuth: (_sessionID, reqProvider) => ({
+        scheme: workerKeyScheme(reqProvider ?? providerID),
+        value: workerApiKey,
+      }),
+      model,
+    };
+  }
+
+  // 2. Harness on-disk auth — pick the first credential whose provider Lore
+  //    can DIRECTLY authenticate for extraction. A provider is usable only if
+  //    it has a concrete upstream URL (some routes carry url:null — local
+  //    runtimes like ollama/vllm/lmstudio) AND does not require a runtime token
+  //    exchange we can't do from a stored key (github-copilot mints a Copilot
+  //    token from a GitHub token — a stored bearer isn't usable as-is). Anything
+  //    filtered here falls through to the accurate "no usable credential"
+  //    guidance rather than a confusing downstream "no response from the model".
+  const creds: AgentResolvedAuth[] = readUsableAuth(agentName);
+  const usable = creds.find((c) => {
+    if (c.providerID === "github-copilot") return false;
+    return resolveProviderRoute(c.providerID)?.url != null;
+  });
+  if (usable) {
+    const model = usable.modelID
+      ? { providerID: usable.providerID, modelID: usable.modelID }
+      : defaultModelForProvider(usable.providerID);
+    return {
+      getAuth: () => ({ scheme: usable.scheme, value: usable.value }),
+      model,
+    };
+  }
+
+  // 3. Live session / last-seen credential captured in-process. Match the model
+  //    to that credential's provider (or cfg.model when explicitly set) so the
+  //    extraction routes to the provider we actually hold a credential for.
+  const lastSeenProvider = getLastSeenAuthProvider() ?? undefined;
+  const sessionCred = resolveAuth(
+    undefined,
+    cfgModel?.providerID ?? lastSeenProvider,
+  );
+  if (sessionCred) {
+    const model =
+      cfgModel ?? defaultModelForProvider(lastSeenProvider ?? undefined);
+    return { getAuth: resolveAuth, model };
+  }
+
+  // 4. cfg.model override with no resolvable credential → nothing usable.
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -663,69 +747,8 @@ export async function commandImport(
   const startOpts: StartOptions = { quiet: true, local: true };
   const { config, owned, shutdown } = await startGateway(startOpts);
   const cfg = loreConfig();
-  // `cfg.model` is normally unset — Lore takes the model from the first client
-  // request. Standalone `lore import` has no request, so it falls back to a
-  // built-in default. Track whether the provider was *explicitly* configured so
-  // the no-credential message below doesn't tell a Copilot/OpenRouter user to
-  // set an "anthropic key" they don't have.
-  const modelExplicit = cfg.model != null;
-  const defaultModel = cfg.model ?? {
-    providerID: "anthropic",
-    modelID: "claude-sonnet-4-6",
-  };
-
-  // Extraction needs a usable credential. `lore import` is a standalone CLI
-  // process: it never proxies a conversation turn, so no client credential is
-  // ever captured under a session. The ONLY credential it can use is a
-  // dedicated worker key (LORE_WORKER_API_KEY). Without one, every extraction
-  // call resolves no-auth and `llm.prompt` returns null — the import would
-  // silently create ZERO knowledge while reporting success (the exact trap a
-  // user hit). Fail loudly with actionable guidance instead.
+  const cfgModel = cfg.model;
   const workerApiKey = config.workerApiKey;
-  const getImportAuth: (
-    sessionID?: string,
-    providerID?: string,
-  ) => AuthCredential | null = workerApiKey
-    ? (_sessionID, providerID) => ({
-        scheme: workerKeyScheme(providerID),
-        value: workerApiKey,
-      })
-    : resolveAuth;
-
-  if (
-    !workerApiKey &&
-    getImportAuth(undefined, defaultModel.providerID) == null
-  ) {
-    // Only name a specific provider when the user explicitly configured one.
-    // Otherwise stay neutral: many users authenticate via a subscription
-    // (GitHub Copilot, Claude/ChatGPT OAuth) and have no API key to export at
-    // all, so leading with LORE_WORKER_API_KEY sends them down a dead end. The
-    // universal path is `lore run` + one message, which captures whatever
-    // credential the agent already uses.
-    const keyHint = modelExplicit
-      ? `<your ${defaultModel.providerID} key>`
-      : "<key for your provider>";
-    console.error(
-      `\n[lore] Can't import: no credential is available for background extraction.\n` +
-        `[lore] \`lore import\` runs standalone with no conversation to borrow a\n` +
-        `[lore] credential from. Two ways forward:\n` +
-        `[lore]\n` +
-        `[lore]   1. Easiest — run \`lore run\`, send one message, and the import\n` +
-        `[lore]      happens automatically once your credential is captured.\n` +
-        `[lore]\n` +
-        `[lore]   2. Give \`lore import\` a dedicated worker key and retry:\n` +
-        `[lore]        export LORE_WORKER_API_KEY=${keyHint}\n` +
-        `[lore]        lore import`,
-    );
-    if (owned) await shutdown();
-    return;
-  }
-
-  const llm = createGatewayLLMClient(
-    { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
-    getImportAuth,
-    defaultModel,
-  );
 
   try {
     let totalCreated = 0;
@@ -733,10 +756,36 @@ export async function commandImport(
     let totalDeleted = 0;
     let _totalChunks = 0;
     let totalFailed = 0;
+    // Track whether ANY agent had a usable credential, so we can print
+    // accurate guidance if the whole run authenticated nothing.
+    let anyAuthResolved = false;
 
     for (const result of results) {
       const provider = getProvider(result.agentName);
       if (!provider) continue;
+
+      // Resolve THIS agent's credential from its own on-disk auth (or the
+      // explicit worker key / cfg.model). Different agents can authenticate
+      // different providers, so resolve per agent rather than once up front.
+      const auth = resolveAgentImportAuth(
+        result.agentName,
+        workerApiKey,
+        cfgModel,
+      );
+      if (!auth) {
+        console.log(
+          `[lore] Skipping ${result.agentDisplayName}: no usable credential found ` +
+            `in its on-disk auth (none stored, expired, or provider not proxied).`,
+        );
+        continue;
+      }
+      anyAuthResolved = true;
+
+      const llm = createGatewayLLMClient(
+        { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
+        auth.getAuth,
+        auth.model,
+      );
 
       const sessionIds = result.sessions.map((s) => s.id);
       console.log(`[lore] Reading ${result.agentDisplayName} conversations...`);
@@ -757,7 +806,7 @@ export async function commandImport(
         llm,
         projectPath,
         chunks,
-        model: defaultModel,
+        model: auth.model,
         onProgress: (progress) => {
           process.stderr.write(
             `\r[lore]   Chunk ${progress.current}/${progress.total} — ${progress.created} created, ${progress.updated} updated`,
@@ -769,10 +818,10 @@ export async function commandImport(
       process.stderr.write("\n");
 
       // Only mark sessions imported if the LLM actually answered a chunk. A
-      // no-auth run returns null per chunk (0 answered) without throwing — the
-      // pre-flight guard above catches the common case, but a credential can go
-      // stale mid-run. Recording a never-answered run would permanently
-      // suppress a real re-import via hasAgentImportRecord().
+      // no-auth run returns null per chunk (0 answered) without throwing — a
+      // resolved credential can still go stale mid-run. Recording a
+      // never-answered run would permanently suppress a real re-import via
+      // hasAgentImportRecord().
       if (extractResult.chunksAnswered === 0) {
         console.log(
           `[lore] No response from the model for ${result.agentDisplayName} — ` +
@@ -799,6 +848,32 @@ export async function commandImport(
       totalDeleted += extractResult.deleted;
       _totalChunks += extractResult.chunksProcessed;
       totalFailed += extractResult.chunksFailed;
+    }
+
+    // No agent had a usable credential — explain how to fix it, then stop
+    // before claiming a successful (empty) import. Only name a specific
+    // provider in the key hint when the user EXPLICITLY configured a model;
+    // otherwise stay neutral (a Copilot/OpenRouter user has no "anthropic key"
+    // to export). Lead with the universal `lore run` path.
+    if (!anyAuthResolved) {
+      const keyHint = cfgModel
+        ? `<your ${cfgModel.providerID} key>`
+        : "<key for your provider>";
+      console.error(
+        "\n[lore] Can't import: no usable credential found for background extraction.\n" +
+          "[lore] `lore import` authenticates using each agent's OWN stored credentials,\n" +
+          "[lore] but none were usable (none found, expired, or the provider needs a\n" +
+          "[lore] runtime token exchange Lore can't do standalone, e.g. GitHub Copilot).\n" +
+          "[lore] Two ways forward:\n" +
+          "[lore]\n" +
+          "[lore]   1. Easiest — run `lore run`, send one message, and the import\n" +
+          "[lore]      happens automatically once your credential is captured.\n" +
+          "[lore]\n" +
+          "[lore]   2. Give `lore import` a dedicated worker key and retry:\n" +
+          `[lore]        export LORE_WORKER_API_KEY=${keyHint}\n` +
+          "[lore]        lore import",
+      );
+      return;
     }
 
     // Record import timestamp (supplementary — auto-import gates on per-agent

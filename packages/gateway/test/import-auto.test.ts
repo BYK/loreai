@@ -110,17 +110,16 @@ describe("maybeAutoImport — credential-aware scheduling", () => {
   });
 
   test("deferred → flush with an unresolved credential skips loudly (no silent no-op)", async () => {
-    // No cfg.model, so the default provider (anthropic) is only a fallback —
-    // not a user choice. Even when the first authenticated turn is a different
-    // provider (openai) with no anthropic credential resolvable, we must NOT
-    // tell the user to authenticate "anthropic" (they never chose it). Instead
-    // give the neutral, still-actionable "send one message" notice — and never
-    // vanish silently.
+    // No cfg.model, so the model provider is derived from whatever the turn
+    // authenticated. When the flush turn reports a provider for which NO
+    // credential is resolvable, extraction can't authenticate — we must NOT
+    // vanish silently: give the neutral, still-actionable "send one message"
+    // notice and re-register so a later usable turn retries.
     await maybeAutoImport(baseConfig());
     expect(hasPendingImport()).toBe(true);
 
-    // Simulate the first turn authenticating openai.
-    setLastSeenAuth({ scheme: "api-key", value: "sk-openai" }, "openai");
+    // Simulate a flush turn that names openai but leaves NO resolvable
+    // credential for it (auth registry empty for openai).
     logs.length = 0;
     await flushPendingImport("openai");
 
@@ -201,9 +200,7 @@ describe("maybeAutoImport — credential-aware scheduling", () => {
     await maybeAutoImport(baseConfig());
     expect(hasPendingImport()).toBe(true);
 
-    // Turn 1: authenticates a provider with no resolvable credential for the
-    // default (anthropic) model → skip + re-register.
-    setLastSeenAuth({ scheme: "api-key", value: "sk-openai" }, "openai");
+    // Turn 1: names a provider with no resolvable credential → skip + re-register.
     logs.length = 0;
     await flushPendingImport("openai");
     expect(logs.join("\n")).toContain("Skipping knowledge import");

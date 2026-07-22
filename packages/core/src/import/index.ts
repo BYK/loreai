@@ -9,6 +9,8 @@ export type {
   DetectedSession,
   DetectionResult,
   AgentHistoryProvider,
+  AgentAuthProvider,
+  AgentResolvedAuth,
 } from "./types";
 
 // Detection
@@ -22,6 +24,15 @@ export {
   getProvider,
   clearProviders,
 } from "./providers";
+
+// Harness on-disk auth registry
+export {
+  registerAuthProvider,
+  getAuthProviders,
+  getAuthProvider,
+  clearAuthProviders,
+  readUsableAuth,
+} from "./auth";
 
 // Extraction (lazy — avoid pulling in LLM/curator deps for detection-only use)
 export {
@@ -91,3 +102,10 @@ import "./providers/cline";
 import "./providers/continue";
 import "./providers/pi";
 import "./providers/aider";
+
+// Register built-in harness auth readers on first import.
+// Each reader module calls registerAuthProvider() at load time.
+import "./auth/opencode";
+import "./auth/claude-code";
+import "./auth/codex";
+import "./auth/pi";
