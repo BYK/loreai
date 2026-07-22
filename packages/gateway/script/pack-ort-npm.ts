@@ -7,7 +7,7 @@
  * prefers them over WASM).
  *
  * Steps, all at the release version (CRAFT_NEW_VERSION):
- *   1. Generate the 6 platform packages and `npm pack` each into the tarball dir
+ *   1. Generate the per-platform packages and `npm pack` each into the tarball dir
  *      → `loreai-onnxruntime-<target>-<version>.tgz` (Craft publishes them via a
  *      dedicated npm target keyed on that name).
  *   2. Inject `optionalDependencies` (one per platform package, pinned EXACTLY

@@ -89,11 +89,11 @@ describe("buildOrtPlatformPackages (real onnxruntime-node)", () => {
     expect(linux.files).not.toContain("libonnxruntime.so.1.27.0");
   });
 
-  test("darwin keeps its versioned dylib; win32 ships both DLLs", () => {
+  test("darwin keeps the install-name dylib and drops the versioned duplicate; win32 ships both DLLs", () => {
     const darwin = built.find((b) => b.target === "darwin-arm64")!;
-    expect(
-      darwin.files.some((f) => /^libonnxruntime\..*\.dylib$/.test(f)),
-    ).toBe(true);
+    // Keep the addon's `@rpath` install-name; drop the identical longer-versioned copy.
+    expect(darwin.files).toContain("libonnxruntime.1.dylib");
+    expect(darwin.files).not.toContain("libonnxruntime.1.27.0.dylib");
     const win = built.find((b) => b.target === "win32-x64")!;
     expect(win.files).toContain("onnxruntime.dll");
     expect(win.files).toContain("DirectML.dll");

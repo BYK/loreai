@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
+  dropVersionedLibAliases,
   ORT_BINDING_FILE,
   ortAssetKey,
   ortNativeAssets,
@@ -100,10 +101,55 @@ describe("vendor-ort-native asset selection (real package)", () => {
     expect(linux).not.toContain("libonnxruntime.so.1.27.0");
   });
 
-  test("darwin keeps its version-named dylib (no shorter alias to drop)", () => {
+  test("darwin keeps the addon's install-name dylib, drops the versioned duplicate", () => {
     const darwin = assets.get("darwin-arm64")!.map((f) => f.file);
-    expect(darwin.some((f) => /^libonnxruntime\..*\.dylib$/.test(f))).toBe(
-      true,
-    );
+    // The addon's `@rpath` install-name is `libonnxruntime.1.dylib`; keep it.
+    expect(darwin).toContain("libonnxruntime.1.dylib");
+    // onnxruntime-node ≥ 1.27 also ships an identical `libonnxruntime.1.27.0.dylib`
+    // (~38 MB) — the longer-versioned duplicate must be dropped, not embedded.
+    expect(darwin).not.toContain("libonnxruntime.1.27.0.dylib");
+    expect(darwin).toContain(ORT_BINDING_FILE);
+  });
+});
+
+describe("dropVersionedLibAliases (pure)", () => {
+  test("darwin: keeps the shorter install-name dylib, drops the longer version", () => {
+    expect(
+      dropVersionedLibAliases([
+        "libonnxruntime.1.27.0.dylib",
+        "libonnxruntime.1.dylib",
+        "onnxruntime_binding.node",
+      ]).sort(),
+    ).toEqual(["libonnxruntime.1.dylib", "onnxruntime_binding.node"]);
+  });
+
+  test("linux: keeps the SONAME, drops the longer versioned .so alias", () => {
+    expect(
+      dropVersionedLibAliases([
+        "libonnxruntime.so.1",
+        "libonnxruntime.so.1.27.0",
+        "onnxruntime_binding.node",
+      ]).sort(),
+    ).toEqual(["libonnxruntime.so.1", "onnxruntime_binding.node"]);
+  });
+
+  test("linux without a duplicate: keeps the sole SONAME unchanged", () => {
+    expect(
+      dropVersionedLibAliases([
+        "libonnxruntime.so.1",
+        "onnxruntime_binding.node",
+      ]).sort(),
+    ).toEqual(["libonnxruntime.so.1", "onnxruntime_binding.node"]);
+  });
+
+  test("windows: distinct DLLs are all kept (no false alias-drop)", () => {
+    const win = [
+      "DirectML.dll",
+      "dxcompiler.dll",
+      "dxil.dll",
+      "onnxruntime.dll",
+      "onnxruntime_binding.node",
+    ];
+    expect(dropVersionedLibAliases(win).sort()).toEqual([...win].sort());
   });
 });
