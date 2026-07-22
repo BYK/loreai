@@ -34,11 +34,13 @@ import { dirname, join } from "node:path";
 import type * as esbuild from "esbuild";
 import { findOrtWebDir } from "./ort-web-plugin";
 
-/** onnxruntime-node@1.21's `dist/binding.js` native-addon require (tagged
- *  template). Kept in sync with `ort-native-plugin.ts`; a bump that changes it
- *  fails the build loudly rather than silently shipping a broken loader. */
+/** onnxruntime-node's `dist/binding.js` native-addon require (tagged template).
+ *  The N-API ABI segment (napi-v3, napi-v6, …) changes across releases, so match
+ *  `napi-v<N>` generically. Kept in sync with `ort-native-plugin.ts`; a bump that
+ *  changes the surrounding shape fails the build loudly (see the guard below)
+ *  rather than silently shipping a broken loader. */
 const ORT_BINDING_REQUIRE =
-  /require\(`\.\.\/bin\/napi-v3\/\$\{process\.platform\}\/\$\{process\.arch\}\/onnxruntime_binding\.node`\)/;
+  /require\(`\.\.\/bin\/napi-v\d+\/\$\{process\.platform\}\/\$\{process\.arch\}\/onnxruntime_binding\.node`\)/;
 
 /** Graceful replacement: native addon when the worker set the path, else a
  *  dormant stub (index.js calls `binding.listSupportedBackends()` at load).

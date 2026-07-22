@@ -7,11 +7,11 @@
  * prefers them over WASM).
  *
  * Steps, all at the release version (CRAFT_NEW_VERSION):
- *   1. Generate the 6 platform packages and `npm pack` each into the tarball dir
+ *   1. Generate the per-platform packages and `npm pack` each into the tarball dir
  *      → `loreai-onnxruntime-<target>-<version>.tgz` (Craft publishes them via a
  *      dedicated npm target keyed on that name).
- *   2. Inject `optionalDependencies` (the 6 packages, pinned EXACTLY to the
- *      release version) into the already-packed `loreai-gateway-<version>.tgz`
+ *   2. Inject `optionalDependencies` (one per platform package, pinned EXACTLY
+ *      to the release version) into the already-packed `loreai-gateway-<version>.tgz`
  *      by extract → edit package.json → repack. Done on the tarball — NOT the
  *      workspace package.json — so the repo + lockfile stay clean and
  *      release-branch `pnpm install --frozen-lockfile` keeps working. npm's
@@ -54,7 +54,7 @@ function packPlatformPackages(tarballsDir: string, version: string): void {
   }
 }
 
-/** Add optionalDependencies (the 6 platform packages, pinned to `version`) to
+/** Add optionalDependencies (the platform packages, pinned to `version`) to
  *  the packed gateway tarball's package.json, in place. */
 function injectGatewayOptionalDeps(tarballsDir: string, version: string): void {
   const gatewayTarball = join(tarballsDir, `loreai-gateway-${version}.tgz`);

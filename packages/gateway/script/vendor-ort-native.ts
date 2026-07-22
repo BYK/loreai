@@ -2,7 +2,7 @@
  * Vendor the native `onnxruntime-node` runtime for every build target.
  *
  * The SEA (fossilize) binary has no `node_modules`, so `onnxruntime-node`'s
- * `binding.js` — which does `require("../bin/napi-v3/<platform>/<arch>/
+ * `binding.js` — which does `require("../bin/napi-v<N>/<platform>/<arch>/
  * onnxruntime_binding.node")` — can't find its native addon inside the binary.
  * Instead we embed the addon + its shared libraries as SEA assets (one set per
  * target) and extract them at runtime (see `native-loader.cjs`, which sets
@@ -11,7 +11,7 @@
  *
  * Unlike `sqlite-vec` (whose per-platform binaries live in separate npm
  * packages), `onnxruntime-node` ships EVERY platform's binaries in one package
- * under `bin/napi-v3/<platform>/<arch>/`. So there is no download step: we copy
+ * under `bin/napi-v<N>/<platform>/<arch>/`. So there is no download step: we copy
  * straight from the installed package. Lore's SEA builds are cross-platform (a
  * single Linux host stages linux/windows and prepares darwin for the macOS
  * `--from-staging` job), and every target's files are present in `node_modules`,
@@ -39,7 +39,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
 const repoRoot = dirname(dirname(packageDir));
 
-/** Map a build target to onnxruntime-node's `bin/napi-v3/<platform>/<arch>`
+/** Map a build target to onnxruntime-node's `bin/napi-v<N>/<platform>/<arch>`
  *  subdirectory (Node's `process.platform`/`process.arch` naming). */
 const ORT_TARGET_SUBDIR: Record<VendorTarget, string> = {
   "darwin-arm64": "darwin/arm64",
@@ -84,22 +84,88 @@ export function ortNodeVersion(): string {
   return v;
 }
 
-/** onnxruntime-node's `bin/napi-v3` root, under which each platform's files
- *  live in `<process.platform>/<process.arch>/` subdirs. */
+/** onnxruntime-node's `bin/napi-v<N>` root, under which each platform's files
+ *  live in `<process.platform>/<process.arch>/` subdirs. The N-API ABI dir name
+ *  (napi-v3, napi-v6, …) changes across onnxruntime-node releases, so discover
+ *  it from the installed package instead of hard-coding it — a version bump that
+ *  moves the dir would otherwise silently break every SEA/npm native build. */
 export function ortNodeBinRoot(): string {
-  return join(ortNodeDir(), "bin", "napi-v3");
+  const binDir = join(ortNodeDir(), "bin");
+  const napiDirs = existsSync(binDir)
+    ? readdirSync(binDir).filter((d) => /^napi-v\d+$/.test(d))
+    : [];
+  if (napiDirs.length !== 1) {
+    throw new Error(
+      `vendor-ort-native: expected exactly one bin/napi-v<N> dir in ` +
+        `onnxruntime-node, found [${napiDirs.join(", ")}]`,
+    );
+  }
+  return join(binDir, napiDirs[0]);
 }
 
 /**
- * The native files for one onnxruntime-node platform, given its `bin/napi-v3`
+ * A shared library filename split into (stem, version, ext) if it carries an
+ * embedded numeric version, else `null`. Handles both linker conventions:
+ *   linux : `libonnxruntime.so.1`      → { stem:"libonnxruntime", ver:"1",      ext:".so" }
+ *           `libonnxruntime.so.1.27.0` → { stem:"libonnxruntime", ver:"1.27.0", ext:".so" }
+ *   darwin: `libonnxruntime.1.dylib`   → { stem:"libonnxruntime", ver:"1",      ext:".dylib" }
+ *           `libonnxruntime.1.27.0.dylib` → { stem:"libonnxruntime", ver:"1.27.0", ext:".dylib" }
+ * Files without an embedded numeric version (the addon, distinct `.dll`s) → null.
+ */
+function parseVersionedLib(
+  file: string,
+): { stem: string; version: string; ext: string } | null {
+  // darwin: <stem>.<numeric-version>.dylib
+  let m = /^(.+?)\.(\d+(?:\.\d+)*)\.dylib$/.exec(file);
+  if (m) return { stem: m[1], version: m[2], ext: ".dylib" };
+  // linux/elf: <stem>.so.<numeric-version>
+  m = /^(.+?\.so)\.(\d+(?:\.\d+)*)$/.exec(file);
+  if (m) return { stem: m[1], version: m[2], ext: "" };
+  return null;
+}
+
+/**
+ * Given a flat list of a platform's native files, drop longer-versioned
+ * duplicates of a shared library, keeping only the canonical (shortest-version)
+ * member of each (stem, ext) group. Pure/deterministic — the filesystem-reading
+ * `collectOrtFiles` delegates its dedup here so the rule is unit-testable with
+ * synthetic file sets. See `collectOrtFiles` for the rationale/examples.
+ */
+export function dropVersionedLibAliases(all: readonly string[]): string[] {
+  const versionComponents = (v: string): number => v.split(".").length;
+  return all.filter((f) => {
+    const info = parseVersionedLib(f);
+    if (!info) return true; // no embedded version → always keep
+    // Drop F if a sibling shares its (stem, ext) but has a shorter version.
+    return !all.some((g) => {
+      if (g === f) return false;
+      const gi = parseVersionedLib(g);
+      return (
+        gi !== null &&
+        gi.stem === info.stem &&
+        gi.ext === info.ext &&
+        versionComponents(gi.version) < versionComponents(info.version)
+      );
+    });
+  });
+}
+
+/**
+ * The native files for one onnxruntime-node platform, given its `bin/napi-v<N>`
  * subdir (e.g. `"linux/x64"`, `"win32/arm64"`). Returns every file in the dir
- * MINUS longer-versioned aliases of another file: linux ships both
- * `libonnxruntime.so.1` (the SONAME the addon's NEEDED entry references) and
- * `libonnxruntime.so.1.21.0` (identical bytes) — we keep the SONAME and drop the
- * duplicate to avoid shipping ~21 MB twice. darwin's `libonnxruntime.1.21.0.
- * dylib` has no shorter alias so it's kept; windows' `onnxruntime.dll` /
- * `DirectML.dll` are kept. Version-robust: no hard-coded library filenames.
- * Throws if the dir is missing or lacks the addon.
+ * MINUS longer-versioned aliases of another shared library. A library can ship
+ * multiple version-named copies of identical bytes that a single linker
+ * install-name/SONAME resolves to:
+ *   linux : `libonnxruntime.so.1` (the SONAME the addon NEEDs) alongside a
+ *           historical `libonnxruntime.so.1.<version>`;
+ *   darwin (onnxruntime-node ≥ 1.27): `libonnxruntime.1.dylib` (the addon's
+ *           `@rpath` install-name) alongside `libonnxruntime.1.27.0.dylib`.
+ * For each (stem, ext) group we keep ONLY the shortest-versioned member (fewest
+ * dotted components — the alias the addon actually references) and drop the
+ * longer duplicates, saving ~21 MB (linux) / ~38 MB (darwin) per platform.
+ * Files with no embedded numeric version (the addon, distinct windows DLLs like
+ * `onnxruntime.dll` / `DirectML.dll`) are always kept. Version-robust: no
+ * hard-coded library filenames. Throws if the dir is missing or lacks the addon.
  */
 export function collectOrtFiles(
   binSubdir: string,
@@ -111,11 +177,7 @@ export function collectOrtFiles(
     );
   }
   const all = readdirSync(dir).filter((f) => !f.startsWith("."));
-  // Drop F when some other G is a strict prefix of F followed by "." — i.e. F is
-  // a longer-versioned alias (libX.so.1.21.0 vs the SONAME libX.so.1).
-  const kept = all.filter(
-    (f) => !all.some((g) => g !== f && f.startsWith(`${g}.`)),
-  );
+  const kept = dropVersionedLibAliases(all);
   if (!kept.includes(ORT_BINDING_FILE)) {
     throw new Error(
       `vendor-ort-native: ${ORT_BINDING_FILE} not found in ${dir}`,
