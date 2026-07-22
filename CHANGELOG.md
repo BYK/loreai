@@ -1,4 +1,314 @@
 # Changelog
+## 0.38.0
+
+### New Features ✨
+
+#### Cch
+
+- Add seeds for Claude Code up to 2.1.217 by @github-actions in [#1440](https://github.com/BYK/loreai/pull/1440)
+- Add seeds for Claude Code up to 2.1.216 by @github-actions in [#1419](https://github.com/BYK/loreai/pull/1419)
+- Add seeds for Claude Code up to 2.1.215 by @github-actions in [#1384](https://github.com/BYK/loreai/pull/1384)
+- Add seeds for Claude Code up to 2.1.214 by @github-actions in [#1375](https://github.com/BYK/loreai/pull/1375)
+- Add seeds for Claude Code up to 2.1.212 by @github-actions in [#1356](https://github.com/BYK/loreai/pull/1356)
+- Add seeds for Claude Code up to 2.1.211 by @github-actions in [#1347](https://github.com/BYK/loreai/pull/1347)
+- Add seeds for Claude Code up to 2.1.210 by @github-actions in [#1339](https://github.com/BYK/loreai/pull/1339)
+- Add seeds for Claude Code up to 2.1.209 by @github-actions in [#1324](https://github.com/BYK/loreai/pull/1324)
+- Add seeds for Claude Code up to 2.1.207 by @github-actions in [#1258](https://github.com/BYK/loreai/pull/1258)
+- Add seeds for Claude Code up to 2.1.206 by @github-actions in [#1242](https://github.com/BYK/loreai/pull/1242)
+- Add seeds for Claude Code up to 2.1.205 by @github-actions in [#1232](https://github.com/BYK/loreai/pull/1232)
+- Add seeds for Claude Code up to 2.1.204 by @github-actions in [#1219](https://github.com/BYK/loreai/pull/1219)
+- Add seeds for Claude Code up to 2.1.202 by @github-actions in [#1199](https://github.com/BYK/loreai/pull/1199)
+
+#### Cli
+
+- `lore admin grant` operator command for tier promotion (#827) by @BYK in [#1364](https://github.com/BYK/loreai/pull/1364)
+- `lore data vacuum` to reclaim the bloated DB file (#1221) by @BYK in [#1226](https://github.com/BYK/loreai/pull/1226)
+- Lore log / lore diff — surface knowledge version history (#962) by @BYK in [#1218](https://github.com/BYK/loreai/pull/1218)
+
+#### Core
+
+- Semantic linter funnel — diff-vs-invariant judge, filters, gate logic by @BYK in [#1361](https://github.com/BYK/loreai/pull/1361)
+- Persist raw input/output token buckets in session_state by @BYK in [#1332](https://github.com/BYK/loreai/pull/1332)
+- Relevance floor for session knowledge (stop off-task surfacing) by @BYK in [#1318](https://github.com/BYK/loreai/pull/1318)
+- Default knowledge.contextSources to ["distillation"] for reliable cross-session fact application by @BYK in [#1293](https://github.com/BYK/loreai/pull/1293)
+- High-salience 'Established facts' block in system[2] for reliable application on weaker models by @BYK in [#1276](https://github.com/BYK/loreai/pull/1276)
+- Self-heal a latched local embedding provider via periodic re-probe by @BYK in [#1275](https://github.com/BYK/loreai/pull/1275)
+- Client key rotation — epoch-aware DEKs + rotateScopeKey + seal/open (E-4c-3b, #827) by @BYK in [#1273](https://github.com/BYK/loreai/pull/1273)
+- Group DEK wrapping + mint-safe member scope-key reads (E-4c-2, #827) by @BYK in [#1267](https://github.com/BYK/loreai/pull/1267)
+- Passive 'facts just there' — fold relevance-ranked distillation+temporal into system[2] (#961) by @BYK in [#1228](https://github.com/BYK/loreai/pull/1228)
+- Automatic free-page reclaim on the idle tick (#1221) by @BYK in [#1227](https://github.com/BYK/loreai/pull/1227)
+- Throttle the temporal re-chunk backfill CPU on constrained hosts by @BYK in [#1184](https://github.com/BYK/loreai/pull/1184)
+- Local knowledge version compaction + de-CASCADE ref FKs (#909) by @BYK in [#1213](https://github.com/BYK/loreai/pull/1213)
+- Objective, justifier-free coding-agent degradation signals (#961) by @BYK in [#1185](https://github.com/BYK/loreai/pull/1185)
+
+#### Eval
+
+- Decision-evolution + negative-control recall scenario (#1403) by @BYK in [#1431](https://github.com/BYK/loreai/pull/1431)
+- Offline no-spend context-rot A/B from recorded results (#961) by @BYK in [#1202](https://github.com/BYK/loreai/pull/1202)
+- Objective retrieval scoring, separated from the LLM judge (#961) by @BYK in [#1186](https://github.com/BYK/loreai/pull/1186)
+
+#### Gateway
+
+- Wire discover→invite + auto-deploy Edge Functions (E-5-d-2, #630) by @BYK in [#1396](https://github.com/BYK/loreai/pull/1396)
+- Email team invites via SMTP2GO (E-5-e, #630/#827) by @BYK in [#1392](https://github.com/BYK/loreai/pull/1392)
+- GitHub repo-collaborator discovery (#630, E-5-d Slice 1) by @BYK in [#1388](https://github.com/BYK/loreai/pull/1388)
+- Route GitHub Models for the semantic-linter judge (#1368) by @BYK in [#1373](https://github.com/BYK/loreai/pull/1373)
+- `lore invariant-check` CLI command by @BYK in [#1362](https://github.com/BYK/loreai/pull/1362)
+- Friendlier hint for pass-through 429 on OAuth sessions by @BYK in [#1369](https://github.com/BYK/loreai/pull/1369)
+- Route OpenRouter worker calls to the cheapest provider (:floor) by @BYK in [#1349](https://github.com/BYK/loreai/pull/1349)
+- Log subagent flag + resolved LTM budget for one-grep triage by @BYK in [#1336](https://github.com/BYK/loreai/pull/1336)
+- Materiality gate for knowledge-delta emission by @BYK in [#1328](https://github.com/BYK/loreai/pull/1328)
+- Github-provision Edge Function + login wiring (E-5-a-2, #827) by @BYK in [#1316](https://github.com/BYK/loreai/pull/1316)
+- Tell the agent Lore manages the context window by @BYK in [#1303](https://github.com/BYK/loreai/pull/1303)
+- Lore team CLI + team scope_keys sync (E-4c-4, #827) by @BYK in [#1278](https://github.com/BYK/loreai/pull/1278)
+- Surface degraded memory (embeddings + workers) via /health and lore doctor by @BYK in [#1274](https://github.com/BYK/loreai/pull/1274)
+- Publish identity public key to the directory (E-3b, #827) by @BYK in [#1260](https://github.com/BYK/loreai/pull/1260)
+- Telemetry for empty completions returned to the client by @BYK in [#1205](https://github.com/BYK/loreai/pull/1205)
+- Env-gated warmup cache-divergence probe by @BYK in [#1200](https://github.com/BYK/loreai/pull/1200)
+
+#### Import
+
+- Native mem0 connector for the structured-import lane by @BYK in [#1417](https://github.com/BYK/loreai/pull/1417)
+- Structured-memory import lane for migrating Engram memory by @BYK in [#1415](https://github.com/BYK/loreai/pull/1415)
+- Worktree-aware detection + multi-agent selection by @BYK in [#1344](https://github.com/BYK/loreai/pull/1344)
+
+#### Invariant Check
+
+- --effort knob + invariantCheck.effort config by @BYK in [#1393](https://github.com/BYK/loreai/pull/1393)
+- Prose-tolerant judge parsing + unparseable visibility by @BYK in [#1390](https://github.com/BYK/loreai/pull/1390)
+
+#### Supabase
+
+- GitHub Teams provisioning RPC + schema (E-5-a-1, #827) by @BYK in [#1313](https://github.com/BYK/loreai/pull/1313)
+- Pin membership/role helper oracles to self (E, #827) by @BYK in [#1286](https://github.com/BYK/loreai/pull/1286)
+- Multi-epoch scope_keys + atomic rotate_scope_key (E-4c-3a, #827) by @BYK in [#1271](https://github.com/BYK/loreai/pull/1271)
+- Team lifecycle RPCs — create/add/remove/set-role (E-4c-1, #827) by @BYK in [#1264](https://github.com/BYK/loreai/pull/1264)
+- Enforce_row_quota membership guard + effective_tier (E-4b, #827) by @BYK in [#1263](https://github.com/BYK/loreai/pull/1263)
+- Per-verb write-gate — viewers read, editors/admins write (E-4a, #827) by @BYK in [#1262](https://github.com/BYK/loreai/pull/1262)
+- Identity_pub directory + member-aware scope_keys RLS (E-3a, #827) by @BYK in [#1259](https://github.com/BYK/loreai/pull/1259)
+- Membership-based content RLS (E-2, #827) by @BYK in [#1257](https://github.com/BYK/loreai/pull/1257)
+- Org → scope registry + FK relax (E-1, #827) by @BYK in [#1256](https://github.com/BYK/loreai/pull/1256)
+- Enforce append-only on temporal_messages (D-3a, #826) by @BYK in [#1243](https://github.com/BYK/loreai/pull/1243)
+- Pro-tier remote mirror for distillations + temporal (D-1, #826) by @BYK in [#1240](https://github.com/BYK/loreai/pull/1240)
+- Server-side tombstone reaper (#909) by @BYK in [#1233](https://github.com/BYK/loreai/pull/1233)
+- Raise free-tier entity-graph caps (#1221 follow-up) by @BYK in [#1230](https://github.com/BYK/loreai/pull/1230)
+- Server-side recency eviction for entity_aliases + entity_relations (#1191b PR2a) by @BYK in [#1206](https://github.com/BYK/loreai/pull/1206)
+- Server-side continuous top-N eviction for knowledge (#1191b PR1) by @BYK in [#1203](https://github.com/BYK/loreai/pull/1203)
+
+#### Sync
+
+- Domain auto-join (Model B: verified-admin claim + approve-on-join) (E-5-b, #827) by @BYK in [#1354](https://github.com/BYK/loreai/pull/1354)
+- Offline (--offline) team invites with ephemeral key delivery (E-5-c-2, #827) by @BYK in [#1352](https://github.com/BYK/loreai/pull/1352)
+- Direct email team invites with zero-follow-up DEK sharing (E-5-c-1, #827) by @BYK in [#1346](https://github.com/BYK/loreai/pull/1346)
+- Encrypt entity-graph content columns on the wire (C-4, #825) by @BYK in [#1341](https://github.com/BYK/loreai/pull/1341)
+- Re-enqueue the linked entity graph on team approval (#1307) by @BYK in [#1311](https://github.com/BYK/loreai/pull/1311)
+- Decrypt each pulled row with its own scope's DEK (E-5-F2, #827) by @BYK in [#1310](https://github.com/BYK/loreai/pull/1310)
+- Resolve team scope + migrate knowledge & entity graph on promotion (E-5-F3-3, #827) by @BYK in [#1304](https://github.com/BYK/loreai/pull/1304)
+- Project→team-scope binding + promotion policy plumbing (E-5-F3-1, #827) by @BYK in [#1296](https://github.com/BYK/loreai/pull/1296)
+- Pull-only mirror of the org/scope registry (E-5 foundation, #827) by @BYK in [#1290](https://github.com/BYK/loreai/pull/1290)
+- Gate Pro fanout (distillations + temporal) on git_remote (P2c, #1246) by @BYK in [#1253](https://github.com/BYK/loreai/pull/1253)
+- Gate indirect child content on parent syncability (P2b, #1246) by @BYK in [#1252](https://github.com/BYK/loreai/pull/1252)
+- Gate knowledge + entities content on git_remote (P2a, #1246) by @BYK in [#1251](https://github.com/BYK/loreai/pull/1251)
+- Cross-device project-identity mapping (P1, #1246) by @BYK in [#1247](https://github.com/BYK/loreai/pull/1247)
+- Restore-residency for pulled temporal messages (D-4a, #826) by @BYK in [#1245](https://github.com/BYK/loreai/pull/1245)
+- Arm Pro-tier distillation + temporal backup, client side (D-3b, #826) by @BYK in [#1244](https://github.com/BYK/loreai/pull/1244)
+- Tier-aware synced-table selection (D-2, #826) by @BYK in [#1241](https://github.com/BYK/loreai/pull/1241)
+- Safe-reap watermark so no active device misses a deletion (#909) by @BYK in [#1235](https://github.com/BYK/loreai/pull/1235)
+- Server-side entity eviction via synced sync_rank (#1191b PR2b) by @BYK in [#1207](https://github.com/BYK/loreai/pull/1207)
+- Seed knowledge_meta for live entries only (JOIN knowledge_current) by @BYK in [#1198](https://github.com/BYK/loreai/pull/1198)
+- Align the knowledge_meta seed with knowledge's value order by @BYK in [#1196](https://github.com/BYK/loreai/pull/1196)
+- Value-rank the entity-graph seed (entities/aliases/relations) — #1191a by @BYK in [#1194](https://github.com/BYK/loreai/pull/1194)
+- Show initial-sync progress — "Performing initial sync…" with a live bar by @BYK in [#1192](https://github.com/BYK/loreai/pull/1192)
+- Seed the outbox by value so a capped free tier syncs the most useful knowledge first by @BYK in [#1189](https://github.com/BYK/loreai/pull/1189)
+
+#### Upgrade
+
+- Sentry tracing + metrics for the delta-upgrade path by @BYK in [#1443](https://github.com/BYK/loreai/pull/1443)
+- TTY progress bars for delta-patch apply and full download by @BYK in [#1442](https://github.com/BYK/loreai/pull/1442)
+
+#### Other
+
+- (core,gateway) Persist per-bucket worker cost breakdown for cost observability by @BYK in [#1268](https://github.com/BYK/loreai/pull/1268)
+- (distillation) Reduce oversized user blobs by embedding relevance by @BYK in [#1351](https://github.com/BYK/loreai/pull/1351)
+- (gradient) Per-model quality knee from config + literature-seeded family table (#1404) by @BYK in [#1410](https://github.com/BYK/loreai/pull/1410)
+- (knowledge) Let the curator re-title an entry whose scope broadened by @BYK in [#1422](https://github.com/BYK/loreai/pull/1422)
+- (ltm) Per-entry team-promotion review gate + review CLI (E-5-F3-2, #827) by @BYK in [#1298](https://github.com/BYK/loreai/pull/1298)
+- (opencode) Flag Task sub-agents to the gateway (x-parent-session-id) by @BYK in [#1309](https://github.com/BYK/loreai/pull/1309)
+- (pattern-extract) Gate noisy titles so seeds stay discoverable by @BYK in [#1416](https://github.com/BYK/loreai/pull/1416)
+- (provenance) Capture tool_calls.input_path (file-provenance foundation) by @BYK in [#1424](https://github.com/BYK/loreai/pull/1424)
+- (recall) Surface resolved code anchors + discoverable-title guidance by @BYK in [#1414](https://github.com/BYK/loreai/pull/1414)
+- (website) Add system-preference dark mode to marketing pages by @BYK in [#1319](https://github.com/BYK/loreai/pull/1319)
+
+### Bug Fixes 🐛
+
+#### Build
+
+- Embed only the target platform's native assets per binary by @BYK in [#1449](https://github.com/BYK/loreai/pull/1449)
+- Serialize SEA binary injects to avoid postject WASM race by @BYK in [#1447](https://github.com/BYK/loreai/pull/1447)
+
+#### Core
+
+- Record stated facts neutrally, strip turn-scoped 'don't act on this' framing (#1383) by @BYK in [#1391](https://github.com/BYK/loreai/pull/1391)
+- Fall back to WASM ONNX runtime when native can't load the model (#1379) by @BYK in [#1387](https://github.com/BYK/loreai/pull/1387)
+- Drain in-flight distillation embeds on shutdown + warm-start worker (#1331) by @BYK in [#1385](https://github.com/BYK/loreai/pull/1385)
+- FTS fallback for passive context-sources (#961 Gap 2b) by @BYK in [#1378](https://github.com/BYK/loreai/pull/1378)
+- Pin vec0 storage-mode read across cutover race (no such column: embedding) by @BYK in [#1355](https://github.com/BYK/loreai/pull/1355)
+- GetLtmBudget ceiling caps only the floor + stabilize small windows by @BYK in [#1306](https://github.com/BYK/loreai/pull/1306)
+- Make LTM budget context-aware and sub-agent-aware by @BYK in [#1302](https://github.com/BYK/loreai/pull/1302)
+- Key project identity on origin, not upstream by @BYK in [#1301](https://github.com/BYK/loreai/pull/1301)
+- Fire remote-backfill reseed event from backfillGitRemotes by @BYK in [#1285](https://github.com/BYK/loreai/pull/1285)
+- Fail fast with an actionable error when SQLite lacks FTS5 by @BYK in [#1266](https://github.com/BYK/loreai/pull/1266)
+- Batch instruction-detect cross-session FTS into one query by @BYK in [#1265](https://github.com/BYK/loreai/pull/1265)
+- Fast-first-retry backoff for embedding init failures by @BYK in [#1229](https://github.com/BYK/loreai/pull/1229)
+- Checkpoint the SQLite WAL so it can't grow unbounded (#1221) by @BYK in [#1225](https://github.com/BYK/loreai/pull/1225)
+- Declare onnxruntime-node + sharp as optional deps so the plugin worker resolves the native ONNX backend by @BYK in [#1223](https://github.com/BYK/loreai/pull/1223)
+- Scope knowledge vector search to the current project (cross-project leak) by @BYK in [#1208](https://github.com/BYK/loreai/pull/1208)
+
+#### Deps
+
+- Clear all 15 open Dependabot alerts by @BYK in [#1423](https://github.com/BYK/loreai/pull/1423)
+- Override qs to >=6.15.2 to fix DoS (GHSA-q8mj-m7cp-5q26) by @BYK in [#1224](https://github.com/BYK/loreai/pull/1224)
+
+#### Gateway
+
+- ChatGPT-backend workers reuse session model; prefer gpt-5.6-luna for real openai by @BYK in [#1437](https://github.com/BYK/loreai/pull/1437)
+- True-streaming passthrough for codex/openai-responses main turn by @BYK in [#1435](https://github.com/BYK/loreai/pull/1435)
+- Raise default reasoning budget 8192 → 16384 (land curator on attempt 1) by @BYK in [#1430](https://github.com/BYK/loreai/pull/1430)
+- Reasoning floor keys off any reasoning capability, not toggle-only by @BYK in [#1426](https://github.com/BYK/loreai/pull/1426)
+- Reasoning-headroom floor for OpenAI-protocol workers (no explicit effort) by @BYK in [#1418](https://github.com/BYK/loreai/pull/1418)
+- Worker reasoning-truncation — align OpenAI budget + retry-on-length by @BYK in [#1413](https://github.com/BYK/loreai/pull/1413)
+- Lineage-aware worker model selection + data-policy 404 auto-recovery by @BYK in [#1407](https://github.com/BYK/loreai/pull/1407)
+- Surface reasoning-only worker completions from the OpenAI SSE path (#1334) by @BYK in [#1386](https://github.com/BYK/loreai/pull/1386)
+- Provider-aware worker key scheme — Bearer for GitHub Models (Seer #1373) by @BYK in [#1376](https://github.com/BYK/loreai/pull/1376)
+- Defer lore-run auto-import until a credential is available by @BYK in [#1366](https://github.com/BYK/loreai/pull/1366)
+- Scope worker-incapable streak per worker + derive degradation cause by @BYK in [#1342](https://github.com/BYK/loreai/pull/1342)
+- Inject knowledge-delta as a user→assistant pair (stop M3 acknowledging it) by @BYK in [#1315](https://github.com/BYK/loreai/pull/1315)
+- Stabilize OpenAI content shape to stop per-turn cache busts by @BYK in [#1327](https://github.com/BYK/loreai/pull/1327)
+- Cache accounting on the codex-worker Responses path by @BYK in [#1326](https://github.com/BYK/loreai/pull/1326)
+- Parse cache-write tokens on the OpenAI/OpenRouter response path by @BYK in [#1322](https://github.com/BYK/loreai/pull/1322)
+- Emit cache_control on the OpenAI/OpenRouter request path by @BYK in [#1321](https://github.com/BYK/loreai/pull/1321)
+- Lore doctor treats intentionally-disabled embeddings as PASS, not WARN by @BYK in [#1284](https://github.com/BYK/loreai/pull/1284)
+- Don't escalate credential-class worker failures to Sentry (3J) by @BYK in [#1269](https://github.com/BYK/loreai/pull/1269)
+- Don't flood WARN logs on expected orphan pull-skips by @BYK in [#1222](https://github.com/BYK/loreai/pull/1222)
+- Make cost-tracker auto-compact threshold client-metered-window aware by @BYK in [#1216](https://github.com/BYK/loreai/pull/1216)
+- Don't let one orphan pull row abort the whole sync by @BYK in [#1215](https://github.com/BYK/loreai/pull/1215)
+- Clamp client usage cap to 200K unless request enables context-1m by @BYK in [#1214](https://github.com/BYK/loreai/pull/1214)
+- Stream buffered non-Anthropic upstreams to Anthropic clients (#1052) by @BYK in [#1212](https://github.com/BYK/loreai/pull/1212)
+- Point the worker-degradation warning at `lore doctor` (not the non-existent `lore status`) by @BYK in [#1209](https://github.com/BYK/loreai/pull/1209)
+- Accumulate mislabeled SSE completions through the stream accumulators by @BYK in [#1204](https://github.com/BYK/loreai/pull/1204)
+- Route all *.githubcopilot.com hosts to /chat/completions by @BYK in [#1201](https://github.com/BYK/loreai/pull/1201)
+- Tolerate mislabeled SSE when reading non-streaming completions by @BYK in [#1195](https://github.com/BYK/loreai/pull/1195)
+
+#### Gradient
+
+- Thread budget snapshot into isLargeColdStart to kill limits/knee race (#1401) by @BYK in [#1408](https://github.com/BYK/loreai/pull/1408)
+- Fill-fraction quality model fixes cheap-cache compression (#961) by @BYK in [#1400](https://github.com/BYK/loreai/pull/1400)
+- Force compression on degraded windows via graduated quality multiplier (#961) by @BYK in [#1370](https://github.com/BYK/loreai/pull/1370)
+
+#### Import
+
+- Read engram export from a file, not stdout (#1398) by @BYK in [#1438](https://github.com/BYK/loreai/pull/1438)
+- Resolve mem0 embedded home dir cross-platform (os.homedir, not $HOME) by @BYK in [#1425](https://github.com/BYK/loreai/pull/1425)
+- Make `lore import` authenticate + stop zero-result imports poisoning the auto-import gate by @BYK in [#1406](https://github.com/BYK/loreai/pull/1406)
+
+#### Setup
+
+- Don't crash lore doctor on an unreadable JSON backup sidecar by @BYK in [#1299](https://github.com/BYK/loreai/pull/1299)
+- Store JSON config backup in a sidecar file, not a \_loreBackup key by @BYK in [#1297](https://github.com/BYK/loreai/pull/1297)
+
+#### Supabase
+
+- Revoke outstanding invite tokens on scope member removal (#1345, E-5-c F-2) by @BYK in [#1381](https://github.com/BYK/loreai/pull/1381)
+- GitHub-provision role upgrade-on-resync + role validation (#1314 parts 2-4) by @BYK in [#1380](https://github.com/BYK/loreai/pull/1380)
+- Detach team-org ownership on account deletion (#1314 part 1) by @BYK in [#1374](https://github.com/BYK/loreai/pull/1374)
+- Drop unused idx_identity_pub_updated + document remaining advisors by @BYK in [#1340](https://github.com/BYK/loreai/pull/1340)
+- Revoke default PUBLIC/anon EXECUTE on definer functions by @BYK in [#1338](https://github.com/BYK/loreai/pull/1338)
+- Single SELECT policy on identity_pub (multiple_permissive_policies) by @BYK in [#1337](https://github.com/BYK/loreai/pull/1337)
+- Pin empty search_path on flagged trigger functions by @BYK in [#1335](https://github.com/BYK/loreai/pull/1335)
+- Wrap auth.<fn>() in RLS policies to fix initplan re-evaluation by @BYK in [#1333](https://github.com/BYK/loreai/pull/1333)
+
+#### Sync
+
+- Migrate an orphaned entity graph back to personal on team knowledge deletion (#1312, E-5-F3) by @BYK in [#1382](https://github.com/BYK/loreai/pull/1382)
+- Propagate remote registry-mirror deletions via authoritative snapshot (#1294) by @BYK in [#1372](https://github.com/BYK/loreai/pull/1372)
+- Reap orphaned ephemeral-invite scope_keys rows (#1353) by @BYK in [#1360](https://github.com/BYK/loreai/pull/1360)
+- Recover sync_conflicts.local_content + surface real errors by @BYK in [#1325](https://github.com/BYK/loreai/pull/1325)
+- Belt-and-suspenders gate on the temporal row's own project (#826) by @BYK in [#1255](https://github.com/BYK/loreai/pull/1255)
+- Dedupe reseed of temporal referenced by multiple distillations (#1253) by @BYK in [#1254](https://github.com/BYK/loreai/pull/1254)
+- Make projects delete-invisible so reconcile never tombstones the mapping (#1246) by @BYK in [#1248](https://github.com/BYK/loreai/pull/1248)
+- Converge pulled entity_relations UNIQUE collisions instead of skipping (#1217) by @BYK in [#1236](https://github.com/BYK/loreai/pull/1236)
+- Converge pulled entity_alias UNIQUE collisions instead of skipping (#1217) by @BYK in [#1234](https://github.com/BYK/loreai/pull/1234)
+- Eviction polish — knowledge_meta cap headroom + relation cascade only when both endpoints gone (#1191b) by @BYK in [#1210](https://github.com/BYK/loreai/pull/1210)
+- Classify PGRST schema errors as poison + route deletes through the classifier (#1188) by @BYK in [#1193](https://github.com/BYK/loreai/pull/1193)
+- De-spam the quota-pause WARN — log once per pause, not every cycle by @BYK in [#1190](https://github.com/BYK/loreai/pull/1190)
+- Don't send a phantom content_hash on join-table deletes (PGRST204) by @BYK in [#1187](https://github.com/BYK/loreai/pull/1187)
+- Eager-mint the scope DEK at `lore sync enable` (#1182) by @BYK in [#1183](https://github.com/BYK/loreai/pull/1183)
+
+#### Other
+
+- (ci) Run semantic-linter via built CLI bundle, not tsx by @BYK in [#1377](https://github.com/BYK/loreai/pull/1377)
+- (distill) Preserve leading user prose during blob reduction (#1343 follow-up) by @BYK in [#1367](https://github.com/BYK/loreai/pull/1367)
+- (embedding) Bump onnxruntime-node 1.21.0 → 1.27.0 to fix Node 24 HandleScope crash by @BYK in [#1444](https://github.com/BYK/loreai/pull/1444)
+- (eval) Decision-recall negative-control baseline must be "raw", not "no-memory" by @BYK in [#1433](https://github.com/BYK/loreai/pull/1433)
+- (ltm) Run context-source fold even when the knowledge table is empty (#961) by @BYK in [#1432](https://github.com/BYK/loreai/pull/1432)
+- (markdown) Converge normalize() for html-block-in-list divergence (#1357) by @BYK in [#1359](https://github.com/BYK/loreai/pull/1359)
+- (onboarding) Provider-neutral import messages + first-run UX by @BYK in [#1439](https://github.com/BYK/loreai/pull/1439)
+- (responses) Extract text from structured function_call_output.output by @BYK in [#1291](https://github.com/BYK/loreai/pull/1291)
+- (team) Empty-discover guard + prod env for fn deploy + deflake reaper test (#1396/#1397) by @BYK in [#1399](https://github.com/BYK/loreai/pull/1399)
+
+### Documentation 📚
+
+- (gradient) Record #1404-B negative result — keep literature quality-knee priors (#1404) by @BYK in [#1441](https://github.com/BYK/loreai/pull/1441)
+- (lint) Document why unbound-method and no-non-null-assertion stay warn by @BYK in [#1292](https://github.com/BYK/loreai/pull/1292)
+- (website) Add 'Distill the knowledge, not the model' blog post by @BYK in [#1317](https://github.com/BYK/loreai/pull/1317)
+- Semantic linter (CI invariant-check) guide by @BYK in [#1411](https://github.com/BYK/loreai/pull/1411)
+
+### Internal Changes 🔧
+
+#### Core
+
+- Batch recordToolCalls tool_use seeds into one multi-row upsert (#1178 / 3G) by @BYK in [#1395](https://github.com/BYK/loreai/pull/1395)
+- Direct coverage for WASM-respawn per-request error suppression (#1379 B2) by @BYK in [#1389](https://github.com/BYK/loreai/pull/1389)
+- Fix stale getGitRemote docstring + non-vacuous upstream fallback by @BYK in [#1305](https://github.com/BYK/loreai/pull/1305)
+- Memoize project path→id resolution per connection (3K) by @BYK in [#1272](https://github.com/BYK/loreai/pull/1272)
+
+#### Gateway
+
+- Remove dead string branch in OpenAI conversation breakpoint by @BYK in [#1330](https://github.com/BYK/loreai/pull/1330)
+- Clarify OpenAI conversation-breakpoint content branch by @BYK in [#1329](https://github.com/BYK/loreai/pull/1329)
+- Make context-note tests exercise a genuinely empty baseline by @BYK in [#1308](https://github.com/BYK/loreai/pull/1308)
+- Unit coverage for lore team CLI (E-4c-4, #827) by @BYK in [#1280](https://github.com/BYK/loreai/pull/1280)
+- Cover worker-cost-breakdown aggregation + UI rendering (#1268 follow-up) by @BYK in [#1270](https://github.com/BYK/loreai/pull/1270)
+- Unit-cover publishIdentityPub (#1260 follow-up) by @BYK in [#1261](https://github.com/BYK/loreai/pull/1261)
+
+#### Lint
+
+- Enforce no-base-to-string (fix 102 unsafe stringifications) by @BYK in [#1288](https://github.com/BYK/loreai/pull/1288)
+- Enforce restrict-template-expressions by @BYK in [#1283](https://github.com/BYK/loreai/pull/1283)
+- Enforce no-explicit-any + no-redundant-type-constituents by @BYK in [#1282](https://github.com/BYK/loreai/pull/1282)
+- Enforce no-unnecessary-type-assertion (−169 redundant casts) by @BYK in [#1281](https://github.com/BYK/loreai/pull/1281)
+- Adopt oxc stack (oxlint + oxfmt), retire Biome by @BYK in [#1277](https://github.com/BYK/loreai/pull/1277)
+
+#### Sync
+
+- Unit coverage for E-5-c invite client + auto-wrap (#827) by @BYK in [#1350](https://github.com/BYK/loreai/pull/1350)
+- Clean projects in the top-level engine beforeEach (#1246) by @BYK in [#1250](https://github.com/BYK/loreai/pull/1250)
+- Tier-2 end-to-end project-identity restore round-trip (D-4b, #1246) by @BYK in [#1249](https://github.com/BYK/loreai/pull/1249)
+- End-to-end encrypted knowledge round-trip through the real engine (#825) by @BYK in [#1181](https://github.com/BYK/loreai/pull/1181)
+
+#### Other
+
+- (ci) Format invariant-check report.mjs (oxfmt) by @BYK in [#1371](https://github.com/BYK/loreai/pull/1371)
+- (import) Raise commandImport patch coverage to 100% by @BYK in [#1348](https://github.com/BYK/loreai/pull/1348)
+- (lore) Update .lore.md knowledge by @BYK in [18db36d1](https://github.com/BYK/loreai/commit/18db36d142498e3f93772d0d183c5212f1febfcf)
+- (upgrade) Speed up delta-patch apply on the 310MB binary by @BYK in [#1436](https://github.com/BYK/loreai/pull/1436)
+- Bump Node 20 actions to Node 24 majors (deprecation) by @BYK in [#1394](https://github.com/BYK/loreai/pull/1394)
+- Advisory semantic-linter GitHub Action + workflow by @BYK in [#1363](https://github.com/BYK/loreai/pull/1363)
+
+### Other
+
+- revert(core): remove no-op "Established facts" salience block (#1276) by @BYK in [#1287](https://github.com/BYK/loreai/pull/1287)
+
 ## 0.37.0
 
 ### New Features ✨
