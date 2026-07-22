@@ -97,7 +97,7 @@ describe("vendor-ort-native asset selection (real package)", () => {
     const linux = assets.get("linux-x64")!.map((f) => f.file);
     expect(linux).toContain("libonnxruntime.so.1");
     // The identical, longer-versioned alias must NOT be embedded twice.
-    expect(linux).not.toContain("libonnxruntime.so.1.21.0");
+    expect(linux).not.toContain("libonnxruntime.so.1.27.0");
   });
 
   test("darwin keeps its version-named dylib (no shorter alias to drop)", () => {

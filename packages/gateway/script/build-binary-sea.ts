@@ -712,7 +712,7 @@ async function buildBinary() {
     }
   }
   // Runtime manifest of the ORT native file set per target. native-loader.cjs
-  // reads it to learn the (version-specific, e.g. libonnxruntime.1.21.0.dylib)
+  // reads it to learn the (version-specific, e.g. libonnxruntime.<version>.dylib)
   // filenames to extract for the running platform — so filenames live in ONE
   // place (vendor-ort-native.ts) instead of being duplicated in the loader.
   const ortFileManifest: Record<string, string[]> = {};

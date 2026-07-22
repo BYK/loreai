@@ -9,6 +9,7 @@ overrides:
   ip-address: 10.2.0
   fast-xml-parser: 5.7.3
   '@huggingface/hub': 2.11.0
+  onnxruntime-node: 1.27.0
   yaml: '>=2.8.3'
   esbuild: '>=0.28.1'
   '@opentelemetry/core': '>=2.8.0'
@@ -123,8 +124,8 @@ importers:
         specifier: ^3.7.1
         version: 3.8.1
       onnxruntime-node:
-        specifier: 1.21.0
-        version: 1.21.0
+        specifier: 1.27.0
+        version: 1.27.0
       sharp:
         specifier: ^0.34.1
         version: 0.34.5
@@ -169,8 +170,8 @@ importers:
         specifier: ^0.10.1
         version: 0.10.1
       onnxruntime-node:
-        specifier: 1.21.0
-        version: 1.21.0
+        specifier: 1.27.0
+        version: 1.27.0
       tar:
         specifier: '>=7.5.19'
         version: 7.5.20
@@ -2251,6 +2252,10 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
+  adm-zip@0.5.18:
+    resolution: {integrity: sha512-ufJnssQGbxzLNS1Ho9bCtX4rQKCCvoVuDLHoJyc3F9dOGDB4BkWs2Ci0kv53lqocAEQ/Cbi+I2XCsNYGqVYqng==}
+    engines: {node: '>=12.0'}
+
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
@@ -2412,10 +2417,6 @@ packages:
 
   boolbase@1.0.0:
     resolution: {integrity: sha512-JZOSA7Mo9sNGB8+UjSgzdLtokWAky1zbztM3WRLCbZ70/3cTANmQmOdR7y2g+J0e2WXywy1yS468tY+IruqEww==}
-
-  boolean@3.2.0:
-    resolution: {integrity: sha512-d0II/GO9uf9lfUHH2BQsjxzRJZBdsjgsBiW4BvhWk/3qoKwQFjIDVN19PfX8F2D/r9PCMTtLWjYVCFrpeYUzsw==}
-    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   bowser@2.14.1:
     resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
@@ -2629,9 +2630,6 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  detect-node@2.1.0:
-    resolution: {integrity: sha512-T0NIuQpnTvFDATNuHN5roPwSBG83rFsuO+MXXH9/3N1eFbn4wcPjttvjMLEPWJ0RGUYgQE7cGgS3tNxbqCGM7g==}
-
   devalue@5.8.1:
     resolution: {integrity: sha512-4CXDYRBGqN+57wVJkuXBYmpAVUSg3L6JAQa/DFqm238G73E1wuyc/JhGQJzN7vUf/CMphYau2zXbfWzDR5aTEw==}
 
@@ -2711,9 +2709,6 @@ packages:
   es-object-atoms@1.1.2:
     resolution: {integrity: sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==}
     engines: {node: '>= 0.4'}
-
-  es6-error@4.1.1:
-    resolution: {integrity: sha512-Um/+FxMr9CISWh0bi5Zv0iOD+4cFh5qLeks1qhAopKVAJw3drgKbKySikp7wGhDL0HPeaja0P5ULZrxLkniUVg==}
 
   esast-util-from-estree@2.0.0:
     resolution: {integrity: sha512-4CyanoAudUSBAn5K13H4JhsMH6L9ZP7XbLVe/dKybkxMO7eDyLsT8UHl9TRNrU2Gr9nz+FovfSIjuXWJ81uVwQ==}
@@ -2905,8 +2900,8 @@ packages:
     resolution: {integrity: sha512-Wjlyrolmm8uDpm/ogGyXZXb1Z+Ca2B8NbJwqBVg0axK9GbBeoS7yGV6vjXnYdGm6X53iehEuxxbyiKp8QmN4Vw==}
     engines: {node: 18 || 20 || >=22}
 
-  global-agent@3.0.0:
-    resolution: {integrity: sha512-PT6XReJ+D07JvGoxQMkT6qji/jVNfX/h364XHZOWeRzy64sSFr+xJ5OX7LI3b4MPQzdL4H8Y8M0xzPpsVMwA8Q==}
+  global-agent@4.1.3:
+    resolution: {integrity: sha512-KUJEViiuFT3I97t+GYMikLPJS2Lfo/S2F+DQuBWzuzaMPnvt5yyZePzArx36fBzpGTxZjIpDbXLeySLgh+k76g==}
     engines: {node: '>=10.0'}
 
   globalthis@1.0.4:
@@ -3166,9 +3161,6 @@ packages:
   json-schema-traverse@1.0.0:
     resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
 
-  json-stringify-safe@5.0.1:
-    resolution: {integrity: sha512-ZClg6AaYvamvYEE82d3Iyd3vSSIjQ+odgjaTzRuO3s7toCdFKczob2i0zCh7JE8kWn17yvAWhUVxvqGwUalsRA==}
-
   json5@2.2.3:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
@@ -3321,8 +3313,8 @@ packages:
     engines: {node: '>= 20'}
     hasBin: true
 
-  matcher@3.0.0:
-    resolution: {integrity: sha512-OkeDaAZ/bQCxeFAozM55PKcKU0yJMPGifLwV4Qgjitu+5MoAfSQN4lsLJeXZ1b8w0x+/Emda6MZgXS1jvsapng==}
+  matcher@4.0.0:
+    resolution: {integrity: sha512-S6x5wmcDmsDRRU/c2dkccDwQPXoFczc5+HpQ2lON8pnvHlnvHAHj5WlLVvw6n6vNyHuVugYrFohYxbS+pvFpKQ==}
     engines: {node: '>=10'}
 
   math-intrinsics@1.1.0:
@@ -3629,14 +3621,14 @@ packages:
   oniguruma-to-es@4.3.6:
     resolution: {integrity: sha512-csuQ9x3Yr0cEIs/Zgx/OEt9iBw9vqIunAPQkx19R/fiMq2oGVTgcMqO/V3Ybqefr1TBvosI6jU539ksaBULJyA==}
 
-  onnxruntime-common@1.21.0:
-    resolution: {integrity: sha512-Q632iLLrtCAVOTO65dh2+mNbQir/QNTVBG3h/QdZBpns7mZ0RYbLRBgGABPbpU9351AgYy7SJf1WaeVwMrBFPQ==}
-
   onnxruntime-common@1.22.0-dev.20250409-89f8206ba4:
     resolution: {integrity: sha512-vDJMkfCfb0b1A836rgHj+ORuZf4B4+cc2bASQtpeoJLueuFc5DuYwjIZUBrSvx/fO5IrLjLz+oTrB3pcGlhovQ==}
 
-  onnxruntime-node@1.21.0:
-    resolution: {integrity: sha512-NeaCX6WW2L8cRCSqy3bInlo5ojjQqu2fD3D+9W5qb5irwxhEyWKXeH2vZ8W9r6VxaMPUan+4/7NDwZMtouZxEw==}
+  onnxruntime-common@1.27.0:
+    resolution: {integrity: sha512-3KxL5wIVqa8Ex08jxSzncm9CMgw8CjOFyOQ7SxvG9o0cVLlhTNKXyIQuTbtX4tGPJEf73OER2xrjt4HJSBL4ow==}
+
+  onnxruntime-node@1.27.0:
+    resolution: {integrity: sha512-QEzGwrvNBgv4uPVdnbHsOGG4G6T96mdlcFI8aAKPjMU8wOPpVocPXb6k3QGkaZagVTv2G9Bnnbo6Z3JdXr1fQw==}
     os: [win32, darwin, linux]
 
   onnxruntime-web@1.22.0-dev.20250409-89f8206ba4:
@@ -4017,10 +4009,6 @@ packages:
     resolution: {integrity: sha512-XQBQ3I8W1Cge0Seh+6gjj03LbmRFWuoszgK9ooCpwYIrhhoO80pfq4cUkU5DkknwfOfFteRwlZ56PYOGYyFWdg==}
     engines: {node: '>= 4'}
 
-  roarr@2.15.4:
-    resolution: {integrity: sha512-CHhPh+UNHD2GTXNYhPWLnU8ONHdI+5DI+4EYIAOaiD63rHeYlZvyh8P+in5999TTSFgUYuKUAjzRI4mdh/p+2A==}
-    engines: {node: '>=8.0'}
-
   rolldown@1.1.5:
     resolution: {integrity: sha512-t9z29cJjXf/vxQ8dyhCSpt6H6aSwHTk8cT5I3iy6SMXuFpk5mB6PL6XfC8PCwrPTx93udwKUm9HRteAlTGBLiA==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -4047,9 +4035,6 @@ packages:
     resolution: {integrity: sha512-6R3J5M4AcbtLUdZmRv2SygeVaM7IhrLXu9BmnOGmmACak8fiUtOsYNWUS4uK7upbmHIBbLBeFeI//477BKLBzA==}
     engines: {node: '>=11.0.0'}
 
-  semver-compare@1.0.0:
-    resolution: {integrity: sha512-YM3/ITh2MJ5MtzaM429anh+x2jiLVjqILF4m4oyQB18W7Ggea7BfqdH/wGMK7dDiMghv/6WG7znWMwUDzJiXow==}
-
   semver@6.3.1:
     resolution: {integrity: sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA==}
     hasBin: true
@@ -4074,8 +4059,8 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  serialize-error@7.0.1:
-    resolution: {integrity: sha512-8I8TjW5KMOKsZQTvoxjuSIa7foAwPWGOts+6o7sgjz41/qMD9VQHEDxi6PBvK2l0MXUmqZyNpUK+T2tQaaElvw==}
+  serialize-error@8.1.0:
+    resolution: {integrity: sha512-3NnuWfM6vBYoy5gZFvHiYsVbafvI9vZv/+jlIigFn4oP4zjNPK3LhcY0xSCgeb1a5L8jO71Mit9LlNoi2UfDDQ==}
     engines: {node: '>=10'}
 
   sharp@0.34.5:
@@ -4146,9 +4131,6 @@ packages:
   split2@4.2.0:
     resolution: {integrity: sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==}
     engines: {node: '>= 10.x'}
-
-  sprintf-js@1.1.3:
-    resolution: {integrity: sha512-Oo+0REFV59/rz3gfJNKQiBlwfHaSESl1pcGyABQsnnIfWOFt6JNj5gCog2U6MLZ//IGYD+nA8nI+mTShREReaA==}
 
   sqlite-vec-darwin-arm64@0.1.9:
     resolution: {integrity: sha512-jSsZpE42OfBkGL/ItyJTVCUwl6o6Ka3U5rc4j+UBDIQzC1ulSSKMEhQLthsOnF/MdAf1MuAkYhkdKmmcjaIZQg==}
@@ -4296,8 +4278,8 @@ packages:
     resolution: {integrity: sha512-1h/Lnq9yajKY2PEbBadPXj3VxsDDu844OnaAo52UVmIzIvwwtBPIuNvkjuzBlTWpfJyUbG3ez0KSBibQkj4ojg==}
     engines: {node: '>=0.6.11 <=0.7.0 || >=0.7.3'}
 
-  type-fest@0.13.1:
-    resolution: {integrity: sha512-34R7HTnG0XIJcBSn5XhDd7nNFPRcXYRZrBB2O2jdKqYODldSzBAqzsWoZYYvduky73toYS/ESqxPvkDf/F0XMg==}
+  type-fest@0.20.2:
+    resolution: {integrity: sha512-Ne+eE4r0/iWnpAxD852z3A+N0Bt5RN//NjJwRd2VFHEmrywxf5vsZlh4R6lixl6B+wz/8d+maTSAkN1FIkI3LQ==}
     engines: {node: '>=10'}
 
   typebox@1.1.38:
@@ -5765,7 +5747,7 @@ snapshots:
   '@huggingface/transformers@3.8.1':
     dependencies:
       '@huggingface/jinja': 0.5.9
-      onnxruntime-node: 1.21.0
+      onnxruntime-node: 1.27.0
       onnxruntime-web: 1.22.0-dev.20250409-89f8206ba4
       sharp: 0.34.5
     optional: true
@@ -6895,6 +6877,8 @@ snapshots:
 
   acorn@8.16.0: {}
 
+  adm-zip@0.5.18: {}
+
   agent-base@7.1.4: {}
 
   ajv-draft-04@1.0.0(ajv@8.20.0):
@@ -7107,8 +7091,6 @@ snapshots:
 
   boolbase@1.0.0: {}
 
-  boolean@3.2.0: {}
-
   bowser@2.14.1: {}
 
   brace-expansion@5.0.7:
@@ -7290,8 +7272,6 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  detect-node@2.1.0: {}
-
   devalue@5.8.1: {}
 
   devlop@1.1.0:
@@ -7360,8 +7340,6 @@ snapshots:
   es-object-atoms@1.1.2:
     dependencies:
       es-errors: 1.3.0
-
-  es6-error@4.1.1: {}
 
   esast-util-from-estree@2.0.0:
     dependencies:
@@ -7625,14 +7603,12 @@ snapshots:
       minipass: 7.1.3
       path-scurry: 2.0.2
 
-  global-agent@3.0.0:
+  global-agent@4.1.3:
     dependencies:
-      boolean: 3.2.0
-      es6-error: 4.1.1
-      matcher: 3.0.0
-      roarr: 2.15.4
+      globalthis: 1.0.4
+      matcher: 4.0.0
       semver: 7.8.4
-      serialize-error: 7.0.1
+      serialize-error: 8.1.0
 
   globalthis@1.0.4:
     dependencies:
@@ -8010,8 +7986,6 @@ snapshots:
 
   json-schema-traverse@1.0.0: {}
 
-  json-stringify-safe@5.0.1: {}
-
   json5@2.2.3: {}
 
   jsonc-parser@2.3.1: {}
@@ -8136,7 +8110,7 @@ snapshots:
 
   marked@18.0.5: {}
 
-  matcher@3.0.0:
+  matcher@4.0.0:
     dependencies:
       escape-string-regexp: 4.0.0
 
@@ -8702,16 +8676,16 @@ snapshots:
       regex: 6.1.0
       regex-recursion: 6.0.2
 
-  onnxruntime-common@1.21.0: {}
-
   onnxruntime-common@1.22.0-dev.20250409-89f8206ba4:
     optional: true
 
-  onnxruntime-node@1.21.0:
+  onnxruntime-common@1.27.0: {}
+
+  onnxruntime-node@1.27.0:
     dependencies:
-      global-agent: 3.0.0
-      onnxruntime-common: 1.21.0
-      tar: 7.5.20
+      adm-zip: 0.5.18
+      global-agent: 4.1.3
+      onnxruntime-common: 1.27.0
 
   onnxruntime-web@1.22.0-dev.20250409-89f8206ba4:
     dependencies:
@@ -9180,15 +9154,6 @@ snapshots:
 
   retry@0.13.1: {}
 
-  roarr@2.15.4:
-    dependencies:
-      boolean: 3.2.0
-      detect-node: 2.1.0
-      globalthis: 1.0.4
-      json-stringify-safe: 5.0.1
-      semver-compare: 1.0.0
-      sprintf-js: 1.1.3
-
   rolldown@1.1.5:
     dependencies:
       '@oxc-project/types': 0.139.0
@@ -9269,8 +9234,6 @@ snapshots:
 
   sax@1.6.0: {}
 
-  semver-compare@1.0.0: {}
-
   semver@6.3.1: {}
 
   semver@7.7.4: {}
@@ -9281,9 +9244,9 @@ snapshots:
 
   semver@7.8.4: {}
 
-  serialize-error@7.0.1:
+  serialize-error@8.1.0:
     dependencies:
-      type-fest: 0.13.1
+      type-fest: 0.20.2
 
   sharp@0.34.5:
     dependencies:
@@ -9385,8 +9348,6 @@ snapshots:
   space-separated-tokens@2.0.2: {}
 
   split2@4.2.0: {}
-
-  sprintf-js@1.1.3: {}
 
   sqlite-vec-darwin-arm64@0.1.9:
     optional: true
@@ -9546,7 +9507,7 @@ snapshots:
 
   tunnel@0.0.6: {}
 
-  type-fest@0.13.1: {}
+  type-fest@0.20.2: {}
 
   typebox@1.1.38: {}
 

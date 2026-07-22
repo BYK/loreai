@@ -48,7 +48,7 @@ import {
 export interface OrtNpmPlatform {
   /** `${process.platform}-${process.arch}`, e.g. "linux-x64", "win32-arm64". */
   target: string;
-  /** onnxruntime-node `bin/napi-v3` subdir, e.g. "linux/x64". */
+  /** onnxruntime-node `bin/napi-v<N>` subdir, e.g. "linux/x64". */
   subdir: string;
   /** npm `os` field value (== process.platform). */
   os: string;
@@ -56,11 +56,12 @@ export interface OrtNpmPlatform {
   cpu: string;
 }
 
-/** The platforms onnxruntime-node@1.21 ships prebuilt binaries for. */
+/** The platforms onnxruntime-node ships prebuilt binaries for. Note: 1.27.0
+ *  dropped the Intel macOS (`darwin-x64`) prebuilt, so it's absent here — Intel
+ *  Macs fall back to WASM via the null binding-path resolution. */
 export const ORT_NPM_PLATFORMS: readonly OrtNpmPlatform[] = [
   { target: "linux-x64", subdir: "linux/x64", os: "linux", cpu: "x64" },
   { target: "linux-arm64", subdir: "linux/arm64", os: "linux", cpu: "arm64" },
-  { target: "darwin-x64", subdir: "darwin/x64", os: "darwin", cpu: "x64" },
   {
     target: "darwin-arm64",
     subdir: "darwin/arm64",

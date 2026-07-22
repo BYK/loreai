@@ -18,7 +18,7 @@
  *      in the unreachable browser branch — so stubbing it avoids bundling the
  *      ~MBs of WASM glue (and shipping the `.wasm`) with zero behavioral change.
  *   3. Rewrite `onnxruntime-node`'s `binding.js` native-addon `require(...)` —
- *      which resolves `../bin/napi-v3/<platform>/<arch>/onnxruntime_binding.node`
+ *      which resolves `../bin/napi-v<N>/<platform>/<arch>/onnxruntime_binding.node`
  *      relative to node_modules (absent in a SEA) — to require the path
  *      `native-loader.cjs` exposes on `globalThis.__LORE_ORT_BINDING_PATH__`
  *      after extracting the addon from a SEA asset.
@@ -31,12 +31,13 @@ import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type * as esbuild from "esbuild";
 
-/** The exact native-addon `require` in onnxruntime-node@1.21's `dist/binding.js`
- *  (a tagged-template path). Matching it precisely lets us fail loudly if a
- *  future bump changes the shape, rather than silently shipping a broken addon
- *  loader. */
+/** The native-addon `require` in onnxruntime-node's `dist/binding.js` (a
+ *  tagged-template path). The N-API ABI segment (napi-v3, napi-v6, …) changes
+ *  across releases, so match `napi-v<N>` generically. Matching the rest of the
+ *  shape precisely lets us fail loudly if a future bump changes it, rather than
+ *  silently shipping a broken addon loader. */
 const ORT_BINDING_REQUIRE =
-  /require\(`\.\.\/bin\/napi-v3\/\$\{process\.platform\}\/\$\{process\.arch\}\/onnxruntime_binding\.node`\)/;
+  /require\(`\.\.\/bin\/napi-v\d+\/\$\{process\.platform\}\/\$\{process\.arch\}\/onnxruntime_binding\.node`\)/;
 
 /** Replacement: require the runtime-extracted addon path, throwing a clear error
  *  if the loader shim didn't run (so a broken SEA fails loudly, not with a

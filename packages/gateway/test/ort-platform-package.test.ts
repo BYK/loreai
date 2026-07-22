@@ -17,10 +17,9 @@ import {
 // embeddings (resolve throws → WASM fallback). This binds both sides.
 
 describe("ORT_NPM_PLATFORMS ⇄ runtime resolution key", () => {
-  test("covers the 6 onnxruntime-node platforms, no dupes", () => {
+  test("covers the 5 onnxruntime-node platforms, no dupes", () => {
     expect(ORT_NPM_PLATFORMS.map((p) => p.target).sort()).toEqual([
       "darwin-arm64",
-      "darwin-x64",
       "linux-arm64",
       "linux-x64",
       "win32-arm64",
@@ -87,7 +86,7 @@ describe("buildOrtPlatformPackages (real onnxruntime-node)", () => {
   test("alias-drop keeps the linux SONAME, drops the versioned duplicate", () => {
     const linux = built.find((b) => b.target === "linux-x64")!;
     expect(linux.files).toContain("libonnxruntime.so.1");
-    expect(linux.files).not.toContain("libonnxruntime.so.1.21.0");
+    expect(linux.files).not.toContain("libonnxruntime.so.1.27.0");
   });
 
   test("darwin keeps its versioned dylib; win32 ships both DLLs", () => {
