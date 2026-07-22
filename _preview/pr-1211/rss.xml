@@ -146,33 +146,36 @@ on the frontier model:&lt;/p&gt;
 &lt;tbody&gt;
 &lt;tr&gt;
 &lt;td&gt;vanilla&lt;/td&gt;
-&lt;td&gt;16%&lt;/td&gt;
-&lt;td&gt;3&lt;/td&gt;
-&lt;td&gt;59&lt;/td&gt;
-&lt;td&gt;$5.51&lt;/td&gt;
+&lt;td&gt;35%&lt;/td&gt;
+&lt;td&gt;7&lt;/td&gt;
+&lt;td&gt;80&lt;/td&gt;
+&lt;td&gt;$10.39&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;&lt;strong&gt;Lore&lt;/strong&gt;&lt;/td&gt;
 &lt;td&gt;&lt;strong&gt;100%&lt;/strong&gt;&lt;/td&gt;
 &lt;td&gt;&lt;strong&gt;0&lt;/strong&gt;&lt;/td&gt;
 &lt;td&gt;&lt;strong&gt;33&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;$9.96&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;$6.48&lt;/strong&gt;&lt;/td&gt;
 &lt;/tr&gt;
 &lt;/tbody&gt;
 &lt;/table&gt;
-&lt;p&gt;Two things are happening at once. The vanilla agent compacts three times and loses five
-of every six probes to it. Lore never compacts, because it manages the window on every
-turn instead of waiting for it to overflow, and it keeps all four facts, in nearly half
-the turns.&lt;/p&gt;
-&lt;p&gt;Note the cost column, because we are not going to hide it: Lore’s run costs &lt;em&gt;more&lt;/em&gt;, not
-less. That number is the whole of Lore’s bill, the conversation and the background
-distillation that captures memory, run on the same model on the same key. The vanilla
-run looks cheaper only because the thing it is not paying for is the thing it is failing
-at. Compaction is not free either, it busts the prompt cache and rewrites the prefix, and
-it is what drags the vanilla run out to 59 turns, but a compacting agent that loses the
-facts is not a cheaper way to succeed, it is a cheaper way to fail. The honest framing is
-not “Lore is cheaper.” It is “Lore finishes, reliably, in far fewer turns, and you can
-read its entire cost off one bill.”&lt;/p&gt;
+&lt;p&gt;Two things are happening at once. The vanilla agent compacts seven times and still keeps
+barely a third of the probes; the retention it does have is noisy, some runs recover a
+fact from their own summary, some lose all four. Lore never compacts, because it manages
+the window on every turn instead of waiting for it to overflow, and it keeps all four
+facts every run, in well under half the turns.&lt;/p&gt;
+&lt;p&gt;And this time the cost column runs the other way, so we will be just as upfront about it.
+Lore’s figure is the whole of its bill, the conversation plus the background distillation
+that captures memory, run on the same model and the same key; the background worker is
+about a dollar of a seven-dollar run. Even carrying that, Lore comes in cheaper than
+vanilla, because compaction is not free: each of those seven compactions busts the prompt
+cache and rewrites the prefix, and the re-reading it forces is what drags the vanilla run
+out to eighty turns. A compacting agent that loses the facts is not a cheaper way to
+succeed, it is a more expensive way to fail. We were careful, in an earlier draft, not to
+claim Lore was cheaper, because on the numbers we had then it was not. On the corrected
+numbers it is, on this run, and we would rather show you the reversal than quietly keep
+the cautious old framing.&lt;/p&gt;
 &lt;p&gt;The pattern holds on a cheaper model, where the dollars are small enough to see the shape
 plainly:&lt;/p&gt;
 &lt;table&gt;
@@ -188,8 +191,8 @@ plainly:&lt;/p&gt;
 &lt;tr&gt;
 &lt;td&gt;vanilla&lt;/td&gt;
 &lt;td&gt;0%&lt;/td&gt;
-&lt;td&gt;3&lt;/td&gt;
-&lt;td&gt;49&lt;/td&gt;
+&lt;td&gt;5&lt;/td&gt;
+&lt;td&gt;47&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;&lt;strong&gt;Lore&lt;/strong&gt;&lt;/td&gt;
@@ -258,11 +261,11 @@ scale:&lt;/p&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;&lt;strong&gt;Lore (DeepSeek Flash)&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;83%&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;100%&lt;/strong&gt;&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mnemonic (DeepSeek Flash)&lt;/td&gt;
-&lt;td&gt;25%&lt;/td&gt;
+&lt;td&gt;n/a*&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mem0 (DeepSeek Flash)&lt;/td&gt;
@@ -270,18 +273,21 @@ scale:&lt;/p&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;&lt;strong&gt;Lore (MiniMax-M3)&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;~92%&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;100%&lt;/strong&gt;&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mnemonic (MiniMax-M3)&lt;/td&gt;
-&lt;td&gt;40%&lt;/td&gt;
+&lt;td&gt;0%&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mem0 (MiniMax-M3)&lt;/td&gt;
-&lt;td&gt;42%&lt;/td&gt;
+&lt;td&gt;33%&lt;/td&gt;
 &lt;/tr&gt;
 &lt;/tbody&gt;
 &lt;/table&gt;
+&lt;p&gt;&lt;small&gt;*mnemonic on DeepSeek Flash is left out: every run in that cell errored out before
+producing a scorable result, so we have no honest number to report rather than a zero we
+cannot stand behind.&lt;/small&gt;&lt;/p&gt;
 &lt;p&gt;The gap is not about storage quality, we just saw the stores hold the same facts. It is
 about who has to remember to use it. A store the agent drives only works if the agent
 decides, on its own, to save the offhand value when it is mentioned, and then to go
@@ -314,8 +320,8 @@ dedicated model has room to write more than a tool call squeezed into the coding
 turn. It is a real edge, but a modest one. The decisive difference is not what gets
 written, it is whether anything gets written at all without the agent being told to.&lt;/p&gt;
 &lt;h2 id=&quot;what-it-costs-honestly&quot;&gt;What it costs, honestly&lt;/h2&gt;
-&lt;p&gt;Cost is where memory tools get quiet, so here is ours out loud, and it does not flatter
-us. On the cross-session run with Sonnet:&lt;/p&gt;
+&lt;p&gt;Cost is where memory tools get quiet, so here is ours out loud. On the cross-session run
+with Sonnet:&lt;/p&gt;
 &lt;table&gt;
 &lt;thead&gt;
 &lt;tr&gt;
@@ -327,58 +333,56 @@ us. On the cross-session run with Sonnet:&lt;/p&gt;
 &lt;tbody&gt;
 &lt;tr&gt;
 &lt;td&gt;vanilla&lt;/td&gt;
-&lt;td&gt;$4.04&lt;/td&gt;
+&lt;td&gt;$4.77&lt;/td&gt;
 &lt;td&gt;none&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mnemonic&lt;/td&gt;
-&lt;td&gt;$3.98&lt;/td&gt;
+&lt;td&gt;$4.89&lt;/td&gt;
 &lt;td&gt;Gemini (embeddings + extraction), external&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mem0&lt;/td&gt;
-&lt;td&gt;$4.05–$4.33&lt;/td&gt;
+&lt;td&gt;$4.91&lt;/td&gt;
 &lt;td&gt;mem0 cloud subscription, external&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;&lt;strong&gt;Lore&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;$5.86&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;$4.60&lt;/strong&gt;&lt;/td&gt;
 &lt;td&gt;none&lt;/td&gt;
 &lt;/tr&gt;
 &lt;/tbody&gt;
 &lt;/table&gt;
-&lt;p&gt;Lore is the most expensive line, and we want to be precise about why, because it is not
-the reason you might guess. It is not cache-write churn, both arms write essentially
-nothing to cache. It is two honest things. First, Lore’s number is the &lt;em&gt;whole&lt;/em&gt; bill: the
+&lt;p&gt;Lore is the cheapest line here, but we want to be precise about what that number is and
+is not, because it is easy to over-read. Lore’s figure is the &lt;em&gt;whole&lt;/em&gt; bill: the
 conversation plus the background distillation that does the capturing, all on the same
-model and the same key. Roughly a third of that Sonnet figure is the background worker,
-work the other tools also do but bill somewhere you cannot see. Second, Lore injects the
-relevant memory into the working context, so each turn carries a little more than a bare
-run would.&lt;/p&gt;
-&lt;p&gt;The competitors’ lines are cheaper on paper only because part of their cost is missing
-from the page. mnemonic’s fact extraction and embeddings run on Gemini; mem0 runs on a
+model and the same key. Roughly $0.23 of that $4.60 is the background worker, work the
+other tools also do but bill somewhere you cannot see. It comes in a little under the
+others mostly because Lore folds the captured memory straight into context and gets the
+answer in fewer turns, not because we are doing something magic on price, and we would not
+lean hard on a thirty-cent edge.&lt;/p&gt;
+&lt;p&gt;And the competitors’ lines carry a cost this table cannot show: part of their spend is
+off the page. mnemonic’s fact extraction and embeddings run on Gemini; mem0 runs on a
 hosted subscription. Those are real charges you cannot read off your model spend, so the
 “third-party” column is an unknown, not a zero. mem0’s is a flat monthly fee, which means
 its marginal per-run cost is near nothing if you are already paying it, and a whole plan
-if you are not. Either way, it is not on the bill we can show you.&lt;/p&gt;
-&lt;p&gt;Two of Lore’s costs above are also higher in this benchmark than they would be for you in
-practice, and we would rather adjust for that openly than quietly bank the flattering
-number. First, the background distillation ran on the same frontier model as the
+if you are not. Either way, it is not on the bill we can show you, whereas all of Lore’s
+is.&lt;/p&gt;
+&lt;p&gt;Lore’s number here is also, if anything, pessimistic in two ways it would not be for you
+in practice. First, the background distillation ran on the same frontier model as the
 conversation, because this harness pins one model per run; in normal use you point the
 worker at a cheap model, which works on any provider and cuts that bucket by roughly ten
-times. Second, if you run Lore directly against Anthropic or OpenAI, those background
-worker calls go through their Message Batches API at half price; this harness disables
-batching because it has to finish distilling before it can probe the next session, and it
-routes through OpenRouter, which has no batch API anyway. Putting the worker on a cheap
-model alone brings Lore’s Sonnet run to roughly &lt;strong&gt;$4.2&lt;/strong&gt;, a hair over vanilla for a run
-that actually keeps the facts; a direct-Anthropic user batching the worker would land
-lower still.&lt;/p&gt;
-&lt;p&gt;So we will not claim Lore is cheaper on the raw benchmark number, because there it is not.
-What we will claim is narrower and true: Lore’s cost is &lt;em&gt;entirely visible and lives on one
-bill&lt;/em&gt;, the biggest thing inflating it here (a frontier-priced worker) is a config choice
-you would not make in practice, and even at the harness’s worst-case number it buys
-reliable retention where the cheaper alternatives drop it, in fewer turns. You are paying
-a bit more to not think about any of it, and to be able to account for all of it.&lt;/p&gt;
+times, taking that $0.23 down to a rounding error. Second, if you run Lore directly
+against Anthropic or OpenAI, those background worker calls go through their Message
+Batches API at half price; this harness disables batching because it has to finish
+distilling before it can probe the next session, and it routes through OpenRouter, which
+has no batch API anyway.&lt;/p&gt;
+&lt;p&gt;So here is the claim, and it is stronger than the one we could make on our earlier,
+broken numbers: on this benchmark Lore is not more expensive, it is a little cheaper, and
+its cost is &lt;em&gt;entirely visible and lives on one bill&lt;/em&gt;. The single-long frontier run tells
+the same story more sharply, a bill of $6.48 that keeps every fact against $10.39 that
+keeps a third. You are not paying a premium to not think about any of it; you are paying
+less, and getting to account for all of it.&lt;/p&gt;
 &lt;h2 id=&quot;what-we-are-not-claiming&quot;&gt;What we are not claiming&lt;/h2&gt;
 &lt;p&gt;The benchmark has limits and we would rather say them than have you find them.&lt;/p&gt;
 &lt;p&gt;Start with the most obvious one: we built Lore, we designed this benchmark, we ran it,
@@ -393,13 +397,18 @@ re-run it and update the numbers.&lt;/p&gt;
 &lt;p&gt;We also could not measure the competitors’ third-party backend costs, so their totals are
 visible cost plus an unknown, not a full accounting. The reliability gap on cheaper models
 is real, but on the frontier model it closes to a tie, and we showed that rather than bury
-it. The cheaper-model numbers are not clean 100%s either: individual runs drop to zero
-when the model invents its own defaults even with the right values in front of it, the
-same way a model can ignore any instruction you give it. That is a ceiling no memory layer
-lifts, and we kept those runs in the averages rather than trim them. We also excluded, on
-every arm, runs where a memory tool made zero calls, because a tool that was never invoked
-tells you nothing about the tool. And we could not evaluate Lore on an anonymous free
-endpoint, because its background worker needs a real key to run.&lt;/p&gt;
+it. Where the numbers are noisy, it is the vanilla arm that carries the noise: the
+frontier single-long baseline swings run to run, some runs recovering a fact from their
+own compaction summary and some losing all four, which is the shape of degradation, not a
+clean failure. Lore’s cells came in at a flat 100% across every model and cap here, which
+we read as the task being within reach once the facts are actually in front of the model,
+not as proof no ceiling exists. A model can still ignore a value sitting in plain sight,
+the same way it can ignore any instruction; that is a ceiling no memory layer lifts. We
+kept every valid run in the averages rather than trim them. We also excluded, on every
+arm, runs where a memory tool made zero calls or errored out before producing a scorable
+result, because a tool that was never invoked tells you nothing about the tool. And we
+could not evaluate Lore on an anonymous free endpoint, because its background worker needs
+a real key to run.&lt;/p&gt;
 &lt;p&gt;And, as said above, the window pressure is manufactured: we pipe large reference blobs
 into most turns to force compaction on a benchmark timescale. That makes the token and
 cost totals artifacts of the harness, not a forecast of your bill. It is why we lean on
@@ -414,20 +423,26 @@ store on the sidelines does not change that, however good the store is, because 
 runs at the moment of overflow. Managing the window in the loop does, and you never have
 to think about it.&lt;/p&gt;
 &lt;p&gt;That last part is not hypothetical. Building this benchmark already changed the product
-twice. First, an early cut showed cheaper models dropping the incidental facts even when
-Lore had captured them perfectly, the facts were in memory, just not reliably in front of
-the model when it mattered, so we changed Lore to fold a session’s own distilled memory
-into the working context automatically, the moment it is written. Then the audit itself
-surfaced a real bug on our own side: on one model our background worker was silently
-failing to extract anything, the mirror image of the competitor problem we had just fixed.
-We fixed that too. The benchmark did not just score the product. It kept telling us where
-it was broken.&lt;/p&gt;
+twice, both times because a result looked wrong and turned out to be our bug. First, an
+early cut showed cheaper models dropping the incidental facts even when Lore had captured
+them, so we changed Lore to fold a session’s own distilled memory into the working context
+automatically, the moment it is written. Then a later, sharper version of the same
+symptom: a cheaper-model arm was scoring zero, and we had a tidy story ready about it
+being the model’s ceiling, not our layer. We did not believe our own excuse enough to
+skip checking, and the check proved it wrong. The facts were captured, embedded, and
+searchable; the injection path was returning nothing whenever a project had no promoted
+long-term knowledge yet, so on a fresh project it silently handed the model an empty
+context. Fixing that flipped that arm from 0% to 100%, on both cheaper models, and is the
+single biggest reason the corrected numbers in this post are stronger than the draft we
+started with. The benchmark did not just score the product. It kept telling us where it
+was broken, including the times we would rather have blamed the model.&lt;/p&gt;
 &lt;p&gt;We have claimed that memory is table stakes and that the real value lies in active
 context management. This is the shape of the evidence: on a frontier model, a good store
-ties us, and the win narrows to fewer turns and a bill you can fully account for. On the
-cheaper models people actually run at scale, the win is retention itself, because those
-models do not reliably remember to use a store they have to drive by hand, and Lore does
-not make them. We could always &lt;em&gt;feel&lt;/em&gt; that difference. Putting a test around it, and being
+ties us on retention, and Lore’s win is fewer turns and a fully accountable bill that came
+in a little &lt;em&gt;under&lt;/em&gt; the alternatives here. On the cheaper models people actually run at
+scale, the win is retention itself, because those models do not reliably remember to use a
+store they have to drive by hand, and Lore does not make them. We could always &lt;em&gt;feel&lt;/em&gt; that
+difference. Putting a test around it, and being
 honest when the test caught us, is how we get to keep improving it.&lt;/p&gt;
 </content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>benchmark</category><category>agents</category></item><item><title>How Lore remembers, forgets, and changes its mind</title><link>https://withlore.ai/blog/how-lore-remembers-and-forgets/</link><guid isPermaLink="true">https://withlore.ai/blog/how-lore-remembers-and-forgets/</guid><description>Most memory tools now ship a set of principles for how an agent should manage its context. Lore&apos;s principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on.</description><pubDate>Thu, 02 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Everywhere you look, agents are being taught to fix themselves. Self-healing loops,
 self-improving memory, a model that reads back its own transcript, rewrites its own
