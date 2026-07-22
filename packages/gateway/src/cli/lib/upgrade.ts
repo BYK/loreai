@@ -42,6 +42,7 @@ import {
 } from "./binary";
 import { attemptDeltaUpgrade } from "./delta-upgrade";
 import { UpgradeError } from "./errors";
+import { makeByteProgress } from "./progress";
 import {
   downloadNightlyBlob,
   fetchManifest,
@@ -287,6 +288,11 @@ export type DownloadResult = {
 
 /**
  * Stream a response body through gzip decompression to disk.
+ *
+ * Shows a byte-counter progress line on a TTY. The decompressed size is not
+ * known ahead of time (Content-Length covers only the compressed stream), so
+ * the bar is indeterminate — a live byte count, not a fraction, to avoid a
+ * misleading total.
  */
 async function streamDecompressToFile(
   body: ReadableStream<Uint8Array>,
@@ -298,10 +304,24 @@ async function streamDecompressToFile(
       Uint8Array
     >,
   );
-  await pipeline(
-    Readable.fromWeb(stream as never),
-    createWriteStream(destPath),
-  );
+
+  const progress = makeByteProgress("Downloading", null);
+  try {
+    // Tap the stream to count decompressed bytes without buffering them.
+    const counting = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        progress.onProgress(chunk.byteLength);
+        controller.enqueue(chunk);
+      },
+    });
+    const counted = stream.pipeThrough(counting);
+    await pipeline(
+      Readable.fromWeb(counted as never),
+      createWriteStream(destPath),
+    );
+  } finally {
+    progress.done();
+  }
 }
 
 function getNightlyGzFilename(): string {
