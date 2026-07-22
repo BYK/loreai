@@ -30,6 +30,7 @@ import {
 } from "./binary";
 import { applyPatchChainInMemory, parsePatchHeader } from "./bspatch";
 import { makeByteProgress } from "./progress";
+import { spanDeltaUpgrade, type DeltaUpgradeTelemetry } from "../../sentry";
 import { VERSION } from "../version";
 import {
   downloadLayerBlob,
@@ -540,36 +541,61 @@ export async function attemptDeltaUpgrade(
 
   const channel = isNightlyVersion(targetVersion) ? "nightly" : "stable";
 
-  try {
-    const result =
-      channel === "nightly"
-        ? await resolveAndApplyDelta({
-            targetVersion,
-            oldBinaryPath,
-            destPath,
-            resolveFromNetwork: () =>
-              resolveNightlyChainWithContext(targetVersion),
-            channel: "nightly",
-            offline,
-          })
-        : await resolveAndApplyDelta({
-            targetVersion,
-            oldBinaryPath,
-            destPath,
-            resolveFromNetwork: () =>
-              resolveStableChain(VERSION, targetVersion),
-            channel: "stable",
-            offline,
-          });
+  // Wrap the attempt in a `lore.upgrade.delta` span recording the same decision
+  // points Sentry CLI captures (result/source/patch_bytes/chain_length). The
+  // report callback is filled in by resolveAndApplyDelta as facts become known.
+  return spanDeltaUpgrade(
+    { channel, fromVersion: VERSION, toVersion: targetVersion },
+    async (report) => {
+      try {
+        const result =
+          channel === "nightly"
+            ? await resolveAndApplyDelta({
+                targetVersion,
+                oldBinaryPath,
+                destPath,
+                resolveFromNetwork: () =>
+                  resolveNightlyChainWithContext(targetVersion),
+                channel: "nightly",
+                offline,
+                report,
+              })
+            : await resolveAndApplyDelta({
+                targetVersion,
+                oldBinaryPath,
+                destPath,
+                resolveFromNetwork: () =>
+                  resolveStableChain(VERSION, targetVersion),
+                channel: "stable",
+                offline,
+                report,
+              });
 
-    return result;
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(
-      `[lore] Delta upgrade failed (${msg}), falling back to full download`,
-    );
-    return null;
-  }
+        if (result === null) {
+          report({
+            channel,
+            fromVersion: VERSION,
+            toVersion: targetVersion,
+            result: "unavailable",
+          });
+        }
+        return result;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        report({
+          channel,
+          fromVersion: VERSION,
+          toVersion: targetVersion,
+          result: "error",
+          errorMessage: msg,
+        });
+        console.error(
+          `[lore] Delta upgrade failed (${msg}), falling back to full download`,
+        );
+        return null;
+      }
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +609,7 @@ type ResolveAndApplyOpts = {
   resolveFromNetwork: () => Promise<PatchChain | null>;
   channel: string;
   offline?: boolean;
+  report?: (t: DeltaUpgradeTelemetry) => void;
 };
 
 async function resolveAndApplyDelta(
@@ -593,16 +620,43 @@ async function resolveAndApplyDelta(
     oldBinaryPath,
     destPath,
     resolveFromNetwork,
+    channel,
     offline,
+    report,
   } = opts;
+
+  const reportOk = (
+    source: string,
+    r: { sha256: string; patchBytes: number; chainLength: number },
+  ): void => {
+    report?.({
+      channel,
+      fromVersion: VERSION,
+      toVersion: targetVersion,
+      source,
+      result: "ok",
+      patchBytes: r.patchBytes,
+      chainLength: r.chainLength,
+      sha256: r.sha256,
+    });
+  };
 
   // Check patch cache first — enables fully offline upgrades
   const cached = await tryLoadCachedChain(VERSION, targetVersion);
   if (cached) {
-    return await applyChainAndReturn(cached, oldBinaryPath, destPath);
+    const r = await applyChainAndReturn(cached, oldBinaryPath, destPath);
+    reportOk("cache", r);
+    return r;
   }
 
   if (offline) {
+    report?.({
+      channel,
+      fromVersion: VERSION,
+      toVersion: targetVersion,
+      source: "offline_miss",
+      result: "unavailable",
+    });
     return null;
   }
 
@@ -614,7 +668,9 @@ async function resolveAndApplyDelta(
     savePatchesToCache(chain, chain.steps).catch(() => {});
   }
 
-  return await applyChainAndReturn(chain, oldBinaryPath, destPath);
+  const r = await applyChainAndReturn(chain, oldBinaryPath, destPath);
+  reportOk("network", r);
+  return r;
 }
 
 async function tryLoadCachedChain(

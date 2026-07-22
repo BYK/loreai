@@ -886,6 +886,103 @@ export async function spanStartupBackfill(
 }
 
 // ---------------------------------------------------------------------------
+// Delta-upgrade (CLI self-update) tracing + metrics
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of a delta-upgrade attempt, for span attributes and metrics.
+ * Mirrors the points Sentry CLI records on its `upgrade.delta` span so the two
+ * CLIs can be compared in the same dashboards.
+ */
+export type DeltaUpgradeTelemetry = {
+  channel: string; // "stable" | "nightly"
+  fromVersion: string;
+  toVersion: string;
+  /** cache | network | offline_miss — where the patch chain came from. */
+  source?: string;
+  /** ok (patches applied) | unavailable (no usable chain) | error. */
+  result: "ok" | "unavailable" | "error";
+  patchBytes?: number;
+  chainLength?: number;
+  sha256?: string;
+  errorMessage?: string;
+};
+
+/**
+ * Wrap a delta-upgrade attempt in a `lore.upgrade.delta` span, recording the
+ * decision attributes Sentry CLI captures (from/to version, channel, result,
+ * patch bytes, chain length, source) and emitting patch-size + chain-length
+ * distributions on success. The span is best-effort: telemetry must never
+ * change upgrade behavior, and a Sentry failure must not break the update.
+ *
+ * `run` performs the actual resolve+apply and reports its outcome via the
+ * `report` callback (called with the telemetry fields that only become known
+ * during the attempt). Returns whatever `run` returns.
+ */
+export async function spanDeltaUpgrade<T>(
+  base: { channel: string; fromVersion: string; toVersion: string },
+  run: (report: (t: DeltaUpgradeTelemetry) => void) => Promise<T>,
+): Promise<T> {
+  if (!Sentry.isInitialized()) {
+    return run(() => {});
+  }
+
+  return Sentry.startSpan(
+    {
+      name: "lore.upgrade.delta",
+      op: "upgrade.delta",
+      attributes: {
+        "delta.from_version": base.fromVersion,
+        "delta.to_version": base.toVersion,
+        "delta.channel": base.channel,
+      },
+    },
+    async (span) => {
+      let outcome: DeltaUpgradeTelemetry | null = null;
+      const report = (t: DeltaUpgradeTelemetry): void => {
+        outcome = t;
+        span.setAttribute("delta.result", t.result);
+        if (t.source) span.setAttribute("delta.source", t.source);
+        if (t.patchBytes !== undefined)
+          span.setAttribute("delta.patch_bytes", t.patchBytes);
+        if (t.chainLength !== undefined)
+          span.setAttribute("delta.chain_length", t.chainLength);
+        if (t.sha256) span.setAttribute("delta.sha256", t.sha256.slice(0, 12));
+        if (t.errorMessage) span.setAttribute("delta.error", t.errorMessage);
+      };
+
+      try {
+        return await run(report);
+      } finally {
+        // Emit distributions only for a successful patch application — the
+        // "how much did delta save us" signal. Fire-and-forget. Read via a
+        // function so TS's closure narrowing (outcome only assigned in the
+        // callback) doesn't collapse the type to never.
+        const finalOutcome = (): DeltaUpgradeTelemetry | null => outcome;
+        const done = finalOutcome();
+        if (done && done.result === "ok") {
+          const attrs = { channel: base.channel };
+          if (done.patchBytes !== undefined) {
+            Sentry.metrics.distribution(
+              "lore.upgrade.delta.patch_bytes",
+              done.patchBytes,
+              { attributes: attrs, unit: "byte" },
+            );
+          }
+          if (done.chainLength !== undefined) {
+            Sentry.metrics.distribution(
+              "lore.upgrade.delta.chain_length",
+              done.chainLength,
+              { attributes: attrs },
+            );
+          }
+        }
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Client-abort-under-pressure capture
 // ---------------------------------------------------------------------------
 
