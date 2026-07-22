@@ -342,6 +342,16 @@ async function runFossilize(
     console.log(
       `→ fossilize: ${target}, ${Object.keys(manifest).length} asset(s)`,
     );
+    // fossilize reads the "ort-manifest.json" asset by that literal filename
+    // from the manifest's directory (it ignores the manifest's `src` field).
+    // All targets share that one runtime key but need target-specific content,
+    // so copy this target's persisted ort-manifest-<target>.json onto the
+    // shared ort-manifest.json path right before its (serial) fossilize run.
+    const stagingDir = dirname(manifestPath);
+    copyFileSync(
+      join(stagingDir, `ort-manifest-${target}.json`),
+      join(stagingDir, "ort-manifest.json"),
+    );
     const targetOutDir = join(distBinDir, target);
     try {
       await fossilize(
@@ -780,8 +790,16 @@ async function buildBinary() {
   uploadSentrySourcemap(stagingDir, mapPath);
 
   // Write each target's manifest = shared assets + that target's native libs
-  // (vec0 + ORT set) + a target-scoped ort-manifest.json. Returns target →
-  // manifest path so runFossilize can build each binary from its own manifest.
+  // (vec0 + ORT set) + the shared "ort-manifest.json" runtime key. Returns
+  // target → manifest path so runFossilize can build each binary from its own
+  // manifest. NOTE: fossilize keys every asset by its `file` field and reads
+  // the bytes from `<manifestDir>/<file>` — it ignores `src`. Since all targets
+  // must use the identical runtime asset key "ort-manifest.json" but need
+  // different content, we persist each target's content as
+  // "ort-manifest-<target>.json" and runFossilize (which runs fossilize
+  // serially, once per target) copies the right one onto the shared
+  // "ort-manifest.json" path immediately before each target's build. This also
+  // keeps the staging dir self-contained for --from-staging.
   const manifestByTarget = new Map<CompileTarget, string>();
   for (const target of targets) {
     const manifest: Record<string, ManifestEntry> = { ...sharedManifest };
@@ -793,19 +811,15 @@ async function buildBinary() {
       manifest[assetKey] = { file: assetKey, src: assetKey };
     }
 
-    // Per-target ORT file manifest — native-loader.cjs only ever reads the
-    // running platform's entry, so a single-target manifest is sufficient.
-    const perTargetOrtFiles = { [target]: ortFileManifest[target] ?? [] };
-    const ortManifestKey = `ort-manifest-${target}.json`;
+    // native-loader.cjs only ever reads the running platform's entry, so a
+    // single-target manifest suffices.
     writeFileSync(
-      join(stagingDir, ortManifestKey),
-      JSON.stringify(perTargetOrtFiles),
+      join(stagingDir, `ort-manifest-${target}.json`),
+      JSON.stringify({ [target]: ortFileManifest[target] ?? [] }),
     );
-    // Runtime always reads "ort-manifest.json"; alias this target's file to
-    // that key inside its own manifest.
     manifest["ort-manifest.json"] = {
       file: "ort-manifest.json",
-      src: ortManifestKey,
+      src: "ort-manifest.json",
     };
 
     const manifestPath = join(stagingDir, `asset-manifest-${target}.json`);
