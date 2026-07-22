@@ -28,7 +28,8 @@ import {
   isDowngrade,
   isNightlyVersion,
 } from "./binary";
-import { applyPatchChainInMemory } from "./bspatch";
+import { applyPatchChainInMemory, parsePatchHeader } from "./bspatch";
+import { makeByteProgress } from "./progress";
 import { VERSION } from "../version";
 import {
   downloadLayerBlob,
@@ -632,12 +633,38 @@ async function applyChainAndReturn(
   oldBinaryPath: string,
   destPath: string,
 ): Promise<DeltaResult> {
-  const sha256 = await applyPatchChain(chain, oldBinaryPath, destPath);
-  return {
-    sha256,
-    patchBytes: chain.totalSize,
-    chainLength: chain.patches.length,
-  };
+  // Progress bar for the apply phase: total is the final binary size (the last
+  // patch's declared `newSize`), so the number shown is the real output the
+  // user gets — not the sum of intermediate hop writes. The bar advances per
+  // byte written across all hops, so it stays smooth through the chain.
+  let finalSize: number | null = null;
+  try {
+    const last = chain.patches.at(-1);
+    if (last) {
+      finalSize = parsePatchHeader(last.data).newSize;
+    }
+  } catch {
+    // Header parse is best-effort for the bar; a corrupt header is rejected
+    // properly downstream. Leave the bar indeterminate in that case.
+    finalSize = null;
+  }
+  const label = `Applying ${chain.patches.length} patch(es)`;
+  const progress = makeByteProgress(label, finalSize);
+  try {
+    const sha256 = await applyPatchChain(
+      chain,
+      oldBinaryPath,
+      destPath,
+      progress.onProgress,
+    );
+    return {
+      sha256,
+      patchBytes: chain.totalSize,
+      chainLength: chain.patches.length,
+    };
+  } finally {
+    progress.done();
+  }
 }
 
 /**
@@ -690,11 +717,13 @@ export async function applyPatchChain(
   chain: PatchChain,
   oldBinaryPath: string,
   destPath: string,
+  onBytes?: (bytes: number) => void,
 ): Promise<string> {
   const sha256 = await applyPatchChainInMemory(
     oldBinaryPath,
     chain.patches.map((p) => p.data),
     destPath,
+    onBytes,
   );
 
   if (sha256 !== chain.expectedSha256) {
