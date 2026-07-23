@@ -24,7 +24,9 @@ describe("defaultModelForProvider", () => {
   test("github-copilot → its WORKER_DEFAULTS entry", () => {
     const m = defaultModelForProvider("github-copilot");
     expect(m.providerID).toBe("github-copilot");
-    expect(m.modelID).toBe("gpt-5.4-mini");
+    // Must be a Copilot model served on /chat/completions (the worker path).
+    // gpt-5.4-mini is /responses-only on Copilot and 400s — do NOT use it here.
+    expect(m.modelID).toBe("gpt-5-mini");
   });
 
   test("google/gemini → gemini fallback (no WORKER_DEFAULTS entry by design)", () => {

@@ -1047,7 +1047,10 @@ const WORKER_DEFAULTS: Record<
   // "claude-sonnet-4.6"), so this entry serves only as a last-resort fallback.
   "github-copilot": {
     providerID: "github-copilot",
-    modelID: "gpt-5.4-mini", // default; overridden by resolveGitHubCopilotWorker
+    // gpt-5-mini (NOT gpt-5.4-mini): only /chat/completions-served Copilot
+    // models work for background workers. gpt-5.4-mini is /responses-only on
+    // Copilot and 400s on the worker's Chat Completions path (live-verified).
+    modelID: "gpt-5-mini", // default; overridden by resolveGitHubCopilotWorker
     alreadyCheap: (id) =>
       id.includes("mini") ||
       id.includes("nano") ||
@@ -1087,8 +1090,12 @@ const EXPENSIVE_MODEL_THRESHOLD = 1.5;
 
 /**
  * General-purpose fallback worker for GitHub Copilot sessions where no
- * same-family worker is detected. GPT-5.4-mini matched GPT-5.4 exactly
- * (24 obs each) on distillation quality.
+ * same-family worker is detected.
+ *
+ * Must be a model Copilot serves on `/chat/completions` — background workers
+ * always use the Chat Completions path. `gpt-5.4-mini` is `/responses`-only on
+ * Copilot and 400s here; `gpt-5-mini` is the cheap chat-completions-capable
+ * analog (live-verified).
  *
  * Only used for GitHub Copilot (where all models are available at no
  * extra cost). For other providers, we fall back to the session model
@@ -1096,7 +1103,7 @@ const EXPENSIVE_MODEL_THRESHOLD = 1.5;
  */
 const _GENERAL_FALLBACK_WORKER = {
   providerID: "github-copilot",
-  modelID: "gpt-5.4-mini",
+  modelID: "gpt-5-mini",
 };
 
 /**
@@ -1110,9 +1117,10 @@ function resolveGitHubCopilotWorker(sessionModelID: string): {
   if (sessionModelID.startsWith("claude-")) {
     return { providerID: "github-copilot", modelID: "claude-sonnet-4.6" };
   }
-  // For all other model families (OpenAI, Google, xAI, etc.) use GPT-5.4-mini
-  // which is available on Copilot and validated for quality parity
-  return { providerID: "github-copilot", modelID: "gpt-5.4-mini" };
+  // For all other model families (OpenAI, Google, xAI, etc.) use gpt-5-mini —
+  // a cheap Copilot model served on /chat/completions (the worker path).
+  // NOT gpt-5.4-mini, which Copilot serves only via /responses (400s here).
+  return { providerID: "github-copilot", modelID: "gpt-5-mini" };
 }
 
 /**
@@ -1228,45 +1236,49 @@ export function getWorkerModel(session?: {
     const entry = getModelEntrySync(effectiveModelID);
     const inputCost = entry.cost?.input ?? 3;
 
-    if (inputCost >= EXPENSIVE_MODEL_THRESHOLD) {
-      if (effectiveProvider === "github-copilot") {
-        // GitHub Copilot proxies many providers — detect family from model ID
-        costAwareDefault = resolveGitHubCopilotWorker(effectiveModelID);
-      } else {
-        const mapping = WORKER_DEFAULTS[effectiveProvider];
-        if (mapping && !mapping.alreadyCheap(effectiveModelID)) {
-          // Prefer the newest cheap-tier member of the target family from
-          // models.dev (so the worker tracks new generations automatically);
-          // fall back to the hardcoded modelID when data is cold/unavailable.
-          const newest = mapping.family
-            ? resolveNewestInFamily(
-                mapping.providerID,
-                mapping.family,
-                mapping.alreadyCheap,
-                inputCost,
-              )
-            : undefined;
+    if (effectiveProvider === "github-copilot") {
+      // GitHub Copilot proxies many providers at no extra cost, so the worker
+      // pick is about ROUTABILITY, not price: it must be a model Copilot serves
+      // on /chat/completions (the worker path). Session models like gpt-5.4-mini
+      // / gpt-5.5 / gpt-5.6-* are /responses-only and 400 there, so we must
+      // remap EVEN for a cheap session model (below the expensive threshold) —
+      // otherwise the fallback echoes the responses-only session model verbatim.
+      // resolveGitHubCopilotWorker always returns a chat-completions-capable id.
+      costAwareDefault = resolveGitHubCopilotWorker(effectiveModelID);
+    } else if (inputCost >= EXPENSIVE_MODEL_THRESHOLD) {
+      const mapping = WORKER_DEFAULTS[effectiveProvider];
+      if (mapping && !mapping.alreadyCheap(effectiveModelID)) {
+        // Prefer the newest cheap-tier member of the target family from
+        // models.dev (so the worker tracks new generations automatically);
+        // fall back to the hardcoded modelID when data is cold/unavailable.
+        const newest = mapping.family
+          ? resolveNewestInFamily(
+              mapping.providerID,
+              mapping.family,
+              mapping.alreadyCheap,
+              inputCost,
+            )
+          : undefined;
+        costAwareDefault = {
+          providerID: mapping.providerID,
+          modelID: newest ?? mapping.modelID,
+        };
+      }
+      // Unknown providers: try to find a cheaper model from the same
+      // provider using models.dev pricing data. This enables cost-aware
+      // worker selection for Google, xAI, MiniMax, etc. without needing
+      // hardcoded WORKER_DEFAULTS entries.
+      if (!mapping && cachedModelData) {
+        const cheaper = findCheaperSameProviderModel(
+          effectiveProvider,
+          effectiveModelID,
+          inputCost,
+        );
+        if (cheaper) {
           costAwareDefault = {
-            providerID: mapping.providerID,
-            modelID: newest ?? mapping.modelID,
+            providerID: effectiveProvider,
+            modelID: cheaper,
           };
-        }
-        // Unknown providers: try to find a cheaper model from the same
-        // provider using models.dev pricing data. This enables cost-aware
-        // worker selection for Google, xAI, MiniMax, etc. without needing
-        // hardcoded WORKER_DEFAULTS entries.
-        if (!mapping && cachedModelData) {
-          const cheaper = findCheaperSameProviderModel(
-            effectiveProvider,
-            effectiveModelID,
-            inputCost,
-          );
-          if (cheaper) {
-            costAwareDefault = {
-              providerID: effectiveProvider,
-              modelID: cheaper,
-            };
-          }
         }
       }
     }
