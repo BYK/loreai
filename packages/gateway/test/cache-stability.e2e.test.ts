@@ -478,7 +478,14 @@ describe("cache stability (e2e)", () => {
     }
   });
 
-  it("material LTM changes are replayed as durable prompt deltas without rewriting system[2]", async () => {
+  it("context-bound LTM rides a durable delta from first injection onward; NO system[2] block is ever emitted", async () => {
+    // New contract: context-bound LTM ("system[2]") is fully retired. It never
+    // appears in any `system` block — it rides the durable prompt-delta path
+    // (an ambient [user,assistant] pair in `messages`) from its FIRST injection.
+    // So the FIRST time a context entry is selected a delta block is appended
+    // (seq 0), and each later DISTINCT material change appends one more block.
+    // The only frozen system blocks left (host prompt + system[1] preferences)
+    // must stay byte-stable across turns.
     const turns = Array.from({ length: 4 }, (_, i) => ({
       userMessage: `Delta turn ${i}: continue the work.`,
       assistantText: `Delta response ${i}.`,
@@ -542,7 +549,7 @@ describe("cache stability (e2e)", () => {
           category: "gotcha",
           title: "Durable delta gotcha",
           content:
-            "Initial context-bound knowledge that should be pinned in system[2].",
+            "Initial context-bound knowledge that rides the durable delta on first injection.",
           session: sessionID,
         });
         largeContextID = ltm.create({
@@ -556,11 +563,12 @@ describe("cache stability (e2e)", () => {
           session: sessionID,
         });
         // Relevance scoring is stubbed for this test (see the spy setup above the
-        // loop) so BOTH just-created entries score above the floor and pin
-        // deterministically. Without it, the relevance floor's fallback-only
-        // safety net makes 2-entry pinning depend on embedding-worker readiness
-        // and cosine asymmetry (flaky under load). The floor is covered in
-        // ltm.test.ts; this test targets durable-delta replay + system[2] stability.
+        // loop) so BOTH just-created entries score above the floor and surface
+        // deterministically on the first injection. Without it, the relevance
+        // floor's fallback-only safety net makes 2-entry surfacing depend on
+        // embedding-worker readiness and cosine asymmetry (flaky under load).
+        // The floor is covered in ltm.test.ts; this test targets the durable-
+        // delta first-injection + system[2] absence + system[1] stability.
         scoreableIds = [contextID, largeContextID];
       }
 
@@ -587,23 +595,36 @@ describe("cache stability (e2e)", () => {
     const bodies = harness.upstreamBodies();
     expect(bodies.length).toBe(turns.length);
 
-    // Turn 2 establishes system[2]. Turn 3 forces an emergency LTM refresh after
-    // the knowledge entry changed. The update must be carried by a durable
-    // prompt delta in messages, while cached system blocks remain byte-identical.
+    // Turn 2 (bodies[1]) is the first turn context-bound LTM is selected. Under
+    // the new contract it rides a durable delta in `messages` — it is NEVER
+    // emitted as a system[2] block. So the frozen system blocks (host prompt +
+    // system[1] preferences) established by turn 2 stay byte-identical on every
+    // later turn, and the context entry's content must NOT appear in any system
+    // block on ANY turn (proving system[2] is simply absent).
     const steadySystem = systemBlocks(bodies[1]);
     expect(systemBlocks(bodies[2])).toEqual(steadySystem);
     expect(systemBlocks(bodies[3])).toEqual(steadySystem);
+    for (let i = 0; i < bodies.length; i++) {
+      const sys = systemBlocks(bodies[i]).join("\n");
+      expect(
+        sys,
+        `turn ${i + 1}: context-bound knowledge leaked into a system block — ` +
+          `it must ride the durable delta in messages, never system[2]`,
+      ).not.toContain("context-bound knowledge");
+      expect(sys).not.toContain("durable delta marker");
+    }
 
+    // The context-bound knowledge appears in the message tail (durable delta),
+    // carrying BOTH the initial first-injection block (seq 0) and the later
+    // material-change block (seq 1). The large changed entry overflows the delta
+    // render budget and is folded into the actionable recall-by-id index (never
+    // silently dropped) so the model can recall its full current content.
     const turn3Messages = serializedMessages(bodies[2]);
     const turn4Messages = serializedMessages(bodies[3]);
     expect(turn3Messages).toContain("Lore knowledge update");
     expect(turn3Messages).toContain(
       "Updated context-bound knowledge that must arrive as a durable prompt delta",
     );
-    // The large changed entry overflows the delta render budget. It is no longer
-    // dumped as a truncated half-entry ("Additional Changed Knowledge"); instead
-    // it is folded into the actionable recall-by-id index so it is referenced
-    // (not silently dropped) and the model can recall its full current content.
     expect(turn3Messages).not.toContain("Additional Changed Knowledge");
     expect(turn3Messages).not.toContain("Superseded");
     expect(turn3Messages).toContain("Other relevant knowledge");
@@ -614,6 +635,15 @@ describe("cache stability (e2e)", () => {
     );
     expect(turn4Messages).toContain(`[k:${largeContextID}]`);
 
+    // Delta-row accounting under the new (delta-primary) model:
+    //   - seq 0: FIRST injection of the freshly-selected set (turn 2) — this
+    //     block did NOT exist under the old contract (first injection used to go
+    //     to system[2] with no delta row).
+    //   - seq 1: the mid-session material change (turn 3, forced Layer-4 refresh
+    //     after ltm.update) → one more appended block.
+    //   - turn 4 re-runs the diff but the surfaced set already matches the DB
+    //     (both changes surfaced), so NO further block is appended.
+    // → exactly two immutable blocks.
     const rows = harness.queryDB<{
       seq: number;
       selector: string;
@@ -622,16 +652,24 @@ describe("cache stability (e2e)", () => {
       "SELECT seq, selector, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0].seq).toBe(0);
-    const selector = JSON.parse(rows[0].selector) as {
+    expect(
+      rows.map((r) => r.seq),
+      `expected first-injection (seq 0) + one material change (seq 1), got ` +
+        `seqs=${rows.map((r) => r.seq).join(",")}`,
+    ).toEqual([0, 1]);
+    const selector0 = JSON.parse(rows[0].selector) as {
       target: string;
       insertAt: number;
     };
-    expect(selector.target).toBe("messages");
-    expect(Number.isInteger(selector.insertAt)).toBe(true);
-    expect(rows[0].content).toContain("Updated context-bound knowledge");
+    expect(selector0.target).toBe("messages");
+    expect(Number.isInteger(selector0.insertAt)).toBe(true);
+    // seq 0 = the initial set (first injection): the original content + the
+    // large entry's recall-by-id reference.
+    expect(rows[0].content).toContain("Initial context-bound knowledge");
     expect(rows[0].content).toContain(`[k:${largeContextID}]`);
+    // seq 1 = the material change: the updated content.
+    expect(rows[1].content).toContain("Updated context-bound knowledge");
+    expect(rows[1].content).toContain(`[k:${largeContextID}]`);
   });
 
   it("budget-overflow knowledge surfaces as a recall-by-id ToC in system[1] (A) and the delta (B) [#917]", async () => {
@@ -785,17 +823,24 @@ describe("cache stability (e2e)", () => {
     );
   });
 
-  it("ranking churn with NO DB change emits NO delta and keeps the prefix byte-stable (the cause=incremental bust)", async () => {
+  it("ranking churn with NO DB change appends NO extra delta beyond the first injection and keeps the prefix byte-stable (the cause=incremental bust)", async () => {
     // T1 regression for the production bust (session 1LYkXZ7jkiHHnqPl): the delta
     // fired on per-turn relevance-ranking churn (the forSession selection picks a
     // different subset each turn) even though NO knowledge changed in the DB,
     // rewriting a deep-prefix message every turn → ~250k tokens rewritten per
     // turn. We force the recompute path (overflow set + near-zero idle-resume so
     // forSession re-scores every turn) and VARY the query topic each turn so the
-    // selected subset churns — but never mutate the DB. The DB-sourced trigger
-    // must emit ZERO delta rows, and the cached system prefix must stay
-    // byte-identical. Under the old selection-based trigger, the churn wrote
-    // (and rewrote) a "Superseded" delta → this test fails (mutation-verified).
+    // selected subset churns — but never mutate the DB.
+    //
+    // New contract (delta-primary): the FIRST injection of context-bound LTM
+    // appends exactly ONE durable block (seq 0). After that, pure ranking churn
+    // (a different top-K subset each turn, but NO DB mutation) must append NO
+    // further blocks — the DB-sourced trigger (detectSurfacedMutations compares
+    // the advancing surfaced set against the live DB, not the per-turn
+    // selection) surfaces nothing to change. And the cached system prefix must
+    // stay byte-identical. Under the old selection-based trigger, the churn
+    // wrote (and rewrote) a "Superseded" delta EVERY turn → many rows → this
+    // test fails (mutation-verified).
     const topics = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
     const turns = Array.from({ length: 6 }, (_, i) => ({
       // Each turn foregrounds a DIFFERENT topic so forSession re-ranks which
@@ -823,8 +868,9 @@ describe("cache stability (e2e)", () => {
 
     const { ltm } = await import("@loreai/core");
     // Seed many entries spread across the topics, enough to overflow the
-    // system[2] budget so the SELECTED subset is a moving target as the query
-    // topic changes — reproducing the ranking churn without any DB mutation.
+    // context-bound render budget so the SELECTED subset is a moving target as
+    // the query topic changes — reproducing the ranking churn without any DB
+    // mutation.
     const SEED_PER_TOPIC = 6;
     for (const topic of topics) {
       for (let i = 0; i < SEED_PER_TOPIC; i++) {
@@ -869,21 +915,27 @@ describe("cache stability (e2e)", () => {
       // NB: intentionally NO ltm.update / ltm.remove anywhere — the DB is frozen.
     }
 
-    // The core guarantee: no genuine knowledge mutation → ZERO durable-delta
-    // rows, regardless of how the relevance selection churned across turns.
+    // The core guarantee: the FIRST injection appends exactly ONE block (seq 0);
+    // pure ranking churn (no genuine knowledge mutation) appends NOTHING further,
+    // regardless of how the relevance selection churned across the later turns.
     const deltaRows = harness.queryDB<{ seq: number; content: string }>(
       "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
     expect(
-      deltaRows.length,
-      `expected ZERO delta rows on pure ranking churn (no DB change), got ` +
-        `${deltaRows.length} — the selection-based trigger rewrote a delta on ` +
-        `mere re-ranking, which is the cause=incremental bust`,
-    ).toBe(0);
+      deltaRows.map((r) => r.seq),
+      `expected exactly the first-injection block (seq 0) and NO churn-driven ` +
+        `rows, got seqs=${deltaRows.map((r) => r.seq).join(",")} — a >1 count ` +
+        `means the selection-based trigger rewrote a delta on mere re-ranking, ` +
+        `which is the cause=incremental bust`,
+    ).toEqual([0]);
+    // The single first-injection block carries genuine new knowledge, never a
+    // "Superseded — ignore these ids" churn list.
+    expect(deltaRows[0].content).not.toContain("Superseded");
 
     // And the cached system prefix must be byte-identical once established
-    // (turn 2+), proving the churn never rewrote system[2] either.
+    // (turn 2+), proving the churn never emitted a context-bound system[2] block
+    // either — context-bound LTM rides the delta only.
     const bodies = harness.upstreamBodies();
     const steady = systemBlocks(bodies[1]);
     for (let i = 2; i < bodies.length; i++) {
@@ -892,14 +944,15 @@ describe("cache stability (e2e)", () => {
   });
 
   it("successive knowledge changes APPEND immutable blocks at the tail (no in-place rewrite)", async () => {
-    // Append-only redesign: each genuine knowledge change appends a NEW
-    // immutable block at the CURRENT tail (seq = MAX+1) rather than rewriting
-    // one coalesced row in place at a frozen deep position. The cache-stability
-    // guarantee is no longer "exactly one row" but "every block, once written,
-    // is byte-immutable and tail-anchored" — so a write extends the cache
-    // frontier instead of invalidating the prefix from a deep index (the
-    // session-1LYkXZ7jkiHHnqPl `cause=incremental` bust). We assert: (a) one
-    // block per DISTINCT change, (b) monotonically increasing insertAt
+    // Append-only redesign: the FIRST injection appends an immutable block (seq
+    // 0), and each subsequent genuine knowledge change appends a NEW immutable
+    // block at the CURRENT tail (seq = MAX+1) rather than rewriting one coalesced
+    // row in place at a frozen deep position. The cache-stability guarantee is no
+    // longer "exactly one row" but "every block, once written, is byte-immutable
+    // and tail-anchored" — so a write extends the cache frontier instead of
+    // invalidating the prefix from a deep index (the session-1LYkXZ7jkiHHnqPl
+    // `cause=incremental` bust). We assert: (a) one block for the first injection
+    // plus one per DISTINCT change, (b) monotonically increasing insertAt
     // (tail-appended, never shifting the prefix), (c) earlier blocks are
     // byte-identical after later appends.
     const turns = Array.from({ length: 6 }, (_, i) => ({
@@ -953,7 +1006,7 @@ describe("cache stability (e2e)", () => {
           scope: "project",
           category: "gotcha",
           title: "Coalesce gotcha",
-          content: "Initial coalesce knowledge pinned in system[2].",
+          content: "Initial coalesce knowledge carried by the first delta.",
           session: sessionID,
         });
       }
@@ -986,15 +1039,16 @@ describe("cache stability (e2e)", () => {
       [sessionID],
     );
 
-    // One immutable block per distinct change (three edits → three blocks),
-    // appended (not coalesced) with monotonically increasing seqs.
+    // One immutable block for the first injection (seq 0) plus one per distinct
+    // change (three edits → seqs 1,2,3), appended (not coalesced) with
+    // monotonically increasing seqs.
     expect(
       rows.length,
-      `expected one appended block per distinct change, got seqs=${rows
+      `expected first-injection block + one per distinct change, got seqs=${rows
         .map((r) => r.seq)
         .join(",")}`,
-    ).toBe(3);
-    expect(rows.map((r) => r.seq)).toEqual([0, 1, 2]);
+    ).toBe(4);
+    expect(rows.map((r) => r.seq)).toEqual([0, 1, 2, 3]);
 
     // Tail-appended: insertAt is non-decreasing across blocks (each new block
     // sits at or after the previous — it never shifts the cached prefix).
@@ -1005,21 +1059,49 @@ describe("cache stability (e2e)", () => {
       expect(insertAts[i]).toBeGreaterThanOrEqual(insertAts[i - 1]);
     }
 
-    // Immutability: block 0's bytes are identical to the first time it appeared,
-    // even after blocks 1 and 2 were appended on later turns.
+    // Immutability: block 0's CONTENT and surfaced-mutation signature (`mut`)
+    // are identical to the first time it appeared, even after blocks 1, 2 and 3
+    // were appended on later turns. Its `insertAt` may legitimately re-anchor
+    // (safeDeltaInsertIndex persists the nudge when compression slides the array
+    // below it — the documented Bug-2 fix that keeps the block byte-POSITION-
+    // stable across layers); that re-anchor rewrites ONLY insertAt, never the
+    // mutation signature or the rendered content. So we compare `mut` + content
+    // (the real cache-safety invariant), not the whole selector.
     expect(block0First).not.toBeNull();
-    expect(rows[0].selector).toBe(block0First?.selector);
+    const block0FirstSel = JSON.parse(block0First?.selector ?? "{}") as {
+      target: string;
+      mut: unknown;
+    };
+    const block0NowSel = JSON.parse(rows[0].selector) as {
+      target: string;
+      mut: unknown;
+    };
+    expect(block0NowSel.target).toBe(block0FirstSel.target);
+    expect(block0NowSel.mut).toEqual(block0FirstSel.mut);
     expect(rows[0].content).toBe(block0First?.content);
+
+    // Context-bound knowledge never leaks into a system block — it rides the
+    // durable delta only. system[2] is retired.
+    const allBodies = harness.upstreamBodies();
+    for (let i = 0; i < allBodies.length; i++) {
+      expect(
+        systemBlocks(allBodies[i]).join("\n"),
+        `turn ${i + 1}: coalesce knowledge leaked into a system block`,
+      ).not.toContain("coalesce");
+    }
   });
 
-  it("genuine supersessions on different turns surface NO delta and keep system[2] byte-stable (incl. restart)", async () => {
+  it("genuine supersessions on different turns append NO removal delta beyond the first injection and never emit system[2] (incl. restart)", async () => {
     // Trim (quality + cost): a removals-only diff no longer injects a mid-session
     // "Superseded — ignore these ids" delta — that list was content the model
     // could not reliably act on, and its per-turn churn was the dominant
-    // cache-bust driver. Here two entries are genuinely removed on two different
-    // turns (with a restart between them) under forced layer 4: NO delta block is
-    // appended, and the frozen system[2] pin stays byte-identical the whole time
-    // (the stale entries are simply left pinned until the next session refresh).
+    // cache-bust driver. Under the new delta-primary contract the FIRST injection
+    // of the selected set appends ONE durable block (seq 0); here two entries are
+    // then genuinely removed on two different turns (with a restart between them)
+    // under forced layer 4: NO further delta block is appended (a removal on its
+    // own produces no message), and NO context-bound system[2] block is ever
+    // emitted (the stale entries are simply left in the frozen delta until the
+    // next session refresh).
     const turns = Array.from({ length: 7 }, (_, i) => ({
       userMessage: `Cumulative turn ${i}: continue.`,
       assistantText: `Cumulative response ${i}.`,
@@ -1064,16 +1146,17 @@ describe("cache stability (e2e)", () => {
         );
         sessionID = rows[0]?.session_id ?? "";
         expect(sessionID).not.toBe("");
-        // Create BOTH entries on turn 0 (before the pin freezes at turn 1), so
-        // the frozen system[2] baseline contains both. We count superseded
-        // BULLETS (not id prefixes) so same-ms UUIDv7 8-char-prefix collision is
-        // irrelevant.
+        // Create BOTH entries on turn 0 (before the first injection surfaces
+        // them on turn 1). The first-injection delta records them; the later
+        // removals must NOT append a "Superseded" delta.
         idA = ltm.create({
           projectPath,
           scope: "project",
           category: "gotcha",
           title: "Cumulative entry A",
-          content: "Entry A pinned in system[2] before removal. ".repeat(8),
+          content: "Entry A carried by the first delta before removal. ".repeat(
+            8,
+          ),
           session: sessionID,
         });
         idB = ltm.create({
@@ -1081,7 +1164,9 @@ describe("cache stability (e2e)", () => {
           scope: "project",
           category: "gotcha",
           title: "Cumulative entry B",
-          content: "Entry B pinned in system[2] before removal. ".repeat(8),
+          content: "Entry B carried by the first delta before removal. ".repeat(
+            8,
+          ),
           session: sessionID,
         });
       }
@@ -1098,31 +1183,41 @@ describe("cache stability (e2e)", () => {
       "SELECT seq, content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    // Removals-only → NOTHING is appended. (A removal still advances the surfaced
-    // set when it rides a genuine content change, but on its own it never
-    // produces a delta block.)
+    // Exactly the first-injection block (seq 0) exists; the two removals append
+    // NOTHING (a removal advances the surfaced set when it rides a genuine
+    // content change, but on its own it never produces a delta block).
     expect(
-      rows.length,
-      `expected NO appended delta blocks for removals-only, got seqs=${rows
-        .map((r) => r.seq)
-        .join(",")}`,
-    ).toBe(0);
+      rows.map((r) => r.seq),
+      `expected only the first-injection block (seq 0) and NO removal deltas, ` +
+        `got seqs=${rows.map((r) => r.seq).join(",")}`,
+    ).toEqual([0]);
+    // No removal ever surfaces a "Superseded — ignore these ids" list.
+    for (const r of rows) {
+      expect(r.content).not.toContain("Superseded");
+    }
 
-    // The frozen system[2] pin must stay byte-identical across every turn after
-    // it froze — the genuine removals (and the restart between them) must never
-    // rewrite or recompute it.
+    // No context-bound system[2] block is ever emitted, and the remaining frozen
+    // system blocks (host prompt + system[1]) stay byte-identical across every
+    // turn after they froze — the genuine removals (and the restart between them)
+    // must never rewrite or recompute them.
     const bodies = harness.upstreamBodies();
     const steadySystem = systemBlocks(bodies[1]);
     for (let i = 2; i < bodies.length; i++) {
       expect(
         systemBlocks(bodies[i]),
         `system blocks changed on turn ${i + 1} after a genuine removal — the ` +
-          `frozen system[2] pin must never be rewritten by a removal`,
+          `frozen system prefix must never be rewritten by a removal`,
       ).toEqual(steadySystem);
+    }
+    for (let i = 0; i < bodies.length; i++) {
+      expect(
+        systemBlocks(bodies[i]).join("\n"),
+        `turn ${i + 1}: context-bound knowledge leaked into a system block`,
+      ).not.toContain("carried by the first delta");
     }
   });
 
-  it("removed LTM entries surface NO mid-session delta and keep system[2] byte-stable", async () => {
+  it("removed LTM entries append NO removal delta beyond the first injection and never emit system[2]", async () => {
     const turns = Array.from({ length: 4 }, (_, i) => ({
       userMessage: `Removal delta turn ${i}: continue the work.`,
       assistantText: `Removal delta response ${i}.`,
@@ -1170,7 +1265,7 @@ describe("cache stability (e2e)", () => {
           category: "gotcha",
           title: "Removed durable delta gotcha",
           content:
-            "Context-bound knowledge that will be removed without rewriting system[2].",
+            "Context-bound knowledge that will be removed after riding the first delta.",
           session: sessionID,
         });
       }
@@ -1182,15 +1277,25 @@ describe("cache stability (e2e)", () => {
 
     const bodies = harness.upstreamBodies();
     expect(bodies.length).toBe(turns.length);
+    // No context-bound system[2] block is ever emitted; the remaining frozen
+    // system blocks (host prompt + system[1]) are byte-identical from turn 2 on,
+    // and the context entry's content never appears in a system block.
     const steadySystem = systemBlocks(bodies[1]);
     expect(systemBlocks(bodies[2])).toEqual(steadySystem);
     expect(systemBlocks(bodies[3])).toEqual(steadySystem);
+    for (let i = 0; i < bodies.length; i++) {
+      expect(
+        systemBlocks(bodies[i]).join("\n"),
+        `turn ${i + 1}: context-bound knowledge leaked into a system block`,
+      ).not.toContain("Context-bound knowledge that will be removed");
+    }
 
     const turn3Messages = serializedMessages(bodies[2]);
     const turn4Messages = serializedMessages(bodies[3]);
-    // Removals-only no longer surface a mid-session message: the deleted entry
-    // is left pinned (stale) in the frozen system[2] until the next session
-    // refresh, and no "Superseded" delta is injected to bust the cache.
+    // The removal itself surfaces NO mid-session message: no "Superseded — ignore
+    // these ids" delta is ever injected to bust the cache. The only delta present
+    // is the first-injection block (the entry's original content), left as stale
+    // context in the frozen delta until the next session refresh.
     expect(turn3Messages).not.toContain("Superseded");
     expect(turn4Messages).not.toContain("Superseded");
 
@@ -1198,7 +1303,12 @@ describe("cache stability (e2e)", () => {
       "SELECT content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(rows).toHaveLength(0);
+    // Exactly one block: the first injection (seq 0). The removal appends nothing.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).not.toContain("Superseded");
+    expect(rows[0].content).toContain(
+      "Context-bound knowledge that will be removed",
+    );
   });
 
   it("frozen system[1] survives a mid-session preference DELETE across a restart (ses_14b9bf3d… incident)", async () => {
@@ -1371,7 +1481,7 @@ describe("cache stability (e2e)", () => {
     expect(bodies[2]).not.toContain("Mid-session minted preference");
   });
 
-  it("normal LTM refresh preserves system[2] and surfaces NO removal delta", async () => {
+  it("normal LTM refresh appends NO removal delta beyond the first injection and never emits system[2]", async () => {
     const turns = Array.from({ length: 4 }, (_, i) => ({
       userMessage: `Normal removal delta turn ${i}: continue the work.`,
       assistantText: `Normal removal delta response ${i}.`,
@@ -1418,7 +1528,7 @@ describe("cache stability (e2e)", () => {
           category: "gotcha",
           title: "Normal removed durable delta gotcha",
           content:
-            "Context-bound knowledge removed during normal refresh must not rewrite system[2].",
+            "Context-bound knowledge removed during normal refresh rides the first delta only.",
           session: sessionID,
         });
       }
@@ -1431,12 +1541,21 @@ describe("cache stability (e2e)", () => {
 
     const bodies = harness.upstreamBodies();
     expect(bodies.length).toBe(turns.length);
+    // No context-bound system[2] block is ever emitted; the remaining frozen
+    // system blocks are byte-identical from turn 2 on, and the context entry's
+    // content never appears in a system block.
     const steadySystem = systemBlocks(bodies[1]);
     expect(systemBlocks(bodies[2])).toEqual(steadySystem);
     expect(systemBlocks(bodies[3])).toEqual(steadySystem);
+    for (let i = 0; i < bodies.length; i++) {
+      expect(
+        systemBlocks(bodies[i]).join("\n"),
+        `turn ${i + 1}: context-bound knowledge leaked into a system block`,
+      ).not.toContain("Context-bound knowledge removed during normal refresh");
+    }
 
     const turn3Messages = serializedMessages(bodies[2]);
-    // A removal during a normal (non-emergency) refresh must keep system[2]
+    // A removal during a normal (non-emergency) refresh keeps the system prefix
     // byte-stable (asserted above) and must NOT inject a "Superseded" delta —
     // removals-only no longer surface mid-session.
     expect(turn3Messages).not.toContain("Superseded");
@@ -1444,7 +1563,12 @@ describe("cache stability (e2e)", () => {
       "SELECT content FROM session_prompt_deltas WHERE session_id = ? ORDER BY seq",
       [sessionID],
     );
-    expect(rows).toHaveLength(0);
+    // Exactly one block: the first injection (seq 0). The removal appends nothing.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).not.toContain("Superseded");
+    expect(rows[0].content).toContain(
+      "Context-bound knowledge removed during normal refresh",
+    );
   });
 
   it("cached system blocks stay byte-stable across gradient compression layers", async () => {
