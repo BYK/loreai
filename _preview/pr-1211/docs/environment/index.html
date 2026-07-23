@@ -129,10 +129,6 @@ for (const pre of blocks) {
 <td><code dir="auto">LORE_WARMING_ENABLED</code></td>
 <td>Whether cache warming is enabled. Resolution priority (highest first): 1. <code dir="auto">LORE_WARMING_ENABLED</code> env var — “0”/“false”/“off”/“no” disable, anything else enables (override for automation / CI). 2. DB-persisted KV override, set via the dashboard or <code dir="auto">/lore:warm:on|off</code> (“1” = on, “0” = off). Absent → fall through. 3. <code dir="auto">cache.warming.enabled</code> from <code dir="auto">.lore.json</code> (schema default: true). This makes the file-only config flag runtime-settable without a restart — mirroring the daily-budget toggle. The gate lives in <code dir="auto">shouldWarm</code>, so warming can be turned off globally the moment it stops paying for itself.</td>
 </tr>
-<tr>
-<td><code dir="auto">LORE_WORKER_MODEL</code></td>
-<td>Env var override — highest priority. Useful for global worker model configuration without per-project .lore.json (e.g. routing all workers to MiniMax). Format: “providerID/modelID” or just “modelID” (defaults to anthropic provider).</td>
-</tr>
 </tbody>
 </table>
 <div class="sl-heading-wrapper level-h2"><h2 id="cli--lore-command">CLI / <code dir="auto">lore</code> command</h2><a class="sl-anchor-link" href="#cli--lore-command"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “CLI / lore command”</span></a></div>
@@ -195,6 +191,10 @@ for (const pre of blocks) {
 <tr>
 <td><code dir="auto">LORE_UPSTREAM_EXTRA_HEADERS</code></td>
 <td>Forward LORE_UPSTREAM_EXTRA_HEADERS to Codex via the <code dir="auto">openai_provider_headers</code> config key (TOML map of header name → value). Codex appends these to every outbound request to the OpenAI-compatible upstream, which now points at the Lore gateway. The gateway reads the same env var and re-injects them on the actual upstream call — this is a belt-and-suspenders pass-through so a user with a custom corporate proxy gets headers on both hops.</td>
+</tr>
+<tr>
+<td><code dir="auto">LORE_WORKER_MODEL</code><br><strong>Parser:</strong> <code dir="auto">parseWorkerModelEnv</code></td>
+<td>Parse the <code dir="auto">LORE_WORKER_MODEL</code> env-var override into a <code dir="auto">{providerID, modelID}</code>. Format: <code dir="auto">"providerID/modelID"</code> (e.g. <code dir="auto">openai/gpt-5.4-mini</code>) or a bare <code dir="auto">"modelID"</code> which assumes the <code dir="auto">anthropic</code> provider (the historical default). Returns <code dir="auto">undefined</code> only for an unset/empty value. Single source of truth shared by the live worker-model selection ({@link getWorkerModel}) and standalone <code dir="auto">lore import</code>, so the env override behaves identically in both paths.</td>
 </tr>
 </tbody>
 </table>

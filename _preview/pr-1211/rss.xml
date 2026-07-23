@@ -68,38 +68,39 @@ efficient:&lt;/p&gt;
 &lt;tbody&gt;
 &lt;tr&gt;
 &lt;td&gt;vanilla&lt;/td&gt;
-&lt;td&gt;35%&lt;/td&gt;
+&lt;td&gt;20%&lt;/td&gt;
 &lt;td&gt;7&lt;/td&gt;
-&lt;td&gt;80&lt;/td&gt;
-&lt;td&gt;$10.39&lt;/td&gt;
+&lt;td&gt;56&lt;/td&gt;
+&lt;td&gt;$9.79&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;&lt;strong&gt;Lore&lt;/strong&gt;&lt;/td&gt;
 &lt;td&gt;&lt;strong&gt;100%&lt;/strong&gt;&lt;/td&gt;
 &lt;td&gt;&lt;strong&gt;0&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;33&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;$6.48&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;53&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;$9.54&lt;/strong&gt;&lt;/td&gt;
 &lt;/tr&gt;
 &lt;/tbody&gt;
 &lt;/table&gt;
-&lt;p&gt;Two things are happening at once. The vanilla agent compacts seven times and still keeps
-barely a third of the probes; the retention it does have is noisy, some runs recover a
-fact from their own summary, some lose all four. Lore never compacts, because it manages
-the window on every turn instead of waiting for it to overflow, and it keeps all four
-facts every run, in well under half the steps.&lt;/p&gt;
-&lt;p&gt;And this time the cost column runs the other way. Lore’s figure is the whole of its bill,
-the conversation plus the background distillation that captures memory; the background
-worker is a small slice of the run, and this benchmark is part of why it is small. An
-earlier version showed the worker re-reading whole reference blobs it did not need, so now
-Lore trims an oversized user blob down to the part that carries meaning before it ever
-distills, and that trimming is in these numbers. Two further savings are not: in real use
-the worker runs on a cheaper model than the conversation, and against Anthropic or OpenAI
-its calls go through the batch API at half price, but this harness pins one model per run
-and turns batching off so it can finish distilling before the next session (more on that
-below). Even without those two discounts, Lore comes in under vanilla, because compaction
-is not free: each compaction busts the prompt cache, rewrites the prefix, and forces the
-re-reading that runs the vanilla step count up. A compacting agent that loses the facts is
-not a cheaper way to succeed, it is a more expensive way to fail.&lt;sup&gt;&lt;a href=&quot;#user-content-fn-meters&quot; id=&quot;user-content-fnref-meters&quot; data-footnote-ref aria-describedby=&quot;footnote-label&quot;&gt;1&lt;/a&gt;&lt;/sup&gt;&lt;/p&gt;
+&lt;p&gt;Two things are happening at once. The vanilla agent compacts seven times and keeps one
+probe run in five; the retention it does have is noisy, some runs recover a fact from their
+own summary, most lose all four. Lore never compacts, because it manages the window on
+every turn instead of waiting for it to overflow, and it keeps all four facts every run, in
+fewer steps.&lt;/p&gt;
+&lt;p&gt;The cost here is close to a tie, and that is the honest read: Lore lands just under vanilla,
+about a quarter under a percent, not a headline saving. Lore’s figure is the whole of its
+bill, the conversation plus the background distillation that captures memory; the background
+worker is a small slice of the run (about nine cents here), and this benchmark is part of
+why it is small. An earlier version showed the worker re-reading whole reference blobs it
+did not need, so now Lore trims an oversized user blob down to the part that carries meaning
+before it ever distills, and that trimming is in these numbers. Two further savings are not:
+in real use the worker runs on a cheaper model than the conversation, and against Anthropic
+or OpenAI its calls go through the batch API at half price, but this harness pins one model
+per run and turns batching off so it can finish distilling before the next session (more on
+that below). Even so, the point of this table is not the dollar column, it is the other two:
+Lore keeps every fact and compacts zero times, where vanilla compacts seven and keeps almost
+nothing. A compacting agent that loses the facts is not a cheaper way to succeed, it is a
+more expensive way to fail.&lt;sup&gt;&lt;a href=&quot;#user-content-fn-meters&quot; id=&quot;user-content-fnref-meters&quot; data-footnote-ref aria-describedby=&quot;footnote-label&quot;&gt;1&lt;/a&gt;&lt;/sup&gt;&lt;/p&gt;
 &lt;p&gt;The pattern holds on a cheaper model, where the dollars are small enough to see the shape
 plainly:&lt;/p&gt;
 &lt;table&gt;
@@ -138,7 +139,8 @@ we put Lore next to two good ones:
 &lt;a href=&quot;https://github.com/mem0ai/mem0&quot;&gt;mem0&lt;/a&gt; (cloud) and
 &lt;a href=&quot;https://github.com/Aamirofficiall/mnemonic&quot;&gt;mnemonic&lt;/a&gt; (a local SQLite store, the closest
 analogue to how Lore keeps things on your own disk).&lt;/p&gt;
-&lt;p&gt;On the frontier model, everyone with memory got it right:&lt;/p&gt;
+&lt;p&gt;On the frontier model, every system with memory carried the facts, and Lore and vanilla
+mark the two ends of the range:&lt;/p&gt;
 &lt;table&gt;
 &lt;thead&gt;
 &lt;tr&gt;
@@ -152,22 +154,24 @@ analogue to how Lore keeps things on your own disk).&lt;/p&gt;
 &lt;td&gt;0%&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
-&lt;td&gt;Lore&lt;/td&gt;
-&lt;td&gt;100%&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;mnemonic&lt;/td&gt;
-&lt;td&gt;100%&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;Lore&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;100%&lt;/strong&gt;&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
 &lt;td&gt;mem0&lt;/td&gt;
-&lt;td&gt;100%&lt;/td&gt;
+&lt;td&gt;92%&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;mnemonic&lt;/td&gt;
+&lt;td&gt;67%&lt;/td&gt;
 &lt;/tr&gt;
 &lt;/tbody&gt;
 &lt;/table&gt;
-&lt;p&gt;That is the honest headline: a good store works, and on a capable model it works
-reliably. We will not pretend otherwise. Every system had captured all four facts
-correctly. No tool stored better than another.&lt;/p&gt;
+&lt;p&gt;That is the honest headline: a good store works, and on a capable model it works well. We
+will not pretend otherwise. Every system had captured the facts; where the competitors miss
+here it is the model failing to recall on a given run, not the store failing to hold. Even
+so, on the frontier model the gap is narrow, and we would rather show the spread than round
+it up to a tie.&lt;/p&gt;
 &lt;p&gt;The difference shows up on the cheaper, everyday models, the kind you actually run at
 scale:&lt;sup&gt;&lt;a href=&quot;#user-content-fn-zeros&quot; id=&quot;user-content-fnref-zeros&quot; data-footnote-ref aria-describedby=&quot;footnote-label&quot;&gt;2&lt;/a&gt;&lt;/sup&gt;&lt;/p&gt;
 &lt;table&gt;
@@ -240,8 +244,8 @@ dedicated model has room to write more than a tool call squeezed into the coding
 turn. It is a real edge, but a modest one. The decisive difference is not what gets
 written, it is whether anything gets written at all without the agent being told to.&lt;/p&gt;
 &lt;h2 id=&quot;what-it-costs-honestly&quot;&gt;What it costs, honestly&lt;/h2&gt;
-&lt;p&gt;Cost is where memory tools get quiet, so here is ours out loud. On the cross-session run
-with Sonnet:&lt;/p&gt;
+&lt;p&gt;Cost is where memory tools get quiet, so here is ours out loud, including the part that
+does not flatter us. On the cross-session run with Sonnet-5:&lt;/p&gt;
 &lt;table&gt;
 &lt;thead&gt;
 &lt;tr&gt;
@@ -253,46 +257,60 @@ with Sonnet:&lt;/p&gt;
 &lt;tbody&gt;
 &lt;tr&gt;
 &lt;td&gt;vanilla&lt;/td&gt;
-&lt;td&gt;$4.77&lt;/td&gt;
+&lt;td&gt;$3.92&lt;/td&gt;
 &lt;td&gt;none&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
-&lt;td&gt;mnemonic&lt;/td&gt;
-&lt;td&gt;$4.89&lt;/td&gt;
-&lt;td&gt;Gemini (embeddings + extraction), external&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
 &lt;td&gt;mem0&lt;/td&gt;
-&lt;td&gt;$4.91&lt;/td&gt;
+&lt;td&gt;$3.97&lt;/td&gt;
 &lt;td&gt;mem0 cloud subscription, external&lt;/td&gt;
 &lt;/tr&gt;
 &lt;tr&gt;
+&lt;td&gt;mnemonic&lt;/td&gt;
+&lt;td&gt;$4.02&lt;/td&gt;
+&lt;td&gt;Gemini (embeddings + extraction), external&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
 &lt;td&gt;&lt;strong&gt;Lore&lt;/strong&gt;&lt;/td&gt;
-&lt;td&gt;&lt;strong&gt;$4.60&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;$5.20&lt;/strong&gt;&lt;/td&gt;
 &lt;td&gt;none&lt;/td&gt;
 &lt;/tr&gt;
 &lt;/tbody&gt;
 &lt;/table&gt;
-&lt;p&gt;Lore is the cheapest line here, but be careful how you read it. Lore’s figure is the
-&lt;em&gt;whole&lt;/em&gt; bill: the conversation plus the background distillation that does the capturing, on
-one key. Roughly $0.23 of that $4.60 is the background worker, work the other tools also do
-but bill somewhere you cannot see. It lands a little under the others because Lore folds
-the captured memory straight into context and answers in fewer turns, not because we do
-anything clever on price. We would not lean on a thirty-cent edge.&lt;/p&gt;
-&lt;p&gt;The competitors’ lines also hide a cost this table cannot show. mnemonic’s extraction and
-embeddings run on Gemini; mem0 runs on a hosted subscription. The Gemini spend is real but
-small, and it lands on a separate bill rather than your model spend; mem0’s is a flat
-monthly fee, near nothing per run if you already pay it, a whole plan if you do not. Either
+&lt;p&gt;Lore is the most expensive line here, and we are not going to bury that under the retention
+win. Two things are true at once. The retention win is real: Lore held all four facts on
+every run while vanilla held none, and on the cheaper models it held them where the stores
+did not. And Lore costs more per run on this frontier cross-session case. Both belong in the
+same paragraph.&lt;/p&gt;
+&lt;p&gt;Where the extra dollar goes is worth being precise about, because the benchmark is what
+turned it up. Lore’s figure is the whole bill: the conversation plus the background
+distillation, on one key, about $0.28 of it the worker. The rest of the gap is prompt-cache
+churn. When Lore first injects a session’s recalled memory it rewrites part of the prefix,
+which busts the cache for that turn; on the single-breakpoint protocol this benchmark runs
+through, that one rewrite re-priced more of the prompt than it should have. Measuring this
+run is how we found it. We have since landed two fixes, one that stops the recalled-memory
+block from busting the whole system prefix, and one that stops the compression layer from
+oscillating turn to turn, and together they cut this cross-session figure from about $6.22
+to the $5.20 above. It is still over vanilla, and the residual is a first-injection rewrite
+we have not yet driven to zero. We would rather publish the number that is still above the
+line, with the direction of travel, than wait for a prettier one.&lt;sup&gt;&lt;a href=&quot;#user-content-fn-meters&quot; id=&quot;user-content-fnref-meters-2&quot; data-footnote-ref aria-describedby=&quot;footnote-label&quot;&gt;1&lt;/a&gt;&lt;/sup&gt;&lt;/p&gt;
+&lt;p&gt;The competitors’ lines also hide a cost this table cannot show. mem0 runs on a hosted
+subscription; mnemonic’s extraction and embeddings run on Gemini. mem0’s is a flat monthly
+fee, near nothing per run if you already pay it, a whole plan if you do not; the Gemini
+spend is real but small, and lands on a separate bill rather than your model spend. Either
 way it is off the bill we can show you, and all of Lore’s is on it.&lt;/p&gt;
-&lt;p&gt;And Lore’s number here is pessimistic: as noted above, the harness runs the worker on the
-same frontier model and with batching off, both of which you avoid in normal use. Point the
-worker at a cheap model and that $0.23 bucket drops by roughly ten times; run against
-Anthropic or OpenAI and the batch API halves it again.&lt;/p&gt;
-&lt;p&gt;So the claim is simple: on this benchmark Lore is not more expensive, it is a little
-cheaper, and its cost is &lt;em&gt;entirely visible and on one bill&lt;/em&gt;. The single-long frontier run
-says it more sharply, a bill that keeps every fact against one that keeps a third. You do
-not pay a premium to stop thinking about any of this. You pay less, and you get to account
-for all of it.&lt;/p&gt;
+&lt;p&gt;And Lore’s number here is pessimistic in one direction the others are not: as noted above,
+the harness runs the worker on the same frontier model and with batching off, both of which
+you avoid in normal use. Point the worker at a cheap model and that $0.28 bucket drops by
+roughly ten times; run against Anthropic or OpenAI and the batch API halves it again. That
+does not close the whole gap, but it is real, and it is on our side to keep closing.&lt;/p&gt;
+&lt;p&gt;So the honest claim is narrower than “cheaper.” On this benchmark Lore keeps every fact,
+answers in fewer steps, and puts its entire cost on one visible bill, and on the frontier
+cross-session case it runs a dollar or so over a vanilla agent that keeps nothing. The
+single-long frontier run is where the trade reads cleanly, near-identical bills, one that
+keeps every fact against one that keeps a fifth. You do not pay a premium to stop thinking
+about any of this on the cases that matter most, and where you do pay a little more, you get
+to account for all of it.&lt;/p&gt;
 &lt;h2 id=&quot;what-we-are-not-claiming&quot;&gt;What we are not claiming&lt;/h2&gt;
 &lt;p&gt;The benchmark has limits and we would rather say them than have you find them.&lt;/p&gt;
 &lt;p&gt;Start with the most obvious one: we built Lore, we designed this benchmark, we ran it,
@@ -300,14 +318,16 @@ and Lore comes out on top. That is a conflict of interest and you should read th
 with it in mind. The best evidence we can offer that we took it seriously is the audit we
 mentioned up top: our first cut had the competitors at a flat zero, we did not like how
 good that looked for us, we dug in, and the zero turned out to be our bug, not their
-failure. We fixed it and the competitors climbed to a tie on the frontier model. We still
-almost certainly did not tune mem0 or mnemonic as well as their own authors would. If you
-maintain one of these tools and we got your configuration wrong, tell us and we will
+failure. We fixed it and the competitors climbed to near-parity on the frontier model. We
+still almost certainly did not tune mem0 or mnemonic as well as their own authors would. If
+you maintain one of these tools and we got your configuration wrong, tell us and we will
 re-run it and update the numbers.&lt;/p&gt;
 &lt;p&gt;We did not meter the competitors’ third-party backends ourselves, so their totals are
 visible cost plus a small off-bill charge, not a full accounting. The reliability gap on
-cheaper models is real, but on the frontier model it closes to a tie, and we showed that
-rather than bury it. Where the numbers are noisy, it is the vanilla arm that carries the
+cheaper models is real, but on the frontier model it narrows to a near-tie, and we showed
+that rather than bury it. And Lore is not the cheapest arm on the frontier cross-session
+run, it is the priciest; we put that in its own table rather than lead with the retention
+win alone. Where the numbers are noisy, it is the vanilla arm that carries the
 noise: the frontier single-long baseline swings run to run, some runs recovering a fact
 from their own compaction summary and some losing all four, the shape of degradation, not
 a clean failure. Lore’s cells came in at a flat 100% across every model and cap here, which
@@ -340,16 +360,21 @@ we had a tidy story ready about the model’s ceiling, not our layer. We did not
 own excuse enough to skip the check, and the check killed it. The facts were captured,
 embedded, and searchable; the injection path returned nothing whenever a project had no
 promoted long-term knowledge yet, so on a fresh project it handed the model an empty
-context. Fixing that flipped the arm from 0% to 100% on both cheaper models. The benchmark
-did not just score the product. It kept telling us where it was broken, including the times
-we would rather have blamed the model.&lt;/p&gt;
+context. Fixing that flipped the arm from 0% to 100% on both cheaper models. And it did not
+stop at retention: measuring the cross-session bill turned up two ways Lore was busting the
+prompt cache more than it needed to, a recalled-memory block that re-priced the whole system
+prefix on first injection, and a compression layer that oscillated turn to turn; fixing both
+cut the frontier cross-session cost from about $6.22 to $5.20. The benchmark did not just
+score the product. It kept telling us where it was broken, including the times we would
+rather have blamed the model.&lt;/p&gt;
 &lt;p&gt;We have claimed that memory is table stakes and that the real value is active context
-management. This is the shape of the evidence. On a frontier model, a good store ties us on
-retention, and Lore’s win is fewer steps and a bill you can fully account for. On the
-cheaper models people actually run at scale, the win is retention itself, because those
-models do not reliably remember to drive a store by hand, and Lore does not ask them to. We
-could always &lt;em&gt;feel&lt;/em&gt; that difference. Putting a test around it, and being honest when the
-test caught us, is how we keep improving it.&lt;/p&gt;
+management. This is the shape of the evidence. On a frontier model, a good store lands near
+Lore on retention, and Lore’s edge is fewer steps and a bill you can fully account for,
+paid against a small cost premium we are still working down. On the cheaper models people
+actually run at scale, the win is retention itself, because those models do not reliably
+remember to drive a store by hand, and Lore does not ask them to. We could always &lt;em&gt;feel&lt;/em&gt;
+that difference. Putting a test around it, and being honest when the test caught us, both on
+what we got wrong and on where we still cost more, is how we keep improving it.&lt;/p&gt;
 &lt;section data-footnotes class=&quot;footnotes&quot;&gt;&lt;h2 class=&quot;sr-only&quot; id=&quot;footnote-label&quot;&gt;Footnotes&lt;/h2&gt;
 &lt;ol&gt;
 &lt;li id=&quot;user-content-fn-meters&quot;&gt;
@@ -358,7 +383,7 @@ differently. On the Lore arm, Lore manages the window and proxies the model call
 OpenCode records zero token usage for those turns, so Lore’s dollars come from Lore’s own
 cost ledger while vanilla’s come from OpenCode’s usage stream. Both meters multiply the
 same token counts by the same models.dev prices, so the numbers are comparable, but they
-are two meters, not one, and we would rather you know that than assume otherwise. &lt;a href=&quot;#user-content-fnref-meters&quot; data-footnote-backref=&quot;&quot; aria-label=&quot;Back to reference 1&quot; class=&quot;data-footnote-backref&quot;&gt;↩&lt;/a&gt;&lt;/p&gt;
+are two meters, not one, and we would rather you know that than assume otherwise. &lt;a href=&quot;#user-content-fnref-meters&quot; data-footnote-backref=&quot;&quot; aria-label=&quot;Back to reference 1&quot; class=&quot;data-footnote-backref&quot;&gt;↩&lt;/a&gt; &lt;a href=&quot;#user-content-fnref-meters-2&quot; data-footnote-backref=&quot;&quot; aria-label=&quot;Back to reference 1-2&quot; class=&quot;data-footnote-backref&quot;&gt;↩&lt;sup&gt;2&lt;/sup&gt;&lt;/a&gt;&lt;/p&gt;
 &lt;/li&gt;
 &lt;li id=&quot;user-content-fn-zeros&quot;&gt;
 &lt;p&gt;Our first instinct was that the competitor zeros had to be a harness bug. They
