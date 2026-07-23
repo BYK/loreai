@@ -20,6 +20,7 @@ import {
   resetWorkerModelState,
   clearModelDataCache,
   lookupProviderRoute,
+  _setModelDataForTest,
   type ModelsDevEntry,
 } from "../src/worker-model";
 // Capability consumers — asserted end-to-end against the real merge so the
@@ -1484,6 +1485,85 @@ describe("family-based worker resolution", () => {
     expect(result?.providerID).toBe("anthropic");
     // Hardcoded WORKER_DEFAULTS offline fallback (current newest sonnet).
     expect(result?.modelID).toBe("claude-sonnet-5");
+  });
+
+  test("github-copilot non-claude session resolves to a /chat/completions-capable worker (gpt-5-mini, not gpt-5.4-mini)", async () => {
+    // Regression for the Copilot import 400: gpt-5.4-mini is /responses-only on
+    // Copilot, so the background worker (Chat Completions path) 400s with
+    // "unsupported_api_for_model". The non-claude Copilot worker must default to
+    // gpt-5-mini, which Copilot serves on /chat/completions (live-verified).
+    await warmCache({
+      "github-copilot": {
+        api: "https://api.githubcopilot.com",
+        models: {
+          // Expensive session model → triggers cost-aware Copilot worker pick.
+          "gpt-5.4": {
+            id: "gpt-5.4",
+            cost: { input: 2, output: 10, cache_read: 0.2 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "github-copilot",
+      model: "gpt-5.4",
+    });
+
+    expect(result?.providerID).toBe("github-copilot");
+    expect(result?.modelID).toBe("gpt-5-mini");
+    expect(result?.modelID).not.toBe("gpt-5.4-mini");
+  });
+
+  test("github-copilot claude session resolves to claude-sonnet-4.6 (chat/completions-capable)", async () => {
+    await warmCache({
+      "github-copilot": {
+        api: "https://api.githubcopilot.com",
+        models: {
+          "claude-opus-4.8": {
+            id: "claude-opus-4.8",
+            cost: { input: 5, output: 25, cache_read: 0.5 },
+            limit: LIMIT,
+          },
+        },
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "github-copilot",
+      model: "claude-opus-4.8",
+    });
+
+    expect(result?.providerID).toBe("github-copilot");
+    expect(result?.modelID).toBe("claude-sonnet-4.6");
+  });
+
+  test("github-copilot CHEAP responses-only session is still remapped off /responses (not echoed)", async () => {
+    // Regression for the live-worker echo gap: gpt-5.4-mini is cheap ($0.75 <
+    // $1.5 threshold) AND /responses-only. The old code only remapped Copilot
+    // models on the EXPENSIVE branch, so a cheap responses-only session model
+    // fell through to the fallback echo → worker sent gpt-5.4-mini to
+    // /chat/completions → 400. The Copilot remap must fire regardless of cost.
+    resetWorkerModelState();
+    _setModelDataForTest({
+      "gpt-5.4-mini": {
+        id: "gpt-5.4-mini",
+        cost: { input: 0.75, output: 4.5, cache_read: 0.19 },
+        limit: LIMIT,
+      },
+    });
+
+    const result = getWorkerModel({
+      providerID: "github-copilot",
+      model: "gpt-5.4-mini",
+    });
+
+    expect(result?.providerID).toBe("github-copilot");
+    // Must NOT echo the responses-only session model.
+    expect(result?.modelID).not.toBe("gpt-5.4-mini");
+    expect(result?.modelID).toBe("gpt-5-mini");
+    resetWorkerModelState();
   });
 
   test("unknown provider: lineage-aware pick favors the closest cheaper tier, newest member", async () => {
