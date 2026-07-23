@@ -61,7 +61,7 @@ const HEADER_SIZE = 32;
  * ~310 MB; 2 GiB is a generous ceiling that no legitimate release approaches
  * while staying well under the point where the allocation itself would crash.
  */
-const MAX_OUTPUT_SIZE = 2 * 1024 * 1024 * 1024;
+export const MAX_OUTPUT_SIZE = 2 * 1024 * 1024 * 1024;
 
 /** Parsed TRDIFF10 header fields */
 export type PatchHeader = {
@@ -436,10 +436,7 @@ let loadCounter = 0;
 
 async function loadOldBinary(oldPath: string): Promise<OldReader> {
   loadCounter += 1;
-  const tempCopy = join(
-    tmpdir(),
-    `lore-patch-old-${process.pid}-${loadCounter}`,
-  );
+  const tempCopy = join(tmpdir(), `binpatch-old-${process.pid}-${loadCounter}`);
   // Tracked outside the try so the catch can release a handle that was opened
   // before a later step (e.g. stat) failed — otherwise the fd would leak.
   let handle: FileHandle | undefined;

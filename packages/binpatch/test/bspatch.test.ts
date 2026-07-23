@@ -33,7 +33,7 @@ import {
   applyPatchToMemory,
   offtin,
   parsePatchHeader,
-} from "../src/cli/lib/bspatch";
+} from "../src/bspatch";
 
 // ---------------------------------------------------------------------------
 // Helpers

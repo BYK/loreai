@@ -16,10 +16,9 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compareVersions, getConfigDir } from "./binary";
+import { compareVersions, getConfigDir, getPatchCache } from "./binary";
 import { VERSION } from "../version";
 import { prefetchNightlyPatches, prefetchStablePatches } from "./delta-upgrade";
-import { cleanupPatchCache } from "./patch-cache";
 import {
   fetchLatestFromGitHub,
   fetchLatestNightlyVersion,
@@ -226,7 +225,7 @@ async function maybePrefetchPatches(
 
   // Opportunistic cleanup of stale cached patches
   try {
-    await cleanupPatchCache();
+    await getPatchCache().cleanup();
   } catch {
     /* ignore */
   }

@@ -21,6 +21,7 @@ import {
 import { chmod, copyFile, mkdir, unlink } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import { compare as semverCompare } from "semver";
+import { makeCache, type PatchCache } from "binpatch";
 import { VERSION } from "../version";
 import { stringifyUnknown, UpgradeError } from "./errors";
 
@@ -358,4 +359,16 @@ export function getConfigDir(): string {
   const home =
     process.env.HOME ?? process.env.USERPROFILE ?? require("node:os").homedir();
   return join(home, ".lore");
+}
+
+/** Subdirectory (under the config dir) where delta patches are cached. */
+const PATCH_CACHE_DIR = "patch-cache";
+
+/**
+ * The delta-patch cache, rooted at `<configDir>/patch-cache`. This is the one
+ * place the Lore-specific cache location is bound to the generic `binpatch`
+ * cache; consumers call `.save()/.load()/.cleanup()/.clear()` on the result.
+ */
+export function getPatchCache(): PatchCache {
+  return makeCache(join(getConfigDir(), PATCH_CACHE_DIR));
 }

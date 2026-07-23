@@ -23,13 +23,17 @@
 import {
   compareVersions,
   GITHUB_RELEASES_URL,
+  getPatchCache,
   getPlatformBinaryName,
   getUserAgent,
   isDowngrade,
   isNightlyVersion,
 } from "./binary";
-import { applyPatchChainInMemory, parsePatchHeader } from "./bspatch";
-import { makeByteProgress } from "./progress";
+import {
+  applyPatchChainInMemory,
+  makeByteProgress,
+  parsePatchHeader,
+} from "binpatch";
 import { spanDeltaUpgrade, type DeltaUpgradeTelemetry } from "../../sentry";
 import { VERSION } from "../version";
 import {
@@ -39,7 +43,6 @@ import {
   listTags,
   type OciManifest,
 } from "./ghcr";
-import { loadCachedChain, savePatchesToCache } from "./patch-cache";
 
 /** Maximum stable patches to chain before falling back to full download */
 const MAX_STABLE_CHAIN_DEPTH = 10;
@@ -665,7 +668,9 @@ async function resolveAndApplyDelta(
 
   // Save to cache for future offline upgrades, then apply
   if (chain.steps) {
-    savePatchesToCache(chain, chain.steps).catch(() => {});
+    getPatchCache()
+      .save(chain, chain.steps)
+      .catch(() => {});
   }
 
   const r = await applyChainAndReturn(chain, oldBinaryPath, destPath);
@@ -678,7 +683,7 @@ async function tryLoadCachedChain(
   targetVersion: string,
 ): Promise<PatchChain | null> {
   try {
-    return await loadCachedChain(currentVersion, targetVersion);
+    return await getPatchCache().load(currentVersion, targetVersion);
   } catch {
     return null;
   }
@@ -811,7 +816,7 @@ async function prefetchAndCache(
     return;
   }
 
-  await savePatchesToCache(chain, chain.steps);
+  await getPatchCache().save(chain, chain.steps);
 }
 
 /**
