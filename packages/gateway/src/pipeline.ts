@@ -791,6 +791,25 @@ export function ltmEntryKeys(
     .sort();
 }
 
+/**
+ * A delta baseline that surfaces the FULL current set as "changed".
+ *
+ * The delta path (`detectSurfacedMutations`) reports an entry only when its
+ * CURRENT content hash differs from the hash recorded in the surfaced-set
+ * baseline. To surface every entry on FIRST injection — where there is no prior
+ * system[2] pin to diff against — we seed the baseline with each id paired with
+ * an EMPTY hash sentinel (`"<id>:"`). Every entry's real hash differs from ""
+ * so the whole set surfaces once, then the appended block records the true
+ * hashes and the surfaced set advances normally (no re-fire on later turns).
+ *
+ * This mirrors the material-change / `MAX_DELTA_BLOCKS` coalesce path, which
+ * likewise re-captures the full set by diffing current content against a
+ * stale-hash baseline — here the "stale" hash is simply empty.
+ */
+export function fullSurfaceBaseline(ids: Iterable<string>): string[] {
+  return [...ids].map((id) => `${id}:`).sort();
+}
+
 /** system[1] (stable LTM) cache breakpoint TTL in ms. Documents the 1h
  *  `cache_control` TTL carried by the system[1] block. As of v45 system[1] is
  *  frozen for the session's life and never recomputed mid-session, so an idle
@@ -1525,7 +1544,23 @@ function hasMaterialLtmDelta(input: {
  *
  * @internal Exported for tests.
  */
-export function detectSurfacedMutations(surfacedKeys: string[] | undefined): {
+export function detectSurfacedMutations(
+  surfacedKeys: string[] | undefined,
+  // Content resolver for SYNTHETIC context-source entries (category
+  // `recalled`, ids `d:<id>`/`t:<id>` from distillation/temporal folding). These
+  // are point-in-time SNAPSHOTS that do NOT live in the `knowledge` table, so
+  // `ltm.get`/`getByLogical` can never resolve them — without this map they'd be
+  // silently dropped (never surfaced, never rendered), regressing the default
+  // `contextSources: ["distillation"]` passive-fact feature. Keyed by the same
+  // id space as `surfacedKeys` (`d:<id>`/`t:<id>`). A synthetic's content is
+  // immutable for a given id, so its hash only mismatches on FIRST surface —
+  // exactly the turn its entry is present in this map — after which the hash
+  // matches and no content lookup is needed.
+  syntheticEntries?: Map<
+    string,
+    { category: string; title: string; content: string }
+  >,
+): {
   changed: Array<{
     id: string;
     category: string;
@@ -1562,15 +1597,39 @@ export function detectSurfacedMutations(surfacedKeys: string[] | undefined): {
     const logicalId = ltm.logicalIdOf(id);
     const current = ltm.get(id) ?? ltm.getByLogical(logicalId);
     if (!current) {
+      // Not a resolvable `knowledge` row. Before treating it as a non-knowledge
+      // synthetic, check the context-source snapshot map: distillation/temporal
+      // facts (`d:`/`t:`) are folded into the selection but live outside the
+      // knowledge table, so their content must come from the current turn's
+      // `entries`, not the DB. Surface on hash mismatch (the first-surface turn)
+      // so they reach the wire via the durable delta — parity with the old
+      // system[2] render.
+      const synthetic = syntheticEntries?.get(id);
+      if (synthetic) {
+        const currentHash = surfaceSignature(
+          synthetic.title,
+          synthetic.content,
+        );
+        if (currentHash !== surfacedHash) {
+          changed.push({
+            id,
+            category: synthetic.category,
+            title: synthetic.title,
+            content: synthetic.content,
+          });
+        }
+        continue;
+      }
       // Null resolution means EITHER a genuinely deleted knowledge entry OR an
       // id that was never a `knowledge` row at all (e.g. lat.md synthetics,
       // which forSession injects as KnowledgeEntry-shaped rows with ids like
-      // `file#Heading` that live in lat_sections). Only the former is a real
-      // supersession — classify as removed ONLY when the logical id is actually
-      // tombstoned. Otherwise the model would be told to ignore still-valid
-      // pinned knowledge, and (append-only) that false removal would be frozen
-      // into an immutable block + advance the surfaced set past a non-knowledge
-      // id.
+      // `file#Heading` that live in lat_sections; or a context-source snapshot
+      // that has left the current selection and so is absent from the map on a
+      // later turn). Only a real knowledge deletion is a supersession — classify
+      // as removed ONLY when the logical id is actually tombstoned. Otherwise the
+      // model would be told to ignore still-valid pinned knowledge, and
+      // (append-only) that false removal would be frozen into an immutable block
+      // + advance the surfaced set past a non-knowledge id.
       if (ltm.isTombstoned(logicalId)) removedIds.push(id);
       continue;
     }
@@ -1816,8 +1875,9 @@ export function appendKnowledgePromptDelta(input: {
   //   - a removal/change ALREADY surfaced by a prior block has left the surfaced
   //     set, so a PERSISTENT mutation (e.g. 66 pinned entries genuinely gone)
   //     fires exactly once, not every turn.
-  // `nextKeys`/`entries` are retained on the input for the gate sites
-  // (hasMaterialLtmDelta) but are intentionally unused here.
+  // `nextKeys` is retained on the input for the gate sites (hasMaterialLtmDelta).
+  // `entries` supplies content for SYNTHETIC context-source ids (see
+  // syntheticEntries below); knowledge-row content is re-derived from the DB.
   let blocks = listSessionPromptDeltas(input.sessionID);
   // Bound pathological growth: if too many blocks have accumulated without a
   // reshuffle to coalesce them, clear them and re-derive ONE cumulative block
@@ -1829,7 +1889,28 @@ export function appendKnowledgePromptDelta(input: {
     blocks = [];
   }
   const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
-  const { changed, removedIds } = detectSurfacedMutations(surfacedKeys);
+  // Context-source snapshots (category `recalled`, ids `d:`/`t:`) don't live in
+  // the knowledge table, so detectSurfacedMutations can't resolve their content
+  // from the DB — supply it from this turn's selection. A synthetic's content
+  // is immutable per id, so it only needs resolving on its first-surface turn,
+  // which is exactly when it's present in `input.entries`.
+  const syntheticEntries = new Map<
+    string,
+    { category: string; title: string; content: string }
+  >();
+  for (const e of input.entries ?? []) {
+    if (e.category === ltm.RECALLED_CONTEXT_CATEGORY) {
+      syntheticEntries.set(e.id, {
+        category: e.category,
+        title: e.title,
+        content: e.content,
+      });
+    }
+  }
+  const { changed, removedIds } = detectSurfacedMutations(
+    surfacedKeys,
+    syntheticEntries,
+  );
   const messages = buildKnowledgeDeltaMessage(
     changed,
     removedIds,
@@ -7124,17 +7205,23 @@ async function handleConversationTurn(
   const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
   resolveToolResults(loreMessages);
 
-  // --- 6. LTM injection (3-block system prompt for cache efficiency) ---
+  // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
   // system[0]: Host prompt              [no cache_control]
   // system[1]: Stable LTM (preferences) [cache_control: 1h] — pinned ≥1h
-  // system[2]: Context-bound LTM        [no cache_control]  — diff-pinned
   //
   // system[0]+[1] form a stable prefix cached at 1h TTL (written at 2×
-  // cost, read at 0.1×). system[2] rides the conversation cache (5m TTL,
-  // 1.25×). When context-bound LTM changes (turn 1→2, curation), only
-  // system[2] and messages are re-processed; system[0]+[1] are cache reads.
-  let stableLtmText: string | undefined; // block 2: preferences
-  let ltmText: string | undefined; // block 3: context-bound entries
+  // cost, read at 0.1×). Context-bound LTM (gotchas/patterns/architecture +
+  // distillation/temporal context-sources) is NO LONGER emitted as a system[2]
+  // block — it rides the durable prompt-delta path from its FIRST injection
+  // onward (appended [user,assistant] pair at a frozen conversation-tail
+  // position, replayed byte-identically, re-anchored on compression). This
+  // removes the once-per-session first-population bust that a system[2] block
+  // caused (amplified on the OpenAI/OpenRouter path, where the whole system
+  // string shares a single cache_control breakpoint). `ltmText` is retained as
+  // the (now always-undefined) system[2] slot for clarity; the pin/cache
+  // bookkeeping below survives purely as the delta's diff baseline.
+  let stableLtmText: string | undefined; // block 2: preferences (system[1])
+  let ltmText: string | undefined; // retired system[2] slot — always undefined
   let pendingKnowledgeDelta:
     | {
         previousKeys: string[] | undefined;
@@ -7466,14 +7553,13 @@ async function handleConversationTurn(
               pinned != null && pinned.formatted === cached.formatted;
 
           if (pinned && setUnchanged) {
-            // Same entry set (or identical text) — keep the pinned text to
-            // preserve the cache prefix. Zero bust on pure re-ranking.
-            ltmText = pinned.formatted;
-            // Keep the session cache in lock-step with the pin so the persisted
-            // ltmCacheText never diverges from ltmPinText. Otherwise a restart
-            // would reload cache=freshText / pin=oldText, and the warm-cache
-            // byte-equality check would spuriously re-pin (one needless bust)
-            // and drop entryKeys. (Addresses review finding S1.)
+            // Same entry set (or identical text) — nothing to surface. The full
+            // set is already carried by the durable prompt-delta (appended on
+            // first injection), so we do NOT emit system[2] (`ltmText` stays
+            // undefined). Keep the session cache in lock-step with the pin so the
+            // persisted ltmCacheText never diverges from ltmPinText (a restart
+            // would otherwise reload cache=freshText / pin=oldText and spuriously
+            // re-pin). The pin is baseline-only metadata now — never on the wire.
             if (cachedKeys && cached.formatted !== pinned.formatted) {
               ltmSessionCache.set(sessionID, {
                 formatted: pinned.formatted,
@@ -7491,22 +7577,21 @@ async function handleConversationTurn(
               nextKeys: cachedKeys,
             })
           ) {
-            // Material LTM changed mid-session. Do NOT rewrite system[2]: it is
-            // before the conversation cache breakpoint, so changing it would
-            // throw away the cached prefix. Keep the exact pinned bytes and
-            // append a durable prompt delta at the conversation tail instead.
+            // Material LTM changed mid-session. Surface the change via the
+            // durable prompt delta at the conversation tail; system[2] is never
+            // emitted (`ltmText` stays undefined), so the system prefix is never
+            // busted.
             //
             // CRITICAL: keep `entryKeys` frozen at the baseline that matches the
-            // pinned `formatted` bytes — do NOT advance it to cachedKeys. The
-            // durable delta is coalesced into a single row that is REPLACED each
-            // turn, so it must describe the CUMULATIVE delta between the frozen
-            // system[2] bytes and the current selection. If we advanced the
-            // baseline, the next turn's delta would only describe that turn's
-            // increment and the coalesced row would silently drop earlier
-            // supersessions (leaving stale entries pinned in system[2] with no
-            // correcting delta). The diff is recomputed from the frozen baseline
-            // every turn → re-upserting the same (frozen, current) pair yields
-            // byte-identical content (idempotent, no extra cache bust).
+            // set the durable delta was last coalesced against — do NOT advance
+            // it to cachedKeys. The delta is coalesced into a single row that is
+            // REPLACED each turn, so it must describe the CUMULATIVE delta from
+            // the frozen baseline. If we advanced the baseline, the next turn's
+            // delta would only describe that turn's increment and the coalesced
+            // row would silently drop earlier supersessions. The diff is
+            // recomputed from the frozen baseline every turn → re-upserting the
+            // same (frozen, current) pair yields byte-identical content
+            // (idempotent, no extra cache bust).
             pendingKnowledgeDelta = {
               previousKeys: pinned.entryKeys,
               nextKeys: cachedKeys,
@@ -7524,14 +7609,58 @@ async function handleConversationTurn(
             });
             ltmDirty = true;
             pinDirty = true;
-            ltmText = pinned.formatted;
-          } else {
-            // First injection — pin the new text along with its entry-key
-            // identity. There is no earlier system[2] prefix to preserve yet.
-            const newPin = { ...cached, entryKeys: cachedKeys };
-            ltmPinnedText.set(sessionID, newPin);
+            // ltmText intentionally left undefined: no system[2] block.
+          } else if (freshContextEntries?.length && cachedKeys) {
+            // First injection (no prior system[2] pin). Historically this
+            // seeded system[2] (`ltmText = newPin.formatted`), which — because
+            // system[2] sits inside the cached system prefix — cost a full
+            // prefix re-creation the first turn context-bound LTM appeared
+            // (~90–174K tokens; amplified on the OpenAI/OpenRouter path, where
+            // the whole system string shares a single cache_control breakpoint).
+            //
+            // Instead, route the first injection through the SAME durable
+            // prompt-delta path that already carries mid-session changes: append
+            // a [user,assistant] pair at the conversation tail (byte-stable,
+            // replayed verbatim, re-anchored on compression). system[2] is never
+            // populated (`ltmText` stays undefined), so the system prefix is
+            // never busted by context-bound LTM.
+            //
+            // Seed the delta baseline with an EMPTY-hash sentinel per current id
+            // (`fullSurfaceBaseline`) so `detectSurfacedMutations` surfaces the
+            // FULL set once (each entry's real hash differs from ""). The
+            // appended block records the true hashes, so the surfaced set
+            // advances and later turns don't re-fire — identical mechanics to
+            // the material-change branch, just with an empty baseline instead of
+            // a stale pinned one. We pin the RENDERED text bytes so the persisted
+            // pin (`ltmPinnedText`) keeps its entry-key identity as the baseline
+            // for subsequent material-delta detection, but we do NOT emit it as
+            // system[2] (`ltmText` remains undefined).
+            pendingKnowledgeDelta = {
+              previousKeys: fullSurfaceBaseline(entryKeyIds(cachedKeys)),
+              nextKeys: cachedKeys,
+              entries: freshContextEntries,
+              overflow: freshContextOverflow,
+            };
+            ltmPinnedText.set(sessionID, {
+              formatted: cached.formatted,
+              tokenCount: cached.tokenCount,
+              entryKeys: cachedKeys,
+            });
             pinDirty = true;
-            ltmText = newPin.formatted;
+            // ltmText intentionally left undefined: no system[2] block.
+          } else if (cached) {
+            // Fallback: a `cached` block reached here without matching the
+            // first-injection / material-change / setUnchanged branches — e.g.
+            // the empty-selection removal path above (cachedKeys=[], no fresh
+            // entries), which already queued its removal delta. Keep the pin as
+            // baseline metadata but do NOT emit system[2] (`ltmText` stays
+            // undefined) — the durable delta is the sole carrier.
+            ltmPinnedText.set(sessionID, {
+              ...cached,
+              entryKeys: cachedKeys ?? ltmPinnedText.get(sessionID)?.entryKeys,
+            });
+            pinDirty = true;
+            // ltmText intentionally left undefined: no system[2] block.
           }
         }
       }
@@ -7692,9 +7821,9 @@ async function handleConversationTurn(
           const pinned = ltmPinnedText.get(sessionID);
 
           if (pinned && sameEntryKeys(pinned.entryKeys, entryKeys)) {
-            // Same entry set — keep the pinned text to preserve cache prefix
-            ltmText = pinned.formatted;
-            setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
+            // Same entry set — nothing to surface. The durable delta already
+            // carries the full set; do NOT emit system[2] (`ltmText` undefined).
+            setLtmTokens(stableTokens, sessionID);
             saveSessionTracking(sessionID, {
               ltmCacheText: formatted,
               ltmCacheTokens: tokenCount,
@@ -7708,16 +7837,15 @@ async function handleConversationTurn(
               nextKeys: entryKeys,
             })
           ) {
-            // Material LTM changed during emergency refresh. Preserve the exact
-            // cached system[2] bytes and surface the change as a durable prompt
-            // delta instead of rewriting the pre-breakpoint system block.
+            // Material LTM changed during emergency refresh. Surface the change
+            // as a durable prompt delta; system[2] is not emitted.
             //
-            // CRITICAL: keep `entryKeys` frozen at the baseline matching the
-            // pinned bytes — do NOT advance to the current `entryKeys`. The
-            // coalesced durable delta is replaced each turn, so it must describe
-            // the CUMULATIVE delta from the frozen system[2] to the current
-            // selection; advancing the baseline would drop earlier supersessions
-            // from the single row. (See the matching note on the Layer-1 path.)
+            // CRITICAL: keep `entryKeys` frozen at the baseline matching the set
+            // the durable delta was last coalesced against — do NOT advance to
+            // the current `entryKeys`. The coalesced durable delta is replaced
+            // each turn, so it must describe the CUMULATIVE delta from the frozen
+            // baseline to the current selection; advancing the baseline would
+            // drop earlier supersessions from the single row.
             const frozenKeys = pinned.entryKeys;
             pendingKnowledgeDelta = {
               previousKeys: frozenKeys,
@@ -7735,8 +7863,7 @@ async function handleConversationTurn(
               formatted: pinned.formatted,
               tokenCount: pinned.tokenCount,
             });
-            ltmText = pinned.formatted;
-            setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
+            setLtmTokens(stableTokens, sessionID);
             saveSessionTracking(sessionID, {
               ltmCacheText: pinned.formatted,
               ltmCacheTokens: pinned.tokenCount,
@@ -7744,12 +7871,21 @@ async function handleConversationTurn(
               ltmPinTokens: pinned.tokenCount,
               ltmPinKeys: JSON.stringify(frozenKeys),
             });
+            // ltmText intentionally left undefined: no system[2] block.
           } else {
-            // First Layer 4 injection — pin the new text + identity. There is no
-            // earlier system[2] prefix to preserve yet.
+            // First Layer 4 injection of context-bound LTM. Route it through the
+            // durable delta (full-surface baseline) rather than seeding system[2]
+            // — same rationale as the step-6 first-injection path. Layer 4 busts
+            // the prefix anyway, but keeping context-bound LTM out of system[2]
+            // means it stays cache-stable on the NEXT (non-emergency) turn too.
+            pendingKnowledgeDelta = {
+              previousKeys: fullSurfaceBaseline(entryKeyIds(entryKeys)),
+              nextKeys: entryKeys,
+              entries: contextEntries,
+              overflow: contextOverflow,
+            };
             ltmPinnedText.set(sessionID, { formatted, tokenCount, entryKeys });
-            ltmText = formatted;
-            setLtmTokens(stableTokens + tokenCount, sessionID);
+            setLtmTokens(stableTokens, sessionID);
             saveSessionTracking(sessionID, {
               ltmCacheText: formatted,
               ltmCacheTokens: tokenCount,
@@ -7757,6 +7893,7 @@ async function handleConversationTurn(
               ltmPinTokens: tokenCount,
               ltmPinKeys: JSON.stringify(entryKeys),
             });
+            // ltmText intentionally left undefined: no system[2] block.
           }
           refreshed = true;
           log.info(
@@ -7769,17 +7906,17 @@ async function handleConversationTurn(
       if (!refreshed) {
         const pinned = ltmPinnedText.get(sessionID);
         if (pinned) {
-          // No fresh context-bound entries were selected, but removing an
-          // already-cached system[2] block would still bust the prefix. Keep the
-          // existing pin byte-for-byte and append a durable removal delta so the
-          // model knows the older pinned entries are superseded.
+          // No fresh context-bound entries were selected. Append a durable
+          // removal delta so the model knows the older entries are superseded;
+          // system[2] is not emitted.
           //
-          // CRITICAL: keep entryKeys FROZEN at the baseline matching the pinned
-          // bytes — do NOT wipe to []. The coalesced durable delta is replaced
-          // each turn and must describe the full cumulative frozen→current
-          // (empty) supersession. Wiping the baseline to [] here (in memory AND
-          // persisted) makes the next turn compute previous=[]→next=[] = no
-          // removals, dropping every earlier supersession from the single row.
+          // CRITICAL: keep entryKeys FROZEN at the baseline matching the set the
+          // durable delta was last coalesced against — do NOT wipe to []. The
+          // coalesced durable delta is replaced each turn and must describe the
+          // full cumulative frozen→current (empty) supersession. Wiping the
+          // baseline to [] here (in memory AND persisted) makes the next turn
+          // compute previous=[]→next=[] = no removals, dropping every earlier
+          // supersession from the single row.
           const frozenKeys = pinned.entryKeys;
           pendingKnowledgeDelta = {
             previousKeys: frozenKeys,
@@ -7796,8 +7933,7 @@ async function handleConversationTurn(
             formatted: pinned.formatted,
             tokenCount: pinned.tokenCount,
           });
-          ltmText = pinned.formatted;
-          setLtmTokens(stableTokens + pinned.tokenCount, sessionID);
+          setLtmTokens(stableTokens, sessionID);
           saveSessionTracking(sessionID, {
             ltmCacheText: pinned.formatted,
             ltmCacheTokens: pinned.tokenCount,
@@ -7805,8 +7941,9 @@ async function handleConversationTurn(
             ltmPinTokens: pinned.tokenCount,
             ltmPinKeys: JSON.stringify(frozenKeys),
           });
+          // ltmText intentionally left undefined: no system[2] block.
           log.info(
-            "Context-bound LTM refresh returned no entries; preserving existing pinned system[2] for session",
+            "Context-bound LTM refresh returned no entries; superseding via durable delta for session",
             sessionID,
           );
         } else {

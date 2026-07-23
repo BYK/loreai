@@ -182,6 +182,70 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     expect(result.changed).toEqual([]);
   });
 
+  it("SYNTHETIC context-source (d:/t:) surfaces from the entries map on first surface (#961 fact-loss guard)", () => {
+    // Distillation/temporal context-source facts (category `recalled`, ids
+    // `d:<id>`/`t:<id>`) do NOT live in the `knowledge` table, so they can never
+    // resolve via ltm.get/getByLogical. Since system[2] was retired, the delta
+    // is their ONLY carrier — but detectSurfacedMutations re-derives content from
+    // the DB. Without the synthetic-entries resolver they'd be silently dropped
+    // (the default `contextSources:["distillation"]` regression). The resolver
+    // must surface them on their first-surface turn (sentinel/empty hash) so they
+    // reach the wire.
+    const synthId = "d:00000000-0000-0000-0000-0000000000aa";
+    const title = "Order defaults";
+    const content = "channel=WHOLESALE, region=EMEA, warehouse=WH-07";
+    const syntheticEntries = new Map([
+      [synthId, { category: ltm.RECALLED_CONTEXT_CATEGORY, title, content }],
+    ]);
+    // First surface: baseline seeds an EMPTY-hash sentinel (`<id>:`) so the
+    // synthetic's real hash differs → it must be reported as changed.
+    const surfaced = [`${synthId}:`];
+
+    const withResolver = detectSurfacedMutations(surfaced, syntheticEntries);
+    expect(withResolver.changed).toHaveLength(1);
+    expect(withResolver.changed[0].id).toBe(synthId);
+    expect(withResolver.changed[0].content).toBe(content);
+    expect(withResolver.changed[0].category).toBe(
+      ltm.RECALLED_CONTEXT_CATEGORY,
+    );
+    expect(withResolver.removedIds).toEqual([]);
+
+    // Mutation guard: WITHOUT the resolver (the pre-fix behavior), the synthetic
+    // resolves to nothing in the knowledge DB, is not tombstoned, and is silently
+    // dropped — neither changed nor removed. This is exactly the fact-loss bug.
+    const withoutResolver = detectSurfacedMutations(surfaced);
+    expect(withoutResolver.changed).toEqual([]);
+    expect(withoutResolver.removedIds).toEqual([]);
+  });
+
+  it("SYNTHETIC context-source does NOT re-fire once its real hash is surfaced (immutable snapshot)", () => {
+    // A synthetic's content is immutable for a given id, so after its first
+    // surface the surfaced key carries the real hash. On a later turn — even if
+    // the entry has dropped out of the selection and is absent from the map —
+    // the hash matches, so it must produce NO delta (no churn, no re-fire).
+    const synthId = "t:11111111-1111-1111-1111-1111111111bb";
+    const title = "Temporal aside";
+    const content = "the API base is https://api.internal.example";
+    const realHash = surfaceSignature(title, content);
+    const surfaced = [`${synthId}:${realHash}`];
+
+    // Even with the entry still present in the map, matching hash → no change.
+    const stillPresent = detectSurfacedMutations(
+      surfaced,
+      new Map([
+        [synthId, { category: ltm.RECALLED_CONTEXT_CATEGORY, title, content }],
+      ]),
+    );
+    expect(stillPresent.changed).toEqual([]);
+    expect(stillPresent.removedIds).toEqual([]);
+
+    // Absent from the map (dropped from this turn's selection) → still no change
+    // and — critically — NOT a false removal (it isn't a tombstoned knowledge id).
+    const absent = detectSurfacedMutations(surfaced);
+    expect(absent.changed).toEqual([]);
+    expect(absent.removedIds).toEqual([]);
+  });
+
   it("empty / undefined surfaced set → empty result", () => {
     expect(detectSurfacedMutations([])).toEqual({
       changed: [],
@@ -342,6 +406,36 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
 
     expect(wrote).toBe(true);
     expect(deltaText(sessionID)).toContain("After — materially changed body.");
+  });
+
+  it("WIRING: synthetic context-source (distillation) reaches the wire via the delta on first injection (#961)", () => {
+    // The default `contextSources:["distillation"]` folds distillation/temporal
+    // facts into forSession as synthetic entries (category `recalled`, id
+    // `d:<id>`). With system[2] retired, the durable delta is their only carrier.
+    // First injection seeds a full-surface baseline (empty-hash sentinels); the
+    // synthetic content must be sourced from `entries` (it isn't in the knowledge
+    // DB) and rendered into the persisted delta. Pre-fix, appendKnowledgePromptDelta
+    // dropped it and returned false (no row) — this test guards that regression.
+    const synthId = "d:22222222-2222-2222-2222-2222222222cc";
+    const title = "Order defaults";
+    const content =
+      "channel=WHOLESALE, region=EMEA, warehouse=WH-07, status=SUBMITTED";
+    const sessionID = `wiring-synthetic-${Date.now()}`;
+
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      // full-surface baseline: empty-hash sentinel per id (first injection)
+      previousKeys: [`${synthId}:`],
+      nextKeys: [keyOf(synthId, title, content)],
+      entries: [{ id: synthId, category: "recalled", title, content }],
+    });
+
+    expect(wrote).toBe(true);
+    const text = deltaText(sessionID);
+    expect(text).toContain(content);
+    expect(text).toContain("WHOLESALE");
   });
 
   it("key format matches ltmEntryKeys (the surfaced baseline producer)", () => {
