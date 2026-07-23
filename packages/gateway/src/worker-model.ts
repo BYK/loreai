@@ -1116,6 +1116,32 @@ function resolveGitHubCopilotWorker(sessionModelID: string): {
 }
 
 /**
+ * Parse the `LORE_WORKER_MODEL` env-var override into a `{providerID, modelID}`.
+ *
+ * Format: `"providerID/modelID"` (e.g. `openai/gpt-5.4-mini`) or a bare
+ * `"modelID"` which assumes the `anthropic` provider (the historical default).
+ * Returns `undefined` only for an unset/empty value.
+ *
+ * Single source of truth shared by the live worker-model selection
+ * ({@link getWorkerModel}) and standalone `lore import`, so the env override
+ * behaves identically in both paths.
+ */
+export function parseWorkerModelEnv(
+  envModel: string | undefined,
+): { providerID: string; modelID: string } | undefined {
+  if (!envModel) return undefined;
+  const slashIdx = envModel.indexOf("/");
+  if (slashIdx > 0) {
+    return {
+      providerID: envModel.slice(0, slashIdx),
+      modelID: envModel.slice(slashIdx + 1),
+    };
+  }
+  // No slash — assume anthropic provider (most common case).
+  return { providerID: "anthropic", modelID: envModel };
+}
+
+/**
  * Resolve the effective worker model for background calls.
  *
  * Checks (in order):
@@ -1141,18 +1167,8 @@ export function getWorkerModel(session?: {
   // configuration without per-project .lore.json (e.g. routing all workers
   // to MiniMax). Format: "providerID/modelID" or just "modelID" (defaults
   // to anthropic provider).
-  const envModel = process.env.LORE_WORKER_MODEL;
-  if (envModel) {
-    const slashIdx = envModel.indexOf("/");
-    if (slashIdx > 0) {
-      return {
-        providerID: envModel.slice(0, slashIdx),
-        modelID: envModel.slice(slashIdx + 1),
-      };
-    }
-    // No slash — assume anthropic provider (most common case)
-    return { providerID: "anthropic", modelID: envModel };
-  }
+  const envOverride = parseWorkerModelEnv(process.env.LORE_WORKER_MODEL);
+  if (envOverride) return envOverride;
 
   const cfg = loreConfig();
 

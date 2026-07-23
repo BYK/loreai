@@ -26,7 +26,7 @@ import {
   getLastSeenAuthProvider,
   type AuthCredential,
 } from "../auth";
-import { defaultModelForProvider } from "../worker-model";
+import { defaultModelForProvider, parseWorkerModelEnv } from "../worker-model";
 import { resolveProviderRoute } from "../config";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
@@ -748,7 +748,16 @@ export async function commandImport(
   const startOpts: StartOptions = { quiet: true, local: true };
   const { config, owned, shutdown } = await startGateway(startOpts);
   const cfg = loreConfig();
-  const cfgModel = cfg.workerModel ?? cfg.model;
+  // Worker-model resolution, highest priority first: the LORE_WORKER_MODEL env
+  // override (same parse the live worker path uses), then `.lore.json`
+  // `workerModel`, then the session `model`. Env parity matters here — a user
+  // who set LORE_WORKER_API_KEY + LORE_WORKER_UPSTREAM naturally also sets
+  // LORE_WORKER_MODEL, and silently ignoring it routes their key to the wrong
+  // provider's default model (e.g. anthropic/claude-* → 404 on api.openai.com).
+  const cfgModel =
+    parseWorkerModelEnv(process.env.LORE_WORKER_MODEL) ??
+    cfg.workerModel ??
+    cfg.model;
   const workerApiKey = config.workerApiKey;
 
   // When a dedicated worker key is used, honor LORE_WORKER_UPSTREAM (both
