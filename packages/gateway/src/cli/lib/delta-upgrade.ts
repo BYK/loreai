@@ -23,10 +23,13 @@ import {
 } from "./binary";
 import { GHCR_REGISTRY, GHCR_REPO } from "./ghcr";
 import {
+  type ByteProgress,
   type DeltaResult,
   type DeltaSource,
   ghcrSource,
   githubReleaseSource,
+  makeByteProgress,
+  type ProgressEvent,
   resolveAndApply,
   type SourceStrategy,
 } from "binpatch";
@@ -119,6 +122,10 @@ export async function attemptDeltaUpgrade(
       // Record where the chain resolved from so the final "ok" report can
       // attribute cache vs network; `offline_miss` is reported directly.
       let resolvedSource: DeltaSource | undefined;
+      // Render the apply-phase byte bar from binpatch's progress events. The
+      // bar is created lazily on the first `bytes` event (which carries the
+      // total) and fed per-hop deltas (events report cumulative `written`).
+      const applyBar = makeApplyProgress();
       try {
         const result = await resolveAndApply({
           source: sourceForChannel(channel),
@@ -128,6 +135,7 @@ export async function attemptDeltaUpgrade(
           destPath,
           cache: getPatchCache(),
           offline,
+          onProgress: applyBar.onEvent,
           telemetry: {
             onResolved: (info) => {
               resolvedSource = info.source;
@@ -177,9 +185,38 @@ export async function attemptDeltaUpgrade(
           `[lore] Delta upgrade failed (${msg}), falling back to full download`,
         );
         return null;
+      } finally {
+        applyBar.done();
       }
     },
   );
+}
+
+/**
+ * Adapt binpatch `ProgressEvent`s to the gateway's byte-progress bar. The bar
+ * is created on the first apply-phase `bytes` event (which carries the total),
+ * then advanced by the per-event delta (events report cumulative `written`).
+ * Purely cosmetic — never throws, never aborts the upgrade.
+ */
+function makeApplyProgress(): {
+  onEvent: (event: ProgressEvent) => void;
+  done: () => void;
+} {
+  let bar: ByteProgress | undefined;
+  let lastWritten = 0;
+  return {
+    onEvent: (event) => {
+      if (event.type === "bytes" && event.phase === "apply") {
+        if (!bar) {
+          bar = makeByteProgress("Applying patches", event.total);
+        }
+        const delta = event.written - lastWritten;
+        lastWritten = event.written;
+        if (delta > 0) bar.onProgress(delta);
+      }
+    },
+    done: () => bar?.done(),
+  };
 }
 
 // ---------------------------------------------------------------------------
