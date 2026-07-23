@@ -668,11 +668,13 @@ export async function commandImport(
   // built-in default. Track whether the provider was *explicitly* configured so
   // the no-credential message below doesn't tell a Copilot/OpenRouter user to
   // set an "anthropic key" they don't have.
-  const modelExplicit = cfg.model != null;
-  const defaultModel = cfg.model ?? {
-    providerID: "anthropic",
-    modelID: "claude-sonnet-4-6",
-  };
+  // Prefer `workerModel` over `model` since imports are background work.
+  const modelExplicit = cfg.model != null || cfg.workerModel != null;
+  const defaultModel = cfg.workerModel ??
+    cfg.model ?? {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-6",
+    };
 
   // Extraction needs a usable credential. `lore import` is a standalone CLI
   // process: it never proxies a conversation turn, so no client credential is
@@ -721,10 +723,48 @@ export async function commandImport(
     return;
   }
 
+  const workerUpstreams = config.workerUpstream
+    ? { anthropic: config.workerUpstream, openai: config.workerUpstream }
+    : { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI };
+
+  // `dedicatedWorkerKey` disables the in-adapter protocol-mismatch pre-flight
+  // (llm-adapter.ts) so a deliberately cross-provider key/model combo isn't
+  // rejected. But that guard also caught the common misconfiguration where a
+  // worker key is set with NO routing hint: it defaults to the anthropic
+  // upstream, and a non-`sk-ant-` key there is doomed. Without the guard that
+  // would fire one failed request + one Sentry capture PER CHUNK. Re-assert the
+  // check once here, pre-flight, and fail loudly with actionable guidance
+  // instead. Only applies when we'd hit the DEFAULT anthropic upstream (no
+  // explicit LORE_WORKER_UPSTREAM) with an anthropic-protocol model.
+  if (
+    workerApiKey &&
+    !config.workerUpstream &&
+    defaultModel.providerID === "anthropic" &&
+    !workerApiKey.startsWith("sk-ant-")
+  ) {
+    console.error(
+      `\n[lore] Can't import: LORE_WORKER_API_KEY is set but doesn't look like an\n` +
+        `[lore] Anthropic key (no \`sk-ant-\` prefix), and no target was configured,\n` +
+        `[lore] so it would be sent to Anthropic and rejected. Point it at the right\n` +
+        `[lore] provider, e.g.:\n` +
+        `[lore]\n` +
+        `[lore]   export LORE_WORKER_API_KEY=<a raw key for a provider Lore proxies>\n` +
+        `[lore]   export LORE_WORKER_UPSTREAM=https://api.openai.com/v1   # match your key\n` +
+        `[lore]   lore import\n` +
+        `[lore]\n` +
+        `[lore] Note: a GitHub Copilot / ChatGPT subscription token is NOT a usable\n` +
+        `[lore] raw key. If that's all you have, run \`lore run\` and send one message —\n` +
+        `[lore] Lore captures the live credential and imports automatically.`,
+    );
+    if (owned) await shutdown();
+    return;
+  }
+
   const llm = createGatewayLLMClient(
-    { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
+    workerUpstreams,
     getImportAuth,
     defaultModel,
+    { dedicatedWorkerKey: !!workerApiKey },
   );
 
   try {
