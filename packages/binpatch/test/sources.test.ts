@@ -8,6 +8,7 @@ import {
   ghcrSource,
   type GitHubRelease,
   getStableTargetSha256,
+  OciClient,
   type OciManifest,
   validateChainStep,
 } from "../src";
@@ -293,5 +294,50 @@ describe("ghcrSource resolveChain — SourceStrategy contract on network failure
     });
 
     await expect(source.resolveChain("1.0.0", "1.1.0")).resolves.toBeNull();
+  });
+});
+
+describe("OciClient.downloadBlob — redirect always carries a timeout signal", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("applies a timeout to the redirected blob fetch even when no signal is passed", async () => {
+    // First call: registry returns a 307 to blob storage. Second call: the
+    // redirect target. Capture the redirect call's signal — it MUST be a live
+    // AbortSignal (buildSignal's timeout) even though downloadBlob is called
+    // with signal=undefined (e.g. from prefetch), so a stalled Azure blob
+    // download can never hang the CLI forever.
+    let redirectSignal: AbortSignal | null | undefined;
+    let sawRedirectCall = false;
+    let call = 0;
+    globalThis.fetch = vi.fn(
+      async (_url: unknown, init?: { signal?: AbortSignal | null }) => {
+        call++;
+        if (call === 1) {
+          return new Response(null, {
+            status: 307,
+            headers: { location: "https://blob.example.com/obj" },
+          });
+        }
+        sawRedirectCall = true;
+        redirectSignal = init?.signal;
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      },
+    );
+
+    const client = new OciClient({
+      registry: "https://ghcr.io",
+      repo: "owner/project",
+      userAgent: "test/1.0.0",
+    });
+
+    // No signal argument — the redirect must still get a timeout signal.
+    const res = await client.downloadBlob("tok", "sha256:abc");
+    expect(res.status).toBe(200);
+    expect(sawRedirectCall).toBe(true);
+    expect(redirectSignal).toBeInstanceOf(AbortSignal);
+    expect(redirectSignal?.aborted).toBe(false);
   });
 });

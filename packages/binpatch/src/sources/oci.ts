@@ -294,7 +294,11 @@ export class OciClient {
       try {
         redirectResponse = await fetch(redirectUrl, {
           headers: { "User-Agent": this.userAgent },
-          signal,
+          // Apply the same blob timeout to the redirected (e.g. Azure Blob
+          // Storage) download. Passing the raw `signal` alone means no timeout
+          // when the caller supplied none (e.g. prefetch), so a stalled
+          // connection could hang the CLI forever.
+          signal: buildSignal(BLOB_TIMEOUT, signal),
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
