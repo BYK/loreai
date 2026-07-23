@@ -15,7 +15,8 @@ import {
   exportLoreFile,
 } from "@loreai/core";
 import { createGatewayLLMClient } from "../llm-adapter";
-import { resolveAuth } from "../auth";
+import { resolveAuth, getLastSeenAuthProvider } from "../auth";
+import { defaultModelForProvider } from "../worker-model";
 import { registerPendingImport } from "../pending-import";
 import type { GatewayConfig } from "../config";
 
@@ -129,29 +130,37 @@ export async function maybeAutoImport(
 
   const cfg = loreConfig();
   const modelExplicit = cfg.model != null;
-  const defaultModel = cfg.model ?? {
-    providerID: "anthropic",
-    modelID: "claude-sonnet-4-6",
-  };
+  const hasWorkerKey = !!gatewayConfig.workerApiKey;
+
+  // When the user has no explicit cfg.model, the extraction model must match
+  // whatever provider the session actually authenticated — not a hardcoded
+  // anthropic default (which would route a non-anthropic credential to the
+  // wrong upstream → protocol-mismatch). Resolve it per invocation from the
+  // authenticated / last-seen provider.
+  const resolveModel = (authedProviderID?: string) =>
+    cfg.model ??
+    defaultModelForProvider(
+      authedProviderID ?? getLastSeenAuthProvider() ?? undefined,
+    );
+
   const llm = createGatewayLLMClient(
     {
       anthropic: gatewayConfig.upstreamAnthropic,
       openai: gatewayConfig.upstreamOpenAI,
     },
     resolveAuth,
-    defaultModel,
+    resolveModel(),
   );
 
-  const hasWorkerKey = !!gatewayConfig.workerApiKey;
-
   const job = (authedProviderID?: string) => {
-    // The extraction runs on the configured default model. If the first turn
-    // authenticated a DIFFERENT provider (e.g. session=openai but default
-    // model=anthropic) and no credential resolves for the model's provider,
-    // the extraction can't authenticate — skip loudly rather than silently
-    // churning no-auth. A matching/agnostic credential (or worker key) proceeds.
+    const model = resolveModel(authedProviderID);
+    // The extraction runs on the resolved model. If the first turn
+    // authenticated a DIFFERENT provider than a pinned cfg.model and no
+    // credential resolves for the model's provider, the extraction can't
+    // authenticate — skip loudly rather than silently churning no-auth. A
+    // matching/agnostic credential (or worker key) proceeds.
     const usable =
-      hasWorkerKey || resolveAuth(undefined, defaultModel.providerID) != null;
+      hasWorkerKey || resolveAuth(undefined, model.providerID) != null;
     if (!usable) {
       // Re-register so a LATER authenticated turn retries. flushPendingImport
       // is one-shot (it clears `pending` before calling us), so without this a
@@ -169,12 +178,12 @@ export async function maybeAutoImport(
       if (
         modelExplicit &&
         authedProviderID &&
-        authedProviderID !== defaultModel.providerID
+        authedProviderID !== model.providerID
       ) {
         console.log(
           `[lore] Skipping knowledge import for now: your session uses ${authedProviderID}, ` +
-            `but import is configured for ${defaultModel.providerID}. ` +
-            `Send a message with ${defaultModel.providerID} and it will import automatically.`,
+            `but import is configured for ${model.providerID}. ` +
+            `Send a message with ${model.providerID} and it will import automatically.`,
         );
       } else {
         console.log(
@@ -188,7 +197,7 @@ export async function maybeAutoImport(
       llm,
       projectPath,
       results,
-      defaultModel,
+      model,
       hasWorkerKey,
     ).catch(() => {
       // Background import failed — non-fatal, don't alarm the user.
@@ -202,7 +211,7 @@ export async function maybeAutoImport(
   // backlog, and produce zero knowledge. Defer until the first authenticated
   // turn binds a credential (pipeline flushes via flushPendingImport()).
   const hasCredential =
-    hasWorkerKey || resolveAuth(undefined, defaultModel.providerID) != null;
+    hasWorkerKey || resolveAuth(undefined, resolveModel().providerID) != null;
 
   if (hasCredential) {
     console.log("[lore] Importing knowledge in background...");
