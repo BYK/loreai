@@ -11,6 +11,7 @@ export default defineConfig({
     alias: {
       "@loreai/core": path.resolve(__dirname, "packages/core/src"),
       "@loreai/gateway": path.resolve(__dirname, "packages/gateway/src"),
+      binpatch: path.resolve(__dirname, "packages/binpatch/src"),
     },
   },
   test: {
@@ -22,6 +23,7 @@ export default defineConfig({
       // vitest.evals.config.ts, not here.
       "packages/core/eval/**/*.test.ts",
       "packages/gateway/test/**/*.test.ts",
+      "packages/binpatch/test/**/*.test.ts",
       "packages/opencode/test/**/*.test.ts",
       "packages/pi/test/**/*.test.ts",
     ],

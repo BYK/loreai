@@ -33,6 +33,7 @@ import {
   getBinaryPaths,
   getConfigDir,
   getGitHubHeaders,
+  getPatchCache,
   getPlatformBinaryName,
   GITHUB_RELEASES_URL,
   getBinaryDownloadUrl,
@@ -42,7 +43,7 @@ import {
 } from "./binary";
 import { attemptDeltaUpgrade } from "./delta-upgrade";
 import { UpgradeError } from "./errors";
-import { makeByteProgress } from "./progress";
+import { makeByteProgress } from "binpatch";
 import {
   downloadNightlyBlob,
   fetchManifest,
@@ -51,7 +52,6 @@ import {
   getAnonymousToken,
   getNightlyVersion,
 } from "./ghcr";
-import { clearPatchCache } from "./patch-cache";
 
 /** Regex to strip 'v' prefix from version strings */
 export const VERSION_PREFIX_REGEX = /^v/;
@@ -490,7 +490,9 @@ export async function downloadBinaryToTemp(
     console.error(`[lore] Binary verified (${formatBytes(verifiedSize)})`);
 
     // Clear consumed patch cache
-    clearPatchCache().catch(() => {});
+    getPatchCache()
+      .clear()
+      .catch(() => {});
 
     // Set executable permission (Unix only)
     if (process.platform !== "win32") {

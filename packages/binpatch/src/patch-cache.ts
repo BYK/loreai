@@ -2,10 +2,10 @@
  * Patch Cache
  *
  * File-based cache for delta upgrade patches. Patches are downloaded
- * during background version checks so that `lore upgrade` can apply
- * them offline without any network calls.
+ * during background version checks so that an upgrade can apply them
+ * offline without any network calls.
  *
- * Cache location: <configDir>/patch-cache/
+ * Cache layout, under the caller-provided cache directory:
  * - <fromVersion>-<toVersion>.patch — raw binary patch data
  * - chain-<fromVersion>-<toVersion>.json — chain metadata
  *
@@ -13,14 +13,13 @@
  * blobs. Channel-agnostic — the same version-based naming works for
  * both nightly (GHCR) and stable (GitHub Releases) channels.
  *
- * Adapted from Sentry CLI's patch-cache.ts for Lore.
+ * The cache directory is injected by the consumer via `makeCache(cacheDir)`
+ * so this module carries no product-specific coupling (no config-dir
+ * lookup, no env vars). Adapted from Sentry CLI's patch-cache.ts.
  */
 
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getConfigDir } from "./binary";
-
-const PATCH_CACHE_DIR = "patch-cache";
 
 /** 7-day TTL for cached patches (milliseconds) */
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -43,14 +42,6 @@ export type ChainMeta = {
   cachedAt: number;
   patches: PatchStepMeta[];
 };
-
-function getCacheDir(): string {
-  return join(getConfigDir(), PATCH_CACHE_DIR);
-}
-
-async function ensureCacheDir(): Promise<void> {
-  await mkdir(getCacheDir(), { recursive: true, mode: 0o700 });
-}
 
 /**
  * Sanitize version strings for safe filenames.
@@ -76,15 +67,15 @@ function isNotFound(err: unknown): boolean {
 /**
  * Save a patch file and its chain metadata to the cache.
  */
-export async function savePatchesToCache(
+async function savePatchesToCache(
+  cacheDir: string,
   chain: {
     patches: { data: Uint8Array; size: number }[];
     expectedSha256: string;
   },
   steps: { fromVersion: string; toVersion: string }[],
 ): Promise<void> {
-  await ensureCacheDir();
-  const cacheDir = getCacheDir();
+  await mkdir(cacheDir, { recursive: true, mode: 0o700 });
 
   // Save all patch files in parallel
   await Promise.all(
@@ -197,7 +188,8 @@ function walkChainSteps(
 /**
  * Try to load a complete patch chain from the cache.
  */
-export async function loadCachedChain(
+async function loadCachedChain(
+  cacheDir: string,
   currentVersion: string,
   targetVersion: string,
 ): Promise<{
@@ -205,8 +197,6 @@ export async function loadCachedChain(
   totalSize: number;
   expectedSha256: string;
 } | null> {
-  const cacheDir = getCacheDir();
-
   const chainMetas = await loadAllChainMetas(cacheDir);
   if (chainMetas.length === 0) return null;
 
@@ -312,8 +302,7 @@ async function removeExpiredEntries(
  * Remove stale cache entries older than 7 days.
  * Called opportunistically. Fire-and-forget.
  */
-export async function cleanupPatchCache(): Promise<void> {
-  const cacheDir = getCacheDir();
+async function cleanupPatchCache(cacheDir: string): Promise<void> {
   let files: string[];
   try {
     files = await readdir(cacheDir);
@@ -328,8 +317,7 @@ export async function cleanupPatchCache(): Promise<void> {
  * Remove all cached patch files and chain metadata.
  * Called after a successful upgrade.
  */
-export async function clearPatchCache(): Promise<void> {
-  const cacheDir = getCacheDir();
+async function clearPatchCache(cacheDir: string): Promise<void> {
   let files: string[];
   try {
     files = await readdir(cacheDir);
@@ -341,4 +329,47 @@ export async function clearPatchCache(): Promise<void> {
   await Promise.all(
     files.map((file) => unlink(join(cacheDir, file)).catch(() => {})),
   );
+}
+
+/**
+ * A patch cache bound to a specific directory. The consumer decides where the
+ * cache lives (e.g. `<configDir>/patch-cache`) and injects it here, keeping
+ * this module free of any product-specific config/path lookup.
+ */
+export type PatchCache = {
+  /** Save a patch chain and its metadata to the cache. */
+  save(
+    chain: {
+      patches: { data: Uint8Array; size: number }[];
+      expectedSha256: string;
+    },
+    steps: { fromVersion: string; toVersion: string }[],
+  ): Promise<void>;
+  /** Try to assemble a complete cached chain from current -> target. */
+  load(
+    currentVersion: string,
+    targetVersion: string,
+  ): Promise<{
+    patches: { data: Uint8Array; size: number }[];
+    totalSize: number;
+    expectedSha256: string;
+  } | null>;
+  /** Remove entries older than the TTL. Fire-and-forget. */
+  cleanup(): Promise<void>;
+  /** Remove all cached patches and metadata (e.g. after a successful upgrade). */
+  clear(): Promise<void>;
+};
+
+/**
+ * Create a {@link PatchCache} rooted at `cacheDir`. The directory is created
+ * lazily on first write; reads of a missing directory resolve to empty.
+ */
+export function makeCache(cacheDir: string): PatchCache {
+  return {
+    save: (chain, steps) => savePatchesToCache(cacheDir, chain, steps),
+    load: (currentVersion, targetVersion) =>
+      loadCachedChain(cacheDir, currentVersion, targetVersion),
+    cleanup: () => cleanupPatchCache(cacheDir),
+    clear: () => clearPatchCache(cacheDir),
+  };
 }
