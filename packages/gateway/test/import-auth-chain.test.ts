@@ -4,7 +4,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { resolveAgentImportAuth } from "../src/cli/import";
+import {
+  resolveExtractionUpstreams,
+  buildNeedsModelGuidance,
+} from "../src/cli/import";
 import { workerKeyScheme } from "../src/auth";
+
+type ImportAuth = NonNullable<ReturnType<typeof resolveAgentImportAuth>>;
+type UsableAuth = Extract<ImportAuth, { getAuth: unknown }>;
+
+/**
+ * Assert the result is a usable auth (not null and not the `needsModel`
+ * signal) and return it narrowed, so tests can access model/getAuth/upstream.
+ */
+function usable(res: ImportAuth | null): UsableAuth {
+  expect(res).not.toBeNull();
+  expect(res).not.toHaveProperty("needsModel");
+  return res as UsableAuth;
+}
 
 let tmp: string;
 const saved: Record<string, string | undefined> = {};
@@ -26,6 +43,13 @@ beforeEach(() => {
   setEnv("HOME", tmp);
   setEnv("XDG_DATA_HOME", join(tmp, ".local", "share"));
   setEnv("XDG_CONFIG_HOME", join(tmp, ".config"));
+  // Clear agent env credentials so each test starts from a known state
+  // (the runner's own shell may have these set).
+  setEnv("ANTHROPIC_BASE_URL", undefined);
+  setEnv("ANTHROPIC_AUTH_TOKEN", undefined);
+  setEnv("ANTHROPIC_API_KEY", undefined);
+  setEnv("OPENAI_BASE_URL", undefined);
+  setEnv("OPENAI_API_KEY", undefined);
 });
 
 afterEach(() => {
@@ -41,12 +65,12 @@ describe("resolveAgentImportAuth", () => {
       providerID: "openai",
       modelID: "gpt-5.6-luna",
     });
-    expect(res).not.toBeNull();
-    expect(res?.model).toEqual({
+    const ok = usable(res);
+    expect(ok.model).toEqual({
       providerID: "openai",
       modelID: "gpt-5.6-luna",
     });
-    const cred = res?.getAuth(undefined, "openai");
+    const cred = ok.getAuth(undefined, "openai");
     expect(cred).toEqual({
       scheme: workerKeyScheme("openai"),
       value: "worker-key-123",
@@ -55,19 +79,49 @@ describe("resolveAgentImportAuth", () => {
 
   test("worker key with no cfg.model defaults provider to anthropic", () => {
     const res = resolveAgentImportAuth("opencode", "wk", undefined);
-    expect(res?.model.providerID).toBe("anthropic");
-    expect(res?.getAuth(undefined, undefined)).toEqual({
+    const ok = usable(res);
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.getAuth(undefined, undefined)).toEqual({
       scheme: "api-key",
       value: "wk",
     });
   });
 
   test("harness on-disk api-key is used when no worker key", () => {
+    // anthropic HAS a WORKER_DEFAULTS entry, so the stored key resolves to a
+    // usable credential with a concrete model even with no cfgModel.
+    writeOpenCodeAuth({ anthropic: { type: "api", key: "sk-ant-xyz" } });
+    const res = resolveAgentImportAuth("opencode", undefined, undefined);
+    const ok = usable(res);
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.model.modelID).toBeTruthy(); // real default, never empty
+    expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "sk-ant-xyz" });
+  });
+
+  test("on-disk key for a routable-but-defaultless provider + no model → needsModel (never an empty-model 400)", () => {
+    // openrouter is routable (has a route URL) but has NO WORKER_DEFAULTS entry,
+    // and OpenCode's auth.json stores only the key (no modelID hint). Tier 2
+    // must signal needsModel rather than return {modelID:""} → silent 400.
     writeOpenCodeAuth({ openrouter: { type: "api", key: "sk-or-xyz" } });
     const res = resolveAgentImportAuth("opencode", undefined, undefined);
-    expect(res).not.toBeNull();
-    expect(res?.model.providerID).toBe("openrouter");
-    expect(res?.getAuth()).toEqual({ scheme: "api-key", value: "sk-or-xyz" });
+    expect(res).toEqual({ needsModel: "openrouter" });
+  });
+
+  test("on-disk key for a defaultless provider IS usable with a same-provider cfgModel", () => {
+    // The escape hatch: a matching LORE_WORKER_MODEL supplies the model tier 2
+    // otherwise lacks, so the openrouter key becomes usable.
+    writeOpenCodeAuth({ openrouter: { type: "api", key: "sk-or-xyz" } });
+    const ok = usable(
+      resolveAgentImportAuth("opencode", undefined, {
+        providerID: "openrouter",
+        modelID: "openrouter/some-model",
+      }),
+    );
+    expect(ok.model).toEqual({
+      providerID: "openrouter",
+      modelID: "openrouter/some-model",
+    });
+    expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "sk-or-xyz" });
   });
 
   test("skips harness credential for a provider Lore does not proxy", () => {
@@ -100,9 +154,9 @@ describe("resolveAgentImportAuth", () => {
       },
     });
     const res = resolveAgentImportAuth("opencode", undefined, undefined);
-    expect(res).not.toBeNull();
-    expect(res?.model.providerID).toBe("github-copilot");
-    expect(res?.getAuth()).toEqual({
+    const ok = usable(res);
+    expect(ok.model.providerID).toBe("github-copilot");
+    expect(ok.getAuth()).toEqual({
       scheme: "bearer",
       value: "gho_refresh",
     });
@@ -111,11 +165,57 @@ describe("resolveAgentImportAuth", () => {
   test("prefers a routable credential over an unroutable earlier one", () => {
     writeOpenCodeAuth({
       "nonexistent-provider": { type: "api", key: "skip-me" },
-      minimax: { type: "api", key: "use-me" },
+      anthropic: { type: "api", key: "use-me" },
     });
     const res = resolveAgentImportAuth("opencode", undefined, undefined);
-    expect(res?.model.providerID).toBe("minimax");
-    expect(res?.getAuth()).toEqual({ scheme: "api-key", value: "use-me" });
+    const ok = usable(res);
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "use-me" });
+  });
+
+  test("on-disk credential honors an explicit same-provider cfgModel (LORE_WORKER_MODEL override) — Kjaer Copilot case", () => {
+    // github-copilot on-disk token, but the user set LORE_WORKER_MODEL to a
+    // model their Copilot plan actually serves (the default gpt-5-mini may be
+    // unavailable). The explicit model must win over the built-in default.
+    writeOpenCodeAuth({
+      "github-copilot": {
+        type: "oauth",
+        access: "gho_access",
+        refresh: "gho_refresh",
+        expires: 0,
+      },
+    });
+    const res = resolveAgentImportAuth("opencode", undefined, {
+      providerID: "github-copilot",
+      modelID: "claude-sonnet-5",
+    });
+    const ok = usable(res);
+    expect(ok.model).toEqual({
+      providerID: "github-copilot",
+      modelID: "claude-sonnet-5",
+    });
+    // Still uses the on-disk credential (tier 2), not a worker key.
+    expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "gho_refresh" });
+  });
+
+  test("on-disk credential ignores a cfgModel for a DIFFERENT provider (keeps its own provider's default)", () => {
+    writeOpenCodeAuth({
+      "github-copilot": {
+        type: "oauth",
+        access: "gho_access",
+        refresh: "gho_refresh",
+        expires: 0,
+      },
+    });
+    // cfgModel targets anthropic, but the credential is github-copilot → the
+    // override must NOT apply (it'd route a copilot token to an anthropic model).
+    const res = resolveAgentImportAuth("opencode", undefined, {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-5",
+    });
+    const ok = usable(res);
+    expect(ok.model.providerID).toBe("github-copilot");
+    expect(ok.model.modelID).toBe("gpt-5-mini"); // copilot default, not the anthropic override
   });
 
   test("returns null when the agent has no on-disk auth and no worker key", () => {
@@ -128,8 +228,220 @@ describe("resolveAgentImportAuth", () => {
     // oauth entry for a routable provider still resolves to the default model.
     writeOpenCodeAuth({ anthropic: { type: "api", key: "sk-ant" } });
     const res = resolveAgentImportAuth("opencode", undefined, undefined);
-    expect(res?.model.providerID).toBe("anthropic");
+    const ok = usable(res);
+    expect(ok.model.providerID).toBe("anthropic");
     // default model for anthropic
-    expect(res?.model.modelID).toBe("claude-sonnet-5");
+    expect(ok.model.modelID).toBe("claude-sonnet-5");
+  });
+});
+
+describe("resolveAgentImportAuth — harness env credential (tier 3)", () => {
+  // OpenRouter has no built-in default worker model, so callers must supply a
+  // model (LORE_WORKER_MODEL / .lore.json). Simulate that with cfgModel.
+  const orModel = {
+    providerID: "openrouter",
+    modelID: "openrouter/gpt-5-mini",
+  };
+
+  test("Claude Code via ANTHROPIC_BASE_URL=openrouter + ANTHROPIC_AUTH_TOKEN (bearer) — the OpenRouter setup", () => {
+    // Fresh tmp HOME → no on-disk claude auth, so the env credential is used.
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "sk-or-live");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", undefined, orModel),
+    );
+    expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "sk-or-live" });
+    // cfgModel is honored for the (defaultless) openrouter provider.
+    expect(ok.model).toEqual(orModel);
+    // Extraction is routed to the captured upstream.
+    expect(ok.upstream).toBe("https://openrouter.ai/api");
+  });
+
+  test("env credential for a provider with NO default model + no cfgModel → needsModel signal (not a silent empty-model 400)", () => {
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "sk-or-live");
+    const res = resolveAgentImportAuth("claude-code", undefined, undefined);
+    expect(res).toEqual({ needsModel: "openrouter" });
+  });
+
+  test("ANTHROPIC_AUTH_TOKEN (bearer) wins over ANTHROPIC_API_KEY (api-key)", () => {
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "sk-or-bearer");
+    setEnv("ANTHROPIC_API_KEY", "sk-apikey");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", undefined, orModel),
+    );
+    expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "sk-or-bearer" });
+  });
+
+  test("ANTHROPIC_API_KEY (api-key) used when no auth token", () => {
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_API_KEY", "sk-apikey");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", undefined, orModel),
+    );
+    expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "sk-apikey" });
+  });
+
+  test("token with no base URL falls back to the agent's wire-protocol provider (anthropic has a default model), no upstream", () => {
+    setEnv("ANTHROPIC_AUTH_TOKEN", "sk-tok");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", undefined, undefined),
+    );
+    expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "sk-tok" });
+    expect(ok.model.providerID).toBe("anthropic"); // wireProtocol fallback
+    expect(ok.model.modelID).toBeTruthy(); // anthropic HAS a default model
+    expect(ok.upstream).toBeUndefined();
+  });
+
+  test("unknown-host base URL routes extraction there; provider defaults to wire protocol (anthropic → has default model)", () => {
+    setEnv("ANTHROPIC_BASE_URL", "https://llm.corp.internal");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "corp-tok");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", undefined, undefined),
+    );
+    expect(ok.upstream).toBe("https://llm.corp.internal");
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "corp-tok" });
+  });
+
+  test("env credential ignores a cfgModel for a DIFFERENT provider (same guard as tier 2) — Seer #15446146", () => {
+    // Env points the agent at OpenRouter, but the user's LORE_WORKER_MODEL names
+    // a github-copilot model. Applying it would route the OpenRouter key to a
+    // copilot model → cross-provider mismatch. The override must be ignored and
+    // fall back to the captured provider's default (openrouter has none →
+    // needsModel), NOT silently used.
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "sk-or-live");
+    const res = resolveAgentImportAuth("claude-code", undefined, {
+      providerID: "github-copilot",
+      modelID: "claude-sonnet-5",
+    });
+    // openrouter has no default model and the mismatched cfgModel is ignored.
+    expect(res).toEqual({ needsModel: "openrouter" });
+  });
+
+  test("env credential honors a cfgModel for the SAME (captured) provider", () => {
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "sk-or-live");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", undefined, {
+        providerID: "openrouter",
+        modelID: "openrouter/some-model",
+      }),
+    );
+    expect(ok.model).toEqual({
+      providerID: "openrouter",
+      modelID: "openrouter/some-model",
+    });
+    expect(ok.upstream).toBe("https://openrouter.ai/api");
+  });
+
+  test("on-disk auth (tier 2) takes precedence over env credential (tier 3)", () => {
+    // opencode has on-disk auth AND we set an env token — but opencode has no
+    // authTokenEnvVars, so only tier 2 applies. Use claude-code with BOTH a
+    // stored credential and env vars to prove ordering.
+    mkdirSync(join(tmp, ".claude"), { recursive: true });
+    writeFileSync(
+      join(tmp, ".claude", ".credentials.json"),
+      JSON.stringify({
+        claudeAiOauth: { accessToken: "disk-oauth", expiresAt: null },
+      }),
+      "utf8",
+    );
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "env-token");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", undefined, undefined),
+    );
+    // Tier 2 (on-disk) wins: provider anthropic, not openrouter; no upstream.
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.getAuth()?.value).toBe("disk-oauth");
+    expect(ok.upstream).toBeUndefined();
+  });
+
+  test("worker key (tier 1) takes precedence over env credential (tier 3)", () => {
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    setEnv("ANTHROPIC_AUTH_TOKEN", "env-token");
+    const ok = usable(
+      resolveAgentImportAuth("claude-code", "sk-ant-worker", undefined),
+    );
+    expect(ok.getAuth(undefined, "anthropic")?.value).toBe("sk-ant-worker");
+    expect(ok.upstream).toBeUndefined();
+  });
+
+  test("no token and no on-disk auth → null (unchanged behavior)", () => {
+    setEnv("ANTHROPIC_BASE_URL", "https://openrouter.ai/api");
+    const res = resolveAgentImportAuth("claude-code", undefined, undefined);
+    expect(res).toBeNull();
+  });
+});
+
+describe("resolveExtractionUpstreams", () => {
+  const defaults = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  test("captured env upstream routes BOTH protocol slots at it", () => {
+    expect(
+      resolveExtractionUpstreams(
+        "https://openrouter.ai/api",
+        undefined,
+        defaults,
+      ),
+    ).toEqual({
+      anthropic: "https://openrouter.ai/api",
+      openai: "https://openrouter.ai/api",
+    });
+  });
+
+  test("explicit LORE_WORKER_UPSTREAM (configWorkerUpstream) beats the env upstream", () => {
+    // A user-set dedicated worker upstream always wins — we keep the defaults
+    // map (which the caller already pointed at config.workerUpstream).
+    expect(
+      resolveExtractionUpstreams(
+        "https://openrouter.ai/api",
+        "https://proxy.example/v1",
+        defaults,
+      ),
+    ).toEqual(defaults);
+  });
+
+  test("no captured upstream → defaults unchanged", () => {
+    expect(resolveExtractionUpstreams(undefined, undefined, defaults)).toEqual(
+      defaults,
+    );
+  });
+});
+
+describe("buildNeedsModelGuidance", () => {
+  test("no providers → null (nothing to say)", () => {
+    expect(buildNeedsModelGuidance([], false)).toBeNull();
+    expect(buildNeedsModelGuidance([], true)).toBeNull();
+  });
+
+  test("single provider, nothing else authenticated → full guidance, no 'some agents'", () => {
+    const msg = buildNeedsModelGuidance(["openrouter"], false);
+    expect(msg).toContain("Can't import:");
+    expect(msg).not.toContain("some agents");
+    expect(msg).toContain("export LORE_WORKER_MODEL=openrouter/<model>");
+  });
+
+  test("partial success (some agents authed) → guidance STILL produced, worded 'some agents' — Seer #15456784", () => {
+    // The whole point: a needsModel failure must surface guidance even when
+    // OTHER agents succeeded, because the per-agent skip line promised it.
+    const msg = buildNeedsModelGuidance(["openrouter"], true);
+    expect(msg).not.toBeNull();
+    expect(msg).toContain("some agents");
+    expect(msg).toContain("export LORE_WORKER_MODEL=openrouter/<model>");
+  });
+
+  test("multiple providers → one export line each; plural wording", () => {
+    const msg = buildNeedsModelGuidance(["openrouter", "deepseek"], false);
+    expect(msg).toContain("export LORE_WORKER_MODEL=openrouter/<model>");
+    expect(msg).toContain("export LORE_WORKER_MODEL=deepseek/<model>");
+    expect(msg).toContain("those providers");
+    expect(msg).toContain("openrouter, deepseek");
   });
 });
