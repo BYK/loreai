@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { AGENTS } from "../src/cli/agents";
+import { AGENTS, captureUserUpstream } from "../src/cli/agents";
 
 // ---------------------------------------------------------------------------
 // Claude Code agent
@@ -301,5 +301,110 @@ describe("Gemini CLI agent envVars", () => {
   test("sets LORE_PROJECT to cwd", () => {
     const env = gemini.envVars("http://127.0.0.1:3207", "/home/user/proj");
     expect(env.LORE_PROJECT).toBe("/home/user/proj");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upstream adoption — captureUserUpstream
+// ---------------------------------------------------------------------------
+
+describe("captureUserUpstream", () => {
+  const claude = AGENTS.find((a) => a.name === "claude-code")!;
+  const codex = AGENTS.find((a) => a.name === "codex")!;
+  const opencode = AGENTS.find((a) => a.name === "opencode")!;
+  const gemini = AGENTS.find((a) => a.name === "gemini")!;
+  const GATEWAY = "http://127.0.0.1:3207";
+
+  test("adopts a user's pre-existing ANTHROPIC_BASE_URL for Claude Code", () => {
+    const captured = captureUserUpstream(claude, GATEWAY, {
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
+    });
+    expect(captured).toEqual({
+      url: "https://openrouter.ai/api",
+      wireProtocol: "anthropic",
+    });
+  });
+
+  test("adopts a user's pre-existing OPENAI_BASE_URL for Codex", () => {
+    const captured = captureUserUpstream(codex, GATEWAY, {
+      OPENAI_BASE_URL: "https://api.deepseek.com",
+    });
+    expect(captured).toEqual({
+      url: "https://api.deepseek.com",
+      wireProtocol: "openai",
+    });
+  });
+
+  test("returns null when the base-URL env var is unset", () => {
+    expect(captureUserUpstream(claude, GATEWAY, {})).toBe(null);
+  });
+
+  test("returns null when the base URL already points at the gateway (idempotent re-runs)", () => {
+    const captured = captureUserUpstream(claude, GATEWAY, {
+      ANTHROPIC_BASE_URL: GATEWAY,
+    });
+    expect(captured).toBe(null);
+  });
+
+  test("returns null when the gateway host matches even on a different path", () => {
+    const captured = captureUserUpstream(claude, GATEWAY, {
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:3207/v1",
+    });
+    expect(captured).toBe(null);
+  });
+
+  test("returns null for a loopback URL on a DIFFERENT port (stale gateway, port shifted on restart)", () => {
+    // Seer HIGH: the gateway may restart on a different port (contention). A
+    // stale ANTHROPIC_BASE_URL pointing at a previous gateway (loopback, other
+    // port) must NOT be adopted — else the gateway proxies into itself.
+    const captured = captureUserUpstream(claude, GATEWAY, {
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9999",
+    });
+    expect(captured).toBe(null);
+  });
+
+  test("returns null for localhost and 127.x loopback variants", () => {
+    for (const url of [
+      "http://localhost:8080",
+      "http://127.0.0.5:1234",
+      "http://[::1]:3000",
+    ]) {
+      expect(
+        captureUserUpstream(claude, GATEWAY, { ANTHROPIC_BASE_URL: url }),
+      ).toBe(null);
+    }
+  });
+
+  test("ignores a non-URL / unparseable value", () => {
+    const captured = captureUserUpstream(claude, GATEWAY, {
+      ANTHROPIC_BASE_URL: "not a url",
+    });
+    expect(captured).toBe(null);
+  });
+
+  test("ignores an empty / whitespace value", () => {
+    expect(
+      captureUserUpstream(claude, GATEWAY, {
+        ANTHROPIC_BASE_URL: "   ",
+      }),
+    ).toBe(null);
+  });
+
+  test("returns null for an agent with no adoptable base-URL var (opencode)", () => {
+    const captured = captureUserUpstream(opencode, GATEWAY, {
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api",
+      OPENAI_BASE_URL: "https://openrouter.ai/api",
+    });
+    expect(captured).toBe(null);
+  });
+
+  test("adopts GOOGLE_GEMINI_BASE_URL with gemini wire protocol", () => {
+    const captured = captureUserUpstream(gemini, GATEWAY, {
+      GOOGLE_GEMINI_BASE_URL: "https://my-proxy.example.com",
+    });
+    expect(captured).toEqual({
+      url: "https://my-proxy.example.com",
+      wireProtocol: "gemini",
+    });
   });
 });

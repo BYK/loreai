@@ -754,6 +754,24 @@ export function providerFromUpstreamUrl(
 }
 
 /**
+ * Derive the provider id for a raw upstream URL (e.g. a user's pre-existing
+ * `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL`) by normalizing it the same way an
+ * incoming `x-lore-upstream-url` header is and matching against PROVIDER_ROUTES.
+ *
+ * Used by `lore run` upstream adoption (see `captureUserUpstream`): when the
+ * user already pointed their agent at a KNOWN provider host (OpenRouter,
+ * DeepSeek, etc.), we can tag the session with the right provider so the
+ * gateway flips wire protocol + auth scheme correctly. A miss (custom/self-
+ * hosted host) returns `undefined` — the request still routes to that host via
+ * `x-lore-upstream-url`, just without a provider tag (ingress protocol kept).
+ */
+export function providerForUpstreamOrigin(url: string): string | undefined {
+  const base = extractUpstreamUrlHeader({ "x-lore-upstream-url": url });
+  if (!base) return undefined;
+  return UPSTREAM_URL_TO_PROVIDER.get(base);
+}
+
+/**
  * Resolve the provider id used to tag the global fallback credential
  * (`setLastSeenAuth`). The explicit `x-lore-provider` header is authoritative
  * (the plugin set it deliberately for this turn); only when it is absent or

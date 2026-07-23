@@ -10,7 +10,15 @@ import { createInterface } from "node:readline";
 import { startGateway, probeGateway, type StartOptions } from "./start";
 import { bracketHost } from "../server";
 import { loadConfig } from "../config";
-import { detectAgents, AGENTS, type DetectedAgent } from "./agents";
+import {
+  detectAgents,
+  AGENTS,
+  appendCustomHeader,
+  captureUserUpstream,
+  type AgentDef,
+  type DetectedAgent,
+} from "./agents";
+import { providerForUpstreamOrigin } from "../config";
 import { safeExit } from "./exit";
 import {
   installSignalShutdown,
@@ -19,7 +27,7 @@ import {
   signalExitCode,
 } from "./shutdown";
 import { maybeAutoImport } from "./import-auto";
-import { discoverWorkspaceRoot } from "@loreai/core";
+import { discoverWorkspaceRoot, log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Interactive agent picker (TTY only)
@@ -62,11 +70,202 @@ interface LaunchTarget {
   env: Record<string, string>;
 }
 
-async function resolveLaunchTarget(
+/**
+ * A user-configured upstream adopted from the parent environment, plus the
+ * gateway `LORE_UPSTREAM_<protocol>` var it maps to and the provider id (if the
+ * host is a known one). See `applyUpstreamAdoption`.
+ */
+export interface AdoptedUpstream {
+  url: string;
+  /** Gateway env var to set so the in-process gateway defaults there. */
+  gatewayEnvKey: string;
+  /** Provider id if the host matches a known provider route, else undefined. */
+  providerID: string | undefined;
+  agentDisplayName: string;
+}
+
+/**
+ * Map an agent's wire protocol to the gateway env var that overrides the
+ * default upstream for that protocol. Gemini has no such default knob
+ * (the native endpoint is fixed), so it relies purely on the injected header.
+ */
+function gatewayUpstreamEnvKey(
+  wireProtocol: NonNullable<AgentDef["wireProtocol"]>,
+): string | undefined {
+  switch (wireProtocol) {
+    case "anthropic":
+      return "LORE_UPSTREAM_ANTHROPIC";
+    case "openai":
+      return "LORE_UPSTREAM_OPENAI";
+    case "gemini":
+      return undefined;
+  }
+}
+
+/**
+ * Adopt the user's pre-existing upstream for `agent` (captured from the parent
+ * env) so the gateway proxies THERE instead of the hardcoded default. Called
+ * BEFORE `startGateway`/`loadConfig` so the gateway picks up the override.
+ *
+ * Two mechanisms, applied together:
+ *  1. Set the gateway's own `LORE_UPSTREAM_<protocol>` process env — the
+ *     in-process gateway reads this at `loadConfig()`, so EVERY agent (even
+ *     header-less ones like Gemini/Copilot) gets routed to the user's host.
+ *  2. Return an `AdoptedUpstream` so the per-agent launch env can ALSO inject
+ *     `X-Lore-Upstream-URL` (+ `X-Lore-Provider` for known hosts) — this is
+ *     what flips the wire protocol/auth-scheme for a known provider that
+ *     differs from the ingress shape (e.g. Claude Code → OpenRouter, which is
+ *     an OpenAI-protocol provider reached via an Anthropic-shape client).
+ *
+ * Returns null when the user hasn't overridden the agent's base URL.
+ */
+export function applyUpstreamAdoption(
+  agent: AgentDef,
+  gatewayUrl: string,
+): AdoptedUpstream | null {
+  const captured = captureUserUpstream(agent, gatewayUrl);
+  if (!captured) return null;
+  const gatewayEnvKey = gatewayUpstreamEnvKey(captured.wireProtocol);
+  const providerID = providerForUpstreamOrigin(captured.url);
+  // Set the gateway default upstream for this protocol, UNLESS the user has
+  // explicitly set it already (their explicit LORE_UPSTREAM_* wins).
+  if (gatewayEnvKey && !process.env[gatewayEnvKey]) {
+    process.env[gatewayEnvKey] = captured.url;
+  }
+  // If the host maps to a known provider, also seed LORE_UPSTREAM_<PROVIDER>
+  // so the injected X-Lore-Provider header resolves to the right URL even
+  // when the provider route's static url is null (aggregators/self-hosted).
+  if (providerID) {
+    const provEnvKey = `LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}`;
+    if (!process.env[provEnvKey]) process.env[provEnvKey] = captured.url;
+  }
+  return {
+    url: captured.url,
+    gatewayEnvKey: gatewayEnvKey ?? "",
+    providerID,
+    agentDisplayName: agent.displayName,
+  };
+}
+
+/**
+ * Remote-mode adoption: the remote gateway owns its own config, so we do NOT
+ * set any local `LORE_UPSTREAM_*` env. We only compute the `AdoptedUpstream`
+ * so the launch env can inject `X-Lore-Upstream-URL`/`X-Lore-Provider`, which
+ * the remote gateway honors per request. Returns null when nothing to adopt.
+ */
+export function adoptForRemote(
+  agent: AgentDef,
+  gatewayUrl: string,
+): AdoptedUpstream | null {
+  const captured = captureUserUpstream(agent, gatewayUrl);
+  if (!captured) return null;
+  return {
+    url: captured.url,
+    gatewayEnvKey: "",
+    providerID: providerForUpstreamOrigin(captured.url),
+    agentDisplayName: agent.displayName,
+  };
+}
+
+/**
+ * Inject the adopted-upstream routing headers into an agent's launch env, for
+ * agents that forward `ANTHROPIC_CUSTOM_HEADERS` to the gateway (Claude Code /
+ * Pi). Sets `X-Lore-Upstream-URL` and, for a known host, `X-Lore-Provider`.
+ *
+ * Agents without a header-forwarding mechanism (Codex/Hermes/Copilot/Gemini)
+ * still get routed via the `LORE_UPSTREAM_<protocol>` gateway env set in
+ * `applyUpstreamAdoption`; the header is a no-op for them.
+ */
+export function injectAdoptionHeaders(
+  agent: AgentDef,
+  env: Record<string, string>,
+  adopted: AdoptedUpstream,
+): void {
+  // Only Anthropic-shape agents carry ANTHROPIC_CUSTOM_HEADERS to the gateway.
+  if (agent.wireProtocol !== "anthropic") return;
+  appendCustomHeader(
+    env,
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "X-Lore-Upstream-URL",
+    adopted.url,
+  );
+  if (adopted.providerID) {
+    appendCustomHeader(
+      env,
+      "ANTHROPIC_CUSTOM_HEADERS",
+      "X-Lore-Provider",
+      adopted.providerID,
+    );
+  }
+}
+
+/**
+ * The agent that `lore run` will actually launch, resolved BEFORE the gateway
+ * starts so we can adopt the user's upstream (which requires setting gateway
+ * env before `loadConfig`). `command` is the binary/command to exec; `def` is
+ * the matching registry entry (null for an explicit command with no known
+ * agent — e.g. `lore run some-other-tool`).
+ */
+export interface AgentSelection {
+  command: string;
+  def: AgentDef | null;
+}
+
+/**
+ * Resolve which agent will run, without needing the gateway URL. For an
+ * explicit command, matches the binary to a known agent. For auto-detect,
+ * uses the sole agent or prompts (TTY). Returns null when nothing runnable.
+ *
+ * Runs before `startGateway` so upstream adoption can set gateway env in time.
+ */
+export async function resolveAgentSelection(
+  cmdArgs: string[],
+): Promise<AgentSelection | null> {
+  if (cmdArgs.length > 0) {
+    const def = AGENTS.find((a) => a.binary === cmdArgs[0]) ?? null;
+    return { command: cmdArgs[0], def };
+  }
+
+  const detected = detectAgents();
+  if (detected.length === 0) {
+    console.error("[lore] No known AI agents found on PATH.");
+    console.error(
+      "[lore] Install one of: Claude Code (claude), Codex (codex), Pi (pi), OpenCode (opencode), Hermes (hermes), GitHub Copilot CLI (copilot), Gemini CLI (gemini)",
+    );
+    console.error(`[lore] Or run with an explicit command: lore run <command>`);
+    console.error(
+      `[lore] Using a GUI/IDE agent (Claude Desktop, an IDE extension)? Run`,
+    );
+    console.error(
+      `[lore]   \`lore setup <app>\` and keep a gateway up with \`lore start --bg\`.`,
+    );
+    return null;
+  }
+
+  let agent: DetectedAgent;
+  if (detected.length === 1) {
+    agent = detected[0];
+    console.log(`[lore] Detected ${agent.def.displayName} at ${agent.path}`);
+  } else if (process.stdin.isTTY) {
+    agent = await promptAgent(detected);
+  } else {
+    console.error("[lore] Multiple agents detected but stdin is not a TTY.");
+    console.error("[lore] Specify which agent to run: lore run <command>");
+    for (const a of detected) {
+      console.error(`  - ${a.def.displayName}: lore run ${a.def.binary}`);
+    }
+    return null;
+  }
+  return { command: agent.def.binary, def: agent.def };
+}
+
+export function resolveLaunchTarget(
+  selection: AgentSelection,
   gatewayUrl: string,
   cmdArgs: string[],
   extraArgs: string[],
-): Promise<LaunchTarget | null> {
+  adopted: AdoptedUpstream | null,
+): LaunchTarget {
   // Resolve workspace root once — walks up from cwd looking for monorepo
   // markers (.lore.json with workspaces, .git, pnpm-workspace.yaml, etc.)
   const projectDir = discoverWorkspaceRoot(process.cwd());
@@ -88,6 +287,9 @@ async function resolveLaunchTarget(
         prependArgs.push(...agent.cliArgs(gatewayUrl, projectDir));
       }
     }
+    if (selection.def && adopted) {
+      injectAdoptionHeaders(selection.def, env, adopted);
+    }
     return {
       command: cmdArgs[0],
       args: [...prependArgs, ...cmdArgs.slice(1), ...extraArgs],
@@ -95,46 +297,25 @@ async function resolveLaunchTarget(
     };
   }
 
-  // --- No command: auto-detect agents ---
-  const detected = detectAgents();
-
-  if (detected.length === 0) {
-    console.error("[lore] No known AI agents found on PATH.");
-    console.error(
-      "[lore] Install one of: Claude Code (claude), Codex (codex), Pi (pi), OpenCode (opencode), Hermes (hermes), GitHub Copilot CLI (copilot), Gemini CLI (gemini)",
-    );
-    console.error(`[lore] Or run with an explicit command: lore run <command>`);
-    console.error(
-      `[lore] Using a GUI/IDE agent (Claude Desktop, an IDE extension)? Run`,
-    );
-    console.error(
-      `[lore]   \`lore setup <app>\` and keep a gateway up with \`lore start --bg\`.`,
-    );
-    return null;
+  // --- Auto-detected agent: selection.def is guaranteed non-null here
+  //     (the explicit-command branch above handles the def===null case). ---
+  const def = selection.def;
+  if (!def) {
+    // Unreachable in practice, but keep the type sound without an assertion:
+    // an explicit command with no matching agent takes the branch above.
+    return {
+      command: selection.command,
+      args: [...extraArgs],
+      env: {},
+    };
   }
-
-  let agent: DetectedAgent;
-
-  if (detected.length === 1) {
-    agent = detected[0];
-    console.log(`[lore] Detected ${agent.def.displayName} at ${agent.path}`);
-  } else if (process.stdin.isTTY) {
-    agent = await promptAgent(detected);
-  } else {
-    // Non-TTY with multiple agents — can't prompt
-    console.error("[lore] Multiple agents detected but stdin is not a TTY.");
-    console.error("[lore] Specify which agent to run: lore run <command>");
-    for (const a of detected) {
-      console.error(`  - ${a.def.displayName}: lore run ${a.def.binary}`);
-    }
-    return null;
-  }
-
-  const agentCliArgs = agent.def.cliArgs?.(gatewayUrl, projectDir) ?? [];
+  const agentCliArgs = def.cliArgs?.(gatewayUrl, projectDir) ?? [];
+  const env = def.envVars(gatewayUrl, projectDir);
+  if (adopted) injectAdoptionHeaders(def, env, adopted);
   return {
-    command: agent.def.binary,
+    command: def.binary,
     args: [...agentCliArgs, ...extraArgs],
-    env: agent.def.envVars(gatewayUrl, projectDir),
+    env,
   };
 }
 
@@ -162,11 +343,42 @@ export async function commandRun(
   cmdArgs: string[],
   extraArgs: string[] = [],
 ): Promise<void> {
-  // 1. Start gateway (or delegate to a remote one)
+  // 1. Resolve which agent will run BEFORE starting the gateway, so we can
+  //    adopt the user's pre-existing upstream (which requires setting gateway
+  //    env before loadConfig/startGateway — the config is captured once at
+  //    startup and reused per request).
+  const selection = await resolveAgentSelection(cmdArgs);
+
   const config = loadConfig();
   let gatewayUrl: string;
   let owned: boolean;
   let shutdown: () => Promise<void>;
+  // The config actually in effect for the running gateway. In local mode
+  // startGateway() re-runs loadConfig() AFTER upstream adoption has set
+  // LORE_UPSTREAM_*, so handle.config reflects the adopted upstream while the
+  // `config` captured above is stale (pre-adoption). maybeAutoImport must use
+  // the effective config or its worker calls route to the pre-adoption default
+  // upstream (e.g. api.anthropic.com) and fail auth against the adopted key.
+  let effectiveConfig = config;
+
+  // 2. Adopt the user's existing upstream (local mode only — a remote gateway
+  //    owns its own config; header injection below still routes it there).
+  //    Done before startGateway so LORE_UPSTREAM_* is read by loadConfig.
+  let adopted: AdoptedUpstream | null = null;
+  const isLocal = !(opts.remoteUrl || config.remoteUrl);
+  if (isLocal && selection?.def) {
+    // Prospective local gateway URL for the self-pointing guard. The port may
+    // shift on conflict, but the user's ANTHROPIC_BASE_URL points at their own
+    // provider host, not loopback, so the guard just needs a loopback origin.
+    const prospectiveUrl = `http://127.0.0.1:${config.port}`;
+    adopted = applyUpstreamAdoption(selection.def, prospectiveUrl);
+    if (adopted) {
+      console.log(
+        `[lore] Adopting your ${adopted.agentDisplayName} upstream: ${adopted.url}` +
+          (adopted.providerID ? ` (provider: ${adopted.providerID})` : ""),
+      );
+    }
+  }
 
   if (opts.remoteUrl || config.remoteUrl) {
     // Remote mode: delegate to an existing remote gateway.
@@ -189,6 +401,10 @@ export async function commandRun(
     owned = false;
     shutdown = async () => {};
     console.log(`[lore] Using remote gateway at ${gatewayUrl}`);
+    // In remote mode, adopt via header injection only (no local gateway env).
+    if (selection?.def) {
+      adopted = adoptForRemote(selection.def, gatewayUrl);
+    }
   } else {
     // Local mode: start (or reuse) a local gateway.
     // `lore run` always runs locally — agent is on the same machine.
@@ -196,6 +412,8 @@ export async function commandRun(
     gatewayUrl = `http://${bracketHost(handle.config.hosts[0])}:${handle.port}`;
     owned = handle.owned;
     shutdown = handle.shutdown;
+    // Post-adoption config (LORE_UPSTREAM_* now reflected). Used for autoImport.
+    effectiveConfig = handle.config;
 
     if (owned) {
       console.log(`[lore] Gateway listening on ${gatewayUrl}`);
@@ -205,13 +423,15 @@ export async function commandRun(
   }
   console.log(`[lore] Dashboard: ${gatewayUrl}/ui`);
 
-  // 2. Auto-detect prior conversations (per newly-detected agent)
+  // 3. Auto-detect prior conversations (per newly-detected agent)
   if (owned) {
-    await maybeAutoImport(config);
+    await maybeAutoImport(effectiveConfig);
   }
 
-  // 3. Resolve what to launch
-  const target = await resolveLaunchTarget(gatewayUrl, cmdArgs, extraArgs);
+  // 4. Build the launch target (env + args) now that we have the URL.
+  const target = selection
+    ? resolveLaunchTarget(selection, gatewayUrl, cmdArgs, extraArgs, adopted)
+    : null;
 
   if (!target) {
     // No agent found — start server without launching an agent
@@ -232,6 +452,18 @@ export async function commandRun(
   console.log(
     `[lore] Launching: ${target.command} ${target.args.join(" ")}`.trimEnd(),
   );
+
+  // Silence the in-process gateway's stderr before handing the terminal to the
+  // agent. `lore run` starts the gateway in THIS process, so its `[lore]` log
+  // lines (worker-health, background-import, upstream warnings) write to the
+  // same stderr the interactive agent renders into — corrupting its TUI, the
+  // same failure the Pi/OpenCode plugins avoid via silenceStderr(). We only do
+  // this for an owned gateway feeding an interactive TTY; nothing is lost —
+  // the file sink + Sentry sink keep everything (read with `lore logs`).
+  // `LORE_DEBUG=1` opts back into full stderr for troubleshooting.
+  if (owned && !config.debug && process.stderr.isTTY) {
+    log.silenceStderr();
+  }
 
   const child = launchChild(target);
 

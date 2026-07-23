@@ -31,6 +31,98 @@ export interface AgentDef {
    * rather than environment variables — we inject `-c key=value` overrides.
    */
   cliArgs?: (gatewayUrl: string, cwd: string) => string[];
+  /**
+   * Base-URL env var(s) this agent honors to pick an upstream, in priority
+   * order (first defined wins). `lore run` rewrites these to point the agent
+   * at the gateway — but if the USER already set one (e.g. pointing Claude
+   * Code at OpenRouter or a corporate proxy), that is their intended upstream.
+   * We capture it BEFORE clobbering and tell the gateway to proxy there, so
+   * Lore adopts the user's existing config instead of silently overriding it
+   * with the hardcoded api.anthropic.com / api.openai.com default.
+   *
+   * The captured value's wire protocol is the agent's `wireProtocol` (below):
+   * an Anthropic-shape client (Claude Code) pointed at OpenRouter is adopted
+   * as an anthropic-ingress request whose upstream host is openrouter.ai; the
+   * gateway's `providerFromUpstreamUrl` reverse-map then flips protocol/scheme
+   * for known hosts. Omit for agents whose base URL cannot be adopted this way
+   * (e.g. opencode, which routes via the plugin, not a base-URL env var).
+   */
+  upstreamEnvVars?: string[];
+  /**
+   * The wire protocol the agent speaks to its upstream — used to pick which
+   * gateway `LORE_UPSTREAM_<protocol>` default to override when adopting the
+   * user's captured upstream (see `upstreamEnvVars`).
+   */
+  wireProtocol?: "anthropic" | "openai" | "gemini";
+}
+
+/**
+ * Whether a hostname is a loopback address. Under `lore run` the local gateway
+ * always binds loopback, so ANY loopback host in the user's base-URL env is
+ * either the gateway itself or a stale gateway from a previous run — never a
+ * real upstream to adopt. Rejecting all loopback hosts (not just the exact
+ * origin) keeps re-launches idempotent even when the gateway restarts on a
+ * different port (port contention). A genuine upstream (OpenRouter, a corporate
+ * proxy) is never loopback.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+  if (h === "localhost" || h === "::1" || h === "0.0.0.0" || h === "::")
+    return true;
+  // 127.0.0.0/8
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * The upstream the USER already configured for an agent via its base-URL env
+ * var, captured from the parent environment before `lore run` overrides it.
+ *
+ * Returns the first defined `upstreamEnvVars` value that points somewhere
+ * OTHER than a loopback host, so we never "adopt" the gateway pointing at
+ * itself and re-launches through `lore run` stay idempotent even if the
+ * gateway restarts on a different port. Returns undefined when the agent has
+ * no adoptable base-URL var, none is set, or the only value is loopback.
+ */
+export function captureUserUpstream(
+  agent: AgentDef,
+  gatewayUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { url: string; wireProtocol: NonNullable<AgentDef["wireProtocol"]> } | null {
+  if (!agent.upstreamEnvVars || !agent.wireProtocol) return null;
+  for (const key of agent.upstreamEnvVars) {
+    const raw = env[key];
+    if (!raw) continue;
+    // Strip control chars (CR/LF/etc.) up front — a newline in a base-URL env
+    // var would otherwise ride through into an injected header (CRLF header
+    // smuggling). `new URL()` tolerates an embedded newline, so we cannot rely
+    // on parse-failure to reject it. appendCustomHeader also sanitizes, but we
+    // normalize at the source so every consumer sees a clean value.
+    // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
+    const trimmed = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+    if (!trimmed) continue;
+    // A real base URL has no internal whitespace. Reject anything with an
+    // interior space/tab — after control-char stripping, a CRLF-smuggling
+    // payload like "https://host/\nX-Api-Key: stolen" collapses to a value
+    // with an interior space, which must not be adopted.
+    if (/\s/.test(trimmed)) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      continue;
+    }
+    // Only adopt a real http(s) URL that isn't the gateway itself.
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+    // Reject ANY loopback host, not just the exact gateway origin: the gateway
+    // may restart on a different port (contention), so a stale
+    // ANTHROPIC_BASE_URL=http://127.0.0.1:<old-port> must not be adopted (would
+    // proxy the gateway back into itself). gatewayUrl is unused here now but
+    // kept in the signature for callers/tests and future host-aware checks.
+    void gatewayUrl;
+    if (isLoopbackHost(parsed.hostname)) continue;
+    return { url: trimmed, wireProtocol: agent.wireProtocol };
+  }
+  return null;
 }
 
 /**
@@ -58,15 +150,25 @@ function tomlQuote(value: string): string {
 /**
  * Append a header to ANTHROPIC_CUSTOM_HEADERS (curl-style format:
  * "Name: Value" newline-separated).
+ *
+ * Both `name` and `value` are stripped of control characters (CR/LF/etc.)
+ * before embedding. This is the single sink for every custom header; a raw
+ * newline in `value` would otherwise smuggle a second header into the
+ * newline-delimited format (CRLF header injection) — e.g. an adopted
+ * upstream URL derived from a user-controlled env var. `new URL()` tolerates
+ * an embedded newline, so sanitizing here (in addition to normalizing at the
+ * caller) is defense-in-depth, matching `safeRemote`/`tomlQuote`.
  */
-function appendCustomHeader(
+export function appendCustomHeader(
   env: Record<string, string>,
   envKey: string,
   name: string,
   value: string,
 ): void {
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
+  const clean = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, "");
   const existing = env[envKey] ?? process.env[envKey] ?? "";
-  const header = `${name}: ${value}`;
+  const header = `${clean(name)}: ${clean(value)}`;
   env[envKey] = existing ? `${existing}\n${header}` : header;
 }
 
@@ -100,6 +202,8 @@ export const AGENTS: AgentDef[] = [
     displayName: "Claude Code",
     binary: "claude",
     detect: () => whichSync("claude"),
+    upstreamEnvVars: ["ANTHROPIC_BASE_URL"],
+    wireProtocol: "anthropic",
     envVars: (url, cwd) => {
       const env: Record<string, string> = {
         ANTHROPIC_BASE_URL: url,
@@ -145,6 +249,8 @@ export const AGENTS: AgentDef[] = [
     displayName: "Codex",
     binary: "codex",
     detect: () => whichSync("codex"),
+    upstreamEnvVars: ["OPENAI_BASE_URL"],
+    wireProtocol: "openai",
     envVars: (_url, cwd) => {
       // Codex CLI is a Rust binary that does NOT read OPENAI_BASE_URL from the
       // environment. Provider routing is done exclusively via config.toml or
@@ -215,6 +321,8 @@ export const AGENTS: AgentDef[] = [
     displayName: "Pi",
     binary: "pi",
     detect: () => whichSync("pi"),
+    upstreamEnvVars: ["ANTHROPIC_BASE_URL"],
+    wireProtocol: "anthropic",
     envVars: (url, _cwd) => ({
       ANTHROPIC_BASE_URL: url,
       LORE_GATEWAY_URL: url,
@@ -236,6 +344,8 @@ export const AGENTS: AgentDef[] = [
     displayName: "Hermes Agent",
     binary: "hermes",
     detect: () => whichSync("hermes"),
+    upstreamEnvVars: ["OPENAI_BASE_URL"],
+    wireProtocol: "openai",
     envVars: (url, cwd) => {
       const env: Record<string, string> = {
         // Route Hermes through the gateway. Both keys are undocumented in the
@@ -268,6 +378,8 @@ export const AGENTS: AgentDef[] = [
     displayName: "GitHub Copilot CLI",
     binary: "copilot",
     detect: () => whichSync("copilot"),
+    upstreamEnvVars: ["COPILOT_API_URL"],
+    wireProtocol: "openai",
     envVars: (url, cwd) => {
       // GitHub Copilot CLI talks to the Copilot API (normally
       // api.githubcopilot.com) in OpenAI wire format, performing its own GitHub→
@@ -298,6 +410,8 @@ export const AGENTS: AgentDef[] = [
     displayName: "Gemini CLI",
     binary: "gemini",
     detect: () => whichSync("gemini"),
+    upstreamEnvVars: ["GOOGLE_GEMINI_BASE_URL"],
+    wireProtocol: "gemini",
     envVars: (url, cwd) => {
       // Google's Gemini CLI (GEMINI_API_KEY mode) reads GOOGLE_GEMINI_BASE_URL
       // as the base origin for the native Generative Language API — it appends
