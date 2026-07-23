@@ -13,7 +13,7 @@
 import { describe, expect, test } from "vitest";
 import type { AnthropicCacheOptions } from "../src/translate/anthropic";
 import { buildOpenAIUpstreamRequest } from "../src/translate/openai";
-import type { GatewayRequest } from "../src/translate/types";
+import type { GatewayMessage, GatewayRequest } from "../src/translate/types";
 
 const BASE = "https://openrouter.ai/api";
 
@@ -368,5 +368,96 @@ describe("buildOpenAIUpstreamRequest — full session cache config", () => {
     // exactly 3 breakpoints: system, tool, conversation tail
     const count = (JSON.stringify(body).match(/"cache_control"/g) ?? []).length;
     expect(count).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Intermediate anchor breakpoint (upstream-eviction resilience, #961)
+// ---------------------------------------------------------------------------
+
+// Build an alternating user/assistant conversation of `n` text messages.
+function convo(n: number): GatewayMessage[] {
+  const msgs: GatewayMessage[] = [];
+  for (let i = 0; i < n; i++) {
+    msgs.push({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: `msg ${i} ${"x".repeat(20)}` }],
+    });
+  }
+  return msgs;
+}
+
+// Indices of messages carrying a cache_control (excludes the system block).
+function annotatedConversationIndices(body: Record<string, unknown>): number[] {
+  const msgs = messagesOf(body);
+  const out: number[] = [];
+  msgs.forEach((m, i) => {
+    if (m.role === "system") return;
+    if (JSON.stringify(m.content ?? "").includes("cache_control")) out.push(i);
+  });
+  return out;
+}
+
+describe("buildOpenAIUpstreamRequest — intermediate anchor breakpoint (#961)", () => {
+  const cacheOpts: AnthropicCacheOptions = {
+    systemTTL: "1h",
+    cacheConversation: true,
+    conversationTTL: "5m",
+  };
+
+  test("small conversation gets ONLY the moving tail breakpoint (no anchor)", () => {
+    // 6 conversation messages (< CACHE_ANCHOR_MIN_MESSAGES=12): a single tail
+    // breakpoint already bounds eviction cost, so no anchor is added.
+    const body = getBody(makeRequest({ messages: convo(6) }), cacheOpts);
+    const idxs = annotatedConversationIndices(body);
+    expect(idxs.length).toBe(1); // tail only
+  });
+
+  test("large conversation gets a SECOND, earlier anchor breakpoint", () => {
+    // 30 conversation messages: the ~1MB-class prefix is split into two
+    // independently-cacheable segments so an upstream partial eviction re-bills
+    // only one segment, not the whole prefix (the ~345K input spike, #961).
+    const body = getBody(makeRequest({ messages: convo(30) }), cacheOpts);
+    const idxs = annotatedConversationIndices(body);
+    expect(idxs.length).toBe(2); // anchor + tail
+    // Anchor is strictly before the tail.
+    expect(idxs[0]).toBeLessThan(idxs[1]);
+    // Tail is the last message.
+    expect(idxs[1]).toBe(messagesOf(body).length - 1);
+  });
+
+  test("anchor position is byte-stable as the conversation grows (no self-bust)", () => {
+    // The whole point of quantizing the anchor: it must NOT move every turn, or
+    // it busts the very cache it protects. Growing the conversation by one turn
+    // (within the same quantization bucket) must leave the anchor index put.
+    const bodyA = getBody(makeRequest({ messages: convo(24) }), cacheOpts);
+    const bodyB = getBody(makeRequest({ messages: convo(25) }), cacheOpts);
+    const anchorA = annotatedConversationIndices(bodyA)[0];
+    const anchorB = annotatedConversationIndices(bodyB)[0];
+    expect(anchorA).toBe(anchorB);
+  });
+
+  test("anchor inherits the (longer) system TTL, tail keeps the conversation TTL", () => {
+    const body = getBody(makeRequest({ messages: convo(30) }), cacheOpts);
+    const msgs = messagesOf(body);
+    const idxs = annotatedConversationIndices(body);
+    const ccOf = (i: number) => {
+      const parts = msgs[i].content as Array<Record<string, unknown>>;
+      return parts[parts.length - 1].cache_control;
+    };
+    expect(ccOf(idxs[0])).toEqual({ type: "ephemeral", ttl: "1h" }); // anchor: 1h
+    expect(ccOf(idxs[1])).toEqual({ type: "ephemeral" }); // tail: 5m
+  });
+
+  test("stays within the 4-breakpoint budget with tools + large conversation", () => {
+    // Anthropic (and OpenRouter, for Anthropic models) cap cache_control at 4.
+    // system + tools + anchor + tail must never exceed that.
+    const req = makeRequest({
+      messages: convo(30),
+      tools: [{ name: "recall", description: "search", inputSchema: {} }],
+    });
+    const body = getBody(req, { ...cacheOpts, cacheTools: true });
+    const count = (JSON.stringify(body).match(/"cache_control"/g) ?? []).length;
+    expect(count).toBe(4);
   });
 });
