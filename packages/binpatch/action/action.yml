@@ -1,0 +1,507 @@
+name: binpatch delta patches
+description: >-
+  Generate binary delta patches with zig-bsdiff and publish them to a container
+  registry (OCI/GHCR) or stage them for a GitHub Release. The wire format
+  (TRDIFF10 + zstd) and the registry layout (tag scheme, annotation keys,
+  artifact types, layer titles) match what the binpatch library reads at
+  download time -- keep them in lockstep.
+
+# Composite action. Each of the three modes maps 1:1 to a CI job so a consumer
+# can drop it into an existing generate/publish job graph without reshaping it.
+#
+#   mode: generate-ghcr    -- diff current binaries against the previous GHCR
+#                             nightly, validate patch sizes, leave them in
+#                             <patches-dir>/ for a later publish step.
+#   mode: publish-ghcr     -- push the compressed binaries + an immutable
+#                             versioned tag + the patch manifest to the registry
+#                             with the integrity annotations the client reads.
+#   mode: generate-release -- diff current binaries against the previous stable
+#                             GitHub Release, validate, leave them in
+#                             <patches-dir>/ for the release artifact upload.
+
+inputs:
+  mode:
+    description: "generate-ghcr | publish-ghcr | generate-release"
+    required: true
+  version:
+    description: >-
+      The version being built. Required for the ghcr modes (immutable
+      versioned tag + previous-version lookup); unused by generate-release,
+      which discovers the previous version from the GitHub Releases API.
+    required: false
+    default: ""
+  registry:
+    description: "OCI registry base host, e.g. ghcr.io (ghcr modes only)."
+    required: false
+    default: ghcr.io
+  repo:
+    description: >-
+      Registry repository path, e.g. byk/loreai (ghcr modes only). Lowercase --
+      OCI repositories must be lowercase.
+    required: false
+    default: ""
+  github-repo:
+    description: >-
+      owner/name for the GitHub Release lookup (generate-release mode). Defaults
+      to the current repository.
+    required: false
+    default: ${{ github.repository }}
+  new-binaries-dir:
+    description: >-
+      Directory holding the freshly built UNCOMPRESSED binaries (patch sources
+      and SHA-256 inputs). Binaries are matched by binary-glob.
+    required: false
+    default: new-binaries
+  new-gz-dir:
+    description: >-
+      Directory holding the freshly built .gz binaries (used for the size-ratio
+      gate). May be the same as new-binaries-dir.
+    required: false
+    default: new-binaries
+  binaries-dir:
+    description: >-
+      publish-ghcr: directory with UNCOMPRESSED binaries for SHA-256 annotation
+      computation.
+    required: false
+    default: binaries
+  artifacts-dir:
+    description: >-
+      publish-ghcr: directory with the .gz binaries to push as registry layers.
+      Pushed from inside this dir so layer titles are bare filenames.
+    required: false
+    default: artifacts
+  patches-dir:
+    description: "Directory where patches are written / read."
+    required: false
+    default: patches
+  binary-glob:
+    description: >-
+      Glob (relative to new-binaries-dir) selecting binaries to diff, e.g.
+      'lore-*'. Matched files ending in .gz are skipped.
+    required: false
+    default: "*"
+  artifact-type-prefix:
+    description: >-
+      OCI artifact-type prefix. Binaries use <prefix>.nightly, patches use
+      <prefix>.patch.
+    required: false
+    default: application/vnd.lore.cli
+  nightly-tag:
+    description: "Mutable rolling tag for nightly binaries."
+    required: false
+    default: nightly
+  nightly-tag-prefix:
+    description: "Prefix for immutable versioned nightly tags."
+    required: false
+    default: "nightly-"
+  patch-tag-prefix:
+    description: "Prefix for patch manifest tags."
+    required: false
+    default: "patch-"
+  max-ratio:
+    description: >-
+      Drop any patch larger than this percentage of the gzipped binary. Keep
+      below the client's SIZE_THRESHOLD_RATIO (60%) with margin.
+    required: false
+    default: "50"
+  zig-bsdiff-version:
+    description: "zig-bsdiff release version to install."
+    required: false
+    default: 0.1.19
+  zig-bsdiff-sha256:
+    description: "Expected sha256 of the zig-bsdiff linux-x64 tarball."
+    required: false
+    default: 9f1ac75a133ee09883ad2096a86d57791513de5fc6f262dfadee8dcee94a71b9
+  oras-version:
+    description: "ORAS CLI version to install (ghcr modes)."
+    required: false
+    default: 1.3.1
+  oras-sha256:
+    description: "Expected sha256 of the ORAS linux_amd64 tarball."
+    required: false
+    default: d52c4af76ce6a3ceb8579e51fb751a43ac051cca67f965f973a0b0e897a2bb86
+  patch-push-fatal:
+    description: >-
+      publish-ghcr: when 'false' (default), a failure to push the patch
+      manifest is logged as a warning and does NOT fail the job -- delta
+      upgrades are optional and the binaries + versioned tag are already
+      published. Set 'true' to make patch-push failures fatal.
+    required: false
+    default: "false"
+  github-token:
+    description: "Token for registry login and GitHub Release API access."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  has-patches:
+    description: "'true' when at least one patch survived the size gate."
+    value: ${{ steps.result.outputs.has-patches }}
+  from-version:
+    description: "The previous version the patches diff against (may be empty)."
+    value: ${{ steps.result.outputs.from-version }}
+
+runs:
+  using: composite
+  steps:
+    # ---- validate required inputs per mode --------------------------------
+    - name: Validate inputs
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        VERSION: ${{ inputs.version }}
+        REPO: ${{ inputs.repo }}
+      run: |
+        set -euo pipefail
+        case "$MODE" in
+          generate-ghcr|publish-ghcr)
+            if [ -z "$VERSION" ]; then
+              echo "::error::mode=$MODE requires a non-empty 'version' input"
+              exit 1
+            fi
+            if [ -z "$REPO" ]; then
+              echo "::error::mode=$MODE requires a non-empty 'repo' input"
+              exit 1
+            fi
+            ;;
+          generate-release) ;;
+          *)
+            echo "::error::unknown mode '$MODE' (expected generate-ghcr | publish-ghcr | generate-release)"
+            exit 1
+            ;;
+        esac
+
+    # ---- tool install -----------------------------------------------------
+    - name: Install ORAS CLI
+      if: inputs.mode == 'generate-ghcr' || inputs.mode == 'publish-ghcr'
+      shell: bash
+      env:
+        ORAS_VERSION: ${{ inputs.oras-version }}
+        ORAS_SHA256: ${{ inputs.oras-sha256 }}
+      run: |
+        set -euo pipefail
+        TARBALL="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+        curl --retry 3 --retry-delay 5 --retry-all-errors -sfLo "$TARBALL" \
+          "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${TARBALL}"
+        echo "${ORAS_SHA256}  ${TARBALL}" | sha256sum -c -
+        tar -xz -C /usr/local/bin oras < "$TARBALL"
+        rm "$TARBALL"
+
+    - name: Install zig-bsdiff
+      if: inputs.mode == 'generate-ghcr' || inputs.mode == 'generate-release'
+      shell: bash
+      env:
+        BSDIFF_VERSION: ${{ inputs.zig-bsdiff-version }}
+        BSDIFF_SHA256: ${{ inputs.zig-bsdiff-sha256 }}
+      run: |
+        set -euo pipefail
+        TARBALL="zig-bsdiff-linux-x64.tar.gz"
+        curl --retry 3 --retry-delay 5 --retry-all-errors -sfLo "$TARBALL" \
+          "https://github.com/blackboardsh/zig-bsdiff/releases/download/v${BSDIFF_VERSION}/${TARBALL}"
+        echo "${BSDIFF_SHA256}  ${TARBALL}" | sha256sum -c -
+        tar -xz -C /usr/local/bin < "$TARBALL"
+        rm "$TARBALL"
+
+    # ---- generate-ghcr: fetch previous nightly from the registry ----------
+    - name: Download previous nightly binaries from the registry
+      id: prev-ghcr
+      if: inputs.mode == 'generate-ghcr'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REGISTRY: ${{ inputs.registry }}
+        REPO: ${{ inputs.repo }}
+        NIGHTLY_TAG_PREFIX: ${{ inputs.nightly-tag-prefix }}
+        GH_TOKEN_IN: ${{ inputs.github-token }}
+        ACTOR: ${{ github.actor }}
+      run: |
+        set -euo pipefail
+        FULL_REPO="${REGISTRY}/${REPO}"
+
+        echo "${GH_TOKEN_IN}" | oras login "${REGISTRY}" -u "${ACTOR}" --password-stdin
+
+        # Newest versioned nightly tag strictly older than the one being built.
+        TAGS=$(oras repo tags "${FULL_REPO}" 2>/dev/null | grep "^${NIGHTLY_TAG_PREFIX}[0-9]" | sort -V || echo "")
+        PREV_TAG=""
+        for tag in $TAGS; do
+          if [ "$tag" = "${NIGHTLY_TAG_PREFIX}${VERSION}" ]; then
+            break
+          fi
+          PREV_TAG="$tag"
+        done
+
+        if [ -z "$PREV_TAG" ]; then
+          echo "No previous versioned nightly found, skipping patches"
+          echo "has-prev=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "has-prev=true" >> "$GITHUB_OUTPUT"
+        echo "from-version=${PREV_TAG#"${NIGHTLY_TAG_PREFIX}"}" >> "$GITHUB_OUTPUT"
+        echo "Previous nightly: ${PREV_TAG}"
+
+        mkdir -p old-binaries
+        PREV_MANIFEST_JSON=$(oras manifest fetch "${FULL_REPO}:${PREV_TAG}")
+        echo "$PREV_MANIFEST_JSON" | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] | endswith(".gz")) | .annotations["org.opencontainers.image.title"] + " " + .digest' | while read -r filename digest; do
+          basename="${filename%.gz}"
+          echo "  Downloading previous ${basename}..."
+          oras blob fetch "${FULL_REPO}@${digest}" --output "old-binaries/${filename}"
+          gunzip -f "old-binaries/${filename}"
+        done
+
+    # ---- generate-release: fetch previous stable from GitHub Releases ------
+    - name: Download previous release binaries
+      id: prev-release
+      if: inputs.mode == 'generate-release'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ inputs.github-repo }}
+        NEW_GZ_DIR: ${{ inputs.new-gz-dir }}
+      run: |
+        set -euo pipefail
+        PREV_TAG=$(gh api "repos/${GH_REPO}/releases?per_page=5" \
+          --jq '[.[] | select(.prerelease == false and .draft == false)] | .[0].tag_name // empty')
+
+        if [ -z "$PREV_TAG" ]; then
+          echo "No previous stable release found -- skipping patch generation"
+          echo "has-prev=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "has-prev=true" >> "$GITHUB_OUTPUT"
+        echo "from-version=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+        echo "Previous release: ${PREV_TAG}"
+
+        shopt -s nullglob
+        mkdir -p old-binaries
+        for gz in "${NEW_GZ_DIR}"/*.gz; do
+          name=$(basename "${gz%.gz}")
+          echo "  Downloading ${name}.gz from ${PREV_TAG}..."
+          gh release download "${PREV_TAG}" \
+            --repo "${GH_REPO}" \
+            --pattern "${name}.gz" \
+            --dir old-binaries || echo "  Warning: not found, skipping"
+        done
+        gunzip old-binaries/*.gz 2>/dev/null || true
+
+    # ---- generate (both channels): bsdiff + size gate ---------------------
+    - name: Generate delta patches
+      id: generate
+      if: >-
+        (inputs.mode == 'generate-ghcr' && steps.prev-ghcr.outputs.has-prev == 'true') ||
+        (inputs.mode == 'generate-release' && steps.prev-release.outputs.has-prev == 'true')
+      shell: bash
+      env:
+        NEW_BIN_DIR: ${{ inputs.new-binaries-dir }}
+        PATCHES_DIR: ${{ inputs.patches-dir }}
+        BINARY_GLOB: ${{ inputs.binary-glob }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        mkdir -p "${PATCHES_DIR}"
+        GENERATED=0
+
+        for new_binary in "${NEW_BIN_DIR}"/${BINARY_GLOB}; do
+          name=$(basename "$new_binary")
+          case "$name" in *.gz) continue ;; esac
+
+          old_binary="old-binaries/${name}"
+          [ -f "$old_binary" ] || continue
+
+          echo "Generating patch: ${name}.patch"
+          bsdiff "$old_binary" "$new_binary" "${PATCHES_DIR}/${name}.patch" --use-zstd
+
+          patch_size=$(stat --printf='%s' "${PATCHES_DIR}/${name}.patch")
+          new_size=$(stat --printf='%s' "$new_binary")
+          ratio=$(awk "BEGIN { printf \"%.1f\", ($patch_size / $new_size) * 100 }")
+          echo "  ${patch_size} bytes (${ratio}% of binary)"
+          GENERATED=$((GENERATED + 1))
+        done
+
+        echo "Generated ${GENERATED} patches"
+
+    - name: Validate patch sizes
+      id: validate
+      if: >-
+        (inputs.mode == 'generate-ghcr' && steps.prev-ghcr.outputs.has-prev == 'true') ||
+        (inputs.mode == 'generate-release' && steps.prev-release.outputs.has-prev == 'true')
+      shell: bash
+      env:
+        NEW_GZ_DIR: ${{ inputs.new-gz-dir }}
+        PATCHES_DIR: ${{ inputs.patches-dir }}
+        MAX_RATIO: ${{ inputs.max-ratio }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        # The client rejects chains exceeding SIZE_THRESHOLD_RATIO (60%) of the
+        # gzipped binary; gate here at a tighter default so single-step patches
+        # are caught with margin to spare.
+        for patch_file in "${PATCHES_DIR}"/*.patch; do
+          name=$(basename "$patch_file" .patch)
+          gz_binary="${NEW_GZ_DIR}/${name}.gz"
+          [ -f "$gz_binary" ] || continue
+
+          patch_size=$(stat --printf='%s' "$patch_file")
+          gz_size=$(stat --printf='%s' "$gz_binary")
+          ratio=$(awk "BEGIN { printf \"%.0f\", ($patch_size / $gz_size) * 100 }")
+
+          if [ "$ratio" -gt "${MAX_RATIO}" ]; then
+            echo "::warning::Patch ${name}.patch is ${ratio}% of gzipped binary (limit: ${MAX_RATIO}%) -- removing"
+            rm "$patch_file"
+          fi
+        done
+
+    # ---- publish-ghcr: push binaries + versioned tag + patch manifest -----
+    - name: Log in to the registry
+      if: inputs.mode == 'publish-ghcr'
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        GH_TOKEN_IN: ${{ inputs.github-token }}
+        ACTOR: ${{ github.actor }}
+      run: echo "${GH_TOKEN_IN}" | oras login "${REGISTRY}" -u "${ACTOR}" --password-stdin
+
+    - name: Push binaries to the registry
+      # Push from inside the artifacts directory so ORAS records bare filenames
+      # (e.g. "lore-linux-x64.gz") as layer titles -- the client matches layers
+      # by bare filename.
+      if: inputs.mode == 'publish-ghcr'
+      shell: bash
+      working-directory: ${{ inputs.artifacts-dir }}
+      env:
+        VERSION: ${{ inputs.version }}
+        REGISTRY: ${{ inputs.registry }}
+        REPO: ${{ inputs.repo }}
+        NIGHTLY_TAG: ${{ inputs.nightly-tag }}
+        ARTIFACT_TYPE_PREFIX: ${{ inputs.artifact-type-prefix }}
+        SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+      run: |
+        set -euo pipefail
+        oras push "${REGISTRY}/${REPO}:${NIGHTLY_TAG}" \
+          --artifact-type "${ARTIFACT_TYPE_PREFIX}.nightly" \
+          --annotation "org.opencontainers.image.source=${SOURCE_URL}" \
+          --annotation "version=${VERSION}" \
+          ./*.gz
+
+    - name: Tag versioned nightly
+      # Immutable versioned tag via zero-copy `oras tag` so patch-chain
+      # resolution can find specific nightly versions.
+      if: inputs.mode == 'publish-ghcr'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REGISTRY: ${{ inputs.registry }}
+        REPO: ${{ inputs.repo }}
+        NIGHTLY_TAG: ${{ inputs.nightly-tag }}
+        NIGHTLY_TAG_PREFIX: ${{ inputs.nightly-tag-prefix }}
+      run: |
+        set -euo pipefail
+        oras tag "${REGISTRY}/${REPO}:${NIGHTLY_TAG}" "${NIGHTLY_TAG_PREFIX}${VERSION}"
+
+    - name: Push delta patches to the registry
+      # Upload pre-generated patches as a <patch-tag-prefix><version> manifest
+      # with SHA-256 annotations (computed from the UNCOMPRESSED binaries -- the
+      # sole client-side integrity anchor). Non-fatal: delta upgrades are
+      # optional.
+      if: inputs.mode == 'publish-ghcr'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REGISTRY: ${{ inputs.registry }}
+        REPO: ${{ inputs.repo }}
+        NIGHTLY_TAG_PREFIX: ${{ inputs.nightly-tag-prefix }}
+        PATCH_TAG_PREFIX: ${{ inputs.patch-tag-prefix }}
+        ARTIFACT_TYPE_PREFIX: ${{ inputs.artifact-type-prefix }}
+        PATCHES_DIR: ${{ inputs.patches-dir }}
+        BINARIES_DIR: ${{ inputs.binaries-dir }}
+        PATCH_PUSH_FATAL: ${{ inputs.patch-push-fatal }}
+      run: |
+        set -uo pipefail
+        FULL_REPO="${REGISTRY}/${REPO}"
+
+        # Delta upgrades are optional. push_patches returns non-zero on a real
+        # push failure; unless patch-push-fatal=true we downgrade that to a
+        # warning so a transient registry hiccup cannot fail publish after the
+        # binaries and the versioned tag were already pushed by prior steps.
+        # NOTE: no `set -e` here -- failures are handled by explicit rc checks,
+        # so the caller's error handling below is always reached.
+        push_patches() {
+          # Compute SHA-256 annotations from new binaries and collect patch files.
+          shopt -s nullglob
+          local ANNOTATIONS=""
+          local PATCH_FILES=""
+          local patch_file basename_patch new_binary sha256
+          for patch_file in "${PATCHES_DIR}"/*.patch; do
+            basename_patch=$(basename "$patch_file" .patch)
+            new_binary="${BINARIES_DIR}/${basename_patch}"
+            if [ -f "$new_binary" ]; then
+              sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
+              ANNOTATIONS="${ANNOTATIONS} --annotation sha256-${basename_patch}=${sha256}"
+            fi
+            PATCH_FILES="${PATCH_FILES} $(basename "$patch_file")"
+          done
+
+          if [ -z "$PATCH_FILES" ]; then
+            echo "No patches to push"
+            return 0
+          fi
+
+          # Find from-version by listing versioned nightly tags.
+          local TAGS PREV_TAG="" tag PREV_VERSION
+          TAGS=$(oras repo tags "${FULL_REPO}" 2>/dev/null | grep "^${NIGHTLY_TAG_PREFIX}[0-9]" | sort -V || echo "")
+          for tag in $TAGS; do
+            if [ "$tag" = "${NIGHTLY_TAG_PREFIX}${VERSION}" ]; then break; fi
+            PREV_TAG="$tag"
+          done
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous nightly tag found, skipping patch push"
+            return 0
+          fi
+          PREV_VERSION="${PREV_TAG#"${NIGHTLY_TAG_PREFIX}"}"
+
+          cd "${PATCHES_DIR}" || return 1
+          eval oras push "${FULL_REPO}:${PATCH_TAG_PREFIX}${VERSION}" \
+            --artifact-type "${ARTIFACT_TYPE_PREFIX}.patch" \
+            --annotation "from-version=${PREV_VERSION}" \
+            "${ANNOTATIONS}" \
+            "${PATCH_FILES}"
+          local rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "Pushed patch manifest: ${PATCH_TAG_PREFIX}${VERSION} (from ${PREV_VERSION})"
+          fi
+          return "$rc"
+        }
+
+        push_patches
+        push_rc=$?
+        if [ "$push_rc" -ne 0 ]; then
+          if [ "${PATCH_PUSH_FATAL}" = "true" ]; then
+            echo "::error::Patch manifest push failed (rc=${push_rc})"
+            exit "$push_rc"
+          fi
+          echo "::warning::Patch manifest push failed (rc=${push_rc}) -- delta upgrades unavailable for this build; binaries and versioned tag were still published"
+        fi
+
+    # ---- surface outputs --------------------------------------------------
+    - name: Collect outputs
+      id: result
+      shell: bash
+      env:
+        PATCHES_DIR: ${{ inputs.patches-dir }}
+        FROM_GHCR: ${{ steps.prev-ghcr.outputs.from-version }}
+        FROM_RELEASE: ${{ steps.prev-release.outputs.from-version }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        COUNT=0
+        if [ -d "${PATCHES_DIR}" ]; then
+          for p in "${PATCHES_DIR}"/*.patch; do
+            COUNT=$((COUNT + 1))
+          done
+        fi
+        if [ "$COUNT" -gt 0 ]; then
+          echo "has-patches=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has-patches=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "from-version=${FROM_GHCR}${FROM_RELEASE}" >> "$GITHUB_OUTPUT"
