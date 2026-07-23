@@ -137,6 +137,33 @@ describe("OpenCode auth reader", () => {
     ]);
   });
 
+  test("github-copilot falls back to access when refresh is absent", () => {
+    // Older OpenCode auth.json may lack `refresh`; `access` still works.
+    writeJson(authFile(), {
+      "github-copilot": {
+        type: "oauth",
+        access: "gho_access_only",
+        expires: 0,
+      },
+    });
+    const creds = readUsableAuth("opencode");
+    expect(creds).toEqual([
+      {
+        scheme: "bearer",
+        value: "gho_access_only",
+        providerID: "github-copilot",
+        expiresAt: undefined,
+      },
+    ]);
+  });
+
+  test("github-copilot with neither refresh nor access is omitted (no throw)", () => {
+    writeJson(authFile(), {
+      "github-copilot": { type: "oauth", expires: 0 },
+    });
+    expect(readUsableAuth("opencode")).toEqual([]);
+  });
+
   test("expires:0 sentinel is treated as unexpired (not epoch-0-expired)", () => {
     writeJson(authFile(), {
       openai: { type: "oauth", access: "tok-live", expires: 0 },
