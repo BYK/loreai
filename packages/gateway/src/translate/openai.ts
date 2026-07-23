@@ -524,6 +524,9 @@ export function isGitHubModelsHost(hostname: string): boolean {
 /** The API version pinned for GitHub Models requests. */
 export const GITHUB_MODELS_API_VERSION = "2026-03-10";
 
+/** The API version pinned for GitHub Copilot requests (matches Copilot CLI). */
+export const GITHUB_COPILOT_API_VERSION = "2026-06-01";
+
 /** Static headers GitHub Models requires beyond auth. Empty for every other
  *  host, so callers can spread the result unconditionally. */
 export function gitHubModelsHeaders(url: string): Record<string, string> {
@@ -532,6 +535,27 @@ export function gitHubModelsHeaders(url: string): Record<string, string> {
       return {
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": GITHUB_MODELS_API_VERSION,
+      };
+    }
+  } catch {
+    // Unparseable URL — add nothing.
+  }
+  return {};
+}
+
+/**
+ * Extra headers GitHub Copilot expects on Chat Completions calls. The stored
+ * GitHub OAuth token authenticates on its own (verified), but Copilot's API
+ * canonically wants a `Copilot-Integration-Id` identifying the integration and
+ * an `X-GitHub-Api-Version`. Sending them matches what real Copilot clients do
+ * and hardens against the API tightening later. No-op for non-Copilot hosts.
+ */
+export function copilotHeaders(url: string): Record<string, string> {
+  try {
+    if (isGitHubCopilotHost(new URL(url).hostname)) {
+      return {
+        "Copilot-Integration-Id": "vscode-chat",
+        "X-GitHub-Api-Version": GITHUB_COPILOT_API_VERSION,
       };
     }
   } catch {

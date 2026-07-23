@@ -50,6 +50,7 @@ import {
 import {
   buildOpenAIChatCompletionsUrl,
   gitHubModelsHeaders,
+  copilotHeaders,
 } from "./translate/openai";
 import { accumulateOpenAISSEStream } from "./stream/openai";
 import { accumulateResponsesSSEStream } from "./stream/openai-responses";
@@ -1052,6 +1053,9 @@ function buildOpenAIWorkerRequest(
       ...authHeaders(cred),
       // GitHub Models requires Accept + X-GitHub-Api-Version; no-op for others.
       ...gitHubModelsHeaders(target.url),
+      // GitHub Copilot wants Copilot-Integration-Id + X-GitHub-Api-Version;
+      // no-op for others.
+      ...copilotHeaders(target.url),
     },
     body: JSON.stringify({
       model: model.modelID,
