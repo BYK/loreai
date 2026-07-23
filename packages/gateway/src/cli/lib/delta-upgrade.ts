@@ -122,6 +122,11 @@ export async function attemptDeltaUpgrade(
       // Record where the chain resolved from so the final "ok" report can
       // attribute cache vs network; `offline_miss` is reported directly.
       let resolvedSource: DeltaSource | undefined;
+      // Whether the offline-miss path already emitted its own `unavailable`
+      // report (with source=offline_miss). If so, don't emit a second,
+      // source-less `unavailable` report below — that would overwrite the
+      // telemetry outcome and drop the source attribution.
+      let reported = false;
       // Render the apply-phase byte bar from binpatch's progress events. The
       // bar is created lazily on the first `bytes` event (which carries the
       // total) and fed per-hop deltas (events report cumulative `written`).
@@ -141,6 +146,7 @@ export async function attemptDeltaUpgrade(
               resolvedSource = info.source;
             },
             onOfflineMiss: () => {
+              reported = true;
               report({
                 channel,
                 fromVersion: VERSION,
@@ -153,12 +159,14 @@ export async function attemptDeltaUpgrade(
         });
 
         if (result === null) {
-          report({
-            channel,
-            fromVersion: VERSION,
-            toVersion: targetVersion,
-            result: "unavailable",
-          });
+          if (!reported) {
+            report({
+              channel,
+              fromVersion: VERSION,
+              toVersion: targetVersion,
+              result: "unavailable",
+            });
+          }
         } else {
           report({
             channel,
