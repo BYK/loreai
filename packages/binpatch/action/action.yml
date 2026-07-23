@@ -120,6 +120,14 @@ inputs:
     description: "Expected sha256 of the ORAS linux_amd64 tarball."
     required: false
     default: d52c4af76ce6a3ceb8579e51fb751a43ac051cca67f965f973a0b0e897a2bb86
+  patch-push-fatal:
+    description: >-
+      publish-ghcr: when 'false' (default), a failure to push the patch
+      manifest is logged as a warning and does NOT fail the job -- delta
+      upgrades are optional and the binaries + versioned tag are already
+      published. Set 'true' to make patch-push failures fatal.
+    required: false
+    default: "false"
   github-token:
     description: "Token for registry login and GitHub Release API access."
     required: false
@@ -405,51 +413,74 @@ runs:
         ARTIFACT_TYPE_PREFIX: ${{ inputs.artifact-type-prefix }}
         PATCHES_DIR: ${{ inputs.patches-dir }}
         BINARIES_DIR: ${{ inputs.binaries-dir }}
+        PATCH_PUSH_FATAL: ${{ inputs.patch-push-fatal }}
       run: |
-        set -euo pipefail
+        set -uo pipefail
         FULL_REPO="${REGISTRY}/${REPO}"
 
-        # Compute SHA-256 annotations from new binaries and collect patch files.
-        shopt -s nullglob
-        ANNOTATIONS=""
-        PATCH_FILES=""
-        for patch_file in "${PATCHES_DIR}"/*.patch; do
-          basename_patch=$(basename "$patch_file" .patch)
-          new_binary="${BINARIES_DIR}/${basename_patch}"
-          if [ -f "$new_binary" ]; then
-            sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
-            ANNOTATIONS="${ANNOTATIONS} --annotation sha256-${basename_patch}=${sha256}"
+        # Delta upgrades are optional. push_patches returns non-zero on a real
+        # push failure; unless patch-push-fatal=true we downgrade that to a
+        # warning so a transient registry hiccup cannot fail publish after the
+        # binaries and the versioned tag were already pushed by prior steps.
+        # NOTE: no `set -e` here -- failures are handled by explicit rc checks,
+        # so the caller's error handling below is always reached.
+        push_patches() {
+          # Compute SHA-256 annotations from new binaries and collect patch files.
+          shopt -s nullglob
+          local ANNOTATIONS=""
+          local PATCH_FILES=""
+          local patch_file basename_patch new_binary sha256
+          for patch_file in "${PATCHES_DIR}"/*.patch; do
+            basename_patch=$(basename "$patch_file" .patch)
+            new_binary="${BINARIES_DIR}/${basename_patch}"
+            if [ -f "$new_binary" ]; then
+              sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
+              ANNOTATIONS="${ANNOTATIONS} --annotation sha256-${basename_patch}=${sha256}"
+            fi
+            PATCH_FILES="${PATCH_FILES} $(basename "$patch_file")"
+          done
+
+          if [ -z "$PATCH_FILES" ]; then
+            echo "No patches to push"
+            return 0
           fi
-          PATCH_FILES="${PATCH_FILES} $(basename "$patch_file")"
-        done
 
-        if [ -z "$PATCH_FILES" ]; then
-          echo "No patches to push"
-          exit 0
+          # Find from-version by listing versioned nightly tags.
+          local TAGS PREV_TAG="" tag PREV_VERSION
+          TAGS=$(oras repo tags "${FULL_REPO}" 2>/dev/null | grep "^${NIGHTLY_TAG_PREFIX}[0-9]" | sort -V || echo "")
+          for tag in $TAGS; do
+            if [ "$tag" = "${NIGHTLY_TAG_PREFIX}${VERSION}" ]; then break; fi
+            PREV_TAG="$tag"
+          done
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "No previous nightly tag found, skipping patch push"
+            return 0
+          fi
+          PREV_VERSION="${PREV_TAG#"${NIGHTLY_TAG_PREFIX}"}"
+
+          cd "${PATCHES_DIR}" || return 1
+          eval oras push "${FULL_REPO}:${PATCH_TAG_PREFIX}${VERSION}" \
+            --artifact-type "${ARTIFACT_TYPE_PREFIX}.patch" \
+            --annotation "from-version=${PREV_VERSION}" \
+            "${ANNOTATIONS}" \
+            "${PATCH_FILES}"
+          local rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "Pushed patch manifest: ${PATCH_TAG_PREFIX}${VERSION} (from ${PREV_VERSION})"
+          fi
+          return "$rc"
+        }
+
+        push_patches
+        push_rc=$?
+        if [ "$push_rc" -ne 0 ]; then
+          if [ "${PATCH_PUSH_FATAL}" = "true" ]; then
+            echo "::error::Patch manifest push failed (rc=${push_rc})"
+            exit "$push_rc"
+          fi
+          echo "::warning::Patch manifest push failed (rc=${push_rc}) -- delta upgrades unavailable for this build; binaries and versioned tag were still published"
         fi
-
-        # Find from-version by listing versioned nightly tags.
-        TAGS=$(oras repo tags "${FULL_REPO}" 2>/dev/null | grep "^${NIGHTLY_TAG_PREFIX}[0-9]" | sort -V || echo "")
-        PREV_TAG=""
-        for tag in $TAGS; do
-          if [ "$tag" = "${NIGHTLY_TAG_PREFIX}${VERSION}" ]; then break; fi
-          PREV_TAG="$tag"
-        done
-
-        if [ -z "$PREV_TAG" ]; then
-          echo "No previous nightly tag found, skipping patch push"
-          exit 0
-        fi
-        PREV_VERSION="${PREV_TAG#"${NIGHTLY_TAG_PREFIX}"}"
-
-        cd "${PATCHES_DIR}"
-        eval oras push "${FULL_REPO}:${PATCH_TAG_PREFIX}${VERSION}" \
-          --artifact-type "${ARTIFACT_TYPE_PREFIX}.patch" \
-          --annotation "from-version=${PREV_VERSION}" \
-          "${ANNOTATIONS}" \
-          "${PATCH_FILES}"
-
-        echo "Pushed patch manifest: ${PATCH_TAG_PREFIX}${VERSION} (from ${PREV_VERSION})"
 
     # ---- surface outputs --------------------------------------------------
     - name: Collect outputs
