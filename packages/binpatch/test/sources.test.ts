@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extractSha256,
   extractStableChain,
   filterAndSortChainTags,
   getPatchFromVersion,
   getPatchTargetSha256,
+  ghcrSource,
   type GitHubRelease,
   getStableTargetSha256,
   type OciManifest,
@@ -264,5 +265,33 @@ describe("OCI manifest annotation helpers", () => {
   it("reads the per-binary target sha256", () => {
     expect(getPatchTargetSha256(m, BINARY)).toBe("abc123");
     expect(getPatchTargetSha256(m, "other")).toBeNull();
+  });
+});
+
+describe("ghcrSource resolveChain — SourceStrategy contract on network failure", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("returns null (not throw) when the registry is unreachable", async () => {
+    // The OCI client uses global fetch; make every call fail like a network
+    // outage. Per the SourceStrategy contract a resolution failure must be a
+    // null (→ fall back to full download, reported `unavailable`), never a
+    // thrown system error.
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+
+    const source = ghcrSource({
+      registry: "https://ghcr.io",
+      repo: "owner/project",
+      userAgent: "test/1.0.0",
+      binaryName: BINARY,
+      targetTag: (v) => `nightly-${v}`,
+      compareVersions: cmp,
+    });
+
+    await expect(source.resolveChain("1.0.0", "1.1.0")).resolves.toBeNull();
   });
 });

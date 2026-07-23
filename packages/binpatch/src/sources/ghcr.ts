@@ -22,6 +22,7 @@ import {
   SIZE_THRESHOLD_RATIO,
 } from "../contract";
 import type { SourceStrategy } from "../discover";
+import { BinpatchError } from "../errors";
 import { OciClient, type OciClientConfig, type OciManifest } from "./oci";
 
 export function getPatchFromVersion(manifest: OciManifest): string | null {
@@ -255,28 +256,39 @@ export function ghcrSource(config: GhcrSourceConfig): SourceStrategy {
 
   return {
     async resolveChain(currentVersion, targetVersion, signal) {
-      const token = await client.getAnonymousToken(signal);
+      // A network failure anywhere in resolution (token exchange, manifest /
+      // tag listing, or blob download) means "no usable chain" per the
+      // SourceStrategy contract — return null so the caller falls back to a
+      // full download and it is reported as `unavailable`, not a system
+      // `error`. Only BinpatchError (network) is swallowed; a programming bug
+      // still propagates.
+      try {
+        const token = await client.getAnonymousToken(signal);
 
-      const [targetManifest, patchTags] = await Promise.all([
-        client.fetchManifest(token, targetTag(targetVersion), signal),
-        client.listTags(token, PATCH_TAG_PREFIX, signal),
-      ]);
+        const [targetManifest, patchTags] = await Promise.all([
+          client.fetchManifest(token, targetTag(targetVersion), signal),
+          client.listTags(token, PATCH_TAG_PREFIX, signal),
+        ]);
 
-      const gzLayer = targetManifest.layers.find(
-        (l) =>
-          l.annotations?.["org.opencontainers.image.title"] ===
-          `${binaryName}.gz`,
-      );
-      if (!gzLayer) return null;
+        const gzLayer = targetManifest.layers.find(
+          (l) =>
+            l.annotations?.["org.opencontainers.image.title"] ===
+            `${binaryName}.gz`,
+        );
+        if (!gzLayer) return null;
 
-      return resolveNightlyChain({
-        token,
-        currentVersion,
-        targetVersion,
-        fullGzSize: gzLayer.size,
-        preloadedTags: patchTags,
-        signal,
-      });
+        return await resolveNightlyChain({
+          token,
+          currentVersion,
+          targetVersion,
+          fullGzSize: gzLayer.size,
+          preloadedTags: patchTags,
+          signal,
+        });
+      } catch (error) {
+        if (error instanceof BinpatchError) return null;
+        throw error;
+      }
     },
   };
 }
