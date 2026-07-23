@@ -95,3 +95,56 @@ export interface AgentHistoryProvider {
     maxTokens?: number,
   ): ConversationChunk[];
 }
+
+/**
+ * A credential resolved from a harness's own on-disk auth store, mapped to the
+ * shape Lore's gateway extraction client consumes.
+ *
+ * `scheme` mirrors the gateway `AuthCredential` scheme:
+ *   - "api-key" → sent as `x-api-key`
+ *   - "bearer"  → sent as `Authorization: Bearer <value>`
+ */
+export type AgentResolvedAuth = {
+  /** How to present the credential to the upstream. */
+  scheme: "api-key" | "bearer";
+  /** The raw secret (API key or OAuth access token). */
+  value: string;
+  /**
+   * Lore provider ID the credential authenticates (e.g. "anthropic", "openai",
+   * "minimax", "openrouter"). Must be routable (present in the gateway's
+   * PROVIDER_ROUTES) for the credential to be usable for extraction.
+   */
+  providerID: string;
+  /**
+   * Optional model hint. When omitted, callers fall back to
+   * `defaultModelForProvider(providerID)`.
+   */
+  modelID?: string;
+  /**
+   * Expiry for OAuth-style credentials (epoch ms). Undefined for non-expiring
+   * API keys. A credential at or past this instant is treated as expired and
+   * skipped (v1 does not refresh — the harness owns that).
+   */
+  expiresAt?: number;
+};
+
+/**
+ * Capability for reading a harness's OWN stored credentials so a standalone
+ * `lore import` can authenticate knowledge extraction without a running gateway
+ * or a dedicated `LORE_WORKER_API_KEY`.
+ *
+ * Parallel to {@link AgentHistoryProvider}: each harness owns both "read my
+ * history" and "read my credentials". Implementations MUST NOT throw — return
+ * an empty array on any missing/unreadable/unparseable store.
+ */
+export interface AgentAuthProvider {
+  /** Internal name — matches the corresponding {@link AgentHistoryProvider.name}. */
+  readonly name: string;
+
+  /**
+   * Read the harness's stored credentials, best-first (e.g. the provider the
+   * harness is currently configured to use should come first). Returns an empty
+   * array when nothing usable is found. Never throws.
+   */
+  readAuth(): AgentResolvedAuth[];
+}

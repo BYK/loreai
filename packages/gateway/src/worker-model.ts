@@ -1056,6 +1056,32 @@ const WORKER_DEFAULTS: Record<
   },
 };
 
+/**
+ * Default model for a provider, used when a caller (e.g. `lore import`, the
+ * API extract/rebuild endpoints) needs a concrete model but the user has not
+ * set `cfg.model`. Single source of truth built on {@link WORKER_DEFAULTS} so
+ * import/extraction picks the same validated per-provider default the worker
+ * pipeline uses, instead of hardcoding anthropic.
+ *
+ * The returned `modelID` is the OFFLINE fallback from WORKER_DEFAULTS; the LLM
+ * adapter resolves the live newest-in-family where applicable. Providers with
+ * no WORKER_DEFAULTS entry (google/gemini by design, or anything unknown) get
+ * a sensible fallback; an empty `modelID` signals "let model resolution fill
+ * it in" for unknown providers.
+ */
+export function defaultModelForProvider(providerID?: string): {
+  providerID: string;
+  modelID: string;
+} {
+  const p = providerID ?? "anthropic";
+  const d = WORKER_DEFAULTS[p];
+  if (d) return { providerID: d.providerID, modelID: d.modelID };
+  if (p === "google" || p === "gemini") {
+    return { providerID: p, modelID: "gemini-2.5-flash" };
+  }
+  return { providerID: p, modelID: "" };
+}
+
 /** Cost threshold ($/M input) above which we downgrade to a cheaper worker. */
 const EXPENSIVE_MODEL_THRESHOLD = 1.5;
 

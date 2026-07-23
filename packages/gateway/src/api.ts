@@ -28,7 +28,8 @@ import {
 } from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import { createGatewayLLMClient } from "./llm-adapter";
-import { resolveAuth } from "./auth";
+import { resolveAuth, getLastSeenAuthProvider } from "./auth";
+import { defaultModelForProvider } from "./worker-model";
 import { decodeRequestBody } from "./http-body";
 
 // ---------------------------------------------------------------------------
@@ -130,10 +131,12 @@ let apiLLMClient: LLMClient | null = null;
 function getAPILLMClient(config: GatewayConfig): LLMClient {
   if (!apiLLMClient) {
     const cfg = loreConfig();
-    const defaultModel = cfg.model ?? {
-      providerID: "anthropic",
-      modelID: "claude-sonnet-4-6",
-    };
+    // Match the model to the last-seen credential's provider when config has no
+    // explicit model, so extraction routes to the provider we actually hold a
+    // credential for (not a hardcoded anthropic default).
+    const defaultModel =
+      cfg.model ??
+      defaultModelForProvider(getLastSeenAuthProvider() ?? undefined);
     apiLLMClient = createGatewayLLMClient(
       { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
       resolveAuth,
@@ -536,11 +539,10 @@ async function handleImportExtract(
   }
 
   const cfg = loreConfig();
-  const defaultModel = body.model ??
-    cfg.model ?? {
-      providerID: "anthropic",
-      modelID: "claude-sonnet-4-6",
-    };
+  const defaultModel =
+    body.model ??
+    cfg.model ??
+    defaultModelForProvider(getLastSeenAuthProvider() ?? undefined);
 
   let llm: LLMClient;
   try {
@@ -600,11 +602,10 @@ async function handleEntityRebuild(
   }>(req);
 
   const cfg = loreConfig();
-  const defaultModel = body.model ??
-    cfg.model ?? {
-      providerID: "anthropic",
-      modelID: "claude-sonnet-4-6",
-    };
+  const defaultModel =
+    body.model ??
+    cfg.model ??
+    defaultModelForProvider(getLastSeenAuthProvider() ?? undefined);
 
   let llm: LLMClient;
   try {

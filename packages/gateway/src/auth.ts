@@ -349,6 +349,15 @@ export function getLastSeenAuth(providerID?: string): AuthCredential | null {
 }
 
 /**
+ * Provider ID of the last-seen global credential, or `null` if none captured.
+ * Used by session-less callers (e.g. the import/extract API) to pick a model
+ * default that matches the credential's provider instead of assuming anthropic.
+ */
+export function getLastSeenAuthProvider(): string | null {
+  return globalAuthStale ? null : lastSeenAuthProvider;
+}
+
+/**
  * Mark the global fallback credential as stale. Called when a session-less
  * worker (no sessionID) receives a 401/403 — since there's no session to
  * attach staleness to, we mark the global credential directly.
