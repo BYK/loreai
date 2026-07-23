@@ -23,10 +23,11 @@ The system splits into two halves joined by a single **wire contract**:
 2. **Generation + publishing** — CI-side patch creation and upload to
    GHCR / GitHub Releases. A reusable GitHub Action (separate, later).
 
-This package currently covers the **apply core** (PR1): patch parsing, chain
-application, an offline cache, and byte-progress reporting. Chain **discovery**
-(a pluggable `SourceStrategy` over GHCR tags and GitHub Release assets) lands in
-a follow-up.
+This package covers the **apply core** (patch parsing, chain application, an
+offline cache, byte-progress reporting) and **chain discovery** — a pluggable
+`SourceStrategy` over OCI/GHCR patch-manifest tags and GitHub Release assets,
+plus a cache-first `resolveAndApply` orchestrator. The CI-side patch
+*generation* half ships separately as a composite GitHub Action (later).
 
 ## API
 
@@ -52,14 +53,74 @@ await cache.cleanup(); // drop entries past the 7-day TTL
 await cache.clear();   // wipe everything (e.g. after a successful upgrade)
 ```
 
+### Discovery + resolve-and-apply
+
+Higher level: hand `resolveAndApply` a `SourceStrategy` and it does cache-first
+resolution, apply, SHA verification, and progress events. All product specifics
+are injected — the library has no GitHub/registry/version knowledge baked in.
+
+```ts
+import {
+  resolveAndApply,
+  ghcrSource,
+  githubReleaseSource,
+} from "binpatch";
+
+// Nightly channel — OCI patch-manifest tags on a registry (e.g. GHCR).
+const nightly = ghcrSource({
+  registry: "https://ghcr.io",
+  repo: "owner/project",
+  userAgent: "my-cli/1.2.3",
+  binaryName: "my-cli-linux-x64",
+  targetTag: (v) => `nightly-${v}`,   // where the target image manifest lives
+  compareVersions,                     // your semver comparator (-1|0|1)
+});
+
+// Stable channel — GitHub Release assets.
+const stable = githubReleaseSource({
+  releasesUrl: "https://api.github.com/repos/owner/project/releases",
+  binaryName: "my-cli-linux-x64",
+  userAgent: "my-cli/1.2.3",
+});
+
+const result = await resolveAndApply({
+  source: nightly,            // or stable
+  currentVersion, targetVersion,
+  oldPath, destPath,
+  cache,                       // optional — enables offline upgrades
+  offline,                     // optional — cache-only, never touch the network
+  onProgress: (e) => { /* {type:"phase"|"bytes"|"done", ...} */ },
+  telemetry: {                 // optional — the library is telemetry-agnostic
+    onResolved: ({ source }) => {/* "cache" | "network" */},
+    onOfflineMiss: () => {},
+  },
+});
+// result: { sha256, patchBytes, chainLength } | null (fall back to full download)
+```
+
+Implement your own `SourceStrategy` for any other layout — the contract is a
+single method: `resolveChain(current, target, signal?) => PatchChain | null`.
+
+### Progress is events, never rendering
+
+The library **never draws** progress. `resolveAndApply` emits
+`{ type: "phase" | "bytes" | "done"; phase; ... }` events via `onProgress`; a
+missing handler is silent, and a throwing handler can never abort the operation
+(`safeProgress`). Each consumer renders however it likes — a stderr bar
+(`makeByteProgress` ships as a convenience), a spinner message, or a log line.
+
 ### Exports
 
 - `parsePatchHeader`, `offtin`, `PatchHeader`, `MAX_OUTPUT_SIZE`, `addDiffChunk`
   — TRDIFF10 header parsing + the vectorized diff-add primitive.
 - `applyPatch`, `applyPatchToMemory`, `applyPatchChainInMemory` — patch apply.
-- `makeByteProgress`, `ByteProgress`, `ByteProgressOut` — a simple byte-progress
-  bar (a thin default; the eventual public API is pure event hooks so any
-  consumer can plug in any indicator, or none).
+- `resolveAndApply`, `SourceStrategy`, `ghcrSource`, `githubReleaseSource`,
+  `OciClient` — chain discovery + orchestration.
+- `ProgressEvent`, `ProgressHandler`, `safeProgress` — progress events.
+- `PatchChain`, `PatchLink`, `ChainStep`, `DeltaResult`, `BinpatchError`,
+  and the contract constants (`MAX_STABLE_CHAIN_DEPTH`,
+  `MAX_NIGHTLY_CHAIN_DEPTH`, `SIZE_THRESHOLD_RATIO`, `PATCH_TAG_PREFIX`).
+- `makeByteProgress` — a convenience stderr byte-progress bar (optional).
 - `makeCache`, `PatchCache`, `patchFileName`, `chainFileName`, `ChainMeta`,
   `PatchStepMeta` — the offline patch cache.
 

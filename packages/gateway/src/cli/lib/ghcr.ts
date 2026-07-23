@@ -104,7 +104,7 @@ export const GHCR_REPO = "BYK/loreai";
 export const GHCR_TAG = "nightly";
 
 /** Base URL for GHCR registry API */
-const GHCR_REGISTRY = "https://ghcr.io";
+export const GHCR_REGISTRY = "https://ghcr.io";
 
 /** OCI manifest media type */
 const OCI_MANIFEST_TYPE = "application/vnd.oci.image.manifest.v1+json";
