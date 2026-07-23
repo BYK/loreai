@@ -29,7 +29,6 @@ import {
   setLastTurnAtForTest,
   setTransformCountForTest,
   setBustSpiralHook,
-  prefixPresentFloorApplies,
   recordCacheUsage,
   getPrefixChurnRate,
   PREFIX_CHURN_ALPHA,
@@ -753,16 +752,17 @@ describe("gradient — force escalation (reactive error recovery)", () => {
     // Despite tiny messages, force min layer should push to at least layer 2
     expect(result.layer).toBeGreaterThanOrEqual(2);
     // After one use, the forceMinLayer flag is consumed (proven directly below).
-    // The resulting layer drops from the forced 2 to 1 — NOT back to 0 — because
-    // the prefix-present floor holds a once-compressed session at Layer >= 1
-    // (prefixPresentFloorApplies). The 2→1 drop proves the flag was consumed.
+    // The session sustained layer 2 on turn 1, so the monotonic layer ratchet
+    // (maxSustainedLayer) now holds it at 2 — it must NOT drop back to 1 (or 0),
+    // because decompressing re-renders the prefix and busts the cache. This is
+    // the ratchet: once compressed to L, never select below L (except emergency).
     expect(loadForceMinLayer("force-sess")).toBe(0);
     const result2 = transform({
       messages,
       projectPath: PROJECT,
       sessionID: "force-sess",
     });
-    expect(result2.layer).toBe(1);
+    expect(result2.layer).toBe(2);
   });
 
   test("forceMinLayer is one-shot — cleared after single use", () => {
@@ -780,15 +780,15 @@ describe("gradient — force escalation (reactive error recovery)", () => {
     expect(r1.layer).toBeGreaterThanOrEqual(2);
     // Flag is consumed (one-shot) — proven directly.
     expect(loadForceMinLayer("oneshot-sess")).toBe(0);
-    // Second call — no flag. The layer drops from 2, but the prefix-present
-    // floor holds it at 1 (a once-compressed session never re-enters Layer 0
-    // absent a genuine compaction). The 2→1 drop confirms the flag was consumed.
+    // Second call — no flag. The session sustained layer 2 on turn 1, so the
+    // monotonic ratchet holds it at 2 (never drops to 1/0). Consumption of the
+    // one-shot flag is proven by loadForceMinLayer===0 above, not by a layer drop.
     const r2 = transform({
       messages,
       projectPath: PROJECT,
       sessionID: "oneshot-sess",
     });
-    expect(r2.layer).toBe(1);
+    expect(r2.layer).toBe(2);
   });
 
   test("resetCalibration clears forceMinLayer", () => {
@@ -846,15 +846,16 @@ describe("gradient — forceMinLayer persistence (restart survival)", () => {
     // One-shot: consumed — DB should be cleared
     expect(loadForceMinLayer(SID)).toBe(0);
 
-    // Next call: the forced flag is gone, but the prefix-present floor holds a
-    // once-compressed session at Layer 1 (no re-entry to Layer 0 absent a
-    // genuine compaction). The 2→1 drop confirms the flag was consumed.
+    // Next call: the forced flag is gone, but the session sustained layer 2 on
+    // the prior turn, so the monotonic ratchet holds it at 2 (never drops to
+    // 1/0). Consumption of the one-shot flag is proven by loadForceMinLayer===0
+    // above, not by a layer drop.
     const result2 = transform({
       messages,
       projectPath: PROJECT,
       sessionID: SID,
     });
-    expect(result2.layer).toBe(1);
+    expect(result2.layer).toBe(2);
   });
 
   test("setForceMinLayer writes to DB and transform consumes it", () => {
@@ -880,6 +881,44 @@ describe("gradient — forceMinLayer persistence (restart survival)", () => {
 
     // DB row should be deleted after consumption
     expect(loadForceMinLayer(SID)).toBe(0);
+  });
+
+  test("restart after an emergency (lastLayer=4) re-seeds the ratchet to >= 1 (no Layer-0 front-bust)", () => {
+    // Regression for the cold-start reseed gap: a session whose last persisted
+    // turn was an emergency overflow (lastLayer=4) was compressed before the
+    // emergency, so on resume it must hold the prefix (layer >= 1) — NOT re-enter
+    // layer 0 and front-bust. Layer 4 itself never latches the ratchet, but the
+    // reseed treats a restored 4 as "was compressed, hold >= 1".
+    const SID = "persist-emergency-restart-sess";
+    // Ensure no in-memory state — force a cold start that reads from the DB.
+    resetCalibration(SID);
+    calibrate(0);
+
+    // Persist an emergency turn: lastLayer=4, a known (non-zero) prior window,
+    // lastTurnAt>0 so the atomic restore fires. force_min_layer stays 0 (the
+    // proactive emergency tail does not set it), so there is no forceMinLayer
+    // fallback — the ratchet reseed is the ONLY thing that can hold the floor.
+    db()
+      .query(
+        `INSERT OR REPLACE INTO session_state
+           (session_id, force_min_layer, last_layer, last_known_input,
+            last_known_message_count, last_turn_at, updated_at)
+         VALUES (?, 0, 4, 500, 20, ?, ?)`,
+      )
+      .run(SID, Date.now(), Date.now());
+
+    // Resume with a small conversation that would trivially fit at layer 0.
+    const messages = [
+      makeMsg("er-1", "user", "resume", SID),
+      makeMsg("er-2", "assistant", "ok", SID),
+    ];
+    const result = transform({
+      messages,
+      projectPath: PROJECT,
+      sessionID: SID,
+    });
+    // Ratchet held from the restored emergency state — NOT layer 0.
+    expect(result.layer).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -1806,7 +1845,7 @@ describe("gradient — calibration oscillation fix", () => {
     expect(getLastLayer(SESSION)).toBeGreaterThanOrEqual(1);
   });
 
-  test("sticky layer: allows layer 0 re-entry after compaction shrinks message count", () => {
+  test("monotonic ratchet: does NOT re-enter layer 0 after a host-side compaction shrinks message count", () => {
     // Same setup: force gradient mode (60 × 600 chars ≈ 9000 tokens > maxInput 8000)
     const msgs = Array.from({ length: 60 }, (_, i) =>
       makeMsg(
@@ -1829,21 +1868,24 @@ describe("gradient — calibration oscillation fix", () => {
     const compressedCount = r1.messages.length;
     calibrate(estimateMessages(r1.messages), SESSION, compressedCount);
 
-    // Simulate compaction: session now has only 3 messages (much smaller than lastKnownMessageCount)
+    // Simulate host-side compaction: session now has only 3 tiny messages (far
+    // fewer than lastKnownMessageCount). The OLD design released the floor here
+    // and re-entered layer 0. That is a false economy: re-expanding the prefix to
+    // raw is itself a full cache write. The monotonic ratchet now HOLDS the
+    // session at its sustained layer (>= 1) — a genuine shrink does not release.
     const postCompaction = [
       makeMsg("post-1", "user", "fresh start", SESSION),
       makeMsg("post-2", "assistant", "ready", SESSION),
       makeMsg("post-3", "user", "go", SESSION),
     ];
 
-    // With fewer messages than lastKnownMessageCount, sticky guard is bypassed
     const r2 = transform({
       messages: postCompaction,
       projectPath: PROJECT,
       sessionID: SESSION,
     });
-    // Should be layer 0 — 3 tiny messages easily fit
-    expect(r2.layer).toBe(0);
+    // Ratchet holds — NOT layer 0, despite 3 tiny messages that would otherwise fit.
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
   });
 
   test("ID-based delta: accurately counts new messages after compression", () => {
@@ -2161,13 +2203,16 @@ describe("gradient — distilled-prefix front-bust (spurious Layer 4 + thrash)",
     expect(prefix2).toBe(prefix1);
   });
 
-  test("RELEASES to Layer 0 after a genuine compaction (prefix-floor must not trap a small session)", () => {
+  test("HOLDS its sustained layer after a genuine compaction (monotonic ratchet — no decompress)", () => {
     seedLargeDistillations(40, 12000);
     const r1 = transformPostIdle(largeRawConversation());
     expect(r1.layer).toBeGreaterThanOrEqual(1);
     calibrate(estimateMessages(r1.messages), SID, r1.messages.length);
 
-    // Genuine compaction: tiny conversation + tiny prefix → must sit at Layer 0.
+    // Genuine compaction: tiny conversation + tiny prefix. The OLD design
+    // released to Layer 0 here; the monotonic ratchet now HOLDS at the sustained
+    // layer. Re-expanding the prefix to raw would be a full cache write — a false
+    // economy — so a once-compressed session never decompresses.
     db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
     seedLargeDistillations(1, 200);
     const r2 = transform({
@@ -2179,7 +2224,7 @@ describe("gradient — distilled-prefix front-bust (spurious Layer 4 + thrash)",
       projectPath: `/test/${PID_KEY}`,
       sessionID: SID,
     });
-    expect(r2.layer).toBe(0);
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -2457,57 +2502,23 @@ describe("gradient — overhead/body scale decoupling (usable-collapse fix)", ()
 });
 
 // ---------------------------------------------------------------------------
-// No Layer-0 re-entry once compressed (prefix-present floor)
+// Monotonic compression-layer ratchet (no decompression once compressed)
 // ---------------------------------------------------------------------------
-// Once a session has compressed (reached Layer >= 1, injecting the distilled
-// prefix at messages[0]/[1]), it must NOT drop back to Layer 0 on a later turn —
-// that vanishes the prefix and front-busts the cache. The existing sticky guard
-// only covers lastLayer 1-3 while calibrated; this floor also covers a prior
-// Layer-4 turn and survives a process restart (calibrated=false). It still
-// RELEASES on a genuine compaction (the host shrank the conversation).
+// Once a session compresses to layer L (1-3), it must NEVER select a lower layer
+// on a later turn — that re-renders the distilled prefix at messages[0]/[1] and
+// front-busts the cache; the next turn re-compresses and busts again. The
+// ratchet (maxSustainedLayer) holds the session at its high-water layer
+// unconditionally, including through a host-side conversation shrink ("genuine
+// compaction") — decompressing to reclaim window is a false economy (the reclaim
+// is itself a full cache write). Layer 4 (emergency overflow) is excluded so a
+// one-shot overflow bust never latches the session at emergency.
 //
-// The floor decision is `prefixPresentFloorApplies`, a pure predicate. We test
-// it directly (a full truth table — discriminating: any revert of the predicate
-// flips at least one case). The predicate's WIRING into transform() (pinning the
-// layer UP to >= 1) is proven by the repurposed `forceMinLayer` tests below,
-// which now assert a once-compressed session holds at Layer 1 (2->1) instead of
-// returning to Layer 0. The two transform-level guards here cover the other
-// direction — that the floor does NOT over-apply: a genuine compaction still
-// releases to Layer 0, and a never-compressed small session stays at Layer 0.
-describe("gradient — prefixPresentFloorApplies (no Layer-0 re-entry predicate)", () => {
-  test("never compressed (lastLayer 0) → floor does NOT apply", () => {
-    expect(prefixPresentFloorApplies(0, 100, 0)).toBe(false);
-    expect(prefixPresentFloorApplies(0, 5, 100)).toBe(false);
-    expect(prefixPresentFloorApplies(0, 100, 50)).toBe(false);
-  });
-
-  test("compressed (lastLayer 1-4) + growing/steady conversation → floor applies", () => {
-    for (const layer of [1, 2, 3, 4]) {
-      // count unknown yet (fresh process)
-      expect(prefixPresentFloorApplies(layer, 500, 0)).toBe(true);
-      // conversation grew
-      expect(prefixPresentFloorApplies(layer, 600, 500)).toBe(true);
-      // conversation steady (equal — NOT a shrink)
-      expect(prefixPresentFloorApplies(layer, 500, 500)).toBe(true);
-    }
-  });
-
-  test("covers lastLayer === 4 (the strong sticky guard's `<= 3` excludes it)", () => {
-    expect(prefixPresentFloorApplies(4, 500, 400)).toBe(true);
-  });
-
-  test("genuine compaction (messages shrank below the known window) → floor RELEASES", () => {
-    expect(prefixPresentFloorApplies(1, 3, 500)).toBe(false);
-    expect(prefixPresentFloorApplies(4, 10, 760)).toBe(false);
-  });
-
-  test("shrink is ignored when the window size is not yet known (count 0)", () => {
-    // Fresh process: lastKnownMessageCount=0 must NOT be read as a compaction —
-    // rely on the DB-restored lastLayer to hold the floor until the live count is set.
-    expect(prefixPresentFloorApplies(1, 1, 0)).toBe(true);
-  });
-});
-
+// The WIRING into transform() (pinning the layer UP to maxSustainedLayer) is
+// proven by the repurposed `forceMinLayer` tests above (a once-compressed
+// session holds at its layer, 2->2, instead of dropping to 1/0) and by the
+// transform-level "HOLDS ... after a genuine compaction" tests below. The
+// guards here cover the other direction — that the ratchet does NOT over-apply:
+// a never-compressed small session stays at Layer 0.
 describe("gradient — prefix-present floor: transform-level guards", () => {
   const SID = "prefix-floor-guard-sess";
   const PID_KEY = "prefix-floor-guard-project";
@@ -2574,7 +2585,7 @@ describe("gradient — prefix-present floor: transform-level guards", () => {
     db().query("DELETE FROM session_state WHERE session_id = ?").run(SID);
   });
 
-  test("the floor does NOT trap a genuinely compacted session (releases to Layer 0)", () => {
+  test("the ratchet HOLDS a genuinely compacted session at its sustained layer (no decompress to Layer 0)", () => {
     // Compress once (post-idle forces Layer >= 1, setting lastKnownMessageCount).
     seedDistillations(3, 1500);
     const conv = largeRawConversation();
@@ -2588,7 +2599,9 @@ describe("gradient — prefix-present floor: transform-level guards", () => {
     expect(r1.layer).toBeGreaterThanOrEqual(1);
     calibrate(estimateMessages(r1.messages), SID, r1.messages.length);
 
-    // Genuine compaction: 3 tiny messages, far below the known window.
+    // Genuine compaction: 3 tiny messages, far below the known window. The OLD
+    // design released to Layer 0; the monotonic ratchet now HOLDS at the
+    // sustained layer — decompressing would re-write the whole prefix.
     db().query("DELETE FROM distillations WHERE project_id = ?").run(projectId);
     seedDistillations(1, 150);
     const r2 = transform({
@@ -2600,7 +2613,7 @@ describe("gradient — prefix-present floor: transform-level guards", () => {
       projectPath: `/test/${PID_KEY}`,
       sessionID: SID,
     });
-    expect(r2.layer).toBe(0);
+    expect(r2.layer).toBeGreaterThanOrEqual(1);
   });
 
   test("a never-compressed small session sits at Layer 0 (floor does not over-apply)", () => {
