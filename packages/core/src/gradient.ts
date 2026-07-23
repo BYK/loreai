@@ -790,6 +790,22 @@ type SessionState = {
   lastTransformedCount: number;
   /** Layer used by the most recent transform() call — sticky-layer guard */
   lastLayer: SafetyLayer;
+  /**
+   * High-water compression layer (1-3) this session has ever sustained. Once a
+   * session compresses to layer L, decompressing to a LOWER layer re-renders the
+   * distilled prefix at messages[0/1] (different budget/strip level) and
+   * front-busts the whole prompt cache — then the next turn re-compresses and
+   * busts again (0<->N / 2<->1 thrash). Reclaiming window by decompressing is a
+   * false economy: the reclaim itself is a full cache write. So the layer is a
+   * strict monotonic RATCHET — `effectiveMinLayer` is floored at this every turn,
+   * unconditionally (no release on a genuine host-side context shrink).
+   *
+   * Layer 4 (emergency overflow) is EXCLUDED: it is a deliberate one-shot bust to
+   * recover from "prompt too long", not a sustained level, and must never be
+   * latched here (that would trap the session at emergency permanently). Only
+   * layers 1-3 ratchet.
+   */
+  maxSustainedLayer: SafetyLayer;
   /** Message IDs in the most recent transform() output — ID-based delta estimation */
   lastWindowMessageIDs: Set<string>;
   /** One-shot force escalation: skip layers below this on the next transform() */
@@ -935,6 +951,7 @@ function makeSessionState(): SessionState {
     lastKnownMessageCount: 0,
     lastTransformedCount: 0,
     lastLayer: 0,
+    maxSustainedLayer: 0,
     lastWindowMessageIDs: new Set(),
     forceMinLayer: 0,
     lastTransformEstimate: 0,
@@ -987,6 +1004,24 @@ function getSessionState(sessionID: string): SessionState {
     const persisted = loadSessionTracking(sessionID);
     if (persisted && persisted.lastTurnAt > 0) {
       state.lastLayer = persisted.lastLayer as SafetyLayer;
+      // Re-seed the monotonic layer ratchet from the restored layer. We don't
+      // persist maxSustainedLayer separately (no migration): a session restored
+      // at layer L (1-3) had sustained at least L, so lastLayer is a safe lower
+      // bound for the floor. If the true high-water was higher, the ratchet
+      // re-establishes within a turn.
+      //
+      // A restored lastLayer === 4 means the last turn was an emergency overflow
+      // bust. Layer 4 itself never latches the ratchet (it is not a sustained
+      // level), but the session WAS compressed before the emergency, so on resume
+      // it must still hold the prefix — floor at >= 1 (matching the old
+      // prefix-present floor's documented lastLayer===4 coverage). Without this,
+      // a small resume turn would re-enter layer 0 and front-bust the prefix for
+      // a turn until the next compressed turn re-latches the ratchet.
+      if (state.lastLayer >= 1 && state.lastLayer <= 3) {
+        state.maxSustainedLayer = state.lastLayer;
+      } else if (state.lastLayer === 4) {
+        state.maxSustainedLayer = 1;
+      }
       state.lastKnownInput = persisted.lastKnownInput;
       // v43: restore the last-sent message count so the calibrated-delta
       // estimate identifies only genuinely-new messages on the resume turn
@@ -1557,35 +1592,6 @@ export function getLastLayer(sessionID?: string): SafetyLayer {
   // Fallback for tests: return from the first (and usually only) session state
   const first = sessionStates.values().next().value;
   return first?.lastLayer ?? 0;
-}
-
-/**
- * Decide whether the "prefix-present floor" applies — i.e. whether the next
- * transform must pin to at least Layer 1 (keeping the distilled prefix present
- * at messages[0]/[1]) because the session has already compressed.
- *
- * Returns true when the session has compressed before (`lastLayer >= 1`) AND
- * this turn is NOT a genuine compaction. A genuine compaction is detected when
- * the last-known window size is known (> 0) and the incoming conversation has
- * shrunk below it — that is the one case where dropping back to Layer 0 is
- * correct (the host shrank the conversation, so the prefix is no longer needed).
- *
- * Notes:
- *  - Covers `lastLayer === 4` (the strong sticky guard's `<= 3` excludes it).
- *  - When `lastKnownMessageCount === 0` (fresh process, not yet set), this never
- *    treats the turn as a compaction — it relies on the DB-restored `lastLayer`
- *    to hold the floor until the live count is established.
- *  - Pure function of its inputs — unit-testable without driving a full transform.
- */
-export function prefixPresentFloorApplies(
-  lastLayer: number,
-  messagesLength: number,
-  lastKnownMessageCount: number,
-): boolean {
-  const hasCompressed = lastLayer >= 1;
-  const genuineCompaction =
-    lastKnownMessageCount > 0 && messagesLength < lastKnownMessageCount;
-  return hasCompressed && !genuineCompaction;
 }
 
 /**
@@ -3487,66 +3493,31 @@ function transformInner(input: {
     );
   }
 
-  // --- Sticky layer guard (Option C) ---
-  // After a compressed turn (layer >= N), don't allow re-entry below N until
-  // the session genuinely shrinks (e.g. after compaction deletes messages).
-  // Prevents calibration oscillation AND layer-transition cache busts:
-  //   - 0→1→0: compressed turn stores lastKnownInput=100K for a 50-message
-  //     window, next turn's 300 raw messages produce an undercounted
-  //     expectedInput that "fits" in layer 0 but actually overflows.
-  //   - 1→2→1: layer 2 strips tool outputs (different bytes), bouncing back
-  //     to layer 1 restores them (different bytes again) → two busts.
-  // Pinning to the *actual* last layer prevents all downward oscillation.
-  // Only applied when calibrated (same session, per-session state) to avoid
-  // affecting other sessions including worker sessions.
-  // Layer 4 (emergency) already blows the cache — stickiness there just traps
-  // the session at emergency permanently. Only apply stickiness for layers 1-3
-  // where dropping back would bust a warm cache.
-  if (
-    calibrated &&
-    sessState.lastLayer >= 1 &&
-    sessState.lastLayer <= 3 &&
-    input.messages.length >= sessState.lastKnownMessageCount
-  ) {
+  // --- Monotonic compression-layer ratchet ---
+  // Once a session compresses to layer L (1-3), NEVER select a lower layer for
+  // the rest of the session. Every downgrade re-renders the distilled prefix at
+  // messages[0/1] with a different budget/strip level and front-busts the whole
+  // prompt cache; the next turn re-compresses and busts again (0<->N / 2<->1
+  // thrash). Reclaiming window by decompressing is a false economy — the reclaim
+  // is itself a full cache write.
+  //
+  // This is unconditional: it does NOT release when the host shrinks the
+  // conversation ("genuine compaction"). The earlier design released the floor on
+  // a shrink, but decompressing to exploit the reclaimed room just trades a
+  // cache-read-cheap compressed prefix for a full re-write — the opposite of what
+  // we want. A truly fresh conversation is a new session (new cache) anyway.
+  //
+  // `maxSustainedLayer` only ever holds 1-3 (see the update site after
+  // transform); layer 4 (emergency overflow) is excluded, so a one-shot overflow
+  // bust never latches the session at emergency — after recovery it settles back
+  // to this sustained floor. `forceMinLayer` (the emergency escalation) is
+  // applied separately via the initial `effectiveMinLayer` and can still push
+  // ABOVE this floor for the recovery turn.
+  if (sessState.maxSustainedLayer >= 1) {
     effectiveMinLayer = Math.max(
       effectiveMinLayer,
-      sessState.lastLayer,
+      sessState.maxSustainedLayer,
     ) as SafetyLayer;
-  }
-
-  // --- Prefix-present floor (no Layer-0 re-entry once compressed) ---
-  // Once a session has compressed (reached Layer >= 1), the distilled prefix is
-  // injected at messages[0]/[1]. Dropping back to Layer 0 omits the prefix —
-  // messages[0] changes → full prompt-cache front-bust; the reverse re-injects
-  // it → bust again (0<->N thrash). The strong sticky guard above pins to the
-  // FULL lastLayer, but only for lastLayer 1-3 AND only while `calibrated`.
-  //
-  // For a CALIBRATED 1-3 session this floor's condition equals the sticky
-  // guard's (both gate on `messages.length >= lastKnownMessageCount`), so here
-  // it is pure defense-in-depth. Its GENUINELY NEW coverage is the two gaps the
-  // sticky guard leaves open — exactly where the production front-busts occur:
-  //   (1) lastLayer === 4 (genuine emergency overflow) — excluded by `<= 3`.
-  //   (2) a compressed-but-UNCALIBRATED session (lastKnownInput == 0, so
-  //       `calibrated` is false): the API call hasn't established a token count
-  //       yet (first compressed turn whose call failed before calibrate, or a
-  //       resume/restart before the first calibrate of this process). The sticky
-  //       guard is skipped entirely; without this floor the layer-0 fit and the
-  //       tier-based bust-vs-continue gate (both gated on effectiveMinLayer===0)
-  //       pass the session through at Layer 0 and vanish the prefix.
-  // The floor pins to >= Layer 1 ONLY (prefix PRESENT) — NEVER higher, so it
-  // never traps the session at an emergency layer. It is released only on a
-  // GENUINE compaction: the host shrank the conversation below the last-known
-  // window (and that window is known, i.e. > 0 — so a fresh process with
-  // lastKnownMessageCount=0 does not spuriously release; it relies on the
-  // DB-restored lastLayer to hold the floor until the live count is set).
-  if (
-    prefixPresentFloorApplies(
-      sessState.lastLayer,
-      input.messages.length,
-      sessState.lastKnownMessageCount,
-    )
-  ) {
-    effectiveMinLayer = Math.max(effectiveMinLayer, 1) as SafetyLayer;
   }
 
   // --- Post-idle compact layer ---
@@ -4112,6 +4083,16 @@ export function transform(input: {
     state.lastTransformedCount = result.messages.length;
     state.lastTransformEstimate = result.totalTokens;
     state.lastLayer = result.layer;
+    // Ratchet the high-water compression layer (1-3 only). Layer 0 never lowers
+    // it; layer 4 (emergency) is excluded so a one-shot overflow bust never traps
+    // the session at emergency — after recovery it settles back to this floor.
+    if (
+      result.layer >= 1 &&
+      result.layer <= 3 &&
+      result.layer > state.maxSustainedLayer
+    ) {
+      state.maxSustainedLayer = result.layer;
+    }
     state.lastWindowMessageIDs = new Set(result.messages.map((m) => m.info.id));
 
     // Source the shared cache-economics compressed size from the ACTUAL rebuilt
