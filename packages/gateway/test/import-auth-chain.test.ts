@@ -87,13 +87,25 @@ describe("resolveAgentImportAuth", () => {
     expect(res).toBeNull();
   });
 
-  test("skips a github-copilot credential (token exchange required, not a raw key)", () => {
-    const future = Date.now() + 3600_000;
+  test("resolves a github-copilot credential (bearer, no token exchange)", () => {
+    // OpenCode's github-copilot GitHub OAuth token works directly as a Bearer
+    // against api.githubcopilot.com (route has a concrete url) — it must NOT be
+    // skipped. The refresh field is preferred and expires:0 is not "expired".
     writeOpenCodeAuth({
-      "github-copilot": { type: "oauth", access: "gh-tok", expires: future },
+      "github-copilot": {
+        type: "oauth",
+        access: "gho_access",
+        refresh: "gho_refresh",
+        expires: 0,
+      },
     });
     const res = resolveAgentImportAuth("opencode", undefined, undefined);
-    expect(res).toBeNull();
+    expect(res).not.toBeNull();
+    expect(res?.model.providerID).toBe("github-copilot");
+    expect(res?.getAuth()).toEqual({
+      scheme: "bearer",
+      value: "gho_refresh",
+    });
   });
 
   test("prefers a routable credential over an unroutable earlier one", () => {

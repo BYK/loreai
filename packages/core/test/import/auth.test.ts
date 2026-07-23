@@ -112,6 +112,46 @@ describe("OpenCode auth reader", () => {
     expect(readUsableAuth("opencode")).toEqual([]);
   });
 
+  test("github-copilot oauth uses refresh token as bearer", () => {
+    // OpenCode uses the long-lived GitHub OAuth `refresh` token directly as a
+    // Bearer against api.githubcopilot.com (no copilot_internal/v2/token
+    // exchange). Prefer refresh over access for this provider specifically.
+    writeJson(authFile(), {
+      "github-copilot": {
+        type: "oauth",
+        access: "gho_access_should_not_win",
+        refresh: "gho_refresh_wins",
+        expires: 0,
+      },
+    });
+    const creds = readUsableAuth("opencode");
+    expect(creds).toEqual([
+      {
+        scheme: "bearer",
+        value: "gho_refresh_wins",
+        providerID: "github-copilot",
+        // expires:0 is a "no known expiry" sentinel → expiresAt undefined, so
+        // the credential is NOT filtered out as epoch-0-expired.
+        expiresAt: undefined,
+      },
+    ]);
+  });
+
+  test("expires:0 sentinel is treated as unexpired (not epoch-0-expired)", () => {
+    writeJson(authFile(), {
+      openai: { type: "oauth", access: "tok-live", expires: 0 },
+    });
+    const creds = readUsableAuth("opencode");
+    expect(creds).toEqual([
+      {
+        scheme: "bearer",
+        value: "tok-live",
+        providerID: "openai",
+        expiresAt: undefined,
+      },
+    ]);
+  });
+
   test("garbage file yields [] (no throw)", () => {
     mkdirSync(join(authFile(), ".."), { recursive: true });
     writeFileSync(authFile(), "not json{{{", "utf8");

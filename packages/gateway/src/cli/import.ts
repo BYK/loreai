@@ -92,16 +92,16 @@ export function resolveAgentImportAuth(
   // 2. Harness on-disk auth — pick the first credential whose provider Lore
   //    can DIRECTLY authenticate for extraction. A provider is usable only if
   //    it has a concrete upstream URL (some routes carry url:null — local
-  //    runtimes like ollama/vllm/lmstudio) AND does not require a runtime token
-  //    exchange we can't do from a stored key (github-copilot mints a Copilot
-  //    token from a GitHub token — a stored bearer isn't usable as-is). Anything
+  //    runtimes like ollama/vllm/lmstudio, not reachable for extraction).
+  //    github-copilot IS usable: OpenCode stores the GitHub OAuth token that
+  //    api.githubcopilot.com accepts directly as a Bearer (no runtime token
+  //    exchange needed), and its route carries a concrete url. Anything
   //    filtered here falls through to the accurate "no usable credential"
   //    guidance rather than a confusing downstream "no response from the model".
   const creds: AgentResolvedAuth[] = readUsableAuth(agentName);
-  const usable = creds.find((c) => {
-    if (c.providerID === "github-copilot") return false;
-    return resolveProviderRoute(c.providerID)?.url != null;
-  });
+  const usable = creds.find(
+    (c) => resolveProviderRoute(c.providerID)?.url != null,
+  );
   if (usable) {
     const model = usable.modelID
       ? { providerID: usable.providerID, modelID: usable.modelID }
