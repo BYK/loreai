@@ -1,5 +1,8 @@
 import { describe, test, expect } from "vitest";
-import { extractUpstreamUrlHeader } from "../src/config";
+import {
+  extractUpstreamUrlHeader,
+  providerForUpstreamOrigin,
+} from "../src/config";
 
 // ---------------------------------------------------------------------------
 // extractUpstreamUrlHeader
@@ -183,5 +186,38 @@ describe("extractUpstreamUrlHeader", () => {
         "x-lore-upstream-url": "data:text/html,<h1>hi</h1>",
       }),
     ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// providerForUpstreamOrigin — maps a raw upstream URL to a known provider id
+// ---------------------------------------------------------------------------
+
+describe("providerForUpstreamOrigin", () => {
+  test("maps a known provider host to its provider id", () => {
+    // OpenRouter is a known provider route (openai protocol) — a user's
+    // ANTHROPIC_BASE_URL=openrouter.ai must resolve so the gateway flips
+    // protocol + scheme correctly.
+    expect(providerForUpstreamOrigin("https://openrouter.ai/api")).toBe(
+      "openrouter",
+    );
+  });
+
+  test("normalizes a trailing /v1 the same way the header path does", () => {
+    // extractUpstreamUrlHeader strips a trailing /v1; the reverse-map key is
+    // normalized the same way, so both forms resolve identically.
+    const withV1 = providerForUpstreamOrigin("https://openrouter.ai/api/v1");
+    const without = providerForUpstreamOrigin("https://openrouter.ai/api");
+    expect(withV1).toBe(without);
+  });
+
+  test("returns undefined for an unknown / self-hosted host", () => {
+    expect(
+      providerForUpstreamOrigin("https://my-proxy.internal.example.com"),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined for an unparseable value", () => {
+    expect(providerForUpstreamOrigin("not a url")).toBeUndefined();
   });
 });
