@@ -16,6 +16,7 @@ import {
   getModelEntrySync,
   getModelEntrySyncForProvider,
   getWorkerModel,
+  parseWorkerModelEnv,
   resetWorkerModelState,
   clearModelDataCache,
   lookupProviderRoute,
@@ -897,6 +898,36 @@ describe("canonical-provider capability resolution", () => {
 // ---------------------------------------------------------------------------
 // getWorkerModel
 // ---------------------------------------------------------------------------
+
+describe("parseWorkerModelEnv", () => {
+  test("undefined / empty → undefined", () => {
+    expect(parseWorkerModelEnv(undefined)).toBeUndefined();
+    expect(parseWorkerModelEnv("")).toBeUndefined();
+  });
+
+  test("providerID/modelID form splits on the first slash", () => {
+    expect(parseWorkerModelEnv("openai/gpt-5.4-mini")).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5.4-mini",
+    });
+  });
+
+  test("modelID with extra slashes keeps the remainder in modelID", () => {
+    // Only the FIRST slash separates provider from model — OpenRouter-style
+    // ids like `openrouter/anthropic/claude` must not lose their tail.
+    expect(parseWorkerModelEnv("openrouter/anthropic/claude-sonnet")).toEqual({
+      providerID: "openrouter",
+      modelID: "anthropic/claude-sonnet",
+    });
+  });
+
+  test("bare modelID assumes the anthropic provider", () => {
+    expect(parseWorkerModelEnv("claude-sonnet-4-6")).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-6",
+    });
+  });
+});
 
 describe("getWorkerModel", () => {
   test("returns a model or undefined (depends on lore config)", () => {

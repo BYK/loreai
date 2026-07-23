@@ -58,6 +58,7 @@ describe("commandImport (local mode) — auth pre-flight", () => {
 
   beforeEach(() => {
     delete process.env.LORE_REMOTE_URL; // force local mode
+    delete process.env.LORE_WORKER_MODEL;
     _resetAuthForTest();
     startConfig = {
       upstreamAnthropic: "https://api.anthropic.com",
@@ -86,6 +87,7 @@ describe("commandImport (local mode) — auth pre-flight", () => {
     // Reset process-global config to a clean empty dir so a test that wrote a
     // `.lore.json` (e.g. the workerModel case) can't leak into later tests.
     await loadConfig(tmpdir());
+    delete process.env.LORE_WORKER_MODEL;
     if (prevRemote === undefined) delete process.env.LORE_REMOTE_URL;
     else process.env.LORE_REMOTE_URL = prevRemote;
   });
@@ -188,6 +190,28 @@ describe("commandImport (local mode) — auth pre-flight", () => {
     // workerModel (openai) wins over model (anthropic).
     expect(defaultModel.providerID).toBe("openai");
     expect(defaultModel.modelID).toBe("gpt-5.6-luna");
+  });
+
+  test("LORE_WORKER_MODEL env overrides the extraction model (#1398 / Kjaer)", async () => {
+    // Kjaer set LORE_WORKER_API_KEY + LORE_WORKER_UPSTREAM + LORE_WORKER_MODEL
+    // (all env vars, in parallel), but standalone import never read the model
+    // env var → it defaulted to anthropic/claude-* and 404'd on api.openai.com.
+    // The env var must win, matching the live worker path's precedence.
+    process.env.LORE_WORKER_MODEL = "openai/gpt-5.4-mini";
+    startConfig.workerApiKey = "sk-openai-not-anthropic";
+    startConfig.workerUpstream = "https://api.openai.com/v1";
+
+    await commandImport([], { project, agent: "aider", yes: true });
+
+    expect(errs.join("\n")).not.toContain("Can't import");
+    expect(llmClientCalls.length).toBeGreaterThan(0);
+    const [, , defaultModel] = llmClientCalls[0] as [
+      unknown,
+      unknown,
+      { providerID: string; modelID: string },
+    ];
+    expect(defaultModel.providerID).toBe("openai");
+    expect(defaultModel.modelID).toBe("gpt-5.4-mini");
   });
 
   test("non-Anthropic worker key with no upstream → fails loudly pre-flight (no doomed calls)", async () => {
