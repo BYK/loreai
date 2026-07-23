@@ -1,109 +1,89 @@
-<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Lore Blog</title><description>Product notes, engineering updates, and memory architecture deep dives from Lore.</description><link>https://withlore.ai/</link><language>en-us</language><atom:link href="https://withlore.ai/rss.xml" rel="self" type="application/rss+xml"/><item><title>Automating reviews doesn&apos;t mean losing taste</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Mon, 20 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real
-classifier without a research lab, I had a specific daydream. I wanted to train something that
-reviewed code the way I did, so I could step back from reviewing every change without the
-codebase drifting and without losing the thing reviews were quietly doing for the team. I never
-built it. I never had enough of the right data, and I never had the time. It stayed a daydream.&lt;/p&gt;
-&lt;p&gt;I’m bringing it up because the debate about review has finally caught up to it, and I think both
-sides are half right in a way that’s worth untangling.&lt;/p&gt;
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Lore Blog</title><description>Product notes, engineering updates, and memory architecture deep dives from Lore.</description><link>https://withlore.ai/</link><language>en-us</language><atom:link href="https://withlore.ai/rss.xml" rel="self" type="application/rss+xml"/><item><title>Automating reviews doesn&apos;t mean losing taste</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Mon, 20 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
+without a research lab, I had a specific daydream. I wanted to train something that reviewed code
+the way I did, so I could step back from reviewing every change without the codebase drifting. I
+never built it. I never had enough of the right data, and I never had the time.&lt;/p&gt;
+&lt;p&gt;The debate about review has finally caught up to that daydream, and I think both sides are half
+right.&lt;/p&gt;
 &lt;h2 id=&quot;the-same-complaint-from-two-sides&quot;&gt;The same complaint from two sides&lt;/h2&gt;
 &lt;p&gt;One camp says the whole point of writing code with agents is that a human still reads every line
 before it ships. Slow down, look closely, stay in control. The other camp, often the same people
-on a different day, says the job has quietly turned into something worse: you don’t write much
-anymore, you sit and read change after change the machine produced, and it is dull and a little
-soul-crushing. Reviewing slop, they call it.&lt;/p&gt;
-&lt;p&gt;Those sound like opposite positions. They’re the same one. Review used to be where
-judgment happened and where the team learned how the codebase was meant to work. Now, for a lot
-of people, it has shrunk to a checkpoint you sign off on. The “read every line” camp wants to
-protect what review was. The “this is soul-crushing” camp is telling you it has already gone.
-Neither wants less care in the codebase. Both are answering the same loss.&lt;/p&gt;
+on a different day, says the job has turned into something worse: you don’t write much anymore, you
+sit and read change after change the machine produced, and it is dull and a little soul-crushing.
+Reviewing slop, they call it.&lt;/p&gt;
+&lt;p&gt;Those sound like opposite positions. They’re the same one. Review used to be where judgment
+happened and where the team learned how the codebase was meant to work. Now it has shrunk to a
+checkpoint you sign off on. The “read every line” camp wants to protect what review was. The “this
+is soul-crushing” camp is telling you it has already gone. Both are answering the same loss.&lt;/p&gt;
 &lt;p&gt;A colleague told me the human side of this a few months ago. When he joined the team, he said, he
-learned a lot from getting detailed code reviews from me, the kind where you explain not just what
-to change but why the team works this way. What he picked up wasn’t a list of rules. It was a way
-of working. These days we mostly work on our own, agents write and review most of the code, and he
-told me he kind of misses that. He wasn’t complaining about speed. He was noticing that something
-had stopped passing between us.&lt;/p&gt;
+learned a lot from getting detailed reviews from me, the kind where you explain not just what to
+change but why the team works this way. What he picked up wasn’t a list of rules. It was a way of
+working. Now we mostly work on our own, agents write and review most of the code, and he misses it.
+He wasn’t complaining about speed. He was noticing that something had stopped passing between us.&lt;/p&gt;
 &lt;h2 id=&quot;what-review-was-really-passing-along&quot;&gt;What review was really passing along&lt;/h2&gt;
-&lt;p&gt;That’s the part the speed argument misses. A review was never only a gate. It was how one person’s
-standard reached everyone else. You don’t mock the database in integration tests, and here’s the
-migration bug that taught us why. Deploys go from the release branch, because of the time they
-didn’t. The standard arrived with its reason, at the moment it mattered, to whoever happened to be
-on the change.&lt;/p&gt;
-&lt;p&gt;When that stops, the rules don’t disappear. They just stop showing up when they’re needed. Here
-is the failure we kept hitting, the one that made me want to build the daydream in the first
-place: six months later a pull request quietly brings back the exact thing the team decided
-against. Not out of carelessness. The author wasn’t in the room when the decision was made, or
-was, and it was a year ago. The one reviewer who would catch it at once isn’t on this PR. So it
-merges, and the team learns the lesson again the expensive way.&lt;/p&gt;
-&lt;p&gt;Look closely at what kind of failure that is. Nobody used bad judgment. The change looks
-reasonable on its own. What was missing wasn’t a smarter reviewer. It was a reviewer who knew the
-standard the team set and noticed, at that moment, that the change cut against it. That is not a
-problem of judgment. It is a problem of a standard nobody applied at the right time.&lt;/p&gt;
+&lt;p&gt;A review was never only a gate. It was how one person’s standard reached everyone else. You don’t
+mock the database in integration tests, and here’s the migration bug that taught us why. Deploys go
+from the release branch, because of the time they didn’t. The standard arrived with its reason, at
+the moment it mattered, to whoever was on the change.&lt;/p&gt;
+&lt;p&gt;When that stops, the standards don’t disappear. They stop showing up when they’re needed, and six
+months later a pull request quietly brings back the exact thing the team decided against. Nobody
+used bad judgment. The change looks reasonable on its own. What was missing was a reviewer who knew
+the standard and noticed, right then, that the change cut against it.&lt;/p&gt;
 &lt;h2 id=&quot;you-cant-write-it-down-you-do-it&quot;&gt;You can’t write it down. You do it.&lt;/h2&gt;
-&lt;p&gt;Here is the hard part, and it’s why my old daydream needed data I never had. Most of what makes a
+&lt;p&gt;That is the hard part, and it’s why my old daydream needed data I never had. Most of what makes a
 good reviewer good is not a rule you can write down. It’s taste, built from years of doing the
-work. Ask someone to put their standards in a document and they’ll give you a thin, lifeless
-version of what they actually do. You are what you do, not what you manage to write down. But you
-keep doing it, review after review, decision after decision, and the standard is real even when
+work. Ask someone to put their standards in a document and you get a thin, lifeless version of what
+they actually do. But you keep doing it, review after review, and the standard is real even when
 the document isn’t.&lt;/p&gt;
-&lt;p&gt;That’s the shift that makes this possible now. Lore watches the work the way an apprentice does.
-It sits alongside your sessions, distills what you decide and why, and writes it down for you as
-&lt;a href=&quot;https://withlore.ai/docs/team-memory/&quot;&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/a&gt;, a version-controlled file of the team’s decisions, patterns, and
-gotchas, kept in plain Markdown and reviewed in pull requests like any other file. We’ve written
-before about &lt;a href=&quot;https://withlore.ai/blog/distill-your-own-knowledge/&quot;&gt;why that learning lives in text&lt;/a&gt; rather than
-baked into a model: text is something you can read, diff, carry to the next model, and correct a
-line at a time. You don’t fill in a form. You work, and it learns.&lt;/p&gt;
+&lt;p&gt;That’s the shift that makes this possible now. Lore watches the work the way an apprentice does. It
+sits alongside your sessions, distills what you decide and why, and writes it down for you as
+&lt;a href=&quot;https://withlore.ai/docs/team-memory/&quot;&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/a&gt;, a version-controlled file of the team’s decisions and gotchas,
+reviewed in pull requests like any other file. We’ve written before about
+&lt;a href=&quot;https://withlore.ai/blog/distill-your-own-knowledge/&quot;&gt;why that learning lives in text&lt;/a&gt;. You don’t write docs that go
+stale in a few weeks. You work, and it learns.&lt;/p&gt;
 &lt;p&gt;An apprentice is not you, and I want to be honest about the ceiling. It won’t learn your deepest
 judgment, the calls that come from taste you couldn’t explain if you tried. But it learns the
-standards you set often enough to leave a mark, and that turns out to be a lot of them.&lt;/p&gt;
+standards you set often enough, and that turns out to be a lot of them.&lt;/p&gt;
 &lt;h2 id=&quot;the-apprentice-reviews-the-code&quot;&gt;The apprentice reviews the code&lt;/h2&gt;
-&lt;p&gt;This is the narrow thing I actually wanted ten years ago, and it turns out it was the achievable
-part all along. Not a bot that reproduces my judgment. Something that has learned the standards
-and speaks up when a change goes against one.&lt;/p&gt;
+&lt;p&gt;This is the narrow thing I wanted ten years ago, and it turns out it was the achievable part all
+along. Not a bot that reproduces my judgment. Something that has learned the standards and speaks up
+when a change goes against one.&lt;/p&gt;
 &lt;p&gt;So we built a check that reads the diff against what Lore has learned. On every pull request, the
 &lt;a href=&quot;https://withlore.ai/docs/guides/semantic-linter/&quot;&gt;semantic linter&lt;/a&gt; takes the changes and the standards from
-&lt;code&gt;.lore.md&lt;/code&gt; and asks, for the pairs that look related, one narrow question: does this change go
-against something the team decided? When it thinks the answer is yes, it says so, as an annotation
-on the PR, next to the line, with the reason attached. The reason is the point. It’s the part of
-the review that used to pass from person to person and stopped.&lt;/p&gt;
-&lt;p&gt;It’s a judge, not a rule engine, and that distinction is everything. “Never mock the database in
-integration tests” isn’t a pattern you can match with a regex. It’s a meaning. You can only check
-it by understanding what the change does and what the standard intends, which is exactly the
-reading we used to need a person for. The honest cost is that a judge produces suspicions, not
-verdicts. It can be wrong. We designed around that instead of pretending otherwise.&lt;/p&gt;
+&lt;code&gt;.lore.md&lt;/code&gt; and asks, for the pairs that look related, one question: does this change go against
+something the team decided? When the answer looks like yes, it says so, as an annotation next to
+the line, with the reason attached. The reason is the point. It’s the part of the review that used
+to pass from person to person and stopped.&lt;/p&gt;
+&lt;p&gt;It’s a judge, not a rule engine. “Never mock the database in integration tests” isn’t a pattern you
+can match with a regex. It’s a meaning, and you can only check it by understanding what the change
+does and what the standard intends. The honest cost is that a judge produces suspicions, not
+verdicts. It can be wrong, and we designed around that instead of pretending otherwise.&lt;/p&gt;
 &lt;h2 id=&quot;why-it-doesnt-fail-your-build&quot;&gt;Why it doesn’t fail your build&lt;/h2&gt;
-&lt;p&gt;If you’re in the “read every line” camp, the thing you’re rightly afraid of is a noisy automated
-check that blocks work on a bad guess. We share that fear, so the linter ships advisory only. It
-never fails a build. It leaves a note and a human decides. A probabilistic check that can break
-CI is just a probabilistic build-breaker, and it would teach everyone to ignore it inside a week.&lt;/p&gt;
-&lt;p&gt;And if you’re in the “this is soul-crushing” camp, look at what the linter takes off you. It is
-not the interesting part of review. It is the dull part: checking every change against every
-decision the team has made, which is the work no human does well and no human enjoys. Give that
-to the machine and what’s left is the judgment, the taste, whether this is even the right change.
-The part that was worth doing in the first place.&lt;/p&gt;
-&lt;p&gt;Cost gets the same restraint. A large PR against a full knowledge base is thousands of change-
-and-rule pairs, and calling a model on each one would be slow and expensive. Almost all of those
-pairs are unrelated, so we drop them for free first with a local embedding pass, and spend a
-model call only on the few that look like they might conflict. The model is the last stage of the
-check, not the first.&lt;/p&gt;
-&lt;p&gt;There’s a ladder above advisory, for teams that watch how often the check is wrong on their own
-repo and decide a particular rule is worth blocking on, with a way for an author who knows better
-to override it. But the default sits at the bottom of that ladder on purpose. The system earns
-trust before it can block anything.&lt;/p&gt;
+&lt;p&gt;If you’re in the “read every line” camp, what you’re rightly afraid of is a noisy check that blocks
+work on a bad guess. We share that fear, so the linter ships advisory only. It never fails a build.
+It leaves a note and a human decides. A check that guesses and can break CI would teach everyone to
+ignore it inside a week.&lt;/p&gt;
+&lt;p&gt;And if you’re in the “this is soul-crushing” camp, look at what it takes off you: the dull part,
+checking every change against every standard the team ever set, which is the work no human does well
+or enjoys. What’s left is the judgment, the taste, whether this is even the right change. The part
+worth doing.&lt;/p&gt;
+&lt;p&gt;There’s a ladder above advisory, for teams that watch how often the check is wrong on their own repo
+and decide a rule is worth blocking on, with a way for an author who knows better to override it. But
+the default sits at the bottom on purpose. The system earns trust before it can block anything.&lt;/p&gt;
 &lt;h2 id=&quot;the-narrow-claim&quot;&gt;The narrow claim&lt;/h2&gt;
-&lt;p&gt;I’m not claiming the reviewer goes away. The judgment and taste in a review, the part the “read
-every line” camp is protecting, is not what this replaces, and I’d distrust anyone selling that.
-The claim is narrower and, I think, harder to argue with. No reviewer can hold every standard the
-team has set and apply the right one at the right moment. That one job, a system does well, and
-handing it over costs you none of the taste you were afraid to lose. It gives you back the
-attention for the parts that need a person, and it brings back, a little, what used to pass
-between people when they reviewed each other’s work.&lt;/p&gt;
+&lt;p&gt;I’m not claiming the reviewer goes away. The judgment and taste in a review is not what this
+replaces, and I’d distrust anyone selling that. The claim is narrower: no reviewer can hold every
+standard the team ever set and apply the right one at the right moment. That one job a system does
+well, and handing it over costs you none of the taste you were afraid to lose. It gives you back the
+attention for the parts that need a person, and brings back, a little, what used to pass between
+people when they reviewed each other’s work.&lt;/p&gt;
 &lt;p&gt;That’s the version of automated review I’d ask a doubter to try. Not a bot that approves your PRs.
 An apprentice that learned how you work and speaks up when a change breaks from that, and otherwise
 stays quiet.&lt;/p&gt;
 &lt;p&gt;Because a check that reads every diff against your team’s standards is a lot to take on trust, the
 code that decides what it flags is open to read. Lore is &lt;a href=&quot;https://fair.io&quot;&gt;Fair Source&lt;/a&gt;
 (FSL-1.1-Apache-2.0), and it becomes Apache 2.0 after a set time. A standard you can watch enforce
-itself is worth more than one you have to hold in your head.&lt;/p&gt;</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>knowledge</category><category>code review</category><category>ci</category><category>agents</category></item><item><title>Distill the knowledge, not the model</title><link>https://withlore.ai/blog/distill-your-own-knowledge/</link><guid isPermaLink="true">https://withlore.ai/blog/distill-your-own-knowledge/</guid><description>Satya Nadella named the Reverse Information Paradox. His fix over-solves it: your learning can stay yours in token space, without training a model.</description><pubDate>Mon, 13 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;h2 id=&quot;the-diagnosis-is-right&quot;&gt;The diagnosis is right&lt;/h2&gt;
+itself is worth more than one you have to hold in your head.&lt;/p&gt;
+</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>knowledge</category><category>code review</category><category>ci</category><category>agents</category></item><item><title>Distill the knowledge, not the model</title><link>https://withlore.ai/blog/distill-your-own-knowledge/</link><guid isPermaLink="true">https://withlore.ai/blog/distill-your-own-knowledge/</guid><description>Satya Nadella named the Reverse Information Paradox. His fix over-solves it: your learning can stay yours in token space, without training a model.</description><pubDate>Mon, 13 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;h2 id=&quot;the-diagnosis-is-right&quot;&gt;The diagnosis is right&lt;/h2&gt;
 &lt;p&gt;Satya Nadella &lt;a href=&quot;https://x.com/satyanadella/status/2076323181154230284&quot;&gt;posted this week&lt;/a&gt; about
 what he calls the Reverse Information Paradox, and if you build with these models you already
 feel it. You pay for intelligence in cash, and then you pay again in the proprietary knowledge
@@ -182,7 +162,8 @@ welcome to watch it.&lt;/p&gt;
 exists in a form that asks no one’s permission: token-space, local, model-agnostic, running
 today. In consuming intelligence, you are creating intelligence. That’s his line, and he’s
 right about it. The only question is who keeps it, and you can answer that one yourself this
-afternoon.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>How Lore remembers, forgets, and changes its mind</title><link>https://withlore.ai/blog/how-lore-remembers-and-forgets/</link><guid isPermaLink="true">https://withlore.ai/blog/how-lore-remembers-and-forgets/</guid><description>Most memory tools now ship a set of principles for how an agent should manage its context. Lore&apos;s principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on.</description><pubDate>Thu, 02 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Everywhere you look, agents are being taught to fix themselves. Self-healing loops,
+afternoon.&lt;/p&gt;
+</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>How Lore remembers, forgets, and changes its mind</title><link>https://withlore.ai/blog/how-lore-remembers-and-forgets/</link><guid isPermaLink="true">https://withlore.ai/blog/how-lore-remembers-and-forgets/</guid><description>Most memory tools now ship a set of principles for how an agent should manage its context. Lore&apos;s principles work differently, because the layer enforces them instead of asking the agent to. Here are the rules Lore runs on.</description><pubDate>Thu, 02 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Everywhere you look, agents are being taught to fix themselves. Self-healing loops,
 self-improving memory, a model that reads back its own transcript, rewrites its own
 instructions, and prunes whatever it decides has gone stale. There is real energy here, and
 some of it genuinely works.&lt;/p&gt;
@@ -276,7 +257,8 @@ is one you never have to hope about.&lt;/p&gt;
 not a description you take on faith. Lore is &lt;a href=&quot;https://fair.io&quot;&gt;Fair Source&lt;/a&gt;
 (FSL-1.1-Apache-2.0), so the code that decides what your agent remembers and forgets is right
 there for you to read, and it turns into Apache 2.0 on a timer. Principles you can enforce are
-better than principles you have to believe.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>principles</category><category>agents</category></item><item><title>Why memory is not enough</title><link>https://withlore.ai/blog/why-memory-is-not-enough/</link><guid isPermaLink="true">https://withlore.ai/blog/why-memory-is-not-enough/</guid><description>A long-term memory store remembers what you said last week. It can&apos;t manage the context window that&apos;s overflowing right now. Those are two different problems, and only one of them is getting solved.</description><pubDate>Fri, 26 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Ask anyone building agents what “memory” means and you’ll get the same answer: a place to
+better than principles you have to believe.&lt;/p&gt;
+</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>principles</category><category>agents</category></item><item><title>Why memory is not enough</title><link>https://withlore.ai/blog/why-memory-is-not-enough/</link><guid isPermaLink="true">https://withlore.ai/blog/why-memory-is-not-enough/</guid><description>A long-term memory store remembers what you said last week. It can&apos;t manage the context window that&apos;s overflowing right now. Those are two different problems, and only one of them is getting solved.</description><pubDate>Fri, 26 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;Ask anyone building agents what “memory” means and you’ll get the same answer: a place to
 store facts and decisions so the agent can pull them back later. A vector DB, a knowledge
 graph, a folder of notes, take your pick. It remembers what you discussed last week, and
 there are good tools that do this well now.&lt;/p&gt;
@@ -297,24 +279,24 @@ quite remember its own name. We all quietly accepted this for something that hap
 session, often more than once: the most predictable failure in agentic coding, answered by a
 guillotine. So why has nobody built the thing that keeps up?&lt;/p&gt;
 &lt;h2 id=&quot;two-problems-hiding-behind-one-word&quot;&gt;Two problems hiding behind one word&lt;/h2&gt;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;What you say&lt;/th&gt;&lt;th&gt;What it actually needs&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;”What did we decide about auth last week?”&lt;/td&gt;&lt;td&gt;A long-term memory store.&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;”Wait, what was the other thing you said we should do after this?”&lt;/td&gt;&lt;td&gt;Active context-window management.&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;What you say&lt;/th&gt;
+&lt;th&gt;What it actually needs&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;“What did we decide about auth last week?”&lt;/td&gt;
+&lt;td&gt;A long-term memory store.&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;“Wait, what was the other thing you said we should do after this?”&lt;/td&gt;
+&lt;td&gt;Active context-window management.&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
 &lt;p&gt;These are not the same layer. A long-term store sits &lt;em&gt;beside&lt;/em&gt; your conversation, like a
 notebook you keep open on the desk. It only holds what you bothered to write down, and it
 only helps when you reach for it. That’s exactly right for what carries across sessions: a
@@ -451,5 +433,7 @@ still yours to handle. That’s fine, and a good store is genuinely worth having
 no answer for the session that’s overflowing right now, which is the problem you’ll hit
 today, not next week.&lt;/p&gt;
 &lt;p&gt;Memory is table stakes. Managing the window, in the loop, while it fills, is the part
-nobody wants to build. Make sure you know which one you’re being sold.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>Introducing the Lore Blog</title><link>https://withlore.ai/blog/hello-lore/</link><guid isPermaLink="true">https://withlore.ai/blog/hello-lore/</guid><description>A home for product notes, memory architecture deep dives, and engineering updates from Lore.</description><pubDate>Fri, 05 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;The Lore blog is ready for longer-form writing: release notes, implementation notes, architecture posts, and the practical lessons that show up when AI coding agents work inside real codebases for days at a time.&lt;/p&gt;
-&lt;p&gt;Future posts will cover LLM memory architecture, distillation techniques, context management strategies, and engineering updates from the Lore team.&lt;/p&gt;</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>agents</category></item></channel></rss>
+nobody wants to build. Make sure you know which one you’re being sold.&lt;/p&gt;
+</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>context management</category><category>agents</category></item><item><title>Introducing the Lore Blog</title><link>https://withlore.ai/blog/hello-lore/</link><guid isPermaLink="true">https://withlore.ai/blog/hello-lore/</guid><description>A home for product notes, memory architecture deep dives, and engineering updates from Lore.</description><pubDate>Fri, 05 Jun 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;The Lore blog is ready for longer-form writing: release notes, implementation notes, architecture posts, and the practical lessons that show up when AI coding agents work inside real codebases for days at a time.&lt;/p&gt;
+&lt;p&gt;Future posts will cover LLM memory architecture, distillation techniques, context management strategies, and engineering updates from the Lore team.&lt;/p&gt;
+</content:encoded><dc:creator>Lore Team</dc:creator><category>memory</category><category>agents</category></item></channel></rss>
