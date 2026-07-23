@@ -727,6 +727,20 @@ function ephemeralCacheControl(ttl?: "5m" | "1h" | false): {
     : { type: "ephemeral" };
 }
 
+/**
+ * Minimum number of committed (pre-tail) messages before a second, stable
+ * intermediate `cache_control` anchor is worth adding. Below this the prefix is
+ * small enough that a single tail breakpoint already bounds eviction cost.
+ */
+const CACHE_ANCHOR_MIN_MESSAGES = 12;
+
+/**
+ * Quantization step for the intermediate anchor's position. The anchor sits at a
+ * multiple of this step, so it stays byte-identical for this many turns before
+ * advancing — a moving anchor would bust the very cache it protects.
+ */
+const CACHE_ANCHOR_STEP = 10;
+
 function buildOpenAIMessages(
   messages: GatewayMessage[],
   system: string,
@@ -859,14 +873,58 @@ function buildOpenAIMessages(
       m.role !== "tool" &&
       Array.isArray(m.content) &&
       m.content.length > 0;
-    let idx = result.length - 1;
-    while (idx >= 0 && !isAnnotatable(result[idx])) idx--;
-    const target = idx >= 0 ? result[idx] : undefined;
-    if (target) {
-      const parts = target.content as Array<Record<string, unknown>>;
-      parts[parts.length - 1].cache_control = ephemeralCacheControl(
-        cache.conversationTTL,
-      );
+    const annotate = (
+      m: Record<string, unknown>,
+      ttl?: "5m" | "1h" | false,
+    ) => {
+      const parts = m.content as Array<Record<string, unknown>>;
+      parts[parts.length - 1].cache_control = ephemeralCacheControl(ttl);
+    };
+
+    // (1) Moving tail breakpoint — on the last annotatable message. Advances
+    // every turn; caches everything up to the new tail.
+    let tailIdx = result.length - 1;
+    while (tailIdx >= 0 && !isAnnotatable(result[tailIdx])) tailIdx--;
+    if (tailIdx >= 0) annotate(result[tailIdx], cache.conversationTTL);
+
+    // (2) Stable intermediate anchor breakpoint (upstream-eviction resilience).
+    //
+    // With only the moving tail breakpoint, the entire committed prefix is ONE
+    // cache segment. A single upstream (e.g. OpenRouter) partial cache eviction
+    // then re-bills that whole segment as fresh INPUT (~10x cache-read price) —
+    // observed as one ~345K-token spike per long session, worth ~$1/run on a
+    // frontier model (issue #961). Native Anthropic mitigates this with the
+    // distilled-prefix breakpoint, but at Layer 0 (no distilled prefix) it, too,
+    // has a single segment. Anchoring a second breakpoint partway through the
+    // committed history splits the prefix into two independently-cacheable
+    // segments, so an eviction of one segment leaves the other intact and
+    // bounds the blast radius.
+    //
+    // The anchor MUST be byte-stable across turns or it busts the cache itself.
+    // We quantize its position to a coarse step so it only advances every
+    // CACHE_ANCHOR_STEP messages (byte-identical in between), and only place it
+    // when the committed prefix is large enough to be worth splitting.
+    if (tailIdx >= CACHE_ANCHOR_MIN_MESSAGES) {
+      // Largest multiple of the step strictly below the tail, so the anchor is
+      // always before the moving tail breakpoint and never collides with it.
+      const quantized =
+        Math.floor((tailIdx - 1) / CACHE_ANCHOR_STEP) * CACHE_ANCHOR_STEP;
+      // Walk back from the quantized index to the nearest annotatable message.
+      let anchorIdx = Math.min(quantized, tailIdx - 1);
+      while (anchorIdx > 0 && !isAnnotatable(result[anchorIdx])) anchorIdx--;
+      if (
+        anchorIdx > 0 &&
+        anchorIdx < tailIdx &&
+        isAnnotatable(result[anchorIdx])
+      ) {
+        // Inherit the (longer) system TTL when available: the anchored segment
+        // is old, stable history that benefits from the longer eviction window,
+        // matching how Anthropic anchors its distilled prefix at systemTTL.
+        annotate(
+          result[anchorIdx],
+          cache.systemTTL === false ? cache.conversationTTL : cache.systemTTL,
+        );
+      }
     }
   }
 
