@@ -31,7 +31,11 @@
       "qs": ">=6.15.2",
       "tar": ">=7.5.19",
       "js-yaml": ">=4.3.0 <5",
-      "brace-expansion": ">=5.0.7"
+      "brace-expansion": ">=5.0.7",
+      "fast-uri": ">=3.1.4 <4",
+      "sharp": ">=0.35.0",
+      "svgo": ">=4.0.2",
+      "adm-zip": ">=0.6.0"
     },
     "patchedDependencies": {
       "@sentry/node@10.56.0": "patches/@sentry__node@10.56.0.patch"
