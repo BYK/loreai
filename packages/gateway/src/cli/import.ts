@@ -668,8 +668,9 @@ export async function commandImport(
   // built-in default. Track whether the provider was *explicitly* configured so
   // the no-credential message below doesn't tell a Copilot/OpenRouter user to
   // set an "anthropic key" they don't have.
-  const modelExplicit = cfg.model != null;
-  const defaultModel = cfg.model ?? {
+  // Prefer `workerModel` over `model` since imports are background work.
+  const modelExplicit = cfg.model != null || cfg.workerModel != null;
+  const defaultModel = cfg.workerModel ?? cfg.model ?? {
     providerID: "anthropic",
     modelID: "claude-sonnet-4-6",
   };
@@ -721,10 +722,15 @@ export async function commandImport(
     return;
   }
 
+  const workerUpstreams = config.workerUpstream
+    ? { anthropic: config.workerUpstream, openai: config.workerUpstream }
+    : { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI };
+
   const llm = createGatewayLLMClient(
-    { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
+    workerUpstreams,
     getImportAuth,
     defaultModel,
+    { dedicatedWorkerKey: !!workerApiKey },
   );
 
   try {
