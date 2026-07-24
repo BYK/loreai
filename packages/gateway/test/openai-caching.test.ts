@@ -406,11 +406,29 @@ describe("buildOpenAIUpstreamRequest — intermediate anchor breakpoint (#961)",
   };
 
   test("small conversation gets ONLY the moving tail breakpoint (no anchor)", () => {
-    // 6 conversation messages (< CACHE_ANCHOR_MIN_MESSAGES=12): a single tail
+    // 6 conversation messages (< CACHE_ANCHOR_MIN_MESSAGES): a single tail
     // breakpoint already bounds eviction cost, so no anchor is added.
     const body = getBody(makeRequest({ messages: convo(6) }), cacheOpts);
     const idxs = annotatedConversationIndices(body);
     expect(idxs.length).toBe(1); // tail only
+  });
+
+  test("anchor engagement threshold matches CACHE_ANCHOR_MIN_MESSAGES exactly", () => {
+    // Regression for a stale-constant gap: the anchor lands at
+    // floor((tailIdx/2)/STEP)*STEP, so it only clears the `anchorIdx > 0` guard
+    // once tailIdx reaches 2*STEP (=20). CACHE_ANCHOR_MIN_MESSAGES must equal
+    // that real engagement point — a smaller value would advertise an anchor
+    // that silently never fires just above the threshold.
+    // Just below (tailIdx 19): no anchor.
+    const below = annotatedConversationIndices(
+      getBody(makeRequest({ messages: convo(19) }), cacheOpts),
+    );
+    expect(below.length).toBe(1); // tail only
+    // Exactly at the threshold (tailIdx 20): anchor appears.
+    const at = annotatedConversationIndices(
+      getBody(makeRequest({ messages: convo(20) }), cacheOpts),
+    );
+    expect(at.length).toBe(2); // anchor + tail
   });
 
   test("large conversation gets a SECOND anchor near the prefix MIDPOINT", () => {
