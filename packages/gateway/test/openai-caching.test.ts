@@ -413,28 +413,43 @@ describe("buildOpenAIUpstreamRequest — intermediate anchor breakpoint (#961)",
     expect(idxs.length).toBe(1); // tail only
   });
 
-  test("large conversation gets a SECOND, earlier anchor breakpoint", () => {
-    // 30 conversation messages: the ~1MB-class prefix is split into two
+  test("large conversation gets a SECOND anchor near the prefix MIDPOINT", () => {
+    // 60 conversation messages: the ~1MB-class prefix is split into two
     // independently-cacheable segments so an upstream partial eviction re-bills
     // only one segment, not the whole prefix (the ~345K input spike, #961).
-    const body = getBody(makeRequest({ messages: convo(30) }), cacheOpts);
+    // (Uses 60 rather than 30 so a near-tail anchor is clearly outside the
+    // middle-half band below — the near-tail formula would land at ~50/60.)
+    const body = getBody(makeRequest({ messages: convo(60) }), cacheOpts);
+    const msgs = messagesOf(body);
     const idxs = annotatedConversationIndices(body);
     expect(idxs.length).toBe(2); // anchor + tail
     // Anchor is strictly before the tail.
     expect(idxs[0]).toBeLessThan(idxs[1]);
     // Tail is the last message.
-    expect(idxs[1]).toBe(messagesOf(body).length - 1);
+    expect(idxs[1]).toBe(msgs.length - 1);
+    // CRITICAL (H1): the anchor must sit near the MIDDLE of the committed
+    // prefix, not hugging the tail — otherwise it splits off only a tiny
+    // trailing segment and leaves the large early prefix (where the eviction
+    // actually lands) unprotected. Assert the anchor is in the middle half.
+    const tail = idxs[1];
+    expect(idxs[0]).toBeGreaterThan(tail * 0.25);
+    expect(idxs[0]).toBeLessThan(tail * 0.75);
   });
 
   test("anchor position is byte-stable as the conversation grows (no self-bust)", () => {
     // The whole point of quantizing the anchor: it must NOT move every turn, or
-    // it busts the very cache it protects. Growing the conversation by one turn
-    // (within the same quantization bucket) must leave the anchor index put.
-    const bodyA = getBody(makeRequest({ messages: convo(24) }), cacheOpts);
-    const bodyB = getBody(makeRequest({ messages: convo(25) }), cacheOpts);
-    const anchorA = annotatedConversationIndices(bodyA)[0];
-    const anchorB = annotatedConversationIndices(bodyB)[0];
-    expect(anchorA).toBe(anchorB);
+    // it busts the very cache it protects. Growing the conversation across
+    // several turns (within the same quantization bucket — the midpoint advances
+    // at ~half the tail's rate) must leave the anchor index put.
+    const anchorAt = (n: number) =>
+      annotatedConversationIndices(
+        getBody(makeRequest({ messages: convo(n) }), cacheOpts),
+      )[0];
+    // 24..29 all map to the same quantized midpoint bucket.
+    const a = anchorAt(24);
+    for (const n of [25, 26, 27, 28, 29]) {
+      expect(anchorAt(n)).toBe(a);
+    }
   });
 
   test("anchor inherits the (longer) system TTL, tail keeps the conversation TTL", () => {

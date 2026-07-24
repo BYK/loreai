@@ -900,15 +900,25 @@ function buildOpenAIMessages(
     // segments, so an eviction of one segment leaves the other intact and
     // bounds the blast radius.
     //
+    // Placement: the anchor targets the MIDPOINT of the committed prefix, not a
+    // point near the tail. The observed eviction sits deep in the early prefix
+    // (the accumulated large user blobs), so an anchor hugging the tail would
+    // leave that whole early region as one unprotected segment — it must split
+    // the LARGE half. A midpoint anchor cuts the prefix into two ~equal halves,
+    // so an eviction of the front half re-sends ~half, not all.
+    //
     // The anchor MUST be byte-stable across turns or it busts the cache itself.
     // We quantize its position to a coarse step so it only advances every
     // CACHE_ANCHOR_STEP messages (byte-identical in between), and only place it
     // when the committed prefix is large enough to be worth splitting.
     if (tailIdx >= CACHE_ANCHOR_MIN_MESSAGES) {
-      // Largest multiple of the step strictly below the tail, so the anchor is
-      // always before the moving tail breakpoint and never collides with it.
+      // Midpoint of the committed prefix, quantized DOWN to a step multiple so
+      // it stays put for many turns (the midpoint advances at ~half the tail's
+      // rate, so it moves even less often than the step alone implies). Quantize
+      // guarantees the anchor is stable and strictly below the moving tail.
+      const midpoint = Math.floor(tailIdx / 2);
       const quantized =
-        Math.floor((tailIdx - 1) / CACHE_ANCHOR_STEP) * CACHE_ANCHOR_STEP;
+        Math.floor(midpoint / CACHE_ANCHOR_STEP) * CACHE_ANCHOR_STEP;
       // Walk back from the quantized index to the nearest annotatable message.
       let anchorIdx = Math.min(quantized, tailIdx - 1);
       while (anchorIdx > 0 && !isAnnotatable(result[anchorIdx])) anchorIdx--;
