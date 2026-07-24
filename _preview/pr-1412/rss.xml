@@ -1,8 +1,8 @@
-<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Lore Blog</title><description>Product notes, engineering updates, and memory architecture deep dives from Lore.</description><link>https://withlore.ai/</link><language>en-us</language><atom:link href="https://withlore.ai/rss.xml" rel="self" type="application/rss+xml"/><item><title>Automating reviews doesn&apos;t mean losing taste</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Mon, 20 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Lore Blog</title><description>Product notes, engineering updates, and memory architecture deep dives from Lore.</description><link>https://withlore.ai/</link><language>en-us</language><atom:link href="https://withlore.ai/rss.xml" rel="self" type="application/rss+xml"/><item><title>Automating reviews without lowering the bar</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Fri, 24 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
 without a research lab, I had a specific project in mind. I wanted to train something that reviewed
 code the way I did, so I could step back from reviewing every change without the codebase drifting.
 I never built it. I never had enough of the right data, and I never had the time.&lt;/p&gt;
-&lt;p&gt;The debate about review has finally caught up to that project I never got to, and I think both
+&lt;p&gt;The debate about review has finally caught up with the project I never built, and I think both
 sides are half right.&lt;/p&gt;
 &lt;h2 id=&quot;the-same-complaint-from-two-sides&quot;&gt;The same complaint from two sides&lt;/h2&gt;
 &lt;p&gt;One camp says the whole point of writing code with agents is that a human still reads every line
@@ -10,10 +10,10 @@ before it ships. Slow down, look closely, stay in control. The other camp, often
 on a different day, says the job has turned into something worse: you don’t write much anymore, you
 sit and read change after change the machine produced, and it is dull and a little soul-crushing.
 Reviewing slop, they call it.&lt;/p&gt;
-&lt;p&gt;Those are opposite sides of the same coin. Review used to be where judgment happened and where the
+&lt;p&gt;Those are two views of one loss. Review used to be where judgment happened and where the
 team learned how the codebase was meant to work. Now it has shrunk to a checkpoint you sign off on.
 The “read every line” camp wants to protect what review was. The “this is soul-crushing” camp is
-telling you it has already gone. Both are answering one loss.&lt;/p&gt;
+telling you it has already gone. Both are reacting to one loss.&lt;/p&gt;
 &lt;p&gt;A colleague told me the human side of this a few months ago. When he joined the team, he said, he
 learned a lot from getting detailed reviews from me, the kind where you explain not just what to
 change but why the team works this way. What he picked up wasn’t a list of rules. It was a way of
@@ -21,8 +21,7 @@ working. Now we mostly work on our own, agents write and review most of the code
 He wasn’t complaining about speed. He was noticing that something had stopped passing between us.&lt;/p&gt;
 &lt;p&gt;Armin Ronacher &lt;a href=&quot;https://lucumr.pocoo.org/2026/7/13/the-tower/&quot;&gt;wrote about this&lt;/a&gt; from the other
 end. The shared understanding a team keeps of its own system used to be a byproduct of the friction
-in working together, and agents have quietly removed the friction. What my colleague missed was
-that, felt up close.&lt;/p&gt;
+in working together, and agents have quietly removed the friction. My colleague felt that up close.&lt;/p&gt;
 &lt;h2 id=&quot;what-review-was-really-passing-along&quot;&gt;What review was really passing along&lt;/h2&gt;
 &lt;p&gt;A review was never only a gate. It was how one person’s standard reached everyone else. You don’t
 mock the database in integration tests, and here’s the migration bug that taught us why. Deploys go
@@ -34,18 +33,17 @@ used bad judgment. The change looks reasonable on its own. What was missing was 
 the standard and noticed, right then, that the change cut against it.&lt;/p&gt;
 &lt;h2 id=&quot;you-are-what-you-do-not-what-you-write-down&quot;&gt;You are what you do, not what you write down&lt;/h2&gt;
 &lt;p&gt;That is the hard part, and it’s why the project I never got to needed data I never had. A review
-teaches the
-person reading it, but it’s a poor thing to learn from at scale. It’s the verdict, not the
-reasoning: “don’t do this here” lands, and the thinking that led me there stays in my head. Most of
-what makes a good reviewer good is taste, built from years of doing the work, and you can’t write it
-down. Ask someone to put their standards in a document and you get a thin, lifeless version of what
-they actually do. But you keep doing it, review after review, and the standard is real even when the
-document isn’t.&lt;/p&gt;
+teaches the person reading it, but it’s a poor thing to learn from at scale. It’s the verdict, not
+the reasoning: “don’t do this here” lands, and the thinking that led me there stays in my head. Most
+of what makes a good reviewer good is taste, built from years of doing the work, and you can’t write
+it down. Ask someone to put their standards in a document and you get a thin, lifeless version of
+what they actually do. But you keep doing it, review after review, and the standard is real even
+when the document isn’t.&lt;/p&gt;
 &lt;p&gt;That’s the shift that makes this possible now. Lore watches the work the way an apprentice does. It
 sits alongside your sessions, distills what you decide and why, and writes it down for you as
 &lt;a href=&quot;https://withlore.ai/docs/team-memory/&quot;&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/a&gt;, a version-controlled file of the team’s decisions and gotchas,
 reviewed in pull requests like any other file. We’ve written before about
-&lt;a href=&quot;https://withlore.ai/blog/distill-your-own-knowledge/&quot;&gt;why that learning lives in text&lt;/a&gt;. You don’t write docs that go
+&lt;a href=&quot;https://withlore.ai/blog/distill-your-own-knowledge/&quot;&gt;why knowledge lives in text&lt;/a&gt;. You don’t write docs that go
 stale in a few weeks. You work, and it learns.&lt;/p&gt;
 &lt;p&gt;An apprentice is not you, and I want to be honest about the ceiling. It won’t learn your deepest
 judgment, the calls that come from taste you couldn’t explain if you tried. But it learns the
@@ -74,9 +72,10 @@ ignore it inside a week.&lt;/p&gt;
 checking every change against every standard the team ever set, which is the work no human does well
 or enjoys. What’s left is the judgment, the taste, whether this is even the right change. The part
 worth doing.&lt;/p&gt;
-&lt;p&gt;There’s a ladder above advisory, for teams that watch how often the check is wrong and decide a rule
-is worth blocking on, with an override for the author who knows better. But the default sits at the
-bottom on purpose. The system earns trust before it can block anything.&lt;/p&gt;
+&lt;p&gt;A ladder above advisory is designed in. Once a team has watched how often the check is wrong, a
+rule can graduate to a gate, with an override for the author who knows better. That part is still
+coming. Today everything stays advisory on purpose, because the system should earn trust before it
+can block anything.&lt;/p&gt;
 &lt;h2 id=&quot;wheres-the-limit&quot;&gt;Where’s the limit?&lt;/h2&gt;
 &lt;p&gt;I’m not claiming the reviewer goes away. On the contrary, we’re lightening the reviewer’s load so
 they can do more of what’s valuable: real judgment and taste. Here’s the line: no reviewer can hold
@@ -87,6 +86,13 @@ between people when they reviewed each other’s work.&lt;/p&gt;
 &lt;p&gt;That’s the version of automated review I’d ask a doubter to try. Not a bot that approves or rejects
 your PRs. An apprentice that learned how you work and speaks up when a change breaks from that, and
 otherwise stays quiet.&lt;/p&gt;
+&lt;h2 id=&quot;try-it&quot;&gt;Try it&lt;/h2&gt;
+&lt;p&gt;Install Lore and let it learn from a few sessions:&lt;/p&gt;
+&lt;div class=&quot;expressive-code&quot;&gt;&lt;link rel=&quot;stylesheet&quot; href=&quot;https://withlore.ai/_preview/pr-1412/_astro/ec.w36nc.css&quot;&gt;&lt;script type=&quot;module&quot; src=&quot;https://withlore.ai/_preview/pr-1412/_astro/ec.0vx5m.js&quot;&gt;&lt;/script&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;curl&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;-fsSL&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;https://withlore.ai/install&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#7FDBCA;--1:#096E72&quot;&gt;|&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;bash&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;run&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;curl -fsSL https://withlore.ai/install | bashlore run&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
+&lt;p&gt;Then run the check against any range and see what it flags:&lt;/p&gt;
+&lt;div class=&quot;expressive-code&quot;&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;invariant-check&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;--base&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;main&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;--head&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;HEAD&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;lore invariant-check --base main --head HEAD&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
+&lt;p&gt;With no arguments it auto-detects the range. When you’re ready for CI, the
+&lt;a href=&quot;https://withlore.ai/docs/guides/semantic-linter/&quot;&gt;semantic linter guide&lt;/a&gt; has a copy-paste GitHub Action.&lt;/p&gt;
 </content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>knowledge</category><category>code review</category><category>ci</category><category>agents</category></item><item><title>Distill the knowledge, not the model</title><link>https://withlore.ai/blog/distill-your-own-knowledge/</link><guid isPermaLink="true">https://withlore.ai/blog/distill-your-own-knowledge/</guid><description>Satya Nadella named the Reverse Information Paradox. His fix over-solves it: your learning can stay yours in token space, without training a model.</description><pubDate>Mon, 13 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;h2 id=&quot;the-diagnosis-is-right&quot;&gt;The diagnosis is right&lt;/h2&gt;
 &lt;p&gt;Satya Nadella &lt;a href=&quot;https://x.com/satyanadella/status/2076323181154230284&quot;&gt;posted this week&lt;/a&gt; about
 what he calls the Reverse Information Paradox, and if you build with these models you already
