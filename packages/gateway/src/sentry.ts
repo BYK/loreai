@@ -902,6 +902,12 @@ export type DeltaUpgradeTelemetry = {
   source?: string;
   /** ok (patches applied) | unavailable (no usable chain) | error. */
   result: "ok" | "unavailable" | "error";
+  /**
+   * When result is "unavailable", why no usable chain was found:
+   * no_patches | malformed_chain | too_long | over_budget | network. A
+   * `malformed_chain` is the poisoned-publish signal worth alerting on.
+   */
+  reason?: string;
   patchBytes?: number;
   chainLength?: number;
   sha256?: string;
@@ -943,6 +949,7 @@ export async function spanDeltaUpgrade<T>(
         outcome = t;
         span.setAttribute("delta.result", t.result);
         if (t.source) span.setAttribute("delta.source", t.source);
+        if (t.reason) span.setAttribute("delta.reason", t.reason);
         if (t.patchBytes !== undefined)
           span.setAttribute("delta.patch_bytes", t.patchBytes);
         if (t.chainLength !== undefined)

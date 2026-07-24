@@ -127,6 +127,10 @@ export async function attemptDeltaUpgrade(
       // source-less `unavailable` report below — that would overwrite the
       // telemetry outcome and drop the source attribution.
       let reported = false;
+      // Why the source found no usable chain (telemetry classification). Set by
+      // binpatch's `onUnavailable`; folded into the final `unavailable` report
+      // so a `malformed_chain` (a poisoned publish) is alertable, not silent.
+      let unavailableReason: string | undefined;
       // Render the apply-phase byte bar from binpatch's progress events. The
       // bar is created lazily on the first `bytes` event (which carries the
       // total) and fed per-hop deltas (events report cumulative `written`).
@@ -155,6 +159,9 @@ export async function attemptDeltaUpgrade(
                 result: "unavailable",
               });
             },
+            onUnavailable: (reason) => {
+              unavailableReason = reason;
+            },
           },
         });
 
@@ -165,6 +172,7 @@ export async function attemptDeltaUpgrade(
               fromVersion: VERSION,
               toVersion: targetVersion,
               result: "unavailable",
+              reason: unavailableReason,
             });
           }
         } else {

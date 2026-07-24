@@ -68,13 +68,24 @@ export type StableChainInfo = {
   steps: { fromVersion: string; toVersion: string }[];
 };
 
+/** A stable-chain extraction failure, classified for telemetry. */
+export type StableChainFailure = {
+  failure: "no_patches" | "malformed_chain" | "too_long" | "over_budget";
+};
+
+function isStableChainFailure(
+  v: StableChainInfo | StableChainFailure,
+): v is StableChainFailure {
+  return "failure" in v;
+}
+
 /**
  * Extract the chain of patch URLs from an already-fetched release list.
  * Pure computation — no HTTP.
  */
 export function extractStableChain(
   opts: ExtractStableChainOpts,
-): StableChainInfo | null {
+): StableChainInfo | StableChainFailure {
   const { releases, currentVersion, targetVersion, binaryName, fullGzSize } =
     opts;
   const patchAssetName = `${binaryName}.patch`;
@@ -82,28 +93,32 @@ export function extractStableChain(
   const targetIdx = releases.findIndex((r) => r.tag_name === targetVersion);
   const currentIdx = releases.findIndex((r) => r.tag_name === currentVersion);
   if (targetIdx === -1 || currentIdx === -1 || targetIdx >= currentIdx) {
-    return null;
+    // The current or target release isn't in the fetched window (or they're
+    // mis-ordered) — no chain to build, not a broken one.
+    return { failure: "no_patches" };
   }
 
   const chainReleases = releases.slice(targetIdx, currentIdx);
   if (chainReleases.length > MAX_STABLE_CHAIN_DEPTH) {
-    return null;
+    return { failure: "too_long" };
   }
 
   const targetRelease = chainReleases[0];
-  if (!targetRelease) return null;
+  if (!targetRelease) return { failure: "no_patches" };
   const expectedSha256 = getStableTargetSha256(targetRelease, binaryName) ?? "";
-  if (!expectedSha256) return null;
+  if (!expectedSha256) return { failure: "malformed_chain" };
 
   const patchUrls: string[] = [];
   let totalSize = 0;
   for (const release of chainReleases) {
     const patchAsset = release.assets.find((a) => a.name === patchAssetName);
-    if (!patchAsset) return null;
+    // A release in the range with no patch asset for this platform is a
+    // published-but-broken hop — the poisoned-publish signature.
+    if (!patchAsset) return { failure: "malformed_chain" };
     patchUrls.push(patchAsset.browser_download_url);
     totalSize += patchAsset.size;
     if (totalSize > fullGzSize * SIZE_THRESHOLD_RATIO) {
-      return null;
+      return { failure: "over_budget" };
     }
   }
 
@@ -145,7 +160,7 @@ export function githubReleaseSource(
 
   async function fetchRecentReleases(
     signal?: AbortSignal,
-  ): Promise<GitHubRelease[]> {
+  ): Promise<GitHubRelease[] | null> {
     const perPage = MAX_STABLE_CHAIN_DEPTH + 2;
     let response: Response;
     try {
@@ -157,9 +172,10 @@ export function githubReleaseSource(
         signal,
       });
     } catch {
-      return [];
+      // Network failure — distinct from a genuinely empty release list.
+      return null;
     }
-    if (!response.ok) return [];
+    if (!response.ok) return null;
     return (await response.json()) as GitHubRelease[];
   }
 
@@ -181,15 +197,27 @@ export function githubReleaseSource(
   }
 
   return {
-    async resolveChain(currentVersion, targetVersion, signal) {
+    async resolveChain(currentVersion, targetVersion, signal, report) {
       const releases = await fetchRecentReleases(signal);
+      if (releases === null) {
+        report?.("network");
+        return null;
+      }
 
       const targetRelease = releases.find((r) => r.tag_name === targetVersion);
-      if (!targetRelease) return null;
+      if (!targetRelease) {
+        report?.("no_patches");
+        return null;
+      }
       const gzAsset = targetRelease.assets.find(
         (a) => a.name === `${binaryName}.gz`,
       );
-      if (!gzAsset) return null;
+      // The target release exists but has no `.gz` asset for this platform —
+      // the target publish itself is malformed for this binary.
+      if (!gzAsset) {
+        report?.("malformed_chain");
+        return null;
+      }
 
       const chainInfo = extractStableChain({
         releases,
@@ -198,7 +226,10 @@ export function githubReleaseSource(
         binaryName,
         fullGzSize: gzAsset.size,
       });
-      if (!chainInfo) return null;
+      if (isStableChainFailure(chainInfo)) {
+        report?.(chainInfo.failure);
+        return null;
+      }
 
       const downloadResults = await Promise.all(
         chainInfo.patchUrls.map((url) => downloadPatch(url, signal)),
@@ -207,7 +238,12 @@ export function githubReleaseSource(
       const patches: PatchLink[] = [];
       let totalSize = 0;
       for (const data of downloadResults) {
-        if (!data) return null;
+        // A listed patch asset failed to download — transient, not a broken
+        // publish (the asset exists on the release).
+        if (!data) {
+          report?.("network");
+          return null;
+        }
         patches.push({ data, size: data.byteLength });
         totalSize += data.byteLength;
       }
