@@ -68,10 +68,6 @@ export type StableChainInfo = {
   steps: { fromVersion: string; toVersion: string }[];
 };
 
-/**
- * Extract the chain of patch URLs from an already-fetched release list.
- * Pure computation — no HTTP.
- */
 /** A stable-chain extraction failure, classified for telemetry. */
 export type StableChainFailure = {
   failure: "no_patches" | "malformed_chain" | "too_long" | "over_budget";
@@ -83,6 +79,10 @@ function isStableChainFailure(
   return "failure" in v;
 }
 
+/**
+ * Extract the chain of patch URLs from an already-fetched release list.
+ * Pure computation — no HTTP.
+ */
 export function extractStableChain(
   opts: ExtractStableChainOpts,
 ): StableChainInfo | StableChainFailure {
