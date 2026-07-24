@@ -130,6 +130,7 @@ describe("runCompaction", () => {
     expect(JSON.parse(init?.body as string)).toEqual({
       project_path: "/proj",
       previous_summary: "prev",
+      tokens_before: 4242,
     });
 
     expect(result).toEqual({
@@ -139,6 +140,38 @@ describe("runCompaction", () => {
         tokensBefore: 4242,
       },
     });
+  });
+
+  test("relays { cancel: true } from the gateway as { cancel: true } (no summary fetch)", async () => {
+    // The gateway is the authoritative source for "does this session fit?".
+    // When it says cancel: true, the plugin MUST relay that as-is to Pi's
+    // session_before_compact hook. The fetch still happens (we don't know
+    // until we ask) but the summary branch is skipped entirely.
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ cancel: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const result = await runCompaction({ ...base, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(result).toEqual({ cancel: true });
+  });
+
+  test("prefers cancel over summary if the gateway returns both (cancel wins)", async () => {
+    // Defensive: if a future gateway version returns { cancel: true, summary: "..." },
+    // the cancel signal must win. (Current gateway never returns both, but the
+    // precedence is part of the relay contract.)
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ cancel: true, summary: "should be ignored" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const result = await runCompaction({ ...base, fetchImpl });
+    expect(result).toEqual({ cancel: true });
   });
 
   test("returns undefined on 404 session_not_found (graceful fallback)", async () => {
@@ -163,7 +196,7 @@ describe("runCompaction", () => {
     expect(await runCompaction({ ...base, fetchImpl })).toBeUndefined();
   });
 
-  test("returns undefined on a 2xx with an empty summary", async () => {
+  test("returns undefined on a 2xx with an empty summary and no cancel", async () => {
     const fetchImpl = vi.fn(
       async () =>
         new Response(JSON.stringify({ summary: "" }), { status: 200 }),

@@ -188,7 +188,9 @@ describe("shouldCancelCompactionFromBudget", () => {
     });
 
     it("falls through when upstream is present but model is empty", () => {
-      const d = shouldCancelCompactionFromBudget(50_000, { providerID: "anthropic" });
+      const d = shouldCancelCompactionFromBudget(50_000, {
+        providerID: "anthropic",
+      });
       expect(d.cancel).toBe(false);
       expect(d.mustCompact).toBe(false);
     });
