@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Lore Blog</title><description>Product notes, engineering updates, and memory architecture deep dives from Lore.</description><link>https://withlore.ai/</link><language>en-us</language><atom:link href="https://withlore.ai/rss.xml" rel="self" type="application/rss+xml"/><item><title>Automating reviews doesn&apos;t mean losing taste</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Mon, 20 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
-without a research lab, I had a specific daydream. I wanted to train something that reviewed code
-the way I did, so I could step back from reviewing every change without the codebase drifting. I
-never built it. I never had enough of the right data, and I never had the time.&lt;/p&gt;
-&lt;p&gt;The debate about review has finally caught up to that daydream, and I think both sides are half
-right.&lt;/p&gt;
+without a research lab, I had a specific project in mind. I wanted to train something that reviewed
+code the way I did, so I could step back from reviewing every change without the codebase drifting.
+I never built it. I never had enough of the right data, and I never had the time.&lt;/p&gt;
+&lt;p&gt;The debate about review has finally caught up to that project I never got to, and I think both
+sides are half right.&lt;/p&gt;
 &lt;h2 id=&quot;the-same-complaint-from-two-sides&quot;&gt;The same complaint from two sides&lt;/h2&gt;
 &lt;p&gt;One camp says the whole point of writing code with agents is that a human still reads every line
 before it ships. Slow down, look closely, stay in control. The other camp, often the same people
@@ -32,8 +32,9 @@ the moment it mattered, to whoever was on the change.&lt;/p&gt;
 months later a pull request quietly brings back the exact thing the team decided against. Nobody
 used bad judgment. The change looks reasonable on its own. What was missing was a reviewer who knew
 the standard and noticed, right then, that the change cut against it.&lt;/p&gt;
-&lt;h2 id=&quot;you-cant-write-it-down-you-do-it&quot;&gt;You can’t write it down. You do it.&lt;/h2&gt;
-&lt;p&gt;That is the hard part, and it’s why my old daydream needed data I never had. A review teaches the
+&lt;h2 id=&quot;you-are-what-you-do-not-what-you-write-down&quot;&gt;You are what you do, not what you write down&lt;/h2&gt;
+&lt;p&gt;That is the hard part, and it’s why the project I never got to needed data I never had. A review
+teaches the
 person reading it, but it’s a poor thing to learn from at scale. It’s the verdict, not the
 reasoning: “don’t do this here” lands, and the thinking that led me there stays in my head. Most of
 what makes a good reviewer good is taste, built from years of doing the work, and you can’t write it
@@ -64,7 +65,7 @@ can match with a regex, and any lint rule that tried would be brittle and easy t
 a meaning, and you can only check it by understanding what the change does and what the standard
 intends. The honest cost is that a judge produces suspicions, not verdicts. It can be wrong, and we
 designed around that instead of pretending otherwise.&lt;/p&gt;
-&lt;h2 id=&quot;why-it-doesnt-fail-your-build&quot;&gt;Why it doesn’t fail your build&lt;/h2&gt;
+&lt;h2 id=&quot;the-boring-part-handled&quot;&gt;The boring part, handled&lt;/h2&gt;
 &lt;p&gt;If you’re in the “read every line” camp, what you’re rightly afraid of is a noisy check that blocks
 work on a bad guess. We share that fear, so the linter ships advisory only. It never fails a build.
 It leaves a note and a human decides. A check that guesses and can break CI would teach everyone to
@@ -77,19 +78,15 @@ worth doing.&lt;/p&gt;
 is worth blocking on, with an override for the author who knows better. But the default sits at the
 bottom on purpose. The system earns trust before it can block anything.&lt;/p&gt;
 &lt;h2 id=&quot;wheres-the-limit&quot;&gt;Where’s the limit?&lt;/h2&gt;
-&lt;p&gt;I’m not claiming the reviewer goes away. The judgment and taste in a review is not what this
-replaces, and I’d distrust anyone selling that. Here’s the line: no reviewer can hold every standard
-the team ever set and apply the right one at the right moment. That one job a system does well, and
-handing it over costs you none of the taste you were afraid to lose. It gives you back the attention
-for the parts that need a person, and brings back, a little, what used to pass between people when
-they reviewed each other’s work.&lt;/p&gt;
-&lt;p&gt;That’s the version of automated review I’d ask a doubter to try. Not a bot that approves your PRs.
-An apprentice that learned how you work and speaks up when a change breaks from that, and otherwise
-stays quiet.&lt;/p&gt;
-&lt;p&gt;Because a check that reads every diff against your team’s standards is a lot to take on trust, the
-code that decides what it flags is open to read. Lore is &lt;a href=&quot;https://fair.io&quot;&gt;Fair Source&lt;/a&gt;
-(FSL-1.1-Apache-2.0), and it becomes Apache 2.0 after a set time. A standard you can watch enforce
-itself is worth more than one you have to hold in your head.&lt;/p&gt;
+&lt;p&gt;I’m not claiming the reviewer goes away. On the contrary, we’re lightening the reviewer’s load so
+they can do more of what’s valuable: real judgment and taste. Here’s the line: no reviewer can hold
+every standard the team ever set and apply the right one at the right moment. That one job a system
+does well, and handing it over costs you none of the taste you were afraid to lose. It gives you
+back the attention for the parts that need a person, and brings back, a little, what used to pass
+between people when they reviewed each other’s work.&lt;/p&gt;
+&lt;p&gt;That’s the version of automated review I’d ask a doubter to try. Not a bot that approves or rejects
+your PRs. An apprentice that learned how you work and speaks up when a change breaks from that, and
+otherwise stays quiet.&lt;/p&gt;
 </content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>knowledge</category><category>code review</category><category>ci</category><category>agents</category></item><item><title>Distill the knowledge, not the model</title><link>https://withlore.ai/blog/distill-your-own-knowledge/</link><guid isPermaLink="true">https://withlore.ai/blog/distill-your-own-knowledge/</guid><description>Satya Nadella named the Reverse Information Paradox. His fix over-solves it: your learning can stay yours in token space, without training a model.</description><pubDate>Mon, 13 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;h2 id=&quot;the-diagnosis-is-right&quot;&gt;The diagnosis is right&lt;/h2&gt;
 &lt;p&gt;Satya Nadella &lt;a href=&quot;https://x.com/satyanadella/status/2076323181154230284&quot;&gt;posted this week&lt;/a&gt; about
 what he calls the Reverse Information Paradox, and if you build with these models you already
