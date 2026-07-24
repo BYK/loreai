@@ -73,7 +73,7 @@ import {
   recordEmptyWorkerResponse,
   clearEmptyWorkerStreak,
 } from "./worker-health";
-import { getModelEntrySync } from "./worker-model";
+import { getModelEntrySync, workerModelCandidates } from "./worker-model";
 
 // ---------------------------------------------------------------------------
 // Worker call tracking
@@ -254,6 +254,28 @@ export function isDataPolicyBlocked404(status: number, body: string): boolean {
     /data\s+policy/i.test(body) ||
     /guardrail/i.test(body) ||
     /settings\/privacy/i.test(body)
+  );
+}
+
+/**
+ * True when a 400 body says the requested MODEL is unavailable on this
+ * account/plan (as opposed to a bad request about params). Copilot returns
+ * `code:"model_not_supported"` / `"unsupported_api_for_model"`; other providers
+ * phrase it as "model not found/supported/does not exist". Kept to model-scoped
+ * markers so a generic 400 (bad param, quota, etc.) does NOT trigger a model
+ * swap. Used by the worker retry loop to fall back to a same-provider backup
+ * model (see {@link workerModelCandidates}).
+ */
+export function isModelUnsupported400(status: number, body: string): boolean {
+  if (status !== 400) return false;
+  return (
+    /model_not_supported/i.test(body) ||
+    /unsupported_api_for_model/i.test(body) ||
+    /model_not_found/i.test(body) ||
+    /\bmodel\b[^"]{0,40}?(?:is\s+)?not\s+(?:supported|found|available)\b/i.test(
+      body,
+    ) ||
+    /\bmodel\b[^"]{0,40}?does\s+not\s+exist\b/i.test(body)
   );
 }
 
@@ -1735,14 +1757,39 @@ export function createGatewayLLMClient(
   const factoryVertexProject = opts?.vertexProject;
   return {
     async prompt(system, user, opts) {
-      const model = opts?.model ?? defaultModel;
+      // `model` is mutable: on a 400 model-not-supported the retry loop swaps
+      // in a same-provider backup (workerModelCandidates). Backups never change
+      // provider, so target/protocol/credential stay valid — only the body's
+      // model id changes.
+      let model = opts?.model ?? defaultModel;
 
-      // Skip models already known to produce no usable worker output for THIS
-      // worker kind. This is a capability verdict (not an outage): the call
-      // would just waste a round trip and re-fail. The failing worker defers;
-      // data stays recallable. Scoped per worker so a model that can distill
-      // but not curate is still used for distillation.
-      if (isWorkerIncapable(model.providerID, model.modelID, opts?.workerID)) {
+      // Skip models already known to produce no usable worker output. Two
+      // kinds of "incapable" verdict apply:
+      //   - per-worker capability (a model that can distill but not curate) —
+      //     scoped to opts.workerID;
+      //   - account-wide model-not-supported (a 400 from the fallback path
+      //     below, marked with the default ANY_WORKER scope) — the model is
+      //     unavailable on this plan for EVERY worker kind.
+      // A candidate is unusable if EITHER verdict is set.
+      const candidateBlocked = (c: { providerID: string; modelID: string }) =>
+        isWorkerIncapable(c.providerID, c.modelID, opts?.workerID) ||
+        isWorkerIncapable(c.providerID, c.modelID);
+
+      // Advance PAST any blocklisted candidate to the first usable same-provider
+      // backup: once one chunk's model-not-supported 400 has blocklisted the
+      // preferred model (markWorkerIncapable below), every later chunk re-enters
+      // here with that same preferred model. Without this hop it would be
+      // skipped outright and the whole backlog would produce nothing, even
+      // though a working backup exists — so pick up where the fallback left off
+      // instead of re-failing the swap every chunk. Data stays recallable if
+      // none is usable.
+      for (const cand of workerModelCandidates(model)) {
+        if (!candidateBlocked(cand)) {
+          model = cand;
+          break;
+        }
+      }
+      if (candidateBlocked(model)) {
         return null;
       }
 
@@ -1992,6 +2039,16 @@ export function createGatewayLLMClient(
             // its whole allowance on hidden reasoning). See the empty-response
             // block below.
             let lengthRetried = false;
+            // Same-provider backup models to try when the current one is
+            // unavailable on the account/plan (400 model-not-supported). Seeded
+            // from workerModelCandidates minus the active model and any already
+            // blocklisted (incapable) candidate; each unsupported-model 400 pops
+            // the next one.
+            const modelFallbacks = workerModelCandidates(model)
+              .slice(1)
+              .filter(
+                (c) => c.modelID !== model.modelID && !candidateBlocked(c),
+              );
             // Resolve the retry budget once per call (not per attempt) — the
             // value can't change mid-loop and re-reading the env each iteration
             // is wasteful.
@@ -2675,6 +2732,58 @@ export function createGatewayLLMClient(
                   // Do NOT markWorkerPaused: the fix is re-resolution to a
                   // different model, not pausing the session's workers.
                   return null;
+                }
+
+                // 400 model-not-supported: the requested model is unavailable
+                // on this account/plan (Copilot subscription tiers serve
+                // different catalogs). This is a per-account capability fact,
+                // not an outage — retrying the SAME model is futile. Blocklist
+                // it and, if a same-provider backup remains, swap it in and
+                // retry (rebuild via buildWorkerRequest so the OAuth billing
+                // signature is recomputed over the new body). Bounded by the
+                // finite candidate list. Only when NO backup remains do we fall
+                // through to the generic failure below.
+                if (
+                  isModelUnsupported400(response.status, text) &&
+                  modelFallbacks.length > 0
+                ) {
+                  markWorkerIncapable(model.providerID, model.modelID);
+                  // length-checked above, so a value is guaranteed.
+                  const next = modelFallbacks.shift() ?? model;
+                  log.warn(
+                    `worker model ${model.providerID}/${model.modelID} not supported on this account (400) — ` +
+                      `falling back to ${next.providerID}/${next.modelID} ` +
+                      `(worker=${opts?.workerID ?? "unknown"}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}): ${text.slice(0, 160)}`,
+                  );
+                  model = next;
+                  req = await buildWorkerRequest(
+                    target,
+                    activeCred,
+                    model,
+                    system,
+                    user,
+                    maxTokens,
+                    opts?.sessionID,
+                    effectiveTemperature,
+                    factoryVertexProject,
+                    effectiveDisableThinking,
+                    reasoningEffort,
+                  );
+                  // Preserve any runtime beta strip across the rebuild (same
+                  // reasoning as the temperature/thinking rebuilds above).
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
+                  retryCount++;
+                  // A model swap is NOT a transient retry — it's a one-way walk
+                  // down a finite candidate list (bounded by modelFallbacks
+                  // shrinking). Don't let it consume the transient-error budget
+                  // (`attempt < maxRetries`): decrement to cancel the `attempt++`
+                  // the loop applies on `continue`, so the working backup keeps
+                  // its full 429/5xx retry allowance.
+                  attempt--;
+                  continue;
                 }
 
                 log.error(
