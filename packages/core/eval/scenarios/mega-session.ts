@@ -292,12 +292,8 @@ const questions: EvalQuestion[] = [
 
 const scenario: ScenarioDefinition = {
   id: scenarioId,
+  name: "Mega CLI Refactor (2.3M tokens)",
   dimension,
-  label: "Mega CLI Refactor (2.3M tokens)",
-  description:
-    "Real 5-day getsentry/cli refactoring session — 2.3M tokens, 95 user turns, " +
-    "multiple PRs, architectural decisions, multi-phase migration. Tests recall " +
-    "of specific details across extreme context depths.",
   sessions: [
     {
       id: "cli-refactor",
