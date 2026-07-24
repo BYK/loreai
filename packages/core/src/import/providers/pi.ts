@@ -24,7 +24,11 @@ import { registerProvider } from "./index";
 // Constants
 // ---------------------------------------------------------------------------
 
-const PI_DIR = join(homedir(), ".pi", "agent", "sessions");
+// Resolved lazily (not at module load) so `homedir()` is read per call — lets
+// tests redirect it via $HOME and keeps production behavior identical.
+function piDir(): string {
+  return join(homedir(), ".pi", "agent", "sessions");
+}
 const MAX_TOOL_OUTPUT_CHARS = 500;
 const DEFAULT_MAX_TOKENS = 12288;
 
@@ -217,7 +221,7 @@ const piProvider: AgentHistoryProvider = {
 
     for (const projectPath of projectPaths) {
       const encoded = encodeCwd(projectPath);
-      const dir = join(PI_DIR, encoded);
+      const dir = join(piDir(), encoded);
 
       let entries: string[];
       try {

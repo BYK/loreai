@@ -21,9 +21,17 @@ import { registerProvider } from "./index";
 // Constants
 // ---------------------------------------------------------------------------
 
-const CODEX_DIR = join(homedir(), ".codex");
-const SESSIONS_DIR = join(CODEX_DIR, "sessions");
-const ARCHIVED_DIR = join(CODEX_DIR, "archived_sessions");
+// Resolved lazily (not at module load) so `homedir()` is read per call — lets
+// tests redirect it via $HOME and keeps production behavior identical.
+function codexDir(): string {
+  return join(homedir(), ".codex");
+}
+function sessionsDir(): string {
+  return join(codexDir(), "sessions");
+}
+function archivedDir(): string {
+  return join(codexDir(), "archived_sessions");
+}
 const MAX_TOOL_OUTPUT_CHARS = 500;
 const DEFAULT_MAX_TOKENS = 12288;
 
@@ -252,8 +260,8 @@ const codexProvider: AgentHistoryProvider = {
 
     // Scan both active and archived sessions
     const allFiles = [
-      ...findJsonlFiles(SESSIONS_DIR),
-      ...findJsonlFiles(ARCHIVED_DIR),
+      ...findJsonlFiles(sessionsDir()),
+      ...findJsonlFiles(archivedDir()),
     ];
 
     for (const filePath of allFiles) {

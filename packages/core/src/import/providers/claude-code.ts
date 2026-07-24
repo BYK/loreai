@@ -55,7 +55,11 @@ type ContentBlock =
 // Constants
 // ---------------------------------------------------------------------------
 
-const CLAUDE_DIR = join(homedir(), ".claude", "projects");
+// Resolved lazily (not at module load) so `homedir()` is read per call — lets
+// tests redirect it via $HOME and keeps production behavior identical.
+function claudeDir(): string {
+  return join(homedir(), ".claude", "projects");
+}
 const MAX_TOOL_OUTPUT_CHARS = 500;
 const DEFAULT_MAX_TOKENS = 12288;
 
@@ -245,7 +249,7 @@ const claudeCodeProvider: AgentHistoryProvider = {
 
     for (const projectPath of projectPaths) {
       const mangled = manglePath(projectPath);
-      const dir = join(CLAUDE_DIR, mangled);
+      const dir = join(claudeDir(), mangled);
 
       let entries: string[];
       try {
