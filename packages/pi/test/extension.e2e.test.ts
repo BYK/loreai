@@ -184,7 +184,9 @@ describe("pi extension — e2e against a real gateway", () => {
         preparation: {
           previousSummary: "",
           firstKeptEntryId: "e1",
-          tokensBefore: 100,
+          // tokensBefore above the default cancel threshold so the policy
+          // doesn't short-circuit and the request actually reaches /v1/compact.
+          tokensBefore: 250_000,
         },
       },
       {},

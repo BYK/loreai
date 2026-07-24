@@ -109,6 +109,9 @@ describe("runCompaction", () => {
     previousSummary: "prev",
     firstKeptEntryId: "entry-7",
     tokensBefore: 4242,
+    // These tests are about the gateway fetch path itself; disable the
+    // cancel-when-small policy which is tested separately below.
+    cancelThreshold: 0,
   };
 
   test("POSTs to /v1/compact with session header + body, returns shaped result", async () => {
@@ -169,5 +172,219 @@ describe("runCompaction", () => {
         new Response(JSON.stringify({ summary: "" }), { status: 200 }),
     );
     expect(await runCompaction({ ...base, fetchImpl })).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Cancel-when-small policy (Lore manages the window via raw context + recall).
+  // This is the on-Pi analog of OpenCode's --cap-context mechanism.
+  // ---------------------------------------------------------------------------
+  describe("cancel-when-small policy", () => {
+    test("returns { cancel: true } when tokensBefore is below threshold", async () => {
+      const fetchImpl = vi.fn(async () => {
+        throw new Error("fetch should not be called when we cancel");
+      });
+      const result = await runCompaction({
+        gatewayBase: GW,
+        sessionID: "sess-c",
+        projectPath: "/proj",
+        previousSummary: undefined,
+        firstKeptEntryId: "entry-7",
+        tokensBefore: 50_000,
+        cancelThreshold: 200_000,
+        fetchImpl,
+      });
+      expect(result).toEqual({ cancel: true });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    test("returns { cancel: true } at tokensBefore == threshold - 1 (boundary)", async () => {
+      const fetchImpl = vi.fn(async () => {
+        throw new Error("fetch should not be called when we cancel");
+      });
+      const result = await runCompaction({
+        gatewayBase: GW,
+        sessionID: "sess-c",
+        projectPath: "/proj",
+        previousSummary: undefined,
+        firstKeptEntryId: "entry-7",
+        tokensBefore: 199_999,
+        cancelThreshold: 200_000,
+        fetchImpl,
+      });
+      expect(result).toEqual({ cancel: true });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    test("falls through to /v1/compact when tokensBefore is at threshold (raw context would not fit)", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ summary: "ok" }), { status: 200 }),
+      );
+      const result = await runCompaction({
+        gatewayBase: GW,
+        sessionID: "sess-c",
+        projectPath: "/proj",
+        previousSummary: undefined,
+        firstKeptEntryId: "entry-7",
+        tokensBefore: 200_000,
+        cancelThreshold: 200_000,
+        fetchImpl,
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(result).toEqual({
+        compaction: {
+          summary: "ok",
+          firstKeptEntryId: "entry-7",
+          tokensBefore: 200_000,
+        },
+      });
+    });
+
+    test("returns { cancel: true } for any tokensBefore < threshold (sub-threshold fast path)", async () => {
+      const fetchImpl = vi.fn(async () => {
+        throw new Error("fetch should not be called when we cancel");
+      });
+      for (const tokensBefore of [1, 100, 5_000, 50_000, 199_999]) {
+        const result = await runCompaction({
+          gatewayBase: GW,
+          sessionID: "sess-c",
+          projectPath: "/proj",
+          previousSummary: undefined,
+          firstKeptEntryId: "entry-7",
+          tokensBefore,
+          cancelThreshold: 200_000,
+          fetchImpl,
+        });
+        expect(result).toEqual({ cancel: true });
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    test("falls through to /v1/compact when tokensBefore >= threshold (must compact)", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ summary: "ok" }), { status: 200 }),
+      );
+      for (const tokensBefore of [200_000, 250_000, 1_000_000]) {
+        vi.mocked(fetchImpl).mockClear();
+        const result = await runCompaction({
+          gatewayBase: GW,
+          sessionID: "sess-c",
+          projectPath: "/proj",
+          previousSummary: undefined,
+          firstKeptEntryId: "entry-7",
+          tokensBefore,
+          cancelThreshold: 200_000,
+          fetchImpl,
+        });
+        expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(result).toEqual({
+          compaction: {
+            summary: "ok",
+            firstKeptEntryId: "entry-7",
+            tokensBefore,
+          },
+        });
+      }
+    });
+
+    test("does NOT cancel when loreActive is false (fall through to /v1/compact)", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ summary: "ok" }), { status: 200 }),
+      );
+      const result = await runCompaction({
+        gatewayBase: GW,
+        sessionID: "sess-c",
+        projectPath: "/proj",
+        previousSummary: undefined,
+        firstKeptEntryId: "entry-7",
+        tokensBefore: 50_000,
+        cancelThreshold: 200_000,
+        loreActive: false,
+        fetchImpl,
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(result).toEqual({
+        compaction: {
+          summary: "ok",
+          firstKeptEntryId: "entry-7",
+          tokensBefore: 50_000,
+        },
+      });
+    });
+
+    test("does NOT cancel when tokensBefore is 0 / NaN (unknown size — fall through)", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ summary: "ok" }), { status: 200 }),
+      );
+      for (const tokensBefore of [0, NaN, -1]) {
+        vi.mocked(fetchImpl).mockClear();
+        const result = await runCompaction({
+          gatewayBase: GW,
+          sessionID: "sess-c",
+          projectPath: "/proj",
+          previousSummary: undefined,
+          firstKeptEntryId: "entry-7",
+          tokensBefore,
+          cancelThreshold: 200_000,
+          fetchImpl,
+        });
+        expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(result).toEqual({
+          compaction: {
+            summary: "ok",
+            firstKeptEntryId: "entry-7",
+            tokensBefore,
+          },
+        });
+      }
+    });
+
+    test("resolves threshold from LORE_PI_CANCEL_THRESHOLD env var", async () => {
+      const fetchImpl = vi.fn(async () => {
+        throw new Error("fetch should not be called when we cancel");
+      });
+      const result = await runCompaction({
+        gatewayBase: GW,
+        sessionID: "sess-c",
+        projectPath: "/proj",
+        previousSummary: undefined,
+        firstKeptEntryId: "entry-7",
+        tokensBefore: 50_000,
+        env: { LORE_PI_CANCEL_THRESHOLD: "100000" } as NodeJS.ProcessEnv,
+        fetchImpl,
+      });
+      expect(result).toEqual({ cancel: true });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    test("rejects invalid LORE_PI_CANCEL_THRESHOLD env values (falls back to default)", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ summary: "ok" }), { status: 200 }),
+      );
+      for (const bad of ["", "abc", "0", "-5", "not-a-number"]) {
+        const env = {
+          LORE_PI_CANCEL_THRESHOLD: bad,
+        } as unknown as NodeJS.ProcessEnv;
+        vi.mocked(fetchImpl).mockClear();
+        const result = await runCompaction({
+          gatewayBase: GW,
+          sessionID: "sess-c",
+          projectPath: "/proj",
+          previousSummary: undefined,
+          firstKeptEntryId: "entry-7",
+          tokensBefore: 50_000,
+          env,
+          fetchImpl,
+        });
+        // Default 200K → 50K < 200K → cancel. Both path result and fetch
+        // call behavior confirm the env override was rejected.
+        expect(fetchImpl).not.toHaveBeenCalled();
+        expect(result).toEqual({ cancel: true });
+      }
+    });
   });
 });

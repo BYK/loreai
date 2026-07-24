@@ -265,6 +265,71 @@ export function buildProviderRegistrations(opts: {
 }
 
 /**
+ * Default cancel threshold (tokens). Above this, we let Pi compact —
+ * below it, we cancel so Lore manages the window via raw context + recall.
+ * Mirrors OpenCode's `--cap-context` mechanism (Lore caps the layer-0 budget
+ * so OpenCode never natively compacts; on Pi we cap at the same threshold
+ * and cancel the native compaction so the raw context carries the buried
+ * facts into the next turn, with recall as the backup).
+ *
+ * Configurable via `LORE_PI_CANCEL_THRESHOLD` env var so tests + power users
+ * can tune it. The default 200_000 matches the eval cap and Anthropic's
+ * 200K usable window for Sonnet 5 / Sonnet 4 / Opus 4 — large enough to
+ * hold a long session's worth of raw context, small enough to never silently
+ * exceed the model's effective window.
+ */
+export const DEFAULT_PI_CANCEL_THRESHOLD = 200_000;
+
+/**
+ * Resolve the cancel threshold from env, falling back to the constant.
+ * Treats empty / non-numeric / non-positive values as "not set".
+ */
+export function resolveCancelThreshold(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.LORE_PI_CANCEL_THRESHOLD;
+  if (typeof raw !== "string" || raw.trim() === "") return DEFAULT_PI_CANCEL_THRESHOLD;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_PI_CANCEL_THRESHOLD;
+  return n;
+}
+
+/**
+ * Cancel-vs-summary policy: should Pi's upcoming compaction be cancelled so
+ * Lore keeps the raw context (the OpenCode `--cap-context` analog)?
+ *
+ * Returns `true` when:
+ *  - the would-be tokensBefore is below the configured threshold (raw context
+ *    fits), AND
+ *  - Lore is "active" for this session (we'd otherwise lose the chance to
+ *    recall on the next turn).
+ *
+ * Returning `true` causes the extension to return `{ cancel: true }` from the
+ * `session_before_compact` hook, which Pi honors (manual + auto paths, per
+ * `@mariozechner/pi-coding-agent/dist/core/agent-session.js:1275` and `:1498`).
+ *
+ * Returning `false` causes the extension to fall through to the existing POST
+ * /v1/compact summary path. Above the threshold we *must* compact — raw
+ * context would otherwise exceed the model's effective window on the next
+ * turn — so the policy is automatically false-positive-safe.
+ *
+ * Pure: no side effects, no I/O. Easy to unit-test.
+ */
+export function shouldCancelCompaction(
+  tokensBefore: number,
+  opts: { cancelThreshold: number; loreActive: boolean } = {
+    cancelThreshold: DEFAULT_PI_CANCEL_THRESHOLD,
+    loreActive: true,
+  },
+): boolean {
+  if (!opts.loreActive) return false;
+  if (!Number.isFinite(tokensBefore) || tokensBefore <= 0) {
+    // Unknown size — fall through to the gateway summary path. The gateway
+    // can still bail with a 404, in which case we fall back to Pi native.
+    return false;
+  }
+  return tokensBefore < opts.cancelThreshold;
+}
+
+/**
  * Call the gateway's `POST /v1/compact` endpoint and shape the result for Pi's
  * `session_before_compact` hook.
  *
@@ -286,7 +351,12 @@ export async function runCompaction(opts: {
   previousSummary: string | undefined;
   firstKeptEntryId: string;
   tokensBefore: number;
+  /** Override for the cancel-above-token threshold (default 200_000). */
+  cancelThreshold?: number;
+  /** Inject for tests; defaults to `loreActive=true` (the runtime case). */
+  loreActive?: boolean;
   fetchImpl?: typeof fetch;
+  env?: NodeJS.ProcessEnv;
 }): Promise<SessionBeforeCompactResult | undefined> {
   const {
     gatewayBase,
@@ -295,8 +365,26 @@ export async function runCompaction(opts: {
     previousSummary,
     firstKeptEntryId,
     tokensBefore,
+    cancelThreshold,
+    loreActive = true,
     fetchImpl = fetch,
+    env = process.env,
   } = opts;
+
+  // Cancel-when-small policy: if the would-be compacted context fits in our
+  // budget, let Lore keep the raw context (cancel Pi's native compaction).
+  // This is the on-Pi analog of OpenCode's `--cap-context` mechanism that
+  // gives Lore-OpenCode a 0-compaction 100%-retention guarantee. On Pi
+  // there's no provider limit to flip, so we use the hook's cancel + the
+  // `keepRecentTokens` budget to keep the raw context bounded.
+  const threshold = cancelThreshold ?? resolveCancelThreshold(env);
+  if (shouldCancelCompaction(tokensBefore, { cancelThreshold: threshold, loreActive })) {
+    log.info(
+      `pi: cancel compaction — tokensBefore=${tokensBefore} < threshold=${threshold}; ` +
+        `keeping raw context (Lore manages the window via recall).`,
+    );
+    return { cancel: true };
+  }
 
   try {
     const res = await fetchImpl(`${gatewayBase}/v1/compact`, {
