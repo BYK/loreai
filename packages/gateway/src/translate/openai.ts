@@ -728,18 +728,24 @@ function ephemeralCacheControl(ttl?: "5m" | "1h" | false): {
 }
 
 /**
- * Minimum number of committed (pre-tail) messages before a second, stable
- * intermediate `cache_control` anchor is worth adding. Below this the prefix is
- * small enough that a single tail breakpoint already bounds eviction cost.
- */
-const CACHE_ANCHOR_MIN_MESSAGES = 12;
-
-/**
  * Quantization step for the intermediate anchor's position. The anchor sits at a
  * multiple of this step, so it stays byte-identical for this many turns before
  * advancing — a moving anchor would bust the very cache it protects.
  */
 const CACHE_ANCHOR_STEP = 10;
+
+/**
+ * Minimum number of committed (pre-tail) messages before a second, stable
+ * intermediate `cache_control` anchor is placed. Below this the prefix is small
+ * enough that a single tail breakpoint already bounds eviction cost.
+ *
+ * This is `2 * CACHE_ANCHOR_STEP`, not an independent number: the anchor lands at
+ * `floor((tailIdx / 2) / STEP) * STEP`, which only clears 0 (and so passes the
+ * `anchorIdx > 0` guard) once the midpoint reaches a full step, i.e. once
+ * `tailIdx >= 2 * STEP`. Setting a smaller minimum would advertise an anchor that
+ * silently never fires for `tailIdx` in `[min, 2*STEP)`.
+ */
+const CACHE_ANCHOR_MIN_MESSAGES = 2 * CACHE_ANCHOR_STEP;
 
 function buildOpenAIMessages(
   messages: GatewayMessage[],
