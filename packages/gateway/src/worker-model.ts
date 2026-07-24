@@ -1124,6 +1124,52 @@ function resolveGitHubCopilotWorker(sessionModelID: string): {
 }
 
 /**
+ * Per-provider ordered backup worker models, tried (in order) when the
+ * preferred model is unavailable on the user's account/plan (a 400
+ * `model_not_supported` / "model not supported"). The FIRST entry a provider
+ * actually serves wins. Only providers whose per-account model access varies
+ * need an entry here; everything else just uses its preferred/default model.
+ *
+ * GitHub Copilot is the motivating case: Copilot's model catalog differs by
+ * subscription tier, so the built-in default (gpt-5-mini) is unavailable on
+ * plans that only serve, e.g., claude. All entries below are Copilot models
+ * confirmed to exist on /chat/completions (the worker path); the order runs
+ * cheap-first, spanning both the OpenAI and Claude families so at least one is
+ * reachable on any plan. (gpt-5.4-mini is deliberately absent — Copilot serves
+ * it only via /responses and it 400s on the worker's Chat Completions path.)
+ */
+const WORKER_MODEL_FALLBACKS: Record<string, string[]> = {
+  "github-copilot": [
+    "gpt-5-mini",
+    "gpt-4o-mini",
+    "claude-sonnet-4.6",
+    "claude-haiku-4.5",
+  ],
+};
+
+/**
+ * Ordered, deduped list of worker models to try for `preferred`, starting with
+ * `preferred` itself and followed by same-provider backups (see
+ * {@link WORKER_MODEL_FALLBACKS}). Used by the worker adapter to fall back to a
+ * reachable model when the preferred one is unavailable on the user's plan
+ * (400 model-not-supported), instead of failing every chunk. Backups are always
+ * same-provider — a worker must never switch providers (wrong credential/wire).
+ */
+export function workerModelCandidates(preferred: {
+  providerID: string;
+  modelID: string;
+}): { providerID: string; modelID: string }[] {
+  const out: { providerID: string; modelID: string }[] = [preferred];
+  const seen = new Set([preferred.modelID]);
+  for (const modelID of WORKER_MODEL_FALLBACKS[preferred.providerID] ?? []) {
+    if (seen.has(modelID)) continue;
+    seen.add(modelID);
+    out.push({ providerID: preferred.providerID, modelID });
+  }
+  return out;
+}
+
+/**
  * Parse the `LORE_WORKER_MODEL` env-var override into a `{providerID, modelID}`.
  *
  * Format: `"providerID/modelID"` (e.g. `openai/gpt-5.4-mini`) or a bare

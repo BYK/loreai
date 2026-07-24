@@ -27,6 +27,7 @@ import {
   isTemperatureUnsupportedModel,
   isAnthropicClaudeModel,
   isDataPolicyBlocked404,
+  isModelUnsupported400,
   isThinkingUnsupportedModel,
   markThinkingUnsupported,
   workerThinkingOnByDefault,
@@ -36,6 +37,7 @@ import {
   _resetThinkingUnsupportedModels,
 } from "../src/llm-adapter";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
+import { workerModelCandidates } from "../src/worker-model";
 import {
   getConsecutiveTrips,
   resetBackgroundLimiter,
@@ -1013,10 +1015,15 @@ describe("worker data-policy 404: blocklist + re-resolve, not an outage", () => 
     mockMarkPaused.mockClear();
     mockMarkIncapable.mockClear();
     mockMarkFreeBlocked.mockClear();
+    // Reset the shared worker-health blocklist so a model marked incapable by
+    // one test (ANY_WORKER-scoped, e.g. the data-policy 404 case) does not leak
+    // into the next and short-circuit its prompt() at the incapable guard.
+    _resetWorkerHealthForTest();
   });
 
   afterEach(() => {
     mockFetch.mockReset();
+    _resetWorkerHealthForTest();
   });
 
   test("a :free model data-policy 404 blocklists the model + provider :free tier, records data-policy (NOT upstream-error), and does NOT credit-pause", async () => {
@@ -3148,5 +3155,320 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
       (bodyOf(0)?.generationConfig as { maxOutputTokens?: number } | undefined)
         ?.maxOutputTokens,
     ).toBe(24576);
+  });
+});
+
+describe("isModelUnsupported400 detector", () => {
+  test("true for Copilot model_not_supported / unsupported_api_for_model", () => {
+    expect(
+      isModelUnsupported400(
+        400,
+        JSON.stringify({
+          error: {
+            message: "The requested model is not supported.",
+            code: "model_not_supported",
+          },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isModelUnsupported400(
+        400,
+        JSON.stringify({ error: { code: "unsupported_api_for_model" } }),
+      ),
+    ).toBe(true);
+  });
+
+  test("true for prose 'model X is not available/found/does not exist'", () => {
+    expect(
+      isModelUnsupported400(400, "The model gpt-5-mini is not available"),
+    ).toBe(true);
+    expect(isModelUnsupported400(400, "model not found")).toBe(true);
+    expect(
+      isModelUnsupported400(400, "That model does not exist for this account"),
+    ).toBe(true);
+  });
+
+  test("false for a generic 400 (bad param / quota) — must not swap the model", () => {
+    expect(isModelUnsupported400(400, "temperature is not supported")).toBe(
+      false,
+    );
+    expect(isModelUnsupported400(400, "invalid request: bad max_tokens")).toBe(
+      false,
+    );
+  });
+
+  test("false for non-400 statuses", () => {
+    expect(
+      isModelUnsupported400(404, JSON.stringify({ code: "model_not_found" })),
+    ).toBe(false);
+    expect(
+      isModelUnsupported400(
+        429,
+        JSON.stringify({ code: "model_not_supported" }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("workerModelCandidates", () => {
+  test("github-copilot: preferred first, then same-provider backups (deduped)", () => {
+    const out = workerModelCandidates({
+      providerID: "github-copilot",
+      modelID: "gpt-5-mini",
+    });
+    expect(out[0]).toEqual({
+      providerID: "github-copilot",
+      modelID: "gpt-5-mini",
+    });
+    const ids = out.map((c) => c.modelID);
+    // Preferred appears exactly once (dedup), and Claude backups are present.
+    expect(ids.filter((m) => m === "gpt-5-mini")).toHaveLength(1);
+    expect(ids).toContain("claude-sonnet-4.6");
+    // Every candidate stays on the same provider — a worker must never switch.
+    expect(out.every((c) => c.providerID === "github-copilot")).toBe(true);
+  });
+
+  test("a non-preferred copilot model still yields the full provider backup set", () => {
+    const ids = workerModelCandidates({
+      providerID: "github-copilot",
+      modelID: "gpt-4o-mini",
+    }).map((c) => c.modelID);
+    expect(ids[0]).toBe("gpt-4o-mini");
+    expect(ids).toContain("gpt-5-mini");
+    expect(ids).toContain("claude-sonnet-4.6");
+    expect(ids.filter((m) => m === "gpt-4o-mini")).toHaveLength(1);
+  });
+
+  test("a provider with no fallback list → just the preferred model", () => {
+    expect(
+      workerModelCandidates({
+        providerID: "anthropic",
+        modelID: "claude-sonnet-5",
+      }),
+    ).toEqual([{ providerID: "anthropic", modelID: "claude-sonnet-5" }]);
+  });
+});
+
+describe("worker 400 model-not-supported: fall back to a same-provider backup", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const mockMarkIncapable = vi.mocked(markWorkerIncapable);
+  const mockMarkPaused = vi.mocked(markWorkerPaused);
+
+  const UNSUPPORTED_400 = JSON.stringify({
+    error: {
+      message: 'The requested model "gpt-5-mini" is not supported.',
+      code: "model_not_supported",
+    },
+  });
+  const OK_200 = JSON.stringify({
+    choices: [{ message: { content: "worked on the backup" } }],
+    usage: { prompt_tokens: 5, completion_tokens: 3 },
+  });
+
+  beforeEach(() => {
+    mockMarkIncapable.mockClear();
+    mockMarkPaused.mockClear();
+    _resetWorkerHealthForTest();
+  });
+  afterEach(() => {
+    mockFetch.mockReset();
+    _resetWorkerHealthForTest();
+  });
+
+  test("preferred model 400s model_not_supported → blocklist it, retry with the next candidate, succeed", async () => {
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      return call === 1
+        ? new Response(UNSUPPORTED_400, {
+            status: 400,
+            statusText: "Bad Request",
+          })
+        : new Response(OK_200, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+    });
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "gho_test" }),
+      { providerID: "github-copilot", modelID: "gpt-5-mini" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      workerID: "lore-import",
+      sessionID: "sess-fallback",
+      protocol: "openai",
+      upstreamProviderID: "github-copilot",
+      upstreamUrl: "https://api.githubcopilot.com",
+    });
+
+    // Recovered on the backup model.
+    expect(text).toBe("worked on the backup");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // The preferred model was blocklisted for this worker kind.
+    expect(mockMarkIncapable).toHaveBeenCalledWith(
+      "github-copilot",
+      "gpt-5-mini",
+    );
+    // Second request used a DIFFERENT (backup) model id.
+    const [, secondInit] = mockFetch.mock.calls[1];
+    const secondBody = JSON.parse(secondInit?.body as string) as {
+      model?: string;
+    };
+    expect(secondBody.model).toBeDefined();
+    expect(secondBody.model).not.toBe("gpt-5-mini");
+    // Not a session credit-pause — the fix is a model swap, not a pause.
+    expect(mockMarkPaused).not.toHaveBeenCalled();
+  });
+
+  test("a provider with NO backup list surfaces the 400 (no swap, one call)", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { message: "model not found", code: "model_not_supported" },
+        }),
+        { status: 400, statusText: "Bad Request" },
+      ),
+    );
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      workerID: "lore-import",
+      sessionID: "sess-nobackup",
+    });
+
+    expect(text).toBeNull();
+    // No backup to try → exactly one attempt, no model blocklisted via this path.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockMarkIncapable).not.toHaveBeenCalled();
+  });
+
+  test("after one chunk blocklists the preferred model, the NEXT call starts directly on the backup (no repeated 400)", async () => {
+    // Call 1: preferred 400s, backup 200s (blocklists preferred).
+    // Call 2: the top-of-prompt candidate advance must skip the now-incapable
+    // preferred and go straight to the backup — otherwise every later chunk
+    // would either re-400 or be skipped outright.
+    let call = 0;
+    mockFetch.mockImplementation(async (_url, init) => {
+      call++;
+      const body = JSON.parse(init?.body as string) as { model?: string };
+      // Only the preferred model 400s; any backup succeeds.
+      return body.model === "gpt-5-mini"
+        ? new Response(UNSUPPORTED_400, {
+            status: 400,
+            statusText: "Bad Request",
+          })
+        : new Response(OK_200, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+    });
+
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "gho_test" }),
+      { providerID: "github-copilot", modelID: "gpt-5-mini" },
+    );
+
+    const opts = {
+      workerID: "lore-import",
+      sessionID: "sess-advance",
+      protocol: "openai" as const,
+      upstreamProviderID: "github-copilot",
+      upstreamUrl: "https://api.githubcopilot.com",
+    };
+
+    const first = await client.prompt("system", "user", opts);
+    expect(first).toBe("worked on the backup");
+    const callsAfterFirst = call; // 2 (preferred 400 + backup 200)
+    expect(callsAfterFirst).toBe(2);
+
+    const second = await client.prompt("system", "user", opts);
+    expect(second).toBe("worked on the backup");
+    // The second call made exactly ONE fetch — it started on the backup and
+    // never re-tried the blocklisted preferred model.
+    expect(call - callsAfterFirst).toBe(1);
+    const [, secondCallInit] = mockFetch.mock.calls[2];
+    const secondCallBody = JSON.parse(secondCallInit?.body as string) as {
+      model?: string;
+    };
+    expect(secondCallBody.model).not.toBe("gpt-5-mini");
+  });
+
+  test("a model swap does NOT consume the transient-error retry budget", async () => {
+    // Seer #15455762: a model fallback must not spend the `maxRetries` budget
+    // meant for 429/5xx. With maxRetries=1: preferred 400s (swap), then the
+    // BACKUP hits one transient 429 before 200. If the swap consumed the single
+    // retry, the 429 would exhaust the budget and the call would fail. It must
+    // succeed — the backup keeps its full transient allowance.
+    const prev = process.env.LORE_MAX_RETRIES;
+    process.env.LORE_MAX_RETRIES = "1";
+    resetBackgroundLimiter();
+    try {
+      let call = 0;
+      mockFetch.mockImplementation(async (_url, init) => {
+        call++;
+        const body = JSON.parse(init?.body as string) as { model?: string };
+        if (body.model === "gpt-5-mini") {
+          // Preferred → model_not_supported (triggers the swap).
+          return new Response(UNSUPPORTED_400, {
+            status: 400,
+            statusText: "Bad Request",
+          });
+        }
+        // Backup: one transient 429 (retry-after 0 → instant), then success.
+        if (call === 2) {
+          return new Response(
+            JSON.stringify({ error: { message: "rate limited" } }),
+            { status: 429, headers: { "retry-after": "0" } },
+          );
+        }
+        return new Response(OK_200, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+
+      const client = createGatewayLLMClient(
+        {
+          anthropic: "https://api.githubcopilot.com",
+          openai: "https://api.githubcopilot.com",
+        },
+        () => ({ scheme: "bearer", value: "gho_test" }),
+        { providerID: "github-copilot", modelID: "gpt-5-mini" },
+      );
+
+      const text = await client.prompt("system", "user", {
+        workerID: "lore-import",
+        sessionID: "sess-budget",
+        protocol: "openai",
+        upstreamProviderID: "github-copilot",
+        upstreamUrl: "https://api.githubcopilot.com",
+      });
+
+      // preferred 400 (swap) → backup 429 (transient retry) → backup 200.
+      expect(text).toBe("worked on the backup");
+      expect(call).toBe(3);
+    } finally {
+      if (prev === undefined) delete process.env.LORE_MAX_RETRIES;
+      else process.env.LORE_MAX_RETRIES = prev;
+    }
   });
 });
