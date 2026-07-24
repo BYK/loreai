@@ -80,18 +80,22 @@ describe("spanDeltaUpgrade", () => {
     expect(cl?.value).toBe(3);
   });
 
-  it("emits NO distributions on unavailable (graceful fallback)", async () => {
-    setupStartSpan();
+  it("emits NO distributions on unavailable (graceful fallback) and records the reason", async () => {
+    const { attrs } = setupStartSpan();
     await spanDeltaUpgrade(BASE, async (report) => {
       report({
         channel: "stable",
         fromVersion: "1.0.0",
         toVersion: "1.1.0",
         result: "unavailable",
+        reason: "malformed_chain",
       });
       return null;
     });
     expect(Sentry.metrics.distribution).not.toHaveBeenCalled();
+    expect(attrs["delta.result"]).toBe("unavailable");
+    // The poisoned-publish signal must reach the span so it is alertable.
+    expect(attrs["delta.reason"]).toBe("malformed_chain");
   });
 
   it("emits NO distributions when a non-ok report carries patch metrics (ok-gate is load-bearing)", async () => {

@@ -192,6 +192,49 @@ describe("resolveAndApply", () => {
     expect(result).toBeNull();
   });
 
+  it("fires onUnavailable('malformed_chain') when the source classifies a broken chain", async () => {
+    // A source that finds patch tags in range but a broken/missing-layer
+    // manifest reports `malformed_chain` — the poisoned-publish signal.
+    const source: SourceStrategy = {
+      resolveChain: vi.fn(async (_current, _target, _signal, report) => {
+        report?.("malformed_chain");
+        return null;
+      }),
+    };
+    const onUnavailable = vi.fn();
+    const dest = writeTemp("out-malformed.bin", Buffer.alloc(0));
+
+    const result = await resolveAndApply({
+      source,
+      currentVersion: "1.0.0",
+      targetVersion: "1.1.0",
+      oldPath: OLD,
+      destPath: dest,
+      telemetry: { onUnavailable },
+    });
+
+    expect(result).toBeNull();
+    expect(onUnavailable).toHaveBeenCalledExactlyOnceWith("malformed_chain");
+  });
+
+  it("defaults onUnavailable to 'no_patches' when the source reports nothing", async () => {
+    const source: SourceStrategy = { resolveChain: vi.fn(async () => null) };
+    const onUnavailable = vi.fn();
+    const dest = writeTemp("out-nopatches.bin", Buffer.alloc(0));
+
+    const result = await resolveAndApply({
+      source,
+      currentVersion: "1.0.0",
+      targetVersion: "1.1.0",
+      oldPath: OLD,
+      destPath: dest,
+      telemetry: { onUnavailable },
+    });
+
+    expect(result).toBeNull();
+    expect(onUnavailable).toHaveBeenCalledExactlyOnceWith("no_patches");
+  });
+
   it("throws on a SHA-256 mismatch (caller falls back to full download)", async () => {
     const chain = makeChain(Buffer.from("real output"));
     // Corrupt the expected hash so the applied result cannot match.

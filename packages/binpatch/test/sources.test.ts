@@ -13,6 +13,14 @@ import {
   validateChainStep,
 } from "../src";
 
+// Build a JSON Response for mocked fetch calls.
+function json(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 // A semver-ish comparator matching the gateway's compareVersions contract
 // (returns -1 | 0 | 1) for the nightly tag-ordering tests.
 function cmp(a: string, b: string): -1 | 0 | 1 {
@@ -112,21 +120,22 @@ describe("extractStableChain", () => {
       binaryName: BINARY,
       fullGzSize: 40,
     });
-    expect(info).not.toBeNull();
+    expect(info).not.toHaveProperty("failure");
+    if ("failure" in info) throw new Error("expected a chain, got a failure");
     // Two hops: 1.0.0 -> 1.1.0 -> 1.2.0. Expected sha is the target's.
-    expect(info?.expectedSha256).toBe("aaaa");
-    expect(info?.steps).toEqual([
+    expect(info.expectedSha256).toBe("aaaa");
+    expect(info.steps).toEqual([
       { fromVersion: "1.0.0", toVersion: "1.1.0" },
       { fromVersion: "1.1.0", toVersion: "1.2.0" },
     ]);
     // patchUrls are apply-order: 1.1.0's patch first, then 1.2.0's.
-    expect(info?.patchUrls).toEqual([
+    expect(info.patchUrls).toEqual([
       "https://example.test/1.1.0/tool-linux-x64.patch",
       "https://example.test/1.2.0/tool-linux-x64.patch",
     ]);
   });
 
-  it("returns null when a hop is missing its patch asset", () => {
+  it("reports malformed_chain when a hop is missing its patch asset", () => {
     // 1.0.0 has no patch asset, but it is the current version (not in the
     // chain slice), so drop 1.1.0's patch instead to force a gap.
     const broken = releases.map((r) =>
@@ -142,10 +151,10 @@ describe("extractStableChain", () => {
         binaryName: BINARY,
         fullGzSize: 40,
       }),
-    ).toBeNull();
+    ).toEqual({ failure: "malformed_chain" });
   });
 
-  it("returns null when the chain exceeds the size ratio gate", () => {
+  it("reports over_budget when the chain exceeds the size ratio gate", () => {
     // fullGzSize tiny → 60% ratio easily exceeded by the 5+6 byte patches.
     expect(
       extractStableChain({
@@ -155,10 +164,10 @@ describe("extractStableChain", () => {
         binaryName: BINARY,
         fullGzSize: 1,
       }),
-    ).toBeNull();
+    ).toEqual({ failure: "over_budget" });
   });
 
-  it("returns null when target is not older than current in the list", () => {
+  it("reports no_patches when target is not older than current in the list", () => {
     expect(
       extractStableChain({
         releases,
@@ -167,7 +176,7 @@ describe("extractStableChain", () => {
         binaryName: BINARY,
         fullGzSize: 40,
       }),
-    ).toBeNull();
+    ).toEqual({ failure: "no_patches" });
   });
 });
 
@@ -222,31 +231,31 @@ describe("validateChainStep", () => {
     expect(res).toEqual({ ok: true, digest: "sha256:deadbeef", size: 50 });
   });
 
-  it("rejects a from-version mismatch (broken chain link)", () => {
+  it("rejects a from-version mismatch (broken chain link) as malformed", () => {
     const res = validateChainStep(manifest("9.9.9", 50), {
       expectedFrom: "1.0.0",
       patchLayerName: `${BINARY}.patch`,
       sizeLimit: 100,
     });
-    expect(res.ok).toBe(false);
+    expect(res).toEqual({ ok: false, reason: "malformed" });
   });
 
-  it("rejects a patch layer over the size limit", () => {
+  it("rejects a patch layer over the size limit as over_budget", () => {
     const res = validateChainStep(manifest("1.0.0", 500), {
       expectedFrom: "1.0.0",
       patchLayerName: `${BINARY}.patch`,
       sizeLimit: 100,
     });
-    expect(res.ok).toBe(false);
+    expect(res).toEqual({ ok: false, reason: "over_budget" });
   });
 
-  it("rejects when the named patch layer is absent", () => {
+  it("rejects (as malformed) when the named patch layer is absent", () => {
     const res = validateChainStep(manifest("1.0.0", 50), {
       expectedFrom: "1.0.0",
       patchLayerName: "other.patch",
       sizeLimit: 100,
     });
-    expect(res.ok).toBe(false);
+    expect(res).toEqual({ ok: false, reason: "malformed" });
   });
 });
 
@@ -275,7 +284,7 @@ describe("ghcrSource resolveChain — SourceStrategy contract on network failure
     globalThis.fetch = realFetch;
   });
 
-  it("returns null (not throw) when the registry is unreachable", async () => {
+  it("returns null (not throw) and reports 'network' when the registry is unreachable", async () => {
     // The OCI client uses global fetch; make every call fail like a network
     // outage. Per the SourceStrategy contract a resolution failure must be a
     // null (→ fall back to full download, reported `unavailable`), never a
@@ -293,7 +302,108 @@ describe("ghcrSource resolveChain — SourceStrategy contract on network failure
       compareVersions: cmp,
     });
 
-    await expect(source.resolveChain("1.0.0", "1.1.0")).resolves.toBeNull();
+    const report = vi.fn();
+    await expect(
+      source.resolveChain("1.0.0", "1.1.0", undefined, report),
+    ).resolves.toBeNull();
+    expect(report).toHaveBeenCalledExactlyOnceWith("network");
+  });
+
+  it("reports 'malformed_chain' when a patch tag in range is missing its platform layer", async () => {
+    // The exact poisoned-publish scenario: a patch tag exists in the range
+    // (so it is NOT 'no_patches'), links correctly by from-version, but its
+    // manifest carries a bogus layer instead of `${BINARY}.patch` (e.g. a
+    // dependency patch that leaked into publish). The chain must be rejected
+    // and classified `malformed_chain` so the poison is observable.
+    const token = { token: "t" };
+    const gzLayer = {
+      digest: "sha256:gz",
+      mediaType: "application/gzip",
+      size: 1000,
+      annotations: { "org.opencontainers.image.title": `${BINARY}.gz` },
+    };
+    const targetManifest = { schemaVersion: 2, layers: [gzLayer] };
+    // patch-1.1.0 links from 1.0.0 but has a bogus (non-platform) layer.
+    const poisonedManifest = {
+      schemaVersion: 2,
+      annotations: { "from-version": "1.0.0" },
+      layers: [
+        {
+          digest: "sha256:bogus",
+          mediaType: "application/vnd.oci.image.layer.v1.tar",
+          size: 42,
+          annotations: {
+            "org.opencontainers.image.title": "@dep__thing@1.2.3.patch",
+          },
+        },
+      ],
+    };
+
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/token")) return json(token);
+      if (u.includes("/tags/list")) return json({ tags: ["patch-1.1.0"] });
+      if (u.includes("/manifests/nightly-1.1.0")) return json(targetManifest);
+      if (u.includes("/manifests/patch-1.1.0")) return json(poisonedManifest);
+      throw new TypeError(`unexpected fetch: ${u}`);
+    });
+
+    const source = ghcrSource({
+      registry: "https://ghcr.io",
+      repo: "owner/project",
+      userAgent: "test/1.0.0",
+      binaryName: BINARY,
+      targetTag: (v) => `nightly-${v}`,
+      compareVersions: cmp,
+    });
+
+    const report = vi.fn();
+    await expect(
+      source.resolveChain("1.0.0", "1.1.0", undefined, report),
+    ).resolves.toBeNull();
+    expect(report).toHaveBeenCalledExactlyOnceWith("malformed_chain");
+  });
+
+  it("reports 'network' (not 'malformed_chain') when a chain manifest fetch fails transiently", async () => {
+    // A patch tag is in range, but fetching its manifest fails (5xx / reset /
+    // timeout). This is transient, NOT a poisoned publish — it must report
+    // `network`, never a false `malformed_chain` poison alert. (A real poison
+    // fetches HTTP 200 and is caught by validateNightlyChain instead.)
+    const token = { token: "t" };
+    const gzLayer = {
+      digest: "sha256:gz",
+      mediaType: "application/gzip",
+      size: 1000,
+      annotations: { "org.opencontainers.image.title": `${BINARY}.gz` },
+    };
+    const targetManifest = { schemaVersion: 2, layers: [gzLayer] };
+
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes("/token")) return json(token);
+      if (u.includes("/tags/list")) return json({ tags: ["patch-1.1.0"] });
+      if (u.includes("/manifests/nightly-1.1.0")) return json(targetManifest);
+      // The in-range patch manifest 5xxs on every (retried) attempt.
+      if (u.includes("/manifests/patch-1.1.0")) {
+        return new Response("upstream boom", { status: 503 });
+      }
+      throw new TypeError(`unexpected fetch: ${u}`);
+    });
+
+    const source = ghcrSource({
+      registry: "https://ghcr.io",
+      repo: "owner/project",
+      userAgent: "test/1.0.0",
+      binaryName: BINARY,
+      targetTag: (v) => `nightly-${v}`,
+      compareVersions: cmp,
+    });
+
+    const report = vi.fn();
+    await expect(
+      source.resolveChain("1.0.0", "1.1.0", undefined, report),
+    ).resolves.toBeNull();
+    expect(report).toHaveBeenCalledExactlyOnceWith("network");
   });
 });
 

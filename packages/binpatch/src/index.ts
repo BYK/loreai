@@ -63,9 +63,11 @@ export {
 export {
   type DeltaSource,
   type DeltaTelemetry,
+  type DeltaUnavailableReason,
   resolveAndApply,
   type ResolveAndApplyOpts,
   type SourceStrategy,
+  type UnavailableReporter,
 } from "./discover";
 
 // Sources.
