@@ -23,18 +23,17 @@ import {
 } from "./binary";
 import { GHCR_REGISTRY, GHCR_REPO } from "./ghcr";
 import {
-  type ByteProgress,
   type DeltaResult,
   type DeltaSource,
   ghcrSource,
   githubReleaseSource,
-  makeByteProgress,
   type ProgressEvent,
   resolveAndApply,
   type SourceStrategy,
 } from "binpatch";
 import { spanDeltaUpgrade } from "../../sentry";
 import { VERSION } from "../version";
+import { type ByteProgress, makeByteProgress } from "./progress";
 
 export type { DeltaResult, PatchChain } from "binpatch";
 
