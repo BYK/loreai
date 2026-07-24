@@ -27,7 +27,8 @@ import {
   type AuthCredential,
 } from "../auth";
 import { defaultModelForProvider, parseWorkerModelEnv } from "../worker-model";
-import { resolveProviderRoute } from "../config";
+import { resolveProviderRoute, providerForUpstreamOrigin } from "../config";
+import { AGENTS, captureUserEnvCredential } from "./agents";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
 import {
@@ -62,19 +63,40 @@ type AgentResolvedAuth =
  *      the caller resolves as `workerModel ?? model`).
  *   2. The harness's OWN on-disk auth (routable + unexpired) — the automatic
  *      "use my existing credentials" path.
- *   3. A live session / last-seen credential captured in THIS process (e.g.
+ *   3. The harness's env-based credential: its base-URL + auth-token env vars
+ *      (e.g. Claude Code with ANTHROPIC_BASE_URL=openrouter.ai +
+ *      ANTHROPIC_AUTH_TOKEN=<key>). This is the common OpenRouter / proxy setup
+ *      where nothing is stored on disk but the credential is fully usable.
+ *   4. A live session / last-seen credential captured in THIS process (e.g.
  *      `lore import` invoked after a session, or a warmed global fallback).
- *   4. `cfgModel` explicit override (falls to `resolveAuth`, may be null).
+ *   5. `cfgModel` explicit override (falls to `resolveAuth`, may be null).
  * Returns null when nothing usable is found for this agent.
  */
 export function resolveAgentImportAuth(
   agentName: string,
   workerApiKey: string | undefined,
   cfgModel: { providerID: string; modelID: string } | undefined,
-): {
-  getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null;
-  model: { providerID: string; modelID: string };
-} | null {
+):
+  | {
+      getAuth: (
+        sessionID?: string,
+        providerID?: string,
+      ) => AuthCredential | null;
+      model: { providerID: string; modelID: string };
+      /** Upstream URL to route extraction to, when captured from the agent's env. */
+      upstream?: string;
+    }
+  | {
+      /**
+       * A credential WAS found in the agent's env, but its provider has no
+       * default worker model and the user set no model — so extraction would
+       * send an empty model id and 400. The caller must tell the user to set an
+       * explicit worker model (env override / `.lore.json` model) rather than
+       * silently fail.
+       */
+      needsModel: string;
+    }
+  | null {
   // 1. Explicit dedicated worker key wins. Provider comes from cfg.model when
   //    set, else anthropic (historical default for the raw-key path).
   if (workerApiKey) {
@@ -103,16 +125,76 @@ export function resolveAgentImportAuth(
     (c) => resolveProviderRoute(c.providerID)?.url != null,
   );
   if (usable) {
-    const model = usable.modelID
-      ? { providerID: usable.providerID, modelID: usable.modelID }
-      : defaultModelForProvider(usable.providerID);
+    // Honor an explicit user model (LORE_WORKER_MODEL / .lore.json) when it
+    // targets this credential's provider — the credential authenticates the
+    // provider, the user picks the model. This matters for GitHub Copilot,
+    // whose per-subscription model access varies: the built-in default
+    // (gpt-5-mini) may be unavailable on a Copilot plan that only serves
+    // claude-*, so a user who set LORE_WORKER_MODEL=github-copilot/claude-sonnet-5
+    // must get their model, not the default. Fall back to the credential's own
+    // model hint, then the provider default.
+    const model =
+      cfgModel && cfgModel.providerID === usable.providerID
+        ? cfgModel
+        : usable.modelID
+          ? { providerID: usable.providerID, modelID: usable.modelID }
+          : defaultModelForProvider(usable.providerID);
+    // A routable-but-defaultless provider (openrouter, deepseek, groq, …) has
+    // no WORKER_DEFAULTS entry, so defaultModelForProvider returns an empty
+    // modelID — and an on-disk credential often carries no modelID hint either
+    // (e.g. OpenCode's auth.json stores only the key). Sending model="" would
+    // 400 at the upstream, so signal needsModel instead of returning an
+    // unusable credential (same guard as tier 3). We DO have their key.
+    if (!model.modelID) {
+      return { needsModel: usable.providerID };
+    }
     return {
       getAuth: () => ({ scheme: usable.scheme, value: usable.value }),
       model,
     };
   }
 
-  // 3. Live session / last-seen credential captured in-process. Match the model
+  // 3. Harness ENV credential: the user pointed the agent at a provider purely
+  //    through shell env (base-URL + auth-token env vars), with nothing on disk.
+  //    Very common for OpenRouter / corporate-proxy setups. Resolve the provider
+  //    from the captured base URL (a known host → provider via the reverse map;
+  //    unknown host still works — we route extraction straight at that upstream
+  //    and default the model). Route extraction to the captured upstream.
+  const agentDef = AGENTS.find((a) => a.name === agentName);
+  if (agentDef) {
+    const envCred = captureUserEnvCredential(agentDef);
+    if (envCred) {
+      const providerID = envCred.upstreamUrl
+        ? (providerForUpstreamOrigin(envCred.upstreamUrl) ??
+          agentDef.wireProtocol ??
+          "anthropic")
+        : (agentDef.wireProtocol ?? "anthropic");
+      // Honor an explicit user model ONLY when it targets this credential's
+      // provider (same guard as tier 2) — the env credential authenticates
+      // `providerID`, so a cfgModel for a DIFFERENT provider would route this
+      // key to the wrong upstream/model. Otherwise fall back to the provider
+      // default.
+      const model =
+        cfgModel && cfgModel.providerID === providerID
+          ? cfgModel
+          : defaultModelForProvider(providerID);
+      // An aggregator/proxy provider (openrouter, deepseek, groq, …) has no
+      // WORKER_DEFAULTS entry, so defaultModelForProvider returns an empty
+      // modelID. Sending model="" would 400 at the upstream — so instead of
+      // silently returning an unusable credential, signal that the user must
+      // pick a model (LORE_WORKER_MODEL / .lore.json). We DO have their key.
+      if (!model.modelID) {
+        return { needsModel: providerID };
+      }
+      return {
+        getAuth: () => ({ scheme: envCred.scheme, value: envCred.token }),
+        model,
+        upstream: envCred.upstreamUrl ?? undefined,
+      };
+    }
+  }
+
+  // 4. Live session / last-seen credential captured in-process. Match the model
   //    to that credential's provider (or cfg.model when explicitly set) so the
   //    extraction routes to the provider we actually hold a credential for.
   const lastSeenProvider = getLastSeenAuthProvider() ?? undefined;
@@ -126,8 +208,61 @@ export function resolveAgentImportAuth(
     return { getAuth: resolveAuth, model };
   }
 
-  // 4. cfg.model override with no resolvable credential → nothing usable.
+  // 5. cfg.model override with no resolvable credential → nothing usable.
   return null;
+}
+
+/**
+ * Pick the per-protocol upstreams map for an extraction call. When the
+ * credential was captured from the agent's own env (tier 3, `agentUpstream`
+ * set), route BOTH protocol slots at that captured upstream (e.g.
+ * openrouter.ai) — unless the user configured an explicit dedicated
+ * `LORE_WORKER_UPSTREAM` (`configWorkerUpstream`), which always takes
+ * precedence. Otherwise fall back to the default per-protocol upstreams.
+ */
+export function resolveExtractionUpstreams(
+  agentUpstream: string | undefined,
+  configWorkerUpstream: string | undefined,
+  defaults: { anthropic: string; openai: string },
+): { anthropic: string; openai: string } {
+  if (agentUpstream && !configWorkerUpstream) {
+    return { anthropic: agentUpstream, openai: agentUpstream };
+  }
+  return defaults;
+}
+
+/**
+ * Build the "found your credential but no worker model" guidance shown when one
+ * or more agents resolved a credential for a provider with no default worker
+ * model (and the user set none). Returns null when there's nothing to say.
+ *
+ * Independent of whether OTHER agents authenticated: the per-agent skip lines
+ * promise "(see below)", so this guidance must appear whenever ANY agent hit
+ * the needsModel condition. `anyAuthResolved` only tweaks the wording ("some
+ * agents") — the caller decides whether to also stop the run.
+ */
+export function buildNeedsModelGuidance(
+  providers: string[],
+  anyAuthResolved: boolean,
+): string | null {
+  if (providers.length === 0) return null;
+  const providerList = providers.join(", ");
+  const exportLines = providers
+    .map(
+      (p) =>
+        `[lore]   export LORE_WORKER_MODEL=${p}/<model>   # e.g. ${p}/gpt-5-mini`,
+    )
+    .join("\n");
+  return (
+    `\n[lore] Can't import${anyAuthResolved ? " some agents" : ""}: found your ${providerList} credential(s), but\n` +
+    `[lore] no built-in default worker model exists for ${providers.length > 1 ? "those providers" : providerList}, so Lore\n` +
+    `[lore] doesn't know which model to run extraction on. Pick one and retry:\n` +
+    `[lore]\n` +
+    `${exportLines}\n` +
+    `[lore]   lore import\n` +
+    `[lore]\n` +
+    `[lore] (or set \`model\` / \`workerModel\` in .lore.json).`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -805,6 +940,10 @@ export async function commandImport(
     // Track whether ANY agent had a usable credential, so we can print
     // accurate guidance if the whole run authenticated nothing.
     let anyAuthResolved = false;
+    // Providers for which we found an agent's env credential but no default
+    // model (and the user set none) — collected across ALL agents so the final
+    // guidance names every affected provider, not just the last one seen.
+    const needsModelProviders = new Set<string>();
 
     for (const result of results) {
       const provider = getProvider(result.agentName);
@@ -825,13 +964,36 @@ export async function commandImport(
         );
         continue;
       }
+      if ("needsModel" in auth) {
+        // We HAVE the user's key but not a model to use it with.
+        needsModelProviders.add(auth.needsModel);
+        console.log(
+          `[lore] Skipping ${result.agentDisplayName}: found your ${auth.needsModel} ` +
+            `credential, but no worker model is set for that provider. ` +
+            `Set one and retry (see below).`,
+        );
+        continue;
+      }
       anyAuthResolved = true;
 
-      const llm = createGatewayLLMClient(
+      // When the credential was captured from the agent's own env (tier 3),
+      // route extraction to that captured upstream (e.g. openrouter.ai), not
+      // the default anthropic/openai host. A dedicated worker key
+      // (config.workerUpstream) still takes precedence.
+      const agentUpstreams = resolveExtractionUpstreams(
+        auth.upstream,
+        config.workerUpstream,
         workerUpstreams,
+      );
+
+      const llm = createGatewayLLMClient(
+        agentUpstreams,
         auth.getAuth,
         auth.model,
-        { dedicatedWorkerKey: !!workerApiKey },
+        // A captured env credential is a user-provided key for a specific
+        // upstream — treat it like a dedicated worker key so the in-adapter
+        // protocol-mismatch pre-flight doesn't reject a non-anthropic key.
+        { dedicatedWorkerKey: !!workerApiKey || auth.upstream != null },
       );
 
       const sessionIds = result.sessions.map((s) => s.id);
@@ -897,6 +1059,25 @@ export async function commandImport(
       totalFailed += extractResult.chunksFailed;
     }
 
+    // We found the user's credential but no model to drive it (an aggregator /
+    // proxy provider with no built-in default, and no model configured). Tell
+    // them exactly how to fix it — we're one env var away from working. Name
+    // EVERY affected provider (a multi-agent run can hit more than one). Shown
+    // whenever ANY agent hit this, even if OTHERS authenticated successfully —
+    // the per-agent skip lines promised "(see below)", so the guidance must
+    // always appear when a needsModel failure occurred.
+    const needsModelMsg = buildNeedsModelGuidance(
+      [...needsModelProviders],
+      anyAuthResolved,
+    );
+    if (needsModelMsg) {
+      console.error(needsModelMsg);
+      // Nothing else authenticated → stop here (don't fall through to the
+      // generic "no credential" block or the success summary). If OTHER agents
+      // succeeded, keep going so their import still records + summarizes.
+      if (!anyAuthResolved) return;
+    }
+
     // No agent had a usable credential — explain how to fix it, then stop
     // before claiming a successful (empty) import. Only name a specific
     // provider in the key hint when the user EXPLICITLY configured a model;
@@ -908,15 +1089,22 @@ export async function commandImport(
         : "<key for your provider>";
       console.error(
         "\n[lore] Can't import: no usable credential found for background extraction.\n" +
-          "[lore] `lore import` authenticates using each agent's OWN stored credentials,\n" +
-          "[lore] but none were usable (none found, expired, or the provider needs a\n" +
-          "[lore] runtime token exchange Lore can't do standalone, e.g. GitHub Copilot).\n" +
-          "[lore] Two ways forward:\n" +
+          "[lore] `lore import` authenticates using each agent's OWN credentials —\n" +
+          "[lore] its on-disk auth file OR its base-URL + auth-token env vars (e.g.\n" +
+          "[lore] ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN) — but none were usable\n" +
+          "[lore] (none found, expired, or the provider needs a runtime token exchange\n" +
+          "[lore] Lore can't do standalone, e.g. GitHub Copilot).\n" +
+          "[lore] Ways forward:\n" +
           "[lore]\n" +
-          "[lore]   1. Easiest — run `lore run`, send one message, and the import\n" +
-          "[lore]      happens automatically once your credential is captured.\n" +
+          "[lore]   1. If you launch your agent with base-URL + token env vars set\n" +
+          "[lore]      (OpenRouter / proxy setups), export them in THIS shell and retry:\n" +
+          "[lore]        export ANTHROPIC_BASE_URL=... ANTHROPIC_AUTH_TOKEN=...\n" +
+          "[lore]        lore import\n" +
           "[lore]\n" +
-          "[lore]   2. Give `lore import` a dedicated worker key and retry:\n" +
+          "[lore]   2. Or run `lore run`, send one message, and the import happens\n" +
+          "[lore]      automatically once your credential is captured.\n" +
+          "[lore]\n" +
+          "[lore]   3. Or give `lore import` a dedicated worker key and retry:\n" +
           `[lore]        export LORE_WORKER_API_KEY=${keyHint}\n` +
           "[lore]        lore import",
       );

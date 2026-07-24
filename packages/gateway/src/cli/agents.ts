@@ -54,6 +54,18 @@ export interface AgentDef {
    * user's captured upstream (see `upstreamEnvVars`).
    */
   wireProtocol?: "anthropic" | "openai" | "gemini";
+  /**
+   * Env var(s) the agent reads for its API credential, in priority order
+   * (first defined non-empty wins). Paired with `upstreamEnvVars`: a user who
+   * points the agent at a provider purely via shell env (e.g. Claude Code at
+   * OpenRouter via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) has a fully
+   * usable credential Lore can reuse for standalone `lore import` — even
+   * though nothing is stored in the agent's on-disk auth file. `scheme` is how
+   * the value is sent upstream: `bearer` (Authorization: Bearer) vs `api-key`
+   * (x-api-key / Anthropic-style). Omit for agents whose credential can't be
+   * read from a static env var (e.g. opencode, github-copilot token exchange).
+   */
+  authTokenEnvVars?: { var: string; scheme: "bearer" | "api-key" }[];
 }
 
 /**
@@ -123,6 +135,73 @@ export function captureUserUpstream(
     return { url: trimmed, wireProtocol: agent.wireProtocol };
   }
   return null;
+}
+
+/**
+ * Sanitize + validate a base-URL env value. Returns a clean http(s) URL string
+ * (control chars stripped, interior whitespace rejected — see the CRLF note in
+ * captureUserUpstream) or null if unusable. Loopback is NOT rejected here:
+ * unlike `lore run`, `lore import` starts no long-lived gateway to point at, so
+ * a loopback base URL (a running gateway the user already has) is a legitimate
+ * extraction upstream.
+ */
+function cleanBaseUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
+  const trimmed = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (!trimmed || /\s/.test(trimmed)) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      return null;
+  } catch {
+    return null;
+  }
+  return trimmed;
+}
+
+/**
+ * A credential the user configured for an agent purely through shell env vars:
+ * the agent's base-URL (`upstreamEnvVars`) plus its auth-token
+ * (`authTokenEnvVars`). This is a fully usable extraction credential even when
+ * NOTHING is stored in the agent's on-disk auth file — the common OpenRouter /
+ * corporate-proxy setup (e.g. Claude Code with ANTHROPIC_BASE_URL=openrouter.ai
+ * + ANTHROPIC_AUTH_TOKEN=<key>). Returns the token + scheme + captured upstream
+ * URL, so `lore import` can route extraction to that upstream. Returns null if
+ * the agent has no env-credential mechanism, or the token/base URL is missing.
+ * A base URL is NOT required (some setups set only the token and rely on the
+ * provider default), but a token IS.
+ */
+export function captureUserEnvCredential(
+  agent: AgentDef,
+  env: NodeJS.ProcessEnv = process.env,
+): {
+  token: string;
+  scheme: "bearer" | "api-key";
+  upstreamUrl: string | null;
+} | null {
+  if (!agent.authTokenEnvVars) return null;
+  let picked: { token: string; scheme: "bearer" | "api-key" } | null = null;
+  for (const { var: key, scheme } of agent.authTokenEnvVars) {
+    const raw = env[key];
+    if (!raw) continue;
+    // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
+    const token = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+    if (!token) continue;
+    picked = { token, scheme };
+    break;
+  }
+  if (!picked) return null;
+  // Capture the paired base URL (first defined + valid), if any.
+  let upstreamUrl: string | null = null;
+  for (const key of agent.upstreamEnvVars ?? []) {
+    const clean = cleanBaseUrl(env[key]);
+    if (clean) {
+      upstreamUrl = clean;
+      break;
+    }
+  }
+  return { ...picked, upstreamUrl };
 }
 
 /**
@@ -204,6 +283,14 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("claude"),
     upstreamEnvVars: ["ANTHROPIC_BASE_URL"],
     wireProtocol: "anthropic",
+    // Claude Code: ANTHROPIC_AUTH_TOKEN is a Bearer token (used for
+    // OpenRouter / proxy setups); ANTHROPIC_API_KEY is the first-party
+    // x-api-key. Bearer wins when both are set (matches Claude Code's own
+    // precedence: an explicit auth token overrides the api key).
+    authTokenEnvVars: [
+      { var: "ANTHROPIC_AUTH_TOKEN", scheme: "bearer" },
+      { var: "ANTHROPIC_API_KEY", scheme: "api-key" },
+    ],
     envVars: (url, cwd) => {
       const env: Record<string, string> = {
         ANTHROPIC_BASE_URL: url,
@@ -251,6 +338,7 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("codex"),
     upstreamEnvVars: ["OPENAI_BASE_URL"],
     wireProtocol: "openai",
+    authTokenEnvVars: [{ var: "OPENAI_API_KEY", scheme: "bearer" }],
     envVars: (_url, cwd) => {
       // Codex CLI is a Rust binary that does NOT read OPENAI_BASE_URL from the
       // environment. Provider routing is done exclusively via config.toml or
