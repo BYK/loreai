@@ -4,8 +4,7 @@
     "noEmit": true,
     "types": ["bun"],
     "paths": {
-      "@loreai/core": ["../core/src/index.ts"],
-      "binpatch": ["../binpatch/src/index.ts"]
+      "@loreai/core": ["../core/src/index.ts"]
     }
   },
   "include": ["src", "test", "script"]

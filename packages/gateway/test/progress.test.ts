@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { makeByteProgress } from "../src/progress";
+import { makeByteProgress } from "../src/cli/lib/progress";
 
 type FakeOut = {
   isTTY: boolean;

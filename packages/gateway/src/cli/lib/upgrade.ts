@@ -43,7 +43,7 @@ import {
 } from "./binary";
 import { attemptDeltaUpgrade } from "./delta-upgrade";
 import { UpgradeError } from "./errors";
-import { makeByteProgress } from "binpatch";
+import { makeByteProgress } from "./progress";
 import {
   downloadNightlyBlob,
   fetchManifest,
