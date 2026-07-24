@@ -6129,6 +6129,76 @@ async function handleCompaction(
 // ---------------------------------------------------------------------------
 
 /**
+ * Cancel-when-fits decision for the explicit `/v1/compact` endpoint.
+ *
+ * Returns:
+ *   { cancel: true, reason: string, mustCompact: false }   — caller should
+ *       cancel the host agent's compaction and keep the raw context
+ *   { cancel: false, reason: string, mustCompact: true  }  — caller should
+ *       proceed to generate a Lore-aware summary
+ *   { cancel: false, reason: string, mustCompact: false }  — caller cannot
+ *       decide (no upstream on session, or tokens_before is unknown /
+ *       missing); default to the existing summary path
+ *
+ * Pure: no I/O, no state mutation. Easy to unit-test in isolation.
+ *
+ * The "budget" is `model.context - model.output` (per models.dev). The
+ * reasoning is documented at the call site in `handleCompactEndpoint`.
+ */
+export type CompactCancelDecision =
+  | { cancel: true; mustCompact: false; reason: string }
+  | { cancel: false; mustCompact: true; reason: string }
+  | { cancel: false; mustCompact: false; reason: string };
+
+export function shouldCancelCompactionFromBudget(
+  tokensBefore: number | undefined,
+  upstream: { model?: string; providerID?: string } | undefined,
+): CompactCancelDecision {
+  // Caller didn't pass tokens_before → we can't decide; fall through to
+  // the existing summary path (preserves the pre-#961 contract).
+  if (typeof tokensBefore !== "number" || !Number.isFinite(tokensBefore)) {
+    return {
+      cancel: false,
+      mustCompact: false,
+      reason: "tokens_before is unknown (caller did not pass it)",
+    };
+  }
+  // tokens_before <= 0 is treated as "unknown" — defensible because every
+  // real session in flight has >0 tokens. Skipping the cancel path here
+  // matches the existing 0-value behavior in the gradient layer.
+  if (tokensBefore <= 0) {
+    return {
+      cancel: false,
+      mustCompact: false,
+      reason: `tokens_before=${tokensBefore} is non-positive; treating as unknown`,
+    };
+  }
+  // No upstream on session → no model spec to compute the budget from.
+  // Conservatively generate a summary rather than cancel.
+  if (!upstream?.model) {
+    return {
+      cancel: false,
+      mustCompact: false,
+      reason: "no upstream model on session; cannot compute budget",
+    };
+  }
+  const spec = getModelSpec(upstream.model, upstream.providerID);
+  const effectiveBudget = spec.context - spec.output;
+  if (tokensBefore <= effectiveBudget) {
+    return {
+      cancel: true,
+      mustCompact: false,
+      reason: `tokensBefore=${tokensBefore} <= budget=${effectiveBudget} (model=${spec.context} − output=${spec.output}); host should keep raw context`,
+    };
+  }
+  return {
+    cancel: false,
+    mustCompact: true,
+    reason: `tokensBefore=${tokensBefore} > budget=${effectiveBudget} (model=${spec.context} − output=${spec.output}); must compact`,
+  };
+}
+
+/**
  * Handle an explicit compaction summary request from a plugin (e.g. Pi).
  * Unlike `handleCompaction` which detects compaction from request patterns,
  * this endpoint accepts a direct JSON body with project path and optional
@@ -6136,12 +6206,32 @@ async function handleCompaction(
  *
  * The caller must include a session-identifying header (e.g. x-lore-session-id)
  * so the gateway can resolve the correct internal session.
+ *
+ * Body schema:
+ *   project_path:     string   (required) — absolute project root
+ *   previous_summary: string?  (optional) — last summary, for iterative update
+ *   tokens_before:    number?  (optional) — caller's estimate of the session's
+ *                     current pre-compaction token count. When provided, the
+ *                     gateway compares it against the resolved model's
+ *                     `context - output` budget; if it fits, the gateway
+ *                     returns `{ cancel: true }` and does NOT generate a
+ *                     summary. The caller (e.g. Pi) is expected to relay this
+ *                     to the host's `session_before_compact` hook as
+ *                     `{ cancel: true }`, which prevents the host from
+ *                     compacting at all and keeps the raw context end-to-end.
+ *                     This is the on-Pi analog of OpenCode's
+ *                     `cfg.compaction = { auto: false, prune: false }` — the
+ *                     gateway manages the window, not the host agent.
  */
 export async function handleCompactEndpoint(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
-  let body: { project_path?: string; previous_summary?: string };
+  let body: {
+    project_path?: string;
+    previous_summary?: string;
+    tokens_before?: number;
+  };
   try {
     // Decode any Content-Encoding (e.g. zstd) before JSON-parsing.
     body = JSON.parse(await decodeRequestBody(req)) as typeof body;
@@ -6207,12 +6297,47 @@ export async function handleCompactEndpoint(
     );
   }
 
+  // Cancel-when-fits policy. The gateway is the authoritative source for
+  // "does this session's raw context fit in the layer-0 budget?" — the plugin
+  // just relays. We resolve the session's lastUpstream to a real ModelSpec
+  // (per models.dev context/output limits) and compare tokensBefore to
+  // (context - output). If the caller's claim of "the session fits" is
+  // genuine, return { cancel: true } and skip the summary work entirely.
+  //
+  // Above-budget sessions still get the existing summary path. Below-budget
+  // sessions are canceled — the host agent keeps the raw context, and Lore
+  // continues to manage the window via distillation + recall on subsequent
+  // turns.
+  //
+  // This intentionally does NOT consult maxLayer0Tokens (the per-model cost
+  // cap from setModelLimits). That value is per-request and is not stored
+  // across turns, so reading it from the gradient module here would be
+  // racy/zero. The natural cancel threshold IS the model's real context
+  // window minus output reserve — anything that fits there is safe to
+  // keep raw; anything above it must be summarized (or the next LLM call
+  // will overflow). If we later want a tighter per-session cap, it's a
+  // single constant in one place to change.
+  const state = sessions.get(sessionID);
+  const cancelDecision = shouldCancelCompactionFromBudget(
+    body.tokens_before,
+    state?.lastUpstream,
+  );
+  if (cancelDecision.cancel) {
+    log.info(`compact endpoint: cancel — ${cancelDecision.reason}`);
+    return new Response(JSON.stringify({ cancel: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (cancelDecision.mustCompact) {
+    log.info(`compact endpoint: must compact — ${cancelDecision.reason}`);
+  }
+
   log.info(
     `compact endpoint: generating summary for session ${sessionID.slice(0, 16)}`,
   );
 
   try {
-    const state = sessions.get(sessionID);
     const summary = await generateCompactionSummary({
       projectPath,
       sessionID,
