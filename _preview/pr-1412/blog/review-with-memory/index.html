@@ -14,15 +14,19 @@ before it ships. Slow down, look closely, stay in control. The other camp, often
 on a different day, says the job has turned into something worse: you don’t write much anymore, you
 sit and read change after change the machine produced, and it is dull and a little soul-crushing.
 Reviewing slop, they call it.</p>
-<p>Those sound like opposite positions. They’re the same one. Review used to be where judgment
-happened and where the team learned how the codebase was meant to work. Now it has shrunk to a
-checkpoint you sign off on. The “read every line” camp wants to protect what review was. The “this
-is soul-crushing” camp is telling you it has already gone. Both are answering the same loss.</p>
+<p>Those are opposite sides of the same coin. Review used to be where judgment happened and where the
+team learned how the codebase was meant to work. Now it has shrunk to a checkpoint you sign off on.
+The “read every line” camp wants to protect what review was. The “this is soul-crushing” camp is
+telling you it has already gone. Both are answering one loss.</p>
 <p>A colleague told me the human side of this a few months ago. When he joined the team, he said, he
 learned a lot from getting detailed reviews from me, the kind where you explain not just what to
 change but why the team works this way. What he picked up wasn’t a list of rules. It was a way of
 working. Now we mostly work on our own, agents write and review most of the code, and he misses it.
 He wasn’t complaining about speed. He was noticing that something had stopped passing between us.</p>
+<p>Armin Ronacher <a href="https://lucumr.pocoo.org/2026/7/13/the-tower/">wrote about this</a> from the other
+end. The shared understanding a team keeps of its own system used to be a byproduct of the friction
+in working together, and agents have quietly removed the friction. What my colleague missed was
+that, felt up close.</p>
 <h2 id="what-review-was-really-passing-along">What review was really passing along</h2>
 <p>A review was never only a gate. It was how one person’s standard reached everyone else. You don’t
 mock the database in integration tests, and here’s the migration bug that taught us why. Deploys go
@@ -33,11 +37,13 @@ months later a pull request quietly brings back the exact thing the team decided
 used bad judgment. The change looks reasonable on its own. What was missing was a reviewer who knew
 the standard and noticed, right then, that the change cut against it.</p>
 <h2 id="you-cant-write-it-down-you-do-it">You can’t write it down. You do it.</h2>
-<p>That is the hard part, and it’s why my old daydream needed data I never had. Most of what makes a
-good reviewer good is not a rule you can write down. It’s taste, built from years of doing the
-work. Ask someone to put their standards in a document and you get a thin, lifeless version of what
-they actually do. But you keep doing it, review after review, and the standard is real even when
-the document isn’t.</p>
+<p>That is the hard part, and it’s why my old daydream needed data I never had. A review teaches the
+person reading it, but it’s a poor thing to learn from at scale. It’s the verdict, not the
+reasoning: “don’t do this here” lands, and the thinking that led me there stays in my head. Most of
+what makes a good reviewer good is taste, built from years of doing the work, and you can’t write it
+down. Ask someone to put their standards in a document and you get a thin, lifeless version of what
+they actually do. But you keep doing it, review after review, and the standard is real even when the
+document isn’t.</p>
 <p>That’s the shift that makes this possible now. Lore watches the work the way an apprentice does. It
 sits alongside your sessions, distills what you decide and why, and writes it down for you as
 <a href="/_preview/pr-1412/docs/team-memory/"><code>.lore.md</code></a>, a version-controlled file of the team’s decisions and gotchas,
@@ -48,9 +54,9 @@ stale in a few weeks. You work, and it learns.</p>
 judgment, the calls that come from taste you couldn’t explain if you tried. But it learns the
 standards you set often enough, and that turns out to be a lot of them.</p>
 <h2 id="the-apprentice-reviews-the-code">The apprentice reviews the code</h2>
-<p>This is the narrow thing I wanted ten years ago, and it turns out it was the achievable part all
-along. Not a bot that reproduces my judgment. Something that has learned the standards and speaks up
-when a change goes against one.</p>
+<p>This is the thing I wanted ten years ago, and it turns out the achievable part was the part that
+mattered. Not a machine that thinks like me. One that learned the standards and speaks up when a
+change goes against one.</p>
 <p>So we built a check that reads the diff against what Lore has learned. On every pull request, the
 <a href="/_preview/pr-1412/docs/guides/semantic-linter/">semantic linter</a> takes the changes and the standards from
 <code>.lore.md</code> and asks, for the pairs that look related, one question: does this change go against
@@ -58,9 +64,10 @@ something the team decided? When the answer looks like yes, it says so, as an an
 the line, with the reason attached. The reason is the point. It’s the part of the review that used
 to pass from person to person and stopped.</p>
 <p>It’s a judge, not a rule engine. “Never mock the database in integration tests” isn’t a pattern you
-can match with a regex. It’s a meaning, and you can only check it by understanding what the change
-does and what the standard intends. The honest cost is that a judge produces suspicions, not
-verdicts. It can be wrong, and we designed around that instead of pretending otherwise.</p>
+can match with a regex, and any lint rule that tried would be brittle and easy to route around. It’s
+a meaning, and you can only check it by understanding what the change does and what the standard
+intends. The honest cost is that a judge produces suspicions, not verdicts. It can be wrong, and we
+designed around that instead of pretending otherwise.</p>
 <h2 id="why-it-doesnt-fail-your-build">Why it doesn’t fail your build</h2>
 <p>If you’re in the “read every line” camp, what you’re rightly afraid of is a noisy check that blocks
 work on a bad guess. We share that fear, so the linter ships advisory only. It never fails a build.
@@ -70,16 +77,16 @@ ignore it inside a week.</p>
 checking every change against every standard the team ever set, which is the work no human does well
 or enjoys. What’s left is the judgment, the taste, whether this is even the right change. The part
 worth doing.</p>
-<p>There’s a ladder above advisory, for teams that watch how often the check is wrong on their own repo
-and decide a rule is worth blocking on, with a way for an author who knows better to override it. But
-the default sits at the bottom on purpose. The system earns trust before it can block anything.</p>
-<h2 id="the-narrow-claim">The narrow claim</h2>
+<p>There’s a ladder above advisory, for teams that watch how often the check is wrong and decide a rule
+is worth blocking on, with an override for the author who knows better. But the default sits at the
+bottom on purpose. The system earns trust before it can block anything.</p>
+<h2 id="wheres-the-limit">Where’s the limit?</h2>
 <p>I’m not claiming the reviewer goes away. The judgment and taste in a review is not what this
-replaces, and I’d distrust anyone selling that. The claim is narrower: no reviewer can hold every
-standard the team ever set and apply the right one at the right moment. That one job a system does
-well, and handing it over costs you none of the taste you were afraid to lose. It gives you back the
-attention for the parts that need a person, and brings back, a little, what used to pass between
-people when they reviewed each other’s work.</p>
+replaces, and I’d distrust anyone selling that. Here’s the line: no reviewer can hold every standard
+the team ever set and apply the right one at the right moment. That one job a system does well, and
+handing it over costs you none of the taste you were afraid to lose. It gives you back the attention
+for the parts that need a person, and brings back, a little, what used to pass between people when
+they reviewed each other’s work.</p>
 <p>That’s the version of automated review I’d ask a doubter to try. Not a bot that approves your PRs.
 An apprentice that learned how you work and speaks up when a change breaks from that, and otherwise
 stays quiet.</p>
