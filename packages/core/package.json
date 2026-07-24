@@ -20,7 +20,7 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.eval.json",
     "build": "tsx script/build.ts"
   },
   "dependencies": {
@@ -43,6 +43,7 @@
     "sharp": "^0.35.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.0",
     "@types/mdast": "^4.0.4"
   },
   "files": [

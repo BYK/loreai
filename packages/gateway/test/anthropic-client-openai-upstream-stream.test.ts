@@ -129,7 +129,19 @@ describe("Anthropic client + OpenAI upstream (streaming re-emission, #1052)", ()
     setUpstreamInterceptor(async () => openAICopilotStream());
 
     const config = loadConfig();
+    // Force an OS-assigned ephemeral port on the config object itself rather
+    // than trusting the process-global LORE_LISTEN_PORT env var. Vitest runs
+    // multiple test files in a shared worker process, so another file can
+    // clobber LORE_LISTEN_PORT (e.g. the shared harness sets it) between our
+    // line-108 assignment and this loadConfig(). If that stale value is invalid
+    // it falls back to the fixed DEFAULT_PORT and two files collide, and in the
+    // race window server.port could surface as 0 → "bad port" fetch (#1429).
+    config.port = 0;
+    config.portExplicit = false;
     const server = await startServer(config);
+    // Fail loudly at the source if the bind didn't resolve a real port, instead
+    // of leaking an invalid port into a downstream "bad port" fetch error.
+    expect(server.port).toBeGreaterThan(0);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
     teardownFn = () => {
