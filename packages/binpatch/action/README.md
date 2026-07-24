@@ -18,9 +18,9 @@ generate/publish job graph without reshaping it.
 
 | `mode` | What it does |
 |---|---|
-| `generate-ghcr` | Diff freshly built binaries against the previous **GHCR nightly**, size-gate the patches, leave them in `patches/` for a later publish step. |
-| `publish-ghcr` | Push the compressed binaries to the registry (`:<nightly-tag>`), create the immutable `<nightly-tag-prefix><version>` tag, and push the patch manifest (`:<patch-tag-prefix><version>`) with the integrity annotations the client reads. |
-| `generate-release` | Diff freshly built binaries against the previous stable **GitHub Release**, size-gate, leave them in `patches/` for a release-artifact upload (e.g. consumed by Craft). |
+| `generate-ghcr` | Diff freshly built binaries against the previous **GHCR nightly**, size-gate the patches, leave them in `.delta-patches/` for a later publish step. |
+| `publish-ghcr` | Push the compressed binaries to the registry (`:<nightly-tag>`), create the immutable `<nightly-tag-prefix><version>` tag, and push the patch manifest (`:<patch-tag-prefix><version>`) with the integrity annotations the client reads. Only patches with a matching binary in `binaries-dir` are pushed. |
+| `generate-release` | Diff freshly built binaries against the previous stable **GitHub Release**, size-gate, leave them in `.delta-patches/` for a release-artifact upload (e.g. consumed by Craft). |
 
 ## Wire contract (defaults)
 

@@ -71,9 +71,13 @@ inputs:
     required: false
     default: artifacts
   patches-dir:
-    description: "Directory where patches are written / read."
+    description: >-
+      Directory where patches are written / read. Defaults to a dotted dir
+      (".delta-patches") so it can never collide with a repo's own "patches/"
+      directory (e.g. pnpm/patch-package dependency patches) that a preceding
+      checkout may have placed in the workspace.
     required: false
-    default: patches
+    default: .delta-patches
   binary-glob:
     description: >-
       Glob (relative to new-binaries-dir) selecting binaries to diff, e.g.
@@ -433,10 +437,18 @@ runs:
           for patch_file in "${PATCHES_DIR}"/*.patch; do
             basename_patch=$(basename "$patch_file" .patch)
             new_binary="${BINARIES_DIR}/${basename_patch}"
-            if [ -f "$new_binary" ]; then
-              sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
-              ANNOTATIONS="${ANNOTATIONS} --annotation sha256-${basename_patch}=${sha256}"
+            # Only publish a patch that corresponds to a real published binary.
+            # A patch with no matching binary is not a delta patch (e.g. an
+            # unrelated source/dependency patch that leaked into the dir); its
+            # SHA-256 anchor is unknowable, so the client could never verify it.
+            # Skip it rather than push an unusable layer that would poison the
+            # whole chain for every consumer spanning this version.
+            if [ ! -f "$new_binary" ]; then
+              echo "::warning::Skipping ${basename_patch}.patch -- no matching binary in ${BINARIES_DIR}/ (not a delta patch)"
+              continue
             fi
+            sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
+            ANNOTATIONS="${ANNOTATIONS} --annotation sha256-${basename_patch}=${sha256}"
             PATCH_FILES="${PATCH_FILES} $(basename "$patch_file")"
           done
 

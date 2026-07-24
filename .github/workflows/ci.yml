@@ -1026,7 +1026,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nightly-patches
-          path: patches/*.patch
+          path: .delta-patches/*.patch
+          # .delta-patches is a dotted dir; upload-artifact skips hidden paths
+          # by default, so opt in explicitly.
+          include-hidden-files: true
 
   publish-nightly:
     name: Publish Nightly to GHCR
@@ -1069,7 +1072,7 @@ jobs:
         id: download-patches
         with:
           name: nightly-patches
-          path: patches
+          path: .delta-patches
 
       - name: Publish nightly + patches to GHCR
         uses: ./packages/binpatch/action
@@ -1079,7 +1082,7 @@ jobs:
           repo: byk/loreai
           artifacts-dir: artifacts
           binaries-dir: binaries
-          patches-dir: patches
+          patches-dir: .delta-patches
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
@@ -1122,7 +1125,7 @@ jobs:
 
       - name: Ensure patches directory exists
         if: startsWith(github.ref, 'refs/heads/release/')
-        run: mkdir -p patches && touch patches/empty
+        run: mkdir -p .delta-patches && touch .delta-patches/empty
 
       - name: Upload release patches
         if: startsWith(github.ref, 'refs/heads/release/')
@@ -1132,8 +1135,10 @@ jobs:
           # Always upload so Craft's artifact provider finds the artifact.
           # When no previous release has binaries, the directory is empty;
           # the placeholder ensures upload-artifact creates the artifact.
-          # (upload-artifact ignores hidden files by default)
-          path: patches/
+          # .delta-patches is a dotted dir AND the placeholder is a hidden
+          # file, so opt in to hidden-file upload explicitly.
+          path: .delta-patches/
+          include-hidden-files: true
 
   # ---------------------------------------------------------------------------
   # CI status: single required check for branch protection.
