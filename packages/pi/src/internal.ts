@@ -268,12 +268,26 @@ export function buildProviderRegistrations(opts: {
  * Call the gateway's `POST /v1/compact` endpoint and shape the result for Pi's
  * `session_before_compact` hook.
  *
- * Returns a compaction result on success, or `undefined` to fall back to Pi's
- * default compaction on ANY error path:
+ * The plugin is a dumb relay. The gateway is the single source of truth for
+ * "does this session's raw context fit in the layer-0 budget?" — it returns
+ * either:
+ *
+ *   { cancel: true }                       — host should keep the raw context;
+ *                                            we relay as `{ cancel: true }` to
+ *                                            Pi's `session_before_compact` hook
+ *                                            (which Pi honors on both manual
+ *                                            and auto paths, per
+ *                                            agent-session.js:1275 / :1498).
+ *   { summary: string }                    — use this Lore-aware summary
+ *                                            instead of Pi's default. We shape
+ *                                            it as `{ compaction: {...} }`.
+ *
+ * Returns `undefined` to fall back to Pi's default compaction on ANY error
+ * path:
  *   - 404 `session_not_found` (this session never routed through Lore),
  *   - any other non-2xx response,
  *   - a thrown/network error,
- *   - a 2xx with an empty summary.
+ *   - a 2xx with neither `cancel: true` nor a non-empty `summary`.
  *
  * Never throws and never writes to stdout/stderr — all diagnostics go through
  * the core `log` module (file-based, TUI-safe). `fetchImpl` is injectable for
@@ -308,6 +322,7 @@ export async function runCompaction(opts: {
       body: JSON.stringify({
         project_path: projectPath,
         previous_summary: previousSummary,
+        tokens_before: tokensBefore,
       }),
     });
 
@@ -329,11 +344,26 @@ export async function runCompaction(opts: {
       return undefined;
     }
 
-    const { summary } = (await res.json()) as { summary: string };
-    if (!summary) return undefined;
-
+    const body = (await res.json()) as { cancel?: boolean; summary?: string };
+    // Gateway's authoritative cancel decision wins. If the gateway says
+    // "this session's raw context fits; don't compact", we relay as
+    // { cancel: true } and skip the summary branch.
+    if (body.cancel === true) {
+      log.info(
+        "pi: gateway returned cancel=true — keeping raw context " +
+          "(Lore manages the window via recall on the next turn).",
+      );
+      return { cancel: true };
+    }
+    if (typeof body.summary !== "string" || body.summary === "") {
+      return undefined;
+    }
     return {
-      compaction: { summary, firstKeptEntryId, tokensBefore },
+      compaction: {
+        summary: body.summary,
+        firstKeptEntryId,
+        tokensBefore,
+      },
     };
   } catch (err) {
     log.warn("pi: custom compaction failed, falling back to default:", err);
