@@ -1334,10 +1334,15 @@ async function cmdVacuum(): Promise<void> {
     `Database: ${mb(dbFileSizeBytes())} (${mb(freelistBytes())} reclaimable free pages)`,
   );
   console.log(
-    "Running VACUUM — this rewrites the whole database and can take a while (and ~2× the DB size in free disk) on a large DB…",
+    "Running VACUUM — this rewrites the whole database and can take a while (and ~2× the DB size in free disk) on a large DB. temporal_vec is also rebuilt to re-pack its mostly-empty vec0 chunks (the dominant size on a heavily-used DB).",
   );
   try {
-    const { beforeBytes, afterBytes } = vacuum();
+    const { beforeBytes, afterBytes, vec0Rebuild } = vacuum();
+    if (vec0Rebuild && vec0Rebuild.beforeChunks > vec0Rebuild.afterChunks) {
+      console.log(
+        `vec0-rebuild: ${vec0Rebuild.beforeChunks} → ${vec0Rebuild.afterChunks} chunks (${vec0Rebuild.rowsRebuilt} rows re-packed)`,
+      );
+    }
     console.log(
       `Done — ${mb(beforeBytes)} → ${mb(afterBytes)} (reclaimed ${mb(Math.max(0, beforeBytes - afterBytes))}).`,
     );

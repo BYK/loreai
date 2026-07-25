@@ -717,6 +717,185 @@ function chunkIds(ids: string[], size: number): string[][] {
   return out;
 }
 
+/**
+ * Rebuild a `vec0` table to re-pack its mostly-empty chunks and reclaim disk
+ * space. vec0 allocates vectors in fixed-size chunks (default 1,024 slots ×
+ * `dim` × 4 bytes ≈ 3 MB for 768-dim) partitioned by `(project_id,
+ * session_id)`. Once a chunk is touched, the entire 3 MB stays allocated even
+ * if most of its slots become empty — sqlite-vec has no `optimize` command
+ * (upstream issues #54, #184, #185, #220 are all open). On a heavily-used DB
+ * this is the dominant size contributor: temporal_vec at 8% slot utilization
+ * means ~92% of its packed-chunk bytes are empty slots.
+ *
+ * Strategy: stage every row in a TEMP table, DROP the virtual table (which
+ * drops all its shadow tables — `_chunks`, `_vector_chunks00`, `_rowids`,
+ * `_auxiliary`, `_info`), re-CREATE it at the current dimension, and re-INSERT
+ * the staged rows. The virtual-table INSERT path re-packs the vectors into the
+ * minimum number of chunks (~⌈N / 1024⌉), so on a 311K-row temporal_vec at
+ * 8% utilization this collapses ~3,800 chunks into ~305 — reclaiming ~10 GB.
+ *
+ * Runs the whole drop+recreate+insert inside a SAVEPOINT, so the rebuild is
+ * atomic by construction — a crash mid-rebuild rolls back the staging table,
+ * the virtual-table DROP, and the re-CREATE, leaving the DB exactly as it was.
+ * The whole staged copy is held in the temp DB (~3 KB/row), so on a 311K-row
+ * table this is ~1 GB of transient disk; run during a maintenance window, not
+ * on the idle tick.
+ *
+ * Returns row + chunk counts so the caller can surface the reclaim. No-op
+ * outside vec0 mode (no vec0 tables to rebuild) or when the table is missing.
+ */
+/** Run `fn` inside a SQLite SAVEPOINT on `conn`. On success the savepoint is
+ *  released; on error it is rolled back and released, then the error is
+ *  re-thrown. A SAVEPOINT (not BEGIN) makes this safe whether the caller is
+ *  already inside a transaction (nested) or not (top-level). `name` must be a
+ *  bare SQL identifier — interpolated, never bound. */
+function withSavepointOn<T>(
+  conn: EmbeddingWriteConn,
+  name: string,
+  fn: () => T,
+): T {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `withSavepointOn: invalid savepoint name ${JSON.stringify(name)}`,
+    );
+  }
+  conn.query(`SAVEPOINT ${name}`).run();
+  try {
+    const result = fn();
+    conn.query(`RELEASE ${name}`).run();
+    return result;
+  } catch (e) {
+    conn.query(`ROLLBACK TO ${name}`).run();
+    conn.query(`RELEASE ${name}`).run();
+    throw e;
+  }
+}
+
+export function vec0Rebuild(
+  conn: EmbeddingWriteConn,
+  table: EmbeddingTable,
+): { rowsRebuilt: number; beforeChunks: number; afterChunks: number } {
+  if (readStorageMode(conn) !== "vec0") {
+    return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
+  }
+  const vt = VEC_TABLE[table];
+  const chunksTable = `${vt}_chunks`;
+  const exists = conn
+    .query("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+    .get(vt);
+  if (!exists) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
+
+  // The vec0 virtual table exists but its `_chunks` shadow table may not if a
+  // prior rebuild crashed between DROP and re-CREATE. Treat that as "nothing
+  // to rebuild" rather than throwing a cryptic `no such table` error.
+  const chunksExists = conn
+    .query("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+    .get(chunksTable);
+  if (!chunksExists) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
+
+  const dim = readVecDimension(conn);
+  if (dim === null) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
+
+  // Stage all rows in a TEMP table (regular SQLite storage, not vec0), drop
+  // the virtual table, recreate it via the canonical DDL, and re-insert.
+  // `vec0Ddl` returns DDL for all four tables; find the one matching `vt`.
+  const staging = `_rebuild_${vt}`;
+  const ddl = vec0Ddl(dim).find((d) =>
+    d.includes(`CREATE VIRTUAL TABLE IF NOT EXISTS ${vt} `),
+  );
+  if (!ddl) throw new Error(`vec0Rebuild: no DDL for ${vt} at dim=${dim}`);
+
+  // The whole rebuild runs inside a SAVEPOINT so the staging table's CREATE
+  // and DROP are transactional with the rest of the rebuild. On error the
+  // savepoint rollback undoes both the staging table and the virtual-table
+  // DROP/CREATE, leaving the DB exactly as it was before the rebuild — no
+  // leaked `_rebuild_*` temp table, no missing vec0 table. This makes the
+  // function safe-by-default: the caller does NOT need to wrap it in an outer
+  // transaction (though wrapping is still fine — the savepoint nests).
+  return withSavepointOn(conn, "vec0_rebuild", () => {
+    const beforeChunks = (
+      conn.query(`SELECT COUNT(*) AS n FROM ${chunksTable}`).get() as {
+        n: number;
+      }
+    ).n;
+
+    let stagedCount = 0;
+    switch (table) {
+      case "temporal":
+        conn
+          .query(
+            `CREATE TEMP TABLE ${staging} AS SELECT chunk_id, message_id, project_id, session_id, embedding FROM ${vt}`,
+          )
+          .run();
+        break;
+      case "distillations":
+        conn
+          .query(
+            `CREATE TEMP TABLE ${staging} AS SELECT id, project_id, session_id, embedding FROM ${vt}`,
+          )
+          .run();
+        break;
+      case "knowledge":
+      case "entities":
+        conn
+          .query(
+            `CREATE TEMP TABLE ${staging} AS SELECT id, embedding FROM ${vt}`,
+          )
+          .run();
+        break;
+    }
+    stagedCount = (
+      conn.query(`SELECT COUNT(*) AS n FROM ${staging}`).get() as { n: number }
+    ).n;
+
+    conn.query(`DROP TABLE ${vt}`).run();
+    conn.query(ddl).run();
+
+    switch (table) {
+      case "temporal":
+        conn
+          .query(
+            `INSERT INTO ${vt}(chunk_id, message_id, project_id, session_id, embedding) SELECT chunk_id, message_id, project_id, session_id, embedding FROM ${staging}`,
+          )
+          .run();
+        break;
+      case "distillations":
+        conn
+          .query(
+            `INSERT INTO ${vt}(id, project_id, session_id, embedding) SELECT id, project_id, session_id, embedding FROM ${staging}`,
+          )
+          .run();
+        break;
+      case "knowledge":
+      case "entities":
+        conn
+          .query(
+            `INSERT INTO ${vt}(id, embedding) SELECT id, embedding FROM ${staging}`,
+          )
+          .run();
+        break;
+    }
+    conn.query(`DROP TABLE ${staging}`).run();
+
+    const afterChunks = (
+      conn.query(`SELECT COUNT(*) AS n FROM ${chunksTable}`).get() as {
+        n: number;
+      }
+    ).n;
+    const rowsRebuilt = (
+      conn.query(`SELECT COUNT(*) AS n FROM ${vt}`).get() as { n: number }
+    ).n;
+    // Paranoia: a rebuild that loses rows indicates a bug in the staging flow.
+    // Surface it via the row count (caller can assert).
+    if (rowsRebuilt !== stagedCount) {
+      throw new Error(
+        `vec0Rebuild(${vt}): staged ${stagedCount} rows but rebuilt table has ${rowsRebuilt}`,
+      );
+    }
+    return { rowsRebuilt, beforeChunks, afterChunks };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Mode-aware "missing/has embedding" predicates for backfill detection
 // ---------------------------------------------------------------------------
