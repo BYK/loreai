@@ -60,7 +60,7 @@ function insertToolCall(
 }
 
 function insertKnowledge(
-  projectId: string,
+  projectId: string | null,
   id: string,
   opts?: { sourceSession?: string; crossProject?: boolean },
 ): void {
@@ -72,7 +72,7 @@ function insertKnowledge(
     )
     .run(
       id,
-      projectId,
+      projectId ?? null,
       opts?.sourceSession ?? null,
       opts?.crossProject ? 1 : 0,
       now,
@@ -366,5 +366,20 @@ describe("reassignKnowledge", () => {
       .query("SELECT cross_project FROM knowledge WHERE id = ?")
       .get("k-cross-1") as { cross_project: number };
     expect(row.cross_project).toBe(1);
+  });
+
+  test("clears cross_project when moving from global to project", () => {
+    insertKnowledge("", "k-global-1", { crossProject: true });
+
+    data.reassignKnowledge("k-global-1", PROJECT_A);
+
+    const row = db()
+      .query("SELECT cross_project, project_id FROM knowledge WHERE id = ?")
+      .get("k-global-1") as {
+      cross_project: number;
+      project_id: string | null;
+    };
+    expect(row.cross_project).toBe(0);
+    expect(row.project_id).toBe(pidA);
   });
 });
