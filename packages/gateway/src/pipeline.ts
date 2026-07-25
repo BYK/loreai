@@ -989,18 +989,73 @@ function isGatewayMessage(v: unknown): v is GatewayMessage {
   );
 }
 
+// The framing note prepended to the knowledge-delta user message. Extracted to
+// a constant so the legacy-block migration (parseDeltaMessages) can recognize
+// the pair it belongs to. Keep the substring "Lore knowledge update" — the
+// cache-stability e2e asserts on it.
+const KNOWLEDGE_DELTA_FRAMING_NOTE =
+  "[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]";
+
+// The inert assistant closer that ends the knowledge-delta exchange (the model
+// must not treat the pair as an open user turn — #1315). Also the canonical
+// assistant text the legacy migration rewrites a payload-carrying assistant to.
+const KNOWLEDGE_DELTA_ASSISTANT_CLOSER = "Understood.";
+
+function firstText(m: GatewayMessage | undefined): string | undefined {
+  const b = m?.content?.[0];
+  return b && b.type === "text" ? b.text : undefined;
+}
+
 // A delta block's content is now a user→assistant PAIR, stored as a JSON array.
 // Legacy blocks (persisted before the pair change, and single-message test
 // fixtures) stored ONE message object — accept both so already-persisted
 // sessions keep replaying and never crash. Returns [] on anything unparseable.
+//
+// Migration (#1490): blocks persisted before the payload moved off the
+// assistant turn store `[{user: framing}, {assistant: "## Long-term Knowledge…"}]`.
+// Replayed as-is they keep the payload on a visible/completed assistant turn —
+// the exact dump + premature-loop-exit bug this PR fixes — for the life of the
+// session. On load, rewrite that legacy pair to the new shape: payload appended
+// to the framing-note user message, assistant becomes the inert closer. A block
+// already in the new shape (user text already contains the payload) is returned
+// unchanged. Only the exact `[user(framing-only), assistant(payload)]` shape is
+// migrated; anything else (single message, new pair, non-delta) passes through.
 function parseDeltaMessages(raw: string): GatewayMessage[] {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) return parsed.filter(isGatewayMessage);
-    return isGatewayMessage(parsed) ? [parsed] : [];
+    parsed = JSON.parse(raw);
   } catch {
     return [];
   }
+  if (!Array.isArray(parsed)) {
+    return isGatewayMessage(parsed) ? [parsed] : [];
+  }
+  const msgs = parsed.filter(isGatewayMessage);
+  if (msgs.length !== 2) return msgs;
+  const [m0, m1] = msgs;
+  if (m0.role !== "user" || m1.role !== "assistant") return msgs;
+  const userText = firstText(m0);
+  const asstText = firstText(m1);
+  if (
+    typeof userText !== "string" ||
+    typeof asstText !== "string" ||
+    !userText.startsWith(KNOWLEDGE_DELTA_FRAMING_NOTE) ||
+    userText.includes("## Long-term Knowledge") || // already migrated / new shape
+    !asstText.includes("## Long-term Knowledge") // nothing to move
+  ) {
+    return msgs;
+  }
+  // Legacy pair: move the assistant payload onto the framing-note user message.
+  return [
+    {
+      role: "user",
+      content: [{ type: "text", text: `${userText}\n\n${asstText}` }],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: KNOWLEDGE_DELTA_ASSISTANT_CLOSER }],
+    },
+  ];
 }
 
 /**
@@ -1759,7 +1814,7 @@ export function buildKnowledgeDeltaMessage(
       content: [
         {
           type: "text",
-          text: `[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]\n\n${rendered}${tocRendered}`,
+          text: `${KNOWLEDGE_DELTA_FRAMING_NOTE}\n\n${rendered}${tocRendered}`,
         },
       ],
     },
@@ -1768,7 +1823,7 @@ export function buildKnowledgeDeltaMessage(
       content: [
         {
           type: "text",
-          text: "Understood.",
+          text: KNOWLEDGE_DELTA_ASSISTANT_CLOSER,
         },
       ],
     },
