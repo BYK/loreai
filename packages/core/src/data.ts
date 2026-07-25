@@ -1503,18 +1503,20 @@ export function reassignKnowledge(
   // Move ALL versions of the logical entry so a multi-version entry isn't split
   // across projects (reviewer NIT).
   // When moving from cross_project to a project, clear the flag.
-  const clearCrossProject = oldProjectId === null || oldProjectId === '';
+  const clearCrossProject = oldProjectId === null || oldProjectId === "";
   database.query("BEGIN IMMEDIATE").run();
   try {
     database
-      .query("UPDATE knowledge SET project_id = ?, cross_project = ? WHERE logical_id = ?")
+      .query(
+        "UPDATE knowledge SET project_id = ?, cross_project = ? WHERE logical_id = ?",
+      )
       .run(toId, clearCrossProject ? 0 : 1, entry.logical_id);
 
     // Clean up knowledge_transfers that became self-referential after the move.
     if (clearCrossProject) {
       const movedLogicalIds = database
         .query(
-          "SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND cross_project = 0"
+          "SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND cross_project = 0",
         )
         .all(toId)
         .map((r) => (r as { logical_id: string }).logical_id);

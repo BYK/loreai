@@ -375,7 +375,10 @@ describe("reassignKnowledge", () => {
 
     const row = db()
       .query("SELECT cross_project, project_id FROM knowledge WHERE id = ?")
-      .get("k-global-1") as { cross_project: number; project_id: string | null };
+      .get("k-global-1") as {
+      cross_project: number;
+      project_id: string | null;
+    };
     expect(row.cross_project).toBe(0);
     expect(row.project_id).toBe(pidA);
   });
