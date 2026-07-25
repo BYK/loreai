@@ -1490,6 +1490,7 @@ export function reassignKnowledge(
   toProjectPath: string,
   opts?: { gitRemote?: string },
 ): boolean {
+  const database = db();
   // Resolve to the current entry via the stable logical_id (A2, #823).
   const entry =
     ltm.get(knowledgeId) ?? ltm.getByLogical(ltm.logicalIdOf(knowledgeId));
@@ -1501,9 +1502,37 @@ export function reassignKnowledge(
   const oldProjectId = entry.project_id;
   // Move ALL versions of the logical entry so a multi-version entry isn't split
   // across projects (reviewer NIT).
-  db()
-    .query("UPDATE knowledge SET project_id = ? WHERE logical_id = ?")
-    .run(toId, entry.logical_id);
+  // When moving from cross_project to a project, clear the flag.
+  const clearCrossProject = oldProjectId === null || oldProjectId === '';
+  database.query("BEGIN IMMEDIATE").run();
+  try {
+    database
+      .query("UPDATE knowledge SET project_id = ?, cross_project = ? WHERE logical_id = ?")
+      .run(toId, clearCrossProject ? 0 : 1, entry.logical_id);
+
+    // Clean up knowledge_transfers that became self-referential after the move.
+    if (clearCrossProject) {
+      const movedLogicalIds = database
+        .query(
+          "SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND cross_project = 0"
+        )
+        .all(toId)
+        .map((r: { logical_id: string }) => r.logical_id);
+      const kPlaceholders = movedLogicalIds.map(() => "?").join(",");
+      database
+        .query(
+          `DELETE FROM knowledge_transfers
+           WHERE recalled_in_project_id = ?
+             AND knowledge_id IN (${kPlaceholders})`,
+        )
+        .run(toId, ...movedLogicalIds);
+    }
+
+    database.query("COMMIT").run();
+  } catch (e) {
+    database.query("ROLLBACK").run();
+    throw e;
+  }
 
   invalidateProjectsCache();
   invalidateGlobalStatsCache();
