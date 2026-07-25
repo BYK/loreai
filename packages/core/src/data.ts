@@ -1517,7 +1517,7 @@ export function reassignKnowledge(
           "SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND cross_project = 0"
         )
         .all(toId)
-        .map((r: { logical_id: string }) => r.logical_id);
+        .map((r) => (r as { logical_id: string }).logical_id);
       const kPlaceholders = movedLogicalIds.map(() => "?").join(",");
       database
         .query(
