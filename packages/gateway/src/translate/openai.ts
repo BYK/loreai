@@ -56,6 +56,12 @@ export function parseOpenAIRequest(
   if (typeof raw.top_logprobs === "number") {
     extras.top_logprobs = raw.top_logprobs;
   }
+  if (raw.stream_options && typeof raw.stream_options === "object") {
+    const so = raw.stream_options as Record<string, unknown>;
+    if (typeof so.include_usage === "boolean") {
+      extras.stream_options = { include_usage: so.include_usage };
+    }
+  }
 
   // Parse messages and extract system prompt
   const rawMessages = Array.isArray(raw.messages) ? raw.messages : [];
@@ -352,10 +358,16 @@ function buildOpenAINonStreamResponse(resp: GatewayResponse): Response {
       prompt_tokens: usage.inputTokens,
       completion_tokens: usage.outputTokens,
       total_tokens: usage.inputTokens + usage.outputTokens,
-      ...(usage.cacheReadInputTokens != null
+      ...(usage.cacheReadInputTokens != null ||
+      usage.cacheCreationInputTokens != null
         ? {
             prompt_tokens_details: {
-              cached_tokens: usage.cacheReadInputTokens,
+              ...(usage.cacheReadInputTokens != null
+                ? { cached_tokens: usage.cacheReadInputTokens }
+                : {}),
+              ...(usage.cacheCreationInputTokens != null
+                ? { cache_creation_tokens: usage.cacheCreationInputTokens }
+                : {}),
             },
           }
         : {}),
@@ -395,11 +407,38 @@ function buildOpenAIStreamResponse(resp: GatewayResponse): Response {
         : `chatcmpl-${resp.id}`;
       const created = Math.floor(Date.now() / 1000);
 
+      // Build the terminal usage object from resp.usage (or ZERO_USAGE fallback).
+      // Mirrors the working reference at stream/openai.ts:285-308 so OpenAI
+      // Chat Completions clients that read usage from the final SSE chunk
+      // (e.g. Pi) get the data they asked for via stream_options.include_usage.
+      // Emitted unconditionally, not gated on include_usage — same as the
+      // reference; clients that didn't opt in simply ignore the extra field.
+      const ru = resp.usage ?? ZERO_USAGE;
+      const terminalUsage: Record<string, unknown> = {
+        prompt_tokens: ru.inputTokens,
+        completion_tokens: ru.outputTokens,
+        total_tokens: ru.inputTokens + ru.outputTokens,
+      };
+      if (
+        ru.cacheReadInputTokens != null ||
+        ru.cacheCreationInputTokens != null
+      ) {
+        const details: Record<string, number> = {};
+        if (ru.cacheReadInputTokens != null) {
+          details.cached_tokens = ru.cacheReadInputTokens;
+        }
+        if (ru.cacheCreationInputTokens != null) {
+          details.cache_creation_tokens = ru.cacheCreationInputTokens;
+        }
+        terminalUsage.prompt_tokens_details = details;
+      }
+
       function emitChunk(
         delta: Record<string, unknown>,
         finishReason: string | null,
+        usage?: Record<string, unknown>,
       ) {
-        const chunk = {
+        const chunk: Record<string, unknown> = {
           id: baseId,
           object: "chat.completion.chunk",
           created,
@@ -412,6 +451,9 @@ function buildOpenAIStreamResponse(resp: GatewayResponse): Response {
             },
           ],
         };
+        if (usage) {
+          chunk.usage = usage;
+        }
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`),
         );
@@ -452,8 +494,9 @@ function buildOpenAIStreamResponse(resp: GatewayResponse): Response {
         }
       }
 
-      // Emit final chunk with finish reason
-      emitChunk({}, mapStopReason(resp.stopReason));
+      // Emit final chunk with finish reason AND usage (single chunk, matching
+      // the working reference at stream/openai.ts:285-308).
+      emitChunk({}, mapStopReason(resp.stopReason), terminalUsage);
 
       // Send [DONE] marker
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -696,6 +739,9 @@ export function buildOpenAIUpstreamRequest(
     }
     if (req.extras.top_logprobs !== undefined) {
       body.top_logprobs = req.extras.top_logprobs;
+    }
+    if (req.extras.stream_options !== undefined) {
+      body.stream_options = req.extras.stream_options;
     }
   }
 
