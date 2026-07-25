@@ -989,18 +989,73 @@ function isGatewayMessage(v: unknown): v is GatewayMessage {
   );
 }
 
+// The framing note prepended to the knowledge-delta user message. Extracted to
+// a constant so the legacy-block migration (parseDeltaMessages) can recognize
+// the pair it belongs to. Keep the substring "Lore knowledge update" — the
+// cache-stability e2e asserts on it.
+const KNOWLEDGE_DELTA_FRAMING_NOTE =
+  "[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]";
+
+// The inert assistant closer that ends the knowledge-delta exchange (the model
+// must not treat the pair as an open user turn — #1315). Also the canonical
+// assistant text the legacy migration rewrites a payload-carrying assistant to.
+const KNOWLEDGE_DELTA_ASSISTANT_CLOSER = "Understood.";
+
+function firstText(m: GatewayMessage | undefined): string | undefined {
+  const b = m?.content?.[0];
+  return b && b.type === "text" ? b.text : undefined;
+}
+
 // A delta block's content is now a user→assistant PAIR, stored as a JSON array.
 // Legacy blocks (persisted before the pair change, and single-message test
 // fixtures) stored ONE message object — accept both so already-persisted
 // sessions keep replaying and never crash. Returns [] on anything unparseable.
+//
+// Migration (#1490): blocks persisted before the payload moved off the
+// assistant turn store `[{user: framing}, {assistant: "## Long-term Knowledge…"}]`.
+// Replayed as-is they keep the payload on a visible/completed assistant turn —
+// the exact dump + premature-loop-exit bug this PR fixes — for the life of the
+// session. On load, rewrite that legacy pair to the new shape: payload appended
+// to the framing-note user message, assistant becomes the inert closer. A block
+// already in the new shape (user text already contains the payload) is returned
+// unchanged. Only the exact `[user(framing-only), assistant(payload)]` shape is
+// migrated; anything else (single message, new pair, non-delta) passes through.
 function parseDeltaMessages(raw: string): GatewayMessage[] {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) return parsed.filter(isGatewayMessage);
-    return isGatewayMessage(parsed) ? [parsed] : [];
+    parsed = JSON.parse(raw);
   } catch {
     return [];
   }
+  if (!Array.isArray(parsed)) {
+    return isGatewayMessage(parsed) ? [parsed] : [];
+  }
+  const msgs = parsed.filter(isGatewayMessage);
+  if (msgs.length !== 2) return msgs;
+  const [m0, m1] = msgs;
+  if (m0.role !== "user" || m1.role !== "assistant") return msgs;
+  const userText = firstText(m0);
+  const asstText = firstText(m1);
+  if (
+    typeof userText !== "string" ||
+    typeof asstText !== "string" ||
+    !userText.startsWith(KNOWLEDGE_DELTA_FRAMING_NOTE) ||
+    userText.includes("## Long-term Knowledge") || // already migrated / new shape
+    !asstText.includes("## Long-term Knowledge") // nothing to move
+  ) {
+    return msgs;
+  }
+  // Legacy pair: move the assistant payload onto the framing-note user message.
+  return [
+    {
+      role: "user",
+      content: [{ type: "text", text: `${userText}\n\n${asstText}` }],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: KNOWLEDGE_DELTA_ASSISTANT_CLOSER }],
+    },
+  ];
 }
 
 /**
@@ -1729,15 +1784,24 @@ export function buildKnowledgeDeltaMessage(
   // core/gradient.ts `buildPrefixMessages`), NOT a lone user message. A lone
   // user block read as an open user turn, so instruction-literal models (e.g.
   // MiniMax M3) prefaced every turn with "Acknowledged… none of this applies…
-  // I won't reference this knowledge." The pair closes the exchange: the tiny
-  // user note frames it as ambient context (and says not to reply), and the
-  // KNOWLEDGE PAYLOAD rides the ASSISTANT turn so the model treats it as its
-  // own settled prior note rather than a pending request.
+  // I won't reference this knowledge." The pair closes the exchange so the model
+  // does not react to it.
+  //
+  // The KNOWLEDGE PAYLOAD rides the USER turn (as ambient context), and the
+  // ASSISTANT turn is a tiny inert closer ("Understood.") that ends the
+  // exchange. Putting the markdown payload on the assistant turn (the pre-fix
+  // behavior) had two failure modes observed in production: (1) agent harnesses
+  // (Claude Code REPL, OpenCode) RENDER the historical assistant message as a
+  // visible turn — the recurring `⏺ Long-term Knowledge` dump; and (2) the model
+  // treats that fake assistant turn as an already-completed turn and ends early,
+  // so the agent loop exits prematurely (needs "continue"). Neither happens when
+  // the payload is incoming user-role context and the assistant message carries
+  // no markdown.
   //
   // Placement is safe for role-alternation + tool-pairing: the block is spliced
   // before the final message (a user turn / tool_result in an agent request via
-  // safeDeltaInsertIndex against len-1), so the injected assistant is always
-  // followed by a user turn. Stacked pairs alternate cleanly
+  // safeDeltaInsertIndex against len-1), so the injected assistant closer is
+  // always followed by a user turn. Stacked pairs alternate cleanly
   // (…user,asst,user,asst,final-user). The only same-role adjacency possible is
   // [user][inj-user] at the leading edge — identical to the prior single-user
   // behavior. The pair carries no tool_use/tool_result.
@@ -1750,7 +1814,7 @@ export function buildKnowledgeDeltaMessage(
       content: [
         {
           type: "text",
-          text: "[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]",
+          text: `${KNOWLEDGE_DELTA_FRAMING_NOTE}\n\n${rendered}${tocRendered}`,
         },
       ],
     },
@@ -1759,7 +1823,7 @@ export function buildKnowledgeDeltaMessage(
       content: [
         {
           type: "text",
-          text: rendered + tocRendered,
+          text: KNOWLEDGE_DELTA_ASSISTANT_CLOSER,
         },
       ],
     },

@@ -1,8 +1,14 @@
 import { describe, test, expect } from "vitest";
-import { ltm, recallById } from "@loreai/core";
+import {
+  ltm,
+  recallById,
+  appendSessionPromptDelta,
+  ensureProject,
+} from "@loreai/core";
 import {
   buildKnowledgeDeltaMessage,
   buildKnowledgeCatalogText,
+  applySessionPromptDeltas,
 } from "../src/pipeline";
 import type { GatewayMessage } from "../src/translate/types";
 
@@ -208,12 +214,14 @@ describe("ToC ids are recall-resolvable (#917 round-trip)", () => {
 // The knowledge-delta block is injected mid-conversation. As a lone user-role
 // message it read as an open user turn, so instruction-literal models (e.g.
 // MiniMax M3) "Acknowledged… none of this applies… I won't reference it" on
-// every turn. Mirroring the distilled-prefix pattern (buildPrefixMessages), the
-// block is now a user→assistant PAIR: a tiny framing note on the user side and
-// the knowledge payload on the assistant side, so the exchange is already
-// closed and the model does not react to it.
+// every turn. The block is a user→assistant PAIR so the exchange is closed and
+// the model does not react to it. The knowledge PAYLOAD rides the USER turn
+// (ambient context) and the assistant turn is a tiny inert closer: putting the
+// markdown payload on the assistant turn made harnesses RENDER it as a visible
+// `⏺ Long-term Knowledge` turn AND made the model treat it as an
+// already-completed turn, ending the agent loop early.
 describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", () => {
-  test("returns a pair: user framing (non-ack) + assistant payload", () => {
+  test("payload rides the USER turn; assistant turn is an inert closer", () => {
     const msgs = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed entry")],
       [],
@@ -231,17 +239,105 @@ describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", (
     expect(userText).toContain("Lore knowledge update");
     // Explicit non-acknowledgment framing — the whole point of the fix.
     expect(userText.toLowerCase()).toContain("do not");
-    // Payload rides the ASSISTANT turn so the model treats it as settled
-    // context (its own prior note), not a pending user request.
-    expect(asstText).toContain("Changed entry");
-    expect(asstText).toContain("## Long-term Knowledge");
-    // The framing note must NOT carry the payload.
-    expect(userText).not.toContain("## Long-term Knowledge");
+    // The PAYLOAD rides the USER turn (ambient context), so it is incoming
+    // context rather than a fake assistant turn.
+    expect(userText).toContain("Changed entry");
+    expect(userText).toContain("## Long-term Knowledge");
+    // REGRESSION GUARD: the assistant turn must NEVER carry the markdown
+    // payload — that is what harnesses render as a visible dump and what the
+    // model mistakes for a completed turn (premature loop exit). It is an
+    // inert closer only.
+    expect(asstText).not.toContain("## Long-term Knowledge");
+    expect(asstText).not.toContain("Changed entry");
+    expect(asstText.length).toBeLessThan(40);
   });
 
   test("no genuine change → empty array (no pair injected)", () => {
     expect(
       buildKnowledgeDeltaMessage([], [], [toc("019bbbbb", "Lonely")]),
     ).toEqual([]);
+  });
+});
+
+// Seer follow-up (#1490): blocks persisted BEFORE the payload moved off the
+// assistant turn store `[{user: framing-only}, {assistant: payload}]`. Replayed
+// as-is they keep the payload on a visible/completed assistant turn — the exact
+// dump + premature-loop-exit bug — for the life of the session. parseDeltaMessages
+// migrates the legacy pair to the new shape on load.
+describe("parseDeltaMessages — legacy assistant-payload block migration (#1490)", () => {
+  const FRAMING =
+    "[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]";
+  const PAYLOAD =
+    "## Long-term Knowledge\n\n### Gotcha\n\n* **[019aaaaa] T: old payload";
+
+  function seedAndReplay(content: GatewayMessage[]): GatewayMessage[] {
+    const sessionID = `migrate-${Math.random().toString(36).slice(2)}`;
+    const projectID = ensureProject(
+      `/tmp/lore-migrate-${Math.random().toString(36).slice(2)}`,
+    );
+    appendSessionPromptDelta({
+      sessionID,
+      projectID,
+      selector: JSON.stringify({ target: "messages", insertAt: 0 }),
+      content: JSON.stringify(content),
+    });
+    const layout: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "real turn" }] },
+    ];
+    return applySessionPromptDeltas(layout, sessionID);
+  }
+
+  test("legacy [user framing-only, assistant payload] block is migrated to payload-on-user", () => {
+    const legacy: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: FRAMING }] },
+      { role: "assistant", content: [{ type: "text", text: PAYLOAD }] },
+    ];
+    const out = seedAndReplay(legacy);
+    // The replayed pair: user carries framing+payload, assistant is the inert closer.
+    const injUser = out[0];
+    const injAsst = out[1];
+    expect(injUser.role).toBe("user");
+    expect(injAsst.role).toBe("assistant");
+    const userText = (injUser.content[0] as { text: string }).text;
+    const asstText = (injAsst.content[0] as { text: string }).text;
+    expect(userText).toContain("Lore knowledge update");
+    expect(userText).toContain("## Long-term Knowledge");
+    expect(userText).toContain("old payload");
+    // The migrated assistant turn must NOT carry the markdown payload.
+    expect(asstText).not.toContain("## Long-term Knowledge");
+    expect(asstText).not.toContain("old payload");
+    expect(asstText.length).toBeLessThan(40);
+  });
+
+  test("already-new [user framing+payload, assistant closer] block replays unchanged", () => {
+    const newShape: GatewayMessage[] = [
+      {
+        role: "user",
+        content: [{ type: "text", text: `${FRAMING}\n\n${PAYLOAD}` }],
+      },
+      { role: "assistant", content: [{ type: "text", text: "Understood." }] },
+    ];
+    const out = seedAndReplay(newShape);
+    const injUser = out[0];
+    const injAsst = out[1];
+    const userText = (injUser.content[0] as { text: string }).text;
+    const asstText = (injAsst.content[0] as { text: string }).text;
+    expect(userText).toBe(`${FRAMING}\n\n${PAYLOAD}`); // not double-migrated
+    expect(asstText).toBe("Understood.");
+  });
+
+  test("single legacy user message (pre-pair) passes through unmigrated", () => {
+    const single: GatewayMessage[] = [
+      {
+        role: "user",
+        content: [{ type: "text", text: `${FRAMING}\n\n${PAYLOAD}` }],
+      },
+    ];
+    const out = seedAndReplay(single);
+    // Single message preserved as-is (parseDeltaMessages accepts single-message legacy).
+    expect(out[0].role).toBe("user");
+    expect((out[0].content[0] as { text: string }).text).toContain(
+      "## Long-term Knowledge",
+    );
   });
 });
