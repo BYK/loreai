@@ -208,12 +208,14 @@ describe("ToC ids are recall-resolvable (#917 round-trip)", () => {
 // The knowledge-delta block is injected mid-conversation. As a lone user-role
 // message it read as an open user turn, so instruction-literal models (e.g.
 // MiniMax M3) "Acknowledged… none of this applies… I won't reference it" on
-// every turn. Mirroring the distilled-prefix pattern (buildPrefixMessages), the
-// block is now a user→assistant PAIR: a tiny framing note on the user side and
-// the knowledge payload on the assistant side, so the exchange is already
-// closed and the model does not react to it.
+// every turn. The block is a user→assistant PAIR so the exchange is closed and
+// the model does not react to it. The knowledge PAYLOAD rides the USER turn
+// (ambient context) and the assistant turn is a tiny inert closer: putting the
+// markdown payload on the assistant turn made harnesses RENDER it as a visible
+// `⏺ Long-term Knowledge` turn AND made the model treat it as an
+// already-completed turn, ending the agent loop early.
 describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", () => {
-  test("returns a pair: user framing (non-ack) + assistant payload", () => {
+  test("payload rides the USER turn; assistant turn is an inert closer", () => {
     const msgs = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed entry")],
       [],
@@ -231,12 +233,17 @@ describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", (
     expect(userText).toContain("Lore knowledge update");
     // Explicit non-acknowledgment framing — the whole point of the fix.
     expect(userText.toLowerCase()).toContain("do not");
-    // Payload rides the ASSISTANT turn so the model treats it as settled
-    // context (its own prior note), not a pending user request.
-    expect(asstText).toContain("Changed entry");
-    expect(asstText).toContain("## Long-term Knowledge");
-    // The framing note must NOT carry the payload.
-    expect(userText).not.toContain("## Long-term Knowledge");
+    // The PAYLOAD rides the USER turn (ambient context), so it is incoming
+    // context rather than a fake assistant turn.
+    expect(userText).toContain("Changed entry");
+    expect(userText).toContain("## Long-term Knowledge");
+    // REGRESSION GUARD: the assistant turn must NEVER carry the markdown
+    // payload — that is what harnesses render as a visible dump and what the
+    // model mistakes for a completed turn (premature loop exit). It is an
+    // inert closer only.
+    expect(asstText).not.toContain("## Long-term Knowledge");
+    expect(asstText).not.toContain("Changed entry");
+    expect(asstText.length).toBeLessThan(40);
   });
 
   test("no genuine change → empty array (no pair injected)", () => {

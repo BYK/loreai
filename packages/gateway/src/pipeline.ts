@@ -1729,15 +1729,24 @@ export function buildKnowledgeDeltaMessage(
   // core/gradient.ts `buildPrefixMessages`), NOT a lone user message. A lone
   // user block read as an open user turn, so instruction-literal models (e.g.
   // MiniMax M3) prefaced every turn with "Acknowledged… none of this applies…
-  // I won't reference this knowledge." The pair closes the exchange: the tiny
-  // user note frames it as ambient context (and says not to reply), and the
-  // KNOWLEDGE PAYLOAD rides the ASSISTANT turn so the model treats it as its
-  // own settled prior note rather than a pending request.
+  // I won't reference this knowledge." The pair closes the exchange so the model
+  // does not react to it.
+  //
+  // The KNOWLEDGE PAYLOAD rides the USER turn (as ambient context), and the
+  // ASSISTANT turn is a tiny inert closer ("Understood.") that ends the
+  // exchange. Putting the markdown payload on the assistant turn (the pre-fix
+  // behavior) had two failure modes observed in production: (1) agent harnesses
+  // (Claude Code REPL, OpenCode) RENDER the historical assistant message as a
+  // visible turn — the recurring `⏺ Long-term Knowledge` dump; and (2) the model
+  // treats that fake assistant turn as an already-completed turn and ends early,
+  // so the agent loop exits prematurely (needs "continue"). Neither happens when
+  // the payload is incoming user-role context and the assistant message carries
+  // no markdown.
   //
   // Placement is safe for role-alternation + tool-pairing: the block is spliced
   // before the final message (a user turn / tool_result in an agent request via
-  // safeDeltaInsertIndex against len-1), so the injected assistant is always
-  // followed by a user turn. Stacked pairs alternate cleanly
+  // safeDeltaInsertIndex against len-1), so the injected assistant closer is
+  // always followed by a user turn. Stacked pairs alternate cleanly
   // (…user,asst,user,asst,final-user). The only same-role adjacency possible is
   // [user][inj-user] at the leading edge — identical to the prior single-user
   // behavior. The pair carries no tool_use/tool_result.
@@ -1750,7 +1759,7 @@ export function buildKnowledgeDeltaMessage(
       content: [
         {
           type: "text",
-          text: "[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]",
+          text: `[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]\n\n${rendered}${tocRendered}`,
         },
       ],
     },
@@ -1759,7 +1768,7 @@ export function buildKnowledgeDeltaMessage(
       content: [
         {
           type: "text",
-          text: rendered + tocRendered,
+          text: "Understood.",
         },
       ],
     },
