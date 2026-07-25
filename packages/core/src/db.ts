@@ -5,6 +5,7 @@ import {
   readStorageMode,
   readVecDimension,
   repartitionVec0Project,
+  vec0Rebuild,
 } from "./db/vec-store";
 import { join, dirname } from "node:path";
 import { chmodSync, mkdirSync, statSync } from "node:fs";
@@ -3693,9 +3694,47 @@ export function freelistBytes(): number {
 export function vacuum(opts?: { noWait?: boolean }): {
   beforeBytes: number;
   afterBytes: number;
+  vec0Rebuild?: {
+    rowsRebuilt: number;
+    beforeChunks: number;
+    afterChunks: number;
+  };
 } {
   const conn = db();
   const beforeBytes = dbFileSizeBytes();
+
+  // Re-pack temporal_vec's mostly-empty chunks BEFORE the VACUUM so the freed
+  // chunk pages land on the freelist and the VACUUM can return them to the OS.
+  // vec0 allocates 3 MB per (project, session) chunk and never frees a chunk
+  // whose slots become empty (upstream issues #54, #184, #185, #220 all open);
+  // on a heavily-used DB temporal_vec dominates the file at 8% slot
+  // utilization, so this is the single biggest reclaim lever. Wrapped in its
+  // own IMMEDIATE transaction so a crash leaves the vec0 table intact (drop +
+  // recreate + insert is atomic); a no-op in blob mode and on empty/fresh DBs.
+  // Skipped for noWait (the idle auto-reclaim) — the staging + re-insert cost
+  // (~1 GB transient disk, ~30s for 311K rows) is too heavy for an event-loop
+  // caller; only the explicit `lore data vacuum` runs it.
+  let vec0RebuildStats:
+    | { rowsRebuilt: number; beforeChunks: number; afterChunks: number }
+    | undefined;
+  if (!opts?.noWait) {
+    conn.exec("BEGIN IMMEDIATE");
+    try {
+      vec0RebuildStats = vec0Rebuild(conn, "temporal");
+      conn.exec("COMMIT");
+    } catch (err) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {
+        // no open txn to roll back
+      }
+      throw err;
+    }
+    // Flush the rebuild into the main file so VACUUM sees the post-rebuild
+    // page layout (VACUUM cannot run while the rebuild is still in the WAL).
+    checkpointWal();
+  }
+
   // The mode-converting VACUUM needs a near-exclusive moment; a reader pinning a WAL
   // snapshot would otherwise make it busy-wait the whole BUSY_TIMEOUT_MS (~5s stall).
   // `noWait` (used by the idle auto-reclaim, which runs on the event loop) drops the
@@ -3714,7 +3753,11 @@ export function vacuum(opts?: { noWait?: boolean }): {
     if (opts?.noWait) conn.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   }
   checkpointWal();
-  return { beforeBytes, afterBytes: dbFileSizeBytes() };
+  return {
+    beforeBytes,
+    afterBytes: dbFileSizeBytes(),
+    vec0Rebuild: vec0RebuildStats,
+  };
 }
 
 /** `PRAGMA auto_vacuum` mode: 0=NONE, 1=FULL, 2=INCREMENTAL. */
