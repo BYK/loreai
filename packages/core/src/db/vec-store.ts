@@ -734,16 +734,43 @@ function chunkIds(ids: string[], size: number): string[][] {
  * minimum number of chunks (~⌈N / 1024⌉), so on a 311K-row temporal_vec at
  * 8% utilization this collapses ~3,800 chunks into ~305 — reclaiming ~10 GB.
  *
- * Caller MUST wrap this in a transaction (BEGIN IMMEDIATE / COMMIT) so the
- * drop+recreate+insert is atomic — a crash mid-rebuild would otherwise leave
- * the vec0 table missing until the next startup backfill, and recall would
- * silently degrade to FTS-only for the affected table. The whole staged copy
- * is held in the temp DB (~3 KB/row), so on a 311K-row table this is ~1 GB of
- * transient disk; run during a maintenance window, not on the idle tick.
+ * Runs the whole drop+recreate+insert inside a SAVEPOINT, so the rebuild is
+ * atomic by construction — a crash mid-rebuild rolls back the staging table,
+ * the virtual-table DROP, and the re-CREATE, leaving the DB exactly as it was.
+ * The whole staged copy is held in the temp DB (~3 KB/row), so on a 311K-row
+ * table this is ~1 GB of transient disk; run during a maintenance window, not
+ * on the idle tick.
  *
  * Returns row + chunk counts so the caller can surface the reclaim. No-op
  * outside vec0 mode (no vec0 tables to rebuild) or when the table is missing.
  */
+/** Run `fn` inside a SQLite SAVEPOINT on `conn`. On success the savepoint is
+ *  released; on error it is rolled back and released, then the error is
+ *  re-thrown. A SAVEPOINT (not BEGIN) makes this safe whether the caller is
+ *  already inside a transaction (nested) or not (top-level). `name` must be a
+ *  bare SQL identifier — interpolated, never bound. */
+function withSavepointOn<T>(
+  conn: EmbeddingWriteConn,
+  name: string,
+  fn: () => T,
+): T {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `withSavepointOn: invalid savepoint name ${JSON.stringify(name)}`,
+    );
+  }
+  conn.query(`SAVEPOINT ${name}`).run();
+  try {
+    const result = fn();
+    conn.query(`RELEASE ${name}`).run();
+    return result;
+  } catch (e) {
+    conn.query(`ROLLBACK TO ${name}`).run();
+    conn.query(`RELEASE ${name}`).run();
+    throw e;
+  }
+}
+
 export function vec0Rebuild(
   conn: EmbeddingWriteConn,
   table: EmbeddingTable,
@@ -758,14 +785,16 @@ export function vec0Rebuild(
     .get(vt);
   if (!exists) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
 
+  // The vec0 virtual table exists but its `_chunks` shadow table may not if a
+  // prior rebuild crashed between DROP and re-CREATE. Treat that as "nothing
+  // to rebuild" rather than throwing a cryptic `no such table` error.
+  const chunksExists = conn
+    .query("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+    .get(chunksTable);
+  if (!chunksExists) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
+
   const dim = readVecDimension(conn);
   if (dim === null) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
-
-  const beforeChunks = (
-    conn.query(`SELECT COUNT(*) AS n FROM ${chunksTable}`).get() as {
-      n: number;
-    }
-  ).n;
 
   // Stage all rows in a TEMP table (regular SQLite storage, not vec0), drop
   // the virtual table, recreate it via the canonical DDL, and re-insert.
@@ -776,8 +805,21 @@ export function vec0Rebuild(
   );
   if (!ddl) throw new Error(`vec0Rebuild: no DDL for ${vt} at dim=${dim}`);
 
-  let stagedCount = 0;
-  try {
+  // The whole rebuild runs inside a SAVEPOINT so the staging table's CREATE
+  // and DROP are transactional with the rest of the rebuild. On error the
+  // savepoint rollback undoes both the staging table and the virtual-table
+  // DROP/CREATE, leaving the DB exactly as it was before the rebuild — no
+  // leaked `_rebuild_*` temp table, no missing vec0 table. This makes the
+  // function safe-by-default: the caller does NOT need to wrap it in an outer
+  // transaction (though wrapping is still fine — the savepoint nests).
+  return withSavepointOn(conn, "vec0_rebuild", () => {
+    const beforeChunks = (
+      conn.query(`SELECT COUNT(*) AS n FROM ${chunksTable}`).get() as {
+        n: number;
+      }
+    ).n;
+
+    let stagedCount = 0;
     switch (table) {
       case "temporal":
         conn
@@ -834,31 +876,24 @@ export function vec0Rebuild(
         break;
     }
     conn.query(`DROP TABLE ${staging}`).run();
-  } catch (err) {
-    try {
-      conn.query(`DROP TABLE IF EXISTS ${staging}`).run();
-    } catch {
-      // staging may not exist if the failure was before its CREATE
-    }
-    throw err;
-  }
 
-  const afterChunks = (
-    conn.query(`SELECT COUNT(*) AS n FROM ${chunksTable}`).get() as {
-      n: number;
+    const afterChunks = (
+      conn.query(`SELECT COUNT(*) AS n FROM ${chunksTable}`).get() as {
+        n: number;
+      }
+    ).n;
+    const rowsRebuilt = (
+      conn.query(`SELECT COUNT(*) AS n FROM ${vt}`).get() as { n: number }
+    ).n;
+    // Paranoia: a rebuild that loses rows indicates a bug in the staging flow.
+    // Surface it via the row count (caller can assert).
+    if (rowsRebuilt !== stagedCount) {
+      throw new Error(
+        `vec0Rebuild(${vt}): staged ${stagedCount} rows but rebuilt table has ${rowsRebuilt}`,
+      );
     }
-  ).n;
-  const rowsRebuilt = (
-    conn.query(`SELECT COUNT(*) AS n FROM ${vt}`).get() as { n: number }
-  ).n;
-  // Paranoia: a rebuild that loses rows indicates a bug in the staging flow.
-  // Surface it via the row count (caller can assert).
-  if (rowsRebuilt !== stagedCount) {
-    throw new Error(
-      `vec0Rebuild(${vt}): staged ${stagedCount} rows but rebuilt table has ${rowsRebuilt}`,
-    );
-  }
-  return { rowsRebuilt, beforeChunks, afterChunks };
+    return { rowsRebuilt, beforeChunks, afterChunks };
+  });
 }
 
 // ---------------------------------------------------------------------------

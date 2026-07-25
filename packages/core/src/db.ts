@@ -3730,8 +3730,8 @@ export function vacuum(opts?: { noWait?: boolean }): {
       }
       throw err;
     }
-    // Flush the rebuild into the main file so VACUUM sees the post-rebuild
-    // page layout (VACUUM cannot run while the rebuild is still in the WAL).
+    // Flush the rebuild's freed pages into the main file's freelist so the
+    // following VACUUM can reclaim them to the OS.
     checkpointWal();
   }
 
