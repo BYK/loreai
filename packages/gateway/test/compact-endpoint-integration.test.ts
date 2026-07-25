@@ -140,7 +140,10 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       sessionID,
     );
     expect(compactResp.status).toBe(200);
-    const body = (await compactResp.json()) as { cancel?: boolean; summary?: string };
+    const body = (await compactResp.json()) as {
+      cancel?: boolean;
+      summary?: string;
+    };
     expect(body.cancel).toBe(true);
     expect(body.summary).toBeUndefined();
   });
@@ -183,7 +186,10 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       sessionID,
     );
     expect(compactResp.status).toBe(200);
-    const body = (await compactResp.json()) as { cancel?: boolean; summary?: string };
+    const body = (await compactResp.json()) as {
+      cancel?: boolean;
+      summary?: string;
+    };
     expect(body.cancel).toBe(true);
   });
 
@@ -222,7 +228,10 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       sessionID,
     );
     expect(compactResp.status).toBe(200);
-    const body = (await compactResp.json()) as { cancel?: boolean; summary?: string };
+    const body = (await compactResp.json()) as {
+      cancel?: boolean;
+      summary?: string;
+    };
     expect(body.cancel).toBeFalsy();
   });
 
@@ -268,7 +277,10 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       sessionID,
     );
     expect(cancelResp.status).toBe(200);
-    const cancelBody = (await cancelResp.json()) as { cancel?: boolean; summary?: string };
+    const cancelBody = (await cancelResp.json()) as {
+      cancel?: boolean;
+      summary?: string;
+    };
     expect(cancelBody.cancel).toBe(true);
 
     // 130K exceeds 111_616 budget → must compact (cancel:false).
@@ -281,7 +293,10 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       sessionID,
     );
     expect(compactResp.status).toBe(200);
-    const compactBody = (await compactResp.json()) as { cancel?: boolean; summary?: string };
+    const compactBody = (await compactResp.json()) as {
+      cancel?: boolean;
+      summary?: string;
+    };
     expect(compactBody.cancel).toBeFalsy();
   });
 });
