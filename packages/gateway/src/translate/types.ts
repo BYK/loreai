@@ -246,6 +246,13 @@ export type GatewayRequest = {
     tool_choice?: unknown;
     parallel_tool_calls?: boolean;
     service_tier?: string;
+    /**
+     * OpenAI Chat Completions: `stream_options` from the incoming request
+     * body. Carried through so the upstream call (`buildOpenAIUpstreamRequest`)
+     * can forward it. Today only `include_usage` is captured — other
+     * sub-fields are ignored to keep the surface narrow.
+     */
+    stream_options?: { include_usage?: boolean };
   };
   /**
    * Set when the request originated from Pi's `openai-codex` provider (ingress
