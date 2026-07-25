@@ -276,28 +276,30 @@ does not flatter us. On the cross-session run with Sonnet-5:</p>
 </tr>
 <tr>
 <td><strong>Lore</strong></td>
-<td><strong>$5.20</strong></td>
+<td><strong>$4.02</strong></td>
 <td>none</td>
 </tr>
 </tbody>
 </table>
-<p>Lore is the most expensive line here, and we are not going to bury that under the retention
-win. Two things are true at once. The retention win is real: Lore held all four facts on
-every run while vanilla held none, and on the cheaper models it held them where the stores
-did not. And Lore costs more per run on this frontier cross-session case. Both belong in the
-same paragraph.</p>
-<p>Where the extra dollar goes is worth being precise about, because the benchmark is what
-turned it up. Lore’s figure is the whole bill: the conversation plus the background
-distillation, on one key, about $0.28 of it the worker. The rest of the gap is prompt-cache
-churn. When Lore first injects a session’s recalled memory it rewrites part of the prefix,
-which busts the cache for that turn; on the single-breakpoint protocol this benchmark runs
-through, that one rewrite re-priced more of the prompt than it should have. Measuring this
-run is how we found it. We have since landed two fixes, one that stops the recalled-memory
-block from busting the whole system prefix, and one that stops the compression layer from
-oscillating turn to turn, and together they cut this cross-session figure from about $6.22
-to the $5.20 above. It is still over vanilla, and the residual is a first-injection rewrite
-we have not yet driven to zero. We would rather publish the number that is still above the
-line, with the direction of travel, than wait for a prettier one.<sup><a href="#user-content-fn-meters" id="user-content-fnref-meters-2" data-footnote-ref aria-describedby="footnote-label">1</a></sup></p>
+<p>Lore lands right on the vanilla line here, within run-to-run noise, and it did not
+start there. Two things are true at once. The retention win is real: Lore held all four
+facts on every run while vanilla held none, and on the cheaper models it held them where
+the stores did not. And Lore gets there on the same bill as an agent that keeps nothing.
+Both belong in the same paragraph, and the second one only became true because the
+benchmark forced us to chase it.</p>
+<p>Where the cost went is worth being precise about, because the benchmark is what turned it
+up. Lore’s figure is the whole bill: the conversation plus the background distillation, on
+one key, about $0.28 of it the worker. The rest was prompt-cache churn, and measuring this
+run is how we found it. When Lore first injects a session’s recalled memory it rewrites part
+of the prefix, which busts the cache for that turn; on the single-breakpoint protocol this
+benchmark runs through, that one rewrite re-priced far more of the prompt than it should
+have. We landed three fixes off the back of it: one that stops the recalled-memory block
+from busting the whole system prefix, one that stops the compression layer from oscillating
+turn to turn, and one that anchors a stable cache breakpoint at the middle of the prompt so
+an upstream cache eviction re-bills half the prefix at most instead of all of it. Together
+they cut this cross-session figure from about $6.22 to the $4.02 above, driving the
+one-turn cache spike that opened the gap down to nothing. We would rather publish the number we
+now stand behind, and the road we took to it, than a prettier one we could not explain.<sup><a href="#user-content-fn-meters" id="user-content-fnref-meters-2" data-footnote-ref aria-describedby="footnote-label">1</a></sup></p>
 <p>The competitors’ lines also hide a cost this table cannot show. mem0 runs on a hosted
 subscription; mnemonic’s extraction and embeddings run on Gemini. mem0’s is a flat monthly
 fee, near nothing per run if you already pay it, a whole plan if you do not; the Gemini
@@ -308,13 +310,12 @@ the harness runs the worker on the same frontier model and with batching off, bo
 you avoid in normal use. Point the worker at a cheap model and that $0.28 bucket drops by
 roughly ten times; run against Anthropic or OpenAI and the batch API halves it again. That
 does not close the whole gap, but it is real, and it is on our side to keep closing.</p>
-<p>So the honest claim is narrower than “cheaper.” On this benchmark Lore keeps every fact,
-answers in fewer steps, and puts its entire cost on one visible bill, and on the frontier
-cross-session case it runs a dollar or so over a vanilla agent that keeps nothing. The
-single-long frontier run is where the trade reads cleanly, near-identical bills, one that
-keeps every fact against one that keeps a fifth. You do not pay a premium to stop thinking
-about any of this on the cases that matter most, and where you do pay a little more, you get
-to account for all of it.</p>
+<p>So the honest claim is precise. On this benchmark Lore keeps every fact, answers in fewer
+steps, and puts its entire cost on one visible bill, and on the frontier cross-session case
+it lands on the same bill as a vanilla agent that keeps nothing. The single-long frontier
+run reads the same way, near-identical bills, one that keeps every fact against one that
+keeps a fifth. You do not pay a premium to stop thinking about any of this, and you still
+get to account for all of it.</p>
 <h2 id="what-we-are-not-claiming">What we are not claiming</h2>
 <p>The benchmark has limits and we would rather say them than have you find them.</p>
 <p>Start with the most obvious one: we built Lore, we designed this benchmark, we ran it,
@@ -329,9 +330,9 @@ re-run it and update the numbers.</p>
 <p>We did not meter the competitors’ third-party backends ourselves, so their totals are
 visible cost plus a small off-bill charge, not a full accounting. The reliability gap on
 cheaper models is real, but on the frontier model it narrows to a near-tie, and we showed
-that rather than bury it. And Lore is not the cheapest arm on the frontier cross-session
-run, it is the priciest; we put that in its own table rather than lead with the retention
-win alone. Where the numbers are noisy, it is the vanilla arm that carries the
+that rather than bury it. On cost, Lore lands on the vanilla line on the frontier
+cross-session run rather than under it; we put the full table up rather than lead with the
+retention win alone. Where the numbers are noisy, it is the vanilla arm that carries the
 noise: the frontier single-long baseline swings run to run, some runs recovering a fact
 from their own compaction summary and some losing all four, the shape of degradation, not
 a clean failure. Lore’s cells came in at a flat 100% across every model and cap here, which
@@ -365,16 +366,17 @@ own excuse enough to skip the check, and the check killed it. The facts were cap
 embedded, and searchable; the injection path returned nothing whenever a project had no
 promoted long-term knowledge yet, so on a fresh project it handed the model an empty
 context. Fixing that flipped the arm from 0% to 100% on both cheaper models. And it did not
-stop at retention: measuring the cross-session bill turned up two ways Lore was busting the
+stop at retention: measuring the cross-session bill turned up three ways Lore was busting the
 prompt cache more than it needed to, a recalled-memory block that re-priced the whole system
-prefix on first injection, and a compression layer that oscillated turn to turn; fixing both
-cut the frontier cross-session cost from about $6.22 to $5.20. The benchmark did not just
-score the product. It kept telling us where it was broken, including the times we would
+prefix on first injection, a compression layer that oscillated turn to turn, and a single
+cache breakpoint that let one upstream eviction re-bill the entire prompt; fixing all three
+cut the frontier cross-session cost from about $6.22 to vanilla parity. The benchmark did not
+just score the product. It kept telling us where it was broken, including the times we would
 rather have blamed the model.</p>
 <p>We have claimed that memory is table stakes and that the real value is active context
 management. This is the shape of the evidence. On a frontier model, a good store lands near
-Lore on retention, and Lore’s edge is fewer steps and a bill you can fully account for,
-paid against a small cost premium we are still working down. On the cheaper models people
+Lore on retention, and Lore’s edge is fewer steps and a bill you can fully account for, now
+paid at parity with a vanilla agent that keeps nothing. On the cheaper models people
 actually run at scale, the win is retention itself, because those models do not reliably
 remember to drive a store by hand, and Lore does not ask them to. We could always <em>feel</em>
 that difference. Putting a test around it, and being honest when the test caught us, both on
