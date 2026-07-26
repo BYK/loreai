@@ -99,12 +99,38 @@ describe("safeDeltaInsertIndex — never splits a tool_use/tool_result pair", ()
     assertNoOrphanedTools(out);
   });
 
-  test("clamps to array bounds", () => {
+  test("clamps to array bounds (never the true tail — leaves one real message)", () => {
     const messages = [user(text("hi"))];
+    // The pair must never end at the tail, so the index is capped at length-1.
     expect(safeDeltaInsertIndex(messages, 99)).toBeLessThanOrEqual(
-      messages.length,
+      messages.length - 1,
     );
     expect(safeDeltaInsertIndex(messages, -5)).toBeGreaterThanOrEqual(0);
+  });
+
+  test("never lets the injected pair end at the true tail (the wedge)", () => {
+    // Regression for the wedge: when insertAt resolves to messages.length, the
+    // pair's trailing assistant became the literal last message — a harness
+    // renders it as a stray turn and the model ends the loop early. The index
+    // must be capped so a real user/tool_result always follows the pair.
+    const convo = [
+      user(text("q1")),
+      assistant(text("r1")),
+      user(text("q2")), // the live final user turn
+    ];
+    const idx = safeDeltaInsertIndex(convo, convo.length); // desired = tail
+    // Splice the [user, assistant] pair at idx; the LAST message must be a real
+    // message (the final user turn), never the injected assistant.
+    const out = convo.slice();
+    out.splice(idx, 0, user(text("delta-u")), assistant(text("delta-a")));
+    expect(out[out.length - 1].role).toBe("user");
+    expect((out[out.length - 1].content[0] as { text: string }).text).toBe(
+      "q2",
+    );
+    // And the injected assistant must not be at the tail.
+    expect(out[out.length - 1]).not.toEqual(
+      expect.objectContaining({ role: "assistant" }),
+    );
   });
 });
 

@@ -1006,7 +1006,11 @@ const KNOWLEDGE_DELTA_FRAMING_NOTE =
 // The inert assistant closer that ends the knowledge-delta exchange (the model
 // must not treat the pair as an open user turn — #1315). Also the canonical
 // assistant text the legacy migration rewrites a payload-carrying assistant to.
-const KNOWLEDGE_DELTA_ASSISTANT_CLOSER = "Understood.";
+// Reads as a system memory-refresh annotation (bracketed, matching the framing
+// note), NOT the agent answering the user — so if a harness ever renders it, it
+// does not look like a stray reply. Inert and non-eliciting (closes the
+// exchange, #1315).
+const KNOWLEDGE_DELTA_ASSISTANT_CLOSER = "[memory refreshed]";
 
 function firstText(m: GatewayMessage | undefined): string | undefined {
   const b = m?.content?.[0];
@@ -1263,7 +1267,16 @@ export function safeDeltaInsertIndex(
   messages: GatewayMessage[],
   desired: number,
 ): number {
-  let idx = Math.max(0, Math.min(desired, messages.length));
+  // The injected delta is a user→assistant PAIR. It must NEVER be placed at the
+  // true tail (idx == messages.length): the pair's trailing assistant would
+  // become the literal last message of the request, so (1) agent harnesses
+  // (Claude Code REPL, OpenCode) render it as a stray turn ("Understood.") and
+  // (2) the model sees the conversation ending on its OWN turn and ends the
+  // agent loop early (the wedge). Cap at messages.length - 1 so at least one
+  // real message (a user turn / tool_result) always follows the pair and closes
+  // the request. (Only reachable when messages.length >= 1; an empty array has
+  // no delta to place.)
+  let idx = Math.max(0, Math.min(desired, Math.max(0, messages.length - 1)));
   // Walk backward while the immediately-preceding message is an assistant
   // carrying a tool_use. This covers both a completed pair (the tool_result is
   // at idx) AND a pending tool call (no tool_result follows yet) — in either
@@ -1795,7 +1808,7 @@ export function buildKnowledgeDeltaMessage(
   // does not react to it.
   //
   // The KNOWLEDGE PAYLOAD rides the USER turn (as ambient context), and the
-  // ASSISTANT turn is a tiny inert closer ("Understood.") that ends the
+  // ASSISTANT turn is a tiny inert closer ("[memory refreshed]") that ends the
   // exchange. Putting the markdown payload on the assistant turn (the pre-fix
   // behavior) had two failure modes observed in production: (1) agent harnesses
   // (Claude Code REPL, OpenCode) RENDER the historical assistant message as a
@@ -1805,10 +1818,12 @@ export function buildKnowledgeDeltaMessage(
   // the payload is incoming user-role context and the assistant message carries
   // no markdown.
   //
-  // Placement is safe for role-alternation + tool-pairing: the block is spliced
-  // before the final message (a user turn / tool_result in an agent request via
-  // safeDeltaInsertIndex against len-1), so the injected assistant closer is
-  // always followed by a user turn. Stacked pairs alternate cleanly
+  // Placement is GUARANTEED never to leave the pair at the true tail:
+  // safeDeltaInsertIndex caps the insert index at messages.length - 1, so at
+  // least one real message (a user turn / tool_result) always follows the pair
+  // and closes the request. Without that cap the pair's trailing assistant could
+  // become the literal last message — a harness renders it as a stray turn and
+  // the model ends the loop early (the wedge). Stacked pairs alternate cleanly
   // (…user,asst,user,asst,final-user). The only same-role adjacency possible is
   // [user][inj-user] at the leading edge — identical to the prior single-user
   // behavior. The pair carries no tool_use/tool_result.
