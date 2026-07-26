@@ -37,6 +37,7 @@ import {
   setStorageMode,
   storeEmbedding,
   storeTemporalChunks,
+  TEMPORAL_CHUNK_SIZE,
 } from "../src/db/vec-store";
 import {
   _restoreProvider,
@@ -84,6 +85,30 @@ function v(...xs: number[]): Float32Array {
   }
   n = Math.sqrt(n) || 1;
   for (let i = 0; i < DIM; i++) a[i] /= n; // L2-normalize (system invariant)
+  return a;
+}
+
+// Deterministic 32-bit RNG for reproducible KNN-equivalence fixtures.
+function mulberry32(seed: number): () => number {
+  let a = seed | 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Random L2-normalized 4D vector. Tests that need DISTINCT, non-degenerate
+// vectors use this in place of the helper `v(...)` to avoid accidental ties.
+function unit4(rng: () => number): Float32Array {
+  const a = new Float32Array(DIM);
+  for (let i = 0; i < DIM; i++) a[i] = rng() * 2 - 1;
+  let n = 0;
+  for (let i = 0; i < DIM; i++) n += a[i] * a[i];
+  n = Math.sqrt(n) || 1;
+  for (let i = 0; i < DIM; i++) a[i] /= n;
   return a;
 }
 
@@ -710,6 +735,95 @@ describeVec("dimension change", () => {
         .query("INSERT INTO knowledge_vec(id, embedding) VALUES ('x', ?)")
         .run(toBlob(eight)),
     ).not.toThrow();
+  });
+
+  test("temporal vec0 records the compact chunk size at fresh install", () => {
+    if (!isVecAvailable()) return;
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    // The shadows table only exists after the first INSERT, so write one
+    // row first to materialize it.
+    insTemporal("seed", "s", 1);
+    storeEmbedding(db(), "temporal", "seed", v(1, 0, 0, 0));
+
+    // Stored value must equal the const so future readers can gate rebuilds
+    // against a chunk size recorded in `kv_meta`, not against the DDL string.
+    expect(getKV("vec.temporal_chunk_size")).toBe(String(TEMPORAL_CHUNK_SIZE));
+    const storedSize = (
+      db().query("SELECT size FROM temporal_vec_chunks LIMIT 1").get() as
+        | { size: number }
+        | undefined
+    )?.size;
+    expect(storedSize).toBe(TEMPORAL_CHUNK_SIZE);
+  });
+});
+
+describeVec("chunk size is a storage-only optimization", () => {
+  test("KNN top-k ordering is identical between 64-slot and 1024-slot chunks on the same vector set", () => {
+    if (!isVecAvailable()) return;
+
+    const conn = db();
+    setStorageMode(conn, "vec0");
+    ensureVec0Store(conn, DIM);
+
+    // Clear any prior rows so this test owns the table.
+    conn.query("DELETE FROM knowledge_vec").run();
+
+    // Distinct random unit-4D vectors: stable, non-degenerate, no accidental
+    // ties that would hide a chunk-size ordering swap.
+    const rng = mulberry32(0x517e);
+    const N = 200;
+    const inserted: Array<{ id: string; vec: Float32Array }> = [];
+    for (let i = 0; i < N; i++) {
+      const u = unit4(rng);
+      const id = `vec_${i.toString(36)}`;
+      inserted.push({ id, vec: u });
+    }
+
+    // Compact layout: the 64-slot table we ship to users.
+    conn
+      .query(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec_compact USING vec0(id TEXT PRIMARY KEY, embedding float[${DIM}] distance_metric=cosine, chunk_size=${TEMPORAL_CHUNK_SIZE})`,
+      )
+      .run();
+
+    // Wide layout: the default 1024-slot baseline (~3 MB / chunk).
+    conn
+      .query(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec_wide USING vec0(id TEXT PRIMARY KEY, embedding float[${DIM}] distance_metric=cosine, chunk_size=1024)`,
+      )
+      .run();
+
+    for (const { id, vec } of inserted) {
+      conn
+        .query(
+          "INSERT INTO knowledge_vec_compact (id, embedding) VALUES (?, ?)",
+        )
+        .run(id, toBlob(vec));
+      conn
+        .query("INSERT INTO knowledge_vec_wide (id, embedding) VALUES (?, ?)")
+        .run(id, toBlob(vec));
+    }
+
+    // Pick a query vector that isn't in the corpus so distances are non-trivial.
+    const q = unit4(rng);
+    const k = 10;
+
+    const compactTop = conn
+      .query(
+        "SELECT id FROM knowledge_vec_compact WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+      )
+      .all(toBlob(q), k) as Array<{ id: string }>;
+    const wideTop = conn
+      .query(
+        "SELECT id FROM knowledge_vec_wide WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+      )
+      .all(toBlob(q), k) as Array<{ id: string }>;
+
+    // Both layouts must agree on the top-k ordering — they share the same
+    // cosine algorithm and the same vector data, only the chunk boundary
+    // changes. Any divergence means a search-quality regression.
+    expect(compactTop.map((r) => r.id)).toEqual(wideTop.map((r) => r.id));
   });
 });
 
