@@ -445,6 +445,15 @@ describe("coalesceAdjacentAssistants — keeps the knowledge-delta closer as a s
         content: [{ type: "text", text: "*🧠 Refreshed memory*" }],
       }),
     ).toBe(true);
+    // Legacy closer text (persisted by sessions before #1494) is also
+    // detected — defense-in-depth against the inline-rendering regression
+    // for any block the parseDeltaMessages migration skipped.
+    expect(
+      isKnowledgeDeltaCloser({
+        role: "assistant",
+        content: [{ type: "text", text: "[memory refreshed]" }],
+      }),
+    ).toBe(true);
     expect(
       isKnowledgeDeltaCloser({
         role: "assistant",
@@ -458,6 +467,24 @@ describe("coalesceAdjacentAssistants — keeps the knowledge-delta closer as a s
         content: [{ type: "text", text: "*🧠 Refreshed memory*" }],
       }),
     ).toBe(false);
+  });
+
+  test("legacy '[memory refreshed]' closer stays separate from a real assistant message (no inline merge)", async () => {
+    const { coalesceAdjacentAssistants } = await import("../src/pipeline");
+    const legacyCloser: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "[memory refreshed]" }],
+    };
+    const realReply: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "Sure, I'll do that." }],
+    };
+    // Same protection as the current closer — the legacy text must not be
+    // folded into the real reply.
+    const out = coalesceAdjacentAssistants([legacyCloser, realReply]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toEqual(legacyCloser);
+    expect(out[1]).toEqual(realReply);
   });
 });
 

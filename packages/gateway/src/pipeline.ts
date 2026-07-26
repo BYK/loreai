@@ -1027,7 +1027,19 @@ function firstText(m: GatewayMessage | undefined): string | undefined {
  */
 export function isKnowledgeDeltaCloser(m: GatewayMessage | undefined): boolean {
   if (!m || m.role !== "assistant") return false;
-  return firstText(m) === KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
+  const text = firstText(m);
+  // Match BOTH the current closer AND the legacy `"[memory refreshed]"` text
+  // persisted by sessions before #1494 — parseDeltaMessages rewrites legacy
+  // assistant payloads to the current constant on replay, but a defensive
+  // check here protects any edge case where the legacy closer survives
+  // migration (manual `.lore.md` edits, pre-migration blocks from a fresh
+  // DB, or any block the migration's `asstText.includes("## Long-term
+  // Knowledge")` gate skipped). Without this, legacy closers get folded
+  // into adjacent real assistant messages — the exact inline-rendering
+  // bug we're guarding against.
+  return (
+    text === KNOWLEDGE_DELTA_ASSISTANT_CLOSER || text === "[memory refreshed]"
+  );
 }
 
 // A delta block's content is now a user→assistant PAIR, stored as a JSON array.
