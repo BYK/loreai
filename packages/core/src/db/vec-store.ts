@@ -688,7 +688,7 @@ export function repartitionVec0Project(
   );
 
   for (const { where, params } of scopes) {
-    // temporal_vec: chunk_id PK, +message_id aux, project_id + session_id PARTITION.
+    // temporal_vec: chunk_id PK, +message_id aux, +session_id aux, project_id PARTITION KEY.
     const selT = `SELECT chunk_id, message_id, session_id, embedding FROM temporal_vec WHERE ${where} LIMIT ${REPARTITION_BATCH}`;
     for (;;) {
       const rows = conn.query(selT).all(...params) as Array<{
