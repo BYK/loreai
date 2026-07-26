@@ -15,6 +15,8 @@ import {
   setStorageMode,
   storeEmbedding,
   storeTemporalChunks,
+  TEMPORAL_CHUNK_SIZE,
+  TEMPORAL_CHUNK_SIZE_KEY,
   TEMPORAL_PARTITION_MODE_KEY,
   vec0Rebuild,
 } from "../src/db/vec-store";
@@ -62,7 +64,7 @@ function resetToBlob(): void {
   }
   db()
     .query(
-      "DELETE FROM kv_meta WHERE key IN ('vec.storage_mode', 'vec.dimension', 'vec.temporal_partition_mode')",
+      "DELETE FROM kv_meta WHERE key IN ('vec.storage_mode', 'vec.dimension', 'vec.temporal_partition_mode', 'vec.temporal_chunk_size')",
     )
     .run();
   for (const t of BASE_TABLES) db().query(`DELETE FROM ${t}`).run();
@@ -336,5 +338,80 @@ describeVec("vec0Rebuild", () => {
     // misconfigured staging table — both deserve a thrown error, not silent
     // data loss.
     expect(true).toBe(true);
+  });
+
+  test("rebuilds a legacy 1024-slot temporal table to compact 64-slot chunks", () => {
+    if (!isVecAvailable()) return;
+
+    const conn = db();
+    setStorageMode(conn, "vec0");
+    ensureVec0Store(conn, DIM);
+
+    // Simulate a pre-PR-1499 temporal table: project_only partition
+    // recorded, but chunk size stored as 1024. The rebuild must observe
+    // that mismatch and re-create the table with compact chunks.
+    conn.query("DELETE FROM temporal_vec").run();
+    conn
+      .query("DELETE FROM kv_meta WHERE key = ?")
+      .run(TEMPORAL_CHUNK_SIZE_KEY);
+    conn
+      .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+      .run(TEMPORAL_CHUNK_SIZE_KEY, "1024");
+
+    // Insert a temporal row directly into the source table so the rebuild
+    // pickup finds real data to flatten.
+    conn
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES (?, ?, ?, 'user', ?, 0, 0, ?)",
+      )
+      .run("legacy#1", pid, "s1", "m-legacy", Date.now());
+    const vecs = Array.from({ length: 4 }, (_, i) => v(1, 0, 0, i * 0.001));
+    storeTemporalChunks(conn, "legacy#1", vecs);
+
+    const r = vec0Rebuild(conn, "temporal");
+    expect(r.rowsRebuilt).toBeGreaterThan(0);
+    // The rebuilt chunks must all carry the compact size.
+    const chunkSizes = (
+      conn.query("SELECT size FROM temporal_vec_chunks").all() as Array<{
+        size: number;
+      }>
+    ).map((x) => x.size);
+    expect(chunkSizes.length).toBeGreaterThan(0);
+    for (const size of chunkSizes) expect(size).toBe(TEMPORAL_CHUNK_SIZE);
+    // The marker must reflect the new compact size so future runs skip.
+    expect(
+      conn
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get(TEMPORAL_CHUNK_SIZE_KEY),
+    ).toEqual({ value: String(TEMPORAL_CHUNK_SIZE) });
+  });
+
+  test("skip path covers malformed chunk-size marker", () => {
+    if (!isVecAvailable()) return;
+
+    const conn = db();
+    setStorageMode(conn, "vec0");
+    ensureVec0Store(conn, DIM);
+
+    // Record a non-numeric chunk_size marker. The skip-guard treats it as
+    // "not at the compact size" and re-runs the rebuild, which writes
+    // the canonical value. This exercises the `Number.isSafeInteger` branch
+    // of `readTemporalChunkSize`.
+    conn.query("DELETE FROM temporal_vec").run();
+    // ensureVec0Store already wrote both the canonical partition_mode and
+    // chunk_size markers. Overwrite the chunk_size marker with garbage.
+    conn
+      .query("UPDATE kv_meta SET value = ? WHERE key = ?")
+      .run("garbage", TEMPORAL_CHUNK_SIZE_KEY);
+
+    const r = vec0Rebuild(conn, "temporal");
+    // No rows to rebuild, but the guard must bail through the rebuild path
+    // (not the cached skip path) and overwrite the bad marker.
+    expect(r.rowsRebuilt).toBe(0);
+    expect(
+      conn
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get(TEMPORAL_CHUNK_SIZE_KEY),
+    ).toEqual({ value: String(TEMPORAL_CHUNK_SIZE) });
   });
 });

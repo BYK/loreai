@@ -68,6 +68,18 @@ export const VEC_DIMENSION_KEY = "vec.dimension";
  */
 export const TEMPORAL_PARTITION_MODE_KEY = "vec.temporal_partition_mode";
 
+/**
+ * `kv_meta` key recording the `chunk_size` option used on `temporal_vec`. The
+ * default sqlite-vec chunk holds 1024 vectors (~3 MB at 768 dims); Lore uses
+ * 64 slots (~192 KB) so a sparse project partition does not reserve megabytes
+ * for empty slots. Recorded atomically inside the rebuild savepoint so future
+ * readers know the table is the compact variant and skip the redundant rebuild.
+ */
+export const TEMPORAL_CHUNK_SIZE_KEY = "vec.temporal_chunk_size";
+
+/** sqlite-vec slots per temporal chunk (~192 KB at 768 dims). */
+export const TEMPORAL_CHUNK_SIZE = 64;
+
 /** Logical table → physical base table name. */
 const BASE_TABLE: Record<EmbeddingTable, string> = {
   knowledge: "knowledge",
@@ -105,7 +117,7 @@ export function vec0Ddl(dim: number): string[] {
     `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${dim}] distance_metric=cosine)`,
     `CREATE VIRTUAL TABLE IF NOT EXISTS entity_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${dim}] distance_metric=cosine)`,
     `CREATE VIRTUAL TABLE IF NOT EXISTS distillation_vec USING vec0(id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, +session_id TEXT, embedding float[${dim}] distance_metric=cosine)`,
-    `CREATE VIRTUAL TABLE IF NOT EXISTS temporal_vec USING vec0(chunk_id TEXT PRIMARY KEY, +message_id TEXT, +session_id TEXT, project_id TEXT PARTITION KEY, embedding float[${dim}] distance_metric=cosine)`,
+    `CREATE VIRTUAL TABLE IF NOT EXISTS temporal_vec USING vec0(chunk_id TEXT PRIMARY KEY, +message_id TEXT, +session_id TEXT, project_id TEXT PARTITION KEY, embedding float[${dim}] distance_metric=cosine, chunk_size=${TEMPORAL_CHUNK_SIZE})`,
   ];
 }
 
@@ -478,6 +490,7 @@ export function ensureVec0Store(conn: EmbeddingWriteConn, dim: number): void {
   // layout; never mark it converted or a later vacuum would skip its rebuild.
   if (!temporalExisted || recreating) {
     setKv(conn, TEMPORAL_PARTITION_MODE_KEY, "project_only");
+    setKv(conn, TEMPORAL_CHUNK_SIZE_KEY, String(TEMPORAL_CHUNK_SIZE));
   }
 }
 
@@ -816,6 +829,22 @@ function readTemporalPartitionMode(conn: StorageModeConn): string | null {
   }
 }
 
+/**
+ * Returns the recorded temporal vec0 chunk size, or `null` for legacy tables
+ * (the rebuild path then unconditionally re-runs to pick up compact chunks).
+ */
+function readTemporalChunkSize(conn: StorageModeConn): number | null {
+  try {
+    const row = conn
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get(TEMPORAL_CHUNK_SIZE_KEY) as { value?: string } | null | undefined;
+    const size = Number(row?.value);
+    return Number.isSafeInteger(size) && size > 0 ? size : null;
+  } catch {
+    return null;
+  }
+}
+
 export function vec0Rebuild(
   conn: EmbeddingWriteConn,
   table: EmbeddingTable,
@@ -838,12 +867,13 @@ export function vec0Rebuild(
     .get(chunksTable);
   if (!chunksExists) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
 
-  // temporal-only: skip if already converted to project_only partition mode.
-  // The first `lore data vacuum` after upgrading to the new DDL converts the
-  // layout; subsequent runs have nothing to reclaim.
+  // temporal-only: skip if already converted to project_only with compact
+  // chunks. The first `lore data vacuum` after upgrading to the new DDL
+  // converts the layout; subsequent runs have nothing to reclaim.
   if (
     table === "temporal" &&
-    readTemporalPartitionMode(conn) === "project_only"
+    readTemporalPartitionMode(conn) === "project_only" &&
+    readTemporalChunkSize(conn) === TEMPORAL_CHUNK_SIZE
   ) {
     return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
   }
@@ -947,9 +977,11 @@ export function vec0Rebuild(
         `vec0Rebuild(${vt}): staged ${stagedCount} rows but rebuilt table has ${rowsRebuilt}`,
       );
     }
-    // Record the partition mode for temporal so subsequent rebuilds are skipped.
+    // Record the partition mode AND compact chunk size for temporal so
+    // subsequent rebuilds see the table as already-converted and skip.
     if (table === "temporal") {
       setKv(conn, TEMPORAL_PARTITION_MODE_KEY, "project_only");
+      setKv(conn, TEMPORAL_CHUNK_SIZE_KEY, String(TEMPORAL_CHUNK_SIZE));
     }
     return { rowsRebuilt, beforeChunks, afterChunks };
   });
