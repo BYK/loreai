@@ -317,7 +317,7 @@ describe("parseDeltaMessages — legacy assistant-payload block migration (#1490
       },
       {
         role: "assistant",
-        content: [{ type: "text", text: "[memory refreshed]" }],
+        content: [{ type: "text", text: "*🧠 Refreshed memory*" }],
       },
     ];
     const out = seedAndReplay(newShape);
@@ -326,7 +326,7 @@ describe("parseDeltaMessages — legacy assistant-payload block migration (#1490
     const userText = (injUser.content[0] as { text: string }).text;
     const asstText = (injAsst.content[0] as { text: string }).text;
     expect(userText).toBe(`${FRAMING}\n\n${PAYLOAD}`); // not double-migrated
-    expect(asstText).toBe("[memory refreshed]");
+    expect(asstText).toBe("*🧠 Refreshed memory*");
   });
 
   test("single legacy user message (pre-pair) passes through unmigrated", () => {

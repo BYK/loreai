@@ -78,6 +78,7 @@ import {
   deleteSessionPromptDelta,
   listSessionPromptDeltas,
   updateSessionPromptDeltaSelector,
+  updateSessionPromptDeltaContent,
   withSavepoint,
   loadHeaderSessionIndex,
   isHostedMode,
@@ -1006,15 +1007,27 @@ const KNOWLEDGE_DELTA_FRAMING_NOTE =
 // The inert assistant closer that ends the knowledge-delta exchange (the model
 // must not treat the pair as an open user turn — #1315). Also the canonical
 // assistant text the legacy migration rewrites a payload-carrying assistant to.
-// Reads as a system memory-refresh annotation (bracketed, matching the framing
-// note), NOT the agent answering the user — so if a harness ever renders it, it
-// does not look like a stray reply. Inert and non-eliciting (closes the
-// exchange, #1315).
-const KNOWLEDGE_DELTA_ASSISTANT_CLOSER = "[memory refreshed]";
+// Reads as a system memory-refresh annotation (bracketed markdown emphasis),
+// NOT the agent answering the user — so if a harness ever renders it, it does
+// not look like a stray reply. Inert and non-eliciting (closes the exchange,
+// #1315). Also detected by `isKnowledgeDeltaCloser` so adjacent-assistant
+// coalescing never merges it into a real assistant message.
+const KNOWLEDGE_DELTA_ASSISTANT_CLOSER = "*🧠 Refreshed memory*";
 
 function firstText(m: GatewayMessage | undefined): string | undefined {
   const b = m?.content?.[0];
   return b && b.type === "text" ? b.text : undefined;
+}
+
+/**
+ * True when the assistant message is the knowledge-delta closer. Used by
+ * `coalesceAdjacentAssistants` to keep the closer as a DISTINCT assistant
+ * message — never merged into a real assistant response — so a harness
+ * renders it separately and the model never treats it as its own turn.
+ */
+export function isKnowledgeDeltaCloser(m: GatewayMessage | undefined): boolean {
+  if (!m || m.role !== "assistant") return false;
+  return firstText(m) === KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
 }
 
 // A delta block's content is now a user→assistant PAIR, stored as a JSON array.
@@ -1371,6 +1384,23 @@ export function coalesceAdjacentAssistants(
   for (const m of messages) {
     const last = merged[merged.length - 1];
     if (last && last.role === "assistant" && m.role === "assistant") {
+      // The knowledge-delta closer (`*🧠 Refreshed memory*`) must ALWAYS stay
+      // as a separate assistant message — never coalesced into a real
+      // assistant response. A harness would otherwise render the closer inline
+      // with the real reply (e.g. "Sure, I'll do that. 🧠 Refreshed memory")
+      // and the model could treat the closer as part of its own turn. Insert a
+      // user-turn separator if necessary (the closer is always followed by a
+      // real message after the safeDeltaInsertIndex cap, but that message may
+      // be an assistant(tool_use) in a mid-tool-loop layout).
+      if (isKnowledgeDeltaCloser(last) || isKnowledgeDeltaCloser(m)) {
+        if (isKnowledgeDeltaCloser(last)) {
+          merged.push(m);
+        } else {
+          merged[merged.length - 1] = last;
+          merged.push(m);
+        }
+        continue;
+      }
       // Anthropic (and the block-order-preserving egress) require any leading
       // thinking / redacted_thinking blocks to stay FIRST in an assistant
       // message when extended thinking is active — clients inspect content[0].
@@ -1938,6 +1968,10 @@ export function appendKnowledgePromptDelta(input: {
   sessionID: string;
   projectPath: string;
   insertAt: number;
+  /** Current wall-clock (ms). Used by the debounce window — when the latest
+   *  block's `debounceAt` still covers `now`, the new mutations coalesce into
+   *  it instead of appending a second block. Optional for testability. */
+  now?: number;
   previousKeys: string[] | undefined;
   nextKeys: string[] | undefined;
   entries: Array<{
@@ -2013,6 +2047,17 @@ export function appendKnowledgePromptDelta(input: {
   // so later turns replay it byte-identically (cache-stable by construction).
   // The block stashes the mutation signature it surfaced so the NEXT turn can
   // advance the surfaced set past it (see advanceSurfacedKeys).
+  //
+  // DEBOUNCE: when the latest block is still within KNOWLEDGE_DELTA_DEBOUNCE_MS
+  // of its creation, merge the new mutations into it instead of creating a
+  // second block. This collapses rapid-fire curator batches (e.g. 3 entries
+  // curated back-to-back) into a single block, so the model sees one
+  // `[memory refreshed]` cycle instead of three back-to-back. The merged block's
+  // `mut` is the union of both, its content is the union payload, and its
+  // `insertAt` is the current tail (which may have moved). The debounce window
+  // resets on every coalesce — consecutive mutations within the window keep
+  // merging into the same block. When the window expires (or a compression
+  // fires), the next mutation creates a fresh block and a new window starts.
   const mut: DeltaMutation = {
     changed: changed.map((c) => ({
       id: c.id,
@@ -2020,6 +2065,40 @@ export function appendKnowledgePromptDelta(input: {
     })),
     removed: removedIds,
   };
+
+  const latest = blocks[blocks.length - 1];
+  if (
+    latest &&
+    input.now !== undefined &&
+    withinDebounceWindow(latest.selector, input.now)
+  ) {
+    // Merge into the latest block: union muts, union content, update insertAt.
+    const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
+    const mergedMessages = mergeDeltaContent(
+      JSON.parse(latest.content) as GatewayMessage[],
+      messages,
+    );
+    updateSessionPromptDeltaSelector(
+      input.sessionID,
+      latest.seq,
+      JSON.stringify({
+        target: "messages",
+        insertAt: input.insertAt,
+        mut: mergedMut,
+        debounceAt: input.now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
+      }),
+    );
+    updateSessionPromptDeltaContent(
+      input.sessionID,
+      latest.seq,
+      JSON.stringify(mergedMessages),
+    );
+    log.info(
+      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${mergedMut.changed.length} changed, ${mergedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
+    );
+    return true;
+  }
+
   appendSessionPromptDelta({
     sessionID: input.sessionID,
     projectID: ensureProject(input.projectPath),
@@ -2027,6 +2106,10 @@ export function appendKnowledgePromptDelta(input: {
       target: "messages",
       insertAt: input.insertAt,
       mut,
+      debounceAt:
+        input.now !== undefined
+          ? input.now + KNOWLEDGE_DELTA_DEBOUNCE_MS
+          : undefined,
     }),
     content: JSON.stringify(messages),
   });
@@ -2034,6 +2117,77 @@ export function appendKnowledgePromptDelta(input: {
     `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
   );
   return true;
+}
+
+/**
+ * Window (ms) during which a new mutation merges into the LATEST block instead
+ * of appending a new one. Bounds rapid-fire curator batches (e.g. 3 entries
+ * curated back-to-back) to a single `[memory refreshed]` cycle. 60s — long
+ * enough to absorb a curator batch, short enough that an idle session's next
+ * mutation (after the user resumes) gets its own block.
+ */
+const KNOWLEDGE_DELTA_DEBOUNCE_MS = 60_000;
+
+/** True when the latest block's debounce window still covers `now`. */
+function withinDebounceWindow(rawSelector: string, now: number): boolean {
+  try {
+    const parsed = JSON.parse(rawSelector) as { debounceAt?: unknown };
+    return typeof parsed.debounceAt === "number" && parsed.debounceAt > now;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Union two DeltaMutations. `changed` entries: same id → keep the later (higher)
+ * hash wins (curator may have re-surfaced the same id with new content). `removed`
+ * entries: union of both sets.
+ */
+function mergeMutations(
+  prev: DeltaMutation | null,
+  next: DeltaMutation,
+): DeltaMutation {
+  if (!prev) return next;
+  const changedMap = new Map<string, { id: string; h: string }>();
+  for (const c of prev.changed) changedMap.set(c.id, c);
+  for (const c of next.changed) changedMap.set(c.id, c);
+  const removed = new Set([...prev.removed, ...next.removed]);
+  return {
+    changed: [...changedMap.values()],
+    removed: [...removed],
+  };
+}
+
+/**
+ * Merge the new delta messages into the existing block's content. The existing
+ * block has a user-turn payload + assistant-closer pair; we replace the user
+ * payload with a union of all changed entries (deduped by id, latest content
+ * wins) and remove any removed ids from the rendered list.
+ */
+function mergeDeltaContent(
+  prev: GatewayMessage[],
+  next: GatewayMessage[],
+): GatewayMessage[] {
+  // The existing block is [user(payload), assistant(closer)]. The new block is
+  // the same shape. Concatenate the payloads and keep the closer.
+  const userText = firstText(prev[0]) ?? "";
+  const closerText = firstText(prev[1]) ?? KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
+  // Reuse the next block's payload text directly — it was just built by
+  // buildKnowledgeDeltaMessage from the latest changed/removed set, which is
+  // a superset of the previous block's (the previous block's entries are
+  // already in the surfaced set, so they would NOT appear in `changed` again;
+  // the new payload contains only the genuinely-new mutations).
+  const nextUserText = firstText(next[0]) ?? "";
+  return [
+    {
+      role: "user",
+      content: [{ type: "text", text: `${userText}\n\n${nextUserText}` }],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: closerText }],
+    },
+  ];
 }
 
 /**
@@ -8383,6 +8537,7 @@ async function handleConversationTurn(
       sessionID,
       projectPath,
       insertAt,
+      now: Date.now(),
       ...pendingKnowledgeDelta,
     });
   }

@@ -27,6 +27,7 @@ import {
   removeOrphanedToolResults,
   captureToolPairing400,
   buildKnowledgeDeltaMessage,
+  isKnowledgeDeltaCloser,
 } from "../src/pipeline";
 import { appendSessionPromptDelta, ensureProject } from "@loreai/core";
 import type {
@@ -315,7 +316,7 @@ describe("knowledge-delta PAIR — no consecutive assistants, tool-pairing intac
     });
   }
 
-  test("mid-tool-loop tail: pair folds into the tool_use assistant, alternation preserved", () => {
+  test("mid-tool-loop tail: closer stays separate from the tool_use assistant", () => {
     const sessionID = `pair-toolloop-${Date.now()}`;
     const projectID = ensureProject(`/tmp/lore-pair-toolloop-${Date.now()}`);
     // Realistic agent turn: assistant plans + calls a tool in ONE message, then
@@ -331,13 +332,24 @@ describe("knowledge-delta PAIR — no consecutive assistants, tool-pairing intac
     const out = applySessionPromptDeltas(layout, sessionID);
     removeOrphanedToolResults(out);
     assertNoOrphanedTools(out);
-    assertNoConsecutiveAssistants(out);
+    // The closer (`*🧠 Refreshed memory*`) stays as a DISTINCT assistant
+    // message — never coalesced into the real tool_use assistant. This means
+    // consecutive assistants CAN appear in the mid-tool-loop layout, and that's
+    // intentional: a harness must render the closer separately so the model
+    // never treats it as part of its own turn.
+    const roles = out.map((m) => m.role);
+    expect(roles).toContain("user");
+    expect(roles).toContain("assistant");
+    // The closer must appear as its own assistant message (not merged).
+    const closerIdx = out.findIndex(isKnowledgeDeltaCloser);
+    expect(closerIdx).toBeGreaterThan(-1);
+    expect(out[closerIdx].role).toBe("assistant");
     // The framing note (non-ack) survived as its own user turn…
     const joined = out
       .flatMap((m) => m.content.map((b) => (b as { text?: string }).text ?? ""))
       .join("\n");
     expect(joined).toContain("Lore knowledge update");
-    // …and the knowledge payload rode along (folded into the assistant).
+    // …and the knowledge payload rode along.
     expect(joined).toContain("Card primitive");
     // Stable on replay (frozen position → byte-identical roles).
     const out2 = applySessionPromptDeltas(layout, sessionID);
@@ -357,6 +369,95 @@ describe("knowledge-delta PAIR — no consecutive assistants, tool-pairing intac
     const out = applySessionPromptDeltas(layout, sessionID);
     assertNoOrphanedTools(out);
     assertNoConsecutiveAssistants(out);
+  });
+});
+
+/**
+ * The knowledge-delta closer (`*🧠 Refreshed memory*`) must NEVER coalesce
+ * into an adjacent real assistant message — a harness would render it inline
+ * with the real reply and the model could treat it as part of its own turn.
+ * `coalesceAdjacentAssistants` detects the closer via `isKnowledgeDeltaCloser`
+ * and skips the merge. Regression for the session "Armin's blog post &
+ * folklore solution" where `*🧠 Refreshed memory*` was appearing inline with
+ * the model's real response.
+ */
+describe("coalesceAdjacentAssistants — keeps the knowledge-delta closer as a separate assistant message", () => {
+  test("closer followed by a real assistant message stays distinct (not merged)", async () => {
+    const { coalesceAdjacentAssistants } = await import("../src/pipeline");
+    const closer: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "*🧠 Refreshed memory*" }],
+    };
+    const realReply: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "I'll look into that." }],
+    };
+    const out = coalesceAdjacentAssistants([closer, realReply]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toEqual(closer);
+    expect(out[1]).toEqual(realReply);
+  });
+
+  test("real assistant message followed by a closer stays distinct (not merged)", async () => {
+    const { coalesceAdjacentAssistants } = await import("../src/pipeline");
+    const realReply: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "I'll look into that." }],
+    };
+    const closer: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "*🧠 Refreshed memory*" }],
+    };
+    const out = coalesceAdjacentAssistants([realReply, closer]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toEqual(realReply);
+    expect(out[1]).toEqual(closer);
+  });
+
+  test("two real assistant messages still coalesce (closer protection doesn't break the normal case)", async () => {
+    const { coalesceAdjacentAssistants } = await import("../src/pipeline");
+    const a: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "first part." }],
+    };
+    const b: GatewayMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "second part." }],
+    };
+    const out = coalesceAdjacentAssistants([a, b]);
+    expect(out).toHaveLength(1);
+    expect(out[0].role).toBe("assistant");
+    // Both texts are present in the merged message (order is preserved per
+    // the existing coalesce contract — newer message's content first to keep
+    // any leading reasoning blocks at index 0).
+    const merged = (out[0].content as Array<{ text?: string }>)
+      .map((b) => b.text ?? "")
+      .join("|");
+    expect(merged).toContain("first part.");
+    expect(merged).toContain("second part.");
+  });
+
+  test("isKnowledgeDeltaCloser detects the closer and rejects non-closer text", async () => {
+    const { isKnowledgeDeltaCloser } = await import("../src/pipeline");
+    expect(
+      isKnowledgeDeltaCloser({
+        role: "assistant",
+        content: [{ type: "text", text: "*🧠 Refreshed memory*" }],
+      }),
+    ).toBe(true);
+    expect(
+      isKnowledgeDeltaCloser({
+        role: "assistant",
+        content: [{ type: "text", text: "I'll look into that." }],
+      }),
+    ).toBe(false);
+    expect(isKnowledgeDeltaCloser(undefined)).toBe(false);
+    expect(
+      isKnowledgeDeltaCloser({
+        role: "user",
+        content: [{ type: "text", text: "*🧠 Refreshed memory*" }],
+      }),
+    ).toBe(false);
   });
 });
 
