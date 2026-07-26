@@ -1,4 +1,99 @@
 # Changelog
+## 0.39.0
+
+### New Features ✨
+
+#### Binpatch
+
+- Reusable composite Action for delta-patch generate + publish by @BYK in [#1462](https://github.com/BYK/loreai/pull/1462)
+- Chain discovery behind a pluggable SourceStrategy by @BYK in [#1460](https://github.com/BYK/loreai/pull/1460)
+
+#### Cch
+
+- Add seeds for Claude Code up to 2.1.220 by @github-actions in [#1484](https://github.com/BYK/loreai/pull/1484)
+- Add seeds for Claude Code up to 2.1.219 by @github-actions in [#1481](https://github.com/BYK/loreai/pull/1481)
+- Add seeds for Claude Code up to 2.1.218 by @github-actions in [#1453](https://github.com/BYK/loreai/pull/1453)
+
+#### Core
+
+- Use compact chunk_size=64 for temporal_vec to reclaim ~512 MB by @BYK in [#1499](https://github.com/BYK/loreai/pull/1499)
+- Drop session_id from temporal_vec partition key to reclaim ~10 GB by @BYK in [#1495](https://github.com/BYK/loreai/pull/1495)
+- Rebuild temporal_vec in vacuum to reclaim packed-chunk over-allocation by @BYK in [#1491](https://github.com/BYK/loreai/pull/1491)
+
+#### Import
+
+- Use github-copilot on-disk token directly for extraction by @BYK in [#1457](https://github.com/BYK/loreai/pull/1457)
+- Authenticate extraction from each harness's own on-disk credentials by @BYK in [#1455](https://github.com/BYK/loreai/pull/1455)
+
+#### Other
+
+- (gateway,pi) Authoritatively cancel compaction when layer-0 budget fits (#961) by @BYK in [#1483](https://github.com/BYK/loreai/pull/1483)
+- (upgrade) Surface malformed_chain as a delta telemetry reason by @BYK in [#1472](https://github.com/BYK/loreai/pull/1472)
+
+### Bug Fixes 🐛
+
+#### Cache
+
+- Align CACHE_ANCHOR_MIN_MESSAGES with the anchor's real engagement point (#961) by @BYK in [#1471](https://github.com/BYK/loreai/pull/1471)
+- Anchor the OpenAI intermediate cache_control breakpoint at the prefix midpoint (#961) by @BYK in [#1469](https://github.com/BYK/loreai/pull/1469)
+- Stable intermediate cache_control anchor on the OpenAI protocol path (#961) by @BYK in [#1467](https://github.com/BYK/loreai/pull/1467)
+
+#### Ci
+
+- Typecheck eval/ and deflake anthropic-openai port race by @BYK in [#1476](https://github.com/BYK/loreai/pull/1476)
+- Isolate delta patches in .delta-patches + guard non-binary patches by @BYK in [#1470](https://github.com/BYK/loreai/pull/1470)
+
+#### Core
+
+- Invariant-check judge returns 4 verdicts, not 2 (PR #1490 FP) by @BYK in [#1493](https://github.com/BYK/loreai/pull/1493)
+- Preserve temporal KNN partition pushdown before vacuum by @BYK in [#1496](https://github.com/BYK/loreai/pull/1496)
+
+#### Deps
+
+- Bump postcss to fix GHSA-r28c-9q8g-f849 (#38) by @BYK in [#1487](https://github.com/BYK/loreai/pull/1487)
+- Patch fast-uri, sharp, svgo, adm-zip Dependabot alerts (#30-37) by @BYK in [#1464](https://github.com/BYK/loreai/pull/1464)
+
+#### Gateway
+
+- Debounce knowledge-delta injection + distinct closer block by @BYK in [#1497](https://github.com/BYK/loreai/pull/1497)
+- Never place knowledge-delta pair at the true tail (the wedge) by @BYK in [#1494](https://github.com/BYK/loreai/pull/1494)
+- Drop cache-machinery sentence from knowledge-delta framing note by @BYK in [#1492](https://github.com/BYK/loreai/pull/1492)
+- Inject knowledge-delta payload on user turn, not assistant by @BYK in [#1490](https://github.com/BYK/loreai/pull/1490)
+- Emit usage block on OpenAI-completions streaming responses (#1475) by @BYK in [#1485](https://github.com/BYK/loreai/pull/1485)
+- Route context-bound LTM through the durable delta, retire system[2] (#961) by @BYK in [#1461](https://github.com/BYK/loreai/pull/1461)
+
+#### Import
+
+- Honor env-var + explicit-model credentials for standalone import by @BYK in [#1466](https://github.com/BYK/loreai/pull/1466)
+- Use chat-completions-capable Copilot worker model (gpt-5-mini) by @BYK in [#1459](https://github.com/BYK/loreai/pull/1459)
+- Honor LORE_WORKER_MODEL env var in standalone import by @BYK in [#1456](https://github.com/BYK/loreai/pull/1456)
+- Plumb dedicatedWorkerKey and workerUpstream to LLM client by @JordanTreDaniel in [#1454](https://github.com/BYK/loreai/pull/1454)
+
+#### Other
+
+- (gradient) Strict monotonic compression-layer ratchet — never decompress except emergency (#961) by @BYK in [#1465](https://github.com/BYK/loreai/pull/1465)
+- (run) Adopt the user's existing upstream env instead of clobbering it by @BYK in [#1463](https://github.com/BYK/loreai/pull/1463)
+- (upgrade) Harden SWAR alignment + fix multi-hop apply progress total by @BYK in [#1451](https://github.com/BYK/loreai/pull/1451)
+- (worker) Fall back to a backup model when the preferred one is unavailable by @BYK in [#1468](https://github.com/BYK/loreai/pull/1468)
+- Clear cross_project when moving knowledge from global to project by @BYK in [#1489](https://github.com/BYK/loreai/pull/1489)
+
+### Internal Changes 🔧
+
+#### Gateway
+
+- Add end-to-end integration test for /v1/compact cancel decision (#961) by @BYK in [#1488](https://github.com/BYK/loreai/pull/1488)
+- Consume binpatch from npm instead of the vendored copy by @BYK in [#1474](https://github.com/BYK/loreai/pull/1474)
+
+#### Other
+
+- (binpatch) Extract delta-patch apply core into a workspace package by @BYK in [#1458](https://github.com/BYK/loreai/pull/1458)
+- (deps-dev) Bump tar from 7.5.20 to 7.5.21 in the npm_and_yarn group across 1 directory by @dependabot in [#1477](https://github.com/BYK/loreai/pull/1477)
+- (import) E2e coverage for the commandImport decision matrix + real readers by @BYK in [#1473](https://github.com/BYK/loreai/pull/1473)
+
+### Other
+
+- blog: let your past decisions review the code by @BYK in [#1412](https://github.com/BYK/loreai/pull/1412)
+
 ## 0.38.0
 
 ### New Features ✨
