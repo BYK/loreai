@@ -89,6 +89,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 1000,
     });
 
     // Turn 2 (later, larger conversation): B is genuinely edited.
@@ -100,6 +101,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 121_000, // > 60s past block 1 → outside debounce window
     });
 
     expect(wrote1).toBe(true);
@@ -148,6 +150,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: [],
       entries: [],
+      now: 1000,
     });
     // Turn 2..N: the pin baseline still lists the (gone) entry every turn (the
     // original bug condition), but it must never produce a block.
@@ -161,6 +164,7 @@ describe("append-only durable knowledge deltas", () => {
           previousKeys: pin, // frozen pin — same every turn (the bug condition)
           nextKeys: [],
           entries: [],
+          now: 121_000 + turn * 1000, // outside debounce window — each call a fresh attempt
         }),
       );
     }
@@ -200,6 +204,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 1000,
     });
     const block0Before = listSessionPromptDeltas(sessionID)[0];
 
@@ -211,6 +216,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 121_000, // > 60s past block 0 → outside debounce window
     });
     const block0After = listSessionPromptDeltas(sessionID)[0];
 
@@ -248,6 +254,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 1000,
     });
     ltm.update(b, { content: "B r2." });
     appendKnowledgePromptDelta({
@@ -257,6 +264,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 121_000, // > 60s past block 0 → outside debounce window
     });
     expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
 
@@ -293,6 +301,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 200_000, // outside debounce window — fresh attempt that finds nothing to surface
     });
     expect(wrote).toBe(false);
     expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
@@ -356,6 +365,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 1000,
     });
     // Surfaced is now at v2; another call with no further change → no block.
     const wNoop = appendKnowledgePromptDelta({
@@ -365,6 +375,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 1001, // inside debounce window — coalesces into block 0 (no-op)
     });
     // A genuine second edit → a new block surfaces v3.
     ltm.update(a, { content: "v3." });
@@ -375,6 +386,7 @@ describe("append-only durable knowledge deltas", () => {
       previousKeys: pin,
       nextKeys: pin,
       entries: [],
+      now: 121_000, // > 60s past block 0 → outside debounce window
     });
 
     expect(w1).toBe(true);

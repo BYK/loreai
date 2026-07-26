@@ -1982,7 +1982,10 @@ export function appendKnowledgePromptDelta(input: {
   insertAt: number;
   /** Current wall-clock (ms). Used by the debounce window — when the latest
    *  block's `debounceAt` still covers `now`, the new mutations coalesce into
-   *  it instead of appending a second block. Optional for testability. */
+   *  it instead of appending a second block. Defaults to `Date.now()` so a
+   *  caller can never silently bypass the debounce by forgetting to pass it
+   *  (a previous design used `now?: number` and treated undefined as "skip
+   *  debounce, always append", which was an easy footgun for future callers). */
   now?: number;
   previousKeys: string[] | undefined;
   nextKeys: string[] | undefined;
@@ -2079,11 +2082,8 @@ export function appendKnowledgePromptDelta(input: {
   };
 
   const latest = blocks[blocks.length - 1];
-  if (
-    latest &&
-    input.now !== undefined &&
-    withinDebounceWindow(latest.selector, input.now)
-  ) {
+  const now = input.now ?? Date.now();
+  if (latest && withinDebounceWindow(latest.selector, now)) {
     // Merge into the latest block: union muts, union content, update insertAt.
     const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
     const mergedMessages = mergeDeltaContent(
@@ -2097,7 +2097,7 @@ export function appendKnowledgePromptDelta(input: {
         target: "messages",
         insertAt: input.insertAt,
         mut: mergedMut,
-        debounceAt: input.now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
+        debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
       }),
     );
     updateSessionPromptDeltaContent(
@@ -2118,10 +2118,7 @@ export function appendKnowledgePromptDelta(input: {
       target: "messages",
       insertAt: input.insertAt,
       mut,
-      debounceAt:
-        input.now !== undefined
-          ? input.now + KNOWLEDGE_DELTA_DEBOUNCE_MS
-          : undefined,
+      debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
     }),
     content: JSON.stringify(messages),
   });
