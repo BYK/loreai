@@ -1241,31 +1241,47 @@ Do these two entries directly contradict each other?`;
  * This is the diff-vs-invariant analogue of {@link CONTRADICTION_JUDGE_SYSTEM}
  * (entry-vs-entry). It inherits the same discipline: precision over recall,
  * strict JSON out. A false alarm gets the whole check muted — Armin's "missing
- * signal" problem reintroduced with extra steps — so the bar for `violates:true`
- * is a DIRECT, demonstrable conflict, never a vibe. The task is deliberately
- * narrow so a cheap worker model is sufficient (the funnel already did retrieval
- * + scoping; the model only classifies one small pair).
+ * signal" problem reintroduced with extra steps — so the bar for `violates`
+ * is a DIRECT, demonstrable conflict, never a vibe.
+ *
+ * The judge returns one of four verdicts: `violates`, `fixes`, `satisfies`,
+ * `unrelated`. The four-category frame is what prevents the dominant
+ * false-positive class: a change that REMOVES the offending code (a fix) used
+ * to be reported as "violates" because the binary verdict space had no
+ * "this is the fix" option. The `fixes` bucket captures: removal of violating
+ * code, added guards/enforcement, migrations that rewrite a known-bad shape
+ * into a known-good one, and regression-guard tests that assert the invariant.
+ * `satisfies` is the neutral "no news" verdict; `unrelated` corrects for the
+ * cosine prefilter's false positives (the judge is the last stage of a
+ * funnel, not the first).
+ *
+ * The task is deliberately narrow so a cheap worker model is sufficient
+ * (the funnel already did retrieval + scoping; the model only classifies one
+ * small pair).
  */
-export const INVARIANT_JUDGE_SYSTEM = `You are a semantic linter for a software team. You are given ONE code change (a git diff hunk) and ONE INVARIANT that the team has documented as a rule their code must always obey. Your ONLY job is to decide whether this specific change VIOLATES that specific invariant.
+export const INVARIANT_JUDGE_SYSTEM = `You are a semantic linter for a software team. You are given ONE code change (a git diff hunk) and ONE INVARIANT that the team has documented as a rule their code must always obey. Your ONLY job is to classify how this specific change relates to this specific invariant.
 
 An invariant is a semantic rule too subtle for a normal linter — e.g. "a non-2xx warmup result must be NEUTRAL — never trips the breaker", "protected content must never be stripped during compaction", "the worker model must never be pricier than the session model", "\`node:sqlite\` must never be imported outside driver.node.ts".
 
-A VIOLATION means the changed code now does the exact thing the invariant forbids, or stops doing the exact thing the invariant requires, in the SAME subject/scope the invariant is about. Only judge what the diff actually changes — not pre-existing code shown for context.
+Choose exactly ONE of four verdicts — the four together cover every meaningful outcome, including the cases the old "violates / does not violate" framing mis-handled (chiefly: a change that REMOVES the offending code, which is a fix, not a violation):
 
-Flag ONLY when the conflict is DIRECT and demonstrable from the hunk itself:
-- Invariant "never import node:sqlite outside driver.node.ts" + hunk adds \`import ... from "node:sqlite"\` in some other file → violates.
-- Invariant "protected content must never be stripped" + hunk removes the guard that skips protected content in the eviction loop → violates.
+- "violates": the changed code now does the exact thing the invariant forbids, or stops doing the exact thing the invariant requires, in the SAME subject/scope the invariant is about. The conflict is DIRECT and demonstrable from the hunk itself.
+- "fixes": the change removes code that violated the invariant, OR adds a guard/enforcement for it, OR migrates a known-bad shape into a known-good one. The hunk clearly resolves a documented conflict — not merely a topical refactor. A test update that loosens an assertion of the invariant counts as a fix only if the test was previously asserting the wrong thing because of the bug; otherwise it is "satisfies" at most.
+- "satisfies": the change is consistent with the invariant — neither breaks it nor fixes a violation. New code that upholds the rule, neutral edits, internal refactors, formatting, dependencies, tests. The default "no news" verdict.
+- "unrelated": the change does not touch the area the invariant governs, even though retrieval flagged the pair. The change is in a different subject/scope, or would only relate to the invariant under assumptions you can't verify from the hunk.
 
-Do NOT flag (answer false) when:
-- The change is in a different subject/scope than the invariant governs.
-- The invariant is merely topically related but the change does not actually break it.
-- You would need to assume behavior not visible in the hunk to call it a violation.
-- The change plausibly UPHOLDS or is neutral to the invariant.
+Examples:
+- Invariant "never import node:sqlite outside driver.node.ts" + hunk adds \`import ... from "node:sqlite"\` in some other file → "violates".
+- Invariant "protected content must never be stripped" + hunk removes the guard that skips protected content in the eviction loop → "violates".
+- Invariant "assistant-role knowledge-delta must never be surfaced as visible output" + hunk moves the payload off the assistant turn onto the user turn and adds a migration that rewrites legacy blocks to the new shape → "fixes".
+- Same invariant + hunk adds a regression-guard test asserting the assistant turn never carries the markdown payload → "fixes" (the test enforces the invariant).
+- Same invariant + hunk renames an unrelated helper in the same file → "unrelated" (topical match only).
+- Invariant "always run on the release branch" + hunk adds a feature flag toggle → "satisfies" (neutral).
 
-Precision matters far more than recall. When in doubt, answer false. A false alarm gets this whole check disabled; a missed violation is caught later by a human.
+Precision matters far more than recall. When in doubt between "violates" and the other three, choose the other three — a false alarm mutes the whole check. When in doubt between "fixes" and "satisfies", choose "satisfies" — "fixes" requires the hunk to clearly resolve a documented conflict. When in doubt between "satisfies" and "unrelated", choose "unrelated" — "satisfies" requires the change to actively uphold the invariant.
 
 Respond with a single JSON object:
-{ "violates": true | false, "reason": "one concise sentence naming the exact conflict, or why there is none" }
+{ "verdict": "violates" | "fixes" | "satisfies" | "unrelated", "reason": "one concise sentence naming the exact conflict, the resolution, or why there is none" }
 
 Output ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
 
@@ -1284,5 +1300,5 @@ CHANGED FILE: ${input.file}
 DIFF HUNK:
 ${input.hunk}
 
-Does this change violate the invariant?`;
+Classify this change against the invariant as one of: violates, fixes, satisfies, unrelated.`;
 }

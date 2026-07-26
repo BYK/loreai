@@ -478,7 +478,26 @@ export function changedFiles(hunks: DiffHunk[]): Set<string> {
 // ---------------------------------------------------------------------------
 
 export interface InvariantVerdict {
-  violates: boolean;
+  /**
+   * The judge's classification. One of four mutually exclusive outcomes:
+   *
+   * - `violates` — the diff introduces or leaves in place a direct conflict
+   *   with the invariant (a finding).
+   * - `fixes` — the diff removes code that violated the invariant, adds a
+   *   guard/enforcement, migrates a known-bad shape to a known-good one, or
+   *   adds a regression-guard test that asserts the invariant. NOT a finding.
+   * - `satisfies` — the diff is consistent with the invariant: neutral, a
+   *   refactor, a new feature that upholds the rule. NOT a finding.
+   * - `unrelated` — the diff does not actually touch the area the invariant
+   *   governs, even though the cosine prefilter surfaced the pair. Corrects
+   *   funnel noise. NOT a finding.
+   *
+   * The four-category frame prevents the dominant false-positive class: a
+   * change that REMOVES the offending code (a fix) used to be reported as
+   * "violates" because the binary verdict space had no "this is the fix"
+   * option. With `fixes` available the judge can return the correct answer.
+   */
+  verdict: "violates" | "fixes" | "satisfies" | "unrelated";
   reason: string | null;
 }
 
@@ -532,16 +551,32 @@ export function parseInvariantVerdict(
     if (!candidate) continue;
     try {
       const parsed = JSON.parse(candidate);
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        typeof parsed.violates === "boolean"
-      ) {
+      if (!parsed || typeof parsed !== "object") continue;
+      // Accept the new {verdict: string} shape. The old {violates: boolean}
+      // shape is no longer emitted by the prompt but we still parse it for
+      // backward compatibility with stale logs / test fixtures — mapping
+      // `true` to `violates` and `false` to the conservative `unrelated`
+      // (NOT `satisfies`, since the binary framing couldn't distinguish a fix
+      // from a neutral change).
+      let verdict: InvariantVerdict["verdict"] | null = null;
+      if (typeof parsed.verdict === "string") {
+        if (
+          parsed.verdict === "violates" ||
+          parsed.verdict === "fixes" ||
+          parsed.verdict === "satisfies" ||
+          parsed.verdict === "unrelated"
+        ) {
+          verdict = parsed.verdict;
+        }
+      } else if (typeof parsed.violates === "boolean") {
+        verdict = parsed.violates ? "violates" : "unrelated";
+      }
+      if (verdict !== null) {
         const reason =
           typeof parsed.reason === "string"
             ? parsed.reason.slice(0, 400)
             : null;
-        return { violates: parsed.violates, reason };
+        return { verdict, reason };
       }
     } catch {
       // not valid JSON — try the next candidate
@@ -1024,7 +1059,13 @@ export async function checkInvariants(input: {
       unparseable++;
       continue;
     }
-    if (!verdict.violates) continue;
+    // Only "violates" produces a finding. "fixes", "satisfies", and "unrelated"
+    // are all non-finding verdicts — the four-category frame exists precisely to
+    // let the judge say "this is the fix" or "this hunk isn't actually related"
+    // without flagging. The old binary verdict space could not express either,
+    // which is what produced the dominant false-positive class (a fix being read
+    // as a violation).
+    if (verdict.verdict !== "violates") continue;
     // Fan out the verdict to every hunk in the representative's cluster: a
     // repeated change (e.g. one rename across N files) is flagged in all N.
     // Dedup per (invariant, file): the same invariant flagged against several
