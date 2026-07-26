@@ -141,6 +141,7 @@ export {
   deleteSessionPromptDelta,
   listSessionPromptDeltas,
   updateSessionPromptDeltaSelector,
+  updateSessionPromptDeltaContent,
   recordCacheBustObservation,
   getCacheBustStats,
   summarizeCacheBustStats,

@@ -40,7 +40,9 @@ import {
   reanchorExistingDelta,
   reanchorDeltaOnCompression,
   appendKnowledgePromptDelta,
+  surfaceSignature,
   fnv1a,
+  buildKnowledgeDeltaMessage,
 } from "../src/pipeline";
 import {
   appendSessionPromptDelta,
@@ -1114,6 +1116,8 @@ describe("reanchorDeltaOnCompression — re-anchors (never deletes) on a compres
         previousKeys: pin,
         nextKeys: pin,
         entries: [],
+        now: 1000, // explicit clock so the next call (now=121000) falls outside
+        // the 60s debounce window and forces a fresh block
       }),
     ).toBe(true);
 
@@ -1127,6 +1131,7 @@ describe("reanchorDeltaOnCompression — re-anchors (never deletes) on a compres
         previousKeys: pin,
         nextKeys: pin,
         entries: [],
+        now: 1001, // inside the window — coalesces into block 1
       }),
     ).toBe(false);
 
@@ -1142,6 +1147,7 @@ describe("reanchorDeltaOnCompression — re-anchors (never deletes) on a compres
         previousKeys: pin,
         nextKeys: pin,
         entries: [],
+        now: 121_000, // > 60s past block 1 → outside the debounce window
       }),
     ).toBe(true);
 
@@ -1154,5 +1160,394 @@ describe("reanchorDeltaOnCompression — re-anchors (never deletes) on a compres
       changed: Array<{ id: string }>;
     };
     expect(newestMut.changed.map((c) => c.id)).toEqual([b]);
+  });
+});
+
+/**
+ * Knowledge-delta debounce: when a new mutation arrives within the
+ * debounce window of the latest block (60s default), it coalesces into the
+ * existing block instead of appending a second one. This prevents the model
+ * from seeing multiple back-to-back `*🧠 Refreshed memory*` cycles when the
+ * curator creates several entries in quick succession.
+ */
+describe("appendKnowledgePromptDelta — debounce coalesces rapid mutations", () => {
+  const PROJECT = "/tmp/lore-debounce-test";
+  const keyOf = (id: string, title: string, content: string): string =>
+    `${id}:${surfaceSignature(title, content)}`;
+
+  test("two mutations within the debounce window coalesce into one block", () => {
+    const sessionID = `debounce-merge-${Date.now()}-${Math.random()}`;
+
+    // Create BOTH entries upfront so both are in the baseline, then update
+    // both to trigger two simultaneous mutations — the debounce coalesces
+    // them into one block.
+    const id1 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "First entry",
+      content: "v1.",
+    });
+    const id2 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Second entry",
+      content: "v1.",
+    });
+    const id1V1Key = keyOf(id1, "First entry", "v1.");
+    const id2V1Key = keyOf(id2, "Second entry", "v1.");
+
+    // First mutation: update id1 → v1→v2. Baseline has both v1 keys.
+    ltm.update(id1, { content: "v2 changed." });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [id1V1Key, id2V1Key],
+        nextKeys: [id1V1Key, id2V1Key],
+        entries: [],
+        now: 1000,
+      }),
+    ).toBe(true);
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+
+    // Second mutation within the window: update id2 → v1→v2. id1 is already
+    // in the surfaced set, so only id2 surfaces as a new change.
+    ltm.update(id2, { content: "v2 changed." });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [id1V1Key, id2V1Key],
+        nextKeys: [id1V1Key, id2V1Key],
+        entries: [],
+        now: 5000, // 4s after the first block — within the 60s window
+      }),
+    ).toBe(true);
+
+    // Still only one block — the second mutation coalesced into it.
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(1);
+
+    // The block's mut carries BOTH entries (union).
+    const mergedMut = JSON.parse(rows[0].selector).mut as {
+      changed: Array<{ id: string }>;
+    };
+    expect(mergedMut.changed.map((c) => c.id)).toContain(id1);
+    expect(mergedMut.changed.map((c) => c.id)).toContain(id2);
+
+    // The block's debounceAt was extended.
+    const debounceAt = (
+      JSON.parse(rows[0].selector) as {
+        debounceAt?: number;
+      }
+    ).debounceAt;
+    expect(debounceAt).toBe(5000 + 60_000);
+  });
+
+  test("a mutation AFTER the debounce window expires appends a new block", () => {
+    const sessionID = `debounce-expire-${Date.now()}-${Math.random()}`;
+
+    const id1 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "First entry",
+      content: "v1.",
+    });
+    const id2 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Second entry",
+      content: "v1.",
+    });
+    const id1V1Key = keyOf(id1, "First entry", "v1.");
+    const id2V1Key = keyOf(id2, "Second entry", "v1.");
+
+    ltm.update(id1, { content: "v2 changed." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [id1V1Key, id2V1Key],
+      nextKeys: [id1V1Key, id2V1Key],
+      entries: [],
+      now: 1000,
+    });
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+
+    // Second mutation well after the window (120s > 60s).
+    ltm.update(id2, { content: "v2 changed." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [id1V1Key, id2V1Key],
+      nextKeys: [id1V1Key, id2V1Key],
+      entries: [],
+      now: 121_000,
+    });
+
+    // Two blocks — the second was a fresh append, not a coalesce.
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
+  });
+
+  test("an old-format block (no debounceAt) is NOT coalesced into — always appends", () => {
+    const sessionID = `debounce-legacy-${Date.now()}-${Math.random()}`;
+
+    const id1 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "First entry",
+      content: "v1.",
+    });
+    const id2 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Second entry",
+      content: "v1.",
+    });
+    const id1V1Key = keyOf(id1, "First entry", "v1.");
+    const id2V1Key = keyOf(id2, "Second entry", "v1.");
+
+    ltm.update(id1, { content: "v2 changed." });
+    const pair1 = buildKnowledgeDeltaMessage(
+      [
+        {
+          id: id1,
+          category: "gotcha",
+          title: "First entry",
+          content: "v2 changed.",
+        },
+      ],
+      [],
+    );
+    appendSessionPromptDelta({
+      sessionID,
+      projectID: ensureProject(PROJECT),
+      selector: JSON.stringify({
+        target: "messages",
+        insertAt: 2,
+        mut: {
+          changed: [
+            { id: id1, h: surfaceSignature("First entry", "v2 changed.") },
+          ],
+          removed: [],
+        },
+      }),
+      content: JSON.stringify(pair1),
+    });
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+
+    // Second mutation — no debounceAt on the existing block, so no coalesce.
+    ltm.update(id2, { content: "v2 changed." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [id1V1Key, id2V1Key],
+      nextKeys: [id1V1Key, id2V1Key],
+      entries: [],
+      now: 2000, // well within the 60s window, but block has no debounceAt
+    });
+
+    // Two blocks — legacy block wasn't eligible for coalesce.
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
+  });
+
+  /**
+   * Boundary test for `withinDebounceWindow` (pipeline.ts:2141-2148). The
+   * implementation uses strict `>` — `now === debounceAt` falls OUTSIDE the
+   * window (the block is "no longer coalesce-eligible"). This test pins that
+   * boundary so a future `>` → `>=` mutation can't silently flip the
+   * contract.
+   */
+  test("debounce window boundary: `now === debounceAt` falls OUTSIDE the window (strict >)", () => {
+    const sessionID = `debounce-boundary-${Date.now()}-${Math.random()}`;
+
+    const id1 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Boundary entry",
+      content: "v1.",
+    });
+    const id1V1Key = keyOf(id1, "Boundary entry", "v1.");
+    ltm.update(id1, { content: "v2 changed." });
+
+    // First mutation at now=1000 → block created with debounceAt=1000+60000=61000.
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [id1V1Key],
+      nextKeys: [id1V1Key],
+      entries: [],
+      now: 1000,
+    });
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+
+    // Second mutation at EXACTLY now=61000 (== debounceAt). Strict `>` means
+    // this falls OUTSIDE the window → fresh block appended.
+    ltm.update(id1, { content: "v3 changed." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [id1V1Key],
+      nextKeys: [id1V1Key],
+      entries: [],
+      now: 61_000,
+    });
+    // Two blocks — the second fell outside the debounce window because
+    // now === debounceAt is not strictly less than.
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
+
+    // And for good measure: now=59999 (just inside) coalesces.
+    ltm.update(id1, { content: "v4 changed." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [id1V1Key],
+      nextKeys: [id1V1Key],
+      entries: [],
+      now: 59_999,
+    });
+    // Still two blocks — the third coalesced into the most recent.
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(2);
+  });
+
+  /**
+   * Pins `mergeMutations` "next wins" semantics (pipeline.ts:2155-2168):
+   * when the same id appears in BOTH the previous block's `mut` and the new
+   * incoming `mut`, the new hash replaces the old one. The curator may
+   * re-surface the same id with new content (v1→v2→v3), and we want the
+   * merged block to reflect the latest content, not the oldest. This test
+   * fails if a mutation tries to preserve the older hash.
+   */
+  test("mergeMutations: same id mutated twice within the window yields the LATEST hash, not the first", () => {
+    const sessionID = `debounce-hashwin-${Date.now()}-${Math.random()}`;
+    const title = "Twin mutation entry";
+
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title,
+      content: "v1.",
+    });
+    const v1Key = keyOf(id, title, "v1.");
+
+    // First mutation: v1 → v2.
+    ltm.update(id, { content: "v2." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [v1Key],
+      nextKeys: [v1Key],
+      entries: [],
+      now: 1000,
+    });
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+
+    // Second mutation within window: v2 → v3. Coalesces into the existing
+    // block. The merged `mut` must record v3's hash, not v2's.
+    ltm.update(id, { content: "v3." });
+    appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 2,
+      previousKeys: [v1Key],
+      nextKeys: [v1Key],
+      entries: [],
+      now: 2000,
+    });
+
+    const rows = listSessionPromptDeltas(sessionID);
+    expect(rows).toHaveLength(1);
+    const mergedMut = JSON.parse(rows[0].selector).mut as {
+      changed: Array<{ id: string; h: string }>;
+    };
+    expect(mergedMut.changed).toHaveLength(1);
+    expect(mergedMut.changed[0].id).toBe(id);
+    // The hash MUST be v3's hash, not v2's. surfaceSignature hashes
+    // `title + "\x1f" + content`.
+    const v2Hash = surfaceSignature(title, "v2.");
+    const v3Hash = surfaceSignature(title, "v3.");
+    expect(v3Hash).not.toBe(v2Hash);
+    expect(mergedMut.changed[0].h).toBe(v3Hash);
+    expect(mergedMut.changed[0].h).not.toBe(v2Hash);
+  });
+
+  /**
+   * Pins the "default to Date.now()" behavior — a caller that forgets to
+   * pass `now` must NOT silently bypass the debounce. We test this by
+   * verifying that two rapid calls without `now` (which now resolve to
+   * Date.now() close together) coalesce into one block.
+   */
+  test("debounce works even when caller forgets to pass `now` (defaults to Date.now())", () => {
+    const sessionID = `debounce-defaultnow-${Date.now()}-${Math.random()}`;
+
+    const id1 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Default-now entry",
+      content: "v1.",
+    });
+    const id1V1Key = keyOf(id1, "Default-now entry", "v1.");
+    const id2 = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: "Default-now entry 2",
+      content: "v1.",
+    });
+    const id2V1Key = keyOf(id2, "Default-now entry 2", "v1.");
+
+    // First mutation — no `now` (relies on default Date.now()).
+    ltm.update(id1, { content: "v2 changed." });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [id1V1Key, id2V1Key],
+        nextKeys: [id1V1Key, id2V1Key],
+        entries: [],
+      }),
+    ).toBe(true);
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+
+    // Second mutation immediately after (well within the 60s window).
+    ltm.update(id2, { content: "v2 changed." });
+    expect(
+      appendKnowledgePromptDelta({
+        sessionID,
+        projectPath: PROJECT,
+        insertAt: 2,
+        previousKeys: [id1V1Key, id2V1Key],
+        nextKeys: [id1V1Key, id2V1Key],
+        entries: [],
+      }),
+    ).toBe(true);
+
+    // The two calls coalesce into ONE block — the default Date.now() didn't
+    // bypass the debounce.
+    expect(listSessionPromptDeltas(sessionID)).toHaveLength(1);
+    const rows = listSessionPromptDeltas(sessionID);
+    const mergedMut = JSON.parse(rows[0].selector).mut as {
+      changed: Array<{ id: string }>;
+    };
+    expect(mergedMut.changed.map((c) => c.id)).toContain(id1);
+    expect(mergedMut.changed.map((c) => c.id)).toContain(id2);
   });
 });

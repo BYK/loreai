@@ -5027,6 +5027,28 @@ export function updateSessionPromptDeltaSelector(
 }
 
 /**
+ * Rewrite the persisted `content` JSON for a single delta block, identified by
+ * (sessionID, seq). Selector is left untouched — only the rendered payload
+ * moves. Used by the knowledge-delta debounce: when a new mutation arrives
+ * within the debounce window of the latest block, merge the new payload into
+ * the existing block instead of appending a second one. No-op if no matching
+ * row exists.
+ */
+export function updateSessionPromptDeltaContent(
+  sessionID: string,
+  seq: number,
+  content: string,
+): void {
+  db()
+    .query(
+      `UPDATE session_prompt_deltas
+          SET content = ?
+        WHERE session_id = ? AND seq = ?`,
+    )
+    .run(content, sessionID, seq);
+}
+
+/**
  * Delete all persisted prompt-delta rows for a session. No-op when no rows
  * exist.
  *
