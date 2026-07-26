@@ -178,5 +178,5 @@ runs:
       if: steps.check.outputs.gate_blocked == 'true'
       shell: bash
       run: |
-          echo "::error title=Lore lint::blocking invariant contradiction(s) — see annotations. Override a SOFT finding with a 'lore-override: <invariant> — <reason>' commit trailer; STRICT cannot be overridden."
+        echo "::error title=Lore lint::blocking invariant contradiction(s) — see annotations. Override a SOFT finding with a 'lore-override: <invariant> — <reason>' commit trailer; STRICT cannot be overridden."
         exit 1
