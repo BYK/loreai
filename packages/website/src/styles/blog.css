@@ -262,8 +262,10 @@
   overflow-x: auto;
   border-radius: 4px;
   padding: 1rem;
-  background: var(--inverse-bg);
-  color: var(--inverse-text-dim);
+  background: #23262f;
+  color: #d6deeb;
+  border: 1px solid color-mix(in srgb, #5a7a63, transparent 50%);
+  font-size: .92em;
 }
 
 @media (max-width: 780px) {
