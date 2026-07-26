@@ -29,6 +29,26 @@ export default defineConfig({
   build: {
     format: "directory",
   },
+  // Server-side syntax highlighting for blog posts. Dual themes so the
+  // code-block palette follows the active site theme (default light);
+  // `github-light` for light mode, `github-dark` for dark mode. Matches
+  // Starlight's Expressive Code default on both sides, so blog and
+  // docs share one visual code language: blue keywords, warm-tan
+  // strings, grey comments. `defaultColor: "light"` makes `github-light`
+  // the inline default; the `github-dark` palette is wrapped in a
+  // `prefers-color-scheme: dark` media query block so the code block
+  // adapts to the active theme.
+  markdown: {
+    syntaxHighlight: "shiki",
+    shikiConfig: {
+      themes: {
+        light: "github-light",
+        dark: "github-dark",
+      },
+      defaultColor: "light",
+      wrap: false,
+    },
+  },
   integrations: [
     // Post-build pass that prefixes internal root-absolute links
     // (`/docs/...`) with `base` so they resolve on PR previews
