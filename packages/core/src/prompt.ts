@@ -1234,7 +1234,7 @@ Do these two entries directly contradict each other?`;
 // ---------------------------------------------------------------------------
 
 /**
- * The judge for `lore invariant-check` (the "semantic linter"). Given ONE code
+ * The judge for `lore lint` (the "semantic linter"). Given ONE code
  * change (a git diff hunk) and ONE stored team invariant, it decides whether the
  * change VIOLATES the invariant.
  *

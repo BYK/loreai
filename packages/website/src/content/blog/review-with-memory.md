@@ -136,7 +136,7 @@ lore run
 Then run the check against any range and see what it flags:
 
 ```bash
-lore invariant-check --base main --head HEAD
+lore lint --base main --head HEAD
 ```
 
 With no arguments it auto-detects the range. When you're ready for CI, the

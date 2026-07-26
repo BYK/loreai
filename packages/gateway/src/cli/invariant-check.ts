@@ -1,5 +1,5 @@
 /**
- * `lore invariant-check` — the "semantic linter" PoC.
+ * `lore lint` — the "semantic linter" PoC.
  *
  * Surfaces changes that violate a documented team invariant, at change time.
  * This is a MEASUREMENT TOOL: it NEVER exits non-zero on findings — the whole
@@ -11,8 +11,8 @@
  * with --base/--head. --model sweeps a specific worker model for the eval.
  *
  * Usage:
- *   lore invariant-check [--base <sha>] [--head <sha>] [--model <provider/id>]
- *                        [--project <path>] [--json]
+ *   lore lint [--base <sha>] [--head <sha>] [--model <provider/id>]
+ *             [--project <path>] [--json]
  */
 import { resolve } from "node:path";
 import {

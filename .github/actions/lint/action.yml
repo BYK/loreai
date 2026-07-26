@@ -1,4 +1,4 @@
-name: "Lore semantic linter (invariant-check)"
+name: "Lore semantic linter (lint)"
 description: >-
   Advisory-only: surfaces PR changes that contradict a documented invariant in
   the repo's `.lore.md`. NEVER fails the build — reports findings as annotations
@@ -98,7 +98,7 @@ runs:
         path: ${{ runner.temp }}/lore-ci
         key: ${{ steps.key.outputs.key }}
 
-    - name: Resolve range + run invariant-check
+    - name: Resolve range + run lint
       id: check
       shell: bash
       env:
@@ -130,7 +130,7 @@ runs:
           head="${GITHUB_SHA}"
         fi
 
-        args=(invariant-check --json)
+        args=(lint --json)
         [ -n "$base" ] && args+=(--base "$base")
         [ -n "$head" ] && args+=(--head "$head")
         [ -n "${LORE_IC_MODEL}" ] && args+=(--model "${LORE_IC_MODEL}")
@@ -161,7 +161,7 @@ runs:
           exit 0
         fi
         if [ $rc -ne 0 ]; then
-          echo "::notice title=Lore invariant-check::skipped (tooling: exit $rc)"
+          echo "::notice title=Lore lint::skipped (tooling: exit $rc)"
           cat /tmp/lore-ic.err || true
           echo "skipped=true" >> "$GITHUB_OUTPUT"
           exit 0
@@ -178,5 +178,5 @@ runs:
       if: steps.check.outputs.gate_blocked == 'true'
       shell: bash
       run: |
-        echo "::error title=Lore invariant-check::blocking invariant contradiction(s) — see annotations. Override a SOFT finding with a 'lore-override: <invariant> — <reason>' commit trailer; STRICT cannot be overridden."
+          echo "::error title=Lore lint::blocking invariant contradiction(s) — see annotations. Override a SOFT finding with a 'lore-override: <invariant> — <reason>' commit trailer; STRICT cannot be overridden."
         exit 1
