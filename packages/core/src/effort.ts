@@ -2,7 +2,7 @@
  * Reasoning-effort vocabulary and per-protocol mappings for worker LLM calls.
  *
  * Effort is a single knob a caller can turn to trade cost for depth on a
- * reasoning-capable model. It is surfaced by `lore invariant-check` (as
+ * reasoning-capable model. It is surfaced by `lore lint` (as
  * `--effort` / the `invariantCheck.effort` config key) and threaded through
  * `LLMClient.prompt(..., { reasoningEffort })` into the gateway worker request
  * builders.

@@ -108,7 +108,7 @@ const OPTIONS = {
   project: { type: "string" as const },
   limit: { type: "string" as const },
   json: { type: "boolean" as const },
-  // `lore invariant-check` flags
+  // `lore lint` flags
   base: { type: "string" as const },
   head: { type: "string" as const },
   model: { type: "string" as const },
@@ -457,7 +457,7 @@ export async function _cli(): Promise<void> {
         break;
       }
 
-      case "invariant-check": {
+      case "lint": {
         const { commandInvariantCheck } = await import("./invariant-check");
         await commandInvariantCheck(rest, values);
         break;
@@ -560,7 +560,7 @@ export async function _cli(): Promise<void> {
               "doctor",
               "data",
               "recall",
-              "invariant-check",
+              "lint",
               "log",
               "diff",
               "login",

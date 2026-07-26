@@ -44,9 +44,9 @@ permissions:
   models: read # lets GITHUB_TOKEN call GitHub Models as the default judge
 
 jobs:
-  invariant-check:
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     continue-on-error: true # advisory: never block a PR
     steps:
       - uses: actions/checkout@v6
@@ -59,7 +59,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @loreai/gateway run bundle
       - name: Run Lore semantic linter
-        uses: ./.github/actions/invariant-check
+        uses: ./.github/actions/lint
         with:
           lore-command: "node packages/gateway/dist/bin.cjs"
           model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-models/openai/gpt-5-mini' || '') }}
@@ -141,7 +141,7 @@ Or per-run via the action's `effort` input, or the `--effort` CLI flag. The flag
 The same check is available from the CLI, which is the fastest way to try it against a real range before wiring up CI:
 
 ```bash
-lore invariant-check --base <sha> --head <sha>
+lore lint --base <sha> --head <sha>
 ```
 
 With no arguments it auto-detects the range (the current branch against its base). Useful flags:

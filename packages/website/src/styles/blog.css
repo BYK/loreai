@@ -262,8 +262,41 @@
   overflow-x: auto;
   border-radius: 4px;
   padding: 1rem;
-  background: var(--inverse-bg);
-  color: var(--inverse-text-dim);
+  font-size: .92em;
+}
+
+/* Astro 7.1.3's markdown.shikiConfig with themes: { light, dark } inlines
+   the dark palette as CSS variables on every token but does not emit a
+   per-theme <style> block for plain .md files (Starlight's Expressive
+   Code plugin does that, but the blog uses Astro's built-in markdown
+   processor, not Starlight). So we override the per-token CSS variables
+   in light mode to swap the palette to github-light, matching the
+   blog's light theme and the docs' light rendering.
+   Same per-token mapping as Shiki's github-light theme:
+     #82AAFF  → #0550AE  (keywords/commands - dark blue → dark blue, darker for contrast)
+     #D6DEEB  → #24292F  (default text - light grey → near-black)
+     #ECC48D  → #0A3069  (strings - warm tan → dark blue, conventional in light themes)
+     #7FDBCA  → #116329  (operators - cyan → green)
+   Background: github-light is essentially white #ffffff with a 1px
+   grey border, so the frame just needs the border + a light default. */
+@media (prefers-color-scheme: light) {
+  .blog-prose pre {
+    background: #ffffff;
+    color: #24292f;
+    border: 1px solid #d0d7de;
+  }
+  .blog-prose pre span[style*="--0:#82AAFF"] {
+    color: #0550ae;
+  }
+  .blog-prose pre span[style*="--0:#D6DEEB"] {
+    color: #24292f;
+  }
+  .blog-prose pre span[style*="--0:#ECC48D"] {
+    color: #0a3069;
+  }
+  .blog-prose pre span[style*="--0:#7FDBCA"] {
+    color: #116329;
+  }
 }
 
 @media (max-width: 780px) {
