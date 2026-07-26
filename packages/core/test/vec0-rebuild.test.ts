@@ -61,7 +61,7 @@ function resetToBlob(): void {
   }
   db()
     .query(
-      "DELETE FROM kv_meta WHERE key IN ('vec.storage_mode', 'vec.dimension')",
+      "DELETE FROM kv_meta WHERE key IN ('vec.storage_mode', 'vec.dimension', 'vec.temporal_partition_mode')",
     )
     .run();
   for (const t of BASE_TABLES) db().query(`DELETE FROM ${t}`).run();
@@ -156,20 +156,10 @@ describeVec("vec0Rebuild", () => {
     insTemporal("m2", "s2", 4);
     insTemporal("m3", "s3", 4);
 
-    // We wrote 12 chunk rows across 3 distinct (project, session) partitions,
-    // so vec0 has allocated at least 3 chunks (one per partition).
-    const beforeChunks = (
-      db().query("SELECT COUNT(*) AS n FROM temporal_vec_chunks").get() as {
-        n: number;
-      }
-    ).n;
-    expect(beforeChunks).toBeGreaterThanOrEqual(3);
-
     const r = vec0Rebuild(db(), "temporal");
     expect(r.rowsRebuilt).toBe(12);
-    // After rebuild the partition count is unchanged (3 sessions), but vec0
-    // may pack each partition's 4 rows into the same single chunk.
-    expect(r.afterChunks).toBeGreaterThanOrEqual(3);
+    // After rebuild the sole project partition packs all 12 rows into 1 chunk.
+    expect(r.afterChunks).toBe(1);
     expect(r.afterChunks).toBeLessThanOrEqual(r.beforeChunks);
 
     // Every chunk row still present.
