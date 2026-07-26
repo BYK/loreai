@@ -1149,7 +1149,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
             "@@\n" +
             "+async function loadContextSourceCandidates(pid: string, contextVec: Float32Array, sources: ContextSource[], limit: number) {\n" +
             "+  // Reads raw temporal_messages to surface them as context — NOT the compactor.\n" +
-            "+  const rows = db.prepare(\"SELECT * FROM temporal_messages WHERE ...\").all();\n" +
+            '+  const rows = db.prepare("SELECT * FROM temporal_messages WHERE ...").all();\n' +
             "+  return rows.map(...);\n" +
             "+}",
         },
