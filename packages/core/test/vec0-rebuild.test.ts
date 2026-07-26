@@ -156,15 +156,6 @@ describeVec("vec0Rebuild", () => {
     insTemporal("m2", "s2", 4);
     insTemporal("m3", "s3", 4);
 
-    // We wrote 12 chunk rows across 3 sessions but only 1 project partition,
-    // so the old compound-key layout allocated at least 3 chunks (one per session).
-    // With project_id as sole partition key, all 12 rows pack into 1 chunk.
-    const beforeChunks = (
-      db().query("SELECT COUNT(*) AS n FROM temporal_vec_chunks").get() as {
-        n: number;
-      }
-    ).n;
-
     const r = vec0Rebuild(db(), "temporal");
     expect(r.rowsRebuilt).toBe(12);
     // After rebuild the sole project partition packs all 12 rows into 1 chunk.
