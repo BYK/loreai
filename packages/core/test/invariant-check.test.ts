@@ -622,47 +622,75 @@ describe("changedFiles", () => {
 
 describe("parseInvariantVerdict", () => {
   it("parses a plain JSON verdict", () => {
-    expect(parseInvariantVerdict('{"violates": true, "reason": "x"}')).toEqual({
-      violates: true,
-      reason: "x",
-    });
+    expect(
+      parseInvariantVerdict('{"verdict": "violates", "reason": "x"}'),
+    ).toEqual({ verdict: "violates", reason: "x" });
+  });
+  it("parses each of the four verdict categories", () => {
+    for (const v of ["violates", "fixes", "satisfies", "unrelated"] as const) {
+      expect(parseInvariantVerdict(`{"verdict":"${v}"}`)).toEqual({
+        verdict: v,
+        reason: null,
+      });
+    }
+  });
+  it("returns null for an unknown verdict string (not coerced to satisfies)", () => {
+    // An unknown verdict must NOT be silently coerced to a non-finding —
+    // surface the failure so a drift in the model's vocabulary is visible.
+    expect(parseInvariantVerdict('{"verdict":"probably_violates"}')).toBeNull();
   });
   it("strips ```json fences", () => {
-    expect(parseInvariantVerdict('```json\n{"violates": false}\n```')).toEqual({
-      violates: false,
-      reason: null,
-    });
+    expect(
+      parseInvariantVerdict('```json\n{"verdict": "satisfies"}\n```'),
+    ).toEqual({ verdict: "satisfies", reason: null });
   });
   it("returns null for junk / non-JSON / missing field", () => {
     expect(parseInvariantVerdict(null)).toBeNull();
     expect(parseInvariantVerdict("not json")).toBeNull();
     expect(parseInvariantVerdict('{"reason": "no verdict field"}')).toBeNull();
+    expect(parseInvariantVerdict("{}")).toBeNull();
+    expect(parseInvariantVerdict('{"verdict": 42}')).toBeNull();
   });
   it("extracts a verdict embedded in prose (GLM prose-not-JSON failure mode)", () => {
     expect(
       parseInvariantVerdict(
-        'Sure! Here is my analysis: {"violates": false, "reason": "unrelated"}',
+        'Sure! Here is my analysis: {"verdict": "unrelated", "reason": "different scope"}',
       ),
-    ).toEqual({ violates: false, reason: "unrelated" });
+    ).toEqual({ verdict: "unrelated", reason: "different scope" });
   });
   it("extracts a verdict with trailing prose after the object", () => {
     expect(
       parseInvariantVerdict(
-        '{"violates": true, "reason": "y"}\n\nHope this helps!',
+        '{"verdict": "fixes", "reason": "moves payload off assistant"}\n\nHope this helps!',
       ),
-    ).toEqual({ violates: true, reason: "y" });
+    ).toEqual({ verdict: "fixes", reason: "moves payload off assistant" });
   });
   it("is not fooled by braces inside string values", () => {
     expect(
       parseInvariantVerdict(
-        'The verdict: {"violates": true, "reason": "found a { in the code"}',
+        'The verdict: {"verdict": "violates", "reason": "found a { in the code"}',
       ),
-    ).toEqual({ violates: true, reason: "found a { in the code" });
+    ).toEqual({ verdict: "violates", reason: "found a { in the code" });
   });
   it("still returns null when prose contains no JSON object at all", () => {
     expect(
       parseInvariantVerdict("I think this looks fine, no violation here."),
     ).toBeNull();
+  });
+  it("back-compat: legacy {violates:true} shape maps to 'violates'", () => {
+    // Stale logs / older test fixtures may still carry the old binary shape.
+    // Mapping false -> "unrelated" (the conservative non-finding bucket) is
+    // safer than mapping to "satisfies": the binary framing couldn't tell a
+    // fix from a neutral change, and silently dropping a fix-as-violation FP
+    // back into "satisfies" would surface as a real miss.
+    expect(parseInvariantVerdict('{"violates": true, "reason": "y"}')).toEqual({
+      verdict: "violates",
+      reason: "y",
+    });
+    expect(parseInvariantVerdict('{"violates": false}')).toEqual({
+      verdict: "unrelated",
+      reason: null,
+    });
   });
 });
 
@@ -928,5 +956,208 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.findings).toHaveLength(1);
     // Enumeration invariant → advisory severity even though prescriptive.
     expect(result.findings[0].severity).toBe("advisory");
+  });
+
+  // ---------------------------------------------------------------------
+  // Four-verdict round-trip: validates the PR #1490 fix-as-violation class.
+  // The binary {violates: boolean} verdict space could not express "this
+  // change is the fix", so a fix was reported as a violation. The new
+  // {verdict: "violates"|"fixes"|"satisfies"|"unrelated"} frame lets the
+  // judge return the correct answer for each outcome.
+  // ---------------------------------------------------------------------
+
+  it("a 'fixes' verdict produces NO finding (PR #1490 regression)", async () => {
+    // Mirrors PR #1490's invariant: assistant-role knowledge-delta payload
+    // must never be visible output. The PR's diff MOVES the payload off the
+    // assistant turn — i.e. it IS the fix, but the old binary verdict space
+    // forced a "violates: true" response.
+    const project = "/tmp/ic-test-proj-fixes";
+    await seed(
+      project,
+      "knowledge-delta assistant-payload visibility",
+      "knowledge-delta assistant-role injection must not cause visible dumps; " +
+        "the assistant turn must never carry the raw ## Long-term Knowledge payload",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    const { llm, prompt } = stubLLM(() =>
+      JSON.stringify({
+        verdict: "fixes",
+        reason:
+          "moves payload off assistant turn onto user turn; adds migration that rewrites legacy blocks to the new shape; regression-guard test asserts assistant turn never carries the markdown payload",
+      }),
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [
+        // The actual PR #1490 hunks, simplified to the relevant moves.
+        {
+          file: "src/pipeline.ts",
+          text:
+            "@@\n" +
+            "+function parseDeltaMessages(raw: string): GatewayMessage[] {\n" +
+            "+  // Legacy pair: move the assistant payload onto the framing-note user message.\n" +
+            '+  return [{ role: "user", content: [...] }, { role: "assistant", content: [{ type: "text", text: "Understood." }] }];\n' +
+            "+}",
+        },
+        {
+          file: "src/pipeline.ts",
+          text:
+            "@@\n" +
+            "-      text: rendered + tocRendered,\n" +
+            "+      text: KNOWLEDGE_DELTA_ASSISTANT_CLOSER, // inert closer; payload moved to user turn",
+        },
+      ],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-fixes",
+    });
+    expect(prompt).toHaveBeenCalledTimes(1);
+    // The fix is recognized → NO findings, despite the high cosine match.
+    // (Both hunks are pipeline.ts, so the (invariant, file) dedup collapses
+    // them into a single representative judge call — that's a separate
+    // property of the funnel, not what this test is about.)
+    expect(result.findings).toHaveLength(0);
+    expect(result.judgeCalls).toBe(1);
+  });
+
+  it("a 'satisfies' verdict produces NO finding", async () => {
+    const project = "/tmp/ic-test-proj-satisfies";
+    await seed(
+      project,
+      "tabs rule",
+      "always use tabs for indentation",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    const { llm } = stubLLM(() =>
+      JSON.stringify({
+        verdict: "satisfies",
+        reason: "formatting tweak in unrelated function; tabs rule unchanged",
+      }),
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [{ file: "src/unrelated.ts", text: "@@\n+reformat whitespace" }],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-satisfies",
+    });
+    expect(result.findings).toHaveLength(0);
+  });
+
+  it("an 'unrelated' verdict corrects cosine-prefilter false positives", async () => {
+    // Cosine prefilter said "near" (same embedding), but the judge is the
+    // last stage of the funnel and can correct the prefilter when the diff
+    // doesn't actually touch the invariant's subject/scope.
+    const project = "/tmp/ic-test-proj-unrelated";
+    await seed(
+      project,
+      "node:sqlite import boundary",
+      "node:sqlite must never be imported outside driver.node.ts",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    const { llm } = stubLLM(() =>
+      JSON.stringify({
+        verdict: "unrelated",
+        reason:
+          "diff renames a helper in the same file but does not import node:sqlite",
+      }),
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [
+        {
+          file: "src/driver.node.ts",
+          text: "@@\n-const old = foo;\n+const renamed = foo;",
+        },
+      ],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-unrelated",
+    });
+    expect(result.findings).toHaveLength(0);
+  });
+
+  it("a 'violates' verdict still produces a finding (no recall regression)", async () => {
+    const project = "/tmp/ic-test-proj-violates-still-flags";
+    await seed(
+      project,
+      "node:sqlite import boundary",
+      "node:sqlite must never be imported outside driver.node.ts",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    const { llm } = stubLLM(() =>
+      JSON.stringify({
+        verdict: "violates",
+        reason:
+          'diff adds `import ... from "node:sqlite"` in a non-driver file',
+      }),
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [
+        { file: "src/other.ts", text: '@@\n+import { X } from "node:sqlite"' },
+      ],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-violates",
+    });
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].file).toBe("src/other.ts");
+  });
+
+  // ---------------------------------------------------------------------
+  // Subject/scope disambiguation (PR #1228 regression).
+  //
+  // The invariant constrains the *compactor's output* ("assembleOfflineCompaction
+  // drops raw temporal facts"). PR #1228 added a READ path that surfaces raw
+  // temporal messages as context for the model. The judge previously conflated
+  // "the change touches raw temporal data" with "the change violates the rule
+  // about dropping raw temporal data" — those are NOT the same subject. The
+  // read path is in a different scope (assembly of context, not compaction
+  // output). The prompt's tightened subject/scope disambiguation should make
+  // the judge return "unrelated" or "satisfies", not "violates".
+  // ---------------------------------------------------------------------
+
+  it("a change that READS the invariant's subject is not 'violates' (scope check)", async () => {
+    const project = "/tmp/ic-test-proj-scope-read";
+    await seed(
+      project,
+      "assembleOfflineCompaction drops raw temporal facts",
+      "the compactor must drop raw temporal facts because the distiller can lose concrete values",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    const { llm } = stubLLM(() =>
+      JSON.stringify({
+        verdict: "unrelated",
+        reason:
+          "invariant constrains the compactor's output (assembleOfflineCompaction); " +
+          "the diff adds a separate READ path that surfaces raw temporal messages as context " +
+          "for the model — different subject/scope, the read path is not governed by the compactor rule",
+      }),
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [
+        {
+          file: "packages/core/src/ltm.ts",
+          text:
+            "@@\n" +
+            "+async function loadContextSourceCandidates(pid: string, contextVec: Float32Array, sources: ContextSource[], limit: number) {\n" +
+            "+  // Reads raw temporal_messages to surface them as context — NOT the compactor.\n" +
+            '+  const rows = db.prepare("SELECT * FROM temporal_messages WHERE ...").all();\n' +
+            "+  return rows.map(...);\n" +
+            "+}",
+        },
+      ],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-scope-read",
+    });
+    expect(result.findings).toHaveLength(0);
   });
 });

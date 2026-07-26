@@ -16,14 +16,20 @@ inputs:
     required: false
     default: ""
   model:
-    description: "Judge model (provider/id). Defaults to the configured worker model."
+    description: >-
+      Judge model (provider/id). Defaults to `github-models/openai/gpt-5-mini`
+      when the workflow uses the zero-secret GitHub Models path (the default).
+      In that case the CLI authenticates with the `github.token` built-in, no
+      additional configuration needed. The reference workflow's model-precedence
+      table still lets `LORE_INVARIANT_MODEL` (repo var) or a dedicated
+      `LORE_WORKER_API_KEY` override this.
     required: false
-    default: ""
+    default: "github-models/openai/gpt-5-mini"
   effort:
     description: >-
       Reasoning effort for the judge (off|low|medium|high|xhigh). A cost/depth
-      dial on reasoning-capable models; ignored by non-reasoning models like
-      gpt-4o-mini. Defaults to the `invariantCheck.effort` config value (off).
+      dial on reasoning-capable models; ignored by non-reasoning models.
+      Defaults to the `invariantCheck.effort` config value (off).
     required: false
     default: ""
   worker-api-key:

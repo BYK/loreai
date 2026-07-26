@@ -62,7 +62,7 @@ jobs:
         uses: ./.github/actions/invariant-check
         with:
           lore-command: "node packages/gateway/dist/bin.cjs"
-          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-models/openai/gpt-4o-mini' || '') }}
+          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-models/openai/gpt-5-mini' || '') }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}
 ```
 
@@ -86,7 +86,7 @@ The credential and the model are chosen independently.
 | Situation | Model used |
 | --- | --- |
 | `LORE_INVARIANT_MODEL` repo variable is set | that value (with either credential) |
-| No dedicated key, no variable | `github-models/openai/gpt-4o-mini` |
+| No dedicated key, no variable | `github-models/openai/gpt-5-mini` |
 | Dedicated key, no variable | your repo's configured default worker model |
 
 :::note
@@ -122,7 +122,7 @@ Not every `.lore.md` entry is a candidate. The check only considers **prescripti
 `--effort` (or the `invariantCheck.effort` config key) is a cost/depth dial for the judge on reasoning-capable models. It accepts `off | low | medium | high | xhigh` and defaults to `off`.
 
 - On a reasoning model, higher effort spends more tokens reasoning about each hunk/invariant pair, which helps when subtle contradictions are being missed.
-- On a non-reasoning model (like `gpt-4o-mini`, the zero-secret default), it is ignored.
+- On a non-reasoning model, it is ignored.
 
 Set it per-repo in `.lore.json`:
 
