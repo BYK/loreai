@@ -749,12 +749,15 @@ describeVec("dimension change", () => {
     // Stored value must equal the const so future readers can gate rebuilds
     // against a chunk size recorded in `kv_meta`, not against the DDL string.
     expect(getKV("vec.temporal_chunk_size")).toBe(String(TEMPORAL_CHUNK_SIZE));
-    const storedSize = (
-      db().query("SELECT size FROM temporal_vec_chunks LIMIT 1").get() as
-        | { size: number }
-        | undefined
-    )?.size;
-    expect(storedSize).toBe(TEMPORAL_CHUNK_SIZE);
+    // Walk every chunk the shadows table exposes — every chunk's `size` column
+    // is the chunk capacity assigned at DDL time, never the occupancy.
+    const chunkSizes = (
+      db().query("SELECT size FROM temporal_vec_chunks").all() as Array<{
+        size: number;
+      }>
+    ).map((r) => r.size);
+    expect(chunkSizes.length).toBeGreaterThan(0);
+    for (const size of chunkSizes) expect(size).toBe(TEMPORAL_CHUNK_SIZE);
   });
 });
 
@@ -768,6 +771,12 @@ describeVec("chunk size is a storage-only optimization", () => {
 
     // Clear any prior rows so this test owns the table.
     conn.query("DELETE FROM knowledge_vec").run();
+    // Defensive cleanup: a previous run in this process may have left these
+    // helper tables behind. CREATE without IF NOT EXISTS below would fail in
+    // that case, and CREATE with IF NOT EXISTS would skip the second run and
+    // collide on the same primary keys we want to re-insert.
+    conn.query("DROP TABLE IF EXISTS knowledge_vec_compact").run();
+    conn.query("DROP TABLE IF EXISTS knowledge_vec_wide").run();
 
     // Distinct random unit-4D vectors: stable, non-degenerate, no accidental
     // ties that would hide a chunk-size ordering swap.
@@ -783,14 +792,14 @@ describeVec("chunk size is a storage-only optimization", () => {
     // Compact layout: the 64-slot table we ship to users.
     conn
       .query(
-        `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec_compact USING vec0(id TEXT PRIMARY KEY, embedding float[${DIM}] distance_metric=cosine, chunk_size=${TEMPORAL_CHUNK_SIZE})`,
+        `CREATE VIRTUAL TABLE knowledge_vec_compact USING vec0(id TEXT PRIMARY KEY, embedding float[${DIM}] distance_metric=cosine, chunk_size=${TEMPORAL_CHUNK_SIZE})`,
       )
       .run();
 
     // Wide layout: the default 1024-slot baseline (~3 MB / chunk).
     conn
       .query(
-        `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec_wide USING vec0(id TEXT PRIMARY KEY, embedding float[${DIM}] distance_metric=cosine, chunk_size=1024)`,
+        `CREATE VIRTUAL TABLE knowledge_vec_wide USING vec0(id TEXT PRIMARY KEY, embedding float[${DIM}] distance_metric=cosine, chunk_size=1024)`,
       )
       .run();
 
@@ -824,6 +833,13 @@ describeVec("chunk size is a storage-only optimization", () => {
     // cosine algorithm and the same vector data, only the chunk boundary
     // changes. Any divergence means a search-quality regression.
     expect(compactTop.map((r) => r.id)).toEqual(wideTop.map((r) => r.id));
+
+    // Drop the helper tables so they don't leak into subsequent tests in
+    // this file. The shadow tables (`*_auxiliary`, `*_rowids`, `*_chunks`,
+    // `*_info`, `*_vector_chunks00`) are dropped alongside the virtual
+    // table itself.
+    conn.query("DROP TABLE knowledge_vec_compact").run();
+    conn.query("DROP TABLE knowledge_vec_wide").run();
   });
 });
 
