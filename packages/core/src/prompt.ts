@@ -1270,6 +1270,13 @@ Choose exactly ONE of four verdicts — the four together cover every meaningful
 - "satisfies": the change is consistent with the invariant — neither breaks it nor fixes a violation. New code that upholds the rule, neutral edits, internal refactors, formatting, dependencies, tests. The default "no news" verdict.
 - "unrelated": the change does not touch the area the invariant governs, even though retrieval flagged the pair. The change is in a different subject/scope, or would only relate to the invariant under assumptions you can't verify from the hunk.
 
+**Subject/scope disambiguation (the most common false-positive shape).** Invariants are usually stated with a load-bearing noun — "the compactor drops…", "the eviction loop must…", "the breaker cannot…". The verb's subject is the *thing the invariant constrains*, not every piece of code that reads or touches that data. A change that READS or PROCESSES the data the invariant is about is NOT automatically a violation — read paths are governed by what they DO with the data, not by whether they touch it. Concretely:
+- Invariant "the compactor must drop raw temporal facts because the distiller can lose concrete values" + hunk adds a READ path that surfaces raw temporal messages as context for the model → "unrelated" (the invariant constrains the *compactor's output*, not every read of raw temporal data; the read path is in a different subject/scope).
+- Invariant "the compaction guard must skip protected content" + hunk removes that guard in the eviction loop → "violates" (the guard is the invariant's load-bearing noun).
+- Invariant "the assistant turn must never carry the ## Long-term Knowledge payload" + hunk adds a migration that rewrites legacy blocks to put the payload on the user turn → "fixes" (the assistant turn is the subject; the migration resolves the conflict).
+
+When the invariant's subject appears in the hunk but the hunk doesn't act on the subject in the way the invariant forbids or requires, that is "unrelated" or "satisfies" — not "violates".
+
 Examples:
 - Invariant "never import node:sqlite outside driver.node.ts" + hunk adds \`import ... from "node:sqlite"\` in some other file → "violates".
 - Invariant "protected content must never be stripped" + hunk removes the guard that skips protected content in the eviction loop → "violates".

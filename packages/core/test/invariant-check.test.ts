@@ -1108,4 +1108,56 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0].file).toBe("src/other.ts");
   });
+
+  // ---------------------------------------------------------------------
+  // Subject/scope disambiguation (PR #1228 regression).
+  //
+  // The invariant constrains the *compactor's output* ("assembleOfflineCompaction
+  // drops raw temporal facts"). PR #1228 added a READ path that surfaces raw
+  // temporal messages as context for the model. The judge previously conflated
+  // "the change touches raw temporal data" with "the change violates the rule
+  // about dropping raw temporal data" — those are NOT the same subject. The
+  // read path is in a different scope (assembly of context, not compaction
+  // output). The prompt's tightened subject/scope disambiguation should make
+  // the judge return "unrelated" or "satisfies", not "violates".
+  // ---------------------------------------------------------------------
+
+  it("a change that READS the invariant's subject is not 'violates' (scope check)", async () => {
+    const project = "/tmp/ic-test-proj-scope-read";
+    await seed(
+      project,
+      "assembleOfflineCompaction drops raw temporal facts",
+      "the compactor must drop raw temporal facts because the distiller can lose concrete values",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    const { llm } = stubLLM(() =>
+      JSON.stringify({
+        verdict: "unrelated",
+        reason:
+          "invariant constrains the compactor's output (assembleOfflineCompaction); " +
+          "the diff adds a separate READ path that surfaces raw temporal messages as context " +
+          "for the model — different subject/scope, the read path is not governed by the compactor rule",
+      }),
+    );
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [
+        {
+          file: "packages/core/src/ltm.ts",
+          text:
+            "@@\n" +
+            "+async function loadContextSourceCandidates(pid: string, contextVec: Float32Array, sources: ContextSource[], limit: number) {\n" +
+            "+  // Reads raw temporal_messages to surface them as context — NOT the compactor.\n" +
+            "+  const rows = db.prepare(\"SELECT * FROM temporal_messages WHERE ...\").all();\n" +
+            "+  return rows.map(...);\n" +
+            "+}",
+        },
+      ],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-scope-read",
+    });
+    expect(result.findings).toHaveLength(0);
+  });
 });
