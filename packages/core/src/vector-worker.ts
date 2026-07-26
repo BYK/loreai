@@ -17,7 +17,11 @@
 
 import { parentPort, workerData } from "node:worker_threads";
 import { openReaderConnection, type ReaderConnection } from "./db/reader";
-import { resolveReadMode, readStorageMode } from "./db/vec-store";
+import {
+  resolveReadMode,
+  readStorageMode,
+  TEMPORAL_PARTITION_MODE_KEY,
+} from "./db/vec-store";
 import { runReadJob } from "./read-job";
 import { runVectorQuery } from "./vector-query";
 import type {
@@ -81,7 +85,24 @@ port.on("message", (msg: VectorWorkerInbound) => {
           readStorageMode(conn.db),
           conn.vecAvailable,
         );
-        const hits = runVectorQuery(conn.db, readMode, msg.embedding, msg.spec);
+        const temporalPartitionMode =
+          msg.spec.kind === "temporal"
+            ? ((
+                conn.db
+                  .query("SELECT value FROM kv_meta WHERE key = ?")
+                  .get(TEMPORAL_PARTITION_MODE_KEY) as
+                  | { value?: string }
+                  | null
+                  | undefined
+              )?.value ?? null)
+            : null;
+        const hits = runVectorQuery(
+          conn.db,
+          readMode,
+          msg.embedding,
+          msg.spec,
+          temporalPartitionMode,
+        );
         post({ type: "result", id: msg.id, hits });
       } catch (err) {
         // Per-request failure — reject just this request, keep serving. The

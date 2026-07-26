@@ -13,6 +13,7 @@ import {
   resetVecStorageModeLatch,
   setStorageMode,
   storeTemporalChunks,
+  TEMPORAL_PARTITION_MODE_KEY,
 } from "../src/db/vec-store";
 
 const PROJECT = "/test/data-vacuum";
@@ -121,6 +122,11 @@ describe("VACUUM / free-page reclaim (#1221)", () => {
       }
     ).n;
     expect(beforeChunks).toBe(1);
+
+    // Simulate a pre-vacuum DB so vacuum's internal vec0Rebuild processes rows.
+    db()
+      .query("DELETE FROM kv_meta WHERE key = ?")
+      .run(TEMPORAL_PARTITION_MODE_KEY);
 
     const r = vacuum();
 

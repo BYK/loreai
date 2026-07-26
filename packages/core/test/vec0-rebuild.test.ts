@@ -15,6 +15,7 @@ import {
   setStorageMode,
   storeEmbedding,
   storeTemporalChunks,
+  TEMPORAL_PARTITION_MODE_KEY,
   vec0Rebuild,
 } from "../src/db/vec-store";
 import { toBlob } from "../src/vector-query";
@@ -156,6 +157,11 @@ describeVec("vec0Rebuild", () => {
     insTemporal("m2", "s2", 4);
     insTemporal("m3", "s3", 4);
 
+    // Simulate a pre-vacuum DB so vec0Rebuild processes these rows.
+    db()
+      .query("DELETE FROM kv_meta WHERE key = ?")
+      .run(TEMPORAL_PARTITION_MODE_KEY);
+
     const r = vec0Rebuild(db(), "temporal");
     expect(r.rowsRebuilt).toBe(12);
     // After rebuild the sole project partition packs all 12 rows into 1 chunk.
@@ -169,6 +175,41 @@ describeVec("vec0Rebuild", () => {
     expect(after.length).toBe(12);
     const msgIds = new Set(after.map((x) => x.message_id));
     expect(msgIds).toEqual(new Set(["m1", "m2", "m3"]));
+  });
+
+  test("preserves an unmarked existing compound-partition temporal table", () => {
+    if (!isVecAvailable()) return;
+
+    const conn = db();
+    conn.query("DROP TABLE IF EXISTS temporal_vec").run();
+    conn
+      .query(
+        "CREATE VIRTUAL TABLE temporal_vec USING vec0(chunk_id TEXT PRIMARY KEY, +message_id TEXT, project_id TEXT PARTITION KEY, session_id TEXT PARTITION KEY, embedding float[4] distance_metric=cosine)",
+      )
+      .run();
+    conn
+      .query("DELETE FROM kv_meta WHERE key = ?")
+      .run(TEMPORAL_PARTITION_MODE_KEY);
+
+    ensureVec0Store(conn, DIM);
+    expect(
+      conn
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get(TEMPORAL_PARTITION_MODE_KEY),
+    ).toBeNull();
+
+    conn
+      .query(
+        "INSERT INTO temporal_vec (chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run("old#0", "old", pid, "s1", toBlob(v(1, 0, 0, 0)));
+    setStorageMode(conn, "vec0");
+    expect(vec0Rebuild(conn, "temporal").rowsRebuilt).toBe(1);
+    expect(
+      conn
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get(TEMPORAL_PARTITION_MODE_KEY),
+    ).toEqual({ value: "project_only" });
   });
 
   test("rebuild is atomic: a failure mid-rebuild leaves the original table intact", () => {

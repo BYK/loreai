@@ -214,6 +214,7 @@ export function runVectorQuery(
   readMode: VecReadMode,
   queryEmbedding: Float32Array,
   spec: VectorQuerySpec,
+  temporalPartitionMode?: string | null,
 ): VectorHit[] | DistillationVectorHit[] {
   switch (spec.kind) {
     case "knowledge":
@@ -231,6 +232,10 @@ export function runVectorQuery(
         spec.limit,
       );
     case "temporal":
+      // Resolve the partition mode from the connection if not passed — session-
+      // scoped queries on a pre-vacuum DB (session IS a partition key) need
+      // WHERE filtering; post-vacuum (`project_only`) it must be JS post-filter.
+      const tpm = temporalPartitionMode ?? readTemporalPartitionMode(conn);
       return runTemporal(
         conn,
         readMode,
@@ -238,6 +243,7 @@ export function runVectorQuery(
         spec.projectId,
         spec.limit,
         spec.sessionId,
+        tpm,
       );
   }
 }
@@ -480,6 +486,18 @@ function runAllDistillations(
   return topK;
 }
 
+function readTemporalPartitionMode(conn: VectorQueryConn): string | null {
+  try {
+    const rows = conn
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .all("vec.temporal_partition_mode") as Array<{ value?: string }>;
+    const row = rows[0];
+    return row?.value != null ? row.value : null;
+  } catch {
+    return null;
+  }
+}
+
 function runTemporal(
   conn: VectorQueryConn,
   readMode: VecReadMode,
@@ -487,14 +505,15 @@ function runTemporal(
   projectId: string,
   limit: number,
   sessionId?: string,
+  temporalPartitionMode?: string | null,
 ): VectorHit[] {
   if (readMode === "degraded") return [];
   if (readMode === "vec0") {
-    // project_id is the sole PARTITION KEY → the index scans only the project
-    // shard. session_id is a stored aux column (+session_id, explicitly NOT a
-    // partition key), so KNN WHERE cannot filter on it. When session-scoped,
-    // select session_id and post-filter in JS with widened overfetch to
-    // compensate for attrition.
+    const sessionIsPartitionKey = temporalPartitionMode !== "project_only";
+    // When session_id is a PARTITION KEY (old schema, pre-vacuum), KNN WHERE
+    // can filter on it for a targeted partition scan. After migration to
+    // project-only, session_id is a stored aux column (+session_id) that KNN
+    // WHERE cannot reference — post-filter in JS instead.
     // `temporal_vec` is chunk-keyed and a message may carry MANY chunks
     // (multi-vector part-aware embedding), so a bare `k = limit` could return
     // `limit` *chunks* that collapse to far fewer than `limit` distinct
@@ -507,19 +526,28 @@ function runTemporal(
     // grouping the bounded result set (≤ k ≤ VEC0_MAX_K rows) in JS sidesteps
     // that entirely. Degenerate-safe: with one chunk per message the collapse
     // is 1:1.
-    const run = (k: number): VectorHit[] => {
+    const run = (
+      k: number,
+      useSessionPartitionKey = sessionIsPartitionKey,
+    ): VectorHit[] => {
       const vsql =
-        "SELECT message_id AS id, session_id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance";
-      const vparams: unknown[] = [toBlob(queryEmbedding), k, projectId];
-      const chunkHits = conn.query(vsql).all(...vparams) as Array<{
+        useSessionPartitionKey && sessionId
+          ? "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? AND session_id = ? ORDER BY distance"
+          : "SELECT message_id AS id, session_id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance";
+      const vparams: unknown[] =
+        useSessionPartitionKey && sessionId
+          ? [toBlob(queryEmbedding), k, projectId, sessionId]
+          : [toBlob(queryEmbedding), k, projectId];
+      const rawHits = conn.query(vsql).all(...vparams) as Array<{
         id: string;
-        session_id: string;
+        session_id?: string;
         similarity: number;
       }>;
-      // Post-filter by session when scoped (aux column, cannot be in KNN WHERE)
-      const scoped = sessionId
-        ? chunkHits.filter((h) => h.session_id === sessionId)
-        : chunkHits;
+      // Post-filter by session when not a partition key (aux column)
+      const scoped =
+        !useSessionPartitionKey && sessionId
+          ? rawHits.filter((h) => h.session_id === sessionId)
+          : rawHits;
       // Keep each message's best (max) sim. `scoped` is nearest-first, so the
       // first-seen sim for an id is already its best and Map insertion order is
       // best-first; the stable sort then orders messages by similarity with
@@ -536,12 +564,34 @@ function runTemporal(
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit);
     };
-    const k0 = sessionId ? VEC0_MAX_K : vecK(limit * TEMPORAL_CHUNK_OVERFETCH);
-    const hits = run(k0);
-    // Chunk-collapse + session-post-filter attrition can leave < limit
-    // distinct messages even when more exist deeper; widen to the max KNN
-    // window. Session-scoped queries already start at VEC0_MAX_K.
-    return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
+    const needOverfetch = sessionId && !sessionIsPartitionKey;
+    const k0 = needOverfetch
+      ? VEC0_MAX_K
+      : vecK(limit * TEMPORAL_CHUNK_OVERFETCH);
+    let useSessionPartitionKey = sessionIsPartitionKey;
+    let hits: VectorHit[];
+    try {
+      hits = run(k0);
+    } catch (error) {
+      // A rebuild can replace the old compound-partition table after we read
+      // its absent mode marker but before this KNN query runs. sqlite-vec then
+      // rejects session_id as an auxiliary-column WHERE constraint. Retry once
+      // with the project-only query shape; never retry unrelated failures.
+      if (
+        sessionIsPartitionKey &&
+        sessionId &&
+        error instanceof Error &&
+        error.message.includes("auxiliary column")
+      ) {
+        useSessionPartitionKey = false;
+        hits = run(VEC0_MAX_K, useSessionPartitionKey);
+      } else {
+        throw error;
+      }
+    }
+    return hits.length >= limit || k0 >= VEC0_MAX_K
+      ? hits
+      : run(VEC0_MAX_K, useSessionPartitionKey);
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
