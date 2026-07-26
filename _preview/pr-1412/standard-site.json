@@ -47,8 +47,8 @@
         "$type": "site.standard.document",
         "site": "at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self",
         "path": "/blog/review-with-memory/",
-        "title": "Automating reviews without lowering the bar",
-        "publishedAt": "2026-07-24T00:00:00.000Z",
+        "title": "The Semantic Linter: Automating reviews without losing touch",
+        "publishedAt": "2026-07-26T00:00:00.000Z",
         "description": "You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.",
         "tags": [
           "knowledge",
