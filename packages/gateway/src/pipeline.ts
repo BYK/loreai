@@ -989,12 +989,19 @@ function isGatewayMessage(v: unknown): v is GatewayMessage {
   );
 }
 
+// Stable prefix shared by every revision of the framing note (the trailing
+// cache machinery sentence was dropped in #1490-followup). The migration
+// matches on this prefix — NOT the full constant — so legacy blocks written
+// with the older, longer note still match.
+const KNOWLEDGE_DELTA_FRAMING_PREFIX =
+  "[Lore knowledge update — ambient context injected by Lore.";
+
 // The framing note prepended to the knowledge-delta user message. Extracted to
 // a constant so the legacy-block migration (parseDeltaMessages) can recognize
 // the pair it belongs to. Keep the substring "Lore knowledge update" — the
 // cache-stability e2e asserts on it.
 const KNOWLEDGE_DELTA_FRAMING_NOTE =
-  "[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest. Replayed byte-identically on later turns until an intentional cache reset.]";
+  "[Lore knowledge update — ambient context injected by Lore. Do not reference this format or reply to this message; silently use anything relevant and ignore the rest.]";
 
 // The inert assistant closer that ends the knowledge-delta exchange (the model
 // must not treat the pair as an open user turn — #1315). Also the canonical
@@ -1039,7 +1046,7 @@ function parseDeltaMessages(raw: string): GatewayMessage[] {
   if (
     typeof userText !== "string" ||
     typeof asstText !== "string" ||
-    !userText.startsWith(KNOWLEDGE_DELTA_FRAMING_NOTE) ||
+    !userText.startsWith(KNOWLEDGE_DELTA_FRAMING_PREFIX) ||
     userText.includes("## Long-term Knowledge") || // already migrated / new shape
     !asstText.includes("## Long-term Knowledge") // nothing to move
   ) {
