@@ -15,6 +15,7 @@ import {
   setStorageMode,
   storeEmbedding,
   storeTemporalChunks,
+  TEMPORAL_PARTITION_MODE_KEY,
   vec0Rebuild,
 } from "../src/db/vec-store";
 import { toBlob } from "../src/vector-query";
@@ -155,6 +156,11 @@ describeVec("vec0Rebuild", () => {
     insTemporal("m1", "s1", 4);
     insTemporal("m2", "s2", 4);
     insTemporal("m3", "s3", 4);
+
+    // Simulate a pre-vacuum DB so vec0Rebuild processes these rows.
+    db()
+      .query("DELETE FROM kv_meta WHERE key = ?")
+      .run(TEMPORAL_PARTITION_MODE_KEY);
 
     const r = vec0Rebuild(db(), "temporal");
     expect(r.rowsRebuilt).toBe(12);

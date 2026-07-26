@@ -467,6 +467,12 @@ export function ensureVec0Store(conn: EmbeddingWriteConn, dim: number): void {
   }
   for (const ddl of vec0Ddl(dim)) conn.query(ddl).run();
   setKv(conn, VEC_DIMENSION_KEY, String(dim));
+  // Fresh installs create the temporal_vec table with project_id as the sole
+  // PARTITION KEY; record the mode so runTemporal knows session_id is an aux
+  // column that KNN WHERE cannot reference.
+  if (readTemporalPartitionMode(conn) === null) {
+    setKv(conn, TEMPORAL_PARTITION_MODE_KEY, "project_only");
+  }
 }
 
 // ---------------------------------------------------------------------------

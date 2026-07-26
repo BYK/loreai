@@ -32,6 +32,7 @@ import {
   setStorageMode,
   storeEmbedding,
   storeTemporalChunks,
+  TEMPORAL_PARTITION_MODE_KEY,
 } from "./db/vec-store";
 import { config } from "./config";
 import * as log from "./log";
@@ -2102,8 +2103,16 @@ async function poolOrInProcess(
     if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
     if (pooled !== null) return pooled;
     const readMode = resolveReadMode(readStorageMode(db()), isVecAvailable());
+    const temporalPartitionMode =
+      spec.kind === "temporal" ? getKV(TEMPORAL_PARTITION_MODE_KEY) : null;
     try {
-      return runVectorQuery(db(), readMode, queryEmbedding, spec);
+      return runVectorQuery(
+        db(),
+        readMode,
+        queryEmbedding,
+        spec,
+        temporalPartitionMode,
+      );
     } catch (err) {
       // Safety net for the vec0 read path, which (unlike the blob paths) has no
       // in-line JS fallback: a vec0 `MATCH` can throw transiently — e.g. during a
