@@ -462,15 +462,21 @@ export function setStorageMode(
  */
 export function ensureVec0Store(conn: EmbeddingWriteConn, dim: number): void {
   const storedDim = readVecDimension(conn);
-  if (storedDim !== null && storedDim !== dim) {
+  const temporalExisted = Boolean(
+    conn
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+      .get(VEC_TABLE.temporal),
+  );
+  const recreating = storedDim !== null && storedDim !== dim;
+  if (recreating) {
     for (const vt of VEC_TABLES) conn.query(`DROP TABLE IF EXISTS ${vt}`).run();
   }
   for (const ddl of vec0Ddl(dim)) conn.query(ddl).run();
   setKv(conn, VEC_DIMENSION_KEY, String(dim));
-  // Fresh installs create the temporal_vec table with project_id as the sole
-  // PARTITION KEY; record the mode so runTemporal knows session_id is an aux
-  // column that KNN WHERE cannot reference.
-  if (readTemporalPartitionMode(conn) === null) {
+  // Only a table we created here is known to use the current project-only DDL.
+  // A same-dimension existing table can be the pre-vacuum compound partition
+  // layout; never mark it converted or a later vacuum would skip its rebuild.
+  if (!temporalExisted || recreating) {
     setKv(conn, TEMPORAL_PARTITION_MODE_KEY, "project_only");
   }
 }

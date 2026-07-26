@@ -526,13 +526,16 @@ function runTemporal(
     // grouping the bounded result set (≤ k ≤ VEC0_MAX_K rows) in JS sidesteps
     // that entirely. Degenerate-safe: with one chunk per message the collapse
     // is 1:1.
-    const run = (k: number): VectorHit[] => {
+    const run = (
+      k: number,
+      useSessionPartitionKey = sessionIsPartitionKey,
+    ): VectorHit[] => {
       const vsql =
-        sessionIsPartitionKey && sessionId
+        useSessionPartitionKey && sessionId
           ? "SELECT message_id AS id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? AND session_id = ? ORDER BY distance"
           : "SELECT message_id AS id, session_id, 1 - distance AS similarity FROM temporal_vec WHERE embedding MATCH ? AND k = ? AND project_id = ? ORDER BY distance";
       const vparams: unknown[] =
-        sessionIsPartitionKey && sessionId
+        useSessionPartitionKey && sessionId
           ? [toBlob(queryEmbedding), k, projectId, sessionId]
           : [toBlob(queryEmbedding), k, projectId];
       const rawHits = conn.query(vsql).all(...vparams) as Array<{
@@ -542,7 +545,7 @@ function runTemporal(
       }>;
       // Post-filter by session when not a partition key (aux column)
       const scoped =
-        !sessionIsPartitionKey && sessionId
+        !useSessionPartitionKey && sessionId
           ? rawHits.filter((h) => h.session_id === sessionId)
           : rawHits;
       // Keep each message's best (max) sim. `scoped` is nearest-first, so the
@@ -565,8 +568,30 @@ function runTemporal(
     const k0 = needOverfetch
       ? VEC0_MAX_K
       : vecK(limit * TEMPORAL_CHUNK_OVERFETCH);
-    const hits = run(k0);
-    return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
+    let useSessionPartitionKey = sessionIsPartitionKey;
+    let hits: VectorHit[];
+    try {
+      hits = run(k0);
+    } catch (error) {
+      // A rebuild can replace the old compound-partition table after we read
+      // its absent mode marker but before this KNN query runs. sqlite-vec then
+      // rejects session_id as an auxiliary-column WHERE constraint. Retry once
+      // with the project-only query shape; never retry unrelated failures.
+      if (
+        sessionIsPartitionKey &&
+        sessionId &&
+        error instanceof Error &&
+        error.message.includes("auxiliary column")
+      ) {
+        useSessionPartitionKey = false;
+        hits = run(VEC0_MAX_K, useSessionPartitionKey);
+      } else {
+        throw error;
+      }
+    }
+    return hits.length >= limit || k0 >= VEC0_MAX_K
+      ? hits
+      : run(VEC0_MAX_K, useSessionPartitionKey);
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
