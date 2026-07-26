@@ -536,9 +536,7 @@ function runTemporal(
         .sort((a, b) => b.similarity - a.similarity)
         .slice(0, limit);
     };
-    const k0 = sessionId
-      ? VEC0_MAX_K
-      : vecK(limit * TEMPORAL_CHUNK_OVERFETCH);
+    const k0 = sessionId ? VEC0_MAX_K : vecK(limit * TEMPORAL_CHUNK_OVERFETCH);
     const hits = run(k0);
     // Chunk-collapse + session-post-filter attrition can leave < limit
     // distinct messages even when more exist deeper; widen to the max KNN
