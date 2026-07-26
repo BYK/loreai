@@ -58,6 +58,16 @@ export const VEC_STORAGE_MODE_KEY = "vec.storage_mode";
  */
 export const VEC_DIMENSION_KEY = "vec.dimension";
 
+/**
+ * `kv_meta` key recording the temporal_vec partition layout version.
+ *   - absent / undefined → original layout (project_id + session_id as
+ *     compound PARTITION KEY, creating ~3 MB chunk per active session).
+ *   - `"project_only"`   → rebuilt with project_id as sole PARTITION KEY;
+ *     session_id is a stored aux column (`+session_id`).
+ * Set atomically inside the vec0_rebuild savepoint.
+ */
+export const TEMPORAL_PARTITION_MODE_KEY = "vec.temporal_partition_mode";
+
 /** Logical table → physical base table name. */
 const BASE_TABLE: Record<EmbeddingTable, string> = {
   knowledge: "knowledge",
@@ -80,10 +90,14 @@ const VEC_TABLE: Record<EmbeddingTable, string> = {
  * pushdown. (DiskANN was evaluated and rejected: it supports neither partition
  * keys nor metadata columns, inserts ~400× slower, and is only approximate; it
  * is not even compiled into the upstream `sqlite-vec` build we ship.) Partition
- * keys shard the index so a
- * session/project-scoped query touches only the matching rows; `temporal_vec`
- * is chunk-keyed (`chunk_id`, `+message_id`) ahead of multi-vector chunking
- * (single-vector era writes exactly one chunk per message: `chunk_id = id#0`).
+ * keys shard the index so a project-scoped query touches only the matching
+ * rows; `temporal_vec` uses `project_id` as the sole PARTITION KEY (removed
+ * `session_id` from the partition tuple in PR #1494 to avoid ~10.5 GB chunk-
+ * per-session over-allocation — 3,730 session partitions each needing a 3 MB
+ * chunk at 8% utilization). `session_id` is retained as a stored aux column
+ * (`+session_id`) for post-filter. `temporal_vec` is chunk-keyed (`chunk_id`,
+ * `+message_id`) ahead of multi-vector chunking (single-vector era writes
+ * exactly one chunk per message: `chunk_id = id#0`).
  * `CREATE … IF NOT EXISTS` so the routine is idempotent / re-runnable.
  */
 export function vec0Ddl(dim: number): string[] {
@@ -91,7 +105,7 @@ export function vec0Ddl(dim: number): string[] {
     `CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${dim}] distance_metric=cosine)`,
     `CREATE VIRTUAL TABLE IF NOT EXISTS entity_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${dim}] distance_metric=cosine)`,
     `CREATE VIRTUAL TABLE IF NOT EXISTS distillation_vec USING vec0(id TEXT PRIMARY KEY, project_id TEXT PARTITION KEY, +session_id TEXT, embedding float[${dim}] distance_metric=cosine)`,
-    `CREATE VIRTUAL TABLE IF NOT EXISTS temporal_vec USING vec0(chunk_id TEXT PRIMARY KEY, +message_id TEXT, project_id TEXT PARTITION KEY, session_id TEXT PARTITION KEY, embedding float[${dim}] distance_metric=cosine)`,
+    `CREATE VIRTUAL TABLE IF NOT EXISTS temporal_vec USING vec0(chunk_id TEXT PRIMARY KEY, +message_id TEXT, +session_id TEXT, project_id TEXT PARTITION KEY, embedding float[${dim}] distance_metric=cosine)`,
   ];
 }
 
@@ -771,6 +785,25 @@ function withSavepointOn<T>(
   }
 }
 
+/**
+ * Read the stored temporal_vec partition mode from kv_meta.
+ * Returns `"project_only"` when already converted, or `null` for the original
+ * compound-key layout (absent key = old layout).
+ */
+function readTemporalPartitionMode(conn: StorageModeConn): string | null {
+  try {
+    const row = conn
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get(TEMPORAL_PARTITION_MODE_KEY) as
+      | { value?: string }
+      | null
+      | undefined;
+    return row?.value != null ? row.value : null;
+  } catch {
+    return null;
+  }
+}
+
 export function vec0Rebuild(
   conn: EmbeddingWriteConn,
   table: EmbeddingTable,
@@ -792,6 +825,16 @@ export function vec0Rebuild(
     .query("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
     .get(chunksTable);
   if (!chunksExists) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
+
+  // temporal-only: skip if already converted to project_only partition mode.
+  // The first `lore data vacuum` after upgrading to the new DDL converts the
+  // layout; subsequent runs have nothing to reclaim.
+  if (
+    table === "temporal" &&
+    readTemporalPartitionMode(conn) === "project_only"
+  ) {
+    return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
+  }
 
   const dim = readVecDimension(conn);
   if (dim === null) return { rowsRebuilt: 0, beforeChunks: 0, afterChunks: 0 };
@@ -891,6 +934,10 @@ export function vec0Rebuild(
       throw new Error(
         `vec0Rebuild(${vt}): staged ${stagedCount} rows but rebuilt table has ${rowsRebuilt}`,
       );
+    }
+    // Record the partition mode for temporal so subsequent rebuilds are skipped.
+    if (table === "temporal") {
+      setKv(conn, TEMPORAL_PARTITION_MODE_KEY, "project_only");
     }
     return { rowsRebuilt, beforeChunks, afterChunks };
   });

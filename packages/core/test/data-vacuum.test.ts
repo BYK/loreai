@@ -55,7 +55,7 @@ afterEach(() => {
   }
   db()
     .query(
-      "DELETE FROM kv_meta WHERE key IN ('vec.storage_mode', 'vec.dimension')",
+      "DELETE FROM kv_meta WHERE key IN ('vec.storage_mode', 'vec.dimension', 'vec.temporal_partition_mode')",
     )
     .run();
   for (const t of [
@@ -114,12 +114,13 @@ describe("VACUUM / free-page reclaim (#1221)", () => {
     insTemporal("m2", "s2", 4);
     insTemporal("m3", "s3", 4);
 
+    // All 12 rows share the same project partition, so vec0 allocates exactly 1 chunk.
     const beforeChunks = (
       db().query("SELECT COUNT(*) AS n FROM temporal_vec_chunks").get() as {
         n: number;
       }
     ).n;
-    expect(beforeChunks).toBeGreaterThanOrEqual(3);
+    expect(beforeChunks).toBe(1);
 
     const r = vacuum();
 
@@ -127,7 +128,8 @@ describe("VACUUM / free-page reclaim (#1221)", () => {
     expect(r.vec0Rebuild).toBeDefined();
     expect(r.vec0Rebuild!.rowsRebuilt).toBe(12);
     expect(r.vec0Rebuild!.beforeChunks).toBe(beforeChunks);
-    expect(r.vec0Rebuild!.afterChunks).toBeLessThanOrEqual(beforeChunks);
+    // After rebuild the project-only partition still packs everything into 1 chunk.
+    expect(r.vec0Rebuild!.afterChunks).toBe(1);
 
     // Every chunk row still present after the rebuild.
     const after = db()
