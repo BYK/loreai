@@ -378,4 +378,37 @@ describe("commandLogin (GitHub --no-browser)", () => {
     expect(loadPersistedSession()?.access_token).toBe("at-gh");
     expect(logs.join("\n")).toContain("https://gh.example/oauth?x=1");
   });
+
+  test("empty paste input is rejected with a clear error (not sent to Supabase)", async () => {
+    // Regression: an empty paste used to flow into exchangeCodeForSession and
+    // produce a confusing Supabase error. Now it must throw early.
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth?x=1" },
+      error: null,
+    });
+    h.answer.value = "   ";
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: { session: null },
+      error: null,
+    });
+    h.from.mockReturnValue(profileChain(null));
+
+    // commandLogin catches and process.exit(1)s — verify the exit code and the
+    // surfaced "No code provided." message instead of the throw.
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((
+      code?: number,
+    ) => {
+      throw new Error(`process.exit unexpectedly called with "${code}"`);
+    }) as never);
+    try {
+      await commandLogin([], { "no-browser": true });
+    } catch (e) {
+      // outer catch printed to stderr
+      expect(String(e)).toContain("process.exit");
+    }
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errs.join("\n")).toContain("No code provided.");
+    expect(h.auth.exchangeCodeForSession).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+  });
 });

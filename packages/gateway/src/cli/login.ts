@@ -19,6 +19,7 @@ import { createInterface } from "node:readline/promises";
 import qrcode from "qrcode-terminal";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import {
+  clearProviderTokenCache,
   clearSession,
   createSupabaseClient,
   getCurrentUser,
@@ -37,6 +38,9 @@ import {
  *  Collaborator API requires `repo` for private org repos (e.g. getsentry/*).
  */
 const OAUTH_SCOPES = "read:org repo";
+
+/** Historical GitHub OAuth App default TTL for read-only tokens (8 hours). */
+const GITHUB_PROVIDER_TOKEN_TTL_SECONDS = 8 * 60 * 60;
 
 // ---------------------------------------------------------------------------
 // lore login
@@ -218,15 +222,26 @@ export async function acquireGitHubProviderToken(opts?: {
   const cached = loadCachedProviderToken();
   if (cached) {
     const client = createSupabaseClient();
-    // Restore the persisted session so the returned client is usable.
+    // Restore the persisted session so the returned client is usable. If the
+    // session can't be restored (e.g. refresh_token expired or revoked), the
+    // EF call would 401 with a confusing error — fall through to OAuth instead
+    // so the user gets a fresh re-auth.
     const persisted = loadPersistedSession();
     if (persisted) {
-      await client.auth.setSession({
+      const { error: setErr } = await client.auth.setSession({
         access_token: persisted.access_token,
         refresh_token: persisted.refresh_token,
       });
+      if (setErr) {
+        // Session unrecoverable — discard the cache and run OAuth.
+        clearProviderTokenCache();
+      } else {
+        return { client, providerToken: cached.provider_token };
+      }
+    } else {
+      // No session to bind the token to — discard the cache.
+      clearProviderTokenCache();
     }
-    return { client, providerToken: cached.provider_token };
   }
 
   // No cached token — run OAuth.
@@ -265,27 +280,47 @@ async function acquireGitHubProviderTokenLoopback(): Promise<{
     "If you authorized from another device, paste the code (or redirect URL) here:\n",
   );
 
-  // Race: loopback callback vs stdin paste.
+  // Race: loopback callback vs stdin paste. Empty stdin input is ignored so a
+  // user reflexively pressing Enter can't win the race with a blank code.
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const oauthCode = await Promise.race([
-    cbCode,
-    rl.question("").then((line) => {
-      done.close();
-      rl.close();
-      return extractAuthCode(line.trim());
-    }),
-  ]).finally(() => {
+  const emptyInput = new Error("__skip__");
+  const pastePromise = rl.question("").then(
+    (line) => {
+      const code = extractAuthCode(line.trim());
+      if (!code) throw emptyInput;
+      return code;
+    },
+    () => {
+      // loser-side rejection when Node rejects a pending question on close —
+      // swallow so we don't surface an unhandled rejection.
+      throw emptyInput;
+    },
+  );
+  let oauthCode: string;
+  try {
+    oauthCode = await Promise.race([cbCode, pastePromise]);
+  } catch (e) {
+    if (e === emptyInput) throw new Error("No code provided.");
+    throw e;
+  } finally {
     rl.close();
     done.close();
-  });
+  }
 
   const session = await exchangeOAuthCode(client, oauthCode);
   await finalizeLogin(client, sessionToPersisted(session));
   const providerToken = session.provider_token;
   if (!providerToken) throw new Error("GitHub did not return an access token.");
-  const ttl = session.expires_at
+  // GitHub provider_tokens issued via Supabase don't carry an explicit expiry;
+  // bound the cache by whichever runs out first: the access_token expiry, or
+  // 8h (historical GitHub OAuth App default for read-only flows).
+  const sessionTtl = session.expires_at
     ? session.expires_at - Math.floor(Date.now() / 1000)
     : undefined;
+  const ttl = Math.min(
+    sessionTtl ?? GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+    GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+  );
   persistProviderTokenCache(providerToken, ttl);
   return { client, providerToken };
 }
