@@ -470,6 +470,22 @@ Confidence values (0.0–1.0) — determines injection priority when budget is t
 - Default to 1.0 for preferences with strong directive language, 0.8 for other preferences.
 - Always set confidence on create ops — it determines injection priority.
 
+File associations (D2c PR-2) — point the entry at the code that produced it:
+- Include a \`files: [...]\` field on create or update ops when the entry is clearly about
+  one or more files touched during this session. The system surfaces a "Files touched this
+  session" block in your context (ranked by hit count) — pick the relevant subset, not all
+  of them. Paths should be repo-relative (e.g. \`src/auth/stripe-client.ts\`).
+- When \`update.files\` is omitted, the entry's existing associations are left alone (useful
+  for content-only edits that shouldn't re-tag). When provided, it REPLACES the sidecar in
+  full.
+- An empty \`files: []\` is allowed and means "explicitly clear the associations".
+- Out-of-set files (paths you name that weren't touched this session) are accepted with a
+  warn log — useful when the user mentioned a file in chat without actually editing it. The
+  reverse (a touched file you don't mention) is simply not associated.
+- The stored sidecar is local-only (NOT synced across machines — session context differs).
+- Skip \`files\` when the entry is genuinely conceptual (a cross-cutting preference or decision
+  that isn't tied to any specific file) — only a minority of entries warrant files.
+
 Produce a JSON array of operations:
 [
   {
@@ -479,14 +495,16 @@ Produce a JSON array of operations:
     "content": "Concise knowledge entry — under 150 words",
     "scope": "project" | "global",
     "crossProject": false,
-    "confidence": 1.0
+    "confidence": 1.0,
+    "files": ["src/auth/stripe-client.ts", "src/lib/retry.ts"]
   },
   {
     "op": "update",
     "id": "existing-entry-id",
     "title": "New title — ONLY when the entry's scope genuinely broadened (optional)",
     "content": "Updated content — under 150 words",
-    "confidence": 0.0-1.0
+    "confidence": 0.0-1.0,
+    "files": ["src/auth/stripe-client.ts"]
   },
   {
     "op": "delete",

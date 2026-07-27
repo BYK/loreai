@@ -746,3 +746,61 @@ export function formatToolFailureSection(
   );
   return `### Recurring Tool Failures\n${lines.join("\n")}`;
 }
+
+/**
+ * Per-session file-touch summary: distinct files that file-operating tool
+ * calls (Read/Edit/Write/…) and bash commands with file-touching operands or
+ * redirects ACTED ON during this session (D2c PR-2). Walks
+ * `tool_calls.input_paths_json` (the JSON array written by `recordToolCalls`)
+ * via SQLite's `json_each()` so a single multi-path bash command
+ * (`cat a b c > out.ts`) surfaces every path it touched — not just one.
+ *
+ * Returns a stable-sorted, deduped list of paths AND the per-path hit count
+ * so the curator's "files touched this session" context block can rank by
+ * activity. Capped at `limit` (default 200, well above the curator's
+ * MAX_FILES_IN_CURATOR_CONTEXT=15 to leave headroom). Empty input or no
+ * paths → empty arrays (callers check `paths.length === 0`).
+ */
+export function sessionFileTouches(
+  projectPath: string,
+  sessionID: string,
+  opts?: { limit?: number; sinceMs?: number },
+): { paths: string[]; counts: Record<string, number> } {
+  const pid = ensureProject(projectPath);
+  const limit = opts?.limit ?? 200;
+  const since = opts?.sinceMs ?? 0;
+  // ORDER BY hits DESC, path ASC gives deterministic output for the same
+  // (hits, path) tiebreak — critical for prompt-cache stability of the
+  // context block the curator consumes. The CTE materialises the per-row
+  // JSON expansion once; the bare `FROM t, json_each(t.col)` cross-join
+  // form evaluated incorrectly in SQLite (collapsed to a single path per
+  // call_id — see adversarial review #1504 for the analogous LATERAL fix).
+  const rows = db()
+    .query(
+      `WITH expanded(path) AS (
+         SELECT json_each.value
+           FROM tool_calls, json_each(tool_calls.input_paths_json)
+          WHERE tool_calls.project_id = ?
+            AND tool_calls.session_id = ?
+            AND tool_calls.input_paths_json IS NOT NULL
+            AND tool_calls.created_at >= ?
+       )
+       SELECT path, COUNT(*) AS hits
+         FROM expanded
+        GROUP BY path
+        ORDER BY hits DESC, path ASC
+        LIMIT ?`,
+    )
+    .all(pid, sessionID, since, limit) as Array<{
+    path: string;
+    hits: number;
+  }>;
+  const counts: Record<string, number> = {};
+  const paths: string[] = [];
+  for (const r of rows) {
+    if (typeof r.path !== "string" || r.path.length === 0) continue;
+    counts[r.path] = r.hits;
+    paths.push(r.path);
+  }
+  return { paths, counts };
+}
