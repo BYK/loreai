@@ -7,7 +7,7 @@ import * as log from "./log";
 import * as embedding from "./embedding";
 import {
   classifyToolError,
-  extractFilePath,
+  extractFilePaths,
   isVerifierCall,
   MAX_ERROR_MESSAGE_LEN,
 } from "./tool-trace";
@@ -202,7 +202,7 @@ export function recordToolCalls(input: {
       const batch = seeds.slice(i, i + CHUNK);
       const seedStmt = db().query(
         `INSERT INTO tool_calls
-           (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier, input_path)
+           (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier, input_paths_json)
          VALUES ${Array.from({ length: batch.length }, () => rowSql).join(", ")}
          ON CONFLICT(call_id) DO UPDATE SET
            status = CASE WHEN tool_calls.status = 'pending' THEN excluded.status ELSE tool_calls.status END,
@@ -212,13 +212,18 @@ export function recordToolCalls(input: {
            -- verifier is derived from the tool_use input (stable across re-seeds);
            -- keep the first non-null classification.
            verifier = COALESCE(tool_calls.verifier, excluded.verifier),
-           -- input_path is likewise derived from the (stable) tool_use input;
-           -- keep the first non-null path so a re-seed never clobbers it.
-           input_path = COALESCE(tool_calls.input_path, excluded.input_path)`,
+           -- input_paths_json is likewise derived from the (stable) tool_use
+           -- input (file paths extracted from object/JSON/plaintext/bash shapes);
+           -- keep the first non-null value so a re-seed never clobbers it. The
+           -- column is a JSON-encoded string[] (see #1424 / v76) so D2c PR-2 can
+           -- union the session's touched files without re-parsing.
+           input_paths_json = COALESCE(tool_calls.input_paths_json, excluded.input_paths_json)`,
       );
       const params: Array<string | number | null> = [];
       for (const p of batch) {
         const outcome = toolOutcome(p.tool, p.state);
+        const paths = extractFilePaths(p.state.input);
+        const inputPathsJson = paths.length > 0 ? JSON.stringify(paths) : null;
         params.push(
           p.callID,
           input.info.id,
@@ -231,7 +236,7 @@ export function recordToolCalls(input: {
           outcome.duration,
           createdAt,
           isVerifierCall(p.state.input) ? 1 : 0,
-          extractFilePath(p.state.input) ?? null,
+          inputPathsJson,
         );
       }
       seedStmt.run(...params);

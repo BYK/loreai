@@ -119,7 +119,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(75);
+    expect(row.version).toBe(76);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -176,7 +176,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(75);
+    expect(ver.version).toBe(76);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -188,6 +188,32 @@ describe("db", () => {
     expect(() =>
       fresh.query("SELECT confidence FROM knowledge_current LIMIT 1").all(),
     ).not.toThrow();
+  });
+
+  test("v75/v76: both-columns state (partial v75→v76) converges on re-open", () => {
+    // Regression for B1 (adversarial review of #1504): a DB that has BOTH
+    // `input_path` AND `input_paths_json` (e.g. a partial v75→v76 mid-apply
+    // or a manual sidecar ADD) used to crash the gateway on re-open with
+    // `duplicate column name: input_paths_json`. The migration loop must
+    // converge the schema to the post-rename state (only `input_paths_json`)
+    // and normalize the version to MIGRATIONS.length.
+    const d = db();
+    // Simulate the partial state: input_path was added by v75, then a
+    // manual ADD COLUMN input_paths_json (or a re-apply that half-succeeded).
+    d.exec("ALTER TABLE tool_calls ADD COLUMN input_path TEXT;");
+    d.exec("UPDATE schema_version SET version = 54");
+    close();
+    const fresh = db();
+    const tcols = fresh.query("PRAGMA table_info(tool_calls)").all() as Array<{
+      name: string;
+    }>;
+    const names = tcols.map((c) => c.name);
+    expect(names).toContain("input_paths_json");
+    expect(names).not.toContain("input_path");
+    const ver = fresh.query("SELECT version FROM schema_version").get() as {
+      version: number;
+    };
+    expect(ver.version).toBe(76);
   });
 
   test("v56: knowledge_ref_validity table + projects.last_refcheck_at exist after recovery", () => {

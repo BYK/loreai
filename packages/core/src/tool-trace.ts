@@ -21,6 +21,7 @@
  */
 
 import { db, ensureProject } from "./db";
+import { parse as parseBash } from "unbash";
 
 // ---------------------------------------------------------------------------
 // Error classification
@@ -190,39 +191,358 @@ const PATH_FALLBACK_RE = /(?:[\w.-]+\/)+[\w.-]+\.\w{1,5}/;
 const PATH_SCAN_LIMIT = 8192;
 const PATH_TOKEN_MAX = 260; // generous vs the 255-char component limit on most FSes
 
+// Commands whose positional arguments are file paths. We don't try to be
+// comprehensive — `cat`, `tee`, `cp`, `mv`, `rm`, `head`, `tail`, `less`,
+// `more`, `wc`, `stat`, `file`, `touch`, `chmod`, `chown`, `mkdir`, `rmdir`,
+// `dirname`, `basename`, `realpath`, `readlink`, `source`, `.` cover the vast
+// majority of agent bash that touches files. Deliberately excluded:
+//   - `sed`, `awk`, `gawk`: their first non-flag arg is a SCRIPT (e.g.
+//     `sed 's/x/y/' file`), not a file. Distinguishing the script from the
+//     file operand requires a per-tool option table we don't have — missing
+//     these is the safe direction.
+//   - `grep`, `egrep`, `fgrep`, `rg`: their first non-flag arg is a PATTERN
+//     (e.g. `grep foo file`), not a file. Same trade-off.
+//   - `[`, `test`: builtin test expression; argument shape varies (`[ -f file ]`
+//     vs `[ file1 -ef file2 ]`).
+// For unknown commands, redirect targets (handled below) still surface the
+// touched files. This is provenance-only and best-effort — a miss is always
+// safe.
+const FILE_OPERAND_COMMANDS = new Set([
+  "cat",
+  "tee",
+  "cp",
+  "mv",
+  "rm",
+  "ln",
+  "install",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "wc",
+  "stat",
+  "file",
+  "touch",
+  "chmod",
+  "chown",
+  "mkdir",
+  "rmdir",
+  "dirname",
+  "basename",
+  "realpath",
+  "readlink",
+  "source",
+  ".",
+]);
+
 /**
- * Best-effort extraction of the source-file path a tool call acted on, from its
- * `input` (host-shaped, hence `unknown`). Handles the common file-tool shapes
- * (`{ path }` / `{ filePath }` / `{ file }` — the keys used by Read/Edit/Write/
- * read_file/edit_file/write_to_file across hosts), a JSON string of the same,
- * and a plain-text path fallback. Returns undefined when no path is recoverable
- * (bash/grep/task/etc.), so the caller stores NULL. This is provenance only —
- * a best-effort signal, never load-bearing, so a miss is always safe.
+ * Heuristic: is a Word a literal-or-quoted (no expansion) single token safe to
+ * treat as a file path? unbash breaks words into `parts` (Literal, SingleQuoted,
+ * CommandExpansion, ParameterExpansion, etc.). A word containing expansions
+ * (`$1`, `$(cmd)`, `~`, `${var}`) cannot be resolved to a file path statically,
+ * so we skip it. This bounds the AST walk to safely-extractable operands.
  */
-export function extractFilePath(input: unknown): string | undefined {
-  const fromObject = (o: Record<string, unknown>): string | undefined => {
+function isStaticLiteralWord(word: {
+  text: string;
+  value: string;
+  parts?: ReadonlyArray<{ type: string }>;
+}): boolean {
+  if (word.text.length === 0 || word.text.length > PATH_TOKEN_MAX) return false;
+  if (/\s/.test(word.text)) return false;
+  // Tilde is a runtime expansion (home directory) even though unbash doesn't
+  // tag it with a part type — skip it.
+  if (word.text.startsWith("~")) return false;
+  // Glob metacharacters are runtime expansions of the shell. unbash does NOT
+  // tag them with a part type (it doesn't model pathname expansion), so the
+  // `parts: undefined` lazy-getter fallback below would otherwise treat a
+  // `src/*.ts` literal as a static path-shaped token and surface it as a
+  // touched file. Reject up front.
+  if (/[*?[\]]/.test(word.text)) return false;
+  if (!word.parts || word.parts.length === 0) return true; // unbash lazy getter; fall back to text
+  for (const p of word.parts) {
+    // The runtime type discriminator is "SingleQuoted" (the interface name
+    // SingleQuotedPart is just the TS name for the same shape; verify
+    // unbash/types.d.ts). Any other part type — CommandExpansion,
+    // ParameterExpansion, ArithmeticExpansion, ProcessSubstitution — is a
+    // runtime expansion we cannot resolve.
+    if (p.type === "Literal" || p.type === "SingleQuoted") continue;
+    // DoubleQuoted is a wrapper around a child-part list. Accept iff every
+    // child is a literal (no `$VAR`, `$(…)`, `${…}`). This makes
+    // `cat "src/a.ts"` work (purely literal double-quoted path) while still
+    // rejecting `cat "$HOME/src/a.ts"` (SimpleExpansion inside).
+    if (p.type === "DoubleQuoted") {
+      const inner = (p as { parts?: ReadonlyArray<{ type: string }> }).parts;
+      if (!inner || inner.length === 0) continue;
+      if (inner.every((c) => c.type === "Literal")) continue;
+      return false;
+    }
+    return false;
+  }
+  return true;
+}
+
+function cleanPathToken(s: string): string | undefined {
+  // For the AST walk we want SOME shape constraint so a literal word like
+  // "foo" (a pattern, a variable name, a flag value) isn't mistaken for a
+  // touched file. We accept: anything with a `/` (definite path), or a
+  // bare name with a dotted extension like `db.ts` / `out.log` (looks like
+  // a file). Words with no slash and no extension are not path-like.
+  // The plaintext regex fallback (PATH_FALLBACK_RE) is a separate concern —
+  // there we keep the strict slash requirement (prose risk).
+  if (s.length === 0 || s.length > PATH_TOKEN_MAX || /\s/.test(s)) {
+    return undefined;
+  }
+  if (s.includes("/")) return s;
+  // Bare name with a dotted extension of 1-5 trailing letters.
+  if (/^[^.]+\.[A-Za-z]{1,5}$/.test(s)) return s;
+  return undefined;
+}
+
+/**
+ * Best-effort extraction of the source-file paths a tool call acted on, from a
+ * bash command string. Uses `unbash` (webpro-nl/unbash, zero-dep, tolerant
+ * parser) to walk the AST. Returns the union of:
+ *
+ *   1. **Redirect targets** for file-touching operators (`>`, `>>`, `<`, `<>`,
+ *      `>|`, `>&`, `>>`-family, `<&`). A command like `echo x > out.ts` touches
+ *      `out.ts` even though `out.ts` is not a positional operand.
+ *   2. **Positional operands** of commands in FILE_OPERAND_COMMANDS
+ *      (`cat`, `sed`, `awk`, `grep`, `tee`, `cp`, `mv`, …) that look like paths
+ *      (non-empty, contain a `/`, no whitespace, within PATH_TOKEN_MAX).
+ *
+ * Words containing parameter/command/arithmetic expansions (`$1`, `$(cmd)`, `~`,
+ * `${var}`) are skipped — we can't statically resolve them. The result is
+ * de-duplicated while preserving first-seen order.
+ *
+ * This is **provenance only** — best-effort, never load-bearing, so a miss is
+ * always safe.
+ */
+export function extractFilePathsFromCommand(cmd: string): string[] {
+  if (typeof cmd !== "string" || cmd.length === 0) return [];
+  // Bound the input — a pathological multi-KB command shouldn't traverse the
+  // AST for ages on the request path. Truncation can only drop matches
+  // (safe direction).
+  const slice = cmd.slice(0, PATH_SCAN_LIMIT);
+  let ast: ReturnType<typeof parseBash>;
+  try {
+    ast = parseBash(slice);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string | undefined) => {
+    const clean = cleanPathToken(raw ?? "");
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  };
+
+  // Walk every command node reachable in the AST, surfacing redirect targets
+  // and file-operand positional args. unbash models control flow as nested
+  // commands inside If/While/For/Subshell/etc., so a generic visit collects
+  // every reachable Command node without bespoke per-construct handling.
+  // We also surface `redirects` at every node level — unbash carries
+  // trailing redirects on the OUTER node, not on the inner Command, for
+  // compound constructs like `(cat a) > out.ts`, `for … done > out.ts`,
+  // `if … fi > out.ts`, and `function foo { … } > log`.
+  const FILE_TOUCHING_REDIRECT_OPS = new Set([
+    ">",
+    ">>",
+    "<",
+    "<>",
+    ">|",
+    ">&",
+    "<&",
+    // bash 4+ "redirect stdout AND stderr to file" shorthand, equivalent to
+    // `> file 2>&1`. Common in modern scripts and CI configs.
+    "&>",
+    "&>>",
+  ]);
+  const processRedirects = (
+    redirects:
+      | ReadonlyArray<{
+          operator: string;
+          target?: {
+            text: string;
+            value: string;
+            parts?: ReadonlyArray<{ type: string }>;
+          };
+        }>
+      | undefined,
+  ): void => {
+    if (!redirects) return;
+    for (const r of redirects) {
+      // Heredoc (`<<`, `<<-`) and herestring (`<<<`) targets are delimiters
+      // or inline content, NOT file paths.
+      if (!FILE_TOUCHING_REDIRECT_OPS.has(r.operator)) continue;
+      if (r.target && isStaticLiteralWord(r.target)) push(r.target.value);
+    }
+  };
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    const n = node as {
+      type?: string;
+      // Command fields:
+      name?: {
+        text: string;
+        value: string;
+        parts?: ReadonlyArray<{ type: string }>;
+      };
+      suffix?: ReadonlyArray<{
+        text: string;
+        value: string;
+        parts?: ReadonlyArray<{ type: string }>;
+      }>;
+      redirects?: ReadonlyArray<{
+        operator: string;
+        target?: {
+          text: string;
+          value: string;
+          parts?: ReadonlyArray<{ type: string }>;
+        };
+      }>;
+      // Statement wraps a single command in `command` (e.g. `cat a` is
+      // Statement{ command: Command{ … } }). CompoundList wraps multiple
+      // statements in `commands: Statement[]`.
+      command?: unknown;
+      commands?: ReadonlyArray<unknown>;
+      clause?: unknown;
+      then?: unknown;
+      elif?: ReadonlyArray<{ clause?: unknown; then?: unknown }>;
+      else?: unknown;
+      body?: unknown;
+      do?: unknown;
+      done?: unknown;
+      // For: the iterated wordlist.
+      wordlist?: ReadonlyArray<{
+        text: string;
+        value: string;
+        parts?: ReadonlyArray<{ type: string }>;
+      }>;
+      // Case: items[i].body is a CompoundList of Statements.
+      items?: ReadonlyArray<{ body?: unknown }>;
+    };
+    if (n.type === "Command") {
+      processRedirects(n.redirects);
+      const cmdName = n.name?.text.split(/\s+/)[0] ?? "";
+      if (FILE_OPERAND_COMMANDS.has(cmdName)) {
+        let skipNext = false;
+        for (const w of n.suffix ?? []) {
+          if (skipNext) {
+            skipNext = false;
+            continue;
+          }
+          if (!isStaticLiteralWord(w)) continue;
+          if (w.text.startsWith("-")) {
+            // Eat the next token for long-form options that take an argument,
+            // e.g. `--file FILE` (used by `sed -i` style).
+            if (/^--(?:file|in-place)(?:=.*)?$/.test(w.text)) skipNext = true;
+            continue;
+          }
+          // Use `w.value` (strips quote characters) rather than `w.text` so
+          // single-quoted paths like `'src/a.ts'` land in the DB as the
+          // unquoted path.
+          push(w.value);
+        }
+      }
+      return;
+    }
+    if (n.type === "Statement") {
+      // Trailing redirect on a compound: `(cat a) > out.ts`,
+      // `for … done > out.ts`, `if … fi > out.ts`, `function foo { … } > log`.
+      processRedirects(n.redirects);
+      if (n.command) visit(n.command);
+    }
+    // For: `for f in src/a.ts src/b.ts; do cat $f; done` — the wordlist is
+    // a static set of path candidates; each is a touched file.
+    if (n.type === "For" && n.wordlist) {
+      for (const w of n.wordlist) {
+        if (isStaticLiteralWord(w)) push(w.value);
+      }
+    }
+    // Function/Coproc carry their own redirects.
+    if (n.type === "Function" || n.type === "Coproc") {
+      processRedirects(n.redirects);
+    }
+    // Generic descent for control flow and compound lists.
+    if (n.commands) for (const c of n.commands) visit(c);
+    if (n.clause) visit(n.clause);
+    if (n.then) visit(n.then);
+    if (n.else) visit(n.else);
+    for (const ei of n.elif ?? []) {
+      if (ei.clause) visit(ei.clause);
+      if (ei.then) visit(ei.then);
+    }
+    if (n.body) visit(n.body);
+    if (n.do) visit(n.do);
+    if (n.done) visit(n.done);
+    // Case: items[i].body is a CompoundList of Statements.
+    if (n.items) {
+      for (const it of n.items) {
+        if (it && typeof it === "object" && it.body) visit(it.body);
+      }
+    }
+  };
+
+  for (const stmt of ast.commands ?? []) {
+    visit(stmt);
+  }
+  return out;
+}
+
+/**
+ * Best-effort extraction of the source-file paths a tool call acted on, from
+ * its `input` (host-shaped, hence `unknown`). Returns an array of unique
+ * file paths in first-seen order. The multi-path shape matters because a
+ * single bash command (e.g. `cat a.ts b.ts`) or a tool_use with several path
+ * keys can touch N files — the union is what D2c PR-2 needs to associate a
+ * knowledge entry with the session's touched files.
+ *
+ *   - Object input: read `path` / `filePath` / `file` (single).
+ *   - JSON string of the same object/array shape: parse + same logic.
+ *   - Plain-text path-like token in a raw string: same heuristic as v75.
+ *   - Bash command string: \`extractFilePathsFromCommand\` (unbash AST walk).
+ *
+ * Returns [] when no path is recoverable (e.g. plain bash that doesn't touch
+ * files, grep, task, …). This is provenance only — a miss is always safe.
+ */
+export function extractFilePaths(input: unknown): string[] {
+  const fromObject = (o: Record<string, unknown>): string[] => {
     for (const key of ["path", "filePath", "file"] as const) {
       const v = o[key];
-      if (typeof v === "string" && v.length > 0) return v;
+      if (typeof v === "string" && v.length > 0) return [v];
     }
-    return undefined;
+    return [];
   };
   if (input && typeof input === "object") {
-    return fromObject(input as Record<string, unknown>);
+    const arr = fromObject(input as Record<string, unknown>);
+    if (arr.length) return arr;
+    // Object with a `command`/`cmd` field → fall through to command parsing.
+    const cmd = extractCommand(input);
+    if (cmd) return extractFilePathsFromCommand(cmd);
+    return [];
   }
   if (typeof input === "string") {
     try {
       const parsed = JSON.parse(input);
       if (parsed && typeof parsed === "object") {
-        return fromObject(parsed as Record<string, unknown>);
+        const arr = fromObject(parsed as Record<string, unknown>);
+        if (arr.length) return arr;
+        const cmd = extractCommand(parsed);
+        if (cmd) return extractFilePathsFromCommand(cmd);
+        return [];
       }
     } catch {
       // not JSON — fall through to the plain-text path heuristic
     }
     // The fallback regex requires a `/`; a `/`-free string can never match.
-    if (input.indexOf("/") === -1) return undefined;
+    if (input.indexOf("/") === -1) return [];
     // Bound the scan, then run the backtracking regex only on short,
     // whitespace-bounded tokens (see PATH_SCAN_LIMIT/PATH_TOKEN_MAX notes).
+    const out: string[] = [];
+    const seen = new Set<string>();
     for (const token of input.slice(0, PATH_SCAN_LIMIT).split(/\s+/)) {
       if (
         token.length === 0 ||
@@ -232,11 +552,14 @@ export function extractFilePath(input: unknown): string | undefined {
         continue;
       }
       const match = token.match(PATH_FALLBACK_RE)?.[0];
-      if (match) return match;
+      if (match && !seen.has(match)) {
+        seen.add(match);
+        out.push(match);
+      }
     }
-    return undefined;
+    return out;
   }
-  return undefined;
+  return [];
 }
 
 /**
