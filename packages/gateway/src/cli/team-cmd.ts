@@ -5,6 +5,7 @@
 import { resolve } from "node:path";
 import {
   effectivePromotionPolicy,
+  getGitRemote,
   keystore,
   ltm,
   projectId,
@@ -14,6 +15,7 @@ import {
   setProjectPromotionPolicy,
   setProjectScope,
   syncData,
+  normalizeRemoteUrl,
 } from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "../supabase";
 import { acquireGitHubProviderToken } from "./login";
@@ -100,14 +102,32 @@ export async function commandTeam(
       }
       case "discover": {
         // E-5-d (#630): find which of the caller's GitHub repo collaborators are already on Lore.
-        // Needs a FRESH provider_token (short-lived, not persisted) → re-run GitHub OAuth.
-        const repos = positionals.slice(1).filter((p) => !p.startsWith("--"));
+        // Auto-detects the git remote when no repo arguments given, passes it to the Edge Function
+        // so private org repos are scanned (not just the caller's own repos first-page).
+        const explicitRepos = positionals
+          .slice(1)
+          .filter((p) => !p.startsWith("--"));
+        let repos: string[] | undefined;
+        if (explicitRepos.length > 0) {
+          repos = explicitRepos;
+        } else {
+          const remote = getGitRemote(process.cwd());
+          if (remote) {
+            const slug = githubOwnerRepo(remote);
+            if (slug) repos = [slug];
+          }
+        }
+        console.log(
+          `Discovering collaborators for ${repos ? repos.join(", ") : "your repos"}…`,
+        );
         let providerToken: string;
         // Use the FRESH client bound to the just-refreshed session — the outer `client` from
         // getAuthedClient() may hold a token that expired during the interactive OAuth flow.
+        // acquireGitHubProviderToken now caches the provider_token; a cache hit skips OAuth.
+        const noBrowser = !!values["no-browser"];
         let freshClient = client;
         try {
-          const acquired = await acquireGitHubProviderToken();
+          const acquired = await acquireGitHubProviderToken({ noBrowser });
           freshClient = acquired.client;
           providerToken = acquired.providerToken;
         } catch (e) {
@@ -118,7 +138,7 @@ export async function commandTeam(
         const found = await discoverGitHubCollaborators(
           freshClient,
           providerToken,
-          repos.length > 0 ? repos : undefined,
+          repos,
         );
         if (!found || found.length === 0) {
           console.log("No accessible repos with collaborators found.");
@@ -505,4 +525,18 @@ export async function commandTeam(
 function usage(): void {
   console.error(USAGE);
   process.exitCode = 1;
+}
+
+/**
+ * Normalize a remote URL to a GitHub `owner/repo` slug, or null when the
+ * remote is not a GitHub URL (e.g. self-hosted GitLab). Accepts git@, https://,
+ * or `github.com/owner/name` forms, stripping `.git` suffix and path.
+ */
+function githubOwnerRepo(remote: string): string | null {
+  const normalized = normalizeRemoteUrl(remote);
+  // Match github.com/owner/repo — the normalized output is always lowercased
+  // host/path. If the host isn't github.com, skip (we can't detect via GitHub API).
+  const match = normalized.match(/^github\.com\/([^/]+)\/([^/]+)$/);
+  if (!match) return null;
+  return `${match[1]}/${match[2]}`;
 }

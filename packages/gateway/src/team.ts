@@ -8,7 +8,11 @@
  * CONTENT under a team scope is a later story; here the scope id is the team's `scopes.id`, and all
  * keystore calls key on it.
  */
-import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  FunctionsHttpError,
+  FunctionsRelayError,
+  type SupabaseClient,
+} from "@supabase/supabase-js";
 import { crypto, keystore } from "@loreai/core";
 import { getCurrentUser } from "./supabase";
 import { publishIdentityPub, pullOnce, pushOnce } from "./sync";
@@ -54,7 +58,7 @@ export async function discoverGitHubCollaborators(
   const { data, error } = await client.functions.invoke("github-discover", {
     body: { provider_token: providerToken, repos },
   });
-  if (error) throw new Error(`github-discover: ${error.message}`);
+  if (error) throw await enrichFunctionsError("github-discover", error);
   const payload = data as {
     repos?: Array<{
       repo: string;
@@ -498,4 +502,41 @@ export async function rejectDomainJoin(
     p_request_id: requestId,
   });
   if (error) throw new Error(`reject_domain_join: ${error.message}`);
+}
+
+/**
+ * Enrich a Supabase Edge Function error with the response body, so the CLI
+ * user sees the real error text (e.g. "invalid token", "lookup failed") instead
+ * of the generic "Edge Function returned a non-2xx status code".
+ *
+ * FunctionsHttpError.context is the Response object — read its body.
+ * FunctionsRelayError.context is also a Response (the relay error response).
+ * FunctionsFetchError.context is the original Fetch error.
+ */
+async function enrichFunctionsError(
+  name: string,
+  error: unknown,
+): Promise<Error> {
+  if (error instanceof FunctionsHttpError) {
+    const resp = error.context as Response;
+    try {
+      let body: string | null = null;
+      if (resp?.body) {
+        // Clone in case the response was already consumed by the SDK.
+        body = await resp.clone().text().catch(() => null);
+      }
+      if (body) return new Error(`${name}: ${body}`);
+      return new Error(
+        `${name}: HTTP ${resp?.status ?? "unknown"}: ${error.message}`,
+      );
+    } catch {
+      return new Error(`${name}: HTTP ${resp?.status}: ${error.message}`);
+    }
+  }
+  if (error instanceof FunctionsRelayError) {
+    return new Error(`${name}: relay error — ${error.message}`);
+  }
+  return new Error(
+    `${name}: ${error instanceof Error ? error.message : String(error)}`,
+  );
 }

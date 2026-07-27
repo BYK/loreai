@@ -80,6 +80,7 @@ export function persistSession(session: PersistedSession): void {
   // the mirror intact.
   if (prev && prev.user_id !== session.user_id) {
     syncData.clearPullOnlyMirrors();
+    clearProviderTokenCache();
   }
   setTeamConfig(SESSION_KEY, JSON.stringify(session));
 }
@@ -91,11 +92,79 @@ export function clearSession(): void {
   // sign-out (otherwise currentTier() would keep reporting the logged-out
   // user's tier until a future login + pull).
   syncData.clearPullOnlyMirrors();
+  clearProviderTokenCache();
 }
 
 /** True when a session is persisted locally. Does NOT verify with the server. */
 export function isLoggedIn(): boolean {
   return loadPersistedSession() !== null;
+}
+
+// ---------------------------------------------------------------------------
+// provider_token disk cache (E-5-d, #630) — short-lived, scoped to session
+// ---------------------------------------------------------------------------
+
+/**
+ * The cached GitHub provider_token shape. The token is short-lived (GitHub
+ * OAuth tokens via Supabase often expire in ~8h) and is persisted alongside the
+ * Supabase access_token so that `lore team discover` within the expiry window
+ * avoids re-prompting the OAuth dance.
+ */
+export interface CachedProviderToken {
+  provider_token: string;
+  expires_at: number; // unix seconds
+}
+
+/** team_config key under which the cached provider_token lives. */
+const CACHED_PROVIDER_TOKEN_KEY = "github.provider_token";
+
+/**
+ * Load a previously cached GitHub provider_token, or null when expired / absent.
+ * The token is scoped to the CURRENT Supabase session (access_token); a session
+ * switch (login/logout/account change) naturally invalidates the cache because
+ * clearSession() / persistSession-on-account-switch clear it.
+ */
+export function loadCachedProviderToken(): CachedProviderToken | null {
+  const raw = getTeamConfig(CACHED_PROVIDER_TOKEN_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as CachedProviderToken;
+    if (!parsed.provider_token || typeof parsed.expires_at !== "number")
+      return null;
+    // Expired — discard.
+    if (Date.now() / 1000 >= parsed.expires_at) {
+      deleteTeamConfig(CACHED_PROVIDER_TOKEN_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the GitHub provider_token and its expiry. The expiry is derived from
+ * `expires_in` (seconds from now) on the OAuth session if available, falling
+ * back to a conservative 50-minute default for GitHub tokens that don't carry
+ * an explicit expiry (the Supabase relay sets one on the provider_token when
+ * the upstream GitHub response includes one; when it doesn't, we assume 1h and
+ * shave 10min for clock skew).
+ */
+export function persistProviderTokenCache(
+  providerToken: string,
+  expiresIn?: number,
+): void {
+  const ttl = typeof expiresIn === "number" && expiresIn > 0 ? expiresIn : 3000; // default 50 min
+  const entry: CachedProviderToken = {
+    provider_token: providerToken,
+    expires_at: Math.floor(Date.now() / 1000) + ttl,
+  };
+  setTeamConfig(CACHED_PROVIDER_TOKEN_KEY, JSON.stringify(entry));
+}
+
+/** Clear the cached provider_token — called on logout and account switch. */
+export function clearProviderTokenCache(): void {
+  deleteTeamConfig(CACHED_PROVIDER_TOKEN_KEY);
 }
 
 /**
