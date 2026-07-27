@@ -25,9 +25,12 @@ jobs:
     runs-on: ubuntu-latest
     # gpt-5-mini is the default judge (PR #1493 cross-model validation:
     # 6/6 control PRs clean, 0 unparseable). Warm cache ~2-4 min; cold
-    # start with GitHub Models can take ~13 min on a PR with many
-    # hunks. 20 min gives ~7 min of headroom for cold-start variation.
-    timeout-minutes: 20
+    # start with GitHub Models can take ~15-20 min on a PR with many
+    # hunks and many invariants. 25 min gives ~5-10 min of headroom for
+    # cold-start variation, and it's the empirical cap we hit on the
+    # first run with the gpt-5-mini default (the 15-min cap and the
+    # 20-min cap were both too tight — see PR #1412).
+    timeout-minutes: 25
     # Advisory: a failure here must never block a PR.
     continue-on-error: true
     steps:

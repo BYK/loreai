@@ -46,7 +46,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     continue-on-error: true # advisory: never block a PR
     steps:
       - uses: actions/checkout@v6
