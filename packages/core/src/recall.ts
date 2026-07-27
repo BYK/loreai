@@ -427,6 +427,13 @@ function formatFusedResults(
     knowledgeLogicalIds.length > 0
       ? ltm.knowledgeRefAnchors(knowledgeLogicalIds)
       : undefined;
+  // D2c PR-2: file-path associations share the same batch load shape as
+  // anchors. Batch-loaded once for the whole result set so per-line rendering
+  // is O(1) lookup, and entries with no associations are simply absent.
+  const filesByLogicalId =
+    knowledgeLogicalIds.length > 0
+      ? ltm.knowledgeFileRefsBatch(knowledgeLogicalIds)
+      : undefined;
 
   lines.push(`## Recall Results`);
   lines.push(``);
@@ -456,7 +463,12 @@ function formatFusedResults(
         lines.push(`#### ${SOURCE_LABELS[currentSource]}`);
       }
 
-      const line = renderResultLine(r.item, r.charBudget, anchorsByLogicalId);
+      const line = renderResultLine(
+        r.item,
+        r.charBudget,
+        anchorsByLogicalId,
+        filesByLogicalId,
+      );
       lines.push(line);
     }
   }
@@ -577,10 +589,20 @@ function renderAnchors(anchors?: ltm.KnowledgeRefAnchor[]): string {
   return ` \u21b3 ${parts.join(", ")}`;
 }
 
+/** Render an entry's file-path associations as a `↳ files: a, b, c` suffix
+ *  (D2c PR-2). Parallel to renderAnchors: empty/absent → "". Up to
+ *  MAX_RECALL_FILES_PER_ENTRY (already enforced by the batch reader) paths.
+ *  Sorted deterministically by the writer, so output is stable. */
+function renderFiles(paths?: string[]): string {
+  if (!paths || paths.length === 0) return "";
+  return ` \u21b3 files: ${paths.join(", ")}`;
+}
+
 function renderResultLine(
   tagged: TaggedResult,
   charBudget: number,
   anchorsByLogicalId?: Map<string, ltm.KnowledgeRefAnchor[]>,
+  filesByLogicalId?: Map<string, string[]>,
 ): string {
   const id = taggedResultKey(tagged);
 
@@ -590,26 +612,28 @@ function renderResultLine(
       const age = relativeAge(k.updated_at);
       const titlePart = `**${inline(k.title)}** (${age}): `;
       const anchors = renderAnchors(anchorsByLogicalId?.get(k.logical_id));
+      const files = renderFiles(filesByLogicalId?.get(k.logical_id));
       const contentBudget = Math.max(
         40,
-        charBudget - titlePart.length - anchors.length,
+        charBudget - titlePart.length - anchors.length - files.length,
       );
       const content = truncateAtSentence(inline(k.content), contentBudget);
       const wasTruncated = inline(k.content).length > contentBudget;
-      return `- ${titlePart}${content}${anchors}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${titlePart}${content}${anchors}${files}${wasTruncated ? ` (${id})` : ""}`;
     }
     case "cross-knowledge": {
       const k = tagged.item;
       const age = relativeAge(k.updated_at);
       const titlePart = `**${inline(k.title)}** (${age}, from: ${tagged.projectLabel}): `;
       const anchors = renderAnchors(anchorsByLogicalId?.get(k.logical_id));
+      const files = renderFiles(filesByLogicalId?.get(k.logical_id));
       const contentBudget = Math.max(
         40,
-        charBudget - titlePart.length - anchors.length,
+        charBudget - titlePart.length - anchors.length - files.length,
       );
       const content = truncateAtSentence(inline(k.content), contentBudget);
       const wasTruncated = inline(k.content).length > contentBudget;
-      return `- ${titlePart}${content}${anchors}${wasTruncated ? ` (${id})` : ""}`;
+      return `- ${titlePart}${content}${anchors}${files}${wasTruncated ? ` (${id})` : ""}`;
     }
     case "distillation": {
       const d = tagged.item;
@@ -1486,11 +1510,17 @@ export function recallById(id: string): string {
       const detailAnchors = renderAnchors(
         ltm.knowledgeRefAnchors([entry.logical_id]).get(entry.logical_id),
       );
+      // D2c PR-2: file-path associations, parallel to the anchor line. Same
+      // batch-loader path as the main recall surface — keeps the rendering
+      // semantics consistent (sorted, capped at MAX_RECALL_FILES_PER_ENTRY).
+      const detailFiles = renderFiles(
+        ltm.knowledgeFileRefsBatch([entry.logical_id]).get(entry.logical_id),
+      );
       return [
         `## Recall Detail: ${id}`,
         ``,
         `#### Knowledge`,
-        `- **${inline(entry.title)}** (${entry.category}): ${inline(entry.content)}${detailAnchors}`,
+        `- **${inline(entry.title)}** (${entry.category}): ${inline(entry.content)}${detailAnchors}${detailFiles}`,
       ].join("\n");
     }
     case "d": {

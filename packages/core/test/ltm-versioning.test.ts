@@ -39,11 +39,11 @@ function ftsHits(token: string): number {
 }
 
 describe("A2 sub-PR 1: append-only knowledge scaffolding", () => {
-  test("schema version is 76", () => {
+  test("schema version is 77", () => {
     const v = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(v.version).toBe(76);
+    expect(v.version).toBe(77);
   });
 
   test("create() defaults logical_id = id, version 1, current, not deleted", () => {

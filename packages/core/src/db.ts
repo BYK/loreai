@@ -1904,6 +1904,26 @@ const MIGRATIONS: string[] = [
   -- back-window of non-JSON values is tiny.
   ALTER TABLE tool_calls RENAME COLUMN input_path TO input_paths_json;
   `,
+
+  `
+  -- Version 77: knowledge_file_refs (D2c PR-2). A sidecar keyed on logical_id that
+  -- records which files a knowledge entry was created/updated against during the
+  -- minting session. Mirrors the sidecar pattern of knowledge_meta,
+  -- knowledge_ref_anchor, and knowledge_symbol_presence: associations survive
+  -- version edits because they key on the stable logical_id, NOT on a version
+  -- row. paths_json is a JSON array of unique, repo-relative paths (capped at
+  -- MAX_FILE_REFS_PER_ENTRY=20 by the writer); recall renders up to
+  -- MAX_RECALL_FILES_PER_ENTRY=3 in the '↳ files:' branch (parallel to the
+  -- existing '↳ src/foo.ts:42' anchor line). updated_at is a register clock,
+  -- bumped on every replace (NOT on reads). NOT in SYNCED_TABLES because file
+  -- associations are session-context, not user knowledge; remote machines
+  -- generate their own.
+  CREATE TABLE IF NOT EXISTS knowledge_file_refs (
+    logical_id  TEXT    PRIMARY KEY,
+    paths_json  TEXT    NOT NULL,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+  );
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3498,6 +3518,27 @@ function recoverMissingObjects(database: Database) {
       }
     } else if (!tcols.some((c) => c.name === "input_paths_json")) {
       database.exec("ALTER TABLE tool_calls ADD COLUMN input_paths_json TEXT;");
+    }
+  }
+  // Version 77: knowledge_file_refs (D2c PR-2). Sidecar keyed on logical_id —
+  // records which files a knowledge entry was associated with. New table only;
+  // no backwards-compatible state to preserve (entries created before v77 simply
+  // have no association; recall skips them). CREATE TABLE IF NOT EXISTS is
+  // idempotent so a re-open after a partial v77 apply is safe.
+  {
+    const tables = database
+      .query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_file_refs'",
+      )
+      .all() as Array<{ name: string }>;
+    if (tables.length === 0) {
+      database.exec(`
+        CREATE TABLE knowledge_file_refs (
+          logical_id  TEXT    PRIMARY KEY,
+          paths_json  TEXT    NOT NULL,
+          updated_at  INTEGER NOT NULL DEFAULT 0
+        );
+      `);
     }
   }
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).

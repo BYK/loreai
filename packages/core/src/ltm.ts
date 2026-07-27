@@ -866,6 +866,7 @@ export const LOGICAL_ID_BOOKKEEPING_TABLES = [
   "knowledge_ref_validity",
   "knowledge_symbol_presence",
   "knowledge_ref_anchor",
+  "knowledge_file_refs",
 ] as const;
 
 export function remove(id: string, metadata?: KnowledgeMetadata) {
@@ -2080,6 +2081,99 @@ export type KnowledgeRefAnchor = { kind: "file" | "symbol"; anchor: string };
 /** Max anchors surfaced per entry in recall — enough to point at the code
  *  without bloating the result line. File anchors are preferred over symbols. */
 export const MAX_RECALL_ANCHORS_PER_ENTRY = 3;
+
+/** Max file paths associated with one entry via `setFileRefs`. Beyond this the
+ *  entry is too broad to be useful as a pointer (D2c PR-2). */
+export const MAX_FILE_REFS_PER_ENTRY = 20;
+
+/** Max file paths surfaced per entry in recall — parallel cap to anchors. */
+export const MAX_RECALL_FILES_PER_ENTRY = 3;
+
+export type KnowledgeFileRefs = {
+  /** Unique, sorted, repo-relative paths the entry was associated with during
+   *  the minting session (or on its most recent update). */
+  paths: string[];
+};
+
+/**
+ * Set (replace) the file-path associations for one entry. Idempotent.
+ * Callers (curator apply path) should pass paths they have already validated
+ * as a subset of the minting session's touched-files set OR have explicitly
+ * opted to record an out-of-set file (with their own warn). Dedup + sort +
+ * cap (MAX_FILE_REFS_PER_ENTRY) is the caller's responsibility — `setFileRefs`
+ * applies the cap defensively and returns the paths actually stored.
+ *
+ * `updated_at` is bumped via SQLite's unixepoch('now'), so the register clock
+ * is monotonic per row. NOT in SYNCED_TABLES — file associations are
+ * session-context, not user knowledge; remote machines generate their own.
+ */
+export function setFileRefs(logicalId: string, paths: string[]): string[] {
+  // Defensive normalization: drop empty strings, dedupe, sort for determinism,
+  // cap at MAX_FILE_REFS_PER_ENTRY. Callers should already do this — the
+  // re-cap here is a safety net against a buggy caller passing thousands.
+  const clean = Array.from(
+    new Set(
+      paths
+        .filter((p) => typeof p === "string" && p.trim().length > 0)
+        .map((p) => p.trim()),
+    ),
+  )
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, MAX_FILE_REFS_PER_ENTRY);
+  db()
+    .query(
+      `INSERT INTO knowledge_file_refs (logical_id, paths_json, updated_at)
+         VALUES (?, ?, unixepoch('now'))
+       ON CONFLICT(logical_id) DO UPDATE SET
+         paths_json = excluded.paths_json,
+         updated_at = excluded.updated_at`,
+    )
+    .run(logicalId, JSON.stringify(clean));
+  return clean;
+}
+
+/**
+ * Batch-load the file-path associations for a set of entries by logical_id,
+ * so recall can render `↳ files: src/foo.ts, src/bar.ts` alongside the anchor
+ * line (D2c PR-2). Returns a Map from logical_id to its paths, capped at
+ * MAX_RECALL_FILES_PER_ENTRY (the writer's cap is higher so future callers
+ * can ask for more). Read-only; empty input → empty map. Entries with no
+ * associations are absent from the map (rendering skips the `↳ files:`
+ * line, same as anchors).
+ *
+ * Stable ordering: paths are stored sorted by the writer (see `setFileRefs`),
+ * so the returned list is naturally ordered.
+ */
+export function knowledgeFileRefsBatch(
+  logicalIds: string[],
+): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  if (logicalIds.length === 0) return out;
+  const placeholders = logicalIds.map(() => "?").join(",");
+  const rows = db()
+    .query(
+      `SELECT logical_id, paths_json FROM knowledge_file_refs
+        WHERE logical_id IN (${placeholders})`,
+    )
+    .all(...logicalIds) as Array<{ logical_id: string; paths_json: string }>;
+  for (const r of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.paths_json);
+    } catch {
+      // Malformed JSON is never expected — `setFileRefs` always writes valid
+      // JSON. Skip defensively rather than throw on a corrupt row.
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+    const paths = parsed.filter(
+      (p): p is string => typeof p === "string" && p.length > 0,
+    );
+    if (paths.length === 0) continue;
+    out.set(r.logical_id, paths.slice(0, MAX_RECALL_FILES_PER_ENTRY));
+  }
+  return out;
+}
 
 /**
  * Batch-load the resolved code anchors (file:line / symbol) for a set of entries

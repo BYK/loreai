@@ -75,6 +75,13 @@ export type CuratorOp =
       crossProject?: boolean;
       /** Initial confidence (0.0–1.0). Controls injection priority for preferences. */
       confidence?: number;
+      /** Files touched this session that this entry is about (D2c PR-2).
+       *  If present, must be a subset of `sessionFileTouches()` for the
+       *  minting session — but the curator may also record a file the user
+       *  mentioned without actually editing, in which case applyOps logs a
+       *  warn and proceeds (out-of-set is not an error). Recorded into
+       *  `knowledge_file_refs` sidecar keyed on logical_id. */
+      files?: string[];
     }
   | {
       op: "update";
@@ -82,6 +89,10 @@ export type CuratorOp =
       title?: string;
       content?: string;
       confidence?: number;
+      /** Replace the entry's file-refs sidecar with these paths. Same subset
+       *  rule as `create.files`. `undefined` (omit) means LEAVE the sidecar
+       *  alone — useful for content-only edits that shouldn't re-tag. */
+      files?: string[];
     }
   | { op: "delete"; id: string; reason: string };
 
@@ -405,6 +416,24 @@ export function applyOps(
         title: op.title,
         content,
       });
+      // D2c PR-2: record the curator's chosen file associations against the
+      // new entry's logical_id. Best-effort: out-of-set files are warned but
+      // still recorded (a curator may name a file the user mentioned in chat
+      // without actually editing it).
+      if (op.files && op.files.length > 0) {
+        try {
+          const out = ltm.setFileRefs(id, op.files);
+          if (out.length < op.files.length) {
+            log.warn(
+              `curator op.files: dropped ${
+                op.files.length - out.length
+              } paths (empty/over-cap) for entry ${id.slice(0, 16)}`,
+            );
+          }
+        } catch (err) {
+          log.warn("setFileRefs failed (non-fatal):", err);
+        }
+      }
       created++;
     } else if (op.op === "update") {
       // op.id may already be superseded by an earlier op on the same entry in
@@ -452,6 +481,23 @@ export function applyOps(
         const titleAccepted = after.title !== entry.title;
         if (op.content !== undefined || titleAccepted)
           idsToSync.push(entry.logical_id);
+        // D2c PR-2: optional re-tag with `op.files`. Only act if the field is
+        // explicitly present and is an array — `undefined` means "leave the
+        // sidecar alone" (a content-only update). Replaces the sidecar in full.
+        if (Array.isArray(op.files)) {
+          try {
+            const out = ltm.setFileRefs(entry.logical_id, op.files);
+            if (out.length < op.files.length) {
+              log.warn(
+                `curator op.files: dropped ${
+                  op.files.length - out.length
+                } paths (empty/over-cap) for entry ${entry.logical_id.slice(0, 16)}`,
+              );
+            }
+          } catch (err) {
+            log.warn("setFileRefs failed (non-fatal):", err);
+          }
+        }
         changedEntries.push({
           op: "updated",
           id: entry.logical_id,
@@ -871,11 +917,25 @@ async function runInner(input: {
     log.warn("tool failure context failed (non-fatal):", err);
   }
 
+  // Per-session file-touch summary: which files this session has actually
+  // edited/read/redirected-to, so the curator can decide whether a new
+  // knowledge entry is about one of them (and tag via op.files).
+  let fileTouchContext = "";
+  try {
+    fileTouchContext = buildFilesTouchedContext(
+      input.projectPath,
+      input.sessionID,
+    );
+  } catch (err) {
+    log.warn("files touched context failed (non-fatal):", err);
+  }
+
   const userContent =
     baseUserContent +
     crossSessionContext +
     actionTagContext +
-    toolFailureContext;
+    toolFailureContext +
+    fileTouchContext;
   // Pass the explicit worker model through — never fall back to cfg.model
   // which is the project/session model and may be from a different provider
   // than the worker's upstream URL. Cross-provider model names → 404.
@@ -1171,6 +1231,46 @@ function buildToolFailureContext(
 
   return (
     "\n\n---\nRecurring tool failures across sessions (consider creating gotcha entries for root causes):\n" +
+    lines.join("\n")
+  );
+}
+
+/** Max distinct files surfaced in the curator's per-session context block.
+ *  15 is well below the sessionFileTouches query cap (200) and small enough
+ *  to keep the prompt-cache stable across curator runs of similar shape. */
+const MAX_FILES_IN_CURATOR_CONTEXT = 15;
+
+/**
+ * Build the "files touched this session" context block for the curator
+ * (D2c PR-2). Returns a compact markdown list of the top-N most-touched
+ * files in this session, sorted by hit count (path-tiebreak for prompt-cache
+ * stability). Returns "" when no files have been touched yet (or sessionID
+ * is unavailable) so the block is silently omitted — never surfaces an
+ * empty heading.
+ *
+ * The curator's `create` and `update` ops may now include `files: [...]` —
+ * paths from THIS list (or out-of-list files the curator names explicitly).
+ * Persisted into `knowledge_file_refs` keyed on the entry's logical_id, then
+ * rendered in recall output as a `↳ files: …` line alongside the anchor line.
+ *
+ * Exported for direct unit testing (see curator-files-touched.test.ts).
+ */
+export function buildFilesTouchedContext(
+  projectPath: string,
+  currentSessionID: string,
+): string {
+  if (!projectPath || !currentSessionID) return "";
+  const { paths, counts } = toolTrace.sessionFileTouches(
+    projectPath,
+    currentSessionID,
+  );
+  if (paths.length === 0) return "";
+  const top = paths.slice(0, MAX_FILES_IN_CURATOR_CONTEXT);
+  const lines = top.map((p) => `- \`${p}\` (${counts[p] ?? 1} hits)`);
+  return (
+    "\n\n---\nFiles touched this session (top " +
+    top.length +
+    " by hit count; consider associating entries with these via the `files` field on create/update ops):\n" +
     lines.join("\n")
   );
 }
