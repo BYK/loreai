@@ -17,17 +17,30 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import qrcode from "qrcode-terminal";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import {
+  clearProviderTokenCache,
   clearSession,
   createSupabaseClient,
   getCurrentUser,
   isLoggedIn,
+  loadCachedProviderToken,
   loadPersistedSession,
+  persistProviderTokenCache,
   type PersistedSession,
   persistSession,
   sessionToPersisted,
 } from "../supabase";
+
+/** GitHub OAuth scopes needed:
+ *  - `read:org` — org/team membership mirroring (E-5-a, #827)
+ *  - `repo` — list collaborators on private repos (E-5-d, #630)
+ *  Collaborator API requires `repo` for private org repos (e.g. getsentry/*).
+ */
+const OAUTH_SCOPES = "read:org repo";
+
+/** Historical GitHub OAuth App default TTL for read-only tokens (8 hours). */
+const GITHUB_PROVIDER_TOKEN_TTL_SECONDS = 8 * 60 * 60;
 
 // ---------------------------------------------------------------------------
 // lore login
@@ -165,7 +178,7 @@ async function loginWithGitHub(): Promise<void> {
     // read:org lets us mirror the user's GitHub org/team memberships into Lore teams at login
     // (E-5-a, #827). Verified server-side via the github-provision Edge Function using the returned
     // provider_token — the client never asserts memberships.
-    options: { skipBrowserRedirect: true, redirectTo, scopes: "read:org" },
+    options: { skipBrowserRedirect: true, redirectTo, scopes: OAUTH_SCOPES },
   });
   if (error || !data.url) {
     done.close();
@@ -178,55 +191,187 @@ async function loginWithGitHub(): Promise<void> {
   openBrowser(data.url);
 
   const oauthCode = await code; // resolves when the browser hits the callback
-  const { data: sess, error: exchErr } =
-    await client.auth.exchangeCodeForSession(oauthCode);
-  if (exchErr) throw new Error(exchErr.message);
-  if (!sess.session) throw new Error("No session returned after OAuth.");
+  const session = await exchangeOAuthCode(client, oauthCode);
 
-  await finalizeLogin(client, sessionToPersisted(sess.session));
-  await provisionGitHubTeams(client, sess.session.provider_token);
+  await finalizeLogin(client, sessionToPersisted(session));
+  await provisionGitHubTeams(client, session.provider_token);
 }
 
 /**
- * E-5-d (#630): obtain a FRESH GitHub `provider_token` via a one-shot loopback OAuth, for a
- * capability that needs to read from GitHub after login (e.g. `lore team discover`). The
- * `provider_token` is short-lived and NOT persisted/refreshed (see provisionGitHubTeams), so it must
- * be re-acquired on demand. Returns the fresh token plus the authed client bound to the refreshed
- * session. Requires an interactive browser (loopback); throws if the grant yields no provider_token
- * (e.g. an email-only account). Also refreshes the persisted session as a side effect.
+ * E-5-d (#630): obtain a GitHub `provider_token` for a read-from-GitHub capability
+ * (e.g. `lore team discover`). Checks the disk cache first; if the cached token is
+ * still valid, returns it (no browser). Otherwise runs the OAuth flow:
+ *
+ *   - When a local browser is available: loopback callback (127.0.0.1:ephemeral).
+ *     While waiting, also listens on stdin for a paste — hybrid mode covers users
+ *     who opened the URL on another device even when the loopback started.
+ *   - When remote/headless (`--no-browser` or `!canOpenBrowser()`): paste-code flow
+ *     (fixed `http://127.0.0.1/callback`, user copies the code from the redirect URL).
+ *
+ * Returns the fresh token plus the authed client bound to the refreshed session.
+ * Throws if the grant yields no provider_token (e.g. an email-only account).
+ * Also refreshes the persisted session and caches the provider_token as a side effect.
  */
-export async function acquireGitHubProviderToken(): Promise<{
+export async function acquireGitHubProviderToken(opts?: {
+  noBrowser?: boolean;
+}): Promise<{
+  client: SupabaseClient;
+  providerToken: string;
+}> {
+  // Try the disk cache first — avoids re-prompting OAuth within the token TTL.
+  const cached = loadCachedProviderToken();
+  if (cached) {
+    const client = createSupabaseClient();
+    // Restore the persisted session so the returned client is usable. If the
+    // session can't be restored (e.g. refresh_token expired or revoked), the
+    // EF call would 401 with a confusing error — fall through to OAuth instead
+    // so the user gets a fresh re-auth.
+    const persisted = loadPersistedSession();
+    if (persisted) {
+      const { error: setErr } = await client.auth.setSession({
+        access_token: persisted.access_token,
+        refresh_token: persisted.refresh_token,
+      });
+      if (setErr) {
+        // Session unrecoverable — discard the cache and run OAuth.
+        clearProviderTokenCache();
+      } else {
+        return { client, providerToken: cached.provider_token };
+      }
+    } else {
+      // No session to bind the token to — discard the cache.
+      clearProviderTokenCache();
+    }
+  }
+
+  // No cached token — run OAuth.
+  const noBrowser = opts?.noBrowser ?? !canOpenBrowser();
+  if (noBrowser) return acquireGitHubProviderTokenPaste();
+
+  return acquireGitHubProviderTokenLoopback();
+}
+
+/**
+ * Loopback + hybrid-stdin variant: sets up the 127.0.0.1 callback and simultaneously
+ * watches stdin for a paste. This covers the case where a user's browser is on a
+ * different machine — the loopback never fires, but they can paste the code from
+ * the redirect URL on that machine.
+ */
+async function acquireGitHubProviderTokenLoopback(): Promise<{
   client: SupabaseClient;
   providerToken: string;
 }> {
   const client = createSupabaseClient();
-  const { code, redirectTo, done } = await startLoopbackCallback();
+  const { code: cbCode, redirectTo, done } = await startLoopbackCallback();
   const { data, error } = await client.auth.signInWithOAuth({
     provider: "github",
-    options: { skipBrowserRedirect: true, redirectTo, scopes: "read:org" },
+    options: { skipBrowserRedirect: true, redirectTo, scopes: OAUTH_SCOPES },
   });
   if (error || !data.url) {
     done.close();
     throw new Error(error?.message ?? "Could not start GitHub OAuth.");
   }
+
   console.log("Opening your browser to authorize GitHub access…");
   console.log("If it doesn't open, scan this or visit the URL below:\n");
   await showAuthUrl(data.url);
   openBrowser(data.url);
+  console.log(
+    "If you authorized from another device, paste the code (or redirect URL) here:\n",
+  );
 
-  const oauthCode = await code;
-  const { data: sess, error: exchErr } =
-    await client.auth.exchangeCodeForSession(oauthCode);
-  if (exchErr) throw new Error(exchErr.message);
-  if (!sess.session) throw new Error("No session returned after OAuth.");
-  // Keep the persisted session fresh (this OAuth refreshed the access token).
-  await finalizeLogin(client, sessionToPersisted(sess.session));
-  const providerToken = sess.session.provider_token;
-  if (!providerToken) {
-    throw new Error(
-      "GitHub did not return an access token — this account may not be linked to GitHub.",
-    );
+  // Race: loopback callback vs stdin paste. Empty stdin input is ignored so a
+  // user reflexively pressing Enter can't win the race with a blank code.
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const emptyInput = new Error("__skip__");
+  const pastePromise = rl.question("").then(
+    (line) => {
+      const code = extractAuthCode(line.trim());
+      if (!code) throw emptyInput;
+      return code;
+    },
+    () => {
+      // loser-side rejection when Node rejects a pending question on close —
+      // swallow so we don't surface an unhandled rejection.
+      throw emptyInput;
+    },
+  );
+  let oauthCode: string;
+  try {
+    oauthCode = await Promise.race([cbCode, pastePromise]);
+  } catch (e) {
+    if (e === emptyInput) throw new Error("No code provided.");
+    throw e;
+  } finally {
+    rl.close();
+    done.close();
   }
+
+  const session = await exchangeOAuthCode(client, oauthCode);
+  await finalizeLogin(client, sessionToPersisted(session));
+  const providerToken = session.provider_token;
+  if (!providerToken) throw new Error("GitHub did not return an access token.");
+  // GitHub provider_tokens issued via Supabase don't carry an explicit expiry;
+  // bound the cache by whichever runs out first: the access_token expiry, or
+  // 8h (historical GitHub OAuth App default for read-only flows).
+  const sessionTtl = session.expires_at
+    ? session.expires_at - Math.floor(Date.now() / 1000)
+    : undefined;
+  const ttl = Math.min(
+    sessionTtl ?? GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+    GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+  );
+  persistProviderTokenCache(providerToken, ttl);
+  return { client, providerToken };
+}
+
+/**
+ * Paste-code variant for remote/headless machines. Same PKCE concept as the
+ * loopback path, but uses the fixed `http://127.0.0.1/callback` redirect (the
+ * browser lands on a dead page — user copies the `code=` from the URL bar).
+ */
+async function acquireGitHubProviderTokenPaste(): Promise<{
+  client: SupabaseClient;
+  providerToken: string;
+}> {
+  const client = createSupabaseClient();
+
+  const redirectTo = "http://127.0.0.1/callback";
+  const { data, error } = await client.auth.signInWithOAuth({
+    provider: "github",
+    options: { skipBrowserRedirect: true, redirectTo, scopes: OAUTH_SCOPES },
+  });
+  if (error || !data.url) {
+    throw new Error(error?.message ?? "Could not start GitHub OAuth.");
+  }
+
+  console.log("Scan this with your phone, or open the URL on any device:\n");
+  await showAuthUrl(data.url);
+  console.log(
+    "After authorizing, your browser will try to open " +
+      `${redirectTo}?code=…\n` +
+      "That page won't load — copy the value after `code=` (or paste the " +
+      "whole URL) here.\n",
+  );
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let pasted: string;
+  try {
+    pasted = (await rl.question("Paste the code (or redirect URL): ")).trim();
+  } finally {
+    rl.close();
+  }
+  const oauthCode = extractAuthCode(pasted);
+  if (!oauthCode) throw new Error("No code provided.");
+
+  const session = await exchangeOAuthCode(client, oauthCode);
+  await finalizeLogin(client, sessionToPersisted(session));
+  const providerToken = session.provider_token;
+  if (!providerToken) throw new Error("GitHub did not return an access token.");
+  const ttl = session.expires_at
+    ? session.expires_at - Math.floor(Date.now() / 1000)
+    : undefined;
+  persistProviderTokenCache(providerToken, ttl);
   return { client, providerToken };
 }
 
@@ -248,7 +393,7 @@ async function loginWithGitHubManual(): Promise<void> {
   const redirectTo = "http://127.0.0.1/callback";
   const { data, error } = await client.auth.signInWithOAuth({
     provider: "github",
-    options: { skipBrowserRedirect: true, redirectTo, scopes: "read:org" },
+    options: { skipBrowserRedirect: true, redirectTo, scopes: OAUTH_SCOPES },
   });
   if (error || !data.url) {
     throw new Error(error?.message ?? "Could not start GitHub OAuth.");
@@ -307,6 +452,21 @@ async function provisionGitHubTeams(
   } catch {
     // Best-effort — provisioning retries on next login.
   }
+}
+
+/**
+ * Exchange an OAuth code for a session, returning the full `Session` object.
+ * Shared by all OAuth paths (loopback, paste, hybrid) so the provider_token
+ * extraction and expiry logic is in one place.
+ */
+async function exchangeOAuthCode(
+  client: SupabaseClient,
+  oauthCode: string,
+): Promise<Session> {
+  const { data, error } = await client.auth.exchangeCodeForSession(oauthCode);
+  if (error) throw new Error(error.message);
+  if (!data.session) throw new Error("No session returned after OAuth.");
+  return data.session;
 }
 
 /** Pull the OAuth `code` out of a pasted redirect URL, or return the raw code. */

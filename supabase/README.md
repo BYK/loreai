@@ -92,10 +92,11 @@ deploy them separately (they are not auto-deployed by CI):
 
 ```bash
 supabase functions deploy github-provision
+supabase functions deploy github-discover
 ```
 
 - **`github-provision`** (E-5-a, #827) — mirrors a user's GitHub org/team memberships into Lore
-  teams. At login the CLI requests the `read:org` OAuth scope and passes the returned
+  teams. At login the CLI requests the `read:org repo` OAuth scope and passes the returned
   `provider_token` to this function; the function verifies the caller's Supabase JWT, reads the
   user's *own* memberships from the GitHub API (unforgeable — a client can never assert
   memberships), and calls the **service-role-only** `provision_github_membership` RPC (migration
@@ -103,6 +104,13 @@ supabase functions deploy github-provision
   platform; `GITHUB_API_URL` is optional (defaults to `https://api.github.com`). `verify_jwt = true`
   (config.toml) so only a signed-in user can invoke it. Provisioning is best-effort — a missing
   deploy or GitHub error never fails `lore login`; it simply retries on the next login.
+
+- **`github-discover`** (E-5-d, #630 Slice 1) — reads the caller's GitHub repos and their
+  collaborators, then reveals which collaborators already have a Lore account. Used by
+  `lore team discover`. Like `github-provision`, it verifies the JWT and binds the
+  `provider_token` to the caller's GitHub identity. Requires `read:org` (org/team mirroring)
+  **and** `repo` (to list collaborators on private repos). Backed by migration `0050`
+  (`lore_users_for_github_ids` service-role RPC).
 
 ## Conflict resolution (last-writer-to-remote-wins)
 

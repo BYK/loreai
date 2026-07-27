@@ -20,11 +20,14 @@ vi.mock("@supabase/supabase-js", () => ({
 
 import { db, syncData } from "@loreai/core";
 import {
+  clearProviderTokenCache,
   clearSession,
   getAuthedClient,
   getCurrentUser,
   isLoggedIn,
+  loadCachedProviderToken,
   loadPersistedSession,
+  persistProviderTokenCache,
   persistSession,
   sessionToPersisted,
   SUPABASE_ANON_KEY,
@@ -249,5 +252,69 @@ describe("profile mirror lifecycle (tier must not leak across sessions)", () => 
 
     persistSession(SAMPLE); // switch back to A
     expect(syncData.currentTier()).toBe("free"); // A's stale pro NOT resurrected
+  });
+});
+
+describe("github provider_token disk cache", () => {
+  beforeEach(() => {
+    clearSession();
+    clearProviderTokenCache();
+  });
+
+  test("round-trips a valid token through the cache", () => {
+    expect(loadCachedProviderToken()).toBeNull();
+    persistProviderTokenCache("gh-token-1", 3600);
+    const cached = loadCachedProviderToken();
+    expect(cached?.provider_token).toBe("gh-token-1");
+  });
+
+  test("default TTL falls back to 50 minutes when expiresIn is missing/zero", () => {
+    persistProviderTokenCache("gh-token-2");
+    const cached = loadCachedProviderToken();
+    // Should be valid for ~3000s, not 0s (which would have expired already).
+    expect(cached).not.toBeNull();
+    expect(cached!.expires_at - Math.floor(Date.now() / 1000)).toBeGreaterThan(
+      2900,
+    );
+  });
+
+  test("expired cache entries are dropped on load", () => {
+    // Manually plant an already-expired entry.
+    db()
+      .query(
+        "INSERT INTO team_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(
+        "github.provider_token",
+        JSON.stringify({
+          provider_token: "stale",
+          expires_at: Math.floor(Date.now() / 1000) - 10,
+        }),
+      );
+    expect(loadCachedProviderToken()).toBeNull();
+  });
+
+  test("clearSession clears the cached provider_token", () => {
+    persistProviderTokenCache("gh-token-3", 3600);
+    expect(loadCachedProviderToken()).not.toBeNull();
+    clearSession();
+    expect(loadCachedProviderToken()).toBeNull();
+  });
+
+  test("account switch (different user_id) clears the cached provider_token", () => {
+    persistSession(SAMPLE);
+    persistProviderTokenCache("gh-token-4", 3600);
+    expect(loadCachedProviderToken()).not.toBeNull();
+    persistSession({ ...SAMPLE, user_id: "user-other" });
+    expect(loadCachedProviderToken()).toBeNull();
+  });
+
+  test("token refresh (same user_id) preserves the cached provider_token", () => {
+    persistSession(SAMPLE);
+    persistProviderTokenCache("gh-token-5", 3600);
+    // Refresh the session for the same user — different tokens, same identity.
+    persistSession({ ...SAMPLE, access_token: "at-refreshed" });
+    const cached = loadCachedProviderToken();
+    expect(cached?.provider_token).toBe("gh-token-5");
   });
 });
