@@ -4995,7 +4995,13 @@ function buildStreamingResponse(
             // finish_reason). For Anthropic clients, the preamble's
             // held-back was already consumed before the marker envelope
             // emission above — contAccum's held-back is the relevant close.
-            const heldBack = contAccum.heldBackEvents();
+            // Use takeHeldBackEvents() (not peek) so the held-back is
+            // atomically consumed: defense-in-depth against any future code
+            // path that might read contAccum's heldBack again (e.g. a
+            // refactor that re-enters the drill-down loop or replays the
+            // accumulator). In the current control flow the heldBack is read
+            // exactly once — this just makes the consume semantics explicit.
+            const heldBack = contAccum.takeHeldBackEvents();
             if (heldBack) {
               // Scale usage in held-back message_delta for anti-compaction
               safeEnqueue(encoder.encode(heldBack));
