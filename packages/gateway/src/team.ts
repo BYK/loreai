@@ -523,7 +523,10 @@ async function enrichFunctionsError(
       let body: string | null = null;
       if (resp?.body) {
         // Clone in case the response was already consumed by the SDK.
-        body = await resp.clone().text().catch(() => null);
+        body = await resp
+          .clone()
+          .text()
+          .catch(() => null);
       }
       if (body) return new Error(`${name}: ${body}`);
       return new Error(
