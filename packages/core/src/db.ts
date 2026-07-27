@@ -1890,6 +1890,20 @@ const MIGRATIONS: string[] = [
   -- with the files that produced them (D2c).
   ALTER TABLE tool_calls ADD COLUMN input_path TEXT;
   `,
+
+  `
+  -- Version 76: rename tool_calls.input_path → tool_calls.input_paths_json
+  -- and widen the value to a JSON array. A file-tool call already had at most
+  -- one path, but a single bash command (cat a b c, sed -i a, > b, tee d …) can
+  -- touch N files — the union is the actual provenance signal D2c PR-2 needs.
+  -- The shape is now: NULL | '["a.ts","b.ts"]' (a JSON string of unique,
+  -- non-empty, slash-bearing, non-pathological tokens extracted at record time).
+  -- SQLite's ALTER TABLE … RENAME COLUMN only updates the schema; pre-existing
+  -- rows keep their (non-JSON) value, so readers use a safe-parse helper that
+  -- also accepts a bare path. v75 is only 6 days old in production, so the
+  -- back-window of non-JSON values is tiny.
+  ALTER TABLE tool_calls RENAME COLUMN input_path TO input_paths_json;
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2927,17 +2941,25 @@ function migrate(database: Database) {
       // (skips if already migrated) so a partial apply can't boot-loop (#827 E-4c-3a).
       applyScopeKeyEpochPk(database);
     } else {
+      // Pre-strip any column-side ALTERs that are already satisfied by the
+      // current schema (ADD COLUMN where the column exists, RENAME COLUMN
+      // where the source has already been renamed to the target). This makes
+      // every migration idempotent without relying on the catch-and-retry
+      // path below — necessary for migrations like v75→v76 where the original
+      // column was renamed in a later migration and the ADD+RENAME pair must
+      // be jointly treated as a no-op when the target name already exists.
+      const preStripped = stripAppliedAlters(MIGRATIONS[i], database);
       try {
-        database.exec(MIGRATIONS[i]);
+        database.exec(preStripped);
       } catch (e: unknown) {
         // Multi-statement migrations can partially fail when an early
-        // statement (e.g. ALTER TABLE ADD COLUMN) hits a duplicate-column
-        // error from a prior partial run. Swallow duplicate-column errors
-        // so the rest of the migration loop and the version bump proceed.
-        // Any genuinely new error is re-thrown.
+        // statement (e.g. ALTER TABLE ADD COLUMN, or RENAME COLUMN) hits a
+        // duplicate-column / no-such-column error from a prior partial run.
+        // Swallow these so the rest of the migration loop and the version
+        // bump proceed. Any genuinely new error is re-thrown.
         if (e instanceof Error && /duplicate column name/i.test(e.message)) {
-          // The ALTER TABLE already applied — run remaining statements in
-          // this migration by stripping the offending ALTER and re-exec'ing.
+          // The column-side statement already applied — run remaining
+          // statements in this migration by stripping it and re-exec'ing.
           // (Important: migrate() in db.ts runs each migration via database.exec()
           // which stops at the first error in a multi-statement string.)
           const stripped = stripAppliedAlters(MIGRATIONS[i], database);
@@ -2958,20 +2980,79 @@ function migrate(database: Database) {
 }
 
 /**
- * Strip ALTER TABLE ADD COLUMN statements for columns that already exist.
- * Returns the migration string with those statements removed.
+ * Strip column-side ALTER statements (ADD COLUMN, RENAME COLUMN) that are
+ * already satisfied by the current schema, so a re-run of the migration
+ * becomes a clean no-op. Returns the migration string with those statements
+ * removed.
+ *
+ * Also handles a tricky class of states: when v75 adds `X` and v76 renames
+ * `X` → `Y`, a DB that has *both* `X` and `Y` (an aborted v75→v76 mid-apply
+ * where v75 succeeded and v76 added `Y` without dropping `X`, or a manual
+ * sidecar ADD) must be normalized — the v75 ADD is a no-op, the v76 RENAME
+ * is a no-op, and the orphan `X` is dropped to keep the schema consistent
+ * with what v75→v76 should have produced. The drop is inlined as an
+ * extra ALTER prefix in the returned string so it runs as part of the
+ * same `database.exec()` as the rest of the migration.
  */
 function stripAppliedAlters(migration: string, database: Database): string {
-  return migration.replace(
+  // Some ADD COLUMNs are followed by a RENAME COLUMN in a later migration
+  // (e.g. v75 adds `input_path`, v76 renames to `input_paths_json`). On
+  // partial-apply recovery, the original name is gone but the renamed alias
+  // is present — treat that as "ADD already applied" and strip the ADD so
+  // the migration becomes a no-op. Keys are ORIGINAL column names; values
+  // are the post-rename names.
+  const renamedInto: Record<string, string> = {
+    input_path: "input_paths_json",
+  };
+  // Orphan drop prefix: if both the original and the renamed name are
+  // present (a partial v75→v76 apply), prepend a DROP COLUMN for the
+  // original so the schema converges to the post-rename state.
+  const orphanDrops: string[] = [];
+  for (const [from, to] of Object.entries(renamedInto)) {
+    const tcols = database
+      .query(`PRAGMA table_info(tool_calls)`)
+      .all() as Array<{ name: string }>;
+    if (
+      tcols.some((c) => c.name === from) &&
+      tcols.some((c) => c.name === to)
+    ) {
+      orphanDrops.push(`ALTER TABLE tool_calls DROP COLUMN ${from};`);
+    }
+  }
+  let out = migration.replace(
     /ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)\b[^;]*;/gi,
     (match, table, column) => {
       const cols = database
         .query(`PRAGMA table_info(${table})`)
         .all() as Array<{ name: string }>;
-      if (cols.some((c) => c.name === column)) return ""; // already exists
-      return match; // keep — this ALTER hasn't been applied
+      if (cols.some((c) => c.name === column)) return "";
+      const aliased = renamedInto[column];
+      if (aliased && cols.some((c) => c.name === aliased)) return "";
+      return match;
     },
   );
+  // RENAME COLUMN: strip if the target column already exists (the rename
+  // was already applied in a prior run). The orphan DROP above handles the
+  // `hasFrom && hasTo` case before the RENAME is reached.
+  out = out.replace(
+    /ALTER\s+TABLE\s+(\w+)\s+RENAME\s+COLUMN\s+(\w+)\s+TO\s+(\w+)\s*;/gi,
+    (match, table, from, to) => {
+      const cols = database
+        .query(`PRAGMA table_info(${table})`)
+        .all() as Array<{ name: string }>;
+      const hasFrom = cols.some((c) => c.name === from);
+      const hasTo = cols.some((c) => c.name === to);
+      // Already in the desired state: strip the rename (it's a no-op).
+      if (hasTo && !hasFrom) return "";
+      // Both present: the orphan DROP (above) will remove `from` first when
+      // the prepended statements run; the RENAME itself is still a no-op
+      // because the target already exists. Strip to avoid the
+      // `duplicate column name: <to>` throw.
+      if (hasTo && hasFrom) return "";
+      return match;
+    },
+  );
+  return orphanDrops.length > 0 ? orphanDrops.join(" ") + " " + out : out;
 }
 
 /**
@@ -3391,11 +3472,32 @@ function recoverMissingObjects(database: Database) {
     if (!tcols.some((c) => c.name === "verifier")) {
       database.exec("ALTER TABLE tool_calls ADD COLUMN verifier INTEGER;");
     }
-    // Version 75: tool_calls.input_path (file provenance, #627 Step 1 / D2c).
-    // Same recovery rationale as verifier — CREATE TABLE IF NOT EXISTS cannot
-    // add a missing column to a pre-existing table.
-    if (!tcols.some((c) => c.name === "input_path")) {
-      database.exec("ALTER TABLE tool_calls ADD COLUMN input_path TEXT;");
+    // Version 76: tool_calls.input_paths_json (rename + widen to JSON array).
+    // A DB that was created on v75 has `input_path`; one created on v76 (or
+    // fully migrated) has `input_paths_json`. We need to end up with
+    // `input_paths_json` present in both cases. SQLite ≥3.25 supports
+    // RENAME COLUMN, so an in-place rename is safe. The v75 recovery is
+    // subsumed: a DB with neither column now gets `input_paths_json` added
+    // directly (no need for a separate v75 ADD COLUMN step). If a DB has
+    // BOTH columns (an aborted v75→v76 mid-apply, or a manual sidecar
+    // ADD), the v75 ADD ran but the v76 RENAME didn't complete — drop the
+    // orphan `input_path` so the schema converges to the post-rename
+    // state. The migration loop's `stripAppliedAlters` also handles this
+    // case (prepending an orphan-DROP); this block is a safety net for DBs
+    // that arrive at v76 already (e.g. opened by an older binary that ran
+    // a partial migration, then re-opened here).
+    if (tcols.some((c) => c.name === "input_path")) {
+      if (tcols.some((c) => c.name === "input_paths_json")) {
+        // Both present — drop the orphan. SQLite ≥3.35 supports
+        // DROP COLUMN. (Node ≥22.5 ships SQLite ≥3.46; Bun bundles ≥3.50.)
+        database.exec("ALTER TABLE tool_calls DROP COLUMN input_path;");
+      } else {
+        database.exec(
+          "ALTER TABLE tool_calls RENAME COLUMN input_path TO input_paths_json;",
+        );
+      }
+    } else if (!tcols.some((c) => c.name === "input_paths_json")) {
+      database.exec("ALTER TABLE tool_calls ADD COLUMN input_paths_json TEXT;");
     }
   }
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).

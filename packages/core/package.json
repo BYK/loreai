@@ -34,6 +34,7 @@
     "pickleparser": "0.2.1",
     "remark": "^15.0.1",
     "sqlite-vec": "0.1.9",
+    "unbash": "^4.0.4",
     "uuidv7": "^1.1.0",
     "zod": "^4.3.6"
   },
