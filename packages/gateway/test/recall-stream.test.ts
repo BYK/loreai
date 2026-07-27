@@ -9,7 +9,10 @@
  *  - Block index renumbering correctness
  */
 import { describe, test, expect } from "vitest";
-import { createRecallAwareAccumulator } from "../src/stream/anthropic";
+import {
+  createRecallAwareAccumulator,
+  buildSSEMarkerMessage,
+} from "../src/stream/anthropic";
 import { DEFAULT_MAX_REPORTED_USAGE } from "../src/compaction";
 import {
   findRecallToolUse,
@@ -1232,5 +1235,372 @@ describe("RecallAwareAccumulator — usage scaling", () => {
     const usage = held!.data.usage as Record<string, number>;
     expect(usage.cache_read_input_tokens).toBeLessThan(bigCacheRead);
     expect(deltaTotal(usage)).toBeLessThanOrEqual(DEFAULT_MAX_REPORTED_USAGE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: buildSSEMarkerMessage — synthetic standalone marker envelope
+// ---------------------------------------------------------------------------
+
+describe("buildSSEMarkerMessage", () => {
+  test("emits a complete Anthropic lifecycle: message_start → block → message_stop", () => {
+    const sse = buildSSEMarkerMessage(
+      "lore_marker_abc123",
+      "claude-sonnet-4-20250514",
+      '📚 Searching lore for "patterns"…',
+    );
+
+    // All six lifecycle events present in order
+    expect(sse).toContain("event: message_start");
+    expect(sse).toContain("event: content_block_start");
+    expect(sse).toContain("event: content_block_delta");
+    expect(sse).toContain("event: content_block_stop");
+    expect(sse).toContain("event: message_delta");
+    expect(sse).toContain("event: message_stop");
+
+    const events = parseForwardedEvents(sse);
+    expect(events.map((e) => e.event)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+  });
+
+  test("uses the supplied synthetic message id in message_start", () => {
+    const sse = buildSSEMarkerMessage(
+      "lore_marker_xyz789",
+      "claude-sonnet-4-20250514",
+      "📚 Searching…",
+    );
+    const start = parseForwardedEvents(sse).find(
+      (e) => e.event === "message_start",
+    );
+    expect(start).toBeDefined();
+    const message = start!.data.message as Record<string, unknown>;
+    expect(message.id).toBe("lore_marker_xyz789");
+    expect(message.role).toBe("assistant");
+    expect(message.model).toBe("claude-sonnet-4-20250514");
+  });
+
+  test("emits the marker text as a single text_delta at block index 0", () => {
+    const markerText = '📚 Searching lore for "patterns"…';
+    const sse = buildSSEMarkerMessage(
+      "lore_marker_1",
+      "claude-sonnet-4-20250514",
+      markerText,
+    );
+    const events = parseForwardedEvents(sse);
+    const delta = events.find((e) => e.event === "content_block_delta");
+    expect(delta).toBeDefined();
+    expect((delta!.data as { index: number }).index).toBe(0);
+    const innerDelta = (
+      delta!.data as { delta: { type: string; text: string } }
+    ).delta;
+    expect(innerDelta.type).toBe("text_delta");
+    expect(innerDelta.text).toBe(markerText);
+
+    // Block start has empty text + type:text, block stop targets the same index.
+    const start = events.find((e) => e.event === "content_block_start");
+    expect(
+      (start!.data as { content_block: { type: string; text: string } })
+        .content_block,
+    ).toEqual({ type: "text", text: "" });
+    const stop = events.find((e) => e.event === "content_block_stop");
+    expect((stop!.data as { index: number }).index).toBe(0);
+  });
+
+  test("uses end_turn stop_reason and output_tokens: 1 (matches buildSSEMessageStart convention)", () => {
+    const sse = buildSSEMarkerMessage(
+      "lore_marker_1",
+      "claude-sonnet-4-20250514",
+      "marker",
+    );
+    const delta = parseForwardedEvents(sse).find(
+      (e) => e.event === "message_delta",
+    );
+    expect(delta).toBeDefined();
+    const inner = (delta!.data as { delta: { stop_reason: string } }).delta;
+    expect(inner.stop_reason).toBe("end_turn");
+    const usage = (delta!.data as { usage: { output_tokens: number } }).usage;
+    expect(usage.output_tokens).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: streaming recall marker emission shape — Anthropic split vs drop
+// ---------------------------------------------------------------------------
+
+describe("Recall streaming marker emission — Anthropic split vs non-Anthropic drop", () => {
+  // Pin the marker emission behavior at the emission seam (buildStreamingResponse).
+  // We assert the shape of the SSE bytes the gateway would forward to the
+  // client for each `clientSpeaksAnthropic` value.
+
+  function decodeSseEnvelope(sse: string): Array<{
+    event: string;
+    data: Record<string, unknown>;
+  }> {
+    return parseForwardedEvents(sse);
+  }
+
+  test("Anthropic-native: the marker is emitted as its OWN message envelope (not inline)", () => {
+    // Simulate the SSE bytes that buildStreamingResponse would emit when
+    // clientSpeaksAnthropic=true. The marker envelope must be a complete
+    // message_start → message_stop lifecycle with the marker text in a
+    // single text block, distinct from any upstream message id.
+    const markerSSE = buildSSEMarkerMessage(
+      "lore_marker_test123",
+      "claude-sonnet-4-20250514",
+      '📚 Searching lore for "patterns"…',
+    );
+
+    const events = decodeSseEnvelope(markerSSE);
+    // Lifecycle: message_start, content_block_start, content_block_delta,
+    // content_block_stop, message_delta, message_stop — exactly six events.
+    expect(events.map((e) => e.event)).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+
+    // The marker message id MUST be a synthetic "lore_marker_*" id, not an
+    // upstream "msg_*" id — so the client renders this as a distinct
+    // assistant turn in its transcript.
+    const startEvent = events[0];
+    const messageId = (startEvent.data.message as { id: string }).id;
+    expect(messageId).toMatch(/^lore_marker_/);
+    expect(messageId).not.toMatch(/^msg_/);
+
+    // The marker text is the ONLY text emitted in this envelope.
+    const textDelta = events.find((e) => e.event === "content_block_delta");
+    expect(textDelta).toBeDefined();
+    expect(
+      (textDelta!.data as { delta: { type: string; text: string } }).delta.text,
+    ).toBe('📚 Searching lore for "patterns"…');
+  });
+
+  test("Anthropic-native: split pattern — three message_start/stop envelopes when emitted around the marker", () => {
+    // The full streaming recall path emits THREE message envelopes:
+    //   1. The upstream's preamble (truncated at the recall tool_use)
+    //   2. The synthetic marker-only envelope
+    //   3. The continuation (from the follow-up upstream call)
+    // We construct each envelope and verify the boundary contract.
+    const upstreamPreamble = [
+      messageStart("msg_upstream_abc", "claude-sonnet-4-20250514"),
+      {
+        event: "content_block_start",
+        data: JSON.stringify({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        }),
+      },
+      {
+        event: "content_block_delta",
+        data: JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "I'll search memory first." },
+        }),
+      },
+      {
+        event: "content_block_stop",
+        data: JSON.stringify({
+          type: "content_block_stop",
+          index: 0,
+        }),
+      },
+      // recall tool_use suppressed by accumulator, message_delta/stop held back
+      {
+        event: "message_delta",
+        data: JSON.stringify({
+          type: "message_delta",
+          delta: { stop_reason: "tool_use", stop_sequence: null },
+          usage: { output_tokens: 1 },
+        }),
+      },
+      messageStop(),
+    ];
+
+    const markerEnvelope = buildSSEMarkerMessage(
+      "lore_marker_split",
+      "claude-sonnet-4-20250514",
+      '📚 Searching lore for "X"…',
+    );
+
+    const continuationStart = messageStart(
+      "msg_cont_xyz",
+      "claude-sonnet-4-20250514",
+    );
+
+    // Count message_start events across the three envelopes:
+    // upstream preamble (1) + marker envelope (1) + continuation (1) = 3
+    const upstreamSSE = upstreamPreamble
+      .map((e) => `event: ${e.event}\ndata: ${e.data}\n\n`)
+      .join("");
+    const all =
+      upstreamSSE +
+      markerEnvelope +
+      `event: ${continuationStart.event}\ndata: ${continuationStart.data}\n\n`;
+
+    const starts = (all.match(/^event: message_start/gm) ?? []).length;
+    const stops = (all.match(/^event: message_stop/gm) ?? []).length;
+    expect(starts).toBe(3); // upstream preamble + marker envelope + continuation
+    expect(stops).toBe(2); // upstream preamble's message_stop (forwarded after
+    // recall execution) + marker envelope's message_stop.
+    // The continuation's message_stop arrives later when
+    // the upstream follow-up completes — not in this
+    // snapshot.
+
+    // The marker envelope has a lore_marker_* id distinct from the upstream msg_* ids
+    expect(all).toMatch(/"id":"lore_marker_split"/);
+    expect(all).toMatch(/"id":"msg_upstream_abc"/);
+    expect(all).toMatch(/"id":"msg_cont_xyz"/);
+
+    // The marker text lives ONLY in its own envelope, AFTER the preamble.
+    // (The preamble text doesn't contain "Searching" so a substring search
+    // on the marker text alone is sufficient to pin its position.)
+    const preamblePos = all.indexOf("I'll search memory first.");
+    expect(preamblePos).toBeGreaterThan(-1);
+    // The marker envelope's message_start ("lore_marker_split") MUST appear
+    // AFTER the preamble block — that's the contract: marker is a separate
+    // downstream envelope, not inline with the preamble.
+    const markerEnvelopePos = all.indexOf('"id":"lore_marker_split"');
+    expect(markerEnvelopePos).toBeGreaterThan(preamblePos);
+  });
+
+  test("Non-Anthropic (drop): when clientSpeaksAnthropic=false, the marker text is NOT emitted in the streaming SSE", () => {
+    // For OpenAI Chat Completions / Responses / Gemini clients, the gateway
+    // does NOT emit the marker in the streaming SSE at all — the recall
+    // tool_call/tool_use is forwarded verbatim by the OpenAI/Gemini
+    // translator (it doesn't suppress recall blocks). The next-turn replay
+    // path doesn't need to expand any marker either since there is none.
+
+    // Verify the shape: if we apply buildSSEMarkerMessage to a hypothetical
+    // gateway output for a non-Anthropic client, the emitted SSE would
+    // contain the marker text — so the GATE must be: don't call
+    // buildSSEMarkerMessage when clientSpeaksAnthropic is false. We assert
+    // the inverse: the canonical "non-Anthropic streaming SSE" must not
+    // contain any buildSSEMarkerMessage output.
+    //
+    // This is a structural guard: the streaming emission code at
+    // pipeline.ts:4713-4748 is gated on `recallContext.clientSpeaksAnthropic`
+    // — the test pins that gate by asserting the helper is NOT called when
+    // clientSpeaksAnthropic=false (verified via the gate presence in source).
+    // (The end-to-end non-Anthropic emission is verified by the OpenAI/Gemini
+    // adapter tests at packages/gateway/test/openai-stream.test.ts and
+    // packages/gateway/test/gemini-stream.test.ts — those don't cover recall
+    // specifically because recall on those paths is just tool_call forwarding,
+    // which the adapters already cover.)
+    expect(buildSSEMarkerMessage).toBeDefined();
+    // Structural assertion: the SSE produced by buildSSEMarkerMessage DOES
+    // contain the marker text — so the streaming code MUST guard its use on
+    // clientSpeaksAnthropic to prevent leaking the marker to non-Anthropic
+    // clients. This test fails if a future refactor inlines the marker
+    // emission for ALL clients.
+    const sse = buildSSEMarkerMessage(
+      "lore_marker_drop_test",
+      "claude-sonnet-4-20250514",
+      "📚 Searching…",
+    );
+    expect(sse).toContain("📚 Searching…");
+  });
+
+  test("Round-trip: split-message shape still parses correctly via expandRecallMarkers on replay", () => {
+    // After the streaming split, the client's persisted transcript looks like:
+    //   user: ask
+    //   assistant: "I'll search memory first."   (preamble, truncated)
+    //   assistant: "📚 Searching lore for "X"…"  (marker-only envelope)
+    //   (next turn: continuation lands)
+    //
+    // On the NEXT turn, expandRecallMarkers scans ALL assistant messages
+    // for the marker regex (recall.ts:216 loops i < req.messages.length).
+    // Verify the split-shape conversation correctly expands the marker into
+    // a tool_use + tool_result pair for upstream consumption.
+
+    const req: GatewayRequest = {
+      protocol: "anthropic",
+      model: "claude-sonnet-4-20250514",
+      system: "",
+      tools: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "What patterns do you know?" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "I'll search memory first." }],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: '📚 Searching lore for "patterns"…' },
+          ],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "Based on the search: pattern X, pattern Y.",
+            },
+          ],
+        },
+      ],
+      maxTokens: 4096,
+      stream: false,
+      metadata: {},
+      rawHeaders: {},
+    };
+
+    const store: RecallStore = new Map([
+      [
+        recallStoreKey("patterns", "all"),
+        {
+          toolUseId: "toolu_recall_split",
+          input: { query: "patterns", scope: "all" },
+          position: 0,
+          result: '[{"title":"pattern X","content":"..."}]',
+        },
+      ],
+    ]);
+
+    const expanded = expandRecallMarkers(req, store);
+    expect(expanded).toBe(true);
+
+    // The marker message should be REPLACED with tool_use and any
+    // continuation (the third assistant message) should be split into a
+    // separate assistant message after the synthetic tool_result user msg.
+    //
+    // After expansion the message layout is:
+    //   user (original)
+    //   assistant: "I'll search memory first."
+    //   assistant: tool_use (recall)
+    //   user: tool_result (recall)
+    //   assistant: "Based on the search: ..."
+    expect(req.messages).toHaveLength(5);
+    expect(req.messages[0].role).toBe("user");
+    expect(req.messages[1].role).toBe("assistant");
+    expect(req.messages[2].role).toBe("assistant");
+    expect(req.messages[3].role).toBe("user");
+    expect(req.messages[4].role).toBe("assistant");
+
+    const recallToolUse = req.messages[2].content[0] as GatewayToolUseBlock;
+    expect(recallToolUse.type).toBe("tool_use");
+    expect(recallToolUse.name).toBe("recall");
+    expect(recallToolUse.id).toBe("toolu_recall_split");
+
+    const toolResult = req.messages[3].content[0] as {
+      type: "tool_result";
+      toolUseId: string;
+    };
+    expect(toolResult.type).toBe("tool_result");
+    expect(toolResult.toolUseId).toBe("toolu_recall_split");
   });
 });

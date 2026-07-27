@@ -195,6 +195,7 @@ import {
   buildSSEResponse,
   buildSSEToolUseResponse,
   buildKeepaliveCompactionStream,
+  buildSSEMarkerMessage,
   formatSSEEvent,
   type StreamAccumulator,
   type RecallAwareAccumulator,
@@ -4484,6 +4485,14 @@ function buildStreamingResponse(
     config: GatewayConfig;
     sessionState: SessionState;
     cacheOptions: AnthropicCacheOptions;
+    /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
+     *  recall marker is emitted as its own Anthropic SSE message envelope
+     *  (split) or as an inline synthetic text content block (which the
+     *  OpenAI/Responses/Gemini translators forward as their native text
+     *  chunk). Either way the marker reaches the client — the difference
+     *  is whether it lands as a distinct assistant message in the client's
+     *  transcript (Anthropic native) or as inline text content (others). */
+    clientSpeaksAnthropic: boolean;
   },
   /** When set, prepend a synthetic warning content block to the stream.
    *  Currently used for the worker-degradation warning (#797 removed the
@@ -4710,35 +4719,86 @@ function buildStreamingResponse(
               ),
             });
 
-            // Emit marker text block in place of the suppressed recall block
+            // Emit marker — split into its own SSE message envelope for Anthropic-native
+            // clients (so the marker renders as a DISTINCT assistant message in
+            // the transcript, not inline with the model's preamble); for
+            // non-Anthropic clients (OpenAI Chat Completions / Responses /
+            // Gemini), emit it as a SYNTHETIC text content block in the Anthropic SSE.
+            // The OpenAI/Responses/Gemini adapters (stream/openai.ts, stream/openai-responses.ts,
+            // stream/gemini.ts) each translate text content blocks into their native
+            // streaming format automatically — so the marker reaches the OpenAI client
+            // as a delta.content chunk, the Responses client as an output_text delta,
+            // and the Gemini client as a text part. This preserves the recall context
+            // across turns (the client's persisted transcript has SOMETHING for
+            // expandRecallMarkers to find next turn, fixing the silent-recall-loss bug
+            // that would result from dropping the marker entirely for these clients).
             const markerText = buildRecallMarker(input.query, scope, input.id);
-            const markerIdx =
-              currentAccum.clientBlockCount() + currentBlockOffset;
-            const syntheticMarker = [
-              formatSSEEvent(
-                "content_block_start",
-                JSON.stringify({
-                  type: "content_block_start",
-                  index: markerIdx,
-                  content_block: { type: "text", text: "" },
-                }),
-              ),
-              formatSSEEvent(
-                "content_block_delta",
-                JSON.stringify({
-                  type: "content_block_delta",
-                  index: markerIdx,
-                  delta: { type: "text_delta", text: markerText },
-                }),
-              ),
-              formatSSEEvent(
-                "content_block_stop",
-                JSON.stringify({
-                  type: "content_block_stop",
-                  index: markerIdx,
-                }),
-              ),
-            ].join("");
+            let syntheticMarker: string;
+            if (recallContext.clientSpeaksAnthropic) {
+              const syntheticMessageId = `lore_marker_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+              syntheticMarker = buildSSEMarkerMessage(
+                syntheticMessageId,
+                currentResp.model,
+                markerText,
+              );
+            } else {
+              // Inline synthetic text block at the index where the recall
+              // tool_use was suppressed. Existing translators forward text
+              // blocks to the client's native streaming format — see
+              // stream/openai.ts:225-239 (text_delta → delta.content chunk),
+              // stream/openai-responses.ts (text → output_text delta), and
+              // stream/gemini.ts (buffered → text part in aggregated frame).
+              const markerIdx =
+                currentAccum.clientBlockCount() + currentBlockOffset;
+              syntheticMarker = [
+                formatSSEEvent(
+                  "content_block_start",
+                  JSON.stringify({
+                    type: "content_block_start",
+                    index: markerIdx,
+                    content_block: { type: "text", text: "" },
+                  }),
+                ),
+                formatSSEEvent(
+                  "content_block_delta",
+                  JSON.stringify({
+                    type: "content_block_delta",
+                    index: markerIdx,
+                    delta: { type: "text_delta", text: markerText },
+                  }),
+                ),
+                formatSSEEvent(
+                  "content_block_stop",
+                  JSON.stringify({
+                    type: "content_block_stop",
+                    index: markerIdx,
+                  }),
+                ),
+              ].join("");
+            }
+            // For Anthropic-native clients, the marker is a SEPARATE SSE
+            // message envelope (own message_start/message_stop). The original
+            // envelope (preamble) must close BEFORE the marker opens —
+            // otherwise the wire has two message_start events with no closing
+            // message_stop between them, which is malformed Anthropic SSE.
+            // Forward the original's held-back message_delta + message_stop
+            // FIRST, then emit the marker. Use `takeHeldBackEvents()` so the
+            // mixed-tools terminal-close branch can't double-emit the same
+            // events.
+            // For non-Anthropic clients, the marker is inline so the original
+            // envelope stays open — held-back events are forwarded LATER
+            // (after the follow-up completes, in the recall-only success
+            // path at pipeline.ts:~4960).
+            if (recallContext.clientSpeaksAnthropic) {
+              const originalHeldBack = currentAccum.takeHeldBackEvents();
+              if (originalHeldBack) {
+                if (!safeEnqueue(encoder.encode(originalHeldBack))) {
+                  clearKeepalive();
+                  return;
+                }
+              }
+            }
+
             if (!safeEnqueue(encoder.encode(syntheticMarker))) {
               clearKeepalive();
               return;
@@ -4751,7 +4811,12 @@ function buildStreamingResponse(
                   `${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
 
-              const heldBack = currentAccum.heldBackEvents();
+              // For non-Anthropic clients, the marker is inline (envelope
+              // stays open), so the held-back events close the envelope at
+              // stream end. For Anthropic clients, the held-back was already
+              // consumed (via takeHeldBackEvents) before the marker emission
+              // above — so takeHeldBackEvents() returns "" here, no-op.
+              const heldBack = currentAccum.takeHeldBackEvents();
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
@@ -4806,7 +4871,11 @@ function buildStreamingResponse(
                 `recall follow-up fetch error (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
                 fetchErr,
               );
-              const heldBack = currentAccum.heldBackEvents();
+              // takeHeldBackEvents() — for Anthropic this is a no-op
+              // (already consumed before the marker envelope emission
+              // above); for non-Anthropic the held-back closes the
+              // (still-open) envelope here.
+              const heldBack = currentAccum.takeHeldBackEvents();
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
@@ -4834,7 +4903,11 @@ function buildStreamingResponse(
                 model: currentModifiedReq.model,
                 sessionID: recallContext.sessionState.sessionID,
               });
-              const heldBack = currentAccum.heldBackEvents();
+              // takeHeldBackEvents() — for Anthropic this is a no-op
+              // (already consumed before the marker envelope emission
+              // above); for non-Anthropic the held-back closes the
+              // (still-open) envelope here.
+              const heldBack = currentAccum.takeHeldBackEvents();
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
@@ -4851,14 +4924,28 @@ function buildStreamingResponse(
             );
 
             // Pipe the continuation stream through a recall-aware accumulator.
-            // +1 accounts for the synthetic marker block just emitted.
-            const contBlockOffset =
-              currentAccum.clientBlockCount() + currentBlockOffset + 1;
+            // For Anthropic-native clients:
+            //  - The marker is its own SSE message envelope (separate
+            //    message_start/message_stop), so the continuation's content_block_start
+            //    indices start at 0 in its own message — blockOffset=0.
+            //  - The continuation must open with its OWN message_start (don't suppress).
+            //    The original envelope's message_start/message_stop were already closed
+            //    by the explicit held-back forwarding just before the marker envelope.
+            //
+            // For non-Anthropic clients:
+            //  - The marker is an inline synthetic text block, so the original envelope
+            //    stays open throughout the marker and the continuation. The continuation
+            //    extends the original envelope — blockOffset includes the marker block,
+            //    and the continuation's message_start is suppressed (single-message
+            //    stream per OpenAI Chat Completions / Responses / Gemini).
+            const contBlockOffset = recallContext.clientSpeaksAnthropic
+              ? 0
+              : currentAccum.clientBlockCount() + currentBlockOffset + 1;
             const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
               scaleClientUsage: true,
               maxReportedUsage,
               blockOffset: contBlockOffset,
-              suppressMessageStart: true,
+              suppressMessageStart: !recallContext.clientSpeaksAnthropic,
             });
             const contReader = streamingFollowUp.reader;
             activeReader = contReader;
@@ -4898,6 +4985,16 @@ function buildStreamingResponse(
               );
             }
 
+            // For non-Anthropic clients: the original (preamble) envelope is
+            // kept open throughout the inline marker and the follow-up
+            // continuation. The continuation's terminal message_delta +
+            // message_stop (held back in contAccum below) close the original
+            // envelope inline as the stream ends. Forwarding the preamble's
+            // held-back here would duplicate the close event and break the
+            // OpenAI wire (extra [DONE] sentinel + contradictory
+            // finish_reason). For Anthropic clients, the preamble's
+            // held-back was already consumed before the marker envelope
+            // emission above — contAccum's held-back is the relevant close.
             const heldBack = contAccum.heldBackEvents();
             if (heldBack) {
               // Scale usage in held-back message_delta for anti-compaction
@@ -9120,7 +9217,13 @@ async function handleConversationTurn(
       (resp) =>
         postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
       hasRecallTool
-        ? { modifiedReq, config, sessionState, cacheOptions }
+        ? {
+            modifiedReq,
+            config,
+            sessionState,
+            cacheOptions,
+            clientSpeaksAnthropic: req.protocol === "anthropic",
+          }
         : undefined,
       warningText,
       sessionState.sessionID,
