@@ -656,6 +656,115 @@ export function buildSSETextResponse(
 }
 
 /**
+ * Build a complete Anthropic SSE event sequence for a SYNTHETIC standalone
+ * recall-marker message.
+ *
+ * Purpose: when a client speaks Anthropic SSE natively, the streaming recall
+ * marker (e.g. `📚 Searching lore for "X"…`) is emitted as its OWN
+ * `message_start`/`message_stop` envelope — so the client renders the marker
+ * as a distinct assistant message in its transcript instead of an inline
+ * reply block sitting next to the model's preamble text. The Anthropic SDK
+ * (and Claude Code) treats each `message_start`/`message_stop` envelope as
+ * a separate assistant turn for transcript rendering, even though all the
+ * envelopes land in the same HTTP response stream.
+ *
+ * The synthetic message id MUST differ from the upstream message id so the
+ * client's transcript row is distinct from any real model response.
+ *
+ * Lifecycle:
+ *   message_start -> content_block_start -> content_block_delta ->
+ *     content_block_stop -> message_delta -> message_stop
+ *
+ * Output token count is 1 (matches the `output_tokens: 1` convention used by
+ * `buildSSEMessageStart` so clients that meter on `output_tokens` see a
+ * consistent minimal value for synthetic messages).
+ */
+export function buildSSEMarkerMessage(
+  messageId: string,
+  model: string,
+  markerText: string,
+): string {
+  const events: string[] = [];
+
+  // message_start
+  events.push(
+    formatSSEEvent(
+      "message_start",
+      JSON.stringify({
+        type: "message_start",
+        message: {
+          id: messageId,
+          type: "message",
+          role: "assistant",
+          content: [],
+          model,
+          stop_reason: null,
+          stop_sequence: null,
+          usage: {
+            input_tokens: 0,
+            output_tokens: 1,
+          },
+        },
+      }),
+    ),
+  );
+
+  // content_block_start
+  events.push(
+    formatSSEEvent(
+      "content_block_start",
+      JSON.stringify({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+    ),
+  );
+
+  // content_block_delta — full marker text in one delta
+  events.push(
+    formatSSEEvent(
+      "content_block_delta",
+      JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: markerText },
+      }),
+    ),
+  );
+
+  // content_block_stop
+  events.push(
+    formatSSEEvent(
+      "content_block_stop",
+      JSON.stringify({
+        type: "content_block_stop",
+        index: 0,
+      }),
+    ),
+  );
+
+  // message_delta — end_turn because the marker is a complete, single-block message
+  events.push(
+    formatSSEEvent(
+      "message_delta",
+      JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      }),
+    ),
+  );
+
+  // message_stop
+  events.push(
+    formatSSEEvent("message_stop", JSON.stringify({ type: "message_stop" })),
+  );
+
+  return events.join("");
+}
+
+/**
  * Build a complete Anthropic SSE event sequence from a fully-accumulated
  * `GatewayResponse`, preserving ALL content blocks — text, thinking, tool_use,
  * and opaque (image/etc.) — not just text.
@@ -1036,6 +1145,13 @@ export interface RecallAwareAccumulator extends StreamAccumulator {
   clientBlockCount(): number;
   /** The held-back message_delta + message_stop events (SSE text). */
   heldBackEvents(): string;
+  /**
+   * Atomically return the held-back events AND clear the held-back buffer
+   * so subsequent calls return "" — prevents double-emission when multiple
+   * branches in the caller (e.g. marker-emission seam + mixed-tools
+   * terminal-close branch) both want to forward the close events.
+   */
+  takeHeldBackEvents(): string;
 }
 
 /**
@@ -1243,6 +1359,11 @@ export function createRecallAwareAccumulator(
     recallBlockIndex: () => firstSuppressedIndex,
     clientBlockCount: () => clientBlocks,
     heldBackEvents: () => heldBack,
+    takeHeldBackEvents: () => {
+      const out = heldBack;
+      heldBack = "";
+      return out;
+    },
   };
 }
 
