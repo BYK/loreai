@@ -109,7 +109,12 @@ describe("makeByteProgress", () => {
     // don't see "applied 1.5 GB / 3.1 GB" for what ends up being a
     // 310 MB install.
     const out = fakeOut(true);
-    const p = makeByteProgress("Applying patches", 930 * 1024 * 1024, out, "pct");
+    const p = makeByteProgress(
+      "Applying patches",
+      930 * 1024 * 1024,
+      out,
+      "pct",
+    );
     p.onProgress(310 * 1024 * 1024); // 33%
     p.onProgress(310 * 1024 * 1024); // 66%
     p.onProgress(310 * 1024 * 1024); // 100%
