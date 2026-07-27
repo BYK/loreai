@@ -223,7 +223,18 @@ function makeApplyProgress(): {
     onEvent: (event) => {
       if (event.type === "bytes" && event.phase === "apply") {
         if (!bar) {
-          bar = makeByteProgress("Applying patches", event.total);
+          // Apply bar shows percentage only, not bytes. Multi-hop chains
+          // sum newSize across hops for the event.total, which inflates
+          // the displayed size beyond the final binary (e.g. a 3-hop
+          // 310 MB chain shows 930 MB total — visually alarming). The
+          // percentage answers the user's actual question ("how far
+          // along?") without that distraction.
+          bar = makeByteProgress(
+            "Applying patches",
+            event.total,
+            process.stderr,
+            "pct",
+          );
         }
         const delta = event.written - lastWritten;
         lastWritten = event.written;

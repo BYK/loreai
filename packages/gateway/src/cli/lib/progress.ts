@@ -50,11 +50,16 @@ function formatBytes(n: number): string {
  * @param totalBytes - Expected total bytes; `null` renders an indeterminate
  *   byte counter instead of a bar.
  * @param out - Output stream (defaults to stderr, the CLI's progress channel).
+ * @param format - `"bytes"` (default) renders the accumulated/total byte
+ *   count. `"pct"` renders only the percentage — useful when the byte
+ *   total is misleading (e.g. a multi-hop chain where intermediate hops
+ *   inflate the displayed size beyond the actual final binary).
  */
 export function makeByteProgress(
   label: string,
   totalBytes: number | null,
   out: ByteProgressOut = process.stderr,
+  format: "bytes" | "pct" = "bytes",
 ): ByteProgress {
   const tty = !!out.isTTY;
   let written = 0;
@@ -66,6 +71,9 @@ export function makeByteProgress(
       return `${label}  ${formatBytes(written)}`;
     }
     const frac = Math.min(written / totalBytes, 1);
+    if (format === "pct") {
+      return `${label} [${renderBar(frac)}] ${(frac * 100).toFixed(0)}%`;
+    }
     return (
       `${label} [${renderBar(frac)}] ` +
       `${formatBytes(written)} / ${formatBytes(totalBytes)}`
