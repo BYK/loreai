@@ -95,13 +95,31 @@ export function safeExit(code: number): never {
  * future runtimes with a teardown-free exit can honor it.
  */
 export function forcedExit(code: number): never {
+  // Set the exit code BEFORE we terminate — shells that render SIGKILL as
+  // "Killed" still expose the suggested exit code (`echo $?` after a foreground
+  // SIGKILL returns the suggested code on most shells; the kernel honors it
+  // for waitpid-style reporting). This is the only way to surface `code` since
+  // SIGKILL doesn't carry it.
+  process.exitCode = code;
   if (!ffiExit(code)) {
     // SIGKILL skips all atexit / NAPI teardown. Observed asynchronously.
     process.kill(process.pid, "SIGKILL");
   }
-  // Neither branch returns control to the caller in production. The throw is
-  // unreachable in prod (SIGKILL wins, or FFI _exit wins); it exists only to
-  // give the `never` return type a concrete exit and to let tests observe
-  // "would exit here" via a sentinel.
-  throw new Error(`__forcedExit__:${code}`);
+  // Neither branch returns control to the caller in production. We deliberately
+  // do NOT throw — the throw would race SIGKILL (which is asynchronous) and
+  // produce an unhandled promise rejection / uncaught exception in signal
+  // handlers (see Sentry review on PR #1520). The `never` return type is
+  // satisfied by entering an unreachable tight loop: the kernel delivers SIGKILL
+  // before any further statement executes.
+  //
+  // Test sentinel: when LORE_FORCED_EXIT_SENTEL=1 is set (set by exit.test.ts
+  // in afterEach), throw a tagged error so tests can observe "would exit here"
+  // without the tight loop hanging the worker. Production never sets this.
+  if (process.env.LORE_FORCED_EXIT_SENTINEL === "1") {
+    throw new Error(`__forcedExit__:${code}`);
+  }
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    /* unreachable: SIGKILL is enqueued and will fire before this loop yields */
+  }
 }

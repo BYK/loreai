@@ -46,6 +46,11 @@ beforeEach(() => {
   // Default: FFI "succeeds" — dlopen returns the stub, _exit is a no-op.
   ffiDlopen.mockImplementation(() => ({ symbols: ffiSymbols }));
 
+  // Enable the test-only sentinel throw in forcedExit. Without this the
+  // helper would enter an unreachable tight loop (the prod-only fallback) and
+  // the test worker would hang. See cli/exit.ts and Sentry review on PR #1520.
+  process.env.LORE_FORCED_EXIT_SENTINEL = "1";
+
   vi.spyOn(process, "exit").mockImplementation(processExitMock as never);
   vi.spyOn(process, "kill").mockImplementation(processKillMock as never);
 
@@ -71,6 +76,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   delete (globalThis as { Bun?: unknown }).Bun;
+  delete process.env.LORE_FORCED_EXIT_SENTINEL;
   vi.resetModules();
 });
 
@@ -139,6 +145,20 @@ describe("forcedExit", () => {
     expect(sig).toBe("SIGKILL");
     expect(processExitMock).not.toHaveBeenCalled();
     expect(ffiDlopen).not.toHaveBeenCalled();
+  });
+
+  test("under Node: sets process.exitCode before SIGKILL", async () => {
+    // Seer review (PR #1520): SIGKILL doesn't carry the exit code, so the
+    // helper must set process.exitCode first so shells (and waitpid) see the
+    // code after the forced termination.
+    const savedExitCode = process.exitCode;
+    try {
+      const { forcedExit } = await loadExit(undefined);
+      expect(() => forcedExit(130)).toThrow("__forcedExit__:130");
+      expect(process.exitCode).toBe(130);
+    } finally {
+      process.exitCode = savedExitCode;
+    }
   });
 
   test("under Bun: calls FFI _exit first (process.kill/exit unreachable in prod)", async () => {
