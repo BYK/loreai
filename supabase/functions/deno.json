@@ -1,0 +1,7 @@
+{
+  "nodeModulesDir": "auto",
+  "imports": {
+    "@sentry/deno": "npm:@sentry/deno",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2"
+  }
+}

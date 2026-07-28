@@ -9,23 +9,27 @@
 // GitHub user id reaches setTag/setExtra. Only non-sensitive scalars are tagged
 // (function_name, deployment, and boolean/status flags). sendDefaultPii is false.
 //
-// OPT-OUT: initSentry() is a no-op when SENTRY_DSN is unset, so a local
-// `supabase start` stack (or any deploy without the secret) runs untouched.
+// The DSN is a Sentry public key (not a secret) and is hard-coded below. An
+// explicit SENTRY_DSN env var, if present, overrides it (e.g. for a staging
+// project); otherwise instrumentation is always on.
 import * as Sentry from "npm:@sentry/deno";
+
+// Sentry DSN for the Lore project (o275100). This is a public key, safe to
+// ship in client/server code — it only permits sending events, not reading them.
+const SENTRY_DSN = "https://9b9cbf3a465080792e96fb919b278a38@o275100.ingest.us.sentry.io/4511812805394432";
 
 let initialized = false;
 
 /**
- * Initialize Sentry for a single edge function. Idempotent and a no-op when
- * SENTRY_DSN is not configured in the function's environment.
+ * Initialize Sentry for a single edge function. Idempotent. An explicit
+ * SENTRY_DSN env var, if set, overrides the built-in DSN.
  *
  * @param functionName - e.g. "github-discover"; tagged on every event so
  *   issues are filterable per function in the Sentry UI.
  */
 export function initSentry(functionName: string): void {
   if (initialized) return;
-  const dsn = Deno.env.get("SENTRY_DSN");
-  if (!dsn) return; // local/dev without the secret — skip instrumentation
+  const dsn = Deno.env.get("SENTRY_DSN") ?? SENTRY_DSN;
 
   Sentry.init({
     dsn,
