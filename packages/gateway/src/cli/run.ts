@@ -19,7 +19,7 @@ import {
   type DetectedAgent,
 } from "./agents";
 import { providerForUpstreamOrigin } from "../config";
-import { safeExit } from "./exit";
+import { safeExit, forcedExit } from "./exit";
 import {
   installSignalShutdown,
   installChildSignalForwarding,
@@ -477,12 +477,15 @@ export async function commandRun(
     child.on("exit", (code, signal) => {
       void (async () => {
         // Deadline-bounded so a slow shutdown step can't hang the process.
+        // Use forcedExit on this path: the bounded shutdown may have timed out
+        // (4000ms) and the embedding worker may still be mid-inference in a
+        // native call — safeExit → process.exit() would walk NAPI destructors
+        // under it and SIGABRT (the "💣 Program crashed" report).
         if (owned) await runShutdownWithDeadline(shutdown);
-        // Exit with the child's code (or 128 + signal number for signal deaths)
         if (signal) {
-          safeExit(signalExitCode(signal));
+          forcedExit(signalExitCode(signal));
         }
-        safeExit(code ?? 0);
+        forcedExit(code ?? 0);
       })();
     });
 
@@ -492,7 +495,7 @@ export async function commandRun(
           `[lore] Failed to launch ${target.command}: ${err.message}`,
         );
         if (owned) await runShutdownWithDeadline(shutdown);
-        safeExit(1);
+        forcedExit(1);
       })();
     });
   });
