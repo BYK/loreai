@@ -101,4 +101,30 @@ describe("makeByteProgress", () => {
       p.done();
     }).not.toThrow();
   });
+
+  it("renders percentage only when format='pct' (apply bar suppresses GB scare)", () => {
+    // Multi-hop chains sum newSize across hops, so event.total can far
+    // exceed the final binary size (e.g. 930 MB for a 3-hop 310 MB chain).
+    // The apply bar should show only percentage in that case so users
+    // don't see "applied 1.5 GB / 3.1 GB" for what ends up being a
+    // 310 MB install.
+    const out = fakeOut(true);
+    const p = makeByteProgress(
+      "Applying patches",
+      930 * 1024 * 1024,
+      out,
+      "pct",
+    );
+    p.onProgress(310 * 1024 * 1024); // 33%
+    p.onProgress(310 * 1024 * 1024); // 66%
+    p.onProgress(310 * 1024 * 1024); // 100%
+    p.done();
+
+    const last = out.writes.at(-2);
+    expect(last).toContain("Applying patches");
+    expect(last).toMatch(/\[█+\]\s+100%/);
+    // No byte count in pct mode
+    expect(last).not.toMatch(/\d+\s*(B|KB|MB|GB|TB)/);
+    expect(last).not.toContain("/");
+  });
 });
