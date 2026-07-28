@@ -25,7 +25,8 @@ initSentry("send-invite-email");
 
 Deno.serve(
   wrapHandler("send-invite-email", async (req: Request): Promise<Response> => {
-    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+    if (req.method !== "POST")
+      return json({ error: "method not allowed" }, 405);
 
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) return json({ error: "missing authorization" }, 401);
@@ -37,84 +38,84 @@ Deno.serve(
     if (!url || !anonKey || !serviceKey || !apiKey) {
       return json({ error: "server misconfigured" }, 500);
     }
-  const sender = Deno.env.get("INVITE_SENDER") ?? "keeper@withlore.ai";
-  const apiUrl = Deno.env.get("SMTP2GO_API_URL") ?? undefined;
+    const sender = Deno.env.get("INVITE_SENDER") ?? "keeper@withlore.ai";
+    const apiUrl = Deno.env.get("SMTP2GO_API_URL") ?? undefined;
 
-  // Verify the caller's JWT → user id (never trust a client-supplied identity).
-  const userClient = createClient(url, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-  const {
-    data: { user },
-    error: userErr,
-  } = await userClient.auth.getUser();
-  if (userErr || !user) return json({ error: "invalid token" }, 401);
+    // Verify the caller's JWT → user id (never trust a client-supplied identity).
+    const userClient = createClient(url, anonKey, {
+      global: { headers: { Authorization: authHeader } },
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const {
+      data: { user },
+      error: userErr,
+    } = await userClient.auth.getUser();
+    if (userErr || !user) return json({ error: "invalid token" }, 401);
 
-  const body = (await req.json().catch(() => ({}))) as {
-    token?: string;
-    email?: string;
-  };
-  const token = typeof body.token === "string" ? body.token : "";
-  const email = typeof body.email === "string" ? body.email.trim() : "";
-  if (!token) return json({ error: "missing token" }, 400);
-  if (!email || !EMAIL_RE.test(email))
-    return json({ error: "invalid email" }, 400);
+    const body = (await req.json().catch(() => ({}))) as {
+      token?: string;
+      email?: string;
+    };
+    const token = typeof body.token === "string" ? body.token : "";
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    if (!token) return json({ error: "missing token" }, 400);
+    if (!email || !EMAIL_RE.test(email))
+      return json({ error: "invalid email" }, 400);
 
-  // An offline invite token is `<capability>.<base64url(secret)>`; only the capability part is stored
-  // in pending_invites.token (mirrors acceptTeamInvite). Look up by the capability, but email the
-  // FULL token — the invitee needs the secret suffix to unwrap the DEK.
-  const capability = capabilityOf(token);
+    // An offline invite token is `<capability>.<base64url(secret)>`; only the capability part is stored
+    // in pending_invites.token (mirrors acceptTeamInvite). Look up by the capability, but email the
+    // FULL token — the invitee needs the secret suffix to unwrap the DEK.
+    const capability = capabilityOf(token);
 
-  // Authorize on the TOKEN: resolve the invite service-role, then confirm the caller is an admin of
-  // its scope. Scope/role/team_name come from the row, never from client input — no spam relay.
-  const admin = createClient(url, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-  const { data: inv, error: invErr } = await admin
-    .from("pending_invites")
-    .select("scope_id, role, invited_by, eph_pub, expires_at")
-    .eq("token", capability)
-    .maybeSingle();
-  if (invErr) {
-    capture(invErr);
-    console.error("pending_invites read failed:", invErr.message);
-    return json({ error: "lookup failed" }, 500);
-  }
-  // Generic 404 whether the token is absent or expired — never disclose which.
-  if (!inv || new Date(inv.expires_at as string).getTime() <= Date.now())
-    return json({ error: "invite not found" }, 404);
+    // Authorize on the TOKEN: resolve the invite service-role, then confirm the caller is an admin of
+    // its scope. Scope/role/team_name come from the row, never from client input — no spam relay.
+    const admin = createClient(url, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data: inv, error: invErr } = await admin
+      .from("pending_invites")
+      .select("scope_id, role, invited_by, eph_pub, expires_at")
+      .eq("token", capability)
+      .maybeSingle();
+    if (invErr) {
+      capture(invErr);
+      console.error("pending_invites read failed:", invErr.message);
+      return json({ error: "lookup failed" }, 500);
+    }
+    // Generic 404 whether the token is absent or expired — never disclose which.
+    if (!inv || new Date(inv.expires_at as string).getTime() <= Date.now())
+      return json({ error: "invite not found" }, 404);
 
-  // The caller must be an ADMIN of the invite's scope. Check via scope_role() with the caller JWT
-  // (RLS-safe; resolves auth.uid()). Belt-and-suspenders: also require they created the invite.
-  const { data: roleRow } = await userClient.rpc("scope_role", {
-    p_scope: inv.scope_id,
-  });
-  const isAdmin = roleRow === "admin";
-  const isCreator = inv.invited_by === user.id;
-  if (!isAdmin || !isCreator) return json({ error: "forbidden" }, 403);
+    // The caller must be an ADMIN of the invite's scope. Check via scope_role() with the caller JWT
+    // (RLS-safe; resolves auth.uid()). Belt-and-suspenders: also require they created the invite.
+    const { data: roleRow } = await userClient.rpc("scope_role", {
+      p_scope: inv.scope_id,
+    });
+    const isAdmin = roleRow === "admin";
+    const isCreator = inv.invited_by === user.id;
+    if (!isAdmin || !isCreator) return json({ error: "forbidden" }, 403);
 
-  // Look up the team name for the email copy (service-role read; best-effort).
-  const { data: scopeRow } = await admin
-    .from("scopes")
-    .select("name")
-    .eq("id", inv.scope_id)
-    .maybeSingle();
+    // Look up the team name for the email copy (service-role read; best-effort).
+    const { data: scopeRow } = await admin
+      .from("scopes")
+      .select("name")
+      .eq("id", inv.scope_id)
+      .maybeSingle();
 
-  const message = buildInviteEmail({
-    token,
-    teamName: (scopeRow?.name as string | null) ?? null,
-    role: inv.role as string | null,
-    offline: !!inv.eph_pub,
-  });
+    const message = buildInviteEmail({
+      token,
+      teamName: (scopeRow?.name as string | null) ?? null,
+      role: inv.role as string | null,
+      offline: !!inv.eph_pub,
+    });
 
-  try {
-    await sendViaSmtp2go(email, message, { apiKey, sender, apiUrl });
-  } catch (e) {
-    capture(e);
-    console.error("smtp2go send failed:", (e as Error).message);
-    return json({ error: "send failed" }, 502);
-  }
-  return json({ ok: true });
+    try {
+      await sendViaSmtp2go(email, message, { apiKey, sender, apiUrl });
+    } catch (e) {
+      capture(e);
+      console.error("smtp2go send failed:", (e as Error).message);
+      return json({ error: "send failed" }, 502);
+    }
+    return json({ ok: true });
   }),
 );

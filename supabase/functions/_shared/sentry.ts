@@ -16,7 +16,8 @@ import * as Sentry from "npm:@sentry/deno";
 
 // Sentry DSN for the Lore project (o275100). This is a public key, safe to
 // ship in client/server code — it only permits sending events, not reading them.
-const SENTRY_DSN = "https://9b9cbf3a465080792e96fb919b278a38@o275100.ingest.us.sentry.io/4511812805394432";
+const SENTRY_DSN =
+  "https://9b9cbf3a465080792e96fb919b278a38@o275100.ingest.us.sentry.io/4511812805394432";
 
 let initialized = false;
 
