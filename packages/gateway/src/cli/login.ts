@@ -368,9 +368,17 @@ async function acquireGitHubProviderTokenPaste(): Promise<{
   await finalizeLogin(client, sessionToPersisted(session));
   const providerToken = session.provider_token;
   if (!providerToken) throw new Error("GitHub did not return an access token.");
-  const ttl = session.expires_at
+  // Same 8h cap as the loopback path: GitHub provider_tokens via Supabase
+  // don't carry an explicit expiry, so bind the cache by whichever runs out
+  // first — the access_token expiry, or the historical 8h GitHub OAuth App
+  // default.
+  const sessionTtl = session.expires_at
     ? session.expires_at - Math.floor(Date.now() / 1000)
     : undefined;
+  const ttl = Math.min(
+    sessionTtl ?? GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+    GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+  );
   persistProviderTokenCache(providerToken, ttl);
   return { client, providerToken };
 }
