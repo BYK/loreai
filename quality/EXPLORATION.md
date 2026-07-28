@@ -99,11 +99,10 @@
 ## Pattern Deep Dive — Cross-Implementation Contract Consistency
 
 ### LTM injection across three protocol paths
-- **Implementation A (Anthropic):** `buildAnthropicRequest` at `packages/gateway/src/translate/anthropic.ts:333-423` — uses a 3-block system prompt architecture: system[0]=host prompt, system[1]=stable LTM with 1h cache TTL, system[2]=context-bound LTM without cache control
-- **Implementation B (OpenAI Chat Completions):** Lines 1028-1031 in `pipeline.ts` — concatenates LTM to system string
-- **Implementation C (OpenAI Responses):** Lines 1038-1040 in `pipeline.ts` — concatenates LTM to instructions string
-- **Gap:** Implementations B and C lose the cache TTL differentiation. Anthropic gets stable preferences cached for 1h (reducing cost), while OpenAI paths get all LTM as a single undifferentiated string. This is functionally correct (all paths get LTM) but cost-suboptimal for OpenAI upstreams. Not a bug per se, but an asymmetry.
-- **Candidate requirement:** REQ-LTM-001: LTM injection SHOULD preserve the stable/context-bound distinction across all protocol paths to optimize cache behavior.
+- **Implementation A (Anthropic):** `buildAnthropicRequest` at `packages/gateway/src/translate/anthropic.ts` — uses a 2-block system prompt architecture (since issue #1502): `system[0]`=host prompt, `system[1]`=stable LTM with 1h cache TTL. Context-bound LTM rides a durable prompt-delta user→assistant pair in the message tail, not a `system[2]` block (the system[2] channel was retired — see pipeline.ts `buildKnowledgeDeltaMessage`).
+- **Implementation B (OpenAI Chat Completions):** `pipeline.ts` — concatenates stable LTM to the system string; context-bound LTM rides the durable prompt delta too.
+- **Implementation C (OpenAI Responses):** `pipeline.ts` — concatenates stable LTM to the instructions string; context-bound LTM rides the durable prompt delta too.
+- **Note:** Implementations B and C concatenate stable LTM into a single undifferentiated system string (no separate 1h-TTL block; cache TTL differentiation is an Anthropic-feature only). This is functionally correct (all paths get LTM) but cost-suboptimal on OpenAI upstreams. Not a bug per se, but an asymmetry.
 
 ### Tool result handling across protocol translators
 - **Implementation A (Anthropic):** `translate/anthropic.ts:369-423` — `tool_result` blocks are correctly round-tripped as Anthropic `tool_result` content blocks

@@ -41,6 +41,7 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     const msg = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed entry")],
       [],
+      "7a3f9b2c",
       [
         toc("019bbbbb", "Overflow one"),
         toc("019ccccc", "Overflow two", "gotcha"),
@@ -57,7 +58,9 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
   test("overflow alone (no changes/removals) does NOT create a delta — rides existing cadence", () => {
     // Cache-stability invariant: a delta is only created on material change.
     // Overflow must never trigger one on its own, or it would add cache churn.
-    const msg = buildKnowledgeDeltaMessage([], [], [toc("019bbbbb", "Lonely")]);
+    const msg = buildKnowledgeDeltaMessage([], [], "7a3f9b2c", [
+      toc("019bbbbb", "Lonely"),
+    ]);
     expect(msg).toEqual([]);
   });
 
@@ -65,6 +68,7 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     const msg = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed")],
       [],
+      "7a3f9b2c",
       // Deliberately out of id order.
       [
         toc("019ccccc", "Gamma"),
@@ -88,6 +92,7 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     const msg = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed")],
       [],
+      "7a3f9b2c",
       overflow,
     );
     const t = text(msg);
@@ -100,6 +105,7 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     const msg = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed entry")],
       [id("019eeeee")],
+      "7a3f9b2c",
       [
         toc("019aaaaa", "Should be excluded (changed)"),
         toc("019eeeee", "Should be excluded (removed)"),
@@ -116,6 +122,7 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     const msg = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed entry")],
       [],
+      "7a3f9b2c",
     );
     expect(text(msg)).not.toContain(HEADING);
   });
@@ -199,6 +206,7 @@ describe("ToC ids are recall-resolvable (#917 round-trip)", () => {
     const msg = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "A changed entry")],
       [],
+      "7a3f9b2c",
       [{ id: realId, category: "pattern", title: "Round-trip overflow entry" }],
     );
     const token = text(msg).match(RECALL_ID_RE)?.[1];
@@ -225,6 +233,7 @@ describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", (
     const msgs = buildKnowledgeDeltaMessage(
       [changed("019aaaaa", "Changed entry")],
       [],
+      "7a3f9b2c",
       [toc("019bbbbb", "Overflow one")],
     );
     expect(Array.isArray(msgs)).toBe(true);
@@ -237,8 +246,19 @@ describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", (
     const asstText = (assistant.content[0] as { text: string }).text;
     // Keeps the substring the cache-stability e2e assertions rely on.
     expect(userText).toContain("Lore knowledge update");
-    // Explicit non-acknowledgment framing — the whole point of the fix.
-    expect(userText.toLowerCase()).toContain("do not");
+    // Carries the session token — the #1502 shared-secret that lets the
+    // agent verify the block originated from Lore (and not a third-party
+    // injection). The token is also prenotified in `system[1], so the agent
+    // has it in a trusted slot before any delta arrives.
+    expect(userText).toContain("lore-ctx-");
+    // No imperatives — the prompt-injection classifier in safety-trained
+    // models flags "do not reference" / "silently use" / "ignore the rest"
+    // as injection signatures (issue #1502). The framing is purely
+    // declarative identification; trust is established in system[1] via
+    // `buildLoreContextCapabilityNote` and the shared token.
+    expect(userText.toLowerCase()).not.toContain("do not");
+    expect(userText.toLowerCase()).not.toContain("silently");
+    expect(userText.toLowerCase()).not.toContain("ignore the rest");
     // The PAYLOAD rides the USER turn (ambient context), so it is incoming
     // context rather than a fake assistant turn.
     expect(userText).toContain("Changed entry");
@@ -254,7 +274,9 @@ describe("buildKnowledgeDeltaMessage — non-eliciting user→assistant pair", (
 
   test("no genuine change → empty array (no pair injected)", () => {
     expect(
-      buildKnowledgeDeltaMessage([], [], [toc("019bbbbb", "Lonely")]),
+      buildKnowledgeDeltaMessage([], [], "7a3f9b2c", [
+        toc("019bbbbb", "Lonely"),
+      ]),
     ).toEqual([]);
   });
 });

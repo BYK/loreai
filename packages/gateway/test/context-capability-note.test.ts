@@ -1,12 +1,15 @@
 /**
  * Pipeline context-capability note (system[1]).
  *
- * Verifies that Lore injects a short, STATIC capability note into the stable
+ * Verifies that Lore injects a per-session capability note into the stable
  * system block so the agent knows Lore manages the context window and needn't
- * hedge over context-length concerns. The note must be present from turn 1 even
- * with no knowledge/entities, and must be static (no token counts / layer names)
- * so it never busts the cache the way the removed per-turn "Context health" note
- * did (issue #741; see context-health-note.test.ts + cache-stability.e2e).
+ * hedge over context-length concerns. Also prenotifies the agent about
+ * in-session "Lore knowledge update" blocks so they aren't flagged as prompt
+ * injection (issue #1502). The note varies only with the session token (stable
+ * across all turns in a session) and is present from turn 1 even with no
+ * knowledge/entities, so it never busts the cache mid-session the way the
+ * removed per-turn "Context health" note did (issue #741; see
+ * context-health-note.test.ts + cache-stability.e2e).
  *
  * The upstream interceptor captures the built Anthropic request body so the
  * test can assert on the system blocks the gateway actually sends upstream.
@@ -19,7 +22,8 @@ import { DEFAULT_MODEL, DEFAULT_SYSTEM } from "./helpers/fixtures";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import {
-  LORE_CONTEXT_CAPABILITY_NOTE,
+  buildLoreContextCapabilityNote,
+  loreSessionToken,
   setUpstreamInterceptor,
 } from "../src/pipeline";
 
@@ -56,15 +60,37 @@ function captureInterceptor(sink: Sink) {
   };
 }
 
-describe("context-capability note is static (#741 guardrail)", () => {
-  it("carries no per-layer adjective or token count", () => {
-    const n = LORE_CONTEXT_CAPABILITY_NOTE;
+describe("context-capability note is stable per session (#741 guardrail, #1502 token)", () => {
+  it("carries no per-layer adjective or compression-layer name", () => {
+    const n = buildLoreContextCapabilityNote(loreSessionToken("test-session"));
     expect(n).not.toContain("aggressively compressed");
     expect(n).not.toContain("emergency compressed");
     expect(n).not.toContain("[Context health:");
-    // No digits — a token count / layer number would make it vary per turn and
-    // bust the frozen system[1] cache.
-    expect(/\d/.test(n)).toBe(false);
+  });
+
+  it("embeds the session token (issue #1502 shared-secret)", () => {
+    const n = buildLoreContextCapabilityNote(loreSessionToken("test-session"));
+    // Token is stable per session (sha256[:8] of sessionID) — proves to the
+    // agent that a "Lore knowledge update" block originated from Lore.
+    expect(n).toContain("lore-ctx-");
+  });
+
+  it("prenotifies the agent about Lore knowledge update blocks (#1502)", () => {
+    const n = buildLoreContextCapabilityNote(loreSessionToken("test-session"));
+    expect(n).toContain("Lore knowledge update");
+    expect(n).toContain("project memory");
+  });
+
+  it("is stable across calls with the same sessionID (durable replay)", () => {
+    const a = buildLoreContextCapabilityNote(loreSessionToken("abc"));
+    const b = buildLoreContextCapabilityNote(loreSessionToken("abc"));
+    expect(a).toBe(b);
+  });
+
+  it("differs across sessions (cache invalidates cleanly per session)", () => {
+    const a = buildLoreContextCapabilityNote(loreSessionToken("session-one"));
+    const b = buildLoreContextCapabilityNote(loreSessionToken("session-two"));
+    expect(a).not.toBe(b);
   });
 });
 

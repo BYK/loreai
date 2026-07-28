@@ -365,19 +365,20 @@ export const LoreConfig = z.object({
           "Lower confidence on entries whose file:line / command references no longer resolve against the repo. Unverifiable refs never penalize. Default: true.",
         ),
       /** Fold relevance-ranked distillation and/or raw temporal messages into
-       *  the context-bound (system[2]) injection so in-session facts are "just
-       *  there" without the model calling the recall tool. Scored on the same
-       *  cosine scale as knowledge and packed under the same stickyIds
-       *  hysteresis so the prompt cache stays stable.
+       *  the context-bound LTM injection (rides the durable prompt-delta user→
+       *  assistant pair — issue #1502 retired the 5m-TTL system[2] channel) so
+       *  in-session facts are "just there" without the model calling the recall
+       *  tool. Scored on the same cosine scale as knowledge and packed under
+       *  the same stickyIds hysteresis so the prompt cache stays stable.
        *
        *  Default: ["distillation"]. Cross-session facts survive in gen-0
        *  distillations the moment a session is distilled — well before the
        *  slower curation path promotes them to durable knowledge. Folding
-       *  distillations in gives those facts a path into system[2] without
-       *  waiting on promotion, which is what actually makes offhand facts get
-       *  applied on cheaper models (application tracks presence in system[2],
-       *  not any salience treatment). Raw "temporal" stays opt-in — it is
-       *  larger and noisier. Empty = off. */
+       *  distillations in gives those facts a path into the context-bound
+       *  delta without waiting on promotion, which is what actually makes
+       *  offhand facts get applied on cheaper models (application tracks
+       *  presence in the context-bound delta, not any salience treatment).
+       *  Raw "temporal" stays opt-in — it is larger and noisier. Empty = off. */
       contextSources: z
         .array(z.enum(["distillation", "temporal"]))
         .default(["distillation"])
@@ -385,12 +386,13 @@ export const LoreConfig = z.object({
           'Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Default: ["distillation"]; add "temporal" for raw messages; [] = off.',
         ),
       /** Minimum cosine similarity for a vector-scored knowledge/context entry
-       *  to be surfaced into a session (system[2] + delta ToC + overflow). An
-       *  entry whose ONLY signal is a weak vector similarity below this floor is
-       *  dropped, so off-task project knowledge (e.g. watchOS entries during a
-       *  React Native task) isn't surfaced. FTS keyword matches are inherently
-       *  relevant and bypass the floor. Set to 0 to disable (surface any vector
-       *  hit, the pre-#1211 behavior). Default: 0.35. */
+       *  to be surfaced into a session (context-bound LTM delta + ToC +
+       *  overflow). An entry whose ONLY signal is a weak vector similarity
+       *  below this floor is dropped, so off-task project knowledge (e.g.
+       *  watchOS entries during a React Native task) isn't surfaced. FTS
+       *  keyword matches are inherently relevant and bypass the floor. Set to
+       *  0 to disable (surface any vector hit, the pre-#1211 behavior).
+       *  Default: 0.35. */
       minRelevance: z
         .number()
         .min(0)
@@ -431,12 +433,12 @@ export const LoreConfig = z.object({
           "Run the curator mid-conversation (turn-based), not just on idle. " +
             "Default: false. WARNING: only enable on free-write / non-caching " +
             "providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), " +
-            "mid-session curation changes the knowledge base, which rewrites the " +
-            "context-bound LTM block (system[2]) and busts the prompt cache for " +
-            "the rest of a large conversation (a single change can re-write " +
-            "hundreds of thousands of cached tokens). Deferring curation to idle " +
-            "makes that rewrite free (the cache is cold then). Where cache writes " +
-            "are free this is harmless and yields fresher knowledge sooner.",
+            "mid-session curation changes the knowledge base, which queues a " +
+            "knowledge-delta block (user→assistant pair appended " +
+            "mid-conversation) that re-writes part of the prompt tail each " +
+            "time the knowledge set changes. Deferring curation to idle lets " +
+            "the queue stay empty during active turns. Where cache writes are " +
+            "free this is harmless and yields fresher knowledge sooner.",
         ),
       afterTurns: z
         .number()

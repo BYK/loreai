@@ -54,9 +54,10 @@ export function isWarmupProbeEnabled(): boolean {
 
 export type CacheSegmentDigest = {
   /** SHA (12 hex) of system blocks up to & including the 1h breakpoint — the
-   *  stable "head" (system[0] host prompt + system[1] LTM). system[2]
-   *  (context-bound LTM) is excluded: it rides the conversation cache, not the
-   *  head, so including it would produce false head-drift. */
+   *  stable "head" (system[0] host prompt + system[1] LTM). Context-bound
+   *  LTM rides the durable prompt-delta channel (message tail), not a system
+   *  block, so it never enters the head hash — issue #1502 retired the
+   *  `system[2]` channel. */
   headSha: string;
   /** SHA (12 hex) of the tools array (1h breakpoint on the last tool). */
   toolsSha: string;
@@ -65,7 +66,7 @@ export type CacheSegmentDigest = {
   prefixSha: string;
   /** Number of cache_control breakpoints in the serialized body. */
   bpCount: number;
-  /** Count of system blocks (sanity: 2 or 3). */
+  /** Count of system blocks (sanity: 2 once #1502 landed; was 3 with system[2]). */
   systemBlocks: number;
   /** Serialized byte length (uncompressed). */
   bytes: number;
@@ -472,14 +473,18 @@ function isObjectKeyPosition(json: string, offset: number): boolean {
  *  - messages mid-conversation → "earlier message modified" (distillation rewrite)
  *
  * @param messageCount - total messages in the current request (for end-detection)
- * @param turn - 1-based turn number (for disambiguating the turn-2 system[2] insertion)
+ * @param _turn - legacy: disambiguating the turn-2 context-bound LTM first-injection
+ *   that used to ride system[2]; context-bound LTM now rides the durable prompt
+ *   delta — issue #1502 — so the turn-2 branch no longer fires for the retired
+ *   channel. Kept for back-compat with existing callers (renamed to `_turn`
+ *   because the value is no longer read).
  */
 export function inferDivergenceReason(
   path: string,
   prevLength: number,
   currLength: number,
   messageCount?: number,
-  turn?: number,
+  _turn?: number,
 ): string {
   if (path === "<end>") {
     return currLength > prevLength
@@ -489,36 +494,41 @@ export function inferDivergenceReason(
   if (path === "<start>") return "request structure changed from start";
   if (path === "<root>") return "top-level structure changed";
 
-  // System prompt blocks (3-block architecture):
+  // System prompt blocks (2-block architecture since issue #1502 retired
+  // the 5m-TTL system[2] channel — context-bound LTM now rides the durable
+  // prompt delta in the message tail, NOT a system block):
   //  system[0] = host system prompt (stable, cached with 1h TTL)
   //  system[1] = stable LTM: preferences (pinned >=1h, cached with 1h TTL)
-  //  system[2] = context-bound LTM: non-preference entries (diff-pinned, rides conversation cache)
   //  bare "system" = plain string system prompt (no array structure)
   if (path === "system[0]" || path.startsWith("system[0]"))
     return "host system prompt changed";
   if (path === "system[1]" || path.startsWith("system[1]")) {
     // The PATH SUFFIX reliably disambiguates the two very different system[1]
-    // divergence cases (the old turn===2-only heuristic conflated them and hid
+    // divergence cases (the old turn===2 heuristic conflated them and hid
     // the ses_14b9bf3d… incident, where consolidation deleted entries that were
     // in the frozen system[1]):
     //
-    //  (a) BARE "system[1]" — the system array GREW: context-bound LTM
-    //      (system[2]) is injected for the first time, so the first differing
-    //      byte lands at the array boundary (`]`→`,`) right after system[1]
-    //      while system[1] itself is byte-identical. mapOffsetToJsonPath reports
-    //      the array-frame path with no inner key (no ".text"). On turn 2 this
-    //      is the expected one-shot transient; otherwise it is a structural
-    //      block-insertion shift.
+    //  (a) BARE "system[1]" — the system array GREW: a new system block was
+    //      inserted after system[1], so the first differing byte lands at the
+    //      array boundary (`]`→`,`) right after system[1] while system[1]
+    //      itself is byte-identical. mapOffsetToJsonPath reports the array
+    //      frame path with no inner key (no ".text"). Historically this was
+    //      the turn-2 context-bound LTM first-injection (system[2]); issue
+    //      #1502 retired that channel, so a bare "system[1]" today indicates
+    //      a structural block-insertion shift rather than the expected turn-2
+    //      transient (unless a future caller re-introduces a system[2] block).
     //  (b) "system[1].text" (any sub-path) — system[1]'s OWN content changed
     //      (preference re-curation/consolidation add/remove/edit). This busts
     //      the entire prefix and is a REAL bust regardless of turn number.
     if (path === "system[1]") {
-      if (turn === 2)
-        return "stable LTM array grew — context-bound LTM (system[2]) first injected on turn 2 (expected, not a real system[1] change)";
       return "stable LTM block boundary shifted (system-block insertion)";
     }
     return "stable LTM block content changed (preference re-curation/consolidation — prefix bust)";
   }
+  // Defensive back-compat: a third system block (system[2]) is no longer
+  // emitted by buildAnthropicRequest (issue #1502 retired the channel), but
+  // keep classifying the path so a third-party or future caller that produces
+  // one gets a useful reason instead of falling through to the generic case.
   if (path === "system[2]" || path.startsWith("system[2]"))
     return "context-bound LTM changed (non-preference entries re-ranked)";
   if (path === "system" || path.startsWith("system"))

@@ -304,7 +304,7 @@ describe("knowledge-delta PAIR — no consecutive assistants, tool-pairing intac
   }
 
   function seedPair(sessionID: string, projectID: string, insertAt: number) {
-    const pair = buildKnowledgeDeltaMessage(CHANGED, []);
+    const pair = buildKnowledgeDeltaMessage(CHANGED, [], "7a3f9b2c");
     expect(pair).toHaveLength(2);
     expect(pair[0].role).toBe("user");
     expect(pair[1].role).toBe("assistant");

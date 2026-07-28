@@ -224,21 +224,23 @@ describe("inferDivergenceReason", () => {
     );
   });
 
-  test("system prompt — bare system[1] boundary on turn 2 is the system[2] insertion", () => {
-    // The turn-2 transient: context-bound LTM (system[2]) is injected for the
-    // first time, growing the system array. system[1] itself is byte-identical,
-    // so the first differing byte lands at the array boundary (`]`→`,`) right
-    // after system[1] — mapOffsetToJsonPath reports the BARE "system[1]" path
-    // (no ".text" suffix). This is expected and not a real content change.
+  test("system prompt — bare system[1] boundary on any turn is a block-insertion shift (issue #1502)", () => {
+    // Issue #1502 retired the 5m-TTL system[2] channel: context-bound LTM
+    // rides the durable prompt delta, not a system block. So the bare "system[1]"
+    // boundary path (array GREW at system[1]'s tail while system[1] itself is
+    // byte-identical) is no longer the expected turn-2 transient — it means a
+    // block was structurally inserted/removed regardless of turn number.
     expect(inferDivergenceReason("system[1]", 12000, 12500, undefined, 2)).toBe(
-      "stable LTM array grew — context-bound LTM (system[2]) first injected on turn 2 (expected, not a real system[1] change)",
+      "stable LTM block boundary shifted (system-block insertion)",
+    );
+    expect(inferDivergenceReason("system[1]", 12000, 12500, undefined, 5)).toBe(
+      "stable LTM block boundary shifted (system-block insertion)",
     );
   });
 
   test("system prompt — bare system[1] boundary after turn 2 is a block-insertion shift", () => {
-    // A bare-boundary divergence outside the turn-2 transient means the system
-    // array structure shifted (a block was inserted/removed) without system[1]'s
-    // own content changing.
+    // A bare-boundary divergence means the system array structure shifted
+    // (a block was inserted/removed) without system[1]'s own content changing.
     expect(inferDivergenceReason("system[1]", 12000, 12500, undefined, 5)).toBe(
       "stable LTM block boundary shifted (system-block insertion)",
     );

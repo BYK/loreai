@@ -281,20 +281,16 @@ export type AnthropicCacheOptions = {
    * explicit 1h cache breakpoint. Pinned for ≥1h even through curation
    * changes so the Anthropic prompt cache prefix stays warm.
    *
-   * When provided AND systemTTL is set, the system becomes a 3-block array:
+   * When provided AND systemTTL is set, the system becomes a 2-block array:
    *   system[0]: host prompt        — no cache_control (covered by [1]'s prefix)
    *   system[1]: stable LTM (prefs) — cache_control: 1h TTL
-   *   system[2]: context-bound LTM  — no cache_control (rides conversation cache)
+   *
+   * Context-bound LTM (gotchas, patterns, architecture) is NO LONGER
+   * injected as a system[2] block — it rides the durable prompt-delta
+   * channel (a user→assistant pair appended mid-session). See
+   * `buildKnowledgeDeltaMessage` in pipeline.ts (issue #1502 redesign).
    */
   stableLtmSystem?: string;
-
-  /**
-   * Context-bound LTM text (gotchas, patterns, architecture) injected as
-   * system[2]. No cache_control — benefits from the conversation cache
-   * breakpoint (5m/1h TTL on the last message). Changes on turn 2 and
-   * after curation without busting the stable prefix (system[0]+[1]).
-   */
-  ltmSystem?: string;
 
   /**
    * Cache the last tool definition with an explicit 1h breakpoint.
@@ -400,28 +396,26 @@ export function buildAnthropicRequest(
   if (req.system) {
     const systemTTL = cache?.systemTTL;
     const stableLtm = cache?.stableLtmSystem;
-    const contextLtm = cache?.ltmSystem;
 
     if (systemTTL) {
-      // 3-block system prompt for cache efficiency:
+      // 2-block system prompt for cache efficiency:
       //   system[0]: Host prompt        — no cache_control (covered by prefix)
       //   system[1]: Stable LTM (prefs) — cache_control: 1h TTL
-      //   system[2]: Context-bound LTM  — no cache_control (rides conversation cache)
       //
       // Anthropic prefix caching means system[1]'s 1h breakpoint covers
       // system[0] too (prefix up to the breakpoint). The host prompt
       // doesn't need its own breakpoint — one on system[1] is sufficient.
+      // Context-bound LTM rides the durable prompt-delta channel (no
+      // system[2] block) — see pipeline.ts `buildKnowledgeDeltaMessage`.
       const blocks: Record<string, unknown>[] = [
         { type: "text", text: req.system },
       ];
 
       if (stableLtm) {
         // Stable LTM gets a cache breakpoint — preferences are pinned by
-        // design so the prefix stays warm across turns and sessions. Even
-        // when context-bound LTM changes (turn 1→2, curation),
-        // system[0]+[1] remain cache reads at 0.1× cost. The host prompt
-        // (system[0]) needs no cache_control — Anthropic prefix caching
-        // means system[1]'s breakpoint covers everything before it.
+        // design so the prefix stays warm across turns and sessions. The
+        // host prompt (system[0]) needs no cache_control — Anthropic prefix
+        // caching means system[1]'s breakpoint covers everything before it.
         // Use 1h extended TTL on native Anthropic; bare ephemeral on
         // third-party endpoints that may not support the ttl extension.
         blocks.push({
@@ -442,19 +436,10 @@ export function buildAnthropicRequest(
         blocks[0].cache_control = cacheControl;
       }
 
-      // system[2]: context-bound LTM — no cache_control of its own. It
-      // benefits from the conversation cache breakpoint on the last
-      // message (5m/1h TTL). When this block changes, only system[2] +
-      // messages are re-processed; system[0]+[1] are still cache reads.
-      if (contextLtm) {
-        blocks.push({ type: "text", text: contextLtm });
-      }
-
       body.system = blocks;
     } else {
-      // No caching — concatenate all LTM into a single string.
-      const allLtm = [stableLtm, contextLtm].filter(Boolean).join("\n\n");
-      body.system = allLtm ? `${req.system}\n\n${allLtm}` : req.system;
+      // No caching — concatenate stable LTM into a single string.
+      body.system = stableLtm ? `${req.system}\n\n${stableLtm}` : req.system;
     }
   }
 

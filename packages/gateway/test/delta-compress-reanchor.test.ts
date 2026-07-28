@@ -1327,6 +1327,7 @@ describe("appendKnowledgePromptDelta — debounce coalesces rapid mutations", ()
         },
       ],
       [],
+      "7a3f9b2c",
     );
     appendSessionPromptDelta({
       sessionID,

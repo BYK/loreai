@@ -46,22 +46,20 @@ block-beta
   columns 1
   B1["System · system[0]<br/>harness rules + Lore identity · cache-stable"]
   B2["LTM · system[1]<br/>preferences · entities · knowledge catalog<br/>frozen baseline, cached 1h · cache-write anchor"]
-  B3["LTM · system[2]<br/>context-bound entries · diff-pinned, 5m cache"]
   B4["Meta-Distillations + Distillations<br/>distilled prefix at the head of the messages"]
-  B5["Delta Updates<br/>knowledge deltas in the tail · volatile"]
+  B5["Delta Updates<br/>knowledge deltas in the tail (context-bound LTM rides here)<br/>volatile"]
   B6["Conversation<br/>raw message tail · volatile"]
   classDef sys fill:#ececec,stroke:#888,color:#333
   classDef pinned fill:#8fba96,stroke:#1a3320,color:#1a3320
   classDef distill fill:#c4ddc7,stroke:#1a3320,color:#1a3320
   class B1 sys
   class B2 pinned
-  class B3 pinned
   class B4 distill
   class B5 sys
   class B6 sys
 ```
 
-The formula's parts map onto the wire in the order the model reads them. **System** is `system[0]` — the harness rules and Lore's identity, cache-stable. **LTM** spans two system blocks: `system[1]` holds the stable baseline (preferences, known entities, and a knowledge catalog), frozen for the session and cached at a 1-hour TTL — it's the cache-write anchor — while `system[2]` holds the context-bound entries, re-pinned only when they materially change (see the [LTM pin invariant](#the-ltm-pin-frozen-baseline) below). **Meta-Distillations** and **Distillations** are not a system block at all: they ride at the head of the message array as a distilled prefix, kept byte-stable so appending a new turn stays cheap. **Delta Updates** and **Conversation** fill the rest of the message tail (volatile, ID-referenced, not cache-stable). The gradient's job is to compose these pieces within the context-window budget on every turn; the next section zooms in on that composition.
+The formula's parts map onto the wire in the order the model reads them. **System** is `system[0]` — the harness rules and Lore's identity, cache-stable. **LTM** is `system[1]` — the stable baseline (preferences, known entities, and a knowledge catalog), frozen for the session and cached at a 1-hour TTL; it's the cache-write anchor. There is no `system[2]` block: context-bound entries (gotchas, patterns, architecture) used to ride a 5m-TTL system[2] but now ride the **delta-update** channel instead — a user→assistant pair appended mid-conversation and re-pinned only when entries materially change (see the [LTM pin invariant](#the-ltm-pin-frozen-baseline) below). This keeps `system[1]` byte-stable for the whole session and avoids the once-per-session first-population cache bust that a 5m-TTL system[2] block caused. **Meta-Distillations** and **Distillations** are not a system block at all: they ride at the head of the message array as a distilled prefix, kept byte-stable so appending a new turn stays cheap. **Delta Updates** and **Conversation** fill the rest of the message tail (volatile, ID-referenced, not cache-stable). The gradient's job is to compose these pieces within the context-window budget on every turn; the next section zooms in on that composition.
 
 ## Three-tier memory
 
@@ -157,7 +155,9 @@ flowchart TB
 
 #### The LTM pin frozen-baseline
 
-`system[2]` — the third system block, holding context-bound LTM — is **diff-pinned**. The set of entry keys rendered into it is captured the moment the pin is first established and held constant for the rest of the session: later turns re-render the *same* keys, so the block stays byte-stable even as entries are added, edited, or curated out of the top-K. Genuinely new or changed entries don't rewrite the block; they're surfaced as append-only **delta updates** in the message tail. That keeps `system[2]` stable against the 5-minute conversation cache, while the separate `system[1]` baseline (preferences, entities, knowledge catalog) is frozen for the whole session and cached at the 1-hour TTL. Advancing the pinned set on every turn would instead rewrite the block — busting the cache every turn and paying the cache-write price on top.
+The set of entry keys that the context-bound LTM describes is captured the moment the pin is first established and held constant for the rest of the session — a **diff-pinned** baseline. Genuinely new or changed entries don't rewrite the pinned set; they're surfaced as append-only **delta updates** in the message tail (a user→assistant pair, byte-stable once written). That keeps `system[1]` (preferences, entities, knowledge catalog) stable against the 1-hour cache and lets the context-bound channel avoid busting any cached prefix. Advancing the pinned set on every turn would instead rewrite the pinned state, busting the durable-delta pair on every turn and paying the cache-write price on top.
+
+> **Architecture note (issue #1502):** the delta channel is the *sole* surface for context-bound LTM — it used to ride a 5m-TTL `system[2]` block, but that design paid a full prefix re-creation the first turn context-bound LTM appeared and re-introduced a system block that competing harnesses rendered as a visible turn. Routing context-bound LTM through a user→assistant pair also makes the block identifiable to the agent as Lore-originated context (the pair carries the session token reproducible from `sessionID` and prenotified in `system[1]`), rather than as a foreign message.
 
 ## Cost-aware context management
 

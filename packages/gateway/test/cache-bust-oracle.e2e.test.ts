@@ -266,7 +266,7 @@ describe("cache-bust oracle (e2e)", () => {
       `prompt cache is being rewritten, not read — ${detail}. A healthy ` +
         `compressed session reads the cached prefix every turn; a high ratio ` +
         `means a mid-prefix divergence is busting the cache (regression: ` +
-        `LTM-delta-churn / window-march / system[2] rewrite).`,
+        `LTM-delta-churn / window-march / context-bound LTM rewrite).`,
     ).toBeLessThan(0.5);
 
     // And the bust must not happen on (nearly) every steady-state turn.

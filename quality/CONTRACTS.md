@@ -276,18 +276,18 @@ If any check finds a match, the existing entry is updated instead of creating a 
 
 ---
 
-### LTM-05: 3-block system prompt — stable preferences vs context-bound
+### LTM-05: 2-block system prompt — stable preferences in system[1]; context-bound LTM rides the durable prompt delta
 
 **Function:** Pipeline LTM injection
-**Location:** `packages/gateway/src/pipeline.ts:1024-1051` (approximate)
+**Location:** `packages/gateway/src/pipeline.ts` (capability note + `buildKnowledgeDeltaMessage`) and `packages/gateway/src/translate/anthropic.ts` (system block layout)
 
-**Invariant:** LTM is injected as two blocks:
-- `system[1]`: stable preferences only, 1h cache TTL, pinned on turn 1. Budget: `preferenceLtm` config field (default 2% usable context).
-- `system[2]`: context-bound entries (all non-preference categories), 5m cache TTL, deferred until turn 2+. Budget: `ltmBudget` (5% usable).
+**Invariant:** LTM is injected across two surfaces:
+- `system[1]`: stable preferences only, 1h cache TTL, pinned on turn 1. Budget: `preferenceLtm` config field (default 2% usable context). Byte-stable for the session; the [context-capability note](../packages/gateway/src/pipeline.ts) varies only with the session token (#1502) and is otherwise frozen.
+- **Durable prompt delta** (context-bound entries, all non-preference categories): a user→assistant pair inserted at a frozen conversation-tail position and replayed byte-identically across turns; the assistant turn is the inert closer `*🧠 Refreshed memory*`. Budget: `ltmBudget` (5% usable). The user-role block is identified by a session-bound token (sha256[:8] of `sessionID`) that is also prenotified in `system[1], so the agent can verify origin (#1502); the block is declarative and carries no imperative language. (`system[2]` was retired — see issue #1502 and the architecture docs.)
 
 **Breaks if violated:**
-- If preferences use the 5m TTL: they bust the cache every 5 minutes, costing ~$0.50 per bust for the system prompt prefix.
-- If context-bound entries use the 1h TTL: stale knowledge entries (e.g., from an old session) persist for an hour after becoming irrelevant.
+- If preferences use a 5m TTL (or get appended to the message tail): they bust the cache every 5 minutes, costing ~$0.50 per bust for the system prompt prefix.
+- If context-bound entries are routed back into a 5m-TTL `system[2]` block: the once-per-session first-population bust returns (~90-174K tokens re-created on turn 1→2), competing harnesses that render assistant turns visibly re-introduce the `⏺ Long-term Knowledge` dump, and the framing banner arrives in a less-trusted user channel without `system[1]` prenotification (issue #1502).
 
 ---
 
