@@ -80,7 +80,7 @@ Deno.serve(
       });
       payload = buildProvisionPayload(memberships);
     } catch (e) {
-      capture(e);
+      await capture(e);
       return json({ error: `github: ${(e as Error).message}` }, 502);
     }
 
@@ -94,7 +94,7 @@ Deno.serve(
       p_teams: payload.teams,
     });
     if (rpcErr) {
-      capture(rpcErr);
+      await capture(rpcErr);
       console.error("provision_github_membership failed:", rpcErr.message);
       return json({ error: "provisioning failed" }, 500); // generic — details logged server-side
     }
