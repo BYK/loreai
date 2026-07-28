@@ -10,7 +10,7 @@
  *   1. shutdown can never block the process longer than a hard deadline, and
  *   2. a *second* SIGINT/SIGTERM forces an immediate exit.
  */
-import { safeExit } from "./exit";
+import { forcedExit } from "./exit";
 
 const DEFAULT_SHUTDOWN_DEADLINE_MS = 4000;
 
@@ -52,18 +52,32 @@ export function signalExitCode(signal: NodeJS.Signals): number {
 }
 
 /**
+ * Outcome of `runShutdownWithDeadline`. `timedOut` is true when the deadline
+ * fired before `shutdown()` completed — callers MUST use `forcedExit` on that
+ * path because the embedding worker may still be mid-inference in a native
+ * call that `worker.terminate()` could not interrupt, and `safeExit` →
+ * `process.exit()` would walk NAPI destructors under it → SIGABRT.
+ */
+export interface ShutdownResult {
+  /** True if the deadline fired before shutdown() resolved. */
+  timedOut: boolean;
+}
+
+/**
  * Run `shutdown()` but never block longer than `deadlineMs`. A shutdown error
- * is logged and swallowed (so the caller still proceeds to exit), and a timeout
- * resolves the race so the caller can force-exit. Always resolves — never
- * rejects.
+ * is logged and swallowed (so the caller still proceeds to exit); a timeout
+ * resolves the race and is reported via `timedOut: true` so the caller can
+ * pick the right exit path. Always resolves — never rejects.
  */
 export async function runShutdownWithDeadline(
   shutdown: () => Promise<void>,
   deadlineMs: number = SHUTDOWN_DEADLINE_MS,
-): Promise<void> {
+): Promise<ShutdownResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const deadline = new Promise<void>((resolve) => {
     timer = setTimeout(() => {
+      timedOut = true;
       console.error(
         `[lore] Shutdown timed out after ${deadlineMs}ms — forcing exit.`,
       );
@@ -71,9 +85,9 @@ export async function runShutdownWithDeadline(
     }, deadlineMs);
     // Intentionally NOT unref'd: keep the event loop alive for the duration of
     // the (bounded) shutdown so the caller deterministically reaches
-    // `safeExit()` with the right code — under Bun that uses the `_exit` FFI to
-    // dodge a NAPI teardown crash. The timer is cleared the instant shutdown
-    // resolves (see finally), so a fast shutdown still exits immediately.
+    // `safeExit()` with the right code. The timer is cleared the instant
+    // shutdown resolves (see finally), so a fast shutdown still exits
+    // immediately.
   });
   try {
     await Promise.race([
@@ -85,6 +99,7 @@ export async function runShutdownWithDeadline(
   } finally {
     if (timer) clearTimeout(timer);
   }
+  return { timedOut };
 }
 
 /**
@@ -94,6 +109,11 @@ export async function runShutdownWithDeadline(
  *   - First signal:  run `shutdown()` deadline-bounded, then exit.
  *   - Second signal: force an immediate exit (don't wait for the in-flight
  *     graceful shutdown). This is what makes repeated Ctrl+C responsive.
+ *
+ * On every exit path we use `forcedExit` (not `safeExit`) because the deadline
+ * or the second-interrupt shortcut means the embedding worker may still be
+ * mid-inference in a native call — `safeExit` would walk NAPI destructors
+ * under it and SIGABRT (the "💣 Program crashed" report).
  *
  * Exported for testing; prefer `installSignalShutdown` at call sites.
  */
@@ -106,10 +126,13 @@ export function makeSignalShutdownHandler(
     const code = signalExitCode(signal);
     if (count >= 2) {
       console.error("[lore] Received second interrupt — forcing exit.");
-      safeExit(code);
+      forcedExit(code);
     }
     await runShutdownWithDeadline(shutdown);
-    safeExit(code);
+    // Bounded shutdown could have timed out → worker may still be alive.
+    // Use forcedExit unconditionally on this path for the same reason
+    // second-signal does — the 4000ms cap is the only timing guarantee we have.
+    forcedExit(code);
   };
 }
 
@@ -125,6 +148,10 @@ export function installSignalShutdown(shutdown: () => Promise<void>): void {
  * signal to the child (whose exit then drives gateway teardown) and force-exit
  * on a second interrupt so the user is never stuck on a hung child/shutdown.
  *
+ * Uses `forcedExit` on the second interrupt because the first one may already
+ * have triggered a deadline-bounded shutdown that left the embedding worker
+ * mid-inference. See `makeSignalShutdownHandler` for the full rationale.
+ *
  * Exported for testing; prefer `installChildSignalForwarding` at call sites.
  */
 export function makeChildForwardHandler(child: {
@@ -135,7 +162,7 @@ export function makeChildForwardHandler(child: {
     count++;
     if (count >= 2) {
       console.error("[lore] Received second interrupt — forcing exit.");
-      safeExit(signalExitCode(signal));
+      forcedExit(signalExitCode(signal));
     }
     try {
       child.kill(signal);
