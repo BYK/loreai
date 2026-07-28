@@ -78,7 +78,7 @@ Deno.serve(
       .eq("token", capability)
       .maybeSingle();
     if (invErr) {
-      capture(invErr);
+      await capture(invErr);
       console.error("pending_invites read failed:", invErr.message);
       return json({ error: "lookup failed" }, 500);
     }
@@ -112,7 +112,7 @@ Deno.serve(
     try {
       await sendViaSmtp2go(email, message, { apiKey, sender, apiUrl });
     } catch (e) {
-      capture(e);
+      await capture(e);
       console.error("smtp2go send failed:", (e as Error).message);
       return json({ error: "send failed" }, 502);
     }

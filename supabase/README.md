@@ -123,9 +123,12 @@ gateway errors.
   `supabase start` stack (or any deploy without the secret) runs untouched. Set it once on
   the hosted project: `supabase secrets set SENTRY_DSN=https://…@o275100.ingest.us.sentry.io/…`
   (and optionally `SENTRY_ENVIRONMENT`, `LORE_VERSION` for the release tag).
-- **What is captured**: only thrown `Error` objects at the GitHub/RPC/SMTP failure paths,
-  tagged with non-sensitive scalars (`function_name`, `deployment`, `release`). Uncaught
-  throws are caught by `wrapHandler` and turned into a generic 500.
+- **What is captured**: errors at the GitHub/RPC/SMTP failure paths, tagged with
+  non-sensitive scalars (`function_name`, `deployment`, `release`). Supabase client
+  errors (`PostgrestError`) are normalized to real `Error` objects before capture so
+  Sentry gets a usable stack; no tokens/ids are attached. Uncaught throws are caught by
+  `wrapHandler` and turned into a generic 500. Each `capture()` awaits `Sentry.flush()`
+  so events are sent before the short-lived edge runtime terminates.
 - **Privacy**: `sendDefaultPii` is `false` and **no** `provider_token`, email address, email
   body, or GitHub user id is ever attached to a Sentry event — these functions handle
   secrets, so PII is never sent to Sentry.

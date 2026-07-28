@@ -49,18 +49,43 @@ export function initSentry(functionName: string): void {
 }
 
 /**
- * Capture an exception to Sentry. No-op when Sentry isn't initialized (no DSN).
- * Pass only Error objects — never tokens, emails, or ids.
+ * Normalize a captured value into an Error. Supabase client errors
+ * (e.g. PostgrestError) are plain objects, not Error instances; Sentry produces
+ * weak events (missing/empty stack) for those, so we wrap them. Only scalar
+ * message/hint are extracted — the raw object is NEVER JSON.stringify'd
+ * because it may carry PII (query context, row contents).
  */
-export function capture(err: unknown): void {
+function toError(err: unknown): Error {
+  if (err instanceof Error) return err;
+  if (typeof err === "string") return new Error(err);
+  const message =
+    (err as { message?: unknown })?.message ??
+    (err as { hint?: unknown })?.hint ??
+    "edge function error";
+  return new Error(
+    typeof message === "string" ? message : "edge function error",
+  );
+}
+
+/**
+ * Capture an exception to Sentry and await the flush so the event is sent even
+ * in a short-lived edge runtime that terminates right after the call. No-op
+ * when Sentry isn't initialized (no DSN). Non-Error values (e.g. Supabase
+ * PostgrestError) are normalized to Error so Sentry gets a real stack — no
+ * tokens/emails/ids are attached.
+ */
+export async function capture(err: unknown): Promise<void> {
   if (!Sentry.isInitialized()) return;
-  Sentry.captureException(err);
+  Sentry.captureException(toError(err));
+  await Sentry.flush(2000);
 }
 
 /**
  * Wrap a Deno.serve handler so any uncaught throw is reported to Sentry and
  * converted into a generic 500 JSON (instead of an opaque edge-platform error),
- * preserving the function's existing response shape for handled cases.
+ * preserving the function's existing response shape for handled cases. The
+ * flush is awaited so the short-lived edge runtime sends the event before the
+ * function returns and the runtime terminates.
  */
 export function wrapHandler(
   functionName: string,
@@ -70,7 +95,7 @@ export function wrapHandler(
     try {
       return await handler(req);
     } catch (err) {
-      capture(err);
+      await capture(err);
       return new Response(JSON.stringify({ error: "internal error" }), {
         status: 500,
         headers: { "content-type": "application/json" },

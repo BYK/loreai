@@ -88,7 +88,7 @@ Deno.serve(
       }
       selfGithubId = tokenOwner.id;
     } catch (e) {
-      capture(e);
+      await capture(e);
       return json({ error: `github: ${(e as Error).message}` }, 502);
     }
 
@@ -105,7 +105,7 @@ Deno.serve(
         repos = await fetchUserRepos(providerToken, { apiUrl });
       }
     } catch (e) {
-      capture(e);
+      await capture(e);
       return json({ error: `github: ${(e as Error).message}` }, 502);
     }
     repos = repos.slice(0, MAX_REPOS);
@@ -124,7 +124,7 @@ Deno.serve(
         rosters.push({ repo: `${repo.owner}/${repo.name}`, collaborators });
       } catch (e) {
         // A transient error on one repo shouldn't sink the batch — log and skip.
-        capture(e);
+        await capture(e);
         console.error(
           `collaborators ${repo.owner}/${repo.name}:`,
           (e as Error).message,
@@ -144,7 +144,7 @@ Deno.serve(
         p_github_ids: githubIds,
       });
       if (error) {
-        capture(error);
+        await capture(error);
         console.error("lore_users_for_github_ids failed:", error.message);
         return json({ error: "lookup failed" }, 500);
       }
