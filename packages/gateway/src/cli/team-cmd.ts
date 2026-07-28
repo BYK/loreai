@@ -534,9 +534,12 @@ function usage(): void {
  */
 function githubOwnerRepo(remote: string): string | null {
   const normalized = normalizeRemoteUrl(remote);
-  // Match github.com/owner/repo — the normalized output is always lowercased
-  // host/path. If the host isn't github.com, skip (we can't detect via GitHub API).
-  const match = normalized.match(/^github\.com\/([^/]+)\/([^/]+)$/);
+  // Match github.com/owner/repo. `normalizeRemoteUrl` lowercases the host but
+  // preserves the path's case; GitHub itself is case-insensitive on the host
+  // (but the path must match exactly), so we anchor the host case-insensitively
+  // and pass the path through verbatim. Skip non-GitHub remotes (e.g. self-
+  // hosted GitLab) — we can't query them via the GitHub API.
+  const match = normalized.match(/^github\.com\/([^/]+)\/([^/]+)$/i);
   if (!match) return null;
   return `${match[1]}/${match[2]}`;
 }
