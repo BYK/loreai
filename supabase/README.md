@@ -112,6 +112,24 @@ supabase functions deploy github-discover
   **and** `repo` (to list collaborators on private repos). Backed by migration `0050`
   (`lore_users_for_github_ids` service-role RPC).
 
+## Observability (Sentry)
+
+All three edge functions send failures to Sentry via the shared helper in
+`supabase/functions/_shared/sentry.ts` (using `@sentry/deno`). This mirrors the gateway's
+existing Sentry setup (same project `o275100`) so edge-function errors show up alongside
+gateway errors.
+
+- **Opt-in via secret**: the helper is a **no-op** when `SENTRY_DSN` is unset, so a local
+  `supabase start` stack (or any deploy without the secret) runs untouched. Set it once on
+  the hosted project: `supabase secrets set SENTRY_DSN=https://…@o275100.ingest.us.sentry.io/…`
+  (and optionally `SENTRY_ENVIRONMENT`, `LORE_VERSION` for the release tag).
+- **What is captured**: only thrown `Error` objects at the GitHub/RPC/SMTP failure paths,
+  tagged with non-sensitive scalars (`function_name`, `deployment`, `release`). Uncaught
+  throws are caught by `wrapHandler` and turned into a generic 500.
+- **Privacy**: `sendDefaultPii` is `false` and **no** `provider_token`, email address, email
+  body, or GitHub user id is ever attached to a Sentry event — these functions handle
+  secrets, so PII is never sent to Sentry.
+
 ## Conflict resolution (last-writer-to-remote-wins)
 
 The gateway syncs push-then-pull. When the same row was changed on two machines

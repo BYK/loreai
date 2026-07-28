@@ -28,6 +28,7 @@ import {
   parseRepoRef,
   type RepoCollaborators,
 } from "./discover.ts";
+import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -39,110 +40,119 @@ function json(body: unknown, status = 200): Response {
 // Cap the number of repos we scan per call — bounds GitHub API fan-out (and cost) per request.
 const MAX_REPOS = 50;
 
-Deno.serve(async (req: Request): Promise<Response> => {
-  if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+initSentry("github-discover");
 
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) return json({ error: "missing authorization" }, 401);
+Deno.serve(
+  wrapHandler("github-discover", async (req: Request): Promise<Response> => {
+    if (req.method !== "POST")
+      return json({ error: "method not allowed" }, 405);
 
-  const url = Deno.env.get("SUPABASE_URL");
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!url || !anonKey || !serviceKey) {
-    return json({ error: "server misconfigured" }, 500);
-  }
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return json({ error: "missing authorization" }, 401);
 
-  // Verify the caller's Supabase JWT → user id (never trust a client-supplied id).
-  const userClient = createClient(url, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-  const {
-    data: { user },
-    error: userErr,
-  } = await userClient.auth.getUser();
-  if (userErr || !user) return json({ error: "invalid token" }, 401);
-
-  const jwtGithubId = resolveJwtGithubId(user);
-
-  const body = (await req.json().catch(() => ({}))) as {
-    provider_token?: string;
-    repos?: string[];
-  };
-  const providerToken = body.provider_token;
-  if (!providerToken) return json({ error: "missing provider_token" }, 400);
-
-  const apiUrl = Deno.env.get("GITHUB_API_URL") ?? undefined;
-
-  // Bind the provider_token to the authenticated identity (same guard as github-provision).
-  let selfGithubId: number;
-  try {
-    const tokenOwner = await fetchGitHubUser(providerToken, { apiUrl });
-    if (!isTokenOwnerBound(tokenOwner.id, jwtGithubId)) {
-      return json({ error: "provider_token identity mismatch" }, 403);
+    const url = Deno.env.get("SUPABASE_URL");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !anonKey || !serviceKey) {
+      return json({ error: "server misconfigured" }, 500);
     }
-    selfGithubId = tokenOwner.id;
-  } catch (e) {
-    return json({ error: `github: ${(e as Error).message}` }, 502);
-  }
 
-  // Resolve the repo set: explicit list (validated) or the caller's own repos (first page).
-  let repos: Array<{ owner: string; name: string }>;
-  try {
-    if (Array.isArray(body.repos) && body.repos.length > 0) {
-      repos = [];
-      for (const r of body.repos) {
-        const ref = parseRepoRef(r);
-        if (ref) repos.push(ref);
-      }
-    } else {
-      repos = await fetchUserRepos(providerToken, { apiUrl });
-    }
-  } catch (e) {
-    return json({ error: `github: ${(e as Error).message}` }, 502);
-  }
-  repos = repos.slice(0, MAX_REPOS);
-
-  // Read each repo's collaborators with the caller's token (repos they can't read are skipped).
-  const rosters: RepoCollaborators[] = [];
-  for (const repo of repos) {
-    try {
-      const collaborators = await fetchRepoCollaborators(
-        providerToken,
-        repo,
-        selfGithubId,
-        { apiUrl },
-      );
-      if (collaborators === null) continue; // inaccessible — skip, don't fail the whole call
-      rosters.push({ repo: `${repo.owner}/${repo.name}`, collaborators });
-    } catch (e) {
-      // A transient error on one repo shouldn't sink the batch — log and skip.
-      console.error(
-        `collaborators ${repo.owner}/${repo.name}:`,
-        (e as Error).message,
-      );
-    }
-  }
-
-  // Service-role lookup: which collaborator github ids have a Lore account. Returns only the SET of
-  // present ids (never user_ids) — the RPC is service-role-only so this is the only enumeration path.
-  const githubIds = collectGithubIds(rosters);
-  const loreIds = new Set<number>();
-  if (githubIds.length > 0) {
-    const admin = createClient(url, serviceKey, {
+    // Verify the caller's Supabase JWT → user id (never trust a client-supplied id).
+    const userClient = createClient(url, anonKey, {
+      global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false, autoRefreshToken: false },
     });
-    const { data, error } = await admin.rpc("lore_users_for_github_ids", {
-      p_github_ids: githubIds,
-    });
-    if (error) {
-      console.error("lore_users_for_github_ids failed:", error.message);
-      return json({ error: "lookup failed" }, 500);
-    }
-    for (const row of (data ?? []) as Array<{ github_id: number | string }>) {
-      loreIds.add(Number(row.github_id));
-    }
-  }
+    const {
+      data: { user },
+      error: userErr,
+    } = await userClient.auth.getUser();
+    if (userErr || !user) return json({ error: "invalid token" }, 401);
 
-  return json({ repos: annotateOnLore(rosters, loreIds) });
-});
+    const jwtGithubId = resolveJwtGithubId(user);
+
+    const body = (await req.json().catch(() => ({}))) as {
+      provider_token?: string;
+      repos?: string[];
+    };
+    const providerToken = body.provider_token;
+    if (!providerToken) return json({ error: "missing provider_token" }, 400);
+
+    const apiUrl = Deno.env.get("GITHUB_API_URL") ?? undefined;
+
+    // Bind the provider_token to the authenticated identity (same guard as github-provision).
+    let selfGithubId: number;
+    try {
+      const tokenOwner = await fetchGitHubUser(providerToken, { apiUrl });
+      if (!isTokenOwnerBound(tokenOwner.id, jwtGithubId)) {
+        return json({ error: "provider_token identity mismatch" }, 403);
+      }
+      selfGithubId = tokenOwner.id;
+    } catch (e) {
+      capture(e);
+      return json({ error: `github: ${(e as Error).message}` }, 502);
+    }
+
+    // Resolve the repo set: explicit list (validated) or the caller's own repos (first page).
+    let repos: Array<{ owner: string; name: string }>;
+    try {
+      if (Array.isArray(body.repos) && body.repos.length > 0) {
+        repos = [];
+        for (const r of body.repos) {
+          const ref = parseRepoRef(r);
+          if (ref) repos.push(ref);
+        }
+      } else {
+        repos = await fetchUserRepos(providerToken, { apiUrl });
+      }
+    } catch (e) {
+      capture(e);
+      return json({ error: `github: ${(e as Error).message}` }, 502);
+    }
+    repos = repos.slice(0, MAX_REPOS);
+
+    // Read each repo's collaborators with the caller's token (repos they can't read are skipped).
+    const rosters: RepoCollaborators[] = [];
+    for (const repo of repos) {
+      try {
+        const collaborators = await fetchRepoCollaborators(
+          providerToken,
+          repo,
+          selfGithubId,
+          { apiUrl },
+        );
+        if (collaborators === null) continue; // inaccessible — skip, don't fail the whole call
+        rosters.push({ repo: `${repo.owner}/${repo.name}`, collaborators });
+      } catch (e) {
+        // A transient error on one repo shouldn't sink the batch — log and skip.
+        capture(e);
+        console.error(
+          `collaborators ${repo.owner}/${repo.name}:`,
+          (e as Error).message,
+        );
+      }
+    }
+
+    // Service-role lookup: which collaborator github ids have a Lore account. Returns only the SET of
+    // present ids (never user_ids) — the RPC is service-role-only so this is the only enumeration path.
+    const githubIds = collectGithubIds(rosters);
+    const loreIds = new Set<number>();
+    if (githubIds.length > 0) {
+      const admin = createClient(url, serviceKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+      const { data, error } = await admin.rpc("lore_users_for_github_ids", {
+        p_github_ids: githubIds,
+      });
+      if (error) {
+        capture(error);
+        console.error("lore_users_for_github_ids failed:", error.message);
+        return json({ error: "lookup failed" }, 500);
+      }
+      for (const row of (data ?? []) as Array<{ github_id: number | string }>) {
+        loreIds.add(Number(row.github_id));
+      }
+    }
+
+    return json({ repos: annotateOnLore(rosters, loreIds) });
+  }),
+);
