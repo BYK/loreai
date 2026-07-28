@@ -34,10 +34,9 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
 
-      - run: pnpm install --frozen-lockfile
-
       # Check if website files changed. On 'closed' events we always proceed
-      # (cleanup). Otherwise we only build/deploy when website files changed.
+      # (cleanup). Otherwise we only install/build/deploy when website files
+      # changed — non-website PRs skip the whole install + build.
       - name: Check for website changes
         id: filter
         if: github.event.action != 'closed'
@@ -47,6 +46,12 @@ jobs:
             website:
               - 'packages/website/**'
               - '.github/workflows/docs-preview.yml'
+
+      - name: Install dependencies
+        if: >-
+          (github.event.action == 'closed' || steps.filter.outputs.website == 'true') &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: pnpm install --frozen-lockfile
 
       - name: Build website
         if: >-
