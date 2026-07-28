@@ -7,6 +7,9 @@
  * never-throws contract (a failing output stream must not propagate).
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { makeByteProgress } from "../src/cli/lib/progress";
@@ -126,5 +129,26 @@ describe("makeByteProgress", () => {
     // No byte count in pct mode
     expect(last).not.toMatch(/\d+\s*(B|KB|MB|GB|TB)/);
     expect(last).not.toContain("/");
+  });
+
+  it("apply bar call site passes 'pct' format (regression: #1519 review)", () => {
+    // Regression: delta-upgrade.ts apply bar previously called
+    // makeByteProgress(label, total) without passing format, so the bar
+    // fell back to bytes mode and the "pct only" UX never applied.
+    // Reads the source to assert the call site actually wires "pct",
+    // so a future regression to bytes mode is caught even if the
+    // helper itself still defaults to "bytes".
+    const src = readFileSync(
+      join(__dirname, "../src/cli/lib/delta-upgrade.ts"),
+      "utf8",
+    );
+    // Find the makeByteProgress call inside the apply bar branch.
+    // Accept either trailing-arg "pct" or a non-default format arg.
+    const matches: string[] = src.match(/makeByteProgress\([^)]*\)/g) ?? [];
+    const applyCall = matches.find(
+      (m) => m.includes("Applying patches") && m.includes("event.total"),
+    );
+    expect(applyCall).toBeDefined();
+    expect(applyCall).toMatch(/["']pct["']/);
   });
 });
