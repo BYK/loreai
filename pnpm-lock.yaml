@@ -49,8 +49,8 @@ importers:
         specifier: ^4.1.8
         version: 4.1.8(vitest@4.1.8)
       binpatch:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: ^0.3.1
+        version: 0.3.1
       esbuild:
         specifier: '>=0.28.1'
         version: 0.28.1
@@ -181,8 +181,8 @@ importers:
         specifier: ^7.7.1
         version: 7.7.1
       binpatch:
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.3.1
+        version: 0.3.1
       fossilize:
         specifier: ^0.10.1
         version: 0.10.1
@@ -2435,6 +2435,10 @@ packages:
 
   binpatch@0.1.0:
     resolution: {integrity: sha512-xhD1I3NwmywSGPK4EqQLT+jcDsnboWzHoBh1UrFrLf/68m4Ohy/i7NCdm4jSIzDv7ZHfiDsjgKtztCQyLY1+kw==}
+    engines: {node: '>=22.5'}
+
+  binpatch@0.3.1:
+    resolution: {integrity: sha512-KD1kWfjqXp+SaNxY71QJ16I+6NU/U8MJD1H9A9VDLqrmmslXvRi+7evICcYwftdhu+Yxd6lH1OqypfYbjfFb8g==}
     engines: {node: '>=22.5'}
 
   binpunch@1.0.0:
@@ -7111,6 +7115,8 @@ snapshots:
   bignumber.js@9.3.1: {}
 
   binpatch@0.1.0: {}
+
+  binpatch@0.3.1: {}
 
   binpunch@1.0.0: {}
 
