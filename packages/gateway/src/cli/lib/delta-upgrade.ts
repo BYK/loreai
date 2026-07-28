@@ -223,7 +223,12 @@ function makeApplyProgress(): {
     onEvent: (event) => {
       if (event.type === "bytes" && event.phase === "apply") {
         if (!bar) {
-          bar = makeByteProgress("Applying patches", event.total, process.stderr, "pct");
+          bar = makeByteProgress(
+            "Applying patches",
+            event.total,
+            process.stderr,
+            "pct",
+          );
         }
         const delta = event.written - lastWritten;
         lastWritten = event.written;
