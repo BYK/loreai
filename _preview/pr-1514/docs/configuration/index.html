@@ -437,7 +437,7 @@ for (const pre of blocks) {
 <td>boolean</td>
 <td><code dir="auto">false</code></td>
 <td></td>
-<td>Run the curator mid-conversation (turn-based), not just on idle. Default: false. WARNING: only enable on free-write / non-caching providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), mid-session curation changes the knowledge base, which queues a knowledge-delta block (user→assistant pair appended mid-conversation) that re-writes part of the prompt tail each time it changes. Deferring curation to idle lets the queue stay empty during active turns. Where cache writes are free this is harmless and yields fresher knowledge sooner.</td>
+<td>Run the curator mid-conversation (turn-based), not just on idle. Default: false. WARNING: only enable on free-write / non-caching providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), mid-session curation changes the knowledge base, which queues a knowledge-delta block (user→assistant pair appended mid-conversation) that re-writes part of the prompt tail each time the knowledge set changes. Deferring curation to idle lets the queue stay empty during active turns. Where cache writes are free this is harmless and yields fresher knowledge sooner.</td>
 </tr>
 <tr>
 <td><code dir="auto">afterTurns</code></td>
