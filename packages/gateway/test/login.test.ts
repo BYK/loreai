@@ -26,13 +26,16 @@ vi.mock("node:readline/promises", () => ({
 }));
 
 import {
+  acquireGitHubProviderToken,
   canOpenBrowser,
   commandLogin,
   commandLogout,
   commandWhoami,
 } from "../src/cli/login";
 import {
+  clearProviderTokenCache,
   clearSession,
+  loadCachedProviderToken,
   loadPersistedSession,
   persistSession,
 } from "../src/supabase";
@@ -61,6 +64,7 @@ let errSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   clearSession();
+  clearProviderTokenCache();
   for (const fn of Object.values(h.auth)) fn.mockReset();
   h.from.mockReset();
   h.answer.value = "";
@@ -410,5 +414,55 @@ describe("commandLogin (GitHub --no-browser)", () => {
     expect(errs.join("\n")).toContain("No code provided.");
     expect(h.auth.exchangeCodeForSession).not.toHaveBeenCalled();
     exitSpy.mockRestore();
+  });
+});
+
+describe("acquireGitHubProviderToken — paste-path TTL cap", () => {
+  beforeEach(() => {
+    clearSession();
+    clearProviderTokenCache();
+    for (const fn of Object.values(h.auth)) fn.mockReset();
+    h.from.mockReset();
+    h.answer.value = "";
+  });
+
+  test("paste-path cache TTL is capped at 8h even when session TTL is longer", async () => {
+    // Regression for PR #1512: the paste path's TTL was bound directly to
+    // session.expires_at. Cap it at 8h so a long Supabase session TTL doesn't
+    // cache the GitHub token past its actual validity.
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth?x=1" },
+      error: null,
+    });
+    h.answer.value = "abc-123-def";
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "at-gh",
+          refresh_token: "rt-gh",
+          expires_at: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60, // 1 year
+          expires_in: 365 * 24 * 60 * 60,
+          provider_token: "gh-provider-token",
+          token_type: "bearer",
+          user: {
+            id: "user-123",
+            email: "me@example.com",
+            user_metadata: { user_name: "octocat", name: "Octo Cat" },
+          },
+        },
+      },
+      error: null,
+    });
+    h.from.mockReturnValue(profileChain(null));
+
+    const result = await acquireGitHubProviderToken({ noBrowser: true });
+    expect(result.providerToken).toBe("gh-provider-token");
+
+    const cached = loadCachedProviderToken();
+    expect(cached).not.toBeNull();
+    const ttl = cached!.expires_at - Math.floor(Date.now() / 1000);
+    // Should be ≤ 8h (28800s), NOT 1 year.
+    expect(ttl).toBeLessThanOrEqual(8 * 60 * 60 + 5); // 5s slack for test clock
+    expect(ttl).toBeGreaterThan(8 * 60 * 60 - 10); // and at least ~8h
   });
 });
