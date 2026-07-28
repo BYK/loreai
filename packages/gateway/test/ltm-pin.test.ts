@@ -1,11 +1,15 @@
 /**
- * Unit tests for the reorder-tolerant LTM diff-pin (system[2] cache stability).
+ * Unit tests for the reorder-tolerant LTM diff-pin (durable prompt-delta
+ * cache stability).
  *
  * The pin reuses its rendered text verbatim whenever the *selected entry set*
  * is unchanged (same entry IDs, any order, same per-entry content), and re-pins
  * only when the set changes or an entry's content changes. This eliminates the
  * cache busts that the old positional `textDiffRatio` metric produced on pure
- * re-ranking. See packages/gateway/src/pipeline.ts.
+ * re-ranking. See packages/gateway/src/pipeline.ts. (The pin originally pinned
+ * a `system[2]` block; issue #1502 retired that channel — context-bound LTM
+ * now rides the durable prompt-delta pair — but the diff-pin property still
+ * holds for the delta's baseline keys.)
  */
 import { describe, test, expect } from "vitest";
 import {
@@ -164,7 +168,7 @@ describe("shouldReanchorPinKeys — surfaceSignature key-format migration", () =
     `${e.id}:${fnv1a(`${e.title}\x1f${e.content}`)}`;
   const legacy = [legacyKey(A), legacyKey(B)].sort();
   const current = ltmEntryKeys([A, B]);
-  const rendered = "system[2] rendered bytes for A + B";
+  const rendered = "context-bound LTM rendered bytes for A + B";
 
   test("legacy and new keys differ but share the same id set", () => {
     expect(sameEntryKeys(legacy, current)).toBe(false);

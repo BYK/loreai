@@ -374,10 +374,10 @@ Integration test groups verifying end-to-end behavior across Lore's gateway, cor
 **Expected results:**
 - System prompt contains `## Long-term Knowledge` section (or equivalent LTM block)
 - Preferences appear in stable block (system[1]) with cache control
-- Context-bound entries appear in system[2] without cache control
-- 3-block structure preserved
+- Context-bound entries appear in the durable prompt-delta pair (user→assistant) in the message tail (issue #1502 removed the 5m-TTL `system[2]` channel — context-bound LTM no longer rides a system block)
+- 2-block system structure preserved (system[0] host + system[1] stable LTM)
 
-**Pass/fail criteria:** LTM content present in upstream system prompt with 3-block structure.
+**Pass/fail criteria:** LTM content present upstream with the 2-block system structure + a context-bound delta pair in the message tail.
 
 ### Test 8.2: LTM injected into OpenAI Chat Completions system message
 

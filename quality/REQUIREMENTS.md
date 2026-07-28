@@ -261,16 +261,16 @@ Requirements are grouped by functional section. All requirements are **Tier 3** 
 | **Functional Section** | LTM Injection |
 | **Specificity** | Architectural guidance |
 
-**Summary:** LTM injection SHOULD preserve the stable/context-bound distinction (separate blocks with different cache TTLs) across all three protocol paths, not just Anthropic, to optimize cache behavior wherever the upstream supports it.
+**Summary:** LTM injection SHOULD preserve the stable/context-bound distinction (stable LTM in `system[1]` with a 1h cache TTL; context-bound LTM in the durable prompt-delta user→assistant pair in the message tail) across all three protocol paths, not just Anthropic, to optimize cache behavior wherever the upstream supports it.
 
 **User Story:** As a cost-conscious developer using an OpenAI-protocol upstream that supports caching, I want stable preference entries to be cached separately from session-specific context so that I get the same cache efficiency benefits as Anthropic users.
 
-**Implementation Note:** The Anthropic path at `packages/gateway/src/translate/anthropic.ts:368–423` implements a 3-block system prompt: `system[0]` = host prompt, `system[1]` = stable LTM with 1h `cache_control`, `system[2]` = context-bound LTM without cache control. The OpenAI paths at `packages/gateway/src/pipeline.ts:1057–1070` concatenate all LTM (`stableLtmSystem` + `ltmSystem`) into a single system string — losing the cache TTL differentiation. This is functionally correct (all paths receive LTM) but cost-suboptimal.
+**Implementation Note:** The Anthropic path at `packages/gateway/src/translate/anthropic.ts` implements a 2-block system prompt (issue #1502): `system[0]` = host prompt, `system[1]` = stable LTM with 1h `cache_control`. Context-bound LTM rides the durable prompt-delta channel — a user→assistant pair appended mid-conversation (`buildKnowledgeDeltaMessage` in `pipeline.ts`) — not a `system[2]` block (the 5m-TTL `system[2]` channel was retired). The OpenAI paths in `pipeline.ts` concatenate stable LTM into a single system string and route context-bound LTM through the same durable prompt-delta channel — losing the 1h-TTL differentiation for stable LTM on OpenAI upstreams that don't implement the separate-segment caching Anthropic offers. This is functionally correct (all paths receive LTM) but cost-suboptimal on OpenAI upstreams.
 
 **Conditions of Satisfaction:**
 1. When an OpenAI-protocol upstream supports prompt caching (e.g., via request-level cache hints), stable LTM is separated for cache optimization.
 2. When the upstream doesn't support caching, LTM concatenation behavior is unchanged.
-3. The distinction between `stableLtmSystem` (preferences, 1h TTL) and `ltmSystem` (context-bound, 5m TTL) is maintained in the pipeline regardless of downstream protocol.
+3. The distinction between `stableLtmSystem` (preferences, 1h TTL) and the context-bound delta channel is maintained in the pipeline regardless of downstream protocol — no code path re-introduces a 5m-TTL `system[2]` block (issue #1502 removed that channel and its `ltmSystem` field).
 
 **Alternative Paths:**
 - Emit stable LTM as a separate system message before the main system message in the OpenAI format.

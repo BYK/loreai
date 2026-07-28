@@ -34,7 +34,6 @@ function req(prefixText: string, tailText: string): GatewayRequest {
 const opts: AnthropicCacheOptions = {
   systemTTL: "1h",
   stableLtmSystem: "STABLE LTM",
-  ltmSystem: "context LTM",
   cacheTools: true,
   cacheConversation: true,
   conversationTTL: "5m",
@@ -54,7 +53,7 @@ describe("cacheSegmentDigest", () => {
   test("returns stable hashes and 4 breakpoints for a distilled body", () => {
     const d = digest("prefix v1", "tail A");
     expect(d.bpCount).toBe(4); // system[1], tools, distilled-prefix, tail
-    expect(d.systemBlocks).toBe(3); // host + stableLtm + contextLtm
+    expect(d.systemBlocks).toBe(2); // host + stableLtm (context LTM rides the delta)
     expect(d.headSha).toMatch(/^[0-9a-f]{12}$/);
   });
 

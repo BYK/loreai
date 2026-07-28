@@ -494,75 +494,84 @@ describe("buildAnthropicRequest — caching doesn't affect other fields", () => 
 });
 
 // ---------------------------------------------------------------------------
-// LTM as separate system block
+// LTM as stable system[1] block (context-bound LTM was removed — system[2]
+// is no longer emitted; context LTM rides the durable prompt delta).
 // ---------------------------------------------------------------------------
 
 describe("buildAnthropicRequest — LTM system block", () => {
   test("LTM creates a second system block without cache_control", () => {
     const body = getBody(makeRequest(), {
       systemTTL: "1h",
-      ltmSystem: "## Long-term Knowledge\n\n* entry one\n* entry two",
+      stableLtmSystem: "## Long-term Knowledge\n\n* entry one\n* entry two",
     });
     const blocks = body.system as Array<Record<string, unknown>>;
     expect(blocks).toHaveLength(2);
 
-    // Block 0: host prompt with 1h cache
+    // Block 0: host prompt — no cache_control (covered by block 1's prefix)
     expect(blocks[0].type).toBe("text");
     expect(blocks[0].text).toBe("You are a helpful assistant.");
-    expect(blocks[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(blocks[0].cache_control).toBeUndefined();
 
-    // Block 1: LTM — no cache_control
+    // Block 1: stable LTM — cache_control: 1h
     expect(blocks[1].type).toBe("text");
     expect(blocks[1].text).toBe(
       "## Long-term Knowledge\n\n* entry one\n* entry two",
     );
-    expect(blocks[1].cache_control).toBeUndefined();
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
-  test("no LTM block when ltmSystem is undefined", () => {
+  test("no LTM block when stableLtmSystem is undefined — host gets 1h breakpoint", () => {
     const body = getBody(makeRequest(), { systemTTL: "1h" });
     const blocks = body.system as Array<Record<string, unknown>>;
     expect(blocks).toHaveLength(1);
     expect(blocks[0].text).toBe("You are a helpful assistant.");
+    expect(blocks[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
-  test("no LTM block when ltmSystem is empty string", () => {
-    const body = getBody(makeRequest(), { systemTTL: "1h", ltmSystem: "" });
+  test("no LTM block when stableLtmSystem is empty string — host gets 1h breakpoint", () => {
+    const body = getBody(makeRequest(), {
+      systemTTL: "1h",
+      stableLtmSystem: "",
+    });
     const blocks = body.system as Array<Record<string, unknown>>;
     expect(blocks).toHaveLength(1);
   });
 
-  test("LTM with 5m TTL uses ephemeral without ttl field on host block", () => {
+  test("LTM with 5m TTL uses ephemeral without ttl field on stable block", () => {
     const body = getBody(makeRequest(), {
       systemTTL: "5m",
-      ltmSystem: "some knowledge",
+      stableLtmSystem: "some knowledge",
     });
     const blocks = body.system as Array<Record<string, unknown>>;
     expect(blocks).toHaveLength(2);
-    expect(blocks[0].cache_control).toEqual({ type: "ephemeral" });
-    expect(blocks[1].cache_control).toBeUndefined();
+    // Host — no cache_control
+    expect(blocks[0].cache_control).toBeUndefined();
+    // Stable LTM uses bare ephemeral (no ttl field)
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral" });
   });
 
   test("LTM concatenated as string when no caching", () => {
     const body = getBody(makeRequest(), {
       systemTTL: false,
-      ltmSystem: "some knowledge",
+      stableLtmSystem: "some knowledge",
     });
     expect(typeof body.system).toBe("string");
     expect(body.system).toBe("You are a helpful assistant.\n\nsome knowledge");
   });
 
-  test("no LTM concatenation when ltmSystem undefined and no caching", () => {
+  test("no LTM concatenation when stableLtmSystem undefined and no caching", () => {
     const body = getBody(makeRequest(), { systemTTL: false });
     expect(body.system).toBe("You are a helpful assistant.");
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3-block system prompt: host + stable LTM + context-bound LTM
+// 2-block system prompt: host + stable LTM
+// (Context-bound LTM was removed from system[2] — it rides the durable
+//  prompt-delta channel; see pipeline.ts buildKnowledgeDeltaMessage.)
 // ---------------------------------------------------------------------------
 
-describe("buildAnthropicRequest — 3-block system prompt", () => {
+describe("buildAnthropicRequest — 2-block system prompt", () => {
   test("stable LTM creates block with 1h cache, host has no cache_control", () => {
     const body = getBody(makeRequest(), {
       systemTTL: "1h",
@@ -580,33 +589,10 @@ describe("buildAnthropicRequest — 3-block system prompt", () => {
     expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
-  test("all 3 blocks: host + stable LTM (1h) + context LTM (no cache)", () => {
-    const body = getBody(makeRequest(), {
-      systemTTL: "1h",
-      stableLtmSystem: "## Preferences\n* coding style",
-      ltmSystem: "## Gotcha\n* watch out for X",
-    });
-    const blocks = body.system as Array<Record<string, unknown>>;
-    expect(blocks).toHaveLength(3);
-
-    // Block 0: host prompt — no cache_control
-    expect(blocks[0].text).toBe("You are a helpful assistant.");
-    expect(blocks[0].cache_control).toBeUndefined();
-
-    // Block 1: stable LTM — 1h cache breakpoint
-    expect(blocks[1].text).toBe("## Preferences\n* coding style");
-    expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-
-    // Block 2: context-bound LTM — no cache_control (rides conversation cache)
-    expect(blocks[2].text).toBe("## Gotcha\n* watch out for X");
-    expect(blocks[2].cache_control).toBeUndefined();
-  });
-
-  test("stable LTM only (no context LTM) produces 2 blocks", () => {
+  test("stable LTM produces 2 blocks", () => {
     const body = getBody(makeRequest(), {
       systemTTL: "1h",
       stableLtmSystem: "## Preferences\n* style",
-      ltmSystem: undefined,
     });
     const blocks = body.system as Array<Record<string, unknown>>;
     expect(blocks).toHaveLength(2);
@@ -614,37 +600,23 @@ describe("buildAnthropicRequest — 3-block system prompt", () => {
     expect(blocks[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   });
 
-  test("context LTM only (no stable LTM) falls back to host prompt breakpoint", () => {
+  test("no stable LTM falls back to host prompt breakpoint", () => {
     const body = getBody(makeRequest(), {
       systemTTL: "1h",
       stableLtmSystem: undefined,
-      ltmSystem: "## Gotcha\n* watch out",
     });
     const blocks = body.system as Array<Record<string, unknown>>;
-    expect(blocks).toHaveLength(2);
+    expect(blocks).toHaveLength(1);
     // Host gets the cache breakpoint as fallback
     expect(blocks[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-    // Context LTM — no cache_control
-    expect(blocks[1].cache_control).toBeUndefined();
   });
 
-  test("no caching concatenates both LTM texts into single string", () => {
+  test("no caching concatenates stable LTM into single string", () => {
     const body = getBody(makeRequest(), {
       systemTTL: false,
       stableLtmSystem: "prefs",
-      ltmSystem: "gotchas",
     });
     expect(typeof body.system).toBe("string");
-    expect(body.system).toBe(
-      "You are a helpful assistant.\n\nprefs\n\ngotchas",
-    );
-  });
-
-  test("no caching with only stable LTM concatenates correctly", () => {
-    const body = getBody(makeRequest(), {
-      systemTTL: false,
-      stableLtmSystem: "prefs",
-    });
     expect(body.system).toBe("You are a helpful assistant.\n\nprefs");
   });
 
@@ -652,17 +624,14 @@ describe("buildAnthropicRequest — 3-block system prompt", () => {
     const body = getBody(makeRequest(), {
       systemTTL: "5m",
       stableLtmSystem: "## Preferences\n* style",
-      ltmSystem: "## Gotcha\n* issue",
     });
     const blocks = body.system as Array<Record<string, unknown>>;
-    expect(blocks).toHaveLength(3);
+    expect(blocks).toHaveLength(2);
     // Host — no cache_control
     expect(blocks[0].cache_control).toBeUndefined();
     // Stable LTM uses bare ephemeral (no ttl) when systemTTL is not "1h" —
     // third-party Anthropic-compatible endpoints may reject the ttl extension.
     expect(blocks[1].cache_control).toEqual({ type: "ephemeral" });
-    // Context LTM — no cache_control
-    expect(blocks[2].cache_control).toBeUndefined();
   });
 });
 
@@ -756,7 +725,9 @@ describe("buildAnthropicRequest — tool caching", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Combined: all cache layers (system 1h + LTM + tools 1h + conversation 5m)
+// Combined: all cache layers (system 1h + stable LTM + tools 1h + conversation 5m)
+// (Context-bound LTM no longer rides system[2] — it rides the durable prompt
+//  delta channel; see buildKnowledgeDeltaMessage in pipeline.ts.)
 // ---------------------------------------------------------------------------
 
 describe("buildAnthropicRequest — full layered caching", () => {
@@ -782,16 +753,16 @@ describe("buildAnthropicRequest — full layered caching", () => {
     });
     const body = getBody(req, {
       systemTTL: "1h",
-      ltmSystem: "## Knowledge\n\n* gotcha one",
+      stableLtmSystem: "## Knowledge\n\n* gotcha one",
       cacheTools: true,
       cacheConversation: true,
     });
 
-    // System: 2 blocks — host (1h BP) + LTM (no BP)
+    // System: 2 blocks — host (no BP) + stable LTM (1h BP)
     const system = body.system as Array<Record<string, unknown>>;
     expect(system).toHaveLength(2);
-    expect(system[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-    expect(system[1].cache_control).toBeUndefined();
+    expect(system[0].cache_control).toBeUndefined();
+    expect(system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 
     // Tools: last tool gets 1h BP
     const tools = body.tools as Array<Record<string, unknown>>;

@@ -25,7 +25,8 @@ describe("shouldRunInFlightCuration", () => {
 
   test("does NOT run when inFlight is off (the default) even past the threshold", () => {
     // This is the fix: mid-session curation is gated off by default so it can't
-    // rewrite system[2] and bust the prompt cache during an active conversation.
+    // queue a context-bound LTM delta and bust the prompt cache during an
+    // active conversation.
     expect(shouldRunInFlightCuration({ ...base, inFlight: false })).toBe(false);
   });
 
