@@ -28,6 +28,7 @@ import {
   parseRepoRef,
   type RepoCollaborators,
 } from "./discover.ts";
+import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -39,18 +40,21 @@ function json(body: unknown, status = 200): Response {
 // Cap the number of repos we scan per call — bounds GitHub API fan-out (and cost) per request.
 const MAX_REPOS = 50;
 
-Deno.serve(async (req: Request): Promise<Response> => {
-  if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+initSentry("github-discover");
 
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) return json({ error: "missing authorization" }, 401);
+Deno.serve(
+  wrapHandler("github-discover", async (req: Request): Promise<Response> => {
+    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
 
-  const url = Deno.env.get("SUPABASE_URL");
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!url || !anonKey || !serviceKey) {
-    return json({ error: "server misconfigured" }, 500);
-  }
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return json({ error: "missing authorization" }, 401);
+
+    const url = Deno.env.get("SUPABASE_URL");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !anonKey || !serviceKey) {
+      return json({ error: "server misconfigured" }, 500);
+    }
 
   // Verify the caller's Supabase JWT → user id (never trust a client-supplied id).
   const userClient = createClient(url, anonKey, {
@@ -83,6 +87,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     selfGithubId = tokenOwner.id;
   } catch (e) {
+    capture(e);
     return json({ error: `github: ${(e as Error).message}` }, 502);
   }
 
@@ -99,6 +104,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       repos = await fetchUserRepos(providerToken, { apiUrl });
     }
   } catch (e) {
+    capture(e);
     return json({ error: `github: ${(e as Error).message}` }, 502);
   }
   repos = repos.slice(0, MAX_REPOS);
@@ -117,6 +123,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       rosters.push({ repo: `${repo.owner}/${repo.name}`, collaborators });
     } catch (e) {
       // A transient error on one repo shouldn't sink the batch — log and skip.
+      capture(e);
       console.error(
         `collaborators ${repo.owner}/${repo.name}:`,
         (e as Error).message,
@@ -136,6 +143,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       p_github_ids: githubIds,
     });
     if (error) {
+      capture(error);
       console.error("lore_users_for_github_ids failed:", error.message);
       return json({ error: "lookup failed" }, 500);
     }
@@ -145,4 +153,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 
   return json({ repos: annotateOnLore(rosters, loreIds) });
-});
+  }),
+);

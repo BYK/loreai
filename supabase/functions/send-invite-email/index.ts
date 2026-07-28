@@ -9,6 +9,7 @@
 // injected by the platform. INVITE_SENDER defaults to keeper@withlore.ai; SMTP2GO_API_URL optional.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildInviteEmail, capabilityOf, sendViaSmtp2go } from "./send.ts";
+import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -20,19 +21,22 @@ function json(body: unknown, status = 200): Response {
 // Conservative RFC-ish email shape check — the recipient is admin-supplied, but we still guard.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-Deno.serve(async (req: Request): Promise<Response> => {
-  if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+initSentry("send-invite-email");
 
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) return json({ error: "missing authorization" }, 401);
+Deno.serve(
+  wrapHandler("send-invite-email", async (req: Request): Promise<Response> => {
+    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
 
-  const url = Deno.env.get("SUPABASE_URL");
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  const apiKey = Deno.env.get("SMTP2GO_API_KEY");
-  if (!url || !anonKey || !serviceKey || !apiKey) {
-    return json({ error: "server misconfigured" }, 500);
-  }
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return json({ error: "missing authorization" }, 401);
+
+    const url = Deno.env.get("SUPABASE_URL");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    const apiKey = Deno.env.get("SMTP2GO_API_KEY");
+    if (!url || !anonKey || !serviceKey || !apiKey) {
+      return json({ error: "server misconfigured" }, 500);
+    }
   const sender = Deno.env.get("INVITE_SENDER") ?? "keeper@withlore.ai";
   const apiUrl = Deno.env.get("SMTP2GO_API_URL") ?? undefined;
 
@@ -73,6 +77,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     .eq("token", capability)
     .maybeSingle();
   if (invErr) {
+    capture(invErr);
     console.error("pending_invites read failed:", invErr.message);
     return json({ error: "lookup failed" }, 500);
   }
@@ -106,8 +111,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     await sendViaSmtp2go(email, message, { apiKey, sender, apiUrl });
   } catch (e) {
+    capture(e);
     console.error("smtp2go send failed:", (e as Error).message);
     return json({ error: "send failed" }, 502);
   }
   return json({ ok: true });
-});
+  }),
+);

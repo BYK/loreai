@@ -18,6 +18,7 @@ import {
   isTokenOwnerBound,
   resolveJwtGithubId,
 } from "./provision.ts";
+import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -26,18 +27,21 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
-  if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+initSentry("github-provision");
 
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) return json({ error: "missing authorization" }, 401);
+Deno.serve(
+  wrapHandler("github-provision", async (req: Request): Promise<Response> => {
+    if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
 
-  const url = Deno.env.get("SUPABASE_URL");
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!url || !anonKey || !serviceKey) {
-    return json({ error: "server misconfigured" }, 500);
-  }
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return json({ error: "missing authorization" }, 401);
+
+    const url = Deno.env.get("SUPABASE_URL");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !anonKey || !serviceKey) {
+      return json({ error: "server misconfigured" }, 500);
+    }
 
   // Verify the caller's Supabase JWT → user id (never trust a client-supplied id).
   const userClient = createClient(url, anonKey, {
@@ -73,6 +77,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const memberships = await fetchGitHubMemberships(providerToken, { apiUrl });
     payload = buildProvisionPayload(memberships);
   } catch (e) {
+    capture(e);
     return json({ error: `github: ${(e as Error).message}` }, 502);
   }
 
@@ -86,6 +91,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     p_teams: payload.teams,
   });
   if (rpcErr) {
+    capture(rpcErr);
     console.error("provision_github_membership failed:", rpcErr.message);
     return json({ error: "provisioning failed" }, 500); // generic — details logged server-side
   }
@@ -95,4 +101,5 @@ Deno.serve(async (req: Request): Promise<Response> => {
     orgs: payload.orgs.length,
     teams: payload.teams.length,
   });
-});
+  }),
+);
