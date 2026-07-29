@@ -19,7 +19,6 @@ import { createInterface } from "node:readline/promises";
 import qrcode from "qrcode-terminal";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import {
-  clearProviderTokenCache,
   clearSession,
   createSupabaseClient,
   getCurrentUser,
@@ -42,6 +41,35 @@ const OAUTH_SCOPES = "read:org repo";
 
 /** Historical GitHub OAuth App default TTL for read-only tokens (8 hours). */
 const GITHUB_PROVIDER_TOKEN_TTL_SECONDS = 8 * 60 * 60;
+
+/**
+ * Persist the provider_token from a fresh OAuth session to the disk cache.
+ *
+ * The TTL is capped at GITHUB_PROVIDER_TOKEN_TTL_SECONDS (8h) regardless of the
+ * Supabase session's expires_at (PR #1512) — GitHub provider_tokens in practice
+ * carry the same 8h lifetime, so a longer Supabase session wouldn't extend the
+ * token's actual validity. Provider_tokens without an expiry on the session
+ * (rare — older GitHub OAuth apps) still get the 8h cap.
+ *
+ * Shared by every OAuth completion path (login + acquire-while-discover +
+ * loginWithGitHubManual) so the cache write is consistent. Returns true when the
+ * cache was written; false if the session had no provider_token (which happens
+ * for OAuth flows that never opened the GitHub scope — rare and shouldn't be
+ * cached).
+ */
+function cacheProviderTokenFromSession(session: Session): boolean {
+  const providerToken = session.provider_token;
+  if (!providerToken) return false;
+  const sessionTtl = session.expires_at
+    ? session.expires_at - Math.floor(Date.now() / 1000)
+    : undefined;
+  const ttl = Math.min(
+    sessionTtl ?? GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+    GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
+  );
+  persistProviderTokenCache(providerToken, ttl);
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // lore login
@@ -195,6 +223,10 @@ async function loginWithGitHub(): Promise<void> {
   const session = await exchangeOAuthCode(client, oauthCode);
 
   await finalizeLogin(client, sessionToPersisted(session));
+  // Persist the GitHub provider_token so the next `lore team discover` within
+  // the 8h window skips the OAuth dance. Without this, every GitHub-touching
+  // command after `lore login` would re-prompt until an OAuth dance ran once.
+  cacheProviderTokenFromSession(session);
   await provisionGitHubTeams(client, session.provider_token);
 }
 
@@ -220,29 +252,30 @@ export async function acquireGitHubProviderToken(opts?: {
   providerToken: string;
 }> {
   // Try the disk cache first — avoids re-prompting OAuth within the token TTL.
+  // On cache HIT: validate the persisted Supabase session via setSession; if it
+  // fails (genuine RefreshTokenRevoked / expired refresh_token / transient net
+  // failure) we fall through to a fresh OAuth dance. The dance itself REWRITES
+  // the cache row on success, so we don't aggressively clear it here — that
+  // would lose a still-valid provider_token on a one-off network blip and force
+  // the dance even on the next call.
   const cached = loadCachedProviderToken();
   if (cached) {
     const client = createSupabaseClient();
-    // Restore the persisted session so the returned client is usable. If the
-    // session can't be restored (e.g. refresh_token expired or revoked), the
-    // EF call would 401 with a confusing error — fall through to OAuth instead
-    // so the user gets a fresh re-auth.
     const persisted = loadPersistedSession();
     if (persisted) {
       const { error: setErr } = await client.auth.setSession({
         access_token: persisted.access_token,
         refresh_token: persisted.refresh_token,
       });
-      if (setErr) {
-        // Session unrecoverable — discard the cache and run OAuth.
-        clearProviderTokenCache();
-      } else {
+      if (!setErr) {
+        // Cache hit + session restorable → no OAuth dance. Both tokens are valid;
+        // the EF call uses them as-is.
         return { client, providerToken: cached.provider_token };
       }
-    } else {
-      // No session to bind the token to — discard the cache.
-      clearProviderTokenCache();
+      // Transient setErr (network / 502 / 504) — keep the cache row, fall through
+      // to the OAuth dance. The dance will overwrite the cache on success.
     }
+    // No persisted session, OR setSession errored: fall through.
   }
 
   // No cached token — run OAuth.
@@ -310,20 +343,11 @@ async function acquireGitHubProviderTokenLoopback(): Promise<{
 
   const session = await exchangeOAuthCode(client, oauthCode);
   await finalizeLogin(client, sessionToPersisted(session));
-  const providerToken = session.provider_token;
-  if (!providerToken) throw new Error("GitHub did not return an access token.");
-  // GitHub provider_tokens issued via Supabase don't carry an explicit expiry;
-  // bound the cache by whichever runs out first: the access_token expiry, or
-  // 8h (historical GitHub OAuth App default for read-only flows).
-  const sessionTtl = session.expires_at
-    ? session.expires_at - Math.floor(Date.now() / 1000)
-    : undefined;
-  const ttl = Math.min(
-    sessionTtl ?? GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
-    GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
-  );
-  persistProviderTokenCache(providerToken, ttl);
-  return { client, providerToken };
+  if (!session.provider_token)
+    throw new Error("GitHub did not return an access token.");
+  // Persist the GitHub provider_token (8h-capped, see helper docstring).
+  cacheProviderTokenFromSession(session);
+  return { client, providerToken: session.provider_token };
 }
 
 /**
@@ -367,21 +391,11 @@ async function acquireGitHubProviderTokenPaste(): Promise<{
 
   const session = await exchangeOAuthCode(client, oauthCode);
   await finalizeLogin(client, sessionToPersisted(session));
-  const providerToken = session.provider_token;
-  if (!providerToken) throw new Error("GitHub did not return an access token.");
-  // Same 8h cap as the loopback path: GitHub provider_tokens via Supabase
-  // don't carry an explicit expiry, so bind the cache by whichever runs out
-  // first — the access_token expiry, or the historical 8h GitHub OAuth App
-  // default.
-  const sessionTtl = session.expires_at
-    ? session.expires_at - Math.floor(Date.now() / 1000)
-    : undefined;
-  const ttl = Math.min(
-    sessionTtl ?? GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
-    GITHUB_PROVIDER_TOKEN_TTL_SECONDS,
-  );
-  persistProviderTokenCache(providerToken, ttl);
-  return { client, providerToken };
+  if (!session.provider_token)
+    throw new Error("GitHub did not return an access token.");
+  // Same 8h cap as the loopback path (see cacheProviderTokenFromSession).
+  cacheProviderTokenFromSession(session);
+  return { client, providerToken: session.provider_token };
 }
 
 // --- GitHub OAuth, headless (manual code paste, no loopback) ----------------
@@ -433,6 +447,9 @@ async function loginWithGitHubManual(): Promise<void> {
   if (!sess.session) throw new Error("No session returned after OAuth.");
 
   await finalizeLogin(client, sessionToPersisted(sess.session));
+  // Persist the GitHub provider_token so the next `lore team discover` within
+  // the 8h window skips the OAuth dance (same as the loopback path).
+  cacheProviderTokenFromSession(sess.session);
   await provisionGitHubTeams(client, sess.session.provider_token);
 }
 
