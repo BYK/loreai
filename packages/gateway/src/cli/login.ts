@@ -19,7 +19,6 @@ import { createInterface } from "node:readline/promises";
 import qrcode from "qrcode-terminal";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import {
-  clearProviderTokenCache,
   clearSession,
   createSupabaseClient,
   getCurrentUser,
