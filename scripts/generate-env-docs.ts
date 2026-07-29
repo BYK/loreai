@@ -292,6 +292,10 @@ function collectEntries(): Map<string, EnvVarEntry> {
     files.push(...walk(coreSrc));
   }
 
+  // Test-only env vars — never set in production, never meant for users.
+  // Listed here so the JSDoc in src doesn't get pulled into the public docs
+  // and so a careless rename of a SENTINEL/TEST_ env doesn't break --check.
+  const TEST_ONLY_ENV = new Set<string>(["LORE_FORCED_EXIT_SENTINEL"]);
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const lines = source.split("\n");
@@ -303,6 +307,7 @@ function collectEntries(): Map<string, EnvVarEntry> {
       for (const match of line.matchAll(localRegex)) {
         const name = match[0].split(".").pop() ?? "";
         if (!name.startsWith("LORE_")) continue;
+        if (TEST_ONLY_ENV.has(name)) continue; // skip test-only sentinels
         // Skip CLI help-text lines: these reference the env var as a
         // bare `LORE_X` literal in a backtick template AND as a real
         // `process.env.LORE_X` / `env.LORE_X` access in a `${...}`
