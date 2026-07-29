@@ -168,6 +168,21 @@ describe("fetchRepoContributors", () => {
     );
     expect(cols).toEqual([]);
   });
+  it("returns [] (empty roster, NOT skip) on 204 — empty repo body", async () => {
+    // Regression for Seer review of PR #1527 (comment 3676072445, finding 15565416/0):
+    // without an explicit 204 branch, `resp.ok === true` and `resp.json()` parses the
+    // empty body as `undefined`, throwing SyntaxError on platforms where JSON.parse("")
+    // fails — the outer try/catch would silently skip the repo as if it were
+    // inaccessible. Documented behavior (discover.ts docstring) says 204 returns [].
+    const f = mockFetch({ "/contributors": { status: 204, body: "" } });
+    const cols = await fetchRepoContributors(
+      "tok",
+      { owner: "o", name: "r" },
+      99,
+      { fetchImpl: f },
+    );
+    expect(cols).toEqual([]);
+  });
   it("follows Link: rel='next' up to MAX_PAGES and dedupes cross-page via Set<id>", async () => {
     const page2Link =
       '<https://api.github.com/repos/o/r/contributors?page=2&anon=true&per_page=100>; rel="next"';
