@@ -266,6 +266,54 @@ export function blocklistGeneration(): number {
   return blocklistGen;
 }
 
+/**
+ * Whether a recent worker call for the given (session, worker) was rejected by
+ * the upstream as unauthenticated (`401`/`403`). Used by the standalone
+ * `lore import` CLI to fail-fast after the FIRST chunk hits a broken credential
+ * — otherwise a 71-chunk import burns 71 doomed requests + 71 Sentry captures
+ * before the loop ends with a generic, unhelpful "no response from the model"
+ * message.
+ *
+ * Pure read; no side effects. The session-less import worker is identified by
+ * `sessionID === "_unknown"`. `withinMs` defaults to 60 seconds — plenty of
+ * window for every chunk of a single import run to see the most-recent
+ * failure, while fresh-but-not-this-run failures (e.g. yesterday's stale key)
+ * don't bleed into today's run.
+ *
+ * Callers SHOULD also pass `sinceMs` (ms-epoch) to bound the check to the
+ * current run; otherwise a stale-but-still-within-`withinMs` failure from a
+ * PRIOR `lore import` invocation in the same process will falsely abort the
+ * next run on its first chunk. The standalone CLI captures `Date.now()` at
+ * the start of each run and passes that timestamp here. An omitted `sinceMs`
+ * falls back to "no lower bound" — convenient for unit tests, brittle in
+ * production.
+ *
+ * Distinct from {@link isAuthStale}: that predicate is consulted by
+ * `resolveAuth()` to drop a STALE credential from `getAuth()`; this predicate
+ * is consulted AFTER `llm.prompt` returned null to attribute the null to an
+ * upstream auth rejection so the caller can surface an actionable error.
+ */
+export function hasRecentAuthRejectedFailure(
+  sessionID: string,
+  workerID: WorkerID | (string & {}),
+  withinMs = 60_000,
+  sinceMs?: number,
+): boolean {
+  const entry = state.get(sessionID);
+  if (!entry) return false;
+  // `sinceMs` lets a fresh invocation ignore stale-but-unexpired failures
+  // recorded by an earlier invocation in this process. Recorded after
+  // runStart → counts; recorded before → ignored (a fresh credential might
+  // have made the failure moot).
+  if (sinceMs != null && entry.lastFailureAt < sinceMs) return false;
+  // has() is O(1); cheaper than maintaining a per-worker list. Workers are a
+  // small finite set today (lore-distill / lore-curator / …) so the Set
+  // membership check is plenty fast.
+  if (!entry.workerIDs.has(workerID)) return false;
+  if (now() - entry.lastFailureAt > withinMs) return false;
+  return entry.reasons.has("auth-rejected");
+}
+
 let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Injectable time source — tests can override. */

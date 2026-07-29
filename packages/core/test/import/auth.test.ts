@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { clearAuthProviders, readUsableAuth } from "../../src/import/auth";
 import { registerAuthProvider } from "../../src/import/auth";
+import { getOpenCodeActiveProvider } from "../../src/import/auth/opencode";
 import { opencodeAuth } from "../../src/import/auth/opencode";
 import { claudeCodeAuth } from "../../src/import/auth/claude-code";
 import { codexAuth } from "../../src/import/auth/codex";
@@ -183,6 +184,161 @@ describe("OpenCode auth reader", () => {
     mkdirSync(join(authFile(), ".."), { recursive: true });
     writeFileSync(authFile(), "not json{{{", "utf8");
     expect(readUsableAuth("opencode")).toEqual([]);
+  });
+
+  test("when auth.json has multiple providers and opencode.json names one as `model`, that credential wins (active-provider reorder)", () => {
+    // The motivating bug: Aditya's auth.json had stale `anthropic` (from
+    // before they switched) + current `openrouter`. The previous behavior
+    // picked whichever entry was first in JSON-iteration order (essentially
+    // oldest config) — typically the stale one. With `model = "openrouter/…"`
+    // set in opencode.json, the active-provider reorder pins openrouter first
+    // and the importer routes to the credential OpenCode is actually using.
+    writeJson(authFile(), {
+      anthropic: { type: "api", key: "sk-ant-stale" },
+      openrouter: { type: "api", key: "sk-or-current" },
+    });
+    const configFile = join(
+      process.env.XDG_CONFIG_HOME as string,
+      "opencode",
+      "opencode.json",
+    );
+    writeJson(configFile, { model: "openrouter/anthropic/claude-sonnet-5" });
+    const creds = readUsableAuth("opencode");
+    expect(creds[0]).toMatchObject({
+      scheme: "api-key",
+      value: "sk-or-current",
+      providerID: "openrouter",
+    });
+    expect(creds).toContainEqual({
+      scheme: "api-key",
+      value: "sk-ant-stale",
+      providerID: "anthropic",
+    });
+  });
+
+  test("active-provider reorder is a no-op when only one provider is on disk", () => {
+    writeJson(authFile(), { anthropic: { type: "api", key: "sk-ant-only" } });
+    const configFile = join(
+      process.env.XDG_CONFIG_HOME as string,
+      "opencode",
+      "opencode.json",
+    );
+    writeJson(configFile, { model: "anthropic/claude-sonnet-5" });
+    const creds = readUsableAuth("opencode");
+    expect(creds).toEqual([
+      { scheme: "api-key", value: "sk-ant-only", providerID: "anthropic" },
+    ]);
+  });
+
+  test("active-provider reorder leaves existing order intact when opencode.json is missing", () => {
+    // No opencode.json → no active provider → fall through to insertion
+    // order. The previous behavior is preserved for users who haven't
+    // customized their config (or who store it elsewhere).
+    writeJson(authFile(), {
+      anthropic: { type: "api", key: "sk-ant-a" },
+      openrouter: { type: "api", key: "sk-or-b" },
+    });
+    const creds = readUsableAuth("opencode");
+    expect(creds.map((c) => c.providerID)).toEqual(["anthropic", "openrouter"]);
+  });
+
+  test("active-provider reorder is a no-op when opencode.json names a provider NOT in auth.json", () => {
+    // User config says "use openai" but their auth.json only has openrouter.
+    // The reorder must NOT fabricate a credential — it can only pin an
+    // existing one. The user sees the openrouter credential via tier-2's
+    // routability filter (or the "no usable credential" guidance).
+    writeJson(authFile(), { openrouter: { type: "api", key: "sk-or-only" } });
+    const configFile = join(
+      process.env.XDG_CONFIG_HOME as string,
+      "opencode",
+      "opencode.json",
+    );
+    writeJson(configFile, { model: "openai/gpt-5-mini" });
+    const creds = readUsableAuth("opencode");
+    expect(creds).toEqual([
+      { scheme: "api-key", value: "sk-or-only", providerID: "openrouter" },
+    ]);
+  });
+});
+
+describe("getOpenCodeActiveProvider", () => {
+  // The provider-prefix lookup that powers the active-provider reorder.
+  // Without this, the importer blindly picks the first routable entry from
+  // auth.json — usually the wrong provider when the user has rotated their
+  // config but left an old credential in auth.json.
+  const configFile = () =>
+    join(process.env.XDG_CONFIG_HOME as string, "opencode", "opencode.json");
+
+  test("returns null when no opencode.json is present", () => {
+    // XDG_CONFIG_HOME points at an empty tmp dir → no config file exists.
+    expect(getOpenCodeActiveProvider()).toBeNull();
+  });
+
+  test("extracts the provider prefix from `model` (anthropic/claude-sonnet-5 → anthropic)", () => {
+    writeJson(configFile(), { model: "anthropic/claude-sonnet-5" });
+    expect(getOpenCodeActiveProvider()).toBe("anthropic");
+  });
+
+  test("extracts provider for `openrouter/anthropic/claude-…` (slash in model id is preserved)", () => {
+    writeJson(configFile(), {
+      model: "openrouter/anthropic/claude-sonnet-5",
+    });
+    expect(getOpenCodeActiveProvider()).toBe("openrouter");
+  });
+
+  test("falls back to `small_model` when `model` is unset", () => {
+    writeJson(configFile(), { small_model: "anthropic/claude-haiku-4-5" });
+    expect(getOpenCodeActiveProvider()).toBe("anthropic");
+  });
+
+  test("resolves {env:VAR} substitution in `model`", () => {
+    // OpenCode supports `{env:OPENCODE_MODEL}` substitution in config strings;
+    // we follow the same rule so an env-driven model still resolves its
+    // provider prefix correctly.
+    setEnv("OPENCODE_MODEL", "openrouter/some/model");
+    writeJson(configFile(), { model: "{env:OPENCODE_MODEL}" });
+    expect(getOpenCodeActiveProvider()).toBe("openrouter");
+  });
+
+  test("ignores config with non-string or empty `model`", () => {
+    writeJson(configFile(), { model: 123 });
+    expect(getOpenCodeActiveProvider()).toBeNull();
+    writeJson(configFile(), { model: "" });
+    expect(getOpenCodeActiveProvider()).toBeNull();
+  });
+
+  test("ignores config with `model` lacking a `/` (no provider prefix)", () => {
+    // "claude-sonnet-5" alone is ambiguous (could be any provider) — must
+    // not be mis-classified. Caller falls back to the first routable
+    // auth.json entry in that case.
+    writeJson(configFile(), { model: "claude-sonnet-5" });
+    expect(getOpenCodeActiveProvider()).toBeNull();
+  });
+
+  test("maps the minimax-coding-plan alias to minimax", () => {
+    // The same normalization as on-disk auth.json keys — keeps the active-
+    // provider detection consistent with how auth.json entries are read.
+    writeJson(configFile(), {
+      model: "minimax-coding-plan/anthropic/claude-sonnet-5",
+    });
+    expect(getOpenCodeActiveProvider()).toBe("minimax");
+  });
+
+  test("project-local opencode.json overrides the global one (OpenCode config precedence)", () => {
+    // OpenCode's documented precedence (opencode.ai/docs/config): managed >
+    // project > user config > remote > built-in. A user with a stale global
+    // `model: "anthropic/..."` plus a project-local `model: "openrouter/..."`
+    // is currently using openrouter — we must read the project config FIRST
+    // or the global setting shadows the project override. Seer flagged this
+    // as a HIGH-severity bug; the fix is to swap the candidate order.
+    const globalCfg = configFile();
+    const projectCfg = join(process.cwd(), "opencode.json");
+    writeJson(globalCfg, { model: "anthropic/claude-sonnet-5" });
+    writeJson(projectCfg, { model: "openrouter/anthropic/claude-sonnet-5" });
+    expect(getOpenCodeActiveProvider()).toBe("openrouter");
+    // Flip: project overrides global regardless of file mtime.
+    writeJson(projectCfg, { model: "anthropic/claude-haiku-4-5" });
+    expect(getOpenCodeActiveProvider()).toBe("anthropic");
   });
 });
 

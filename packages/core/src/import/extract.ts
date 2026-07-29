@@ -61,6 +61,20 @@ export type ExtractionResult = {
    * extraction never authenticated / never ran for real.
    */
   chunksAnswered: number;
+  /**
+   * True when the loop terminated EARLY after a chunk's LLM call returned null
+   * AND a recent worker failure was attributed to an upstream auth rejection
+   * (HTTP 401/403). The intact credential-burn path here would have processed
+   * every remaining chunk with the same broken key — N doomed requests + N
+   * Sentry captures for a 71-chunk import. Aborting lets the caller surface an
+   * actionable "your credential is invalid" error instead of the generic
+   * "no response from the model" message.
+   *
+   * Implies `chunksAnswered === 0`. Always false on the empty-chunks fast-path
+   * (we never even start the loop in that case). Distinct from `chunksFailed`:
+   * abortedByAuth means we CHOSE to stop, not that every chunk happened to fail.
+   */
+  abortedByAuth: boolean;
 };
 
 /**
@@ -77,6 +91,21 @@ export async function extractKnowledge(input: {
   sessionID?: string;
   model?: { providerID: string; modelID: string };
   onProgress?: (progress: ExtractionProgress) => void;
+  /**
+   * Optional peek provided by the gateway-side caller. Returns true when a
+   * recent worker call (within this import run) was rejected by the upstream
+   * as auth-failed (HTTP 401/403). When `llm.prompt` returns null AND the
+   * peek reports true, the loop aborts immediately and the result's
+   * `abortedByAuth` is set — burning 70 more chunks with the same broken key
+   * is worse than unhelpful (it's expensive, alerts Sentry, and replaces a
+   * clean actionable error with a hostile log storm). Core can't peek
+   * worker-health itself (cross-package), so the gateway injects this.
+   *
+   * Defaults to a permissive always-false probe when omitted — preserves the
+   * existing behavior for callers that don't care (e.g. tests of the chunk
+   * loop in isolation).
+   */
+  wasRecentChunkAuthRejected?: () => boolean;
 }): Promise<ExtractionResult> {
   const result: ExtractionResult = {
     created: 0,
@@ -85,10 +114,20 @@ export async function extractKnowledge(input: {
     chunksProcessed: 0,
     chunksFailed: 0,
     chunksAnswered: 0,
+    abortedByAuth: false,
   };
+
+  if (input.chunks.length === 0) {
+    return result;
+  }
 
   // Sort chunks chronologically so knowledge builds up naturally
   const sorted = [...input.chunks].sort((a, b) => a.timestamp - b.timestamp);
+
+  // Default probe: when the gateway doesn't inject one, NEVER trip the
+  // auth-abort. This keeps the existing semantics for tests and for any
+  // future caller that doesn't track worker failures.
+  const probeAuth = input.wasRecentChunkAuthRejected ?? (() => false);
 
   for (let i = 0; i < sorted.length; i++) {
     const chunk = sorted[i];
@@ -131,6 +170,23 @@ export async function extractKnowledge(input: {
         result.created += applied.created;
         result.updated += applied.updated;
         result.deleted += applied.deleted;
+      } else if (probeAuth()) {
+        // `llm.prompt` returned null AND we just learned the upstream said
+        // 401. The remaining chunks will hit the same broken credential —
+        // stop here, attribute the abort to auth, and let the caller surface
+        // an actionable fix rather than a 70-line hostile log. Note we still
+        // call `onProgress` below with the partial total so the CLI's spinner
+        // can clear cleanly instead of leaving the \r in place.
+        result.abortedByAuth = true;
+        result.chunksFailed++;
+        result.chunksProcessed++;
+        input.onProgress?.({
+          current: i + 1,
+          total: sorted.length,
+          created: result.created,
+          updated: result.updated,
+        });
+        return result;
       }
 
       result.chunksProcessed++;

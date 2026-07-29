@@ -25,10 +25,11 @@ vi.mock("../src/cli/start", () => ({
 // the constructor args so we can assert the upstreams map, defaultModel, and
 // the dedicatedWorkerKey option that #1454 plumbs through.
 const llmClientCalls: unknown[][] = [];
+let promptBehavior: () => Promise<string | null> = async () => "[]";
 vi.mock("../src/llm-adapter", () => ({
   createGatewayLLMClient: (...args: unknown[]) => {
     llmClientCalls.push(args);
-    return { prompt: vi.fn(async () => "[]") };
+    return { prompt: vi.fn(promptBehavior) };
   },
 }));
 
@@ -36,6 +37,11 @@ import { commandImport } from "../src/cli/import";
 import { setLastSeenAuth, _resetAuthForTest } from "../src/auth";
 import { load as loadConfig } from "@loreai/core";
 import { writeFileSync } from "node:fs";
+import {
+  recordWorkerFailure,
+  hasRecentAuthRejectedFailure,
+  _resetForTest as _resetWorkerHealth,
+} from "../src/worker-health";
 
 const AIDER_FIXTURE = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -60,6 +66,7 @@ describe("commandImport (local mode) — auth pre-flight", () => {
     delete process.env.LORE_REMOTE_URL; // force local mode
     delete process.env.LORE_WORKER_MODEL;
     _resetAuthForTest();
+    _resetWorkerHealth();
     startConfig = {
       upstreamAnthropic: "https://api.anthropic.com",
       upstreamOpenAI: "https://api.openai.com",
@@ -69,6 +76,7 @@ describe("commandImport (local mode) — auth pre-flight", () => {
     logs.length = 0;
     errs.length = 0;
     llmClientCalls.length = 0;
+    promptBehavior = async () => "[]";
     logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
       logs.push(a.join(" "));
     });
@@ -84,6 +92,7 @@ describe("commandImport (local mode) — auth pre-flight", () => {
     vi.restoreAllMocks();
     rmSync(project, { recursive: true, force: true });
     _resetAuthForTest();
+    _resetWorkerHealth();
     // Reset process-global config to a clean empty dir so a test that wrote a
     // `.lore.json` (e.g. the workerModel case) can't leak into later tests.
     await loadConfig(tmpdir());
@@ -252,5 +261,82 @@ describe("commandImport (local mode) — auth pre-flight", () => {
 
     expect(errs.join("\n")).not.toContain("Can't import");
     expect(logs.join("\n")).toContain("Reading");
+  });
+
+  // ------------------------------------------------------------------------
+  // Fail-fast on upstream auth-rejected (Aditya / OpenCode OpenCode 401 storm)
+  // ------------------------------------------------------------------------
+  //
+  // When the LLM call is rejected by the upstream as auth-failed (HTTP 401/403)
+  // — typically because the on-disk auth.json key is stale/rotated/wrong — the
+  // extraction loop MUST abort after the FIRST chunk and surface an actionable,
+  // credential-fix-shaped error. The previous behavior silently looped through
+  // every chunk and produced only a hostile log storm before settling on "no
+  // response from the model". This regression guard tests the full wiring:
+  // the LLM returns null, worker-health records an auth-rejected failure, the
+  // extractor probes worker-health, the loop aborts, and commandImport prints
+  // the actionable message.
+  test("on-disk api-key rejected by upstream → fail-fast with actionable credential-fix error (no 71-chunk storm)", async () => {
+    // Auth gate must pass BEFORE the LLM is called: inject a session
+    // credential so the auth chain resolves to "anthropic" and the import
+    // loop actually starts. Without this, the command's pre-flight guard
+    // would short-circuit with "no usable credential found" and never reach
+    // the LLM — masking the regression we're testing here.
+    setLastSeenAuth(
+      { scheme: "api-key", value: "sk-ant-broken-real-key" },
+      "anthropic",
+    );
+
+    // Mimic the real adapter: every prompt() returns null AND records an
+    // auth-rejected failure for "lore-import" (mirrors the adapter's path
+    // at llm-adapter.ts:2456-2460). Recording it INSIDE the mocked prompt —
+    // rather than pre-seeding — preserves the production timing: the
+    // failure is recorded DURING commandImport, after `runStartedAt` has
+    // already been captured. The probe's `sinceMs` bound therefore sees
+    // this run's failure (and ignores anything stale from a prior run).
+    let promptCalls = 0;
+    promptBehavior = async () => {
+      promptCalls++;
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      return null;
+    };
+
+    await commandImport([], { project, agent: "aider", yes: true });
+
+    // The Aider fixture exposes a single chunk; a fail-fast should fire
+    // after exactly one prompt call. If the loop drained the queue, the
+    // fail-fast contract regressed — flag it.
+    expect(promptCalls).toBe(1);
+
+    // Sanity: the exact predicate commandImport injects must see what the
+    // mocked prompt recorded (helpful for future regressions — not
+    // load-bearing).
+    expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(true);
+
+    const out = errs.join("\n");
+    // Actionable, credential-fix-shaped message replaces the old generic
+    // "no response from the model".
+    expect(out).toContain("credential Lore is using is invalid");
+    expect(out).toContain("HTTP 401");
+    expect(out).toContain("LORE_WORKER_API_KEY");
+    // Mentions the env-credential fallback hint so an OpenRouter / proxy
+    // user gets pointed at the right env var too.
+    expect(out).toContain("ANTHROPIC_AUTH_TOKEN");
+    // Names the agent whose credential is being rejected so the user knows
+    // exactly which block of advice applies (Aider here; the home run is
+    // OpenCode — adapt as more agents are added).
+    expect(out).toContain("Aider on-disk auth");
+
+    // Old behavior would have printed "No response from the model for" — the
+    // NEW path REPLACES that line for auth-rejected aborts. Never both.
+    expect(logs.join("\n")).not.toContain("No response from the model");
+
+    // Gateway still torn down cleanly on the way out (owned → shutdown).
+    expect(shutdownMock).toHaveBeenCalled();
+
+    // The summary tail tallies the abort as failures so the dashboard sees
+    // the run's footprint — useful when callers grep "X chunks failed" to
+    // gauge whether an import actually ran.
+    expect(logs.join("\n")).toContain("(1 chunks failed)");
   });
 });

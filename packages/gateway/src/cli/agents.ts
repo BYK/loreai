@@ -179,9 +179,18 @@ export function captureUserEnvCredential(
   token: string;
   scheme: "bearer" | "api-key";
   upstreamUrl: string | null;
+  /**
+   * Name of the env var that produced the captured token. Lets the caller
+   * (e.g. `resolveAgentImportAuth` for opencode) map the credential back
+   * to a provider family — env vars are provider-shaped
+   * (ANTHROPIC_API_KEY → anthropic, OPENAI_API_KEY → openai, …) but the
+   * token alone can't disambiguate.
+   */
+  envVarName: string;
 } | null {
   if (!agent.authTokenEnvVars) return null;
   let picked: { token: string; scheme: "bearer" | "api-key" } | null = null;
+  let envVarName: string | null = null;
   for (const { var: key, scheme } of agent.authTokenEnvVars) {
     const raw = env[key];
     if (!raw) continue;
@@ -189,9 +198,10 @@ export function captureUserEnvCredential(
     const token = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
     if (!token) continue;
     picked = { token, scheme };
+    envVarName = key;
     break;
   }
-  if (!picked) return null;
+  if (!picked || !envVarName) return null;
   // Capture the paired base URL (first defined + valid), if any.
   let upstreamUrl: string | null = null;
   for (const key of agent.upstreamEnvVars ?? []) {
@@ -201,7 +211,7 @@ export function captureUserEnvCredential(
       break;
     }
   }
-  return { ...picked, upstreamUrl };
+  return { ...picked, upstreamUrl, envVarName };
 }
 
 /**
@@ -426,6 +436,31 @@ export const AGENTS: AgentDef[] = [
     envVars: (_url, _cwd) => ({
       OPENCODE_CONFIG_CONTENT: OPENCODE_PLUGIN_CONFIG,
     }),
+    // OpenCode reads auth.json FIRST, but the OpenAI/Anthropic/Google
+    // @ai-sdk clients it spawns ALSO honor the well-known shell env vars
+    // below — and shell env wins over auth.json for those SDKs. When the
+    // user has `ANTHROPIC_API_KEY=…` set in their shell, OpenCode's
+    // actual model calls use it (NOT the rotated/old key on disk),
+    // so `lore import` must surface that env credential too — otherwise
+    // we'd silently 401 on a stale key while the live `lore run` works.
+    // Order matters: the bearer/token forms win over the API-key form for
+    // the same provider family, matching Claude Code's documented
+    // precedence (carried as a parity rule).
+    //
+    // Note: `authTokenEnvVars` does NOT identify the provider itself; the
+    // `resolveAgentImportAuth` env-credential branch maps these onto the
+    // agent's `wireProtocol` (anthropic/openai) by default. For OpenCode
+    // we want provider-mapping driven by `~/.config/opencode/opencode.json`'s
+    // `model` field. The new env-credential lookup in `import.ts` does
+    // that mapping by consulting the active provider.
+    authTokenEnvVars: [
+      { var: "ANTHROPIC_AUTH_TOKEN", scheme: "bearer" },
+      { var: "ANTHROPIC_API_KEY", scheme: "api-key" },
+      { var: "OPENAI_API_KEY", scheme: "bearer" },
+      { var: "OPENROUTER_API_KEY", scheme: "bearer" },
+      { var: "GEMINI_API_KEY", scheme: "bearer" },
+      { var: "GOOGLE_API_KEY", scheme: "bearer" },
+    ],
   },
   {
     name: "hermes",

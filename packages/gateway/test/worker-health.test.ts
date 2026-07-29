@@ -19,6 +19,7 @@ import {
   isCapabilityEmpty,
   recordEmptyWorkerResponse,
   clearEmptyWorkerStreak,
+  hasRecentAuthRejectedFailure,
   _resetForTest,
   _setNowForTest,
   type FailureReason,
@@ -862,6 +863,105 @@ describe("worker-health", () => {
       const warning = getDegradationWarning("s-auth");
       expect(warning).not.toBeNull();
       expect(warning).toContain("authentication has gone stale");
+    });
+  });
+
+  // hasRecentAuthRejectedFailure is consumed by extractKnowledge's
+  // wasRecentChunkAuthRejected probe to fail-fast after the FIRST chunk of a
+  // `lore import` run hits an auth-rejected 401. Without it, a 71-chunk import
+  // would burn 71 doomed requests + 71 Sentry captures before exiting with
+  // a generic "no response from the model" message.
+  describe("hasRecentAuthRejectedFailure", () => {
+    test("no failures → false (the empty-state default)", () => {
+      expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(
+        false,
+      );
+    });
+
+    test("auth-rejected failure recorded → true within the window", () => {
+      const t0 = 3_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      // Re-read at t0+5s — well within the default 60s window.
+      _setNowForTest(() => t0 + 5_000);
+      expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(
+        true,
+      );
+    });
+
+    test("failure older than `withinMs` → false (window expired)", () => {
+      const t0 = 4_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      // Beyond the default 60-second window.
+      _setNowForTest(() => t0 + 61_000);
+      expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(
+        false,
+      );
+    });
+
+    test("non-auth reasons → false (the probe is auth-rejected-specific)", () => {
+      const t0 = 5_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("_unknown", "lore-import", "no-response");
+      recordWorkerFailure("_unknown", "lore-import", "upstream-error");
+      recordWorkerFailure("_unknown", "lore-import", "rate-limit");
+      expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(
+        false,
+      );
+    });
+
+    test("different workerID → false (scoped per worker)", () => {
+      const t0 = 6_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("_unknown", "lore-curator", "auth-rejected");
+      expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(
+        false,
+      );
+    });
+
+    test("different sessionID → false (scoped per session)", () => {
+      const t0 = 7_000_000;
+      _setNowForTest(() => t0);
+      recordWorkerFailure("other-session", "lore-import", "auth-rejected");
+      expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(
+        false,
+      );
+    });
+
+    test("`sinceMs` ignores failures recorded before that timestamp (cross-run isolation)", () => {
+      // The motivating leak: a stale-but-still-within-`withinMs` failure
+      // from a PRIOR `lore import` invocation in the same process would
+      // falsely abort the next run on its first chunk (the run hasn't even
+      // recorded a failure yet). `sinceMs` bounds the check to "failures
+      // recorded at or after this run's start" so a fresh run isn't
+      // poisoned by an earlier one.
+      const t0 = 8_000_000;
+      _setNowForTest(() => t0);
+      // Prior run's failure (recorded before this run starts).
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      // Re-read at t0+10s — the failure is recent (10s < 60s window) and
+      // WOULD trip the probe without `sinceMs`.
+      _setNowForTest(() => t0 + 10_000);
+      const runStartedAt = t0 + 10_000;
+      expect(
+        hasRecentAuthRejectedFailure(
+          "_unknown",
+          "lore-import",
+          60_000,
+          runStartedAt,
+        ),
+      ).toBe(false);
+      // Once the current run records its OWN failure, the probe fires.
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      expect(
+        hasRecentAuthRejectedFailure(
+          "_unknown",
+          "lore-import",
+          60_000,
+          runStartedAt,
+        ),
+      ).toBe(true);
     });
   });
 });

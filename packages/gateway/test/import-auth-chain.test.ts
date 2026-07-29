@@ -445,3 +445,110 @@ describe("buildNeedsModelGuidance", () => {
     expect(msg).toContain("openrouter, deepseek");
   });
 });
+
+describe("resolveAgentImportAuth — OpenCode env-vs-disk preference (active provider)", () => {
+  // The user's #1 complaint: `lore import` was 401-storming on a stale
+  // auth.json key because it didn't match what OpenCode ACTUALLY uses today.
+  // Two coordinated fixes:
+  //   (a) readUsableAuth reorders auth.json entries so the user's CURRENTLY
+  //       CONFIGURED provider (per opencode.json's `model`/`small_model`)
+  //       comes first. Without (a), the importer picks whichever entry was
+  //       first in JSON-iteration order — typically the oldest.
+  //   (b) For OpenCode specifically, a shell-env credential for the active
+  //       provider wins over the on-disk credential for that provider —
+  //       matches OpenCode's own env-first precedence in its @ai-sdk clients.
+  //       Without (b), a user with ANTHROPIC_API_KEY set + a stale
+  //       `anthropic: { key }` in auth.json gets 401-stormed even though
+  //       `lore run opencode` succeeds (because OpenCode reads the env var,
+  //       not auth.json).
+
+  function writeOpenCodeConfig(cfg: unknown): void {
+    const dir = join(process.env.XDG_CONFIG_HOME as string, "opencode");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "opencode.json"), JSON.stringify(cfg), "utf8");
+  }
+
+  test("(a) auth.json has both stale anthropic + current openrouter; opencode.json model=openrouter → openrouter wins", () => {
+    writeOpenCodeAuth({
+      anthropic: { type: "api", key: "sk-ant-stale" },
+      openrouter: { type: "api", key: "sk-or-current" },
+    });
+    writeOpenCodeConfig({ model: "openrouter/anthropic/claude-sonnet-5" });
+    // The active-provider reorder pins openrouter first, but openrouter has
+    // no default worker model → the result is the needsModel signal, which
+    // still names the CORRECT (active) provider. If the reorder regressed,
+    // anthropic would be picked — that has a default model — and the test
+    // would see a usable credential for anthropic instead.
+    const res = resolveAgentImportAuth("opencode", undefined, undefined);
+    expect(res).toEqual({ needsModel: "openrouter" });
+  });
+
+  test("(b) ANTHROPIC_API_KEY set + stale anthropic in auth.json + opencode.json model=anthropic → env wins", () => {
+    // The user has ANTHROPIC_API_KEY in their shell (the key OpenCode's
+    // Anthropic SDK actually uses) + an old `anthropic: { key }` left over
+    // from a previous config. Tier-2 on-disk would pick the stale key and
+    // 401-storm; the env preference MUST route to the env credential.
+    writeOpenCodeAuth({ anthropic: { type: "api", key: "sk-ant-stale" } });
+    writeOpenCodeConfig({ model: "anthropic/claude-sonnet-5" });
+    setEnv("ANTHROPIC_API_KEY", "sk-ant-env-fresh");
+    // The env credential wins: returned value is the env-var key, not the
+    // on-disk one. The model uses anthropic's default (anthropic has a
+    // default), so we get a usable auth (not needsModel).
+    const ok = usable(resolveAgentImportAuth("opencode", undefined, undefined));
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.getAuth()).toEqual({
+      scheme: "api-key",
+      value: "sk-ant-env-fresh",
+    });
+  });
+
+  test("(b) ANTHROPIC_API_KEY set but opencode.json points elsewhere → on-disk wins (env does NOT auto-override other providers)", () => {
+    // The env preference is scoped to the ACTIVE provider — a stray
+    // ANTHROPIC_API_KEY in the shell must NOT be used when the user is
+    // actually running openrouter. This would route the wrong key to the
+    // wrong provider. openrouter has no default model → needsModel.
+    writeOpenCodeAuth({ openrouter: { type: "api", key: "sk-or-only" } });
+    writeOpenCodeConfig({ model: "openrouter/some/model" });
+    setEnv("ANTHROPIC_API_KEY", "sk-ant-unused");
+    const res = resolveAgentImportAuth("opencode", undefined, undefined);
+    // needsModel names openrouter — proving the env did NOT leak into the
+    // credential. If the env had been used, we'd see anthropic routing.
+    expect(res).toEqual({ needsModel: "openrouter" });
+  });
+
+  test("env credential with NO on-disk fallback is still picked up via tier 3 (e.g. fresh machine, never ran `opencode auth login`)", () => {
+    writeOpenCodeAuth({}); // no on-disk credentials
+    writeOpenCodeConfig({ model: "anthropic/claude-sonnet-5" });
+    setEnv("ANTHROPIC_API_KEY", "sk-ant-only-env");
+    const ok = usable(resolveAgentImportAuth("opencode", undefined, undefined));
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.getAuth()).toEqual({
+      scheme: "api-key",
+      value: "sk-ant-only-env",
+    });
+  });
+
+  test("ANTHROPIC_AUTH_TOKEN (bearer) wins over ANTHROPIC_API_KEY (api-key) — matches Claude Code precedence parity", () => {
+    writeOpenCodeConfig({ model: "anthropic/claude-sonnet-5" });
+    setEnv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat-env");
+    setEnv("ANTHROPIC_API_KEY", "sk-ant-apikey-env");
+    const ok = usable(resolveAgentImportAuth("opencode", undefined, undefined));
+    expect(ok.getAuth()).toEqual({
+      scheme: "bearer",
+      value: "sk-ant-oat-env",
+    });
+  });
+
+  test("(a)+(b) combined: stale anthropic on-disk + fresh ANTHROPIC_API_KEY in shell + opencode.json model=anthropic → env wins", () => {
+    // End-to-end smoke for the original user complaint. Without these
+    // fixes, the importer picks `sk-ant-stale` from auth.json and
+    // 401-storms; with them, it picks `sk-ant-fresh` from the shell and
+    // routes successfully.
+    writeOpenCodeAuth({ anthropic: { type: "api", key: "sk-ant-stale" } });
+    writeOpenCodeConfig({ model: "anthropic/claude-sonnet-5" });
+    setEnv("ANTHROPIC_API_KEY", "sk-ant-fresh");
+    const ok = usable(resolveAgentImportAuth("opencode", undefined, undefined));
+    expect(ok.model.providerID).toBe("anthropic");
+    expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "sk-ant-fresh" });
+  });
+});
