@@ -155,7 +155,12 @@ export async function fetchRepoContributors(
     // 403/404: skip the repo (caller can't read it / no such repo).
     if (resp.status === 403 || resp.status === 404) return null;
     // 202: stats still computing — caller can retry; treat as empty and don't fail the batch.
-    if (resp.status === 202) return [];
+    // 204: repo is readable but GitHub returned no body (typically an empty repo with no
+    //      commits). Without this branch, `resp.ok === true` and `await resp.json()`
+    //      throws `SyntaxError: Unexpected end of JSON input` on the empty body, which
+    //      the outer per-repo try/catch silently swallows as "inaccessible".
+    //      Documented intent (see function docstring) was to return [] for both 202 and 204.
+    if (resp.status === 202 || resp.status === 204) return [];
     if (!resp.ok)
       throw new Error(
         `github /repos/${repo.owner}/${repo.name}/contributors: ${resp.status}`,
