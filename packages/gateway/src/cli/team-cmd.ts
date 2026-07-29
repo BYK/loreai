@@ -26,8 +26,8 @@ import {
   claimOrgDomain,
   createTeam,
   createTeamInvite,
-  discoverGitHubCollaborators,
-  distinctCollaborators,
+  discoverGitHubContributors,
+  distinctContributors,
   isEmailAddress,
   listDomainJoinRequests,
   listTeams,
@@ -40,7 +40,7 @@ import {
 } from "../team";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <scope>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite <scope> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
+  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <team>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite [<scope>] <invitee> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] | approve <id> | reject <id> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
 
 export async function commandTeam(
   positionals: string[],
@@ -101,9 +101,14 @@ export async function commandTeam(
         break;
       }
       case "discover": {
-        // E-5-d (#630): find which of the caller's GitHub repo collaborators are already on Lore.
+        // E-5-d (#630): find which of the caller's GitHub repo contributors are already on Lore.
         // Auto-detects the git remote when no repo arguments given, passes it to the Edge Function
         // so private org repos are scanned (not just the caller's own repos first-page).
+        //
+        // Uses the CONTRIBUTORS endpoint (default-branch commit attribution), NOT collaborators:
+        // /collaborators returns "everyone with at least triage access" — which on a private org
+        // repo is effectively the org roster. /contributors returns "who actually committed" which
+        // matches the admin's intent when scanning for teammates.
         const explicitRepos = positionals
           .slice(1)
           .filter((p) => !p.startsWith("--"));
@@ -118,7 +123,7 @@ export async function commandTeam(
           }
         }
         console.log(
-          `Discovering collaborators for ${repos ? repos.join(", ") : "your repos"}…`,
+          `Discovering contributors for ${repos ? repos.join(", ") : "your repos"}…`,
         );
         let providerToken: string;
         // Use the FRESH client bound to the just-refreshed session — the outer `client` from
@@ -135,21 +140,21 @@ export async function commandTeam(
           process.exitCode = 1;
           return;
         }
-        const found = await discoverGitHubCollaborators(
+        const found = await discoverGitHubContributors(
           freshClient,
           providerToken,
           repos,
         );
         if (!found || found.length === 0) {
-          console.log("No accessible repos with collaborators found.");
+          console.log("No accessible repos with contributors found.");
           break;
         }
         let onLoreTotal = 0;
         let offLoreTotal = 0;
         for (const r of found) {
-          if (r.collaborators.length === 0) continue;
+          if (r.contributors.length === 0) continue;
           console.log(`\n${r.repo}`);
-          for (const c of r.collaborators) {
+          for (const c of r.contributors) {
             if (c.onLore) onLoreTotal++;
             else offLoreTotal++;
             console.log(
@@ -158,10 +163,10 @@ export async function commandTeam(
           }
         }
 
-        // E-5-d-2: --invite <scope> mints an invite per DISTINCT collaborator so the admin can hand
+        // E-5-d-2: --invite <team> mints an invite per DISTINCT contributor so the admin can hand
         // out join links. Invite-only for everyone (on-Lore or not) — we never expose Lore user_ids,
         // so there is no direct auto-add; an on-Lore invitee just gets a frictionless `accept`.
-        // GitHub's API returns no collaborator emails, so links are printed rather than auto-emailed.
+        // GitHub's API returns no contributor emails, so links are printed rather than auto-emailed.
         const inviteRef = values.invite as string | undefined;
         if (inviteRef !== undefined) {
           // A trailing `--invite` with no value parses as `true` under strict:false — reject it
@@ -194,7 +199,7 @@ export async function commandTeam(
             return;
           }
           // Only admins may mint invites (server enforces this too). Pre-check the local mirror so an
-          // editor gets ONE clear message instead of N identical per-collaborator RPC rejections.
+          // editor gets ONE clear message instead of N identical per-contributor RPC rejections.
           if (scopeMemberRole(scope.id, user.user_id) !== "admin") {
             console.error(
               `\nYou must be an admin of "${scope.name ?? scope.id}" to invite members.`,
@@ -204,15 +209,15 @@ export async function commandTeam(
           }
           const inviteRole =
             (values.role as string) === "viewer" ? "viewer" : "editor";
-          const people = distinctCollaborators(found);
+          const people = distinctContributors(found);
           if (people.length === 0) {
             console.log(
-              "\nNo collaborators to invite (the accessible repos have none). Nothing minted.",
+              "\nNo contributors to invite (the accessible repos have none). Nothing minted.",
             );
             break;
           }
           console.log(
-            `\nMinting ${inviteRole} invites to "${scope.name ?? scope.id}" for ${people.length} collaborator${people.length === 1 ? "" : "s"}:`,
+            `\nMinting ${inviteRole} invites to "${scope.name ?? scope.id}" for ${people.length} contributor${people.length === 1 ? "" : "s"}:`,
           );
           for (const c of people) {
             try {
@@ -231,16 +236,16 @@ export async function commandTeam(
             }
           }
           console.log(
-            "\nShare each link with the matching collaborator (GitHub doesn't expose their email). " +
+            "\nShare each link with the matching contributor (GitHub doesn't expose their email). " +
               "To email an address directly, use `lore team invite <scope> --email <addr>`.",
           );
           break;
         }
 
         console.log(
-          `\n${onLoreTotal} collaborator${onLoreTotal === 1 ? "" : "s"} already on Lore, ` +
-            `${offLoreTotal} not yet. Invite them with \`lore team discover --invite <scope>\` ` +
-            "or `lore team invite <scope> --email <addr>`.",
+          `\n${onLoreTotal} contributor${onLoreTotal === 1 ? "" : "s"} already on Lore, ` +
+            `${offLoreTotal} not yet. Invite them with \`lore team discover --invite <team>\` ` +
+            "or `lore team invite <invitee>` from a project linked to a team.",
         );
         break;
       }
@@ -291,17 +296,85 @@ export async function commandTeam(
         break;
       }
       case "invite": {
-        const scope = positionals[1];
-        if (!scope) return usage();
+        if (!positionals[1]) return usage();
         const role = (values.role as string) ?? "editor";
         if (role !== "editor" && role !== "viewer") return usage();
-        const hint = values.email as string | undefined;
+        const user = await getCurrentUser();
+        if (!user) {
+          console.error("Not logged in — run `lore login` first.");
+          process.exitCode = 1;
+          return;
+        }
+        const p1 = positionals[1];
+        const p2 = positionals[2];
+        // Resolve scope: positional[1] wins if it's a UUID OR a writable team name (existing
+        // behavior). If positional[2] is also present, treat positional[1] strictly as scope and
+        // positional[2] as the invitee hint (the unambiguous two-positional form). Otherwise, when
+        // positional[1] doesn't resolve as a scope AND the cwd (or --project path) is linked to a
+        // team, use the linked team with positional[1] recorded as the invitee hint — the intuitive
+        // case of `lore team invite <someone>` from a linked cwd.
+        let scopeRef: string | null;
+        let inviteeHint: string | undefined;
+        if (p2) {
+          scopeRef = p1;
+          inviteeHint = p2;
+        } else {
+          const direct = resolveWritableScope(p1, user.user_id);
+          if (direct) {
+            scopeRef = p1;
+          } else {
+            const projectPath = resolve(
+              (values.project as string) ?? process.cwd(),
+            );
+            const pid = projectId(projectPath);
+            const linked = pid ? projectScope(pid) : null;
+            const linkedScope = linked
+              ? resolveWritableScope(linked, user.user_id)
+              : null;
+            if (linkedScope) {
+              scopeRef = linked;
+              inviteeHint = p1;
+            } else {
+              scopeRef = null;
+            }
+          }
+        }
+        if (!scopeRef) {
+          console.error(
+            `\nNo team to invite to. Either:\n` +
+              `  - link this project first: lore team link <team>  (then lore team invite <invitee>)\n` +
+              `  - or pass the team explicitly: lore team invite <team> [<invitee>]\n` +
+              `See lore team list for teams you admin.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const scope = resolveWritableScope(scopeRef, user.user_id);
+        if (!scope) {
+          console.error(
+            `\nNo team "${scopeRef}" you can write to. See \`lore team list\`.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        // Only admins may mint invites (server enforces this too). Pre-check the local mirror so an
+        // editor gets ONE clear message instead of an opaque RPC rejection.
+        if (scopeMemberRole(scope.id, user.user_id) !== "admin") {
+          console.error(
+            `\nYou must be an admin of "${scope.name ?? scope.id}" to invite members.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const email = values.email as string | undefined;
+        // --email takes precedence as the hint label; otherwise the invitee positional hint.
+        const hint = email ?? inviteeHint;
         const offline = values.offline === true;
-        const token = await createTeamInvite(client, scope, role, hint, {
+        const token = await createTeamInvite(client, scope.id, role, hint, {
           offline,
         });
-        // E-5-e: if --email is a real address, email the join link. A send failure NEVER loses the
-        // invite — the token/link is always still printed.
+        // E-5-e: if the resolved hint is a real email, email the join link. A send failure NEVER
+        // loses the invite — the token/link is always still printed.
         const willEmail = !!hint && isEmailAddress(hint);
         const emailed = willEmail
           ? await sendInviteEmail(client, token, hint)

@@ -106,10 +106,11 @@ supabase functions deploy github-discover
   deploy or GitHub error never fails `lore login`; it simply retries on the next login.
 
 - **`github-discover`** (E-5-d, #630 Slice 1) — reads the caller's GitHub repos and their
-  collaborators, then reveals which collaborators already have a Lore account. Used by
-  `lore team discover`. Like `github-provision`, it verifies the JWT and binds the
+  default-branch contributors, then reveals which contributors already have a Lore account.
+  Used by `lore team discover`. Like `github-provision`, it verifies the JWT and binds the
   `provider_token` to the caller's GitHub identity. Requires `read:org` (org/team mirroring)
-  **and** `repo` (to list collaborators on private repos). Backed by migration `0050`
+  **and** `repo` (to list contributors on private repos — the `/contributors` endpoint is
+  per-repo just like `/collaborators`). Backed by migration `0050`
   (`lore_users_for_github_ids` service-role RPC).
 
 ## Observability (Sentry)

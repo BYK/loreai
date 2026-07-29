@@ -27,29 +27,34 @@ export interface MemberSummary {
   role: string;
 }
 
-/** A repo's collaborator roster with a Lore-membership flag per collaborator (E-5-d, #630). */
-export interface DiscoveredCollaborator {
+/** A repo's contributor roster with a Lore-membership flag per contributor (E-5-d, #630). */
+export interface DiscoveredContributor {
   login: string;
   githubId: number;
   onLore: boolean;
 }
 export interface DiscoveredRepo {
   repo: string; // "owner/name"
-  collaborators: DiscoveredCollaborator[];
+  contributors: DiscoveredContributor[];
 }
 
 /**
- * E-5-d (#630, Slice 1): discover which of the caller's GitHub repo collaborators already have a Lore
+ * E-5-d (#630, Slice 1): discover which of the caller's GitHub repo contributors already have a Lore
  * account, so the caller can invite the rest to a team they admin. Server-side-verified via the
  * `github-discover` Edge Function using the caller's OWN `provider_token` (a fresh one from GitHub
- * OAuth) — the client never asserts collaborators or membership. Returns null when there is no
- * `read:org`/repo grant (e.g. an email-only login).
+ * OAuth) — the client never asserts membership. Returns null when there is no `read:org`/repo
+ * grant (e.g. an email-only login).
  *
  * `repos` is an optional explicit list ("owner/name" or a GitHub URL); when omitted the Edge Function
- * scans the caller's own repos (first page). Membership is disclosed only for collaborators of repos
+ * scans the caller's own repos (first page). Membership is disclosed only for contributors of repos
  * the caller can actually read on GitHub, and only as an `onLore` boolean (never a Lore user id).
+ *
+ * Contributors, NOT collaborators: GitHub's `/repos/{owner}/{name}/collaborators` returns
+ * "everyone with at least triage access" — which for a private org repo is effectively the entire
+ * org roster (everyone typically gets triage via org rules). `/contributors` returns the commit-
+ * attribution roster instead, which is what admins actually want when scanning "who worked here".
  */
-export async function discoverGitHubCollaborators(
+export async function discoverGitHubContributors(
   client: SupabaseClient,
   providerToken: string | null | undefined,
   repos?: string[],
@@ -62,7 +67,7 @@ export async function discoverGitHubCollaborators(
   const payload = data as {
     repos?: Array<{
       repo: string;
-      collaborators: Array<{
+      contributors: Array<{
         login: string;
         github_id: number;
         on_lore: boolean;
@@ -71,7 +76,7 @@ export async function discoverGitHubCollaborators(
   };
   return (payload.repos ?? []).map((r) => ({
     repo: r.repo,
-    collaborators: r.collaborators.map((c) => ({
+    contributors: r.contributors.map((c) => ({
       login: c.login,
       githubId: c.github_id,
       onLore: c.on_lore,
@@ -80,16 +85,16 @@ export async function discoverGitHubCollaborators(
 }
 
 /**
- * The DISTINCT collaborators across all discovered repos, deduped by GitHub login (a person on
+ * The DISTINCT contributors across all discovered repos, deduped by GitHub login (a person on
  * several repos should get one invite, not one per repo). Sorted for stable output. Used by
  * `lore team discover --invite` to mint one invite per person (E-5-d-2).
  */
-export function distinctCollaborators(
+export function distinctContributors(
   repos: DiscoveredRepo[],
-): DiscoveredCollaborator[] {
-  const byLogin = new Map<string, DiscoveredCollaborator>();
+): DiscoveredContributor[] {
+  const byLogin = new Map<string, DiscoveredContributor>();
   for (const r of repos)
-    for (const c of r.collaborators)
+    for (const c of r.contributors)
       if (!byLogin.has(c.login)) byLogin.set(c.login, c);
   return Array.from(byLogin.values()).sort((a, b) =>
     a.login.localeCompare(b.login),

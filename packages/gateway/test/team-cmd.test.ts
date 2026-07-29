@@ -24,17 +24,17 @@ vi.mock("../src/team", () => ({
   listDomainJoinRequests: vi.fn(),
   approveDomainJoin: vi.fn(),
   rejectDomainJoin: vi.fn(),
-  discoverGitHubCollaborators: vi.fn(),
+  discoverGitHubContributors: vi.fn(),
   sendInviteEmail: vi.fn(),
   // Pure predicate — use the real implementation so --email routing behaves in tests.
   isEmailAddress: (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim()),
   // Pure dedupe helper — real impl so the discover --invite path yields the expected people.
-  distinctCollaborators: (
-    repos: Array<{ collaborators: Array<{ login: string }> }>,
+  distinctContributors: (
+    repos: Array<{ contributors: Array<{ login: string }> }>,
   ) => {
     const seen = new Map<string, { login: string }>();
     for (const r of repos)
-      for (const c of r.collaborators)
+      for (const c of r.contributors)
         if (!seen.has(c.login)) seen.set(c.login, c);
     return Array.from(seen.values()).sort((a, b) =>
       a.login.localeCompare(b.login),
@@ -281,14 +281,43 @@ describe("set-role", () => {
 });
 
 describe("invite (E-5-c)", () => {
-  it("requires a scope", async () => {
+  const PROJECT = "/test/invite/proj";
+
+  beforeEach(() => {
+    db().exec("DELETE FROM scopes");
+    db().exec("DELETE FROM scope_members");
+    // Two teams the caller (u1) admins — s-1 by id, "Rockets" by name (case-insensitive).
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('s-1','o','team','Rockets','manual',0,0)",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('s-2','o','team','Docs','manual',0,0)",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES ('s-1','u1','admin',0,0)",
+      )
+      .run();
+    db()
+      .query(
+        "INSERT INTO scope_members (scope_id, user_id, role, created_at, updated_at) VALUES ('s-2','u1','admin',0,0)",
+      )
+      .run();
+    vi.mocked(getCurrentUser).mockResolvedValue({ user_id: "u1" } as never);
+  });
+
+  it("requires a positional", async () => {
     await run("invite");
     expect(errs.join("\n")).toMatch(/Usage: lore team/);
     expect(process.exitCode).toBe(1);
   });
 
   it("rejects an invalid role", async () => {
-    await commandTeam(["invite", "s"], { role: "admin" });
+    await commandTeam(["invite", "s-1"], { role: "admin" });
     expect(errs.join("\n")).toMatch(/Usage: lore team/);
     expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
   });
@@ -306,6 +335,30 @@ describe("invite (E-5-c)", () => {
     expect(logs.join("\n")).toContain("lore team accept tok-abc");
   });
 
+  it("resolves a team NAME (the UUID-bug fix)", async () => {
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-abc");
+    await commandTeam(["invite", "Rockets"], {});
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-1",
+      "editor",
+      undefined,
+      { offline: false },
+    );
+  });
+
+  it("resolves case-insensitively", async () => {
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-abc");
+    await commandTeam(["invite", "rockets"], {});
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-1",
+      "editor",
+      undefined,
+      { offline: false },
+    );
+  });
+
   it("passes --role and --email through to the client", async () => {
     vi.mocked(team.createTeamInvite).mockResolvedValue("tok-xyz");
     await commandTeam(["invite", "s-2"], { role: "viewer", email: "a@b.dev" });
@@ -321,16 +374,95 @@ describe("invite (E-5-c)", () => {
 
   it("passes --offline through and warns the token carries a key", async () => {
     vi.mocked(team.createTeamInvite).mockResolvedValue("tok-abc.SECRET");
-    await commandTeam(["invite", "s-3"], { offline: true });
+    await commandTeam(["invite", "s-3-not-real"], { offline: true });
+    // No linked cwd, no matching scope → falls through to the helpful error, but we also verify
+    // --offline doesn't accidentally short-circuit resolution. Use a real team here:
+    vi.mocked(team.createTeamInvite).mockClear();
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-xyz.SECRET");
+    await commandTeam(["invite", "s-1"], { offline: true });
     expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
       FAKE_CLIENT,
-      "s-3",
+      "s-1",
       "editor",
       undefined,
       { offline: true },
     );
     expect(logs.join("\n")).toMatch(/one-time decryption key/i);
-    expect(logs.join("\n")).toContain("lore team accept tok-abc.SECRET");
+    expect(logs.join("\n")).toContain("lore team accept tok-xyz.SECRET");
+  });
+
+  it("linked-cwd fallback: `invite <githublogin>` from a linked cwd uses linked team + login as hint", async () => {
+    const pid = ensureProject(PROJECT);
+    setProjectScope(pid, "s-1");
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-friend");
+    await commandTeam(["invite", "MathurAditya724"], { project: PROJECT });
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-1",
+      "editor",
+      "MathurAditya724",
+      { offline: false },
+    );
+    expect(logs.join("\n")).toContain("for MathurAditya724");
+    // The printup walks the regular non-email path — admin manually shares the link.
+    expect(logs.join("\n")).toContain("lore team accept tok-friend");
+  });
+
+  it("linked-cwd fallback + --email: --email wins as the hint and we email the link", async () => {
+    const pid = ensureProject(PROJECT);
+    setProjectScope(pid, "s-1");
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-link");
+    vi.mocked(team.sendInviteEmail).mockResolvedValue(true);
+    await commandTeam(["invite", "MathurAditya724"], {
+      project: PROJECT,
+      email: "mathur@example.com",
+    });
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-1",
+      "editor",
+      "mathur@example.com",
+      { offline: false },
+    );
+    expect(logs.join("\n")).toMatch(
+      /Emailed the join link to mathur@example.com/,
+    );
+  });
+
+  it("explicit two-positional: `invite <team> <who>` uses both, no linked-cwd fallback", async () => {
+    const pid = ensureProject(PROJECT);
+    // Project is linked to Docs (s-2); the explicit s-1 + invitee pair MUST bypass the fallback.
+    setProjectScope(pid, "s-2");
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-exp");
+    await commandTeam(["invite", "s-1", "MathurAditya724"], {
+      project: PROJECT,
+    });
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-1",
+      "editor",
+      "MathurAditya724",
+      { offline: false },
+    );
+  });
+
+  it("no scope match + no linked cwd → helpful error directing user to link or pass explicitly", async () => {
+    await commandTeam(["invite", "MathurAditya724"], {});
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+    expect(errs.join("\n")).toMatch(/No team to invite to/);
+    expect(errs.join("\n")).toMatch(/link this project first/);
+    expect(errs.join("\n")).toMatch(/See lore team list/);
+  });
+
+  it("non-admin on the resolved scope → refused before any RPC fires", async () => {
+    db()
+      .query("UPDATE scope_members SET role='editor' WHERE scope_id='s-1'")
+      .run();
+    await commandTeam(["invite", "Rockets"], {});
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toMatch(/must be an admin/);
+    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
   });
 });
 
@@ -625,22 +757,22 @@ describe("discover --invite (E-5-d-2)", () => {
       client: FAKE_CLIENT,
       providerToken: "gho_x",
     });
-    vi.mocked(team.discoverGitHubCollaborators).mockResolvedValue([
+    vi.mocked(team.discoverGitHubContributors).mockResolvedValue([
       {
         repo: "o/a",
-        collaborators: [
+        contributors: [
           { login: "alice", githubId: 1, onLore: true },
           { login: "bob", githubId: 2, onLore: false },
         ],
       },
       {
         repo: "o/b",
-        collaborators: [{ login: "bob", githubId: 2, onLore: false }],
+        contributors: [{ login: "bob", githubId: 2, onLore: false }],
       },
     ] as never);
   });
 
-  it("mints ONE invite per distinct collaborator and prints accept links", async () => {
+  it("mints ONE invite per distinct contributor and prints accept links", async () => {
     vi.mocked(team.createTeamInvite)
       .mockResolvedValueOnce("tok-alice")
       .mockResolvedValueOnce("tok-bob");
@@ -701,16 +833,16 @@ describe("discover --invite (E-5-d-2)", () => {
     expect(logs.join("\n")).toMatch(/already on Lore/);
   });
 
-  it("with --invite but repos have no collaborators: mints nothing, says so (no confusing '0 collaborators')", async () => {
-    vi.mocked(team.discoverGitHubCollaborators).mockResolvedValue([
-      { repo: "o/empty", collaborators: [] },
+  it("with --invite but repos have no contributors: mints nothing, says so (no confusing '0 contributors')", async () => {
+    vi.mocked(team.discoverGitHubContributors).mockResolvedValue([
+      { repo: "o/empty", contributors: [] },
     ] as never);
     await commandTeam(["discover", "--invite", "Rockets"], {
       invite: "Rockets",
     });
     expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
     const out = logs.join("\n");
-    expect(out).toMatch(/No collaborators to invite/);
-    expect(out).not.toMatch(/for 0 collaborators/);
+    expect(out).toMatch(/No contributors to invite/);
+    expect(out).not.toMatch(/for 0 contributors/);
   });
 });

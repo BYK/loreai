@@ -32,7 +32,7 @@ import {
   claimOrgDomain,
   createTeam,
   createTeamInvite,
-  distinctCollaborators,
+  distinctContributors,
   listTeams,
   rejectDomainJoin,
   removeTeamMember,
@@ -595,10 +595,10 @@ describe("domain auto-join RPC wrappers (E-5-b)", () => {
   });
 });
 
-describe("distinctCollaborators (E-5-d-2)", () => {
+describe("distinctContributors (E-5-d-2)", () => {
   const repo = (name: string, cols: Array<[string, boolean]>) => ({
     repo: name,
-    collaborators: cols.map(([login, onLore]) => ({
+    contributors: cols.map(([login, onLore]) => ({
       login,
       githubId: login.length,
       onLore,
@@ -606,7 +606,7 @@ describe("distinctCollaborators (E-5-d-2)", () => {
   });
 
   it("dedupes a person appearing on multiple repos by login", () => {
-    const out = distinctCollaborators([
+    const out = distinctContributors([
       repo("o/a", [
         ["alice", true],
         ["bob", false],
@@ -620,7 +620,7 @@ describe("distinctCollaborators (E-5-d-2)", () => {
   });
 
   it("keeps the FIRST occurrence's data on a login collision (stable dedupe)", () => {
-    const out = distinctCollaborators([
+    const out = distinctContributors([
       repo("o/a", [["bob", true]]),
       repo("o/b", [["bob", false]]),
     ]);
@@ -629,7 +629,7 @@ describe("distinctCollaborators (E-5-d-2)", () => {
   });
 
   it("sorts by login for stable output", () => {
-    const out = distinctCollaborators([
+    const out = distinctContributors([
       repo("o/a", [
         ["zed", false],
         ["amy", false],
@@ -638,8 +638,8 @@ describe("distinctCollaborators (E-5-d-2)", () => {
     expect(out.map((c) => c.login)).toEqual(["amy", "zed"]);
   });
 
-  it("returns [] for no repos / no collaborators", () => {
-    expect(distinctCollaborators([])).toEqual([]);
-    expect(distinctCollaborators([repo("o/empty", [])])).toEqual([]);
+  it("returns [] for no repos / no contributors", () => {
+    expect(distinctContributors([])).toEqual([]);
+    expect(distinctContributors([repo("o/empty", [])])).toEqual([]);
   });
 });
