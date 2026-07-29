@@ -508,6 +508,14 @@ async function handleImportExtract(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
+  // Stamp the start of THIS extract request so the auth-rejected probe ignores
+  // failures recorded by a PRIOR request in the same gateway process — see
+  // `hasRecentAuthRejectedFailure` for the cross-run leak rationale. Without
+  // this, a user who corrected their credential and retried within 60 seconds
+  // would be immediately aborted on the first chunk by a stale failure
+  // attributed to the previous attempt.
+  const runStartedAt = Date.now();
+
   const body = await parseBody<{
     git_remote?: string;
     path?: string;
@@ -564,8 +572,15 @@ async function handleImportExtract(
     // Remote extract runs session-less under workerID "lore-import". Inject
     // the same fail-fast-on-auth-rejected probe as the local CLI path so a
     // broken credential doesn't burn every chunk before the response returns.
+    // `runStartedAt` bounds the probe to this request's failures only — see
+    // the rationale at the top of `handleImportExtract`.
     wasRecentChunkAuthRejected: () =>
-      hasRecentAuthRejectedFailure("_unknown", "lore-import"),
+      hasRecentAuthRejectedFailure(
+        "_unknown",
+        "lore-import",
+        60_000,
+        runStartedAt,
+      ),
   });
 
   return jsonResponse(result);
