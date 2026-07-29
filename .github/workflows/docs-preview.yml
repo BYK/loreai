@@ -27,13 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          cache: 'pnpm'
-
       # Check if website files changed. On 'closed' events we always proceed
       # (cleanup). Otherwise we only install/build/deploy when website files
       # changed — non-website PRs skip the whole install + build.
@@ -47,24 +40,46 @@ jobs:
               - 'packages/website/**'
               - '.github/workflows/docs-preview.yml'
 
+      # One place decides whether the expensive path runs. This also gates the
+      # toolchain setup below: setup-node's pnpm cache fails its post-job save
+      # when no install ever ran, which failed the whole job on every
+      # non-website PR.
+      - name: Decide whether to build
+        id: gate
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          ACTION: ${{ github.event.action }}
+          WEBSITE_CHANGED: ${{ steps.filter.outputs.website }}
+        run: |
+          if [[ "$HEAD_REPO" == "$THIS_REPO" ]] &&
+             { [[ "$ACTION" == "closed" ]] || [[ "$WEBSITE_CHANGED" == "true" ]]; }; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: pnpm/action-setup@v6
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-node@v6
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
       - name: Install dependencies
-        if: >-
-          (github.event.action == 'closed' || steps.filter.outputs.website == 'true') &&
-          github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.gate.outputs.run == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Build website
-        if: >-
-          (github.event.action == 'closed' || steps.filter.outputs.website == 'true') &&
-          github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.gate.outputs.run == 'true'
         run: pnpm --filter '@loreai/website' build
         env:
           PR_NUMBER: ${{ github.event.number }}
 
       - name: Deploy PR Preview
-        if: >-
-          (github.event.action == 'closed' || steps.filter.outputs.website == 'true') &&
-          github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.gate.outputs.run == 'true'
         uses: rossjrw/pr-preview-action@v1
         with:
           source-dir: packages/website/dist/
