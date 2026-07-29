@@ -16,6 +16,18 @@ Published as [`@loreai/gateway`](https://www.npmjs.com/package/@loreai/gateway) 
 
 Full documentation lives at **[withlore.ai/docs](https://withlore.ai/docs/)**.
 
+## Own your memory, not just your code
+
+The AI tooling ecosystem is in a war for execution, and harnesses are
+incentivized to lock you in. When a closed platform builds "agent memory,"
+it stores your team's decisions inside a proprietary vector database.
+Switch IDEs, switch models, and the team gets amnesia. Lore is the escape
+hatch: a vendor-neutral proxy that sits between your harness and your
+model, and distills your team's context into an open standard —
+[`.lore.md`](https://withlore.ai/docs/team-memory/) — that lives in Git,
+moves between tools, and never leaves your infrastructure unless you want
+it to. The harness is replaceable. Your team's "why" is not.
+
 ## Why
 
 Coding agents forget. Once a conversation exceeds the context window, earlier decisions, bug fixes, and architectural choices vanish. The default approach — summarize-and-compact — loses exactly the operational details agents need. After a few compaction passes, the agent knows you "discussed authentication" but can't actually continue the work.
