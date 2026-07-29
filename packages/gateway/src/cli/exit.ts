@@ -112,9 +112,10 @@ export function forcedExit(code: number): never {
   // satisfied by entering an unreachable tight loop: the kernel delivers SIGKILL
   // before any further statement executes.
   //
-  // Test sentinel: when LORE_FORCED_EXIT_SENTEL=1 is set (set by exit.test.ts
-  // in afterEach), throw a tagged error so tests can observe "would exit here"
-  // without the tight loop hanging the worker. Production never sets this.
+  // Test sentinel: when LORE_FORCED_EXIT_SENTINEL=1 is set (exit.test.ts sets
+  // it in beforeEach and clears it in afterEach), throw a tagged error so tests
+  // can observe "would exit here" without the tight loop hanging the worker.
+  // Production never sets this.
   if (process.env.LORE_FORCED_EXIT_SENTINEL === "1") {
     throw new Error(`__forcedExit__:${code}`);
   }
