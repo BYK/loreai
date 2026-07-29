@@ -28,9 +28,9 @@ enable_signup = true
 verify_jwt = true
 
 [functions.github-discover]
-# E-5-d (#630): discovers which of the caller's GitHub repo collaborators already have a Lore
+# E-5-d (#630): discovers which of the caller's GitHub repo contributors already have a Lore
 # account. verify_jwt=true so only a signed-in user can invoke it; it binds their provider_token to
-# their identity and reads collaborators with the caller's own GitHub access.
+# their identity and reads the default-branch contributors with the caller's own GitHub access.
 verify_jwt = true
 
 [functions.send-invite-email]

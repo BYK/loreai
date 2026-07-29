@@ -34,8 +34,9 @@ import {
 
 /** GitHub OAuth scopes needed:
  *  - `read:org` — org/team membership mirroring (E-5-a, #827)
- *  - `repo` — list collaborators on private repos (E-5-d, #630)
- *  Collaborator API requires `repo` for private org repos (e.g. getsentry/*).
+ *  - `repo` — list per-repo collaborators/contributors on private repos (E-5-d, #630).
+ *  The /collaborators and /contributors endpoints both require `repo` for non-public repos —
+ *  e.g. anything under getsentry/*.
  */
 const OAUTH_SCOPES = "read:org repo";
 

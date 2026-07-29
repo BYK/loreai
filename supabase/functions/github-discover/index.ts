@@ -1,15 +1,20 @@
 // E-5-d (#630, Slice 1): github-discover Edge Function. Reads the caller's repos + each repo's
-// collaborators FROM GitHub with the caller's OWN provider_token (unforgeable — GitHub authorizes on
-// the caller's access), then reveals which collaborators already have a Lore account via the
-// service-role-only lore_users_for_github_ids RPC (0050).
+// default-branch contributors FROM GitHub with the caller's OWN provider_token (unforgeable — GitHub
+// authorizes on the caller's access), then reveals which contributors already have a Lore account
+// via the service-role-only lore_users_for_github_ids RPC (0050).
 //
 // SECURITY:
 //   - The provider_token is bound to the JWT's linked GitHub identity (a leaked/foreign token can't
-//     be used to enumerate someone else's collaborators as this user).
-//   - Lore-membership is disclosed ONLY for collaborators of repos the caller can actually read
+//     be used to enumerate someone else's repos as this user).
+//   - Lore-membership is disclosed ONLY for contributors of repos the caller can actually read
 //     (GitHub 403/404s an inaccessible repo → skipped). No open "is X on Lore" oracle.
 //   - The RPC returns only the SET of present github ids (never Lore user_ids), and is
 //     service-role-only, so a client can never call it directly to enumerate accounts.
+//
+// WHY CONTRIBUTORS: `/collaborators` requires push/access AND returns "everyone with at least
+// triage" — which for a private org repo is effectively the org roster. We use `/contributors`
+// (default branch, cached 24h by GitHub) instead — commit-attribution rosters are the user-asked
+// mental model of "people who worked on this code".
 //
 // Deploy (not auto-deployed): `supabase functions deploy github-discover`. SUPABASE_URL,
 // SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY are injected by the platform; GITHUB_API_URL is
@@ -23,10 +28,10 @@ import {
 import {
   annotateOnLore,
   collectGithubIds,
-  fetchRepoCollaborators,
+  fetchRepoContributors,
   fetchUserRepos,
   parseRepoRef,
-  type RepoCollaborators,
+  type RepoContributors,
 } from "./discover.ts";
 import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
 
@@ -110,29 +115,29 @@ Deno.serve(
     }
     repos = repos.slice(0, MAX_REPOS);
 
-    // Read each repo's collaborators with the caller's token (repos they can't read are skipped).
-    const rosters: RepoCollaborators[] = [];
+    // Read each repo's contributors with the caller's token (repos they can't read are skipped).
+    const rosters: RepoContributors[] = [];
     for (const repo of repos) {
       try {
-        const collaborators = await fetchRepoCollaborators(
+        const contributors = await fetchRepoContributors(
           providerToken,
           repo,
           selfGithubId,
           { apiUrl },
         );
-        if (collaborators === null) continue; // inaccessible — skip, don't fail the whole call
-        rosters.push({ repo: `${repo.owner}/${repo.name}`, collaborators });
+        if (contributors === null) continue; // inaccessible — skip, don't fail the whole call
+        rosters.push({ repo: `${repo.owner}/${repo.name}`, contributors });
       } catch (e) {
         // A transient error on one repo shouldn't sink the batch — log and skip.
         await capture(e);
         console.error(
-          `collaborators ${repo.owner}/${repo.name}:`,
+          `contributors ${repo.owner}/${repo.name}:`,
           (e as Error).message,
         );
       }
     }
 
-    // Service-role lookup: which collaborator github ids have a Lore account. Returns only the SET of
+    // Service-role lookup: which contributor github ids have a Lore account. Returns only the SET of
     // present ids (never user_ids) — the RPC is service-role-only so this is the only enumeration path.
     const githubIds = collectGithubIds(rosters);
     const loreIds = new Set<number>();
