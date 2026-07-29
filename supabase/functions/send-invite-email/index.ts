@@ -4,9 +4,18 @@
 // so this can never be used as an open email-spam relay — you can only email an invite that exists
 // for a team you administer, to one recipient per call.
 //
-// Deploy (not auto-deployed): `supabase functions deploy send-invite-email`. Requires the
-// SMTP2GO_API_KEY Function secret; SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY are
-// injected by the platform. INVITE_SENDER defaults to keeper@withlore.ai; SMTP2GO_API_URL optional.
+// Recipient resolution: the body accepts either an explicit `email` (admin-supplied, sent as-is) OR
+// a `github_login` (server-side lookup). The lookup never returns an email to the gateway — only the
+// SMTP send happens server-side. Resolution order: Lore-account email (via lore_emails_for_github_ids
+// rpc + GitHub /users/{login} for the numeric id), then GitHub public email (only if the user has one
+// set to public). When neither resolves, the EF returns `no_resolvable_email` and the gateway falls
+// back to printing the link — the invite itself is already server-side, so the admin can finish the
+// handoff however they want.
+//
+// Deploy (auto-deployed on push to main via .github/workflows/deploy-functions.yml). SMTP2GO_API_KEY
+// must be set as a Function secret (`supabase secrets set SMTP2GO_API_KEY=…`). SUPABASE_URL /
+// SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY are injected by the platform. INVITE_SENDER defaults
+// to keeper@withlore.ai; SMTP2GO_API_URL optional; GITHUB_API_URL optional (default api.github.com).
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildInviteEmail, capabilityOf, sendViaSmtp2go } from "./send.ts";
 import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
@@ -18,8 +27,36 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-// Conservative RFC-ish email shape check — the recipient is admin-supplied, but we still guard.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const GH_HEADERS = (token: string): Record<string, string> => ({
+  Authorization: `Bearer ${token}`,
+  Accept: "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+  "User-Agent": "lore-send-invite-email",
+});
+
+// GitHub /users/{login} returns { id, email }. Email is null when private.
+// We look the user up primarily to obtain the numeric id — then prefer the Lore-account email for
+// known accounts over the public GitHub email (Lore is the user's primary auth path for the team).
+async function fetchGitHubUserByLogin(
+  providerToken: string,
+  login: string,
+  apiUrl: string,
+  fetchImpl: typeof fetch,
+): Promise<{ id: number | null; email: string | null }> {
+  const resp = await fetchImpl(`${apiUrl}/users/${encodeURIComponent(login)}`, {
+    headers: GH_HEADERS(providerToken),
+  });
+  if (!resp.ok) return { id: null, email: null };
+  const j = (await resp.json().catch(() => ({}))) as {
+    id?: number;
+    email?: string | null;
+  };
+  return {
+    id: typeof j.id === "number" ? j.id : null,
+    email: typeof j.email === "string" && j.email !== "" ? j.email : null,
+  };
+}
 
 initSentry("send-invite-email");
 
@@ -39,9 +76,11 @@ Deno.serve(
       return json({ error: "server misconfigured" }, 500);
     }
     const sender = Deno.env.get("INVITE_SENDER") ?? "keeper@withlore.ai";
-    const apiUrl = Deno.env.get("SMTP2GO_API_URL") ?? undefined;
+    const smtpApiUrl = Deno.env.get("SMTP2GO_API_URL") ?? undefined;
+    const ghApiUrl = (
+      Deno.env.get("GITHUB_API_URL") ?? "https://api.github.com"
+    ).replace(/\/$/, "");
 
-    // Verify the caller's JWT → user id (never trust a client-supplied identity).
     const userClient = createClient(url, anonKey, {
       global: { headers: { Authorization: authHeader } },
       auth: { persistSession: false, autoRefreshToken: false },
@@ -55,20 +94,94 @@ Deno.serve(
     const body = (await req.json().catch(() => ({}))) as {
       token?: string;
       email?: string;
+      github_login?: string;
+      provider_token?: string;
     };
     const token = typeof body.token === "string" ? body.token : "";
-    const email = typeof body.email === "string" ? body.email.trim() : "";
     if (!token) return json({ error: "missing token" }, 400);
-    if (!email || !EMAIL_RE.test(email))
-      return json({ error: "invalid email" }, 400);
+    const explicitEmail =
+      typeof body.email === "string" ? body.email.trim() : "";
+    const githubLogin =
+      typeof body.github_login === "string" ? body.github_login.trim() : "";
+    const providerToken =
+      typeof body.provider_token === "string" ? body.provider_token : "";
 
-    // An offline invite token is `<capability>.<base64url(secret)>`; only the capability part is stored
-    // in pending_invites.token (mirrors acceptTeamInvite). Look up by the capability, but email the
-    // FULL token — the invitee needs the secret suffix to unwrap the DEK.
+    let recipient = "";
+    let resolvedVia:
+      | "explicit_email"
+      | "lore_email"
+      | "github_public_email"
+      | null = null;
+    if (explicitEmail) {
+      if (!EMAIL_RE.test(explicitEmail))
+        return json({ error: "invalid email" }, 400);
+      recipient = explicitEmail;
+      resolvedVia = "explicit_email";
+    } else if (githubLogin) {
+      // Resolve github_login → id via GitHub /users/{login}. Then prefer the Lore email (since
+      // the recipient has a Lore account they're about to accept into), fall back to the GitHub
+      // public email. The admin must supply provider_token so the call uses THEIR scoped grant.
+      if (!providerToken) {
+        return json(
+          {
+            error: "missing provider_token (required for github_login lookup)",
+          },
+          400,
+        );
+      }
+      const { id: ghId, email: ghEmail } = await fetchGitHubUserByLogin(
+        providerToken,
+        githubLogin,
+        ghApiUrl,
+        fetch,
+      );
+      // Try Lore email first (private-bound recipient path: admin knows the user, it's their team).
+      if (ghId !== null) {
+        const admin = createClient(url, serviceKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const { data: loreRows, error: loreErr } = await admin.rpc(
+          "lore_emails_for_github_ids",
+          { p_github_ids: [ghId] },
+        );
+        if (loreErr) {
+          await capture(loreErr);
+          console.error("lore_emails_for_github_ids failed:", loreErr.message);
+          // Continue — public email below may still work.
+        } else if (
+          Array.isArray(loreRows) &&
+          loreRows[0] &&
+          typeof (loreRows[0] as { email?: unknown }).email === "string" &&
+          (loreRows[0] as { email: string }).email.length > 0
+        ) {
+          const loreEmail = (loreRows[0] as { email: string }).email;
+          if (EMAIL_RE.test(loreEmail)) {
+            recipient = loreEmail;
+            resolvedVia = "lore_email";
+          }
+        }
+      }
+      if (!recipient && ghEmail) {
+        if (EMAIL_RE.test(ghEmail)) {
+          recipient = ghEmail;
+          resolvedVia = "github_public_email";
+        }
+      }
+      if (!recipient) {
+        return json(
+          {
+            error: "no_resolvable_email",
+            hint: "Recipient has no Lore email on file and no public GitHub email.",
+          },
+          404,
+        );
+      }
+    } else {
+      return json({ error: "missing email or github_login" }, 400);
+    }
+
     const capability = capabilityOf(token);
 
-    // Authorize on the TOKEN: resolve the invite service-role, then confirm the caller is an admin of
-    // its scope. Scope/role/team_name come from the row, never from client input — no spam relay.
     const admin = createClient(url, serviceKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
@@ -82,12 +195,9 @@ Deno.serve(
       console.error("pending_invites read failed:", invErr.message);
       return json({ error: "lookup failed" }, 500);
     }
-    // Generic 404 whether the token is absent or expired — never disclose which.
     if (!inv || new Date(inv.expires_at as string).getTime() <= Date.now())
       return json({ error: "invite not found" }, 404);
 
-    // The caller must be an ADMIN of the invite's scope. Check via scope_role() with the caller JWT
-    // (RLS-safe; resolves auth.uid()). Belt-and-suspenders: also require they created the invite.
     const { data: roleRow } = await userClient.rpc("scope_role", {
       p_scope: inv.scope_id,
     });
@@ -95,7 +205,6 @@ Deno.serve(
     const isCreator = inv.invited_by === user.id;
     if (!isAdmin || !isCreator) return json({ error: "forbidden" }, 403);
 
-    // Look up the team name for the email copy (service-role read; best-effort).
     const { data: scopeRow } = await admin
       .from("scopes")
       .select("name")
@@ -110,12 +219,16 @@ Deno.serve(
     });
 
     try {
-      await sendViaSmtp2go(email, message, { apiKey, sender, apiUrl });
+      await sendViaSmtp2go(recipient, message, {
+        apiKey,
+        sender,
+        apiUrl: smtpApiUrl,
+      });
     } catch (e) {
       await capture(e);
       console.error("smtp2go send failed:", (e as Error).message);
       return json({ error: "send failed" }, 502);
     }
-    return json({ ok: true });
+    return json({ ok: true, resolved_via: resolvedVia });
   }),
 );

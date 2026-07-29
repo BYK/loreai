@@ -286,6 +286,11 @@ describe("invite (E-5-c)", () => {
   beforeEach(() => {
     db().exec("DELETE FROM scopes");
     db().exec("DELETE FROM scope_members");
+    // Default for sendInviteEmail — tests that expect a successful email overwrite this.
+    vi.mocked(team.sendInviteEmail).mockResolvedValue({
+      ok: false,
+      resolvedVia: null,
+    });
     // Two teams the caller (u1) admins — s-1 by id, "Rockets" by name (case-insensitive).
     db()
       .query(
@@ -412,7 +417,10 @@ describe("invite (E-5-c)", () => {
     const pid = ensureProject(PROJECT);
     setProjectScope(pid, "s-1");
     vi.mocked(team.createTeamInvite).mockResolvedValue("tok-link");
-    vi.mocked(team.sendInviteEmail).mockResolvedValue(true);
+    vi.mocked(team.sendInviteEmail).mockResolvedValue({
+      ok: true,
+      resolvedVia: "explicit_email",
+    });
     await commandTeam(["invite", "MathurAditya724"], {
       project: PROJECT,
       email: "mathur@example.com",
@@ -425,8 +433,64 @@ describe("invite (E-5-c)", () => {
       { offline: false },
     );
     expect(logs.join("\n")).toMatch(
-      /Emailed the join link to mathur@example.com/,
+      /Emailed the join link.*mathur@example\.com/,
     );
+  });
+
+  it("`invite <githublogin>` with server-side email resolution prints the resolved-via label", async () => {
+    // Regression for the bare-invite UX: when admin types a GitHub login instead of an email,
+    // the CLI now hands off to the EF for server-side resolution. We mock sendInviteEmail to
+    // simulate a Lore-account lookup success — the printed message should reflect that.
+    const pid = ensureProject(PROJECT);
+    setProjectScope(pid, "s-1");
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-server");
+    vi.mocked(acquireGitHubProviderToken).mockResolvedValue({
+      client: FAKE_CLIENT,
+      providerToken: "gh-tok",
+    });
+    vi.mocked(team.sendInviteEmail).mockResolvedValue({
+      ok: true,
+      resolvedVia: "lore_email",
+    });
+    await commandTeam(["invite", "MathurAditya724"], { project: PROJECT });
+    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "s-1",
+      "editor",
+      "MathurAditya724",
+      { offline: false },
+    );
+    // The CLI passed the github_login to the EF (NOT a real email); the EF resolved it server-side.
+    expect(vi.mocked(team.sendInviteEmail)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "tok-server",
+      "MathurAditya724",
+      { providerToken: "gh-tok" },
+    );
+    expect(logs.join("\n")).toMatch(
+      /Emailed the join link to the resolved address/,
+    );
+  });
+
+  it("`invite <githublogin>` with no email on file falls back to manual share", async () => {
+    // Mirror of above but the EF returns ok:false (no email on file, no public email). The invite
+    // is still created — the CLI just prints the manual-share message instead of the email one.
+    const pid = ensureProject(PROJECT);
+    setProjectScope(pid, "s-1");
+    vi.mocked(team.createTeamInvite).mockResolvedValue("tok-server-fail");
+    vi.mocked(acquireGitHubProviderToken).mockResolvedValue({
+      client: FAKE_CLIENT,
+      providerToken: "gh-tok",
+    });
+    vi.mocked(team.sendInviteEmail).mockResolvedValue({
+      ok: false,
+      resolvedVia: null,
+    });
+    await commandTeam(["invite", "MathurAditya724"], { project: PROJECT });
+    expect(logs.join("\n")).toMatch(
+      /No email on file to send — share the link manually below/,
+    );
+    expect(logs.join("\n")).toContain("lore team accept tok-server-fail");
   });
 
   it("explicit two-positional: `invite <team> <who>` uses both, no linked-cwd fallback", async () => {
