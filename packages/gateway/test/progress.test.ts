@@ -7,6 +7,9 @@
  * never-throws contract (a failing output stream must not propagate).
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { makeByteProgress } from "../src/cli/lib/progress";
@@ -126,5 +129,52 @@ describe("makeByteProgress", () => {
     // No byte count in pct mode
     expect(last).not.toMatch(/\d+\s*(B|KB|MB|GB|TB)/);
     expect(last).not.toContain("/");
+  });
+
+  it("apply bar call site passes 'pct' format (regression: #1519 review)", () => {
+    // Regression: delta-upgrade.ts apply bar previously called
+    // makeByteProgress(label, total) without passing format, so the bar
+    // fell back to bytes mode and the "pct only" UX never applied.
+    // Reads the source to assert the call site actually wires "pct",
+    // so a future regression to bytes mode is caught even if the
+    // helper itself still defaults to "bytes".
+    const src = readFileSync(
+      join(__dirname, "../src/cli/lib/delta-upgrade.ts"),
+      "utf8",
+    );
+    // Find the makeByteProgress call inside the apply bar branch by scanning
+    // for balanced parentheses, so nested calls like
+    // makeByteProgress("label", computeTotal()) still match. Regex-based
+    // extraction breaks on nested parens, which a real refactor could
+    // easily introduce.
+    function extractCalls(source: string, name: string): string[] {
+      const out: string[] = [];
+      let i = 0;
+      while ((i = source.indexOf(name, i)) !== -1) {
+        const open = source.indexOf("(", i);
+        if (open === -1) break;
+        let depth = 1;
+        let j = open + 1;
+        while (j < source.length && depth > 0) {
+          const ch = source[j];
+          if (ch === "(") depth++;
+          else if (ch === ")") depth--;
+          if (depth > 0) j++;
+        }
+        if (depth === 0) {
+          out.push(source.slice(i, j + 1));
+          i = j + 1;
+        } else {
+          break; // unbalanced, stop scanning
+        }
+      }
+      return out;
+    }
+    const matches: string[] = extractCalls(src, "makeByteProgress");
+    const applyCall = matches.find(
+      (m) => m.includes("Applying patches") && m.includes("event.total"),
+    );
+    expect(applyCall).toBeDefined();
+    expect(applyCall).toMatch(/["']pct["']/);
   });
 });
