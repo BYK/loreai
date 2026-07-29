@@ -37,6 +37,7 @@ import {
   clearSession,
   loadCachedProviderToken,
   loadPersistedSession,
+  persistProviderTokenCache,
   persistSession,
 } from "../src/supabase";
 
@@ -424,6 +425,124 @@ describe("acquireGitHubProviderToken — paste-path TTL cap", () => {
     for (const fn of Object.values(h.auth)) fn.mockReset();
     h.from.mockReset();
     h.answer.value = "";
+  });
+
+  test("loginWithGitHubManual (via commandLogin --no-browser) populates the cache", async () => {
+    // Regression: `lore login` (github) returned a provider_token inline but never
+    // wrote it to the cache, so the FIRST `lore team discover` after `lore login`
+    // always re-prompted OAuth. Login itself must populate the cache.
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth?x=1" },
+      error: null,
+    });
+    h.answer.value = "abc-123-def";
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "at-gh",
+          refresh_token: "rt-gh",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          provider_token: "gh-from-login",
+          user: {
+            id: "user-123",
+            email: "me@example.com",
+            user_metadata: { user_name: "octocat", name: "Octo Cat" },
+          },
+        },
+      },
+      error: null,
+    });
+    h.from.mockReturnValue(profileChain(null));
+
+    await commandLogin([], { "no-browser": true });
+
+    // Cache was written with the OAuth session's provider_token.
+    const cached = loadCachedProviderToken();
+    expect(cached?.provider_token).toBe("gh-from-login");
+    // 8h-capped TTL, not 1h (PR #1512 regression guard included).
+    const ttl = cached!.expires_at - Math.floor(Date.now() / 1000);
+    expect(ttl).toBeLessThanOrEqual(8 * 60 * 60 + 5);
+  });
+
+  test("cache hit returns the cached provider_token without invoking signInWithOAuth", async () => {
+    // Regression: the cache-hit path must NOT call signInWithOAuth; that would
+    // re-open the browser for a token we already have.
+    persistSession({
+      access_token: "at-fresh",
+      refresh_token: "rt-fresh",
+      user_id: "user-123",
+      email: "me@example.com",
+      github_login: "octocat",
+      display_name: "Octo Cat",
+    });
+    persistProviderTokenCache("gh-cached", 3600);
+    h.auth.setSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "at-fresh",
+          refresh_token: "rt-fresh",
+          user: { id: "user-123", email: "me@example.com" },
+        },
+      },
+      error: null,
+    });
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth?should-not-be-called" },
+      error: null,
+    });
+
+    const result = await acquireGitHubProviderToken({ noBrowser: true });
+    expect(result.providerToken).toBe("gh-cached");
+    expect(h.auth.signInWithOAuth).not.toHaveBeenCalled();
+    expect(h.auth.exchangeCodeForSession).not.toHaveBeenCalled();
+  });
+
+  test("cache hit + setSession error preserves the cache row and falls through to dance", async () => {
+    // Regression: a transient setSession failure (network blip, fresh
+    // refresh_token the server hasn't seen yet) used to clear the cache
+    // blindly, then re-do OAuth. The dance itself overwrites the cache on
+    // success, so clearing eagerly loses the row on a one-off error.
+    persistSession({
+      access_token: "at-fresh",
+      refresh_token: "rt-fresh",
+      user_id: "user-123",
+      email: "me@example.com",
+      github_login: "octocat",
+      display_name: null,
+    });
+    persistProviderTokenCache("gh-cached", 3600);
+    h.auth.setSession.mockResolvedValue({
+      data: { session: null, user: null },
+      error: { message: "fetch failed" },
+    });
+    h.auth.signInWithOAuth.mockResolvedValue({
+      data: { url: "https://gh.example/oauth?x=1" },
+      error: null,
+    });
+    h.answer.value = "code-rescue";
+    h.auth.exchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "at-new",
+          refresh_token: "rt-new",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          provider_token: "gh-from-rescue",
+          user: { id: "user-123", email: "me@example.com" },
+        },
+      },
+      error: null,
+    });
+    h.from.mockReturnValue(profileChain(null));
+
+    const result = await acquireGitHubProviderToken({ noBrowser: true });
+    // The dance ran (because setSession errored).
+    expect(h.auth.signInWithOAuth).toHaveBeenCalled();
+    // And produced a fresh token.
+    expect(result.providerToken).toBe("gh-from-rescue");
+    // Most importantly: the cache row is now the FRESH token, not stale.
+    // (We didn't blindly clear; the dance overwrote it.)
+    const cached = loadCachedProviderToken();
+    expect(cached?.provider_token).toBe("gh-from-rescue");
   });
 
   test("paste-path cache TTL is capped at 8h even when session TTL is longer", async () => {
