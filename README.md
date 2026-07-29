@@ -22,11 +22,21 @@ The AI tooling ecosystem is in a war for execution, and harnesses are
 incentivized to lock you in. When a closed platform builds "agent memory,"
 it stores your team's decisions inside a proprietary vector database.
 Switch IDEs, switch models, and the team gets amnesia. Lore is the escape
-hatch: a vendor-neutral proxy that sits between your harness and your
-model, and distills your team's context into an open standard —
-[`.lore.md`](https://withlore.ai/docs/team-memory/) — that lives in Git,
-moves between tools, and never leaves your infrastructure unless you want
-it to. The harness is replaceable. Your team's "why" is not.
+hatch: a vendor-neutral proxy that sits between your harness and your model.
+
+What you actually own is two things, both open, both yours:
+
+- **`.lore.md`** — the curated team knowledge, version-controlled, PR-reviewable,
+  human-readable Markdown at the root of your repo. The diff shows up next to
+  the code change it covers.
+- **A local SQLite database** at `~/.local/share/lore/lore.db` with an open
+  schema. Raw conversations, distillations, long-term memory, entities — all
+  queryable with `sqlite3`, exportable, yours to read with or without Lore.
+
+The engine itself is fair source (FSL-1.1-Apache-2.0) and runs locally.
+When you're ready to share with a team, sync is end-to-end encrypted, scoped
+to the entries you explicitly approve, and the relay never sees plaintext.
+The harness is replaceable. Your team's "why" is not.
 
 ## Why
 

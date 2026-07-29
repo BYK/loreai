@@ -73,13 +73,13 @@ Open memory is what LangChain is asking for. Open source, model
 agnostic, an open format for the artifacts. That is the bar. The
 question is what the format is.
 
-We picked Markdown. Specifically, a single file at the root of the
-repo called `.lore.md`, with one stable marker per entry, entries
-sorted alphabetically by title within each category. That is the
-whole standard. It is human-readable, machine-parseable, and
-Git-friendly out of the box, because Git already knows how to diff
-it, merge it, and review it. The diff shows up in a pull request
-next to the code change the memory touches.
+We picked Markdown for the curated half. Specifically, a single file
+at the root of the repo called `.lore.md`, with one stable marker per
+entry, entries sorted alphabetically by title within each category.
+That is the whole standard. It is human-readable, machine-parseable,
+and Git-friendly out of the box, because Git already knows how to
+diff it, merge it, and review it. The diff shows up in a pull
+request next to the code change the memory touches.
 
 When the team disagrees about whether an entry is right, you do what
 you already do for any other disagreement: open a PR. The debate
@@ -93,7 +93,30 @@ history.
 This is the part closed vector stores can't copy. They can copy the
 format. They can't copy the workflow. The workflow is the value.
 
-## The Markdown escrow
+## The database underneath
+
+The curated file is only half of what you should own. Most of what
+an agent remembers is not meant to be reviewed and merged. The raw
+conversation, the layered distillations, the long-term memory
+entries, the entities the curator found, all the way back to the
+first session. That record belongs to you too, in a different
+artifact.
+
+Lore stores the rest of it in a local SQLite database at
+`~/.local/share/lore/lore.db`, with an open schema the engine
+publishes. You can open it with `sqlite3`, query it with anything
+that speaks the API, export it to CSV, or build your own tooling
+around it. Stop using Lore tomorrow and the database is still
+there. The engine doesn't sit between you and your data. The
+migrations are versioned, the schema is documented, and what Lore
+stored for you is what you can read.
+
+A vector store asks you to trust the retrieval layer because the
+embedding model and the indexing choices the store made are opaque
+to you. SQLite asks for nothing. The file is the database, the
+database is the file.
+
+## The escrow
 
 A vector store says: trust us with the shape of your team's
 thinking, and we will give it back to you on retrieval. It has to
@@ -101,39 +124,48 @@ be that way, because retrieval depends on the embedding model and
 the indexing choices the store made for you. The lock-in lives in
 the dependencies you can't see.
 
-Markdown says: the file is the memory, the memory is the file.
-Distillation writes a Markdown file. Review edits the file. Agents
-read the file. The model behind the agent doesn't matter. The
-harness behind the model doesn't matter. The next vendor reads the
-same Markdown. The previous vendor never had anything to lock you
-to.
+Lore says: the Markdown file is the curated memory, the SQLite file
+is the full memory, and both are yours. Distillation writes the
+Markdown. Distillation also writes the database. Review edits the
+file. You read the database with or without us. Agents read the
+file. Agents read the database. The model behind the agent doesn't
+matter. The harness behind the model doesn't matter. The next
+vendor reads the same Markdown and queries the same SQLite. The
+previous vendor never had anything to lock you to.
+
+When your team is ready to share, the sync engine works the way a
+good group chat does: end-to-end encrypted, scoped to the entries
+you explicitly approve, and the relay never sees plaintext. The
+keys stay with the participants. Sharing is opt-in, per entry, and
+reversible.
 
 We have talked before about
 [why knowledge lives in token space, not in weights](/blog/distill-your-own-knowledge/).
 A vector store is halfway there. It pulls memory out of the model,
 but it puts memory inside another opaque system. To finish the
-move, memory has to be in text humans already share a workflow
-around. That is the escrow. The agent gets it back when it needs
-it. You keep the original in a place your team already knows how
-to govern.
+move, memory has to be in artifacts humans already share a workflow
+around. Markdown for the team. SQLite for the record. End-to-end
+sync if and when you want it. Everything else is a concession to
+someone else's moat.
 
 Models will keep changing. They always do. Every part of the AI
 tooling stack above the model is genuinely up for grabs right now.
 The part that should not be up for grabs is how a team remembers
-what it decided and why. That belongs to the team, in a format
-the team already owns.
+what it decided and why. That belongs to the team, in formats the
+team already owns.
 
 ## Try it
 
-The format is one file. The file is at the root of your repo. It
-is committed, reviewed, and merged the same way as the code next
-to it.
+The format is one file at the root of your repo, plus a SQLite
+database on your machine. Both are committed, reviewed, queried,
+and merged the same way as the code next to them.
 
 ```bash
 curl -fsSL https://withlore.ai/install | bash
 lore run
 ```
 
-After a few sessions, open `.lore.md`. Read what your agent has
-written down. Open a PR when it gets something wrong. That is the
+After a few sessions, open `.lore.md` *and* the database at
+`~/.local/share/lore/lore.db`. Read what your agent has written
+down. Open a PR when it gets something wrong. That is the
 workflow, and that is the answer.

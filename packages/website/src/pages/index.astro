@@ -184,30 +184,31 @@ const base = import.meta.env.BASE_URL;
       <div class="step sr">
         <div class="step-n">01</div>
         <h3 class="step-t">It lives in Git</h3>
-        <p class="step-b">Memory isn't a black box and shouldn't be one. Lore distills your
-          team's context into an open standard — <code class="code-inline">.lore.md</code> —
-          plain Markdown in your repo, version-controlled, PR-reviewable, and
-          human-readable. The same diff shows up next to the code change it covers.</p>
+        <p class="step-b">The curated team knowledge lands in
+          <code class="code-inline">.lore.md</code> — plain Markdown at the root of your repo,
+          version-controlled, PR-reviewable, and human-readable. The same diff shows up
+          next to the code change it covers.</p>
       </div>
       <div class="step sr">
         <div class="step-n">02</div>
-        <h3 class="step-t">It's portable</h3>
-        <p class="step-b">Your team's "why" doesn't belong to any one harness, model, or vendor.
-          Switch from Cursor to OpenCode, or from Claude to OpenAI, without losing a
-          single team invariant. Lore is a vendor-neutral proxy that sits between
-          your harness and your model — the harness is replaceable, your memory isn't.</p>
+        <h3 class="step-t">It lives in your database</h3>
+        <p class="step-b">Everything else Lore keeps for you — raw conversations,
+          distillations, long-term memory, entities — lives in a local SQLite database
+          with an open schema. Read it with <code class="code-inline">sqlite3</code>, query it,
+          export it, or build your own tools around it. Stop using Lore tomorrow and
+          your data is still there, in an open format.</p>
       </div>
       <div class="step sr">
         <div class="step-n">03</div>
-        <h3 class="step-t">It's secure</h3>
-        <p class="step-b">Your data never leaves your infrastructure unless you want it to. Lore
-          runs locally, the engine is fair source, and the artifacts belong to you.
-          We don't hold your organizational knowledge hostage. We just make it
-          accessible to any agent you choose to hire.</p>
+        <h3 class="step-t">It syncs end-to-end</h3>
+        <p class="step-b">When your team is ready, Lore's sync engine works like a private
+          group chat between your SQLite databases — end-to-end encrypted, and only
+          for the content you explicitly allow. The relay never sees plaintext.
+          The keys stay with the participants.</p>
       </div>
     </div>
     <p class="sec-sub sr" style="max-width:900px;margin:1.5rem auto 0;text-align:center;font-size:.82rem;opacity:.85;">
-      The vector-database route is the lock-in route. The Markdown route is the
+      The vector-database route is the lock-in route. The open-format route is the
       freedom route.
       <a href={`${base}blog/the-embedding-trap/`} style="border-bottom:1px solid var(--g4);color:var(--g2)">Why we chose text &rarr;</a>
     </p>
