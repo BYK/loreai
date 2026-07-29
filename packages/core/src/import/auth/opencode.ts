@@ -70,9 +70,16 @@ function normalizeProvider(key: string): string {
  * that case.
  */
 export function getOpenCodeActiveProvider(): string | null {
+  // OpenCode's documented config precedence (from opencode.ai/docs/config):
+  // managed > project > user config > remote > built-in defaults. For
+  // `lore import` we read only the two on-disk sources (managed/remote don't
+  // apply to a standalone run); the project config overrides the user
+  // config, so the project path MUST be consulted FIRST. Otherwise a
+  // project-local override would be silently shadowed by a stale global
+  // setting — and the importer would route against the wrong provider.
   const candidates = [
-    join(xdgConfigHome(), "opencode", "opencode.json"),
     join(cwd(), "opencode.json"),
+    join(xdgConfigHome(), "opencode", "opencode.json"),
   ];
   for (const cfgPath of candidates) {
     const cfg = readJsonFile<{

@@ -323,6 +323,23 @@ describe("getOpenCodeActiveProvider", () => {
     });
     expect(getOpenCodeActiveProvider()).toBe("minimax");
   });
+
+  test("project-local opencode.json overrides the global one (OpenCode config precedence)", () => {
+    // OpenCode's documented precedence (opencode.ai/docs/config): managed >
+    // project > user config > remote > built-in. A user with a stale global
+    // `model: "anthropic/..."` plus a project-local `model: "openrouter/..."`
+    // is currently using openrouter — we must read the project config FIRST
+    // or the global setting shadows the project override. Seer flagged this
+    // as a HIGH-severity bug; the fix is to swap the candidate order.
+    const globalCfg = configFile();
+    const projectCfg = join(process.cwd(), "opencode.json");
+    writeJson(globalCfg, { model: "anthropic/claude-sonnet-5" });
+    writeJson(projectCfg, { model: "openrouter/anthropic/claude-sonnet-5" });
+    expect(getOpenCodeActiveProvider()).toBe("openrouter");
+    // Flip: project overrides global regardless of file mtime.
+    writeJson(projectCfg, { model: "anthropic/claude-haiku-4-5" });
+    expect(getOpenCodeActiveProvider()).toBe("anthropic");
+  });
 });
 
 describe("Claude Code auth reader", () => {
