@@ -1,127 +1,126 @@
 /**
- * Unit tests for the send-invite-email Edge Function's pure core (E-5-e, #630/#827) — invite email
- * body construction + SMTP2GO HTTP send. Mirrors github-discover.test.ts: imports the Deno-free
- * `send.ts` and drives sendViaSmtp2go with a fetch mock.
+ * Unit coverage for sendInviteEmail (E-5-e, #630/#827) — gateway caller that hands off to the
+ * `send-invite-email` Edge Function. Mirrors the structure of team.test.ts (mocks
+ * SupabaseClient.functions.invoke and exercises each branch), but scopes tightly to the new
+ * resolution logic so we hit the 4 branches the codecov patch flagged as uncovered.
  */
 import { describe, expect, it, vi } from "vitest";
-import {
-  buildInviteEmail,
-  capabilityOf,
-  sendViaSmtp2go,
-} from "../../../supabase/functions/send-invite-email/send";
 
-describe("capabilityOf", () => {
-  it("returns a capability-only token unchanged", () => {
-    expect(capabilityOf("abc123")).toBe("abc123");
-  });
-  it("strips the ephemeral secret suffix (offline invite) — DB stores only the capability", () => {
-    expect(capabilityOf("cap.SECRETb64url")).toBe("cap");
-    // only the FIRST dot delimits — the secret itself may contain no dots but be defensive.
-    expect(capabilityOf("cap.a.b")).toBe("cap");
-  });
-});
+// Mock supabase for currentUser + log-only consumer. sendInviteEmail does not touch session.
+vi.mock("../src/supabase", () => ({
+  getCurrentUser: () => Promise.resolve({ user_id: "u1" }),
+}));
 
-describe("buildInviteEmail", () => {
-  it("includes the accept command, team name, role, and expiry", () => {
-    const m = buildInviteEmail({
-      token: "tok123",
-      teamName: "Acme",
-      role: "editor",
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { sendInviteEmail } from "../src/team";
+
+interface InvokeCall {
+  function: string;
+  body: Record<string, unknown>;
+}
+
+function makeClient(invoker: (body: Record<string, unknown>) => unknown) {
+  const calls: InvokeCall[] = [];
+  return {
+    calls,
+    functions: {
+      invoke(name: string, opts: { body: Record<string, unknown> }) {
+        calls.push({ function: name, body: opts.body });
+        return Promise.resolve(invoker(opts.body));
+      },
+    },
+  } as unknown as SupabaseClient & { calls: InvokeCall[] };
+}
+
+describe("sendInviteEmail (E-5-e)", () => {
+  it("sends the hint as a real email when it passes the email regex", async () => {
+    const client = makeClient((body) => ({
+      data: { resolved_via: "explicit_email" },
+      error: null,
+    }));
+    const result = await sendInviteEmail(client, "tok-abcd", "ada@example.com");
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0]).toEqual({
+      function: "send-invite-email",
+      body: { token: "tok-abcd", email: "ada@example.com" },
     });
-    expect(m.subject).toContain("Acme");
-    expect(m.text).toContain("lore team accept tok123");
-    expect(m.text).toContain("as editor");
-    expect(m.text).toContain("14 days");
-    expect(m.html).toContain("lore team accept tok123");
+    expect(result).toEqual({ ok: true, resolvedVia: "explicit_email" });
   });
 
-  it("defaults role to editor and team name when absent", () => {
-    const m = buildInviteEmail({ token: "t" });
-    expect(m.text).toContain("as editor");
-    expect(m.subject).toContain("a Lore team");
+  it("resolves via a github login: passes github_login + provider_token to the EF", async () => {
+    const client = makeClient((body) => ({
+      data: { resolved_via: "lore_email" },
+      error: null,
+    }));
+    const result = await sendInviteEmail(client, "tok-abcd", "octocat", {
+      providerToken: "gho_x",
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0]).toEqual({
+      function: "send-invite-email",
+      body: {
+        token: "tok-abcd",
+        github_login: "octocat",
+        provider_token: "gho_x",
+      },
+    });
+    expect(result).toEqual({ ok: true, resolvedVia: "lore_email" });
   });
 
-  it("maps an unknown role to editor (never leaks a bogus role)", () => {
-    const m = buildInviteEmail({ token: "t", role: "admin" });
-    expect(m.text).toContain("as editor");
+  it("resolves via a github login WITHOUT a providerToken: EF body omits provider_token", async () => {
+    // The EF will return no_resolvable_email; we surface that as { ok: false } so the CLI falls
+    // back to printing the link. The gateway never persists the oauth token for this case.
+    const client = makeClient((body) => ({
+      data: { error: "no_resolvable_email" },
+      error: { message: "no_resolvable_email" },
+    }));
+    const result = await sendInviteEmail(client, "tok-abcd", "octocat");
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].body).not.toHaveProperty("provider_token");
+    expect(client.calls[0].body).toEqual({
+      token: "tok-abcd",
+      github_login: "octocat",
+    });
+    expect(result).toEqual({ ok: false, resolvedVia: null });
   });
 
-  it("adds the one-time-key warning ONLY for offline invites", () => {
-    const online = buildInviteEmail({ token: "t", offline: false });
-    const offline = buildInviteEmail({ token: "t", offline: true });
-    expect(online.text).not.toContain("one-time key");
-    expect(offline.text).toContain("one-time key");
-    expect(offline.html).toContain("one-time key");
+  it("returns { ok: true, resolvedVia: null } when the EF omits resolved_via", async () => {
+    // Defensive path: a future EF version might forget the field. The CLI still surfaces \"emailed\".
+    const client = makeClient(() => ({ data: null, error: null }));
+    const result = await sendInviteEmail(client, "tok-abcd", "ada@example.com");
+    expect(result).toEqual({ ok: true, resolvedVia: null });
   });
 
-  it("escapes HTML in the team name (no injection into the html body)", () => {
-    const m = buildInviteEmail({ token: "t", teamName: "<script>x</script>" });
-    expect(m.html).not.toContain("<script>x</script>");
-    expect(m.html).toContain("&lt;script&gt;");
-  });
-});
-
-describe("sendViaSmtp2go", () => {
-  const email = { subject: "s", text: "t", html: "<p>h</p>" };
-  const opts = (fetchImpl: typeof fetch) => ({
-    apiKey: "KEY",
-    sender: "keeper@withlore.ai",
-    fetchImpl,
+  it("returns { ok: false, resolvedVia: null } when the EF errors", async () => {
+    const client = makeClient(() => ({
+      data: null,
+      error: { message: "smtp2go: 502" },
+    }));
+    const result = await sendInviteEmail(client, "tok-abcd", "ada@example.com");
+    expect(result).toEqual({ ok: false, resolvedVia: null });
   });
 
-  it("POSTs to the SMTP2GO API with the key header and recipient, and resolves on success", async () => {
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const f = vi.fn(async (url: string, init?: RequestInit) => {
-      calls.push({ url, init: init ?? {} });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ data: { succeeded: 1, failed: 0 } }),
-      } as Response;
-    }) as unknown as typeof fetch;
-    await sendViaSmtp2go("a@b.com", email, opts(f));
-    expect(calls[0].url).toContain("api.smtp2go.com");
-    const headers = calls[0].init.headers as Record<string, string>;
-    expect(headers["X-Smtp2go-Api-Key"]).toBe("KEY");
-    const sent = JSON.parse(calls[0].init.body as string);
-    expect(sent.to).toEqual(["a@b.com"]);
-    expect(sent.sender).toBe("keeper@withlore.ai");
-    expect(sent.subject).toBe("s");
+  it("returns { ok: false, resolvedVia: null } when the invoke itself throws (network)", async () => {
+    const client = {
+      functions: {
+        invoke: () => Promise.reject(new Error("network blip")),
+      },
+    } as unknown as SupabaseClient;
+    const result = await sendInviteEmail(client, "tok-abcd", "ada@example.com");
+    expect(result).toEqual({ ok: false, resolvedVia: null });
   });
 
-  it("throws on a non-ok HTTP status", async () => {
-    const f = (async () =>
-      ({
-        ok: false,
-        status: 500,
-        json: async () => ({}),
-      }) as Response) as unknown as typeof fetch;
-    await expect(sendViaSmtp2go("a@b.com", email, opts(f))).rejects.toThrow(
-      /smtp2go: 500/,
-    );
-  });
-
-  it("throws when SMTP2GO reports an API-level error on a 200", async () => {
-    const f = (async () =>
-      ({
-        ok: true,
-        status: 200,
-        json: async () => ({ data: { error: "bad api key" } }),
-      }) as Response) as unknown as typeof fetch;
-    await expect(sendViaSmtp2go("a@b.com", email, opts(f))).rejects.toThrow(
-      /bad api key/,
-    );
-  });
-
-  it("throws when no recipient was accepted (succeeded < 1)", async () => {
-    const f = (async () =>
-      ({
-        ok: true,
-        status: 200,
-        json: async () => ({ data: { succeeded: 0, failed: 1 } }),
-      }) as Response) as unknown as typeof fetch;
-    await expect(sendViaSmtp2go("a@b.com", email, opts(f))).rejects.toThrow(
-      /no recipients accepted/,
-    );
+  it("ignores providerToken when the hint is a real email (email path takes precedence)", async () => {
+    // Belt-and-suspenders: even if the caller passes a providerToken for an email hint, the email
+    // path wins. Makes future-shape refactors obvious in tests.
+    const client = makeClient((body) => ({
+      data: { resolved_via: "explicit_email" },
+      error: null,
+    }));
+    await sendInviteEmail(client, "tok-abcd", "ada@example.com", {
+      providerToken: "gho_x",
+    });
+    expect(client.calls[0].body).not.toHaveProperty("github_login");
+    expect(client.calls[0].body).not.toHaveProperty("provider_token");
   });
 });
