@@ -34,7 +34,7 @@ function makeClient(invoker: (body: Record<string, unknown>) => unknown) {
 
 describe("sendInviteEmail (E-5-e)", () => {
   it("sends the hint as a real email when it passes the email regex", async () => {
-    const client = makeClient((body) => ({
+    const client = makeClient((_body) => ({
       data: { resolved_via: "explicit_email" },
       error: null,
     }));
@@ -48,7 +48,7 @@ describe("sendInviteEmail (E-5-e)", () => {
   });
 
   it("resolves via a github login: passes github_login + provider_token to the EF", async () => {
-    const client = makeClient((body) => ({
+    const client = makeClient((_body) => ({
       data: { resolved_via: "lore_email" },
       error: null,
     }));
@@ -70,7 +70,7 @@ describe("sendInviteEmail (E-5-e)", () => {
   it("resolves via a github login WITHOUT a providerToken: EF body omits provider_token", async () => {
     // The EF will return no_resolvable_email; we surface that as { ok: false } so the CLI falls
     // back to printing the link. The gateway never persists the oauth token for this case.
-    const client = makeClient((body) => ({
+    const client = makeClient((_body) => ({
       data: { error: "no_resolvable_email" },
       error: { message: "no_resolvable_email" },
     }));
@@ -113,7 +113,7 @@ describe("sendInviteEmail (E-5-e)", () => {
   it("ignores providerToken when the hint is a real email (email path takes precedence)", async () => {
     // Belt-and-suspenders: even if the caller passes a providerToken for an email hint, the email
     // path wins. Makes future-shape refactors obvious in tests.
-    const client = makeClient((body) => ({
+    const client = makeClient((_body) => ({
       data: { resolved_via: "explicit_email" },
       error: null,
     }));
