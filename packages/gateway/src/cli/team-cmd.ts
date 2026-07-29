@@ -27,7 +27,6 @@ import {
   createTeam,
   createTeamInvite,
   discoverGitHubContributors,
-  distinctContributors,
   isEmailAddress,
   listDomainJoinRequests,
   listTeams,
@@ -140,37 +139,17 @@ export async function commandTeam(
           process.exitCode = 1;
           return;
         }
-        const found = await discoverGitHubContributors(
-          freshClient,
-          providerToken,
-          repos,
-        );
-        if (!found || found.length === 0) {
-          console.log("No accessible repos with contributors found.");
-          break;
-        }
-        let onLoreTotal = 0;
-        let offLoreTotal = 0;
-        for (const r of found) {
-          if (r.contributors.length === 0) continue;
-          console.log(`\n${r.repo}`);
-          for (const c of r.contributors) {
-            if (c.onLore) onLoreTotal++;
-            else offLoreTotal++;
-            console.log(
-              `  ${c.onLore ? "✓ on Lore  " : "· not yet  "} ${c.login}`,
-            );
-          }
-        }
 
-        // E-5-d-2: --invite <team> mints an invite per DISTINCT contributor so the admin can hand
-        // out join links. Invite-only for everyone (on-Lore or not) — we never expose Lore user_ids,
-        // so there is no direct auto-add; an on-Lore invitee just gets a frictionless `accept`.
-        // GitHub's API returns no contributor emails, so links are printed rather than auto-emailed.
+        // Resolve --invite <team> ahead of the discovery call so we can pass invite_to_scope into
+        // the EF and have it mint+email server-side (E-5-d-2 + E-5-e). The admin pre-checks
+        // (resolveWritableScope + scopeMemberRole mirror) save us a wasted round trip when the
+        // invitee isn't actually allowed to invite to the named scope.
         const inviteRef = values.invite as string | undefined;
+        let resolvedInvite: {
+          scopeId: string;
+          role: "editor" | "viewer";
+        } | null = null;
         if (inviteRef !== undefined) {
-          // A trailing `--invite` with no value parses as `true` under strict:false — reject it
-          // clearly instead of letting a non-string reach the scope lookup.
           if (typeof inviteRef !== "string") {
             console.error("`--invite` requires a team name or id.");
             process.exitCode = 1;
@@ -182,8 +161,6 @@ export async function commandTeam(
             process.exitCode = 1;
             return;
           }
-          // Resolve the target scope: an explicit team name/id, or — when the value doesn't resolve
-          // and the cwd is a project already linked to a team — that linked scope (repo→scope corr.).
           let scope = resolveWritableScope(inviteRef, user.user_id);
           if (!scope) {
             const pid = projectId(process.cwd());
@@ -198,8 +175,6 @@ export async function commandTeam(
             process.exitCode = 1;
             return;
           }
-          // Only admins may mint invites (server enforces this too). Pre-check the local mirror so an
-          // editor gets ONE clear message instead of N identical per-contributor RPC rejections.
           if (scopeMemberRole(scope.id, user.user_id) !== "admin") {
             console.error(
               `\nYou must be an admin of "${scope.name ?? scope.id}" to invite members.`,
@@ -207,38 +182,68 @@ export async function commandTeam(
             process.exitCode = 1;
             return;
           }
-          const inviteRole =
-            (values.role as string) === "viewer" ? "viewer" : "editor";
-          const people = distinctContributors(found);
-          if (people.length === 0) {
+          resolvedInvite = {
+            scopeId: scope.id,
+            role: (values.role as string) === "viewer" ? "viewer" : "editor",
+          };
+        }
+
+        const discovery = await discoverGitHubContributors(
+          freshClient,
+          providerToken,
+          repos,
+          resolvedInvite ?? undefined,
+        );
+        if (!discovery || discovery.repos.length === 0) {
+          console.log("No accessible repos with contributors found.");
+          break;
+        }
+        let onLoreTotal = 0;
+        let offLoreTotal = 0;
+        for (const r of discovery.repos) {
+          if (r.contributors.length === 0) continue;
+          console.log(`\n${r.repo}`);
+          for (const c of r.contributors) {
+            if (c.onLore) onLoreTotal++;
+            else offLoreTotal++;
             console.log(
-              "\nNo contributors to invite (the accessible repos have none). Nothing minted.",
+              `  ${c.onLore ? "✓ on Lore  " : "· not yet  "} ${c.login}`,
+            );
+          }
+        }
+
+        // Server-side invite phase — the EF has already minted+emailed (best-effort), and the report
+        // tells us how many went by email vs how many came back unsent (no resolvable recipient).
+        if (resolvedInvite && discovery.invited) {
+          const inv = discovery.invited;
+          if (inv.total === 0) {
+            console.log(
+              "\nNo accessible repos with contributors found (nothing to invite).",
             );
             break;
           }
           console.log(
-            `\nMinting ${inviteRole} invites to "${scope.name ?? scope.id}" for ${people.length} contributor${people.length === 1 ? "" : "s"}:`,
+            `\n${inv.role} invites to scope ${inv.scopeId}: ` +
+              `emailed ${inv.emailed}, no-email ${inv.noEmail}` +
+              (inv.overCap > 0 ? `, skipped ${inv.overCap} (over cap)` : "") +
+              ".",
           );
-          for (const c of people) {
-            try {
-              const token = await createTeamInvite(
-                client,
-                scope.id,
-                inviteRole,
-              );
+          const printable = inv.results.filter(
+            (r) => r.status !== "emailed" && r.token,
+          );
+          if (printable.length > 0) {
+            console.log("\nCould not email — share these manually:");
+            for (const r of printable) {
               console.log(
-                `  ${c.login}${c.onLore ? " (on Lore)" : ""}:\n    lore team accept ${token}`,
-              );
-            } catch (e) {
-              console.error(
-                `  ${c.login}: invite failed — ${(e as Error).message}`,
+                `  ${r.login} (${r.status}):\n    lore team accept ${r.token}`,
               );
             }
           }
-          console.log(
-            "\nShare each link with the matching contributor (GitHub doesn't expose their email). " +
-              "To email an address directly, use `lore team invite <scope> --email <addr>`.",
-          );
+          if (inv.emailed === 0 && printable.length === 0 && inv.total > 0) {
+            console.log(
+              "\nNo invites sent. Either nobody had a resolvable email or all sends failed.",
+            );
+          }
           break;
         }
 

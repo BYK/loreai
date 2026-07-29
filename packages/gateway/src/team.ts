@@ -50,18 +50,34 @@ export interface DiscoveredRepo {
  * the caller can actually read on GitHub, and only as an `onLore` boolean (never a Lore user id).
  *
  * Contributors, NOT collaborators: GitHub's `/repos/{owner}/{name}/collaborators` returns
- * "everyone with at least triage access" — which for a private org repo is effectively the entire
- * org roster (everyone typically gets triage via org rules). `/contributors` returns the commit-
- * attribution roster instead, which is what admins actually want when scanning "who worked here".
+ * "everyone with at least triage" — which for a private org repo is effectively the entire org roster
+ * (everyone typically gets triage via org rules). `/contributors` returns the commit-attribution
+ * roster instead, which is what admins actually want when scanning "who worked here".
+ *
+ * Optional `invite` opts in to server-side invite minting+emailing. When provided:
+ *   - `scopeId` is the UUID of the team to invite to; the EF enforces admin via `scope_role` + RLS.
+ *   - `role` is `editor` (default) or `viewer`.
+ *   - The EF mints one invite per distinct contributor, resolves each recipient server-side (Lore
+ *     email preferred, GitHub public email fallback), and emails them via `send-invite-email`.
+ *   - Contributors without a resolvable email get a token back in `invited.results[]` for manual
+ *     share — the gateway prints them.
+ *   - The resolved recipient email NEVER round-trips through the gateway.
  */
 export async function discoverGitHubContributors(
   client: SupabaseClient,
   providerToken: string | null | undefined,
   repos?: string[],
-): Promise<DiscoveredRepo[] | null> {
+  invite?: { scopeId: string; role: "editor" | "viewer" },
+): Promise<{ repos: DiscoveredRepo[]; invited?: DiscoverInviteReport } | null> {
   if (!providerToken) return null; // no read:org/repo grant (older session / non-github login)
+  const body: Record<string, unknown> = {
+    provider_token: providerToken,
+    repos,
+  };
+  if (invite) body.invite_to_scope = invite.scopeId;
+  if (invite) body.invite_role = invite.role;
   const { data, error } = await client.functions.invoke("github-discover", {
-    body: { provider_token: providerToken, repos },
+    body,
   });
   if (error) throw await enrichFunctionsError("github-discover", error);
   const payload = data as {
@@ -73,8 +89,28 @@ export async function discoverGitHubContributors(
         on_lore: boolean;
       }>;
     }>;
+    invited?: {
+      scope_id: string;
+      role: string;
+      total: number;
+      emailed: number;
+      no_email: number;
+      over_cap: number;
+      results: Array<{
+        login: string;
+        status:
+          | "emailed"
+          | "no_email"
+          | "forbidden"
+          | "invite_failed"
+          | "send_failed"
+          | "skipped";
+        resolved_via: "lore_email" | "github_public_email" | null;
+        token?: string;
+      }>;
+    };
   };
-  return (payload.repos ?? []).map((r) => ({
+  const discoveredRepos = (payload.repos ?? []).map((r) => ({
     repo: r.repo,
     contributors: r.contributors.map((c) => ({
       login: c.login,
@@ -82,6 +118,46 @@ export async function discoverGitHubContributors(
       onLore: c.on_lore,
     })),
   }));
+  return {
+    repos: discoveredRepos,
+    invited: payload.invited
+      ? {
+          scopeId: payload.invited.scope_id,
+          role: payload.invited.role as "editor" | "viewer",
+          total: payload.invited.total,
+          emailed: payload.invited.emailed,
+          noEmail: payload.invited.no_email,
+          overCap: payload.invited.over_cap,
+          results: payload.invited.results.map((r) => ({
+            login: r.login,
+            status: r.status,
+            resolvedVia: r.resolved_via,
+            token: r.token,
+          })),
+        }
+      : undefined,
+  };
+}
+
+export interface DiscoverInviteReport {
+  scopeId: string;
+  role: "editor" | "viewer";
+  total: number;
+  emailed: number;
+  noEmail: number;
+  overCap: number;
+  results: Array<{
+    login: string;
+    status:
+      | "emailed"
+      | "no_email"
+      | "forbidden"
+      | "invite_failed"
+      | "send_failed"
+      | "skipped";
+    resolvedVia: "lore_email" | "github_public_email" | null;
+    token?: string;
+  }>;
 }
 
 /**
