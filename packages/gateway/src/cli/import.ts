@@ -28,6 +28,7 @@ import {
 } from "../auth";
 import { defaultModelForProvider, parseWorkerModelEnv } from "../worker-model";
 import { resolveProviderRoute, providerForUpstreamOrigin } from "../config";
+import { hasRecentAuthRejectedFailure } from "../worker-health";
 import { AGENTS, captureUserEnvCredential } from "./agents";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
@@ -51,6 +52,7 @@ const {
   importStructuredEntries,
   safeParseImportDoc,
   readUsableAuth,
+  getOpenCodeActiveProvider,
 } = conversationImport;
 type StructuredSourceName = conversationImport.StructuredSourceName;
 type AgentResolvedAuth =
@@ -120,9 +122,24 @@ export function resolveAgentImportAuth(
   //    exchange needed), and its route carries a concrete url. Anything
   //    filtered here falls through to the accurate "no usable credential"
   //    guidance rather than a confusing downstream "no response from the model".
+  //
+  //    OpenCode-specific override: a shell-env credential for the user's
+  //    CURRENTLY-CONFIGURED provider (`~/.config/opencode/opencode.json`'s
+  //    `model`/`small_model`) wins over the on-disk credential for that same
+  //    provider — matches OpenCode's own env-first precedence in its @ai-sdk
+  //    clients. Without this, a user with `ANTHROPIC_API_KEY` set + a stale
+  //    `anthropic: { key }` in auth.json gets a 401-storm from the import
+  //    worker even though `lore run opencode` works (because OpenCode's
+  //    Anthropic SDK reads the env var, not auth.json).
+  const envOverride = pickOpenCodeActiveEnvCredential(agentName);
   const creds: AgentResolvedAuth[] = readUsableAuth(agentName);
-  const usable = creds.find(
-    (c) => resolveProviderRoute(c.providerID)?.url != null,
+  const usable = creds.find((c) =>
+    // Prefer the active-provider credential that the env path selected —
+    // ensures the env credential wins when both exist for the same
+    // provider. Falls back to the first routable entry otherwise.
+    envOverride
+      ? c.providerID === envOverride.providerID
+      : resolveProviderRoute(c.providerID)?.url != null,
   );
   if (usable) {
     // Honor an explicit user model (LORE_WORKER_MODEL / .lore.json) when it
@@ -148,8 +165,16 @@ export function resolveAgentImportAuth(
     if (!model.modelID) {
       return { needsModel: usable.providerID };
     }
+    // The OpenCode env-preference: when an env-var credential was found for
+    // the active provider, use its value (and scheme) instead of the
+    // on-disk one. The on-disk `usable` only tells us WHICH provider to
+    // authenticate — the env path supplies the actual token. Falls back to
+    // the on-disk value when there's no env override (or for non-opencode
+    // agents).
+    const pickedScheme = envOverride?.scheme ?? usable.scheme;
+    const pickedValue = envOverride?.value ?? usable.value;
     return {
-      getAuth: () => ({ scheme: usable.scheme, value: usable.value }),
+      getAuth: () => ({ scheme: pickedScheme, value: pickedValue }),
       model,
     };
   }
@@ -160,15 +185,34 @@ export function resolveAgentImportAuth(
   //    from the captured base URL (a known host → provider via the reverse map;
   //    unknown host still works — we route extraction straight at that upstream
   //    and default the model). Route extraction to the captured upstream.
+  //
+  //    For OpenCode, this branch also catches the case where the user has a
+  //    shell-env credential but NO on-disk credential at all (e.g. fresh
+  //    machine, never ran `opencode auth login` — the env var IS the
+  //    credential). The active-provider lookup in step 2 would return null
+  //    for env because we don't have the on-disk entry to match against.
   const agentDef = AGENTS.find((a) => a.name === agentName);
   if (agentDef) {
     const envCred = captureUserEnvCredential(agentDef);
     if (envCred) {
+      // OpenCode's `authTokenEnvVars` covers multiple provider families
+      // (ANTHROPIC_API_KEY → anthropic, OPENAI_API_KEY → openai, …). Without
+      // a hint, the legacy code fell back to `wireProtocol ?? "anthropic"` —
+      // wrong for OpenCode (no wireProtocol). Use the active provider from
+      // opencode.json when it matches the captured env var, else route by
+      // the env var's NAME (env-var → provider mapping maintained here).
+      // Falls back to wireProtocol/legacy defaults for non-opencode agents.
+      const envDrivenProviderID =
+        agentName === "opencode"
+          ? (pickEnvVarProvider(envCred.envVarName) ??
+            getOpenCodeActiveProvider())
+          : null;
       const providerID = envCred.upstreamUrl
         ? (providerForUpstreamOrigin(envCred.upstreamUrl) ??
+          envDrivenProviderID ??
           agentDef.wireProtocol ??
           "anthropic")
-        : (agentDef.wireProtocol ?? "anthropic");
+        : (envDrivenProviderID ?? agentDef.wireProtocol ?? "anthropic");
       // Honor an explicit user model ONLY when it targets this credential's
       // provider (same guard as tier 2) — the env credential authenticates
       // `providerID`, so a cfgModel for a DIFFERENT provider would route this
@@ -229,6 +273,78 @@ export function resolveExtractionUpstreams(
     return { anthropic: agentUpstream, openai: agentUpstream };
   }
   return defaults;
+}
+
+/**
+ * Map a single auth-token env var name to the provider family it
+ * authenticates. Used by opencode's tier-2/tier-3 routing to figure out
+ * which provider an env-var credential belongs to — the env var carries a
+ * bare token, not a provider ID, and opencode has multiple providers'
+ * env vars in its `authTokenEnvVars` (ANTHROPIC_API_KEY → anthropic,
+ * OPENAI_API_KEY → openai, OPENROUTER_API_KEY → openrouter, etc.).
+ *
+ * Returns null for env vars we don't recognize — the caller falls back
+ * to the active provider (opencode.json's `model`) or to the legacy
+ * wireProtocol default.
+ */
+function pickEnvVarProvider(envVarName: string): string | null {
+  switch (envVarName) {
+    case "ANTHROPIC_API_KEY":
+    case "ANTHROPIC_AUTH_TOKEN":
+      return "anthropic";
+    case "OPENAI_API_KEY":
+      return "openai";
+    case "OPENROUTER_API_KEY":
+      return "openrouter";
+    case "GEMINI_API_KEY":
+    case "GOOGLE_API_KEY":
+      return "google";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Look up a shell-env credential that authenticates the user's CURRENTLY
+ * CONFIGURED opencode provider. Used to prefer a fresh env-var key over a
+ * stale on-disk one in tier 2 — matches OpenCode's own env-first precedence
+ * (the @ai-sdk Anthropic/OpenAI clients read the env var, not auth.json,
+ * so `lore run opencode` succeeds against the env credential even when
+ * auth.json has a rotated key).
+ *
+ * Returns null for non-opencode agents, when no active provider is
+ * detected (no `model`/`small_model` in opencode.json), or when no env
+ * var is set for that provider. Callers MUST fall through to the on-disk
+ * tier-2 path in those cases — the env path can never fully replace
+ * auth.json because the user might still have a usable on-disk credential
+ * from a previous config.
+ */
+function pickOpenCodeActiveEnvCredential(agentName: string): {
+  providerID: string;
+  scheme: "bearer" | "api-key";
+  value: string;
+} | null {
+  if (agentName !== "opencode") return null;
+  const active = getOpenCodeActiveProvider();
+  if (!active) return null;
+  // Walk the opencode agent's authTokenEnvVars (kept in agents.ts for one
+  // place to update); the first match whose var authenticates `active` AND
+  // has a non-empty value wins. We honor the var list's declared precedence
+  // (bearer over api-key for anthropic — matches Claude Code's parity rule).
+  const def = AGENTS.find((a) => a.name === "opencode");
+  if (!def?.authTokenEnvVars) return null;
+  for (const { var: key, scheme } of def.authTokenEnvVars) {
+    if (pickEnvVarProvider(key) !== active) continue;
+    const raw = process.env[key];
+    if (!raw) continue;
+    // Sanitize the same way captureUserEnvCredential does — control chars
+    // would otherwise smuggle headers into the captured credential.
+    // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
+    const token = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+    if (!token) continue;
+    return { providerID: active, scheme, value: token };
+  }
+  return null;
 }
 
 /**
@@ -876,6 +992,11 @@ export async function commandImport(
     return;
   }
 
+  // Stamp the start of THIS import run so the auth-rejected probe ignores
+  // failures recorded by a prior `lore import` invocation in the same process
+  // — see `hasRecentAuthRejectedFailure` for the cross-run leak rationale.
+  const runStartedAt = Date.now();
+
   // Start gateway for LLM access
   console.log("\n[lore] Starting gateway for LLM access...");
 
@@ -1021,10 +1142,76 @@ export async function commandImport(
             `\r[lore]   Chunk ${progress.current}/${progress.total} — ${progress.created} created, ${progress.updated} updated`,
           );
         },
+        // The standalone import path is session-less (no sessionID is passed
+        // to llm.prompt — see extract.ts: workerID is fixed to "lore-import").
+        // Inject the worker-health peek so the loop aborts on the FIRST chunk
+        // whose LLM call returned null AND an upstream `auth-rejected` was
+        // recorded, instead of letting the same broken credential burn the
+        // remaining 70 chunks. The `runStartedAt` bound ignores failures
+        // recorded by a prior `lore import` invocation in this process, so a
+        // second run after a credential fix isn't falsely aborted on chunk 1.
+        wasRecentChunkAuthRejected: () =>
+          hasRecentAuthRejectedFailure(
+            "_unknown",
+            "lore-import",
+            60_000,
+            runStartedAt,
+          ),
       });
 
       // Clear the progress line
       process.stderr.write("\n");
+
+      // Aborted early because the upstream rejected the credential on the
+      // first chunk (HTTP 401/403). Surface a single, actionable error
+      // pointing at the on-disk auth path the user can fix + the env-var
+      // override as a quick unblock. Distinct from chunksAnswered === 0 of
+      // a NON-auth abort (which falls through to the "no response from the
+      // model" message — a transient signal, not actionable here).
+      if (extractResult.abortedByAuth) {
+        const remaining = chunks.length - extractResult.chunksProcessed;
+        // Pluralize so a single-chunk import doesn't read "1 chunks".
+        const remainingWord = remaining === 1 ? "chunk" : "chunks";
+        const wereWord = remaining === 1 ? "was" : "were";
+        const remainingLine =
+          remaining === 0
+            ? "No further chunks were attempted — there were no more after chunk 1."
+            : `The remaining ${remaining} ${remainingWord} ${wereWord} not attempted — retrying would just 401 again.`;
+        console.error(
+          `\n[lore] Can't import ${result.agentDisplayName}: the credential ` +
+            `Lore is using is invalid (HTTP 401 — ${auth.model.providerID} rejected ` +
+            `the key). ${remainingLine}\n` +
+            `[lore]\n` +
+            `[lore] The credential likely came from one of these places. ` +
+            `Pick the one that matches your setup:\n` +
+            `[lore]\n` +
+            `[lore]   1. ${result.agentDisplayName} on-disk auth. Update ` +
+            `or re-authenticate in that agent (e.g. \`opencode auth login\`).\n` +
+            `[lore]      Then either re-run \`lore import\`, or restart \`lore ` +
+            `run\` so the gateway re-captures the fresh key.\n` +
+            `[lore]\n` +
+            `[lore]   2. Shell env vars (e.g. ANTHROPIC_AUTH_TOKEN / ` +
+            `ANTHROPIC_API_KEY / OPENAI_API_KEY). Confirm the key in your shell, ` +
+            `then re-run \`lore import\` from the same shell.\n` +
+            `[lore]\n` +
+            `[lore]   3. Override the import credential entirely with a ` +
+            `dedicated worker key:\n` +
+            `[lore]        export LORE_WORKER_API_KEY=<a fresh raw API key for ` +
+            `provider ${auth.model.providerID}>\n` +
+            `[lore]        lore import\n` +
+            `[lore]\n` +
+            `[lore] Tip: a ChatGPT / GitHub Copilot subscription token is NOT ` +
+            `a usable raw key for the API. If that's all you have, run \`lore ` +
+            `run\` and send one message — Lore captures the live credential ` +
+            `and re-offers imports automatically.`,
+        );
+        totalFailed += extractResult.chunksFailed;
+        // Also tally the chunks we DID NOT attempt so the summary line
+        // accurately reflects the run's footprint (helpful when the
+        // dashboard counts failed-chunks).
+        totalFailed += chunks.length - extractResult.chunksProcessed;
+        continue;
+      }
 
       // Only mark sessions imported if the LLM actually answered a chunk. A
       // no-auth run returns null per chunk (0 answered) without throwing — a

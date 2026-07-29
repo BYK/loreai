@@ -34,6 +34,11 @@ export {
   readUsableAuth,
 } from "./auth";
 
+// OpenCode active-provider detection — the gateway uses this to know which
+// on-disk credential / shell env var to prefer when the user has configured
+// multiple providers (see `getOpenCodeActiveProvider` in `./auth/opencode`).
+export { getOpenCodeActiveProvider } from "./auth/opencode";
+
 // Extraction (lazy — avoid pulling in LLM/curator deps for detection-only use)
 export {
   extractKnowledge,

@@ -30,6 +30,7 @@ import type { GatewayConfig } from "./config";
 import { createGatewayLLMClient } from "./llm-adapter";
 import { resolveAuth, getLastSeenAuthProvider } from "./auth";
 import { defaultModelForProvider } from "./worker-model";
+import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
 
 // ---------------------------------------------------------------------------
@@ -560,6 +561,11 @@ async function handleImportExtract(
     projectPath,
     chunks: body.chunks,
     model: defaultModel,
+    // Remote extract runs session-less under workerID "lore-import". Inject
+    // the same fail-fast-on-auth-rejected probe as the local CLI path so a
+    // broken credential doesn't burn every chunk before the response returns.
+    wasRecentChunkAuthRejected: () =>
+      hasRecentAuthRejectedFailure("_unknown", "lore-import"),
   });
 
   return jsonResponse(result);

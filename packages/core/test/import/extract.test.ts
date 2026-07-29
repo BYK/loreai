@@ -184,4 +184,141 @@ describe("extractKnowledge", () => {
 
     expect(processedLabels).toEqual(["A", "B", "C"]);
   });
+
+  describe("auth-rejected abort (wasRecentChunkAuthRejected)", () => {
+    test("null LLM response + probe returns false → loop continues (existing no-auth semantics)", async () => {
+      // Distinct from the auth-abort path: a null response with no probe
+      // signal leaves the loop intact — `llm.prompt` returned null but no
+      // 401 was attributed. Callers see `chunksAnswered === 0` and the
+      // familiar "no response from the model" message; this preserves the
+      // pre-abort behavior when the gateway doesn't inject a probe.
+      const llm = makeMockLLM(null);
+
+      const result = await extractKnowledge({
+        llm,
+        projectPath: PROJECT_PATH,
+        chunks: [makeChunk(), makeChunk(), makeChunk()],
+      });
+
+      expect(result.abortedByAuth).toBe(false);
+      expect(result.chunksProcessed).toBe(3);
+      expect(result.chunksFailed).toBe(0);
+      expect(result.chunksAnswered).toBe(0);
+    });
+
+    test("null LLM response + probe reports auth-rejected on chunk 1 → abort, rest skipped (#1454 follow-up)", async () => {
+      // The motivating bug: a 71-chunk import with a broken credential used to
+      // burn 71 doomed LLM requests + 71 Sentry captures before exiting with a
+      // generic "no response from the model" message. Aborting after chunk 1
+      // turns that into one failed request + one actionable error.
+      const llm = makeMockLLM(null);
+      const probe = vi.fn(() => true);
+
+      const result = await extractKnowledge({
+        llm,
+        projectPath: PROJECT_PATH,
+        chunks: [
+          makeChunk({ label: "Chunk 1", timestamp: 1000 }),
+          makeChunk({ label: "Chunk 2", timestamp: 2000 }),
+          makeChunk({ label: "Chunk 3", timestamp: 3000 }),
+        ],
+        wasRecentChunkAuthRejected: probe,
+      });
+
+      expect(result.abortedByAuth).toBe(true);
+      expect(result.chunksProcessed).toBe(1); // exactly one chunk was attempted
+      expect(result.chunksFailed).toBe(1); // counted as a failure for the summary
+      expect(result.chunksAnswered).toBe(0);
+      // Probe consulted once — after the one chunk that aborted.
+      expect(probe).toHaveBeenCalledTimes(1);
+      // The LLM was called exactly once: not for chunks 2 or 3.
+      expect((llm.prompt as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
+        1,
+      );
+    });
+
+    test("probe fires only on null responses; valid responses never trip the abort", async () => {
+      // A chunk that returns a valid answer is NOT a candidate for the abort —
+      // even if worker-health's auth-rejected flag is sticky from an earlier
+      // failure. The probe is a SHAPE check (recent failure attributed to
+      // this run), consulted only when `llm.prompt` returned null.
+      const probe = vi.fn(() => true); // always-true probe (pathological)
+      const llm = makeMockLLM("[]"); // empty-but-valid answer
+
+      const result = await extractKnowledge({
+        llm,
+        projectPath: PROJECT_PATH,
+        chunks: [makeChunk(), makeChunk()],
+        wasRecentChunkAuthRejected: probe,
+      });
+
+      expect(result.abortedByAuth).toBe(false);
+      expect(result.chunksProcessed).toBe(2);
+      expect(result.chunksAnswered).toBe(2);
+      // Probe NEVER consulted on a non-null response.
+      expect(probe).not.toHaveBeenCalled();
+    });
+
+    test("mixed: null on chunk 1 with probe=true aborts; later chunks never fire", async () => {
+      // Defense-in-depth: even if chunk 1's null is an OOM/null-quirk (not
+      // truly auth-rejected) the abort is "best-effort, single chunk burned"
+      // — never the whole batch. Distinct from the previous behavior where
+      // a single broken credential burned the full batch.
+      const probe = vi.fn(() => true);
+
+      const result = await extractKnowledge({
+        llm: makeMockLLM(null),
+        projectPath: PROJECT_PATH,
+        chunks: Array.from({ length: 71 }, (_, i) =>
+          makeChunk({ label: `Chunk ${i + 1}`, timestamp: i * 1000 }),
+        ),
+        wasRecentChunkAuthRejected: probe,
+      });
+
+      expect(result.abortedByAuth).toBe(true);
+      // The whole point of the fix: 1 attempted, 70 NOT attempted.
+      expect(result.chunksProcessed).toBe(1);
+      expect((probe as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+    });
+
+    test("empty chunks array → fast-path returns zeros, abortedByAuth stays false", async () => {
+      // The empty-input fast-path must not poison abortedByAuth — with no
+      // chunks there was no LLM call to attribute failure to. The default
+      // zero result is the contract callers see on a "no work" run.
+      const llm = makeMockLLM("[]");
+      const result = await extractKnowledge({
+        llm,
+        projectPath: PROJECT_PATH,
+        chunks: [],
+        wasRecentChunkAuthRejected: () => true,
+      });
+
+      expect(result.abortedByAuth).toBe(false);
+      expect(result.chunksProcessed).toBe(0);
+      expect(result.chunksAnswered).toBe(0);
+    });
+
+    test("aborted run still fires onProgress with the partial total so CLI spinner clears", async () => {
+      // The CLI writes a single \r-progress line on every chunk; without
+      // clearing that line on the abort path, the user sees a stale "Chunk
+      // 1/71 — 0 created, 0 updated" frozen in their terminal. The abort
+      // path MUST fire onProgress one last time before returning.
+      const progressUpdates: Array<{ current: number; total: number }> = [];
+      await extractKnowledge({
+        llm: makeMockLLM(null),
+        projectPath: PROJECT_PATH,
+        chunks: [
+          makeChunk({ timestamp: 1000 }),
+          makeChunk({ timestamp: 2000 }),
+        ],
+        onProgress: (p) =>
+          progressUpdates.push({ current: p.current, total: p.total }),
+        wasRecentChunkAuthRejected: () => true,
+      });
+
+      // Exactly one progress event: chunk 1, total 2. No further event from
+      // the chunk-2 path because the loop aborted before reaching it.
+      expect(progressUpdates).toEqual([{ current: 1, total: 2 }]);
+    });
+  });
 });

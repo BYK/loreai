@@ -17,6 +17,7 @@ import {
 import { createGatewayLLMClient } from "../llm-adapter";
 import { resolveAuth, getLastSeenAuthProvider } from "../auth";
 import { defaultModelForProvider } from "../worker-model";
+import { hasRecentAuthRejectedFailure } from "../worker-health";
 import { registerPendingImport } from "../pending-import";
 import type { GatewayConfig } from "../config";
 
@@ -238,6 +239,11 @@ async function runBackgroundImport(
     return;
   }
 
+  // Stamp this run so the auth-rejected probe ignores failures recorded by
+  // an earlier background run in the same gateway process — see
+  // `hasRecentAuthRejectedFailure` for the cross-run leak rationale.
+  const runStartedAt = Date.now();
+
   let totalCreated = 0;
   let totalUpdated = 0;
 
@@ -254,7 +260,38 @@ async function runBackgroundImport(
       projectPath,
       chunks,
       model,
+      // Same fail-fast-on-auth-rejected injection as `commandImport`. The
+      // background path is session-less ("_unknown") and uses workerID
+      // "lore-import"; the probe reads worker-health's most-recent failure
+      // attributed to this run. Without this, a stale credential would 401
+      // every chunk and a background run produces nothing — silently.
+      wasRecentChunkAuthRejected: () =>
+        hasRecentAuthRejectedFailure(
+          "_unknown",
+          "lore-import",
+          60_000,
+          runStartedAt,
+        ),
     });
+
+    // Aborted early because the upstream rejected the credential (HTTP 401).
+    // Surface a single actionable line and skip recording so the agent is
+    // re-offered next run (NOT marked handled, since nothing was extracted).
+    // This is distinct from chunksAnswered === 0 of a non-auth abort — that
+    // covers "model answered nothing to keep" / transient no-response cases.
+    if (extractResult.abortedByAuth) {
+      const remaining = chunks.length - extractResult.chunksProcessed;
+      const remainingWord = remaining === 1 ? "chunk" : "chunks";
+      const wereWord = remaining === 1 ? "was" : "were";
+      console.error(
+        `[lore] Background import aborted: ${result.agentDisplayName} ` +
+          `credential was rejected by ${model.providerID} (HTTP 401). The ` +
+          `remaining ${remaining} ${remainingWord} ${wereWord} skipped. ` +
+          `Re-authenticate the agent or set LORE_WORKER_API_KEY, then the ` +
+          `next \`lore run\` will re-offer the import.`,
+      );
+      continue;
+    }
 
     // Only mark these sessions imported if the LLM actually answered at least
     // one chunk. A no-auth run returns null per chunk without throwing (0
