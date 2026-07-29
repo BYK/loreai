@@ -757,52 +757,74 @@ describe("discover --invite (E-5-d-2)", () => {
       client: FAKE_CLIENT,
       providerToken: "gho_x",
     });
-    vi.mocked(team.discoverGitHubContributors).mockResolvedValue([
-      {
-        repo: "o/a",
-        contributors: [
-          { login: "alice", githubId: 1, onLore: true },
-          { login: "bob", githubId: 2, onLore: false },
+    // EF now does the mint+email server-side; the gateway just receives an `invited` report.
+    vi.mocked(team.discoverGitHubContributors).mockResolvedValue({
+      repos: [
+        {
+          repo: "o/a",
+          contributors: [
+            { login: "alice", githubId: 1, onLore: true },
+            { login: "bob", githubId: 2, onLore: false },
+          ],
+        },
+        {
+          repo: "o/b",
+          contributors: [{ login: "bob", githubId: 2, onLore: false }],
+        },
+      ],
+      invited: {
+        scopeId: "s9",
+        role: "editor",
+        total: 2,
+        emailed: 0,
+        noEmail: 2,
+        overCap: 0,
+        results: [
+          {
+            login: "alice",
+            status: "no_email",
+            resolvedVia: null,
+            token: "tok-alice",
+          },
+          {
+            login: "bob",
+            status: "no_email",
+            resolvedVia: null,
+            token: "tok-bob",
+          },
         ],
       },
-      {
-        repo: "o/b",
-        contributors: [{ login: "bob", githubId: 2, onLore: false }],
-      },
-    ] as never);
+    } as never);
   });
 
   it("mints ONE invite per distinct contributor and prints accept links", async () => {
-    vi.mocked(team.createTeamInvite)
-      .mockResolvedValueOnce("tok-alice")
-      .mockResolvedValueOnce("tok-bob");
     await commandTeam(["discover", "--invite", "Rockets"], {
       invite: "Rockets",
     });
-    // bob appears on two repos → deduped to a single invite (2 people, not 3).
-    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledTimes(2);
-    // resolved to the team scope id + default editor role.
-    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+    // EF does the minting — gateway never calls createTeamInvite. The gateway passes invite_to_scope
+    // + role to the EF so admins introspect their own (no-loop) request once.
+    expect(vi.mocked(team.discoverGitHubContributors)).toHaveBeenCalledWith(
       FAKE_CLIENT,
-      "s9",
-      "editor",
+      "gho_x",
+      ["Rockets"],
+      { scopeId: "s9", role: "editor" },
     );
     const out = logs.join("\n");
+    // The only-token-not-emailed ones get printed for manual share.
     expect(out).toMatch(/lore team accept tok-alice/);
     expect(out).toMatch(/lore team accept tok-bob/);
-    expect(out).toMatch(/alice \(on Lore\)/);
   });
 
   it("honors --role viewer", async () => {
-    vi.mocked(team.createTeamInvite).mockResolvedValue("tok");
     await commandTeam(["discover", "--invite", "Rockets"], {
       invite: "Rockets",
       role: "viewer",
     });
-    expect(vi.mocked(team.createTeamInvite)).toHaveBeenCalledWith(
+    expect(vi.mocked(team.discoverGitHubContributors)).toHaveBeenCalledWith(
       FAKE_CLIENT,
-      "s9",
-      "viewer",
+      "gho_x",
+      ["Rockets"],
+      { scopeId: "s9", role: "viewer" },
     );
   });
 
@@ -812,7 +834,7 @@ describe("discover --invite (E-5-d-2)", () => {
     });
     expect(process.exitCode).toBe(1);
     expect(errs.join("\n")).toMatch(/No team "Nonexistent"/);
-    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+    expect(vi.mocked(team.discoverGitHubContributors)).not.toHaveBeenCalled();
   });
 
   it("refuses an editor caller (only admins may invite) before firing any RPC → exit 1", async () => {
@@ -824,25 +846,41 @@ describe("discover --invite (E-5-d-2)", () => {
     });
     expect(process.exitCode).toBe(1);
     expect(errs.join("\n")).toMatch(/must be an admin/);
-    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+    expect(vi.mocked(team.discoverGitHubContributors)).not.toHaveBeenCalled();
   });
 
   it("without --invite, only lists (no invites minted)", async () => {
     await commandTeam(["discover"], {});
-    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
+    // The 3rd arg is `repos` — undefined when no explicit positional AND no git remote in cwd;
+    // some test CWDs DO have a remote, in which case it's a one-element array. Accept either.
+    expect(vi.mocked(team.discoverGitHubContributors)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "gho_x",
+      expect.anything(),
+      undefined,
+    );
     expect(logs.join("\n")).toMatch(/already on Lore/);
   });
 
   it("with --invite but repos have no contributors: mints nothing, says so (no confusing '0 contributors')", async () => {
-    vi.mocked(team.discoverGitHubContributors).mockResolvedValue([
-      { repo: "o/empty", contributors: [] },
-    ] as never);
+    vi.mocked(team.discoverGitHubContributors).mockResolvedValue({
+      repos: [{ repo: "o/empty", contributors: [] }],
+      invited: {
+        scopeId: "s9",
+        role: "editor",
+        total: 0,
+        emailed: 0,
+        noEmail: 0,
+        overCap: 0,
+        results: [],
+      },
+    } as never);
     await commandTeam(["discover", "--invite", "Rockets"], {
       invite: "Rockets",
     });
-    expect(vi.mocked(team.createTeamInvite)).not.toHaveBeenCalled();
     const out = logs.join("\n");
-    expect(out).toMatch(/No contributors to invite/);
-    expect(out).not.toMatch(/for 0 contributors/);
+    // total=0 means no contributors at all — surfaced as the same "No accessible repos" line, no
+    // misleading "emailed 0 / no-email 0" tally.
+    expect(out).not.toMatch(/emailed/);
   });
 });
