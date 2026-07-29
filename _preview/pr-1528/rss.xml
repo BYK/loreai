@@ -46,13 +46,13 @@ thing they are arguing about. What looks like memory is a black box.&lt;/p&gt;
 &lt;p&gt;Open memory is what LangChain is asking for. Open source, model
 agnostic, an open format for the artifacts. That is the bar. The
 question is what the format is.&lt;/p&gt;
-&lt;p&gt;We picked Markdown. Specifically, a single file at the root of the
-repo called &lt;code&gt;.lore.md&lt;/code&gt;, with one stable marker per entry, entries
-sorted alphabetically by title within each category. That is the
-whole standard. It is human-readable, machine-parseable, and
-Git-friendly out of the box, because Git already knows how to diff
-it, merge it, and review it. The diff shows up in a pull request
-next to the code change the memory touches.&lt;/p&gt;
+&lt;p&gt;We picked Markdown for the curated half. Specifically, a single file
+at the root of the repo called &lt;code&gt;.lore.md&lt;/code&gt;, with one stable marker per
+entry, entries sorted alphabetically by title within each category.
+That is the whole standard. It is human-readable, machine-parseable,
+and Git-friendly out of the box, because Git already knows how to
+diff it, merge it, and review it. The diff shows up in a pull
+request next to the code change the memory touches.&lt;/p&gt;
 &lt;p&gt;When the team disagrees about whether an entry is right, you do what
 you already do for any other disagreement: open a PR. The debate
 happens in review, on the same surface as the code the memory covers.
@@ -63,38 +63,65 @@ because it lives next to the code, and git history becomes memory
 history.&lt;/p&gt;
 &lt;p&gt;This is the part closed vector stores can’t copy. They can copy the
 format. They can’t copy the workflow. The workflow is the value.&lt;/p&gt;
-&lt;h2 id=&quot;the-markdown-escrow&quot;&gt;The Markdown escrow&lt;/h2&gt;
+&lt;h2 id=&quot;the-database-underneath&quot;&gt;The database underneath&lt;/h2&gt;
+&lt;p&gt;The curated file is only half of what you should own. Most of what
+an agent remembers is not meant to be reviewed and merged. The raw
+conversation, the layered distillations, the long-term memory
+entries, the entities the curator found, all the way back to the
+first session. That record belongs to you too, in a different
+artifact.&lt;/p&gt;
+&lt;p&gt;Lore stores the rest of it in a local SQLite database at
+&lt;code&gt;~/.local/share/lore/lore.db&lt;/code&gt;, with an open schema the engine
+publishes. You can open it with &lt;code&gt;sqlite3&lt;/code&gt;, query it with anything
+that speaks the API, export it to CSV, or build your own tooling
+around it. Stop using Lore tomorrow and the database is still
+there. The engine doesn’t sit between you and your data. The
+migrations are versioned, the schema is documented, and what Lore
+stored for you is what you can read.&lt;/p&gt;
+&lt;p&gt;A vector store asks you to trust the retrieval layer because the
+embedding model and the indexing choices the store made are opaque
+to you. SQLite asks for nothing. The file is the database, the
+database is the file.&lt;/p&gt;
+&lt;h2 id=&quot;the-escrow&quot;&gt;The escrow&lt;/h2&gt;
 &lt;p&gt;A vector store says: trust us with the shape of your team’s
 thinking, and we will give it back to you on retrieval. It has to
 be that way, because retrieval depends on the embedding model and
 the indexing choices the store made for you. The lock-in lives in
 the dependencies you can’t see.&lt;/p&gt;
-&lt;p&gt;Markdown says: the file is the memory, the memory is the file.
-Distillation writes a Markdown file. Review edits the file. Agents
-read the file. The model behind the agent doesn’t matter. The
-harness behind the model doesn’t matter. The next vendor reads the
-same Markdown. The previous vendor never had anything to lock you
-to.&lt;/p&gt;
+&lt;p&gt;Lore says: the Markdown file is the curated memory, the SQLite file
+is the full memory, and both are yours. Distillation writes the
+Markdown. Distillation also writes the database. Review edits the
+file. You read the database with or without us. Agents read the
+file. Agents read the database. The model behind the agent doesn’t
+matter. The harness behind the model doesn’t matter. The next
+vendor reads the same Markdown and queries the same SQLite. The
+previous vendor never had anything to lock you to.&lt;/p&gt;
+&lt;p&gt;When your team is ready to share, the sync engine works the way a
+good group chat does: end-to-end encrypted, scoped to the entries
+you explicitly approve, and the relay never sees plaintext. The
+keys stay with the participants. Sharing is opt-in, per entry, and
+reversible.&lt;/p&gt;
 &lt;p&gt;We have talked before about
 &lt;a href=&quot;https://withlore.ai/blog/distill-your-own-knowledge/&quot;&gt;why knowledge lives in token space, not in weights&lt;/a&gt;.
 A vector store is halfway there. It pulls memory out of the model,
 but it puts memory inside another opaque system. To finish the
-move, memory has to be in text humans already share a workflow
-around. That is the escrow. The agent gets it back when it needs
-it. You keep the original in a place your team already knows how
-to govern.&lt;/p&gt;
+move, memory has to be in artifacts humans already share a workflow
+around. Markdown for the team. SQLite for the record. End-to-end
+sync if and when you want it. Everything else is a concession to
+someone else’s moat.&lt;/p&gt;
 &lt;p&gt;Models will keep changing. They always do. Every part of the AI
 tooling stack above the model is genuinely up for grabs right now.
 The part that should not be up for grabs is how a team remembers
-what it decided and why. That belongs to the team, in a format
-the team already owns.&lt;/p&gt;
+what it decided and why. That belongs to the team, in formats the
+team already owns.&lt;/p&gt;
 &lt;h2 id=&quot;try-it&quot;&gt;Try it&lt;/h2&gt;
-&lt;p&gt;The format is one file. The file is at the root of your repo. It
-is committed, reviewed, and merged the same way as the code next
-to it.&lt;/p&gt;
+&lt;p&gt;The format is one file at the root of your repo, plus a SQLite
+database on your machine. Both are committed, reviewed, queried,
+and merged the same way as the code next to them.&lt;/p&gt;
 &lt;div class=&quot;expressive-code&quot;&gt;&lt;link rel=&quot;stylesheet&quot; href=&quot;https://withlore.ai/_preview/pr-1528/_astro/ec.w36nc.css&quot;&gt;&lt;script type=&quot;module&quot; src=&quot;https://withlore.ai/_preview/pr-1528/_astro/ec.0vx5m.js&quot;&gt;&lt;/script&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;curl&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;-fsSL&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;https://withlore.ai/install&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#7FDBCA;--1:#096E72&quot;&gt;|&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;bash&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;run&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;curl -fsSL https://withlore.ai/install | bashlore run&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
-&lt;p&gt;After a few sessions, open &lt;code&gt;.lore.md&lt;/code&gt;. Read what your agent has
-written down. Open a PR when it gets something wrong. That is the
+&lt;p&gt;After a few sessions, open &lt;code&gt;.lore.md&lt;/code&gt; &lt;em&gt;and&lt;/em&gt; the database at
+&lt;code&gt;~/.local/share/lore/lore.db&lt;/code&gt;. Read what your agent has written
+down. Open a PR when it gets something wrong. That is the
 workflow, and that is the answer.&lt;/p&gt;
 </content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>memory</category><category>infrastructure</category><category>open standards</category><category>lock-in</category><category>markdown</category><category>agents</category></item><item><title>The Semantic Linter: Automating reviews without losing touch</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Sun, 26 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
 without a research lab, I had a specific project in mind. I wanted to train something that reviewed

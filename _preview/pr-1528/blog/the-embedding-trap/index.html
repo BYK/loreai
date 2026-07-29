@@ -50,13 +50,13 @@ thing they are arguing about. What looks like memory is a black box.</p>
 <p>Open memory is what LangChain is asking for. Open source, model
 agnostic, an open format for the artifacts. That is the bar. The
 question is what the format is.</p>
-<p>We picked Markdown. Specifically, a single file at the root of the
-repo called <code>.lore.md</code>, with one stable marker per entry, entries
-sorted alphabetically by title within each category. That is the
-whole standard. It is human-readable, machine-parseable, and
-Git-friendly out of the box, because Git already knows how to diff
-it, merge it, and review it. The diff shows up in a pull request
-next to the code change the memory touches.</p>
+<p>We picked Markdown for the curated half. Specifically, a single file
+at the root of the repo called <code>.lore.md</code>, with one stable marker per
+entry, entries sorted alphabetically by title within each category.
+That is the whole standard. It is human-readable, machine-parseable,
+and Git-friendly out of the box, because Git already knows how to
+diff it, merge it, and review it. The diff shows up in a pull
+request next to the code change the memory touches.</p>
 <p>When the team disagrees about whether an entry is right, you do what
 you already do for any other disagreement: open a PR. The debate
 happens in review, on the same surface as the code the memory covers.
@@ -67,37 +67,64 @@ because it lives next to the code, and git history becomes memory
 history.</p>
 <p>This is the part closed vector stores can’t copy. They can copy the
 format. They can’t copy the workflow. The workflow is the value.</p>
-<h2 id="the-markdown-escrow">The Markdown escrow</h2>
+<h2 id="the-database-underneath">The database underneath</h2>
+<p>The curated file is only half of what you should own. Most of what
+an agent remembers is not meant to be reviewed and merged. The raw
+conversation, the layered distillations, the long-term memory
+entries, the entities the curator found, all the way back to the
+first session. That record belongs to you too, in a different
+artifact.</p>
+<p>Lore stores the rest of it in a local SQLite database at
+<code>~/.local/share/lore/lore.db</code>, with an open schema the engine
+publishes. You can open it with <code>sqlite3</code>, query it with anything
+that speaks the API, export it to CSV, or build your own tooling
+around it. Stop using Lore tomorrow and the database is still
+there. The engine doesn’t sit between you and your data. The
+migrations are versioned, the schema is documented, and what Lore
+stored for you is what you can read.</p>
+<p>A vector store asks you to trust the retrieval layer because the
+embedding model and the indexing choices the store made are opaque
+to you. SQLite asks for nothing. The file is the database, the
+database is the file.</p>
+<h2 id="the-escrow">The escrow</h2>
 <p>A vector store says: trust us with the shape of your team’s
 thinking, and we will give it back to you on retrieval. It has to
 be that way, because retrieval depends on the embedding model and
 the indexing choices the store made for you. The lock-in lives in
 the dependencies you can’t see.</p>
-<p>Markdown says: the file is the memory, the memory is the file.
-Distillation writes a Markdown file. Review edits the file. Agents
-read the file. The model behind the agent doesn’t matter. The
-harness behind the model doesn’t matter. The next vendor reads the
-same Markdown. The previous vendor never had anything to lock you
-to.</p>
+<p>Lore says: the Markdown file is the curated memory, the SQLite file
+is the full memory, and both are yours. Distillation writes the
+Markdown. Distillation also writes the database. Review edits the
+file. You read the database with or without us. Agents read the
+file. Agents read the database. The model behind the agent doesn’t
+matter. The harness behind the model doesn’t matter. The next
+vendor reads the same Markdown and queries the same SQLite. The
+previous vendor never had anything to lock you to.</p>
+<p>When your team is ready to share, the sync engine works the way a
+good group chat does: end-to-end encrypted, scoped to the entries
+you explicitly approve, and the relay never sees plaintext. The
+keys stay with the participants. Sharing is opt-in, per entry, and
+reversible.</p>
 <p>We have talked before about
 <a href="/_preview/pr-1528/blog/distill-your-own-knowledge/">why knowledge lives in token space, not in weights</a>.
 A vector store is halfway there. It pulls memory out of the model,
 but it puts memory inside another opaque system. To finish the
-move, memory has to be in text humans already share a workflow
-around. That is the escrow. The agent gets it back when it needs
-it. You keep the original in a place your team already knows how
-to govern.</p>
+move, memory has to be in artifacts humans already share a workflow
+around. Markdown for the team. SQLite for the record. End-to-end
+sync if and when you want it. Everything else is a concession to
+someone else’s moat.</p>
 <p>Models will keep changing. They always do. Every part of the AI
 tooling stack above the model is genuinely up for grabs right now.
 The part that should not be up for grabs is how a team remembers
-what it decided and why. That belongs to the team, in a format
-the team already owns.</p>
+what it decided and why. That belongs to the team, in formats the
+team already owns.</p>
 <h2 id="try-it">Try it</h2>
-<p>The format is one file. The file is at the root of your repo. It
-is committed, reviewed, and merged the same way as the code next
-to it.</p>
+<p>The format is one file at the root of your repo, plus a SQLite
+database on your machine. Both are committed, reviewed, queried,
+and merged the same way as the code next to them.</p>
 <div class="expressive-code"><link rel="stylesheet" href="/_preview/pr-1528/_astro/ec.w36nc.css"><script type="module" src="/_preview/pr-1528/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">curl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-fsSL</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">https://withlore.ai/install</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#7FDBCA;--1:#096E72">|</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">bash</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">lore</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">run</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="curl -fsSL https://withlore.ai/install | bashlore run"><div></div></button></div></figure></div>
-<p>After a few sessions, open <code>.lore.md</code>. Read what your agent has
-written down. Open a PR when it gets something wrong. That is the
+<p>After a few sessions, open <code>.lore.md</code> <em>and</em> the database at
+<code>~/.local/share/lore/lore.db</code>. Read what your agent has written
+down. Open a PR when it gets something wrong. That is the
 workflow, and that is the answer.</p>
 </div></article></main><footer><div class="foot-bottom"><small>&copy; 2026 Lore.AI</small></div></footer></body></html>
