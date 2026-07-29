@@ -1,0 +1,907 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-v2yiyugj"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Configuration reference | Lore</title><link rel="canonical" href="https://withlore.ai/_preview/pr-1528/docs/configuration/"/><link rel="sitemap" href="/_preview/pr-1528/sitemap-index.xml"/><link rel="icon" type="image/svg+xml" href="/_preview/pr-1528/favicon.svg"/><link rel="icon" type="image/png" sizes="32x32" href="/_preview/pr-1528/favicon-32.png"/><link rel="apple-touch-icon" sizes="180x180" href="/_preview/pr-1528/apple-touch-icon.png"/><link rel="alternate" type="application/rss+xml" title="Lore Blog" href="https://withlore.ai/_preview/pr-1528/rss.xml"/><link rel="site.standard.publication" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self"/><script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "loose", fontFamily: "var(--sl-font)" });
+const blocks = document.querySelectorAll('pre[data-language="mermaid"]');
+for (const pre of blocks) {
+  const source = Array.from(pre.querySelectorAll('.ec-line')).map((l) => l.textContent).join('\n');
+  if (!source.trim()) continue;
+  const id = 'mermaid-' + Math.random().toString(36).slice(2, 9);
+  try {
+    const { svg } = await mermaid.render(id, source);
+    const wrap = document.createElement('div');
+    wrap.className = 'mermaid';
+    wrap.innerHTML = svg;
+    pre.replaceWith(wrap);
+  } catch (err) {
+    console.error('Mermaid render failed:', err);
+    pre.textContent = source;
+  }
+}</script><link rel="shortcut icon" href="/_preview/pr-1528/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v7.1.3"/><meta name="generator" content="Starlight v0.41.3"/><meta property="og:url" content="https://withlore.ai/_preview/pr-1528/docs/configuration/"/><meta property="og:locale" content="en"/><meta name="description" content="Complete reference for every field in .lore.json, the env vars that override them, and the configuration file location."/><meta property="og:title" content="Lore Documentation"/><meta property="og:description" content="Install, operate, and understand Lore's local-first context management and long-term memory for AI coding agents."/><meta property="og:image" content="https://withlore.ai/_preview/pr-1528/og-image-c43f89de.png"/><meta property="og:image:width" content="1200"/><meta property="og:image:height" content="630"/><meta property="og:image:alt" content="Lore.AI — Shared Context for AI Agents"/><meta property="og:type" content="website"/><meta property="og:site_name" content="Lore.AI"/><meta name="twitter:card" content="summary_large_image"/><meta name="twitter:title" content="Lore Documentation"/><meta name="twitter:description" content="Install, operate, and understand Lore's local-first context management and long-term memory for AI coding agents."/><meta name="twitter:image" content="https://withlore.ai/_preview/pr-1528/og-image-c43f89de.png"/><meta name="twitter:site" content="@withLoreAI"/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg><svg aria-hidden="true" class="dark astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg><svg aria-hidden="true" class="auto astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg></template><link rel="stylesheet" href="/_preview/pr-1528/_astro/print.ehPL0gv-.css" media="print"><link rel="stylesheet" href="/_preview/pr-1528/_astro/common.DqR-lMNI.css"><script type="module" src="/_preview/pr-1528/_astro/page.LAbJoB63.js"></script></head><body class="astro-v2yiyugj"><a class="sl-skip-link astro-rmnwd4fh" href="#_top">Skip to content</a><div class="page sl-flex astro-p25af6li"><header class="header astro-p25af6li"><div class="header astro-fzpbxy5g"><div class="title-wrapper sl-flex astro-fzpbxy5g"><a href="/_preview/pr-1528/" class="logo" data-theme="auto" aria-label="Lore.AI — home"><img src="/_preview/pr-1528/_astro/loreai.BYyO8ZaX.svg" class="logo-img logo-img-light" alt="" width="40" height="40" style="height: 40px; width: 40px;"><img src="/_preview/pr-1528/_astro/loreai-dark.BoECdKok.svg" class="logo-img logo-img-dark" alt="" width="40" height="40" style="height: 40px; width: 40px;"><span class="logo-text">Lore<span class="logo-dot">.</span>AI</span></a></div><nav class="site-nav sl-flex print:hidden astro-fzpbxy5g" aria-label="Site navigation"><ul class="astro-fzpbxy5g"><li class="astro-fzpbxy5g"><a href="/_preview/pr-1528/" class="astro-fzpbxy5g">Home</a></li><li class="astro-fzpbxy5g"><a href="/_preview/pr-1528/different/" class="astro-fzpbxy5g">Why Lore</a></li><li class="astro-fzpbxy5g"><a href="/_preview/pr-1528/blog/" class="astro-fzpbxy5g">Blog</a></li><li class="astro-fzpbxy5g"><a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer" class="astro-fzpbxy5g">GitHub</a></li></ul></nav><div class="sl-hidden md:sl-flex print:hidden right-group astro-fzpbxy5g"><div class="sl-flex social-icons astro-fzpbxy5g"><a href="https://github.com/byk/loreai" rel="me" class="sl-flex astro-bg47k7vr"><span class="sr-only astro-bg47k7vr">GitHub</span><svg aria-hidden="true" class="astro-bg47k7vr astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a><a href="https://x.com/withLoreAI" rel="me" class="sl-flex astro-bg47k7vr"><span class="sr-only astro-bg47k7vr">X</span><svg aria-hidden="true" class="astro-bg47k7vr astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M 18.242188 2.25 L 21.554688 2.25 L 14.324219 10.507812 L 22.828125 21.75 L 16.171875 21.75 L 10.953125 14.933594 L 4.992188 21.75 L 1.679688 21.75 L 9.40625 12.914062 L 1.257812 2.25 L 8.082031 2.25 L 12.792969 8.480469 Z M 17.082031 19.773438 L 18.914062 19.773438 L 7.082031 4.125 L 5.113281 4.125 Z M 17.082031 19.773438 "/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-mtqsna4h"><span class="sr-only astro-mtqsna4h">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-mtqsna4h astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-mtqsna4h"><option value="dark" class="astro-mtqsna4h">Dark</option><option value="light" class="astro-mtqsna4h">Light</option><option value="auto" selected class="astro-mtqsna4h">Auto</option></select><svg aria-hidden="true" class="icon caret astro-mtqsna4h astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><script type="module">var e=`starlight-theme`,t=e=>e===`auto`||e===`dark`||e===`light`?e:`auto`,n=()=>t(typeof localStorage<`u`&&localStorage.getItem(e));function r(t){typeof localStorage<`u`&&localStorage.setItem(e,t===`light`||t===`dark`?t:``)}var i=()=>matchMedia(`(prefers-color-scheme: light)`).matches?`light`:`dark`;function a(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e===`auto`?i():e,r(e)}matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,()=>{n()===`auto`&&a(`auto`)});var o=class extends HTMLElement{constructor(){super(),a(n()),this.querySelector(`select`)?.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&a(t(e.currentTarget.value))})}};customElements.define(`starlight-theme-select`,o);</script><script type="module">var e=class extends HTMLElement{constructor(){super();let e=this.querySelector(`select`);e&&(e.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=e.currentTarget.value)}),window.addEventListener(`pageshow`,t=>{if(!t.persisted)return;let n=e.querySelector(`option[selected]`)?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}};customElements.define(`starlight-lang-select`,e);</script></div></div></header><nav class="sidebar print:hidden astro-p25af6li" aria-label="Main"><starlight-menu-button class="print:hidden astro-y5aaab7h"><button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-y5aaab7h"><svg aria-hidden="true" class="open-menu astro-y5aaab7h astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg><svg aria-hidden="true" class="close-menu astro-y5aaab7h astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="m13.41 12 6.3-6.29a1.004 1.004 0 1 0-1.42-1.42L12 10.59l-6.29-6.3a1.004 1.004 0 0 0-1.42 1.42l6.3 6.29-6.3 6.29a1 1 0 0 0 0 1.42.998.998 0 0 0 1.42 0l6.29-6.3 6.29 6.3a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.42L13.41 12Z"/></svg></button></starlight-menu-button><script type="module">var e=class extends HTMLElement{btn=this.querySelector(`button`);constructor(){super(),this.btn.addEventListener(`click`,()=>this.toggleExpanded());let e=this.closest(`nav`);e&&e.addEventListener(`keyup`,e=>this.closeOnEscape(e)),matchMedia(`(min-width: 50em)`).addEventListener(`change`,()=>this.setExpanded(!1))}setExpanded(e){this.setAttribute(`aria-expanded`,String(e)),document.body.toggleAttribute(`data-mobile-menu-expanded`,e),document.querySelectorAll(`.main-frame, .sl-skip-link`).forEach(t=>{t.toggleAttribute(`inert`,e)})}toggleExpanded(){this.setExpanded(this.getAttribute(`aria-expanded`)!==`true`)}closeOnEscape(e){e.code===`Escape`&&(this.setExpanded(!1),this.btn.focus())}};customElements.define(`starlight-menu-button`,e);</script><div id="starlight__sidebar" class="sidebar-pane astro-p25af6li"><div class="sidebar-content sl-flex astro-p25af6li"><sl-sidebar-state-persist data-hash="0tqxle2" class="astro-f6wzkhki"><script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script><ul class="top-level astro-i5kdcfeo"><li class="astro-i5kdcfeo"><details open class="astro-i5kdcfeo"><summary class="astro-i5kdcfeo"><span class="group-label astro-i5kdcfeo"><span class="large astro-i5kdcfeo">Lore</span></span><svg aria-hidden="true" class="caret astro-i5kdcfeo astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="0"></sl-sidebar-restore><ul class="astro-i5kdcfeo"><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Overview</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/install/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Install</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/architecture/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Architecture</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/team-memory/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Team memory</span></a></li></ul></details></li><li class="astro-i5kdcfeo"><details open class="astro-i5kdcfeo"><summary class="astro-i5kdcfeo"><span class="group-label astro-i5kdcfeo"><span class="large astro-i5kdcfeo">Guides</span></span><svg aria-hidden="true" class="caret astro-i5kdcfeo astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="1"></sl-sidebar-restore><ul class="astro-i5kdcfeo"><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/guides/with-opencode/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">OpenCode</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/guides/with-pi/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Pi</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/guides/with-claude-code/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Claude Code</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/guides/with-codex/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Codex</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/guides/custom-upstreams/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Custom upstreams</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/guides/local-inference/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Local inference</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/guides/semantic-linter/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Semantic linter (CI)</span></a></li></ul></details></li><li class="astro-i5kdcfeo"><details open class="astro-i5kdcfeo"><summary class="astro-i5kdcfeo"><span class="group-label astro-i5kdcfeo"><span class="large astro-i5kdcfeo">Reference</span></span><svg aria-hidden="true" class="caret astro-i5kdcfeo astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="2"></sl-sidebar-restore><ul class="astro-i5kdcfeo"><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/configuration/" aria-current="page" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Configuration</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/environment/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Environment variables</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/setup/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Setup command</span></a></li><li class="astro-i5kdcfeo"><a href="/_preview/pr-1528/docs/import/" class="astro-i5kdcfeo"><span class="astro-i5kdcfeo">Import conversations</span></a></li></ul></details></li></ul><script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script></sl-sidebar-state-persist><div class="md:sl-hidden"><nav class="site-nav-mobile astro-oq7puzlo" aria-label="Site navigation"><ul class="astro-oq7puzlo"><li class="astro-oq7puzlo"><a href="/_preview/pr-1528/" class="astro-oq7puzlo">Home</a></li><li class="astro-oq7puzlo"><a href="/_preview/pr-1528/different/" class="astro-oq7puzlo">Why Lore</a></li><li class="astro-oq7puzlo"><a href="/_preview/pr-1528/blog/" class="astro-oq7puzlo">Blog</a></li><li class="astro-oq7puzlo"><a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer" class="astro-oq7puzlo">GitHub</a></li></ul></nav><div class="mobile-preferences sl-flex astro-oq7puzlo"><div class="social-icons astro-oq7puzlo"><a href="https://github.com/byk/loreai" rel="me" class="sl-flex astro-bg47k7vr"><span class="sr-only astro-bg47k7vr">GitHub</span><svg aria-hidden="true" class="astro-bg47k7vr astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a><a href="https://x.com/withLoreAI" rel="me" class="sl-flex astro-bg47k7vr"><span class="sr-only astro-bg47k7vr">X</span><svg aria-hidden="true" class="astro-bg47k7vr astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M 18.242188 2.25 L 21.554688 2.25 L 14.324219 10.507812 L 22.828125 21.75 L 16.171875 21.75 L 10.953125 14.933594 L 4.992188 21.75 L 1.679688 21.75 L 9.40625 12.914062 L 1.257812 2.25 L 8.082031 2.25 L 12.792969 8.480469 Z M 17.082031 19.773438 L 18.914062 19.773438 L 7.082031 4.125 L 5.113281 4.125 Z M 17.082031 19.773438 "/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-mtqsna4h"><span class="sr-only astro-mtqsna4h">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-mtqsna4h astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-mtqsna4h"><option value="dark" class="astro-mtqsna4h">Dark</option><option value="light" class="astro-mtqsna4h">Light</option><option value="auto" selected class="astro-mtqsna4h">Auto</option></select><svg aria-hidden="true" class="icon caret astro-mtqsna4h astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script></div></div></div></div></nav><div class="main-frame astro-p25af6li"><script type="module">var e=document.getElementById(`starlight__sidebar`),t=e?.querySelector(`sl-sidebar-state-persist`),n=`sl-sidebar-state`,r=()=>{let r=[],i=t?.dataset.hash||``;try{let e=sessionStorage.getItem(n),t=JSON.parse(e||`{}`);Array.isArray(t.open)&&t.hash===i&&(r=t.open)}catch{}return{hash:i,open:r,scroll:e?.scrollTop||0}},i=e=>{try{sessionStorage.setItem(n,JSON.stringify(e))}catch{}},a=()=>i(r()),o=(e,t)=>{let n=r();n.open[t]=e,i(n)};t?.addEventListener(`click`,e=>{if(!(e.target instanceof Element))return;let t=e.target.closest(`summary`)?.closest(`details`);if(!t)return;let n=t.querySelector(`sl-sidebar-restore`),r=parseInt(n?.dataset.index||``);isNaN(r)||o(!t.open,r)}),addEventListener(`visibilitychange`,()=>{document.visibilityState===`hidden`&&a()}),addEventListener(`pageHide`,a);</script><div class="lg:sl-flex astro-bcjvhm42"><aside class="right-sidebar-container print:hidden astro-bcjvhm42"><div class="right-sidebar astro-bcjvhm42"><div class="lg:sl-hidden astro-gunclixb"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-wvozstij"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-wvozstij"><details id="starlight__mobile-toc" class="astro-wvozstij"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-wvozstij"><span class="toggle sl-flex astro-wvozstij">On this page<svg aria-hidden="true" class="caret astro-wvozstij astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></span><span class="display-current astro-wvozstij"></span></summary><div class="dropdown astro-wvozstij"><ul class="isMobile astro-t3x5vyyn" style="--depth: 0;"><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#_top" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">Overview</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#where-lorejson-lives" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">Where .lore.json lives</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#how-to-override-a-single-field" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">How to override a single field</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#field-reference" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">Field reference</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#model" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">model</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#workermodel" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">workerModel</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#budget" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">budget</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#idleresumeminutes" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">idleResumeMinutes</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#distillation" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">distillation</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#knowledge" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">knowledge</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#curator" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">curator</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#pruning" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">pruning</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#search" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">search</span></a><ul class="isMobile astro-t3x5vyyn" style="--depth: 1;"><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#searchftsweights" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">search.ftsWeights</span></a></li><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#searchembeddings" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">search.embeddings</span></a></li><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#searchrecall" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">search.recall</span></a></li></ul></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#cache" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">cache</span></a><ul class="isMobile astro-t3x5vyyn" style="--depth: 1;"><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#cachewarming" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">cache.warming</span></a></li></ul></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#workspaces" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">workspaces</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#crossproject" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">crossProject</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#agentsfile" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">agentsFile</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#lorefile" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">loreFile</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#user" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">user</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#invariantcheck" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">invariantCheck</span></a></li></ul></div></details></nav></mobile-starlight-toc><script type="module" src="/_preview/pr-1528/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.BcSo_yiZ.js"></script></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-gunclixb"><div class="sl-container astro-gunclixb"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-t3x5vyyn" style="--depth: 0;"><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#_top" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">Overview</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#where-lorejson-lives" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">Where .lore.json lives</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#how-to-override-a-single-field" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">How to override a single field</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#field-reference" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">Field reference</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#model" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">model</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#workermodel" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">workerModel</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#budget" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">budget</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#idleresumeminutes" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">idleResumeMinutes</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#distillation" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">distillation</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#knowledge" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">knowledge</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#curator" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">curator</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#pruning" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">pruning</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#search" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">search</span></a><ul class="astro-t3x5vyyn" style="--depth: 1;"><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#searchftsweights" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">search.ftsWeights</span></a></li><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#searchembeddings" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">search.embeddings</span></a></li><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#searchrecall" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">search.recall</span></a></li></ul></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#cache" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">cache</span></a><ul class="astro-t3x5vyyn" style="--depth: 1;"><li style="--depth: 1;" class="astro-t3x5vyyn"><a href="#cachewarming" style="--depth: 1;" class="astro-t3x5vyyn"><span style="--depth: 1;" class="astro-t3x5vyyn">cache.warming</span></a></li></ul></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#workspaces" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">workspaces</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#crossproject" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">crossProject</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#agentsfile" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">agentsFile</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#lorefile" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">loreFile</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#user" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">user</span></a></li><li style="--depth: 0;" class="astro-t3x5vyyn"><a href="#invariantcheck" style="--depth: 0;" class="astro-t3x5vyyn"><span style="--depth: 0;" class="astro-t3x5vyyn">invariantCheck</span></a></li></ul></nav></starlight-toc><script type="module" src="/_preview/pr-1528/_astro/TableOfContents.astro_astro_type_script_index_0_lang.Csloo1VZ.js"></script></div></div></div></aside><div class="main-pane astro-bcjvhm42"><main data-pagefind-body class="astro-v2yiyugj" lang="en" dir="ltr"><div class="content-panel astro-r53b2hkj"><div class="sl-container astro-r53b2hkj"><h1 id="_top" class="astro-czxmolmp">Configuration reference</h1></div></div><div class="content-panel astro-r53b2hkj"><div class="sl-container astro-r53b2hkj"><div class="sl-markdown-content"><!-- Auto-generated from packages/core/src/config.ts. Hand-edit the header above; the reference below regenerates via pnpm generate:docs. Do not hand-edit field tables. -->
+<p>Lore’s configuration has three layers, in order of precedence (highest first):</p>
+<ol>
+<li><strong>Environment variables</strong> (the LORE_* family — see the env-vars reference page) — process-level overrides, used by the gateway CLI and runtime.</li>
+<li>The .lore.json file in the project root — per-project, JSONC-parseable, the primary config surface for memory behavior, budget, distillation, search, knowledge, and cross-project settings. This page documents it.</li>
+<li><strong>Built-in defaults</strong> — every field is optional; the Zod schema supplies safe defaults for anything you omit.</li>
+</ol>
+<div class="sl-heading-wrapper level-h2"><h2 id="where-lorejson-lives">Where .lore.json lives</h2><a class="sl-anchor-link" href="#where-lorejson-lives"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Where .lore.json lives”</span></a></div>
+<p>The gateway looks for the .lore.json file in a single location:</p>
+<ul>
+<li>The <strong>project root</strong> — the directory the gateway was launched from, identified by the .lore.json file at its top level.</li>
+</ul>
+<p>If no .lore.json is found, the gateway uses all defaults (every field is optional). In <strong>hosted mode</strong> (env var LORE_HOSTED_MODE=1), .lore.json is not read at all — a crafted file on a client-controlled path could alter gateway behavior, so the gateway uses the defaults to prevent tampering. Hosted-mode deployments should configure Lore through other means (admin-controlled env vars, fixed configuration baked into the deployment).</p>
+<p>The file is <strong>JSONC</strong> (JSON with // line comments and slash-star block comments, plus trailing commas). Example:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/_preview/pr-1528/_astro/ec.w36nc.css"><script type="module" src="/_preview/pr-1528/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="jsonc"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#919F9F;--1:#5D6376">// Use a cheaper worker model for distillation</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"workerModel"</span><span style="--0:#D6DEEB;--1:#403F53">: { </span><span style="--0:#7FDBCA;--1:#096E72">"providerID"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">anthropic</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">"modelID"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">claude-3-5-haiku-latest</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> },</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"curator"</span><span style="--0:#D6DEEB;--1:#403F53">: { </span><span style="--0:#7FDBCA;--1:#096E72">"enabled"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#FF6A83;--1:#A24848">true</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">"maxEntries"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">30</span><span style="--0:#D6DEEB;--1:#403F53"> },</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="{  // Use a cheaper worker model for distillation  &quot;workerModel&quot;: { &quot;providerID&quot;: &quot;anthropic&quot;, &quot;modelID&quot;: &quot;claude-3-5-haiku-latest&quot; },  &quot;curator&quot;: { &quot;enabled&quot;: true, &quot;maxEntries&quot;: 30 },}"><div></div></button></div></figure></div>
+<div class="sl-heading-wrapper level-h2"><h2 id="how-to-override-a-single-field">How to override a single field</h2><a class="sl-anchor-link" href="#how-to-override-a-single-field"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “How to override a single field”</span></a></div>
+<p>The cleanest way to override a single field is via env var if Lore reads it, or by adding the field to .lore.json in the project root. See the env-vars reference page for the env-var override path; everything else is here in the .lore.json reference below.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="field-reference">Field reference</h2><a class="sl-anchor-link" href="#field-reference"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “Field reference”</span></a></div>
+<ul>
+<li><a href="#model"><code dir="auto">model</code></a> — Default session model. When omitted, Lore uses the model from the first client request.</li>
+<li><a href="#workerModel"><code dir="auto">workerModel</code></a> — Background-worker model for distillation, curation, and query expansion. Same-provider invariant: workers MUST use the same provider as the session.</li>
+<li><a href="#budget"><code dir="auto">budget</code></a> — Context-window budget fractions. Sum plus LTM ≈ 1.0.</li>
+<li><a href="#idleResumeMinutes"><code dir="auto">idleResumeMinutes</code></a> — Minutes of inactivity after which Lore refreshes the byte-identity caches on resume (upstream prompt cache is cold). 5 = matches Anthropic’s default-tier TTL. Set to 60 for extended (1h) cache tier. 0 to disable. Default: 5.</li>
+<li><a href="#distillation"><code dir="auto">distillation</code></a> — Distillation pipeline tuning (segment size, thresholds, tool-output truncation).</li>
+<li><a href="#knowledge"><code dir="auto">knowledge</code></a> — Long-term knowledge (curator, entity injection) controls.</li>
+<li><a href="#curator"><code dir="auto">curator</code></a> — Curator scheduling and consolidation thresholds.</li>
+<li><a href="#pruning"><code dir="auto">pruning</code></a> — Storage retention and emergency-pruning thresholds.</li>
+<li><a href="#search"><code dir="auto">search</code></a> — Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.</li>
+<li><a href="#cache"><code dir="auto">cache</code></a> — Anthropic prompt cache TTL and speculative warming.</li>
+<li><a href="#workspaces"><code dir="auto">workspaces</code></a> — Workspace sub-project paths or globs (relative to <code dir="auto">.lore.json</code>). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. “packages/*”).</li>
+<li><a href="#crossProject"><code dir="auto">crossProject</code></a> — Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.</li>
+<li><a href="#agentsFile"><code dir="auto">agentsFile</code></a> — AGENTS.md/CLAUDE.md export/import configuration.</li>
+<li><a href="#loreFile"><code dir="auto">loreFile</code></a> — <code dir="auto">.lore.md</code> export/import configuration.</li>
+<li><a href="#user"><code dir="auto">user</code></a> — User identity for the self-entity. Falls back to git config user.name / user.email if omitted.</li>
+<li><a href="#invariantCheck"><code dir="auto">invariantCheck</code></a> — <code dir="auto">lore lint</code> (semantic linter) tuning.</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="model"><code dir="auto">model</code></h2><a class="sl-anchor-link" href="#model"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “model”</span></a></div>
+<p>Default session model. When omitted, Lore uses the model from the first client request.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">providerID</code></td>
+<td>string</td>
+<td>—</td>
+<td></td>
+<td>Provider ID (e.g. ‘anthropic’, ‘openai’).</td>
+</tr>
+<tr>
+<td><code dir="auto">modelID</code></td>
+<td>string</td>
+<td>—</td>
+<td></td>
+<td>Model identifier within the provider.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="workermodel"><code dir="auto">workerModel</code></h2><a class="sl-anchor-link" href="#workermodel"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “workerModel”</span></a></div>
+<p>Background-worker model for distillation, curation, and query expansion. Same-provider invariant: workers MUST use the same provider as the session.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">providerID</code></td>
+<td>string</td>
+<td>—</td>
+<td></td>
+<td>Provider ID for the worker model.</td>
+</tr>
+<tr>
+<td><code dir="auto">modelID</code></td>
+<td>string</td>
+<td>—</td>
+<td></td>
+<td>Model identifier within the provider.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="budget"><code dir="auto">budget</code></h2><a class="sl-anchor-link" href="#budget"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “budget”</span></a></div>
+<p>Context-window budget fractions. Sum plus LTM ≈ 1.0.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">distilled</code></td>
+<td>number</td>
+<td><code dir="auto">0.25</code></td>
+<td>min 0.05, max 0.5</td>
+<td>Fraction of usable context for distilled prefix. Default: 0.25.</td>
+</tr>
+<tr>
+<td><code dir="auto">raw</code></td>
+<td>number</td>
+<td><code dir="auto">0.4</code></td>
+<td>min 0.1, max 0.7</td>
+<td>Fraction of usable context for the recent raw window (un-distilled). Default: 0.4.</td>
+</tr>
+<tr>
+<td><code dir="auto">output</code></td>
+<td>number</td>
+<td><code dir="auto">0.25</code></td>
+<td>min 0.1, max 0.5</td>
+<td>Fraction of usable context reserved for model output. Default: 0.25.</td>
+</tr>
+<tr>
+<td><code dir="auto">ltm</code></td>
+<td>number</td>
+<td><code dir="auto">0.05</code></td>
+<td>min 0.02, max 0.3</td>
+<td>Max fraction of usable context reserved for context-bound LTM system-prompt injection. Default: 0.05 (5%).</td>
+</tr>
+<tr>
+<td><code dir="auto">preferenceLtm</code></td>
+<td>number</td>
+<td><code dir="auto">0.02</code></td>
+<td>min 0.01, max 0.1</td>
+<td>Fraction of usable context for stable LTM (preferences). Independent of <code dir="auto">ltm</code>. Default: 0.02 (2%).</td>
+</tr>
+<tr>
+<td><code dir="auto">targetCacheReadCostPerTurn</code></td>
+<td>number</td>
+<td><code dir="auto">0.1</code></td>
+<td>min 0</td>
+<td>Per-turn cache-read cost target in dollars. Controls when layer 0 escalates to layer 1. Default: 0.10. Set to 0 to disable cost-aware capping.</td>
+</tr>
+<tr>
+<td><code dir="auto">maxLayer0Tokens</code></td>
+<td>number</td>
+<td>—</td>
+<td>min 0</td>
+<td>Direct override for the layer-0 token cap. 0 = disabled (use full context). Default: undefined (use cost-aware auto).</td>
+</tr>
+<tr>
+<td><code dir="auto">targetBustCost</code></td>
+<td>number</td>
+<td><code dir="auto">1</code></td>
+<td>min 0</td>
+<td>@deprecated Ignored. Tier-based bust-vs-continue replaces static cap.</td>
+</tr>
+<tr>
+<td><code dir="auto">maxContextTokens</code></td>
+<td>number</td>
+<td>—</td>
+<td>min 0</td>
+<td>@deprecated Ignored. Tier-based bust-vs-continue replaces static cap.</td>
+</tr>
+<tr>
+<td><code dir="auto">qualityKnee</code></td>
+<td>number</td>
+<td>—</td>
+<td>min 0, max 1</td>
+<td>Manual override for the per-model quality knee (fill fraction where compression ramps). (0,1). Default: undefined (use the built-in per-model-family seed table, fallback 0.4).</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="idleresumeminutes"><code dir="auto">idleResumeMinutes</code></h2><a class="sl-anchor-link" href="#idleresumeminutes"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “idleResumeMinutes”</span></a></div>
+<p>Minutes of inactivity after which Lore refreshes the byte-identity caches on resume (upstream prompt cache is cold). 5 = matches Anthropic’s default-tier TTL. Set to 60 for extended (1h) cache tier. 0 to disable. Default: 5.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="distillation"><code dir="auto">distillation</code></h2><a class="sl-anchor-link" href="#distillation"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “distillation”</span></a></div>
+<p>Distillation pipeline tuning (segment size, thresholds, tool-output truncation).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">minMessages</code></td>
+<td>number</td>
+<td><code dir="auto">5</code></td>
+<td>min 3</td>
+<td>Minimum number of messages before a segment is eligible for distillation. Default: 5.</td>
+</tr>
+<tr>
+<td><code dir="auto">minSegmentTokens</code></td>
+<td>number</td>
+<td><code dir="auto">64</code></td>
+<td>min 16</td>
+<td>Minimum tokens for a segment to be worth distilling. Default: 64.</td>
+</tr>
+<tr>
+<td><code dir="auto">maxSegmentTokens</code></td>
+<td>number</td>
+<td><code dir="auto">16384</code></td>
+<td>min 256</td>
+<td>Maximum tokens per distillation segment before splitting. Default: 16384.</td>
+</tr>
+<tr>
+<td><code dir="auto">metaThreshold</code></td>
+<td>number</td>
+<td><code dir="auto">20</code></td>
+<td>min 3</td>
+<td>Number of gen-0 segments that triggers meta-distillation. Default: 20.</td>
+</tr>
+<tr>
+<td><code dir="auto">toolOutputMaxChars</code></td>
+<td>number</td>
+<td><code dir="auto">4000</code></td>
+<td>min 0</td>
+<td>Max chars per tool output for distillation input. Set to 0 to disable truncation. Default: 4000.</td>
+</tr>
+<tr>
+<td><code dir="auto">userBlobMaxChars</code></td>
+<td>number</td>
+<td><code dir="auto">12000</code></td>
+<td>min 0</td>
+<td>Trigger threshold (chars) for embedding-based user-blob reduction. Set to 0 to disable. Default: 12000.</td>
+</tr>
+<tr>
+<td><code dir="auto">userBlobKeepChars</code></td>
+<td>number</td>
+<td><code dir="auto">6000</code></td>
+<td>min 0</td>
+<td>Chars kept after reducing an oversized user blob. Default: 6000.</td>
+</tr>
+<tr>
+<td><code dir="auto">userBlobMaxSegments</code></td>
+<td>number</td>
+<td><code dir="auto">48</code></td>
+<td>min 1</td>
+<td>Max blob segments embedded during user-blob reduction. Default: 48.</td>
+</tr>
+<tr>
+<td><code dir="auto">userBlobHeadChars</code></td>
+<td>number</td>
+<td><code dir="auto">1500</code></td>
+<td>min 0</td>
+<td>Chars of the leading user-prose prefix always kept during blob reduction. Set to 0 to disable. Default: 1500.</td>
+</tr>
+<tr>
+<td><code dir="auto">recentSegmentsToKeep</code></td>
+<td>number</td>
+<td><code dir="auto">5</code></td>
+<td>min 0</td>
+<td>Number of most-recent gen-0 segments to keep un-archived when meta-distillation fires. Default: 5.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="knowledge"><code dir="auto">knowledge</code></h2><a class="sl-anchor-link" href="#knowledge"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “knowledge”</span></a></div>
+<p>Long-term knowledge (curator, entity injection) controls.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">enabled</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Enable long-term knowledge storage and system-prompt injection. When false, the curator is disabled but recall and context management remain active. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">maxEntityInject</code></td>
+<td>number</td>
+<td><code dir="auto">30</code></td>
+<td>min 0</td>
+<td>Max entities to inject into the agent system prompt. Set to 0 to disable. Default: 30.</td>
+</tr>
+<tr>
+<td><code dir="auto">autoToolFailureGotchas</code></td>
+<td>boolean</td>
+<td><code dir="auto">false</code></td>
+<td></td>
+<td>Auto-create gotcha entries from recurring tool failures. Default false (noisy; can churn the LTM cache).</td>
+</tr>
+<tr>
+<td><code dir="auto">outcomeReward</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Adjust knowledge confidence by within-session verifier (test/build/typecheck/lint) outcomes. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">referenceValidation</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Lower confidence on entries whose file:line / command references no longer resolve against the repo. Unverifiable refs never penalize. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">contextSources</code></td>
+<td>array<enum></td>
+<td><code dir="auto">["distillation"]</code></td>
+<td></td>
+<td>Fold relevance-ranked distillation/temporal memory into the context-bound injection so facts are passively present (no recall tool needed). Default: [“distillation”]; add “temporal” for raw messages; [] = off.</td>
+</tr>
+<tr>
+<td><code dir="auto">minRelevance</code></td>
+<td>number</td>
+<td><code dir="auto">0.35</code></td>
+<td>min 0, max 1</td>
+<td>Minimum cosine similarity for a vector-only knowledge match to be surfaced into a session. FTS keyword matches bypass it. 0 disables. Default: 0.35.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="curator"><code dir="auto">curator</code></h2><a class="sl-anchor-link" href="#curator"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “curator”</span></a></div>
+<p>Curator scheduling and consolidation thresholds.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">enabled</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Enable the curator (knowledge extraction from conversation). Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">onIdle</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Run the curator on session idle (in addition to turn-based). Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">inFlight</code></td>
+<td>boolean</td>
+<td><code dir="auto">false</code></td>
+<td></td>
+<td>Run the curator mid-conversation (turn-based), not just on idle. Default: false. WARNING: only enable on free-write / non-caching providers (e.g. MiniMax). On cache-sensitive providers (Anthropic), mid-session curation changes the knowledge base, which queues a knowledge-delta block (user→assistant pair appended mid-conversation) that re-writes part of the prompt tail each time the knowledge set changes. Deferring curation to idle lets the queue stay empty during active turns. Where cache writes are free this is harmless and yields fresher knowledge sooner.</td>
+</tr>
+<tr>
+<td><code dir="auto">afterTurns</code></td>
+<td>number</td>
+<td><code dir="auto">3</code></td>
+<td>min 1</td>
+<td>Minimum turns between curator runs. Default: 3.</td>
+</tr>
+<tr>
+<td><code dir="auto">maxEntries</code></td>
+<td>number</td>
+<td><code dir="auto">200</code></td>
+<td>min 10</td>
+<td>Per-project knowledge entry ceiling. A generous backstop, not a quality gate: injection is already token-budget-capped, and the confidence lifecycle (decay + reinforcement) governs what stays. When exceeded, the lowest-value entries are evicted. Default: 200.</td>
+</tr>
+<tr>
+<td><code dir="auto">contextTokenBudget</code></td>
+<td>number</td>
+<td><code dir="auto">20000</code></td>
+<td>min 2000</td>
+<td>Token budget for the existing-entries context sent to the curator each run. Bounds curator LLM cost so it stops scaling with stored entry count; a generous safety ceiling that only trims pathological sets (cross-project entries are always kept). Default: 20000.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="pruning"><code dir="auto">pruning</code></h2><a class="sl-anchor-link" href="#pruning"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “pruning”</span></a></div>
+<p>Storage retention and emergency-pruning thresholds.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">retention</code></td>
+<td>number</td>
+<td><code dir="auto">120</code></td>
+<td>min 1</td>
+<td>Days to keep distilled temporal messages before pruning. Default: 120.</td>
+</tr>
+<tr>
+<td><code dir="auto">maxStorage</code></td>
+<td>number</td>
+<td><code dir="auto">1024</code></td>
+<td>min 50</td>
+<td>Max total temporal_messages storage in MB before emergency pruning. Default: 1024 (1 GB).</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="search"><code dir="auto">search</code></h2><a class="sl-anchor-link" href="#search"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “search”</span></a></div>
+<p>Recall and search pipeline tuning: FTS weights, query expansion, vector boost, embeddings, and output formatting.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">ftsWeights</code></td>
+<td>object</td>
+<td><code dir="auto">{"title":6,"content":2,"category":3}</code></td>
+<td></td>
+<td>BM25 column weights for knowledge FTS5 [title, content, category].</td>
+</tr>
+<tr>
+<td><code dir="auto">recallLimit</code></td>
+<td>number</td>
+<td><code dir="auto">10</code></td>
+<td>min 1, max 50</td>
+<td>Max results per source in recall tool before fusion. Default: 10.</td>
+</tr>
+<tr>
+<td><code dir="auto">queryExpansion</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Enable LLM-based query expansion (2-3 alternative phrasings) for the recall tool. Guarded by a 3s timeout. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">queryExpansionMaxTerms</code></td>
+<td>number</td>
+<td><code dir="auto">8</code></td>
+<td>min 2, max 20</td>
+<td>Max query terms (after stopword removal) for LLM expansion. Longer queries skip expansion. Default: 8.</td>
+</tr>
+<tr>
+<td><code dir="auto">vectorBoostWeight</code></td>
+<td>number</td>
+<td><code dir="auto">1.5</code></td>
+<td>min 1, max 5</td>
+<td>RRF weight multiplier for vector search lists (when query has enough terms). Set to 1.0 to disable. Default: 1.5.</td>
+</tr>
+<tr>
+<td><code dir="auto">vectorBoostMinTerms</code></td>
+<td>number</td>
+<td><code dir="auto">2</code></td>
+<td>min 1, max 10</td>
+<td>Minimum meaningful query terms (after stopword removal) to activate vector boost. Default: 2.</td>
+</tr>
+<tr>
+<td><code dir="auto">graphExpansion</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Enable entity-graph fan-in (linked knowledge + 1-hop relation neighbors) for the recall tool. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">graphBoostWeight</code></td>
+<td>number</td>
+<td><code dir="auto">1</code></td>
+<td>min 0, max 5</td>
+<td>RRF weight multiplier for entity-graph fan-in lists. Set to 0 to neutralize. Default: 1.0.</td>
+</tr>
+<tr>
+<td><code dir="auto">embeddings</code></td>
+<td>object</td>
+<td><code dir="auto">{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768,"workerOffload":true,"workerPoolSize":2}</code></td>
+<td></td>
+<td>Vector embedding search provider, model, and dimensions.</td>
+</tr>
+<tr>
+<td><code dir="auto">recall</code></td>
+<td>object</td>
+<td><code dir="auto">{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0}</code></td>
+<td></td>
+<td>Recall output formatting and result-count limits.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h3"><h3 id="searchftsweights"><code dir="auto">search.ftsWeights</code></h3><a class="sl-anchor-link" href="#searchftsweights"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “search.ftsWeights”</span></a></div>
+<p>BM25 column weights for knowledge FTS5 [title, content, category].</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">title</code></td>
+<td>number</td>
+<td><code dir="auto">6</code></td>
+<td>min 0</td>
+<td>BM25 weight for the entry title column. Default: 6.0.</td>
+</tr>
+<tr>
+<td><code dir="auto">content</code></td>
+<td>number</td>
+<td><code dir="auto">2</code></td>
+<td>min 0</td>
+<td>BM25 weight for the entry content column. Default: 2.0.</td>
+</tr>
+<tr>
+<td><code dir="auto">category</code></td>
+<td>number</td>
+<td><code dir="auto">3</code></td>
+<td>min 0</td>
+<td>BM25 weight for the entry category column. Default: 3.0.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h3"><h3 id="searchembeddings"><code dir="auto">search.embeddings</code></h3><a class="sl-anchor-link" href="#searchembeddings"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “search.embeddings”</span></a></div>
+<p>Vector embedding search provider, model, and dimensions.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">enabled</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Enable vector embedding search. Set to false to explicitly disable. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">provider</code></td>
+<td>enum</td>
+<td><code dir="auto">"local"</code></td>
+<td></td>
+<td>Embedding provider. “local” (no API key, on-device), “voyage” (VOYAGE_API_KEY), “openai” (OPENAI_API_KEY). Default: “local”.</td>
+</tr>
+<tr>
+<td><code dir="auto">model</code></td>
+<td>string</td>
+<td><code dir="auto">"nomic-ai/nomic-embed-text-v1.5"</code></td>
+<td></td>
+<td>Model ID for the embedding provider. Default depends on provider.</td>
+</tr>
+<tr>
+<td><code dir="auto">dimensions</code></td>
+<td>number</td>
+<td><code dir="auto">768</code></td>
+<td>min 64, max 2048</td>
+<td>Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768.</td>
+</tr>
+<tr>
+<td><code dir="auto">workerOffload</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Run vector searches on a read-worker pool off the main event loop. Kill switch (default true); set false to force the in-process path.</td>
+</tr>
+<tr>
+<td><code dir="auto">workerPoolSize</code></td>
+<td>number</td>
+<td><code dir="auto">2</code></td>
+<td>min 1, max 16</td>
+<td>Number of read-worker threads for off-thread vector search. Default: 2.</td>
+</tr>
+<tr>
+<td><code dir="auto">embedPoolSize</code></td>
+<td>number</td>
+<td>—</td>
+<td>min 1, max 8</td>
+<td>Number of local embedding worker threads (each loads its own ~137MB model). Default: memory-gated (1–2). Override with LORE_EMBED_POOL_SIZE.</td>
+</tr>
+<tr>
+<td><code dir="auto">backfillCpuDuty</code></td>
+<td>number</td>
+<td>—</td>
+<td>min 0.1, max 1</td>
+<td>Duty cycle (0.1–1.0) for the one-time temporal re-chunk backfill — the fraction of time it may spend embedding, sleeping the rest so it doesn’t peg a core on weak hosts. 1.0 = full speed. Default: auto-scaled by CPU count. Override with LORE_BACKFILL_CPU_DUTY.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h3"><h3 id="searchrecall"><code dir="auto">search.recall</code></h3><a class="sl-anchor-link" href="#searchrecall"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “search.recall”</span></a></div>
+<p>Recall output formatting and result-count limits.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">charBudget</code></td>
+<td>number</td>
+<td><code dir="auto">12000</code></td>
+<td>min 2000, max 20000</td>
+<td>Total character budget for recall output (~3K tokens at 12000 chars). Default: 12000.</td>
+</tr>
+<tr>
+<td><code dir="auto">relevanceFloor</code></td>
+<td>number</td>
+<td><code dir="auto">0.15</code></td>
+<td>min 0, max 1</td>
+<td>Minimum RRF score (relative to top) to keep. Set to 0 to disable. Default: 0.15.</td>
+</tr>
+<tr>
+<td><code dir="auto">maxResults</code></td>
+<td>number</td>
+<td><code dir="auto">15</code></td>
+<td>min 3, max 30</td>
+<td>Max results to show in recall output. Default: 15.</td>
+</tr>
+<tr>
+<td><code dir="auto">absoluteFloor</code></td>
+<td>number</td>
+<td><code dir="auto">0</code></td>
+<td>min 0</td>
+<td>Absolute RRF score floor; drops weak matches even via the keep-3 backfill. Default: 0 (disabled).</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="cache"><code dir="auto">cache</code></h2><a class="sl-anchor-link" href="#cache"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “cache”</span></a></div>
+<p>Anthropic prompt cache TTL and speculative warming.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">conversationTTL</code></td>
+<td>enum</td>
+<td><code dir="auto">"auto"</code></td>
+<td></td>
+<td>Conversation cache breakpoint TTL. “5m” (Anthropic standard), “1h” (extended tier, 2× write cost), “auto” (auto-upgrade based on cold-cache rate). Default: “auto”.</td>
+</tr>
+<tr>
+<td><code dir="auto">warming</code></td>
+<td>object</td>
+<td><code dir="auto">{"enabled":true}</code></td>
+<td></td>
+<td>Speculative cache warming (keepalive requests before TTL expiry).</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h3"><h3 id="cachewarming"><code dir="auto">cache.warming</code></h3><a class="sl-anchor-link" href="#cachewarming"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “cache.warming”</span></a></div>
+<p>Speculative cache warming (keepalive requests before TTL expiry).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">enabled</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Enable cache warming. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">minReturnProbability</code></td>
+<td>number</td>
+<td>—</td>
+<td>min 0, max 1</td>
+<td>Override return probability threshold below which warming is skipped. Default: auto-derived from cost ratio.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="workspaces"><code dir="auto">workspaces</code></h2><a class="sl-anchor-link" href="#workspaces"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “workspaces”</span></a></div>
+<p>Workspace sub-project paths or globs (relative to <code dir="auto">.lore.json</code>). Imported into the root knowledge base on startup. Supports literal paths and single-level globs (e.g. “packages/*”).</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="crossproject"><code dir="auto">crossProject</code></h2><a class="sl-anchor-link" href="#crossproject"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “crossProject”</span></a></div>
+<p>Include cross-project knowledge in compaction summaries and auto-promote knowledge that recurs across 3+ projects. Default: true.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="agentsfile"><code dir="auto">agentsFile</code></h2><a class="sl-anchor-link" href="#agentsfile"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “agentsFile”</span></a></div>
+<p>AGENTS.md/CLAUDE.md export/import configuration.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">enabled</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Enable AGENTS.md export/import behaviour. Set to false to disable. Default: true.</td>
+</tr>
+<tr>
+<td><code dir="auto">path</code></td>
+<td>string</td>
+<td><code dir="auto">"auto"</code></td>
+<td></td>
+<td>Path to the agents file, relative to the project root, or ‘auto’ (default) to write CLAUDE.md for Claude Code sessions and AGENTS.md otherwise. Set an explicit path (e.g. ‘AGENTS.md’ or ‘CLAUDE.md’) to override.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="lorefile"><code dir="auto">loreFile</code></h2><a class="sl-anchor-link" href="#lorefile"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “loreFile”</span></a></div>
+<p><code dir="auto">.lore.md</code> export/import configuration.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">enabled</code></td>
+<td>boolean</td>
+<td><code dir="auto">true</code></td>
+<td></td>
+<td>Set to false to disable <code dir="auto">.lore.md</code> export/import. When disabled, <code dir="auto">.lore.md</code> is not written, startup skips the <code dir="auto">.lore.md</code> import branch, the recall tool omits the .lore.md commit reminder, and the file watcher ignores <code dir="auto">.lore.md</code>. Knowledge stays in the database and is still injected into the system prompt via LTM. Pair with <code dir="auto">agentsFile.enabled=true</code> to keep sharing knowledge via an inline section in AGENTS.md. Default: true.</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="user"><code dir="auto">user</code></h2><a class="sl-anchor-link" href="#user"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “user”</span></a></div>
+<p>User identity for the self-entity. Falls back to git config user.name / user.email if omitted.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">name</code></td>
+<td>string</td>
+<td>—</td>
+<td></td>
+<td>Display name. Overrides git config user.name.</td>
+</tr>
+<tr>
+<td><code dir="auto">email</code></td>
+<td>string</td>
+<td>—</td>
+<td></td>
+<td>Email address. Overrides git config user.email.</td>
+</tr>
+<tr>
+<td><code dir="auto">aliases</code></td>
+<td>array&lt;{ type, value }&gt;</td>
+<td><code dir="auto">[]</code></td>
+<td></td>
+<td>Additional aliases for the self entity.</td>
+</tr>
+<tr>
+<td><code dir="auto">metadata</code></td>
+<td>Record&lt;string, unknown&gt;</td>
+<td>—</td>
+<td></td>
+<td>Metadata for the self entity (description, role, notes, etc.).</td>
+</tr>
+</tbody>
+</table>
+<div class="sl-heading-wrapper level-h2"><h2 id="invariantcheck"><code dir="auto">invariantCheck</code></h2><a class="sl-anchor-link" href="#invariantcheck"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore>Section titled “invariantCheck”</span></a></div>
+<p><code dir="auto">lore lint</code> (semantic linter) tuning.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
+<th>Constraints</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code dir="auto">effort</code></td>
+<td>enum</td>
+<td><code dir="auto">"off"</code></td>
+<td></td>
+<td>Reasoning effort for the lint judge (off|low|medium|high|xhigh). Trades cost for depth on reasoning-capable models. Default: off. Override per-run with –effort.</td>
+</tr>
+</tbody>
+</table>
+</div><footer class="sl-flex astro-y5rmu4hg"><div class="meta sl-flex astro-y5rmu4hg"></div><div class="pagination-links print:hidden astro-tz4dsmvx" dir="ltr"><a href="/_preview/pr-1528/docs/guides/semantic-linter/" rel="prev" class="astro-tz4dsmvx"><svg aria-hidden="true" class="astro-tz4dsmvx astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-tz4dsmvx">Previous<br class="astro-tz4dsmvx"><span class="link-title astro-tz4dsmvx">Semantic linter (CI)</span></span></a><a href="/_preview/pr-1528/docs/environment/" rel="next" class="astro-tz4dsmvx"><svg aria-hidden="true" class="astro-tz4dsmvx astro-xoxxctml" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg><span class="astro-tz4dsmvx">Next<br class="astro-tz4dsmvx"><span class="link-title astro-tz4dsmvx">Environment variables</span></span></a></div></footer></div></div></main></div></div></div></div></body></html>
