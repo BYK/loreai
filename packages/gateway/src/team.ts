@@ -330,21 +330,47 @@ export function isEmailAddress(s: string): boolean {
 
 /**
  * E-5-e (#630/#827): email a team invitee their join link via the `send-invite-email` Edge Function
- * (SMTP2GO). Best-effort — returns false (never throws) on any failure so the caller can fall back to
- * printing the token link; the invite itself already exists server-side.
+ * (SMTP2GO). Best-effort — returns `{ ok: false }` (never throws) on any failure so the caller can
+ * fall back to printing the token link; the invite itself already exists server-side.
+ *
+ * Recipient resolution happens server-side:
+ *   - `hint` is a real email → sent as-is (`resolved_via: "explicit_email"`).
+ *   - `hint` is a github login + `providerToken` → EF resolves Lore email first (preferred, via the
+ *     `lore_emails_for_github_ids` rpc + GitHub /users/{login} for the numeric id), then GitHub
+ *     public email; refuses (404) when neither exists.
+ *   - `hint` is a github login WITHOUT providerToken → EF returns `no_resolvable_email`; we surface
+ *     that as `{ ok: false }` so the caller can fall back to printing.
+ *
+ * IMPORTANT: the recipient email NEVER round-trips back through the gateway. The EF sends the SMTP
+ * request server-side; the only thing we learn here is whether it sent + how the EF resolved it.
  */
 export async function sendInviteEmail(
   client: SupabaseClient,
   token: string,
-  email: string,
-): Promise<boolean> {
+  hint: string,
+  opts?: { providerToken?: string | null },
+): Promise<{ ok: boolean; resolvedVia: string | null }> {
+  const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(hint);
   try {
-    const { error } = await client.functions.invoke("send-invite-email", {
-      body: { token, email },
+    const body: Record<string, string> = { token };
+    if (isEmail) {
+      body.email = hint;
+    } else {
+      body.github_login = hint;
+      if (opts?.providerToken) body.provider_token = opts.providerToken;
+    }
+    const { data, error } = await client.functions.invoke("send-invite-email", {
+      body,
     });
-    return !error;
+    if (error) return { ok: false, resolvedVia: null };
+    const payload = data as { resolved_via?: string } | null;
+    return {
+      ok: true,
+      resolvedVia:
+        typeof payload?.resolved_via === "string" ? payload.resolved_via : null,
+    };
   } catch {
-    return false;
+    return { ok: false, resolvedVia: null };
   }
 }
 

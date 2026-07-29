@@ -373,22 +373,49 @@ export async function commandTeam(
         const token = await createTeamInvite(client, scope.id, role, hint, {
           offline,
         });
-        // E-5-e: if the resolved hint is a real email, email the join link. A send failure NEVER
-        // loses the invite — the token/link is always still printed.
-        const willEmail = !!hint && isEmailAddress(hint);
-        const emailed = willEmail
-          ? await sendInviteEmail(client, token, hint)
-          : false;
+        // E-5-e (server-side resolve): when the hint is NOT a real email, treat it as a GitHub
+        // login and let the Edge Function look up the recipient server-side (Lore email first,
+        // GitHub public email fallback). For that path we must pass provider_token — acquire it on
+        // demand (cache hits keep this cheap).
+        const willEmail = !!hint;
+        let emailed = false;
+        let emailedVia: string | null = null;
+        if (willEmail) {
+          let providerToken: string | undefined;
+          if (!isEmailAddress(hint)) {
+            try {
+              const acquired = await acquireGitHubProviderToken({
+                noBrowser: !!values["no-browser"],
+              });
+              providerToken = acquired.providerToken;
+            } catch {
+              // No provider_token and the user is offline/cache-empty — the EF will return false
+              // and we fall through to manual printing. Don't hard-fail the invite.
+            }
+          }
+          const result = await sendInviteEmail(client, token, hint, {
+            providerToken,
+          });
+          emailed = result.ok;
+          emailedVia = result.resolvedVia;
+        }
         console.log(
           `Invite created (${role}${hint ? `, for ${hint}` : ""}${offline ? ", offline" : ""}). It expires in 14 days.\n` +
             (offline
               ? "This token carries a one-time decryption key — treat it like a password and prefer a private channel.\n"
               : "") +
-            (willEmail && emailed
-              ? `Emailed the join link to ${hint}.\n`
-              : willEmail
+            (emailed
+              ? `Emailed the join link to ${
+                  emailedVia === "lore_email" ||
+                  emailedVia === "github_public_email"
+                    ? "the resolved address"
+                    : (hint ?? "the address")
+                }.\n`
+              : willEmail && hint && isEmailAddress(hint)
                 ? "Could not send the email — share the link manually below.\n"
-                : "") +
+                : hint && !isEmailAddress(hint)
+                  ? "No email on file to send — share the link manually below.\n"
+                  : "") +
             `Share this with the invitee — they run:\n\n  lore team accept ${token}\n`,
         );
         break;
