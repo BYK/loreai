@@ -1,7 +1,7 @@
 ---
 title: "Local-first memory: Why your AI memory should live on your machine"
 subtitle: "Lore doesn't leave you in the hands of the platform. The architecture is local-first, and we aim to keep it that way."
-description: "Lore is a vendor-neutral proxy that runs on your machine. The memory lives in your repo and your local database, local, sqlite & markdown, run by a fair-source engine."
+description: "Lore is a vendor-neutral proxy that runs on your machine. Local, sqlite & markdown. Run by a fair-source engine."
 pubDate: 2026-07-29
 author: Burak Yigit Kaya
 tags:
@@ -64,8 +64,8 @@ and a vendor change returns the team to zero.
 
 Lore is a vendor-neutral proxy that sits between your harness and
 your model. The whole engine runs on your machine. The memory lives
-in your repo and your local database, local, sqlite & markdown, you
-can read with or without Lore.
+in your repo and a local SQLite database on your disk. You can read
+both with or without Lore.
 
 ```mermaid
 flowchart LR
@@ -85,6 +85,14 @@ flowchart LR
 *The LLM is the cognition, Lore is the memory layer. They form the brain. The harness is the body, the actuator.*
 
 What you actually own is two things:
+
+Even LangChain is starting to realize the limits of black-box databases.
+In June, Harrison wrote about
+[Wiki Memory](https://blog.langchain.com/wiki-memory/), admitting that
+the best format for compressed agent data isn't a proprietary vector
+store — it's files. They are inspectable, editable, and versionable.
+With Lore, you don't have to wait for the industry to build it. You
+already have it.
 
 - **`.lore.md`** at the root of your repo. The curated knowledge the
   team has reviewed and merged. Version-controlled, PR-reviewable,
