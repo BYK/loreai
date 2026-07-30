@@ -69,9 +69,9 @@ with or without Lore.
 
 ```mermaid
 flowchart LR
-    H["Harness<br/>Claude Code · OpenCode · Pi · Codex"]
-    L["Lore<br/>local-first, vendor-neutral proxy<br/>.lore.md + lore.db<br/>on your machine, in open formats"]
-    A["Model Provider API<br/>Anthropic · OpenAI · Google · others"]
+    H["<b>Harness</b><br/>Claude Code · OpenCode · Pi · Codex"]
+    L["<b>Lore</b><br/>local-first, vendor-neutral<br/>.lore.md + lore.db<br/>local, sqlite & markdown"]
+    A["<b>Model Provider API</b><br/>Anthropic · OpenAI · Google · others"]
 
     H --> L
     L --> A
