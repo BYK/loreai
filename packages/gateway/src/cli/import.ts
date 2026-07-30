@@ -29,6 +29,7 @@ import {
 import {
   defaultModelForProvider,
   defaultSelectableModelForProvider,
+  fetchModelData,
   parseWorkerModelEnv,
 } from "../worker-model";
 import { resolveProviderRoute, providerForUpstreamOrigin } from "../config";
@@ -1311,9 +1312,27 @@ export async function commandImport(
         auth: typeof tier1;
         label: string;
       };
+      // Force-load the models.dev snapshot so per-credential default
+      // resolution (defaultSelectableModelForProvider) can pick a
+      // concrete model id for defaultless providers like openrouter,
+      // deepseek, groq, opencode. Without this warmup the chain runs
+      // against an empty cache and filters those credentials at the
+      // `if (!model.modelID) continue` guard. Adm (2026-07-30) hit this
+      // on a fresh `lore import` process — the cache was never warmed.
+      try {
+        await fetchModelData();
+      } catch {
+        // fetchModelData handles its own errors. Failing to load
+        // models.dev shouldn't block the import — fall back to the
+        // empty-cache path (which still tries WORKER_DEFAULTS
+        // providers correctly).
+      }
+      const chain = workerApiKey
+        ? []
+        : buildAuthFallbackChain(result.agentName, cfgModel);
       const candidates: Candidate[] = workerApiKey
         ? [{ auth: tier1, label: "LORE_WORKER_API_KEY" }]
-        : buildAuthFallbackChain(result.agentName, cfgModel).map((c) => ({
+        : chain.map((c) => ({
             auth: {
               getAuth: c.getAuth,
               model: c.model,
