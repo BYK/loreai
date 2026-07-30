@@ -12,11 +12,11 @@ const base = import.meta.env.BASE_URL;
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Lore.AI — Shared context that never gets compacted</title>
-  <meta name="description" content="Lore unifies context-window management and long-term memory for AI agents in one local-first pipeline — infinite sessions, compounding knowledge, shared across tools and providers. No Docker, no cloud." />
+  <title>Lore.AI — Local-first memory for AI agents</title>
+  <meta name="description" content="Lore is the local-first memory layer for AI agents. Plain Markdown and an open SQLite database, on your machine. Local, sqlite & markdown. Run by a fair-source engine. Local, sqlite & markdown." />
   <SocialMeta
-    title="Lore.AI — Shared context that never gets compacted"
-    description="Context-window management and long-term memory for AI agents — one local-first pipeline. Infinite sessions, compounding knowledge, shared across your tools."
+    title="Lore.AI — Local-first memory for AI agents"
+    description="Lore is the local-first memory layer for AI agents. Plain Markdown and an open SQLite database, on your machine. Run by a fair-source engine."
     path=""
   />
   <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`}>
@@ -79,7 +79,8 @@ const base = import.meta.env.BASE_URL;
       </h1>
       <p class="hero-desc sr">Your AI never starts over. Lore keeps sessions coherent for days and millions of
         tokens — no lossy summary that wipes your file paths and decisions — and turns every session into
-        compounding memory across tools, providers, and (soon) your team. No context files. No workflow changes.</p>
+        compounding memory that lives on your machine, in plain Markdown and an open SQLite database. No
+        context files. No lock-in. No workflow changes.</p>
       <div class="hero-install sr">
         <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://withlore.ai/install | bash').then(()=>{this.querySelector('.install-copied').classList.add('show');setTimeout(()=>this.querySelector('.install-copied').classList.remove('show'),2000)})">
           <code><span class="install-prompt">$</span> curl -fsSL https://withlore.ai/install | bash</code>
@@ -194,11 +195,11 @@ const base = import.meta.env.BASE_URL;
         <h3 class="step-t">It lives in your database</h3>
         <p class="step-b">Everything else Lore keeps for you — raw conversations,
           distillations, long-term memory, entities, and the vector embeddings
-          themselves — lives in a local SQLite database with an open schema. The
+          themselves — lives in a local SQLite database on your machine. The
           SQLite file is the vector database: no separate store, no separate bill.
           Read it with <code class="code-inline">sqlite3</code>, query it, export it, or build
           your own tools around it. Stop using Lore tomorrow and your data is
-          still there, in an open format.</p>
+          still there, in plain Markdown and an open SQLite you can read.</p>
       </div>
       <div class="step sr">
         <div class="step-n">03</div>
@@ -210,9 +211,9 @@ const base = import.meta.env.BASE_URL;
       </div>
     </div>
     <p class="sec-sub sr" style="max-width:900px;margin:1.5rem auto 0;text-align:center;font-size:.82rem;opacity:.85;">
-      The vector-database route is the lock-in route. The open-format route is the
+      The vector-database route is the lock-in route. The local-first route is the
       freedom route.
-      <a href={`${base}blog/the-agentic-memory-trap/`} style="border-bottom:1px solid var(--g4);color:var(--g2)">Why we chose text &rarr;</a>
+      <a href={`${base}blog/the-agentic-memory-trap/`} style="border-bottom:1px solid var(--g4);color:var(--g2)">Why we chose local-first &rarr;</a>
     </p>
   </section>
 
