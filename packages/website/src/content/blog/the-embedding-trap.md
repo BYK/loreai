@@ -67,7 +67,6 @@ your model. The whole engine runs on your machine. The memory lives
 in your repo and your local database, in open formats you can read
 with or without Lore.
 
-<figure>
 ```mermaid
 flowchart TB
     H["Harness<br/>Claude Code · OpenCode · Pi · Codex"]
@@ -82,10 +81,8 @@ flowchart TB
     class L lore
     class H,A ext
 ```
-<figcaption style="text-align: center; font-size: 0.9em; opacity: 0.8; margin-top: 0.5rem;">
-  Lore is the brain. The harness is the body. The model provider API is the cognition.
-</figcaption>
-</figure>
+
+*Lore is the brain. The harness is the body. The model provider API is the cognition.*
 
 What you actually own is two things:
 
