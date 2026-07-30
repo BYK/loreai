@@ -315,8 +315,9 @@ describe("commandImport (local mode) — auth pre-flight", () => {
 
     const out = errs.join("\n");
     // Actionable, credential-fix-shaped message replaces the old generic
-    // "no response from the model".
-    expect(out).toContain("credential Lore is using is invalid");
+    // "no response from the model". After auto-fallback, the surface
+    // message names the tried provider(s) + the standard remediation.
+    expect(out).toContain("rejected the credential");
     expect(out).toContain("HTTP 401");
     expect(out).toContain("LORE_WORKER_API_KEY");
     // Mentions the env-credential fallback hint so an OpenRouter / proxy
@@ -326,6 +327,8 @@ describe("commandImport (local mode) — auth pre-flight", () => {
     // exactly which block of advice applies (Aider here; the home run is
     // OpenCode — adapt as more agents are added).
     expect(out).toContain("Aider on-disk auth");
+    // The single tried provider should be in the tried-list.
+    expect(out).toContain("anthropic");
 
     // Old behavior would have printed "No response from the model for" — the
     // NEW path REPLACES that line for auth-rejected aborts. Never both.

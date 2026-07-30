@@ -421,6 +421,13 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("pi"),
     upstreamEnvVars: ["ANTHROPIC_BASE_URL"],
     wireProtocol: "anthropic",
+    // Pi reads ANTHROPIC_AUTH_TOKEN (bearer, for proxies like OpenRouter)
+    // and ANTHROPIC_API_KEY (api-key, first-party Anthropic). Bearer wins
+    // when both are set — matches Claude Code's precedence parity.
+    authTokenEnvVars: [
+      { var: "ANTHROPIC_AUTH_TOKEN", scheme: "bearer" },
+      { var: "ANTHROPIC_API_KEY", scheme: "api-key" },
+    ],
     envVars: (url, _cwd) => ({
       ANTHROPIC_BASE_URL: url,
       LORE_GATEWAY_URL: url,
@@ -469,6 +476,10 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("hermes"),
     upstreamEnvVars: ["OPENAI_BASE_URL"],
     wireProtocol: "openai",
+    // Hermes reads OPENAI_API_KEY (bearer) for OpenAI-compatible upstreams.
+    // OPENAI_BASE_URL is in upstreamEnvVars (above) — captured separately by
+    // captureUserEnvCredential when the user points Hermes at a proxy.
+    authTokenEnvVars: [{ var: "OPENAI_API_KEY", scheme: "bearer" }],
     envVars: (url, cwd) => {
       const env: Record<string, string> = {
         // Route Hermes through the gateway. Both keys are undocumented in the
@@ -503,6 +514,13 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("copilot"),
     upstreamEnvVars: ["COPILOT_API_URL"],
     wireProtocol: "openai",
+    // NOTE: GitHub Copilot CLI stores credentials in its own config
+    // (~/.config/github-copilot/hosts.json), not in shell env vars. The CLI
+    // does NOT document a COPILOT_TOKEN env var. We intentionally don't
+    // wire authTokenEnvVars here — auto-fallback for Copilot conversations
+    // is gated on a prior `lore run` capturing the live token via
+    // getLastSeenAuth (tier 4). To import Copilot history, run `lore run`
+    // once first; subsequent `lore import` will use the captured credential.
     envVars: (url, cwd) => {
       // GitHub Copilot CLI talks to the Copilot API (normally
       // api.githubcopilot.com) in OpenAI wire format, performing its own GitHub→
@@ -535,6 +553,14 @@ export const AGENTS: AgentDef[] = [
     detect: () => whichSync("gemini"),
     upstreamEnvVars: ["GOOGLE_GEMINI_BASE_URL"],
     wireProtocol: "gemini",
+    // Gemini CLI (GEMINI_API_KEY mode) reads GEMINI_API_KEY as a bearer
+    // against the Generative Language API. GOOGLE_API_KEY is the older
+    // sibling and is also honored by Google's Gemini SDK clients — picked
+    // up here so users with either key get auto-fallback coverage.
+    authTokenEnvVars: [
+      { var: "GEMINI_API_KEY", scheme: "bearer" },
+      { var: "GOOGLE_API_KEY", scheme: "bearer" },
+    ],
     envVars: (url, cwd) => {
       // Google's Gemini CLI (GEMINI_API_KEY mode) reads GOOGLE_GEMINI_BASE_URL
       // as the base origin for the native Generative Language API — it appends
