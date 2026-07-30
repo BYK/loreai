@@ -60,7 +60,7 @@ the same way.
 Six months of careful work, six months of capturing a team's taste,
 and a vendor change returns the team to zero.
 
-## Lore is local-first. We aim to keep it that way.
+## Lore is local-first and we want to keep it that way
 
 Lore is a vendor-neutral proxy that sits between your harness and
 your model. The whole engine runs on your machine. The memory lives
@@ -68,7 +68,7 @@ in your repo and your local database, in open formats you can read
 with or without Lore.
 
 ```mermaid
-flowchart TB
+flowchart LR
     H["Harness<br/>Claude Code · OpenCode · Pi · Codex"]
     L["Lore<br/>local-first, vendor-neutral proxy<br/>.lore.md + ~/.local/share/lore/lore.db<br/>on your machine, in open formats"]
     A["Model Provider API<br/>Anthropic · OpenAI · Google · others"]
