@@ -181,21 +181,14 @@ export function resolveAgentImportAuth(
     // aggregator (openrouter, groq, cerebras, huggingface) or shares the same
     // upstream protocol as the cfgModel's provider — these aggregators can
     // proxy the session model id (e.g. `openai/gpt-5.6-luna` → openrouter).
-    const cfgRoute = cfgModel
-      ? resolveProviderRoute(cfgModel.providerID)
-      : null;
     const credRoute = resolveProviderRoute(usable.providerID);
     const isOpenAIAggregator =
       credRoute?.protocol === "openai" &&
       OPENAI_COMPATIBLE_AGGREGATORS.has(usable.providerID);
-    const sameProtocol =
-      cfgRoute != null &&
-      credRoute != null &&
-      cfgRoute.protocol === credRoute.protocol;
     const model =
       cfgModel && cfgModel.providerID === usable.providerID
         ? cfgModel
-        : cfgModel && (sameProtocol || isOpenAIAggregator)
+        : cfgModel && isOpenAIAggregator
           ? { providerID: usable.providerID, modelID: cfgModel.modelID }
           : usable.modelID
             ? { providerID: usable.providerID, modelID: usable.modelID }
@@ -568,21 +561,14 @@ export function buildAuthFallbackChain(
     //      Anthropic-billed, not OpenAI-billed).
     //   3. cred.modelID — explicit per-credential override.
     //   4. per-credential default from models.dev — last-resort fallback.
-    const cfgRoute = cfgModel
-      ? resolveProviderRoute(cfgModel.providerID)
-      : null;
     const credRoute = resolveProviderRoute(cred.providerID);
     const isOpenAIAggregator =
       credRoute?.protocol === "openai" &&
       OPENAI_COMPATIBLE_AGGREGATORS.has(cred.providerID);
-    const sameProtocol =
-      cfgRoute != null &&
-      credRoute != null &&
-      cfgRoute.protocol === credRoute.protocol;
     const model =
       cfgModel && cfgModel.providerID === cred.providerID
         ? cfgModel
-        : cfgModel && (sameProtocol || isOpenAIAggregator)
+        : cfgModel && isOpenAIAggregator
           ? { providerID: cred.providerID, modelID: cfgModel.modelID }
           : cred.modelID
             ? { providerID: cred.providerID, modelID: cred.modelID }
