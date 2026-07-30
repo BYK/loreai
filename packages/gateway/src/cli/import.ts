@@ -26,7 +26,11 @@ import {
   getLastSeenAuthProvider,
   type AuthCredential,
 } from "../auth";
-import { defaultModelForProvider, parseWorkerModelEnv } from "../worker-model";
+import {
+  defaultModelForProvider,
+  defaultSelectableModelForProvider,
+  parseWorkerModelEnv,
+} from "../worker-model";
 import { resolveProviderRoute, providerForUpstreamOrigin } from "../config";
 import { hasRecentAuthRejectedFailure } from "../worker-health";
 import { AGENTS, captureUserEnvCredential } from "./agents";
@@ -491,12 +495,22 @@ export function buildAuthFallbackChain(
       ? `opencode.json active provider: ${cred.providerID}`
       : `on-disk auth.json: ${cred.providerID}`;
 
+    // Per-credential model resolution: when cfgModel targets a DIFFERENT
+    // provider than this credential (common when the user has `cfg.model`
+    // pinned to openai but auth.json carries an openrouter key too), honor
+    // cfgModel only for the matching provider. For other providers, fall
+    // back to a per-credential default — `defaultSelectableModelForProvider`
+    // uses models.dev data when the provider has no `WORKER_DEFAULTS` entry
+    // (openrouter, deepseek, groq, opencode, …), so previously-skipped
+    // credentials with valid keys actually get tried instead of being
+    // silently dropped. Adm (2026-07-30) hit this with openrouter in auth.json
+    // while `cfg.model` was openai.
     const model =
       cfgModel && cfgModel.providerID === cred.providerID
         ? cfgModel
         : cred.modelID
           ? { providerID: cred.providerID, modelID: cred.modelID }
-          : defaultModelForProvider(cred.providerID);
+          : defaultSelectableModelForProvider(cred.providerID);
 
     // Skip candidates that lack a model — same guard as tier 2/3.
     if (!model.modelID) continue;
