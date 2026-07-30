@@ -5,12 +5,8 @@ description: "Lore picks plain Markdown over a vector database for team memory. 
 pubDate: 2026-07-29
 author: Burak Yigit Kaya
 tags:
-  - memory
   - infrastructure
   - open standards
-  - lock-in
-  - markdown
-  - agents
 ---
 
 Last April, Harrison Chase wrote an essay called
