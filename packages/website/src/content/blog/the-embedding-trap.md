@@ -11,7 +11,7 @@ tags:
   - ownership  
 ---
 
-Last April, Harrison Chase wrote an essay called
+In April, Harrison Chase wrote an essay called
 [Your harness, your memory](https://blog.langchain.com/your-harness-your-memory/).
 He named what the AI tooling industry has been circling for a year.
 Memory is the new lock-in. The harness owns it by default, and the
