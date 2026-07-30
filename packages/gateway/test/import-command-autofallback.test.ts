@@ -60,6 +60,7 @@ import {
   recordWorkerFailure,
   _resetForTest as _resetWorkerHealth,
 } from "../src/worker-health";
+import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import { load as loadConfig } from "@loreai/core";
 import { conversationImport } from "@loreai/core";
 import type { conversationImport as CI } from "@loreai/core";
@@ -287,6 +288,102 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     // to OpenRouter via env-only (no auth.json entry) need to see this as a
     // viable path. Aditya hit this gap after switching his default provider.
     expect(out()).toContain("OPENROUTER_API_KEY");
+  });
+
+  test("adm's 4-entry auth.json (anthropic + openai + openrouter + opencode) iterates all 3 default-model entries", async () => {
+    // Regression test for adm's actual case (Slack 2026-07-30). His
+    // ~/.local/share/opencode/auth.json had 4 entries — anthropic + openai
+    // (both stale api-keys), openrouter (a live api-key), and a custom
+    // `opencode` provider key. The original import log showed only the
+    // first two being tried; the live openrouter entry was never reached.
+    //
+    // Before the per-credential default lookup (defaultSelectableModelForProvider)
+    // the chain skipped openrouter/opencode because those providers have no
+    // WORKER_DEFAULTS entry, even though they have valid keys. After the fix
+    // each credential gets a per-provider default — openrouter is routed
+    // against its cheapest selectable model in the cached models.dev data.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-stale-adm",
+          providerID: "anthropic",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-openai-stale-adm",
+          providerID: "openai",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-or-live-adm",
+          providerID: "openrouter",
+        },
+        { scheme: "api-key", value: "sk-oc-adm", providerID: "opencode" },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    // Stub the models.dev cache so defaultSelectableModelForProvider can
+    // pick a concrete model id for openrouter (no WORKER_DEFAULTS entry).
+    // Anthropic defaults to claude-sonnet-5 via WORKER_DEFAULTS; openai
+    // defaults to gpt-5.6-luna the same way. opencode (the literal provider
+    // id from adm's auth.json) has no model in the snapshot → still skipped,
+    // which is the correct fallback.
+    _setModelDataForTest(
+      {
+        "claude-sonnet-5": {
+          id: "claude-sonnet-5",
+          family: "claude-sonnet",
+          cost: { input: 2 },
+        },
+        "gpt-5.6-luna": {
+          id: "gpt-5.6-luna",
+          family: "gpt-luna",
+          cost: { input: 1 },
+        },
+        "anthropic/claude-sonnet-4.5": {
+          id: "anthropic/claude-sonnet-4.5",
+          family: "claude-sonnet",
+          cost: { input: 3 },
+        },
+      },
+      undefined,
+      {
+        anthropic: ["claude-sonnet-5"],
+        openai: ["gpt-5.6-luna"],
+        openrouter: ["anthropic/claude-sonnet-4.5"],
+      },
+    );
+
+    promptBehavior = async () => {
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      return null;
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // anthropic + openai + openrouter all 401 (opencode is skipped — the
+    // bare providerID `opencode` has no selectable worker model in the
+    // cached snapshot). The chain MUST try openrouter before bailing so
+    // adm's live key isn't silently ignored.
+    const triedProviders = llmClientCalls.map((call) => {
+      const model = call[2] as { providerID: string };
+      return model.providerID;
+    });
+    expect(triedProviders).toContain("anthropic");
+    expect(triedProviders).toContain("openai");
+    expect(triedProviders).toContain("openrouter");
+    expect(info()).toContain("Trying on-disk auth.json: openrouter");
+    // Combined diagnostic names every provider the chain tried.
+    expect(out()).toContain("anthropic");
+    expect(out()).toContain("openai");
+    expect(out()).toContain("openrouter");
+    expect(out()).toContain("OPENROUTER_API_KEY");
+
+    // Reset the cached model data so other tests aren't affected.
+    clearModelDataCache();
   });
 
   test("first candidate succeeds → no fallback attempted", async () => {

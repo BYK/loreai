@@ -613,10 +613,14 @@ export function clearModelDataCache(): void {
 export function _setModelDataForTest(
   entries: Record<string, ModelsDevEntry>,
   byProvider?: Record<string, ModelsDevEntry>,
+  providerModelsIndex?: Record<string, string[]>,
 ): void {
   cachedModelData = new Map(Object.entries(entries));
   cachedModelDataByProvider = byProvider
     ? new Map(Object.entries(byProvider))
+    : null;
+  cachedProviderModels = providerModelsIndex
+    ? new Map(Object.entries(providerModelsIndex))
     : null;
   cachedModelDataAt = Date.now();
   resolutionMemo = new Map();
@@ -1083,6 +1087,48 @@ export function defaultModelForProvider(providerID?: string): {
     return { providerID: p, modelID: "gemini-2.5-flash" };
   }
   return { providerID: p, modelID: "" };
+}
+
+/**
+ * Like `defaultModelForProvider` but also resolves a selectable model id for
+ * providers that have no `WORKER_DEFAULTS` entry (openrouter, deepseek, groq,
+ * opencode, …). Returns the cheapest selectable model id from the cached
+ * models.dev snapshot that passes `isSelectableWorkerModel`.
+ *
+ * Returns `{providerID, modelID: ""}` when no qualifying model is found —
+ * callers should treat empty `modelID` the same as `defaultModelForProvider`'s
+ * signal (skip the candidate; it'd 400 at the upstream).
+ *
+ * Used by the `lore import` auth-fallback chain: when a user has a credential
+ * on disk for openrouter/opencode/etc. but their `cfg.model` points at a
+ * different provider (anthropic, openai, …), the chain previously skipped
+ * those credentials because `defaultModelForProvider("openrouter")` returns
+ * empty. With this helper, the chain can resolve a concrete model for each
+ * credential's provider independently.
+ */
+export function defaultSelectableModelForProvider(providerID?: string): {
+  providerID: string;
+  modelID: string;
+} {
+  const base = defaultModelForProvider(providerID);
+  if (base.modelID) return base;
+
+  const p = providerID ?? "anthropic";
+  const providerModelIds = cachedProviderModels?.get(p);
+  if (!providerModelIds || !cachedModelData) return base;
+
+  let cheapestId: string | undefined;
+  let cheapestCost = Number.POSITIVE_INFINITY;
+  for (const modelId of providerModelIds) {
+    const entry = cachedModelData.get(modelId);
+    if (entry?.cost?.input == null) continue;
+    if (entry.cost.input >= cheapestCost) continue;
+    if (!isSelectableWorkerModel(p, modelId)) continue;
+    cheapestCost = entry.cost.input;
+    cheapestId = modelId;
+  }
+  if (cheapestId) return { providerID: p, modelID: cheapestId };
+  return base;
 }
 
 /** Cost threshold ($/M input) above which we downgrade to a cheaper worker. */
