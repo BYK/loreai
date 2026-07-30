@@ -134,9 +134,10 @@ reversible.
 
 We have talked before about
 [why knowledge lives in token space, not in weights](/blog/distill-your-own-knowledge/).
-The same logic applies to where the token-space lives. A vector store
-in someone else's cloud is halfway there. A vector store on your
-machine is the rest of the way.
+The same logic applies to where the token-space lives. A database in
+someone else's cloud is halfway there. A database or engine tied to
+your harness might be better. A replaceable middle layer for memory,
+all data local and owned by you, is the rest of the way.
 
 Models will keep changing. They always do. Every part of the AI
 tooling stack above the model is genuinely up for grabs right now.
