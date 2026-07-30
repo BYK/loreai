@@ -1,7 +1,7 @@
 ---
 title: "Local-first memory: Why your AI memory should live on your machine"
 subtitle: "Lore doesn't leave you in the hands of the platform. The architecture is local-first, and we aim to keep it that way."
-description: "Lore is a vendor-neutral proxy that runs on your machine. Local, sqlite & markdown. Run by a fair-source engine."
+description: "Lore is a vendor-neutral proxy that runs on your machine. Plain Markdown and an open SQLite database, run by a fair-source engine."
 pubDate: 2026-07-29
 author: Burak Yigit Kaya
 tags:
@@ -64,8 +64,9 @@ and a vendor change returns the team to zero.
 
 Lore is a vendor-neutral proxy that sits between your harness and
 your model. The whole engine runs on your machine. The memory lives
-in your repo and a local SQLite database on your disk. You can read
-both with or without Lore.
+in your repo and your local machine as plain Markdown and an open
+SQLite database. You can read, query, and edit it with or without
+Lore.
 
 ```mermaid
 flowchart LR
