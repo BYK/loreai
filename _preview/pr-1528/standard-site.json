@@ -41,13 +41,13 @@
   },
   "documents": [
     {
-      "rkey": "the-embedding-trap",
-      "uri": "at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.document/the-embedding-trap",
+      "rkey": "the-agentic-memory-trap",
+      "uri": "at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.document/the-agentic-memory-trap",
       "record": {
         "$type": "site.standard.document",
         "site": "at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self",
-        "path": "/blog/the-embedding-trap/",
-        "title": "Local-first memory: Why your AI memory should live on your machine",
+        "path": "/blog/the-agentic-memory-trap/",
+        "title": "The Agentic Memory Trap",
         "publishedAt": "2026-07-29T00:00:00.000Z",
         "description": "Lore is a vendor-neutral proxy that runs on your machine. Plain Markdown and an open SQLite database, run by a fair-source engine.",
         "tags": [
