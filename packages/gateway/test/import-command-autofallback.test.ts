@@ -19,7 +19,7 @@
  *    circuiting the test.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -384,6 +384,56 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
 
     // Reset the cached model data so other tests aren't affected.
     clearModelDataCache();
+  });
+
+  test("cfg.model targeting openai routes through openrouter via same protocol", async () => {
+    // Regression test for adm's actual case (Slack 2026-07-30, 2nd attempt):
+    // his session model is `openai/gpt-5.6-luna` (from `cfg.model`) but his
+    // only working credential is on openrouter. The chain must use the
+    // openrouter credential with the SESSION model id (`gpt-5.6-luna`)
+    // because openrouter proxies OpenAI-compatible requests — NOT pick a
+    // random "cheapest model on openrouter" from models.dev (which might
+    // be Anthropic-only on adm's account).
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        { scheme: "api-key", value: "sk-or-live", providerID: "openrouter" },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+
+    // Set cfg.model via .lore.json so the chain picks it up via loadConfig.
+    const lorePath = join(project, ".lore.json");
+    writeFileSync(
+      lorePath,
+      JSON.stringify({
+        model: { providerID: "openai", modelID: "gpt-5.6-luna" },
+      }),
+    );
+    await loadConfig(project);
+
+    promptBehavior = async () => {
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      return null;
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // The chain MUST route openrouter cred with session model id
+    // `gpt-5.6-luna`, NOT some random openrouter-specific model.
+    const openrouterCalls = llmClientCalls.filter((call) => {
+      const model = call[2] as { providerID: string; modelID: string };
+      return model.providerID === "openrouter";
+    });
+    expect(
+      openrouterCalls.length,
+      `expected openrouter call, got 0. info: ${info()}\nout: ${out()}\nllm calls: ${JSON.stringify(llmClientCalls.map((c) => c[2]))}`,
+    ).toBeGreaterThan(0);
+    for (const call of openrouterCalls) {
+      const model = call[2] as { providerID: string; modelID: string };
+      expect(model.modelID).toBe("gpt-5.6-luna");
+    }
   });
 
   test("first candidate succeeds → no fallback attempted", async () => {

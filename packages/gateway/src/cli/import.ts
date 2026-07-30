@@ -64,6 +64,27 @@ type AgentResolvedAuth =
   import("@loreai/core").conversationImport.AgentResolvedAuth;
 
 /**
+ * OpenAI-compatible aggregator providers that proxy model requests to any
+ * underlying vendor. When the user has a credential on one of these, the
+ * session model (e.g. `anthropic/claude-sonnet-5` or `openai/gpt-5.6-luna`)
+ * can be sent as-is — the aggregator resolves the model id and forwards to
+ * the right upstream. This is what makes an OpenRouter/Anthropic-billed key
+ * route correctly even when `cfg.model` targets anthropic directly.
+ *
+ * The set is intentionally tight: only true aggregators that proxy to ANY
+ * model catalog their providers expose. Adding a regular OpenAI-compatible
+ * provider here (e.g. deepseek) would route arbitrary model ids through it
+ * and 400. See adm's 2nd-attempt failure (Slack 2026-07-30) for the
+ * original symptom.
+ */
+const OPENAI_COMPATIBLE_AGGREGATORS = new Set<string>([
+  "openrouter",
+  "groq",
+  "cerebras",
+  "huggingface",
+]);
+
+/**
  * Resolve the extraction credential + model for a given detected agent, in
  * priority order:
  *   1. `LORE_WORKER_API_KEY` explicit override (provider from `cfgModel`, which
@@ -155,12 +176,30 @@ export function resolveAgentImportAuth(
     // claude-*, so a user who set LORE_WORKER_MODEL=github-copilot/claude-sonnet-5
     // must get their model, not the default. Fall back to the credential's own
     // model hint, then the provider default.
+    //
+    // Also honor `cfgModel` when the credential's provider is an OpenAI-compatible
+    // aggregator (openrouter, groq, cerebras, huggingface) or shares the same
+    // upstream protocol as the cfgModel's provider — these aggregators can
+    // proxy the session model id (e.g. `openai/gpt-5.6-luna` → openrouter).
+    const cfgRoute = cfgModel
+      ? resolveProviderRoute(cfgModel.providerID)
+      : null;
+    const credRoute = resolveProviderRoute(usable.providerID);
+    const isOpenAIAggregator =
+      credRoute?.protocol === "openai" &&
+      OPENAI_COMPATIBLE_AGGREGATORS.has(usable.providerID);
+    const sameProtocol =
+      cfgRoute != null &&
+      credRoute != null &&
+      cfgRoute.protocol === credRoute.protocol;
     const model =
       cfgModel && cfgModel.providerID === usable.providerID
         ? cfgModel
-        : usable.modelID
-          ? { providerID: usable.providerID, modelID: usable.modelID }
-          : defaultModelForProvider(usable.providerID);
+        : cfgModel && (sameProtocol || isOpenAIAggregator)
+          ? { providerID: usable.providerID, modelID: cfgModel.modelID }
+          : usable.modelID
+            ? { providerID: usable.providerID, modelID: usable.modelID }
+            : defaultModelForProvider(usable.providerID);
     // A routable-but-defaultless provider (openrouter, deepseek, groq, …) has
     // no WORKER_DEFAULTS entry, so defaultModelForProvider returns an empty
     // modelID — and an on-disk credential often carries no modelID hint either
@@ -497,21 +536,57 @@ export function buildAuthFallbackChain(
       : `on-disk auth.json: ${cred.providerID}`;
 
     // Per-credential model resolution: when cfgModel targets a DIFFERENT
-    // provider than this credential (common when the user has `cfg.model`
-    // pinned to openai but auth.json carries an openrouter key too), honor
-    // cfgModel only for the matching provider. For other providers, fall
-    // back to a per-credential default — `defaultSelectableModelForProvider`
-    // uses models.dev data when the provider has no `WORKER_DEFAULTS` entry
-    // (openrouter, deepseek, groq, opencode, …), so previously-skipped
-    // credentials with valid keys actually get tried instead of being
-    // silently dropped. Adm (2026-07-30) hit this with openrouter in auth.json
-    // while `cfg.model` was openai.
+    // provider than this credential, the question is whether the session
+    // model still applies on this provider's route. The user's session model
+    // is what they last picked in OpenCode (e.g. `openai/gpt-5.6-luna`); if
+    // this credential's provider speaks the same upstream protocol
+    // (OpenAI-compatible), then sending the session model through this
+    // credential is almost certainly what the user wants — OpenRouter
+    // proxies `openai/gpt-5.6-luna` correctly, Groq proxies it, opencode/zen
+    // proxies it, etc. Picking a random "cheapest model on this provider"
+    // from models.dev would route the request to a model the user never
+    // subscribed to (e.g. adm's openrouter key might be Anthropic-billed,
+    // not OpenAI-billed — sending `openai/gpt-5.6-luna` would 400).
+    //
+    // Two cases for cross-provider routing:
+    //   a. Same protocol — cfgModel.providerID and cred.providerID both
+    //      speak, e.g., OpenAI Chat Completions. The model id transfers
+    //      directly.
+    //   b. Cred provider is an OpenAI-compatible aggregator (openrouter,
+    //      groq, cerebras, huggingface, github-copilot, opencode/zen). These
+    //      proxy requests to the underlying provider of the model id — so
+    //      sending `anthropic/claude-sonnet-5` to openrouter routes to
+    //      Anthropic via OpenRouter's OpenAI endpoint. Same for any model
+    //      that openrouter has cataloged.
+    //
+    // So the resolution order is:
+    //   1. cfgModel with matching providerID — use as-is.
+    //   2. cfgModel with a credential provider that speaks the SAME protocol
+    //      OR is an OpenAI-compatible aggregator — swap providerID, keep
+    //      modelID. This handles both the openai→openrouter case AND the
+    //      anthropic→openrouter case (adm's openrouter key may be
+    //      Anthropic-billed, not OpenAI-billed).
+    //   3. cred.modelID — explicit per-credential override.
+    //   4. per-credential default from models.dev — last-resort fallback.
+    const cfgRoute = cfgModel
+      ? resolveProviderRoute(cfgModel.providerID)
+      : null;
+    const credRoute = resolveProviderRoute(cred.providerID);
+    const isOpenAIAggregator =
+      credRoute?.protocol === "openai" &&
+      OPENAI_COMPATIBLE_AGGREGATORS.has(cred.providerID);
+    const sameProtocol =
+      cfgRoute != null &&
+      credRoute != null &&
+      cfgRoute.protocol === credRoute.protocol;
     const model =
       cfgModel && cfgModel.providerID === cred.providerID
         ? cfgModel
-        : cred.modelID
-          ? { providerID: cred.providerID, modelID: cred.modelID }
-          : defaultSelectableModelForProvider(cred.providerID);
+        : cfgModel && (sameProtocol || isOpenAIAggregator)
+          ? { providerID: cred.providerID, modelID: cfgModel.modelID }
+          : cred.modelID
+            ? { providerID: cred.providerID, modelID: cred.modelID }
+            : defaultSelectableModelForProvider(cred.providerID);
 
     // Skip candidates that lack a model — same guard as tier 2/3.
     if (!model.modelID) continue;
