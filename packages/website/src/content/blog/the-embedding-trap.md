@@ -106,7 +106,7 @@ affected entries. Fast and transparent, on your hardware.
 
 ## The vendor route vs the local-first route
 
-Chase is right. You shouldn't put your memory into a vendor's hands.
+Harrison is right. You shouldn't put your memory into a vendor's hands.
 The lock-in is real, and the way to escape it is to keep the data
 on your machine, in open formats you can read with `sqlite3` and
 edit with any text editor. To change a memory entry, you edit the
