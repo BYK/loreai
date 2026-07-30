@@ -67,7 +67,7 @@ process, no separate bill. When a team changes a memory entry, the
 engine picks up the change on the next session and re-embeds the
 affected entries. Fast and transparent, on your hardware.&lt;/p&gt;
 &lt;h2 id=&quot;the-vendor-route-vs-the-local-first-route&quot;&gt;The vendor route vs the local-first route&lt;/h2&gt;
-&lt;p&gt;Chase is right. You shouldn’t put your memory into a vendor’s hands.
+&lt;p&gt;Harrison is right. You shouldn’t put your memory into a vendor’s hands.
 The lock-in is real, and the way to escape it is to keep the data
 on your machine, in open formats you can read with &lt;code&gt;sqlite3&lt;/code&gt; and
 edit with any text editor. To change a memory entry, you edit the
