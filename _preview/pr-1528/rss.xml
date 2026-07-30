@@ -49,14 +49,6 @@ Lore.&lt;/p&gt;
 &lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;H --&amp;gt; L&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;L --&amp;gt; A&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;
 &lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef ext fill:#ececec,stroke:#888,color:#333&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class L lore&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class H,A ext&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;flowchart LR    H[&amp;quot;&lt;b&gt;Harness&lt;/b&gt;&lt;br/&gt;Claude Code · OpenCode · Pi · Codex&amp;quot;]    L[&amp;quot;&lt;b&gt;Lore&lt;/b&gt;&lt;br/&gt;local-first, vendor-neutral&lt;br/&gt;.lore.md + lore.db&lt;br/&gt;local, sqlite &amp;amp; markdown&amp;quot;]    A[&amp;quot;&lt;b&gt;Model Provider API&lt;/b&gt;&lt;br/&gt;Anthropic · OpenAI · Google · others&amp;quot;]    H --&gt; L    L --&gt; A    classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320    classDef ext fill:#ececec,stroke:#888,color:#333    class L lore    class H,A ext&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
 &lt;p&gt;&lt;em&gt;The LLM is the cognition, Lore is the memory layer. They form the brain. The harness is the body, the actuator.&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;What you actually own is two things:&lt;/p&gt;
-&lt;p&gt;Even LangChain is starting to realize the limits of black-box databases.
-In June, Harrison wrote about
-&lt;a href=&quot;https://blog.langchain.com/wiki-memory/&quot;&gt;Wiki Memory&lt;/a&gt;, admitting that
-the best format for compressed agent data isn’t a proprietary vector
-store — it’s files. They are inspectable, editable, and versionable.
-With Lore, you don’t have to wait for the industry to build it. You
-already have it.&lt;/p&gt;
 &lt;ul&gt;
 &lt;li&gt;&lt;strong&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/strong&gt; at the root of your repo. The curated knowledge the
 team has reviewed and merged. Version-controlled, PR-reviewable,
@@ -74,6 +66,18 @@ entries, in one open file. No separate vector store, no separate
 process, no separate bill. When a team changes a memory entry, the
 engine picks up the change on the next session and re-embeds the
 affected entries. Fast and transparent, on your hardware.&lt;/p&gt;
+&lt;p&gt;A few months after that initial post, Harrison himself claimed that
+memory systems sit beside the harness. In
+&lt;a href=&quot;https://blog.langchain.com/wiki-memory/&quot;&gt;Wiki Memory&lt;/a&gt;, he wrote:&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;“This pattern also sits adjacent to memory systems like LangMem,
+Letta, Mem0, and Zep. Those systems attack the broader agent-memory
+problem, while wiki memory is notable because it often uses the
+simplest possible substrate: files.”&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;All these systems, including Mem0, don’t really solve the immediate
+context problem. Lore unifies this and, unsurprisingly, by fusing two
+approaches together: locality &amp;amp; files along with long-term memory.&lt;/p&gt;
 &lt;h2 id=&quot;the-vendor-route-vs-the-local-first-route&quot;&gt;The vendor route vs the local-first route&lt;/h2&gt;
 &lt;p&gt;Harrison is right. You shouldn’t put your memory into a vendor’s hands.
 The lock-in is real, and the way to escape it is to keep the data
