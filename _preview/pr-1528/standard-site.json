@@ -48,7 +48,7 @@
         "site": "at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self",
         "path": "/blog/the-agentic-memory-trap/",
         "title": "The Agentic Memory Trap",
-        "publishedAt": "2026-07-29T00:00:00.000Z",
+        "publishedAt": "2026-07-30T00:00:00.000Z",
         "description": "Lore is a vendor-neutral proxy that runs on your machine. Plain Markdown and an open SQLite database, run by a fair-source engine.",
         "tags": [
           "infrastructure",
