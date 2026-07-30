@@ -22,7 +22,7 @@ The AI tooling ecosystem is in a war for execution, and harnesses are
 incentivized to lock you in. When a closed platform builds "agent memory,"
 it stores your team's decisions inside a proprietary vector database.
 Switch IDEs, switch models, and the team gets amnesia. Lore is the escape
-hatch: a vendor-neutral proxy that sits between your harness and your model.
+hatch: a vendor-neutral memory layer that sits between your harness and your model.
 
 What you actually own is two things, both open, both yours:
 

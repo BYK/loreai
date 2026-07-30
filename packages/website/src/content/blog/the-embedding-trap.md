@@ -1,14 +1,14 @@
 ---
 title: "Local-first memory: Why your AI memory should live on your machine"
 subtitle: "Lore doesn't leave you in the hands of the platform. The architecture is local-first, and we aim to keep it that way."
-description: "Lore is a vendor-neutral proxy that runs on your machine. The memory lives in your repo and your local database, in open formats, run by a fair-source engine."
+description: "Lore is a vendor-neutral memory layer that runs on your machine. The memory lives in your repo and your local database, local, sqlite & markdown, run by a fair-source engine."
 pubDate: 2026-07-29
 author: Burak Yigit Kaya
 tags:
   - infrastructure
   - open standards
   - data
-  - ownership  
+  - ownership
 ---
 
 In April, Harrison Chase wrote an essay called
@@ -52,20 +52,20 @@ provider's server so you cannot move threads between models. The bad
 one runs a closed harness that interacts with memory in ways you
 cannot see, and the artifacts are not portable. The worst one puts
 everything behind an API, including long-term memory, and you own
-none of it. Anthropic's Claude Managed Agents already lives in the
-second camp; Codex builds an encrypted compaction summary nothing
-outside OpenAI can read. The incentive is everywhere, and it points
-the same way.
+none of it. Anthropic's Claude Managed Agents lives in that worst
+camp. Codex's open-source harness produces an encrypted compaction
+summary nothing outside OpenAI can read, so it creeps toward the
+worst too. The incentive is everywhere, and it points the same way.
 
 Six months of careful work, six months of capturing a team's taste,
 and a vendor change returns the team to zero.
 
 ## Lore is local-first and we want to keep it that way
 
-Lore is a vendor-neutral proxy that sits between your harness and
-your model. The whole engine runs on your machine. The memory lives
-in your repo and your local database, in open formats you can read
-with or without Lore.
+Lore is a vendor-neutral memory layer that sits between your harness
+and your model. The whole engine runs on your machine. The memory
+lives in your repo and your local database, local, sqlite & markdown,
+you can read with or without Lore.
 
 ```mermaid
 flowchart LR
@@ -108,10 +108,10 @@ affected entries. Fast and transparent, on your hardware.
 
 Harrison is right. You shouldn't put your memory into a vendor's hands.
 The lock-in is real, and the way to escape it is to keep the data
-on your machine, in open formats you can read with `sqlite3` and
-edit with any text editor. To change a memory entry, you edit the
-file. To delete an entry, you delete the row. To export the corpus,
-you copy the file. To move to a different vendor, you
+on your machine, local, sqlite & markdown, where you can read with
+`sqlite3` and edit with any text editor. To change a memory entry,
+you edit the file. To delete an entry, you delete the row. To export
+the corpus, you copy the file. To move to a different vendor, you
 point the new tool at the same files.
 
 The same logic applies to the harness. You wouldn't lock yourself
