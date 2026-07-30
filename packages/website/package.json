@@ -9,6 +9,9 @@
     "check": "astro check",
     "publish:standard-site": "node scripts/publish-standard-site.mjs"
   },
+  "dependencies": {
+    "mermaid": "11.16.0"
+  },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
     "@astrojs/mdx": "^7.0.3",
