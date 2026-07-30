@@ -70,7 +70,7 @@ with or without Lore.
 ```mermaid
 flowchart LR
     H["Harness<br/>Claude Code · OpenCode · Pi · Codex"]
-    L["Lore<br/>local-first, vendor-neutral proxy<br/>.lore.md + ~/.local/share/lore/lore.db<br/>on your machine, in open formats"]
+    L["Lore<br/>local-first, vendor-neutral proxy<br/>.lore.md + lore.db<br/>on your machine, in open formats"]
     A["Model Provider API<br/>Anthropic · OpenAI · Google · others"]
 
     H --> L
