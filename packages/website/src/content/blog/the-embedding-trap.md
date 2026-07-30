@@ -7,6 +7,8 @@ author: Burak Yigit Kaya
 tags:
   - infrastructure
   - open standards
+  - data
+  - ownership  
 ---
 
 Last April, Harrison Chase wrote an essay called
