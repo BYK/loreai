@@ -109,22 +109,20 @@ affected entries. Fast and transparent, on your hardware.
 
 ## The vendor route vs the local-first route
 
-A vendor-managed memory stack says: trust us with the shape of your
-team's thinking, and we will give it back to you on retrieval. It
-has to work that way, because the data lives behind an API, and the
-schema is whatever the vendor chose. To change a memory entry, you
-ask the vendor. To delete an entry, you ask the vendor. To export
-the corpus, you ask the vendor. To move to a different harness, you
-ask the vendor. The lock-in lives in the dependencies you cannot
-see.
+Chase is right. You shouldn't put your memory into a vendor's hands.
+The lock-in is real, and the way to escape it is to keep the data
+on your machine, in open formats you can read with `sqlite3` and
+edit with any text editor. To change a memory entry, you edit the
+file. To delete an entry, you delete the row. To export the corpus,
+you run `sqlite3 lore.db .dump`. To move to a different vendor, you
+point the new tool at the same files.
 
-Local-first says: the data lives on your machine, in open formats,
-and the engine is the source code in front of you. To change a
-memory entry, you edit the file. To delete an entry, you delete the
-row. To export the corpus, you run `sqlite3 lore.db .dump`. To move
-to a different harness, you point the new harness at the same files.
-The lock-in lives wherever you let it live, and you can move it any
-time.
+The same logic applies to the harness. You wouldn't lock yourself
+into a single LLM provider, and you shouldn't lock yourself into a
+single harness either. Claude Code today, Pi tomorrow, Codex next
+quarter, something new next year. The memory should outlast the
+harness. The harness is the part you swap; the artifact is the part
+that stays.
 
 When your team is ready to share, the sync engine works the way a
 good group chat does: end-to-end encrypted, scoped to the entries
