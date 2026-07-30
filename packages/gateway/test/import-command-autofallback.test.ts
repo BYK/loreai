@@ -282,6 +282,11 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     expect(out()).toContain("openrouter");
     expect(out()).toContain("rejected the credential");
     expect(out()).toContain("No provider auto-fallback could authenticate");
+    // The shell env-vars remediation hint must include OPENROUTER_API_KEY
+    // alongside the canonical anthropic/openai vars — users who have switched
+    // to OpenRouter via env-only (no auth.json entry) need to see this as a
+    // viable path. Aditya hit this gap after switching his default provider.
+    expect(out()).toContain("OPENROUTER_API_KEY");
   });
 
   test("first candidate succeeds → no fallback attempted", async () => {

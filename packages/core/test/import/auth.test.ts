@@ -77,6 +77,56 @@ describe("OpenCode auth reader", () => {
     });
   });
 
+  test("OPENCODE_AUTH_CONTENT env var overrides on-disk auth.json", () => {
+    // Mirrors OpenCode's own precedence in packages/opencode/src/auth/index.ts:
+    // the workspace-adapter runtime writes a synthesized auth blob into the
+    // subprocess env via OPENCODE_AUTH_CONTENT. A standalone `lore import` run
+    // is one such subprocess — it must respect the env override, otherwise
+    // users who switched their default provider via TUI lose every credential
+    // that wasn't already flushed to auth.json.
+    writeJson(authFile(), {
+      anthropic: { type: "api", key: "sk-ant-stale" },
+    });
+    setEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({
+        openrouter: { type: "api", key: "sk-or-live" },
+        anthropic: { type: "api", key: "sk-ant-live" },
+      }),
+    );
+    const creds = readUsableAuth("opencode");
+    expect(creds).toContainEqual({
+      scheme: "api-key",
+      value: "sk-or-live",
+      providerID: "openrouter",
+    });
+    expect(creds).toContainEqual({
+      scheme: "api-key",
+      value: "sk-ant-live",
+      providerID: "anthropic",
+    });
+    // Must NOT see the stale on-disk entry — env wins.
+    expect(creds.find((c) => c.value === "sk-ant-stale")).toBeUndefined();
+  });
+
+  test("falls back to on-disk when OPENCODE_AUTH_CONTENT is malformed", () => {
+    // Defensive: a corrupted env blob must never prevent the importer from
+    // loading the on-disk file (which is the documented fallback in
+    // packages/opencode/src/auth/index.ts:63). Aditya's "401 storm" case
+    // happened in part because the live credential set diverged from the
+    // on-disk file — if both fail to load, the user has no diagnostic.
+    writeJson(authFile(), {
+      anthropic: { type: "api", key: "sk-ant-fallback" },
+    });
+    setEnv("OPENCODE_AUTH_CONTENT", "this is not json{");
+    const creds = readUsableAuth("opencode");
+    expect(creds).toContainEqual({
+      scheme: "api-key",
+      value: "sk-ant-fallback",
+      providerID: "anthropic",
+    });
+  });
+
   test("maps minimax-coding-plan alias to minimax", () => {
     writeJson(authFile(), {
       "minimax-coding-plan": { type: "api", key: "mm-789" },

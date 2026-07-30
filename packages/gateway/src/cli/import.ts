@@ -1495,8 +1495,9 @@ export async function commandImport(
             `[lore]      Then re-run \`lore import\`.\n` +
             `[lore]\n` +
             `[lore]   2. Shell env vars (e.g. ANTHROPIC_AUTH_TOKEN / ` +
-            `ANTHROPIC_API_KEY / OPENAI_API_KEY). Confirm the key in your shell, ` +
-            `then re-run \`lore import\` from the same shell.\n` +
+            `ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY). ` +
+            `Confirm the key in your shell, then re-run \`lore import\` ` +
+            `from the same shell.\n` +
             `[lore]\n` +
             `[lore]   3. Override the import credential entirely with a ` +
             `dedicated worker key:\n` +

@@ -45,6 +45,28 @@ function authPath(): string {
 }
 
 /**
+ * Parse the `OPENCODE_AUTH_CONTENT` env-var blob that OpenCode injects into
+ * subprocesses (see packages/opencode/src/auth/index.ts:55-65 in the upstream
+ * opencode repo). Returns null on any parse error or when the blob is empty
+ * — callers must fall back to the on-disk file in that case, never assume an
+ * env override is authoritative just because the var is defined.
+ */
+function parseAuthContent(
+  raw: string | undefined,
+): Record<string, OpenCodeAuthEntry> | null {
+  if (!raw || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, OpenCodeAuthEntry>;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Normalize an OpenCode provider key to a Lore canonical provider ID. Most
  * models.dev IDs match directly; map known coding-plan aliases to their base
  * provider so the gateway can route them.
@@ -109,8 +131,19 @@ const opencodeAuth: AgentAuthProvider = {
   name: "opencode",
 
   readAuth(): AgentResolvedAuth[] {
-    const store = readJsonFile<Record<string, OpenCodeAuthEntry>>(authPath());
-    if (!store || typeof store !== "object") return [];
+    // Mirror OpenCode's own precedence (packages/opencode/src/auth/index.ts:59):
+    // OPENCODE_AUTH_CONTENT env var takes priority over the on-disk file. This
+    // matters for the workspace-adapter runtime (control-plane/workspace.ts:530)
+    // which writes a synthesized auth blob into the subprocess env — the import
+    // tool runs as a fresh subprocess and would otherwise miss the live
+    // credentials that OpenCode itself uses.
+    const envStore = parseAuthContent(process.env.OPENCODE_AUTH_CONTENT);
+    const onDiskStore =
+      readJsonFile<Record<string, OpenCodeAuthEntry>>(authPath());
+    const store =
+      envStore ??
+      (onDiskStore && typeof onDiskStore === "object" ? onDiskStore : null);
+    if (!store) return [];
 
     const out: AgentResolvedAuth[] = [];
     for (const [key, entry] of Object.entries(store)) {
