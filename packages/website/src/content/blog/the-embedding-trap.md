@@ -82,7 +82,7 @@ flowchart LR
     class H,A ext
 ```
 
-*Lore is the brain. The harness is the body. The model provider API is the cognition.*
+*The LLM is the cognition, Lore is the memory layer. They form the brain. The harness is the body, the actuator.*
 
 What you actually own is two things:
 
