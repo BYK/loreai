@@ -111,7 +111,7 @@ The lock-in is real, and the way to escape it is to keep the data
 on your machine, in open formats you can read with `sqlite3` and
 edit with any text editor. To change a memory entry, you edit the
 file. To delete an entry, you delete the row. To export the corpus,
-you run `sqlite3 lore.db .dump`. To move to a different vendor, you
+you copy the file. To move to a different vendor, you
 point the new tool at the same files.
 
 The same logic applies to the harness. You wouldn't lock yourself
