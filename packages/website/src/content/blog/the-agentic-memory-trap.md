@@ -2,7 +2,7 @@
 title: "The Agentic Memory Trap"
 subtitle: "Why your AI's context must live in an accessible format on your machine, not behind a vendor's API."
 description: "Lore is a vendor-neutral proxy that runs on your machine. Plain Markdown and an open SQLite database, run by a fair-source engine."
-pubDate: 2026-07-29
+pubDate: 2026-07-30
 author: Burak Yigit Kaya
 tags:
   - infrastructure
