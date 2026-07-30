@@ -382,6 +382,190 @@ export function buildNeedsModelGuidance(
 }
 
 // ---------------------------------------------------------------------------
+// Provider-fallback chain (auto-retry on 401)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single extraction credential candidate. The import loop tries each
+ * candidate in order; on upstream 401/403, it records the failure and moves
+ * to the next one. The first candidate that produces at least one
+ * non-`abortedByAuth` chunk wins the whole batch.
+ */
+type AuthCandidate = {
+  /** Display label for the user (e.g. "opencode.json active provider: openrouter"). */
+  label: string;
+  /** Where the credential came from — drives the user-facing note. */
+  source: "opencode-active" | "opencode-on-disk" | "env" | "session";
+  /** Resolves a credential per chunk (called by the LLM client). */
+  getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null;
+  /** Model + provider used for extraction. */
+  model: { providerID: string; modelID: string };
+  /** Optional upstream override (env-credential tier routes here). */
+  upstream?: string;
+};
+
+/**
+ * Build the ordered list of extraction-credential candidates for one agent.
+ *
+ * Order:
+ *  1. The user's CURRENTLY-CONFIGURED provider from opencode.json
+ *     (`model` / `small_model`) — matches what their `lore run` actually
+ *     started with. Best-first because if it's working in `lore run`, it'll
+ *     work here too.
+ *  2. Remaining routable entries from auth.json (the OpenCode reorder in
+ *     `readUsableAuth` already places the active provider first; this is
+ *     the rest of the JSON iteration order — the user's older credentials,
+ *     which may or may not still be valid).
+ *  3. Env credential (tier 3) — common OpenRouter / proxy setups where the
+ *     agent never wrote anything to auth.json but the user has
+ *     ANTHROPIC_API_KEY et al in their shell.
+ *  4. Last-seen session credential (tier 4) — the gateway's global fallback
+ *     for `providerID` matching a prior live request.
+ *
+ * The `LORE_WORKER_API_KEY` explicit override (tier 1) is intentionally
+ * excluded from the chain — it's a deliberate user choice, and silently
+ * retrying past it would surprise users who set the env var to debug
+ * routing. Tier 1 stays single-shot in `resolveAgentImportAuth`.
+ *
+ * Candidates whose provider lacks a default worker model AND the user set
+ * no override are skipped (they'd 400 at the upstream with an empty model
+ * id — the same `needsModel` guard the tier 2 path already enforces).
+ *
+ * Returns an empty array when NOTHING is usable — the caller skips the
+ * agent with the standard "no usable credential" line.
+ */
+export function buildAuthFallbackChain(
+  agentName: string,
+  cfgModel: { providerID: string; modelID: string } | undefined,
+): AuthCandidate[] {
+  const candidates: AuthCandidate[] = [];
+  const seen = new Set<string>();
+
+  function push(c: AuthCandidate | null): void {
+    if (!c) return;
+    // De-dup by (providerID, value) — env and on-disk may resolve to the
+    // same provider with the same key (OpenCode's tier-2 env-preference),
+    // and we want the env path to win over the on-disk path (not silently
+    // retried as a separate candidate).
+    const value = (() => {
+      try {
+        return c.getAuth(undefined, c.model.providerID)?.value ?? "";
+      } catch {
+        return "";
+      }
+    })();
+    const dedupeKey = `${c.model.providerID}::${value}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    candidates.push(c);
+  }
+
+  // Read every usable auth.json credential. The OpenCode reader already
+  // reorders so the active provider sits first; we honor that ordering and
+  // add a separate "opencode-active" label to the first one so the user
+  // knows where it came from.
+  const active = agentName === "opencode" ? getOpenCodeActiveProvider() : null;
+  const onDiskCreds = readUsableAuth(agentName);
+
+  for (const cred of onDiskCreds) {
+    // Routability check — same as the existing tier-2 path. A provider
+    // without a concrete upstream URL (local runtimes like ollama/vllm)
+    // can't be used for extraction; skip it instead of attempting a doomed
+    // call.
+    const isRoutable = resolveProviderRoute(cred.providerID)?.url != null;
+    if (!isRoutable) continue;
+
+    const isActive = active === cred.providerID;
+    const source: AuthCandidate["source"] = isActive
+      ? "opencode-active"
+      : "opencode-on-disk";
+    const label = isActive
+      ? `opencode.json active provider: ${cred.providerID}`
+      : `on-disk auth.json: ${cred.providerID}`;
+
+    const model =
+      cfgModel && cfgModel.providerID === cred.providerID
+        ? cfgModel
+        : cred.modelID
+          ? { providerID: cred.providerID, modelID: cred.modelID }
+          : defaultModelForProvider(cred.providerID);
+
+    // Skip candidates that lack a model — same guard as tier 2/3.
+    if (!model.modelID) continue;
+
+    push({
+      label,
+      source,
+      getAuth: () => ({ scheme: cred.scheme, value: cred.value }),
+      model,
+    });
+  }
+
+  // Env credential (tier 3) — last; if it had a valid token it would have
+  // already won at the env-overrides-on-disk stage for the active provider
+  // (and been de-duped above). This catches the "no on-disk at all" path:
+  // a fresh machine with only shell env credentials.
+  const agentDef = AGENTS.find((a) => a.name === agentName);
+  if (agentDef) {
+    const envCred = captureUserEnvCredential(agentDef);
+    if (envCred) {
+      const envDrivenProviderID =
+        agentName === "opencode"
+          ? (pickEnvVarProvider(envCred.envVarName) ??
+            getOpenCodeActiveProvider())
+          : null;
+      const providerID = envCred.upstreamUrl
+        ? (providerForUpstreamOrigin(envCred.upstreamUrl) ??
+          envDrivenProviderID ??
+          agentDef.wireProtocol ??
+          "anthropic")
+        : (envDrivenProviderID ?? agentDef.wireProtocol ?? "anthropic");
+      const model =
+        cfgModel && cfgModel.providerID === providerID
+          ? cfgModel
+          : defaultModelForProvider(providerID);
+      if (model.modelID) {
+        push({
+          label: `shell env credential: ${envCred.envVarName}`,
+          source: "env",
+          getAuth: () => ({ scheme: envCred.scheme, value: envCred.token }),
+          model,
+          upstream: envCred.upstreamUrl ?? undefined,
+        });
+      }
+    }
+  }
+
+  // Last-seen session credential (tier 4). Only include when the chain so
+  // far is empty — otherwise we'd try a session credential that might be
+  // for a DIFFERENT provider than the active one (cross-provider leak,
+  // #829). When the chain already has candidates from auth.json, those are
+  // a strictly better signal than whatever the gateway captured from a
+  // prior unrelated request.
+  if (candidates.length === 0) {
+    const lastSeenProvider = getLastSeenAuthProvider() ?? undefined;
+    const sessionCred = resolveAuth(
+      undefined,
+      cfgModel?.providerID ?? lastSeenProvider,
+    );
+    if (sessionCred) {
+      const model =
+        cfgModel ?? defaultModelForProvider(lastSeenProvider ?? undefined);
+      if (model.modelID) {
+        candidates.push({
+          label: `last session credential: ${model.providerID}`,
+          source: "session",
+          getAuth: resolveAuth,
+          model,
+        });
+      }
+    }
+  }
+
+  return candidates;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -992,10 +1176,11 @@ export async function commandImport(
     return;
   }
 
-  // Stamp the start of THIS import run so the auth-rejected probe ignores
-  // failures recorded by a prior `lore import` invocation in the same process
-  // — see `hasRecentAuthRejectedFailure` for the cross-run leak rationale.
-  const runStartedAt = Date.now();
+  // NOTE: The auth-rejected probe snapshot (`attemptStartedAt`) is now captured
+  // PER CANDIDATE inside the fallback loop, not once per run. Per-candidate
+  // scoping prevents candidate 1's auth-rejected failure from incorrectly
+  // tripping the probe for candidate 2 when candidate 2 returns null for a
+  // non-auth reason (network timeout, model bug). Seer finding 15586850.
 
   // Start gateway for LLM access
   console.log("\n[lore] Starting gateway for LLM access...");
@@ -1070,52 +1255,64 @@ export async function commandImport(
       const provider = getProvider(result.agentName);
       if (!provider) continue;
 
-      // Resolve THIS agent's credential from its own on-disk auth (or the
-      // explicit worker key / cfg.model). Different agents can authenticate
-      // different providers, so resolve per agent rather than once up front.
-      const auth = resolveAgentImportAuth(
+      // Tier-1 (explicit LORE_WORKER_API_KEY) is a deliberate user override —
+      // single-shot, no fallback. Every other path goes through the
+      // auto-fallback chain below.
+      const tier1 = resolveAgentImportAuth(
         result.agentName,
         workerApiKey,
         cfgModel,
       );
-      if (!auth) {
+      if (tier1 === null) {
         console.log(
           `[lore] Skipping ${result.agentDisplayName}: no usable credential found ` +
             `in its on-disk auth (none stored, expired, or provider not proxied).`,
         );
         continue;
       }
-      if ("needsModel" in auth) {
+      if ("needsModel" in tier1) {
         // We HAVE the user's key but not a model to use it with.
-        needsModelProviders.add(auth.needsModel);
+        needsModelProviders.add(tier1.needsModel);
         console.log(
-          `[lore] Skipping ${result.agentDisplayName}: found your ${auth.needsModel} ` +
+          `[lore] Skipping ${result.agentDisplayName}: found your ${tier1.needsModel} ` +
             `credential, but no worker model is set for that provider. ` +
             `Set one and retry (see below).`,
         );
         continue;
       }
+
+      // Build the candidate list. Tier-1 is a single-entry list (no
+      // auto-fallback past a deliberate user override). Tier-2/3/4 builds
+      // the chain: opencode active provider first, then other auth.json
+      // entries, then env credential, then last-seen session.
+      type Candidate = {
+        auth: typeof tier1;
+        label: string;
+      };
+      const candidates: Candidate[] = workerApiKey
+        ? [{ auth: tier1, label: "LORE_WORKER_API_KEY" }]
+        : buildAuthFallbackChain(result.agentName, cfgModel).map((c) => ({
+            auth: {
+              getAuth: c.getAuth,
+              model: c.model,
+              upstream: c.upstream,
+            },
+            label: c.label,
+          }));
+
+      if (candidates.length === 0) {
+        // Don't set anyAuthResolved — buildAuthFallbackChain filtered out
+        // candidates that lacked a default worker model (an aggregator
+        // provider without `LORE_WORKER_MODEL`). Leaving the flag false
+        // lets the end-of-run "no usable credential" guidance fire so the
+        // user knows what to fix, instead of a silent zero-row import.
+        console.log(
+          `[lore] Skipping ${result.agentDisplayName}: no usable credential found ` +
+            `(auth.json had no routable entries, no shell env credential, no live session).`,
+        );
+        continue;
+      }
       anyAuthResolved = true;
-
-      // When the credential was captured from the agent's own env (tier 3),
-      // route extraction to that captured upstream (e.g. openrouter.ai), not
-      // the default anthropic/openai host. A dedicated worker key
-      // (config.workerUpstream) still takes precedence.
-      const agentUpstreams = resolveExtractionUpstreams(
-        auth.upstream,
-        config.workerUpstream,
-        workerUpstreams,
-      );
-
-      const llm = createGatewayLLMClient(
-        agentUpstreams,
-        auth.getAuth,
-        auth.model,
-        // A captured env credential is a user-provided key for a specific
-        // upstream — treat it like a dedicated worker key so the in-adapter
-        // protocol-mismatch pre-flight doesn't reject a non-anthropic key.
-        { dedicatedWorkerKey: !!workerApiKey || auth.upstream != null },
-      );
 
       const sessionIds = result.sessions.map((s) => s.id);
       console.log(`[lore] Reading ${result.agentDisplayName} conversations...`);
@@ -1132,63 +1329,157 @@ export async function commandImport(
         `[lore] Extracting knowledge from ${chunks.length} chunks (${result.agentDisplayName})...`,
       );
 
-      const extractResult = await extractKnowledge({
-        llm,
-        projectPath,
-        chunks,
-        model: auth.model,
-        onProgress: (progress) => {
-          process.stderr.write(
-            `\r[lore]   Chunk ${progress.current}/${progress.total} — ${progress.created} created, ${progress.updated} updated`,
+      // Iterate the candidate list. Each candidate attempts the full chunk
+      // batch; on upstream 401/403 (abortedByAuth), we move to the next
+      // candidate. The first candidate that produces at least one non-auth
+      // answer wins. Cost: at most one chunk per failed provider (the
+      // worker-health probe inside extract.ts aborts on the first 401).
+      let extractResult: Awaited<ReturnType<typeof extractKnowledge>> | null =
+        null;
+      const triedProviders: Array<{
+        label: string;
+        providerID: string;
+        reason: "auth-rejected" | "no-response";
+      }> = [];
+
+      for (let i = 0; i < candidates.length; i++) {
+        const { auth, label } = candidates[i];
+        const isFirstAttempt = i === 0;
+
+        // Show the user which credential we're attempting (transparency:
+        // not a warning, just an FYI line). On fallback attempts, prefix
+        // with "Trying" so the user can see the failover in action.
+        console.log(
+          isFirstAttempt
+            ? `[lore]   Using ${label}`
+            : `[lore]   Trying ${label}`,
+        );
+
+        // When the credential was captured from the agent's own env (tier 3),
+        // route extraction to that captured upstream (e.g. openrouter.ai), not
+        // the default anthropic/openai host. A dedicated worker key
+        // (config.workerUpstream) still takes precedence.
+        const agentUpstreams = resolveExtractionUpstreams(
+          auth.upstream,
+          config.workerUpstream,
+          workerUpstreams,
+        );
+
+        const llm = createGatewayLLMClient(
+          agentUpstreams,
+          auth.getAuth,
+          auth.model,
+          { dedicatedWorkerKey: !!workerApiKey || auth.upstream != null },
+        );
+
+        // Snapshot the auth-rejected timestamp at the START of this attempt.
+        // Without this, a failure recorded by an EARLIER candidate would
+        // incorrectly trip the probe for THIS candidate if it returns null
+        // for a non-auth reason (network timeout, model bug) — wrongly
+        // attributing the transient failure to auth and skipping a valid
+        // credential. Per-candidate `attemptStartedAt` scopes the probe
+        // strictly to failures recorded during THIS attempt's chunks.
+        const attemptStartedAt = Date.now();
+
+        const attemptResult = await extractKnowledge({
+          llm,
+          projectPath,
+          chunks,
+          model: auth.model,
+          onProgress: (progress) => {
+            process.stderr.write(
+              `\r[lore]   Chunk ${progress.current}/${progress.total} — ${progress.created} created, ${progress.updated} updated`,
+            );
+          },
+          // The standalone import path is session-less (no sessionID is passed
+          // to llm.prompt — see extract.ts: workerID is fixed to "lore-import").
+          // Inject the worker-health peek so the loop aborts on the FIRST chunk
+          // whose LLM call returned null AND an upstream `auth-rejected` was
+          // recorded, instead of letting the same broken credential burn the
+          // remaining 70 chunks.
+          wasRecentChunkAuthRejected: () =>
+            hasRecentAuthRejectedFailure(
+              "_unknown",
+              "lore-import",
+              60_000,
+              attemptStartedAt,
+            ),
+        });
+
+        // Clear the progress line
+        process.stderr.write("\n");
+
+        // Success path: at least one chunk was answered AND we weren't aborted
+        // by auth. Take this candidate's result and stop iterating.
+        if (!attemptResult.abortedByAuth && attemptResult.chunksAnswered > 0) {
+          extractResult = attemptResult;
+          break;
+        }
+
+        // Failed attempt — record this candidate as tried and move to the next.
+        // The wording distinguishes auth-rejected from a generic failure
+        // (network timeout, malformed response, model bug) so the user can
+        // diagnose the right thing. Only the auth-rejected case is
+        // actionable for credential rotation; other failures might be
+        // transient and resolve on the next attempt.
+        triedProviders.push({
+          label,
+          providerID: auth.model.providerID,
+          reason: attemptResult.abortedByAuth ? "auth-rejected" : "no-response",
+        });
+
+        if (i < candidates.length - 1) {
+          const reasonText = attemptResult.abortedByAuth
+            ? `rejected the credential`
+            : `did not answer`;
+          console.log(
+            `[lore]   ${auth.model.providerID} ${reasonText} — ` +
+              `falling through to next provider.`,
           );
-        },
-        // The standalone import path is session-less (no sessionID is passed
-        // to llm.prompt — see extract.ts: workerID is fixed to "lore-import").
-        // Inject the worker-health peek so the loop aborts on the FIRST chunk
-        // whose LLM call returned null AND an upstream `auth-rejected` was
-        // recorded, instead of letting the same broken credential burn the
-        // remaining 70 chunks. The `runStartedAt` bound ignores failures
-        // recorded by a prior `lore import` invocation in this process, so a
-        // second run after a credential fix isn't falsely aborted on chunk 1.
-        wasRecentChunkAuthRejected: () =>
-          hasRecentAuthRejectedFailure(
-            "_unknown",
-            "lore-import",
-            60_000,
-            runStartedAt,
-          ),
-      });
+        }
+      }
 
-      // Clear the progress line
-      process.stderr.write("\n");
+      // No candidate worked — surface a single combined diagnostic.
+      // When ANY tried provider was auth-rejected (vs a generic no-response),
+      // we still print the credential-fix advice because at least one path
+      // needs a fresh key. When ALL tried providers failed for a non-auth
+      // reason, the credential advice is misleading and we surface a generic
+      // "models didn't answer" message instead.
+      if (extractResult === null) {
+        const authRejectedCount = triedProviders.filter(
+          (t) => t.reason === "auth-rejected",
+        ).length;
+        const allNonAuth = authRejectedCount === 0;
+        const triedList = triedProviders
+          .map((t) => `${t.providerID} (${t.label})`)
+          .join(", ");
+        const multiLine =
+          triedProviders.length > 1 && !allNonAuth
+            ? "\n[lore] No provider auto-fallback could authenticate."
+            : "";
 
-      // Aborted early because the upstream rejected the credential on the
-      // first chunk (HTTP 401/403). Surface a single, actionable error
-      // pointing at the on-disk auth path the user can fix + the env-var
-      // override as a quick unblock. Distinct from chunksAnswered === 0 of
-      // a NON-auth abort (which falls through to the "no response from the
-      // model" message — a transient signal, not actionable here).
-      if (extractResult.abortedByAuth) {
-        const remaining = chunks.length - extractResult.chunksProcessed;
-        // Pluralize so a single-chunk import doesn't read "1 chunks".
-        const remainingWord = remaining === 1 ? "chunk" : "chunks";
-        const wereWord = remaining === 1 ? "was" : "were";
-        const remainingLine =
-          remaining === 0
-            ? "No further chunks were attempted — there were no more after chunk 1."
-            : `The remaining ${remaining} ${remainingWord} ${wereWord} not attempted — retrying would just 401 again.`;
+        if (allNonAuth) {
+          console.error(
+            `\n[lore] Can't import ${result.agentDisplayName}: tried ${triedList || "all available"} ` +
+              `and none answered (no HTTP 401 — likely transient network/timeout/model issue).\n` +
+              `[lore]\n` +
+              `[lore] Re-run \`lore import\` after a moment. If this keeps happening, file an ` +
+              `issue with the full output of \`lore import --debug\`.\n`,
+          );
+          totalFailed += chunks.length;
+          continue;
+        }
+
         console.error(
-          `\n[lore] Can't import ${result.agentDisplayName}: the credential ` +
-            `Lore is using is invalid (HTTP 401 — ${auth.model.providerID} rejected ` +
-            `the key). ${remainingLine}\n` +
+          `\n[lore] Can't import ${result.agentDisplayName}: tried ${triedList || "all available"} ` +
+            `and all rejected the credential (HTTP 401).${multiLine}\n` +
             `[lore]\n` +
             `[lore] The credential likely came from one of these places. ` +
             `Pick the one that matches your setup:\n` +
             `[lore]\n` +
             `[lore]   1. ${result.agentDisplayName} on-disk auth. Update ` +
             `or re-authenticate in that agent (e.g. \`opencode auth login\`).\n` +
-            `[lore]      Then either re-run \`lore import\`, or restart \`lore ` +
-            `run\` so the gateway re-captures the fresh key.\n` +
+            `[lore]      Then re-run \`lore import\`.\n` +
             `[lore]\n` +
             `[lore]   2. Shell env vars (e.g. ANTHROPIC_AUTH_TOKEN / ` +
             `ANTHROPIC_API_KEY / OPENAI_API_KEY). Confirm the key in your shell, ` +
@@ -1196,8 +1487,7 @@ export async function commandImport(
             `[lore]\n` +
             `[lore]   3. Override the import credential entirely with a ` +
             `dedicated worker key:\n` +
-            `[lore]        export LORE_WORKER_API_KEY=<a fresh raw API key for ` +
-            `provider ${auth.model.providerID}>\n` +
+            `[lore]        export LORE_WORKER_API_KEY=<a fresh raw API key>\n` +
             `[lore]        lore import\n` +
             `[lore]\n` +
             `[lore] Tip: a ChatGPT / GitHub Copilot subscription token is NOT ` +
@@ -1205,29 +1495,16 @@ export async function commandImport(
             `run\` and send one message — Lore captures the live credential ` +
             `and re-offers imports automatically.`,
         );
-        totalFailed += extractResult.chunksFailed;
-        // Also tally the chunks we DID NOT attempt so the summary line
-        // accurately reflects the run's footprint (helpful when the
-        // dashboard counts failed-chunks).
-        totalFailed += chunks.length - extractResult.chunksProcessed;
+        totalFailed += chunks.length;
         continue;
       }
 
-      // Only mark sessions imported if the LLM actually answered a chunk. A
-      // no-auth run returns null per chunk (0 answered) without throwing — a
-      // resolved credential can still go stale mid-run. Recording a
-      // never-answered run would permanently suppress a real re-import via
-      // hasAgentImportRecord().
-      if (extractResult.chunksAnswered === 0) {
-        console.log(
-          `[lore] No response from the model for ${result.agentDisplayName} — ` +
-            `skipping (will retry on next import).`,
-        );
-        totalFailed += extractResult.chunksFailed;
-        continue;
-      }
-
-      // Record imports for each session
+      // Record imports for each session. (The pre-PR guard for
+      // `chunksAnswered === 0` was deleted — the fallback loop already
+      // surfaces the no-response case via the combined-tried diagnostic when
+      // every candidate fails. A non-aborted candidate with 0 answered is no
+      // longer reachable because the loop's success predicate requires
+      // `chunksAnswered > 0` to break.)
       for (const sess of result.sessions) {
         const hash = computeHash({
           messageCount: sess.messageCount,

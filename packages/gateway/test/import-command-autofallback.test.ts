@@ -1,0 +1,567 @@
+/**
+ * Auto-fallback tests for `lore import`: when the first credential candidate
+ * 401s, the importer tries the next one automatically instead of surfacing the
+ * error to the user. This addresses the Aditya scenario where his OpenCode
+ * auth.json has multiple stale/fresh credentials across providers, and the
+ * gateway's "first match" picker landed on the wrong one — without fallback,
+ * the import would fail with an unhelpful credential-fix message.
+ *
+ * Tests in this file drive the REAL `commandImport` decision loop with
+ * injected auth/history providers and a mocked LLM client. The first call
+ * per candidate returns null + records an auth-rejected failure (mirrors the
+ * adapter's real 401 path). The first candidate to return a valid answer
+ * wins; if all fail, the diagnostic fires.
+ *
+ * Setup notes:
+ *  - All tests use `anthropic` (built-in default model) + `openrouter` (no
+ *    built-in default, requires explicit LORE_WORKER_MODEL). This combination
+ *    lets us cover the fallback chain without the needsModel guard short-
+ *    circuiting the test.
+ */
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const shutdownMock = vi.fn(async () => {});
+let startConfig: Record<string, unknown> = {
+  upstreamAnthropic: "https://api.anthropic.com",
+  upstreamOpenAI: "https://api.openai.com",
+};
+vi.mock("../src/cli/start", () => ({
+  startGateway: vi.fn(async () => ({
+    config: startConfig,
+    owned: true,
+    shutdown: shutdownMock,
+  })),
+}));
+
+// Capture every LLM client construction: [upstreams, getAuth, model, opts].
+// `promptBehavior` controls what each prompt returns so we can simulate the
+// "first candidate 401s, second succeeds" sequence without real network.
+const llmClientCalls: unknown[][] = [];
+let promptBehavior: () => Promise<string | null> = async () => "[]";
+let promptCalls = 0;
+vi.mock("../src/llm-adapter", () => ({
+  createGatewayLLMClient: (...args: unknown[]) => {
+    llmClientCalls.push(args);
+    return {
+      prompt: vi.fn(async () => {
+        promptCalls++;
+        return promptBehavior();
+      }),
+    };
+  },
+}));
+
+import { commandImport } from "../src/cli/import";
+import { _resetAuthForTest, setLastSeenAuth } from "../src/auth";
+import {
+  recordWorkerFailure,
+  _resetForTest as _resetWorkerHealth,
+} from "../src/worker-health";
+import { load as loadConfig } from "@loreai/core";
+import { conversationImport } from "@loreai/core";
+import type { conversationImport as CI } from "@loreai/core";
+
+const { registerProvider, clearProviders, getProviders } = conversationImport;
+const { registerAuthProvider, clearAuthProviders, getAuthProviders } =
+  conversationImport;
+
+type FakeSpec = {
+  name: string;
+  displayName: string;
+  messageCount?: number;
+};
+
+function fakeProvider(spec: FakeSpec): CI.AgentHistoryProvider {
+  const messageCount = spec.messageCount ?? 5;
+  return {
+    name: spec.name,
+    displayName: spec.displayName,
+    detect(): CI.DetectedSession[] {
+      return [
+        {
+          id: `${spec.name}-sess-1`,
+          label: `2026-07-24 (${messageCount} messages)`,
+          startedAt: 1_700_000_000_000,
+          lastActivityAt: 1_700_000_001_000,
+          estimatedTokens: 100,
+          messageCount,
+        } satisfies CI.DetectedSession,
+      ];
+    },
+    readChunks(): CI.ConversationChunk[] {
+      return [
+        {
+          label: `${spec.displayName} session (1 of 1)`,
+          text: "[user] hello\n[assistant] hi there",
+          estimatedTokens: 10,
+          timestamp: 1_700_000_001_000,
+        },
+      ];
+    },
+  };
+}
+
+/**
+ * Build a fake auth provider that returns the given credentials in order.
+ * The chain tries them in returned order, so the FIRST credential is the one
+ * tested first.
+ */
+function fakeAuthProvider(
+  name: string,
+  creds: CI.AgentResolvedAuth[],
+): CI.AgentAuthProvider {
+  return {
+    name,
+    readAuth(): CI.AgentResolvedAuth[] {
+      return creds;
+    },
+  };
+}
+
+describe("commandImport — auto-fallback on 401 across credential candidates", () => {
+  let project: string;
+  let fakeHome: string;
+  const logs: string[] = [];
+  const errs: string[] = [];
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  let realProviders: readonly CI.AgentHistoryProvider[];
+  let realAuthProviders: readonly CI.AgentAuthProvider[];
+
+  const prevHome = process.env.HOME;
+  const prevXdgData = process.env.XDG_DATA_HOME;
+  const prevXdgConfig = process.env.XDG_CONFIG_HOME;
+  const prevWorkerModel = process.env.LORE_WORKER_MODEL;
+
+  beforeEach(() => {
+    delete process.env.LORE_REMOTE_URL; // force local mode
+    delete process.env.LORE_WORKER_MODEL;
+    _resetAuthForTest();
+    _resetWorkerHealth();
+    startConfig = {
+      upstreamAnthropic: "https://api.anthropic.com",
+      upstreamOpenAI: "https://api.openai.com",
+    };
+    project = mkdtempSync(join(tmpdir(), "lore-fb-project-"));
+    fakeHome = mkdtempSync(join(tmpdir(), "lore-fb-home-"));
+    process.env.HOME = fakeHome;
+    process.env.XDG_DATA_HOME = join(fakeHome, ".local", "share");
+    process.env.XDG_CONFIG_HOME = join(fakeHome, ".config");
+
+    realProviders = [...getProviders()];
+    clearProviders();
+    realAuthProviders = [...getAuthProviders()];
+    clearAuthProviders();
+
+    logs.length = 0;
+    errs.length = 0;
+    llmClientCalls.length = 0;
+    promptCalls = 0;
+    logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
+      logs.push(a.join(" "));
+    });
+    errSpy = vi.spyOn(console, "error").mockImplementation((...a) => {
+      errs.push(a.join(" "));
+    });
+    stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    shutdownMock.mockClear();
+  });
+
+  afterEach(async () => {
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    stderrSpy.mockRestore();
+    vi.restoreAllMocks();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
+    clearProviders();
+    for (const p of realProviders) registerProvider(p);
+    clearAuthProviders();
+    for (const a of realAuthProviders) registerAuthProvider(a);
+    _resetAuthForTest();
+    _resetWorkerHealth();
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevXdgData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = prevXdgData;
+    if (prevXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdgConfig;
+    if (prevWorkerModel === undefined) delete process.env.LORE_WORKER_MODEL;
+    else process.env.LORE_WORKER_MODEL = prevWorkerModel;
+    await loadConfig(mkdtempSync(join(tmpdir(), "lore-fb-cfg-")));
+  });
+
+  const out = () => errs.join("\n");
+  const info = () => logs.join("\n");
+
+  test("first candidate 401s → second candidate succeeds (silent fallback)", async () => {
+    // anthropic first (has built-in default model), openrouter second.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-stale",
+          providerID: "anthropic",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-or-fresh",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    // OpenRouter has no built-in default — explicitly set the worker model.
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    // First prompt: 401 (recordWorkerFailure + return null). Subsequent: success.
+    let calls = 0;
+    promptBehavior = async () => {
+      calls++;
+      if (calls === 1) {
+        recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+        return null;
+      }
+      return "[]";
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // Exactly 2 LLM client constructions (one per candidate attempt).
+    expect(llmClientCalls.length).toBe(2);
+    const first = llmClientCalls[0]?.[2] as { providerID: string };
+    const second = llmClientCalls[1]?.[2] as { providerID: string };
+    expect(first.providerID).toBe("anthropic");
+    expect(second.providerID).toBe("openrouter");
+
+    // The user sees transparency lines, NOT the 401 diagnostic.
+    expect(info()).toContain("Using on-disk auth.json: anthropic");
+    expect(info()).toContain("Trying on-disk auth.json: openrouter");
+    expect(info()).not.toContain("Can't import");
+    expect(info()).toContain("anthropic rejected the credential");
+  });
+
+  test("BOTH candidates 401 → combined diagnostic with both providers named", async () => {
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-stale",
+          providerID: "anthropic",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-or-stale",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    promptBehavior = async () => {
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      return null;
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    expect(llmClientCalls.length).toBe(2);
+    expect(out()).toContain("Can't import");
+    expect(out()).toContain("anthropic");
+    expect(out()).toContain("openrouter");
+    expect(out()).toContain("rejected the credential");
+    expect(out()).toContain("No provider auto-fallback could authenticate");
+  });
+
+  test("first candidate succeeds → no fallback attempted", async () => {
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-fresh",
+          providerID: "anthropic",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-or-fresh",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    promptBehavior = async () => "[]";
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    expect(llmClientCalls.length).toBe(1);
+    const model = llmClientCalls[0]?.[2] as { providerID: string };
+    expect(model.providerID).toBe("anthropic");
+    expect(info()).not.toContain("Trying");
+    expect(out()).not.toContain("Can't import");
+  });
+
+  test("env-credential takes over when on-disk candidates fail", async () => {
+    // Use the REAL `opencode` agent name (so env capture runs) but with a
+    // fake history provider and fake auth provider. anthropic on-disk
+    // (default model), env anthropic with a DIFFERENT key — the chain tries
+    // on-disk first (401s), falls through to env (succeeds).
+    registerAuthProvider(
+      fakeAuthProvider("opencode", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-stale",
+          providerID: "anthropic",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode", displayName: "OpenCode" }),
+    );
+    process.env.ANTHROPIC_API_KEY = "sk-ant-fresh-env";
+
+    let calls = 0;
+    promptBehavior = async () => {
+      calls++;
+      if (calls === 1) {
+        recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+        return null;
+      }
+      return "[]";
+    };
+
+    await commandImport([], { project, agent: "opencode", yes: true });
+
+    expect(llmClientCalls.length).toBe(2);
+    expect(info()).not.toContain("Can't import");
+  });
+
+  test("only one candidate available, it 401s → single-candidate diagnostic (no spurious fallback message)", async () => {
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-stale",
+          providerID: "anthropic",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+
+    promptBehavior = async () => {
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      return null;
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    expect(llmClientCalls.length).toBe(1);
+    expect(out()).toContain("Can't import");
+    expect(out()).toContain("anthropic");
+    expect(out()).toContain("rejected the credential");
+    // Only one candidate → no fallback commentary.
+    expect(out()).not.toContain("No provider auto-fallback could authenticate");
+  });
+
+  test("non-Pi/claude-code/codex/opencode agent with shell env credential → env credential enters chain", async () => {
+    // Pi lacks an on-disk auth reader but DOES have `authTokenEnvVars` so
+    // its env credential should be picked up by the chain. With a stale
+    // on-disk key + fresh env key for a DIFFERENT provider, the chain
+    // should iterate both candidates (de-dup by value lets them coexist).
+    //
+    // Use the real `claude-code` agent name (which has ANTHROPIC_AUTH_TOKEN
+    // + ANTHROPIC_API_KEY) to verify the env-tier reaches the chain.
+    registerAuthProvider(
+      fakeAuthProvider("claude-code", [
+        {
+          scheme: "api-key",
+          value: "sk-or-stale",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "claude-code", displayName: "Claude Code" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-fresh-env";
+
+    let calls = 0;
+    promptBehavior = async () => {
+      calls++;
+      if (calls === 1) {
+        recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+        return null;
+      }
+      return "[]";
+    };
+
+    await commandImport([], { project, agent: "claude-code", yes: true });
+
+    // openrouter (on-disk) fails, then anthropic (env) succeeds.
+    expect(llmClientCalls.length).toBe(2);
+    const first = llmClientCalls[0]?.[2] as { providerID: string };
+    const second = llmClientCalls[1]?.[2] as { providerID: string };
+    expect(first.providerID).toBe("openrouter");
+    expect(second.providerID).toBe("anthropic");
+    expect(info()).toContain("ANTHROPIC_API_KEY");
+    expect(info()).not.toContain("Can't import");
+  });
+
+  test("candidate 1 auth-rejected → candidate 2 transient null is NOT mis-attributed to auth (per-candidate probe snapshot)", async () => {
+    // Regression test for Seer finding 15586850. Without per-candidate
+    // `sinceMs` snapshotting, the lingering auth-rejected failure from
+    // candidate 1 would trip the probe for candidate 2 when candidate 2
+    // returns null on chunk 1 for non-auth reasons (network timeout, model
+    // bug), causing the loop to abort candidate 2 with abortedByAuth=true
+    // — wrongly skipping a potentially valid credential.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-stale",
+          providerID: "anthropic",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-or-fresh",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    // Chunk-by-chunk behavior:
+    //   call 1 → candidate 1 (anthropic), chunk 1: returns null +
+    //     recordWorkerFailure (auth-rejected). Aborts that candidate.
+    //   call 2 → candidate 2 (openrouter), chunk 1: returns null WITHOUT
+    //     recording any failure — simulates a transient network error.
+    //   call 3 → candidate 2, chunk 2: returns "[]" (success).
+    // With per-candidate snapshot, call 2's null doesn't trip the probe
+    // (no failure recorded since `attemptStartedAt`), so candidate 2
+    // continues to chunk 2 and succeeds.
+    // Without snapshot, call 2's null + probe seeing call 1's lingering
+    // auth-rejected → wrongly marks candidate 2 as abortedByAuth=true.
+    let calls = 0;
+    promptBehavior = async () => {
+      calls++;
+      if (calls === 1) {
+        recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+        return null;
+      }
+      if (calls === 2) {
+        return null;
+      }
+      return "[]";
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // Both candidates ran. Candidate 2 reached chunk 2 and succeeded —
+    // NOT aborted by candidate 1's lingering auth-rejected failure.
+    expect(llmClientCalls.length).toBe(2);
+    const second = llmClientCalls[1]?.[2] as { providerID: string };
+    expect(second.providerID).toBe("openrouter");
+    expect(info()).not.toContain("Can't import");
+    // chunksAnswered for candidate 2 should be > 0 (chunk 2 succeeded),
+    // NOT abortedByAuth.
+    expect(info()).toContain("Trying on-disk auth.json: openrouter");
+  });
+
+  test("non-auth failure (no 401) → 'did not answer' message, NOT a credential-fix prompt", async () => {
+    // The LLM returns null for non-auth reasons (network timeout, model bug,
+    // etc.). abortedByAuth stays false, but chunksAnswered is also 0 so the
+    // candidate fails the success predicate and falls through to the next.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-valid",
+          providerID: "anthropic",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-or-valid",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    // Every prompt: returns null WITHOUT recording auth-rejected (mirrors a
+    // transient network/timeout failure rather than a 401).
+    promptBehavior = async () => null;
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    expect(llmClientCalls.length).toBe(2);
+    // Generic "did not answer" message — NOT the credential-fix remediation.
+    // Only the FIRST candidate prints this (the LAST one has nothing to
+    // fall through to). The full diagnostic still names every provider.
+    expect(info()).toContain("anthropic did not answer");
+    expect(info()).not.toContain("rejected the credential");
+    // The full diagnostic also avoids the credential-fix advice when no
+    // candidate was auth-rejected.
+    expect(out()).toContain("none answered");
+    expect(out()).toContain("transient network/timeout/model issue");
+    expect(out()).not.toContain("export LORE_WORKER_API_KEY");
+    expect(out()).not.toContain("opencode auth login");
+  });
+
+  test("candidate chain filters out no-model credentials → 'no usable credential' guidance still fires (anyAuthResolved stays false)", async () => {
+    // Regression test for Seer finding 15586423. Without moving
+    // `anyAuthResolved = true` AFTER the candidates.length check, the
+    // end-of-run "no usable credential" guidance is suppressed when the
+    // candidate chain returns 0 entries (e.g. on-disk credentials exist
+    // but every one lacks a default worker model). User sees "0 entries
+    // created" with no actionable error.
+    //
+    // Setup: tier-1 (resolveAgentImportAuth) succeeds via last-seen session
+    // credential for openrouter (no default worker model — model.modelID
+    // is empty). tier-1 returns {getAuth, model} WITHOUT a needsModel
+    // signal (the bug surface). The chain then re-resolves and finds no
+    // routable on-disk credentials + no env, so candidates.length === 0.
+    // anyAuthResolved must stay false so the end-of-run guidance fires.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", []), // no on-disk creds at all
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    // Inject a last-seen session credential for openrouter (no default
+    // model — tier-1 returns it without needsModel).
+    setLastSeenAuth({ scheme: "bearer", value: "sk-or-session" }, "openrouter");
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // Should NOT have built an LLM client (chain filtered everything).
+    expect(llmClientCalls.length).toBe(0);
+    // Per-agent skip line shows the chain found nothing usable.
+    expect(info()).toContain("no usable credential found");
+    // anyAuthResolved remains false → the end-of-run "Ways forward"
+    // guidance fires.
+    expect(out()).toContain("Ways forward");
+  });
+});

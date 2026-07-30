@@ -551,4 +551,74 @@ describe("resolveAgentImportAuth — OpenCode env-vs-disk preference (active pro
     expect(ok.model.providerID).toBe("anthropic");
     expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "sk-ant-fresh" });
   });
+
+  /**
+   * Coverage for the auto-fallback chain's env tier across all agents with
+   * `authTokenEnvVars`. Pi / Hermes / Gemini were added in #1533 so the
+   * chain picks up their env credentials the same way claude-code / codex /
+   * opencode already did. If a future PR removes `authTokenEnvVars` from any
+   * of these agents, the chain silently skips the env tier for that agent
+   * — this test catches the regression before merge.
+   */
+  describe("env-credential coverage across agents", () => {
+    test("claude-code picks up ANTHROPIC_API_KEY (api-key scheme)", () => {
+      setEnv("ANTHROPIC_API_KEY", "sk-ant-cc");
+      const ok = usable(
+        resolveAgentImportAuth("claude-code", undefined, undefined),
+      );
+      expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "sk-ant-cc" });
+    });
+
+    test("claude-code: ANTHROPIC_AUTH_TOKEN (bearer) wins over ANTHROPIC_API_KEY when both set", () => {
+      setEnv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat-cc");
+      setEnv("ANTHROPIC_API_KEY", "sk-ant-apikey-cc");
+      const ok = usable(
+        resolveAgentImportAuth("claude-code", undefined, undefined),
+      );
+      expect(ok.getAuth()).toEqual({
+        scheme: "bearer",
+        value: "sk-ant-oat-cc",
+      });
+    });
+
+    test("codex picks up OPENAI_API_KEY (bearer scheme)", () => {
+      setEnv("OPENAI_API_KEY", "sk-codex");
+      const ok = usable(resolveAgentImportAuth("codex", undefined, undefined));
+      expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "sk-codex" });
+    });
+
+    test("pi picks up ANTHROPIC_API_KEY (api-key scheme) — added in #1533", () => {
+      setEnv("ANTHROPIC_API_KEY", "sk-ant-pi");
+      const ok = usable(resolveAgentImportAuth("pi", undefined, undefined));
+      expect(ok.getAuth()).toEqual({ scheme: "api-key", value: "sk-ant-pi" });
+    });
+
+    test("pi: ANTHROPIC_AUTH_TOKEN (bearer) wins over ANTHROPIC_API_KEY — parity with claude-code", () => {
+      setEnv("ANTHROPIC_AUTH_TOKEN", "sk-ant-oat-pi");
+      setEnv("ANTHROPIC_API_KEY", "sk-ant-apikey-pi");
+      const ok = usable(resolveAgentImportAuth("pi", undefined, undefined));
+      expect(ok.getAuth()).toEqual({
+        scheme: "bearer",
+        value: "sk-ant-oat-pi",
+      });
+    });
+
+    test("hermes picks up OPENAI_API_KEY (bearer scheme) — added in #1533", () => {
+      setEnv("OPENAI_API_KEY", "sk-hermes");
+      const ok = usable(resolveAgentImportAuth("hermes", undefined, undefined));
+      expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "sk-hermes" });
+    });
+
+    test("gemini picks up GEMINI_API_KEY (bearer scheme) — added in #1533", () => {
+      setEnv("GEMINI_API_KEY", "gem-key");
+      const ok = usable(resolveAgentImportAuth("gemini", undefined, undefined));
+      expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "gem-key" });
+    });
+
+    test("gemini: GOOGLE_API_KEY (bearer) is also honored — older sibling", () => {
+      setEnv("GOOGLE_API_KEY", "goog-key");
+      const ok = usable(resolveAgentImportAuth("gemini", undefined, undefined));
+      expect(ok.getAuth()).toEqual({ scheme: "bearer", value: "goog-key" });
+    });
+  });
 });
