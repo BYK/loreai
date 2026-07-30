@@ -85,16 +85,6 @@ flowchart LR
 
 *The LLM is the cognition, Lore is the memory layer. They form the brain. The harness is the body, the actuator.*
 
-What you actually own is two things:
-
-Even LangChain is starting to realize the limits of black-box databases.
-In June, Harrison wrote about
-[Wiki Memory](https://blog.langchain.com/wiki-memory/), admitting that
-the best format for compressed agent data isn't a proprietary vector
-store — it's files. They are inspectable, editable, and versionable.
-With Lore, you don't have to wait for the industry to build it. You
-already have it.
-
 - **`.lore.md`** at the root of your repo. The curated knowledge the
   team has reviewed and merged. Version-controlled, PR-reviewable,
   human-readable Markdown.
@@ -112,6 +102,19 @@ entries, in one open file. No separate vector store, no separate
 process, no separate bill. When a team changes a memory entry, the
 engine picks up the change on the next session and re-embeds the
 affected entries. Fast and transparent, on your hardware.
+
+A few months after that initial post, Harrison himself claimed that
+memory systems sit beside the harness. In
+[Wiki Memory](https://blog.langchain.com/wiki-memory/), he wrote:
+
+> "This pattern also sits adjacent to memory systems like LangMem,
+> Letta, Mem0, and Zep. Those systems attack the broader agent-memory
+> problem, while wiki memory is notable because it often uses the
+> simplest possible substrate: files."
+
+All these systems, including Mem0, don't really solve the immediate
+context problem. Lore unifies this and, unsurprisingly, by fusing two
+approaches together: locality & files along with long-term memory.
 
 ## The vendor route vs the local-first route
 
