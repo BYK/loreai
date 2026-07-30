@@ -282,6 +282,11 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     expect(out()).toContain("openrouter");
     expect(out()).toContain("rejected the credential");
     expect(out()).toContain("No provider auto-fallback could authenticate");
+    // The shell env-vars remediation hint must include OPENROUTER_API_KEY
+    // alongside the canonical anthropic/openai vars — users who have switched
+    // to OpenRouter via env-only (no auth.json entry) need to see this as a
+    // viable path. Aditya hit this gap after switching his default provider.
+    expect(out()).toContain("OPENROUTER_API_KEY");
   });
 
   test("first candidate succeeds → no fallback attempted", async () => {
@@ -530,20 +535,18 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     expect(out()).not.toContain("opencode auth login");
   });
 
-  test("candidate chain filters out no-model credentials → 'no usable credential' guidance still fires (anyAuthResolved stays false)", async () => {
-    // Regression test for Seer finding 15586423. Without moving
-    // `anyAuthResolved = true` AFTER the candidates.length check, the
-    // end-of-run "no usable credential" guidance is suppressed when the
-    // candidate chain returns 0 entries (e.g. on-disk credentials exist
-    // but every one lacks a default worker model). User sees "0 entries
-    // created" with no actionable error.
+  test("tier-4 last-seen session credential for defaultless provider → needsModel signal (workerApiKey unset)", async () => {
+    // Regression test for Seer finding 15586978/1 (and the prior
+    // 15586423). Tier-4 in resolveAgentImportAuth used to return
+    // {getAuth, model} with empty modelID for defaultless providers like
+    // openrouter, which let commandImport proceed to an LLM call with
+    // model="" → upstream 400. After the fix, tier-4 returns
+    // {needsModel: providerID} for parity with tiers 2 and 3, so the
+    // user gets a clear "set a worker model" message instead.
     //
-    // Setup: tier-1 (resolveAgentImportAuth) succeeds via last-seen session
-    // credential for openrouter (no default worker model — model.modelID
-    // is empty). tier-1 returns {getAuth, model} WITHOUT a needsModel
-    // signal (the bug surface). The chain then re-resolves and finds no
-    // routable on-disk credentials + no env, so candidates.length === 0.
-    // anyAuthResolved must stay false so the end-of-run guidance fires.
+    // Setup: only a last-seen session credential for openrouter (no
+    // default worker model). No on-disk creds, no env. Expect the
+    // per-agent skip line to surface the needsModel signal directly.
     registerAuthProvider(
       fakeAuthProvider("opencode-fake", []), // no on-disk creds at all
     );
@@ -551,17 +554,52 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
       fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
     );
     // Inject a last-seen session credential for openrouter (no default
-    // model — tier-1 returns it without needsModel).
+    // model — tier-4 now signals needsModel directly).
     setLastSeenAuth({ scheme: "bearer", value: "sk-or-session" }, "openrouter");
 
     await commandImport([], { project, agent: "opencode-fake", yes: true });
 
-    // Should NOT have built an LLM client (chain filtered everything).
+    // Should NOT have built an LLM client (needsModel signal short-circuits
+    // before the LLM client is constructed).
     expect(llmClientCalls.length).toBe(0);
-    // Per-agent skip line shows the chain found nothing usable.
-    expect(info()).toContain("no usable credential found");
-    // anyAuthResolved remains false → the end-of-run "Ways forward"
-    // guidance fires.
-    expect(out()).toContain("Ways forward");
+    // Per-agent skip line shows the needsModel message with the provider
+    // name and a "Set one and retry" pointer to the guidance below.
+    expect(info()).toContain("found your openrouter credential");
+    expect(info()).toContain("no worker model is set for that provider");
+    // End-of-run guidance fires once for the collected needsModel providers.
+    expect(out()).toContain("worker model");
+  });
+
+  test("all candidates 401 → totalFailed counts ATTEMPTED chunks, not all chunks (1 per candidate)", async () => {
+    // Regression test for Seer finding 15586978/0. The summary report
+    // used to inflate the failure count by `chunks.length` (e.g. 70)
+    // even though the worker-health probe aborts after the FIRST chunk
+    // of each candidate (so only N candidates were actually attempted).
+    // User saw "70 failed" for an agent with 70 chunks + 2 candidates.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        { scheme: "api-key", value: "sk-ant-broken", providerID: "anthropic" },
+        { scheme: "api-key", value: "sk-or-broken", providerID: "openrouter" },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    promptBehavior = async () => {
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      return null;
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // 2 candidates × N chunks each = the probe aborts after 1 chunk
+    // per candidate, so llmClientCalls.length === 2 (one per candidate).
+    expect(llmClientCalls.length).toBe(2);
+    // The failure summary line should report `N chunks failed` where N
+    // equals the number of candidates, NOT chunks.length. (We use a
+    // single-chunk fixture so this is also == 2.)
+    expect(info()).toContain("2 chunks failed");
   });
 });

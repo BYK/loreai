@@ -249,6 +249,14 @@ export function resolveAgentImportAuth(
   if (sessionCred) {
     const model =
       cfgModel ?? defaultModelForProvider(lastSeenProvider ?? undefined);
+    // A routable-but-defaultless provider (openrouter, deepseek, groq, …) has
+    // no WORKER_DEFAULTS entry, so defaultModelForProvider returns an empty
+    // modelID — sending model="" would 400 at the upstream. Match tiers 2 and
+    // 3's needsModel signal so the user gets an actionable "set a worker model"
+    // message rather than a misleading upstream 400. Seer finding 15586978/1.
+    if (!model.modelID) {
+      return { needsModel: model.providerID };
+    }
     return { getAuth: resolveAuth, model };
   }
 
@@ -1466,7 +1474,12 @@ export async function commandImport(
               `[lore] Re-run \`lore import\` after a moment. If this keeps happening, file an ` +
               `issue with the full output of \`lore import --debug\`.\n`,
           );
-          totalFailed += chunks.length;
+          // Count one chunk per attempted candidate (the worker-health
+          // probe aborts on the first chunk, so only chunks.length/total
+          // attempts were actually made — not all chunks). The full
+          // failure summary at the end still surfaces the actual count
+          // for transparency.
+          totalFailed += triedProviders.length || 1;
           continue;
         }
 
@@ -1482,8 +1495,9 @@ export async function commandImport(
             `[lore]      Then re-run \`lore import\`.\n` +
             `[lore]\n` +
             `[lore]   2. Shell env vars (e.g. ANTHROPIC_AUTH_TOKEN / ` +
-            `ANTHROPIC_API_KEY / OPENAI_API_KEY). Confirm the key in your shell, ` +
-            `then re-run \`lore import\` from the same shell.\n` +
+            `ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY). ` +
+            `Confirm the key in your shell, then re-run \`lore import\` ` +
+            `from the same shell.\n` +
             `[lore]\n` +
             `[lore]   3. Override the import credential entirely with a ` +
             `dedicated worker key:\n` +
@@ -1495,7 +1509,11 @@ export async function commandImport(
             `run\` and send one message — Lore captures the live credential ` +
             `and re-offers imports automatically.`,
         );
-        totalFailed += chunks.length;
+        // Count one chunk per auth-rejected candidate (the worker-health
+        // probe aborts on the first chunk of each candidate, so the
+        // actual number of attempted chunks equals the number of tried
+        // providers — not chunks.length).
+        totalFailed += triedProviders.length || 1;
         continue;
       }
 
