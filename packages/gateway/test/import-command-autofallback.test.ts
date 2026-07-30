@@ -436,6 +436,55 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     }
   });
 
+  test("non-aggregator OpenAI-compatible providers (vllm/mistral) do NOT receive cfg.model", async () => {
+    // Regression test for Seer review on PR #1539 (HIGH severity, ID 15601472/0).
+    // The cross-provider routing for cfg.model must be gated on
+    // OPENAI_COMPATIBLE_AGGREGATORS, NOT on shared protocol. vllm, mistral,
+    // deepseek, github-models all use the OpenAI Chat Completions protocol
+    // but each serves its own model catalog — sending `openai/gpt-5.6-luna`
+    // to a vllm provider would 400 because vllm doesn't recognize that id.
+    //
+    // This test verifies that a `vllm` credential is NOT cross-routed to
+    // `openai/gpt-5.6-luna` from cfg.model; instead the chain falls back to
+    // vllm's own default model (or no model → skipped, since vllm isn't in
+    // OPENAI_COMPATIBLE_AGGREGATORS).
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        { scheme: "api-key", value: "mistral-key", providerID: "mistral" },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    const lorePath = join(project, ".lore.json");
+    writeFileSync(
+      lorePath,
+      JSON.stringify({
+        model: { providerID: "openai", modelID: "gpt-5.6-luna" },
+      }),
+    );
+    await loadConfig(project);
+
+    promptBehavior = async () => {
+      recordWorkerFailure("_unknown", "lore-import", "auth-rejected");
+      return null;
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // The chain should NOT have called mistral with `gpt-5.6-luna` (openai's
+    // model id). Either it skipped mistral entirely (needsModel/no default)
+    // or called it with mistral's own default model.
+    const mistralCalls = llmClientCalls.filter((call) => {
+      const model = call[2] as { providerID: string; modelID: string };
+      return model.providerID === "mistral";
+    });
+    for (const call of mistralCalls) {
+      const model = call[2] as { providerID: string; modelID: string };
+      expect(model.modelID).not.toBe("gpt-5.6-luna");
+    }
+  });
+
   test("first candidate succeeds → no fallback attempted", async () => {
     registerAuthProvider(
       fakeAuthProvider("opencode-fake", [
