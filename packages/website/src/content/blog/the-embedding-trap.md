@@ -68,36 +68,23 @@ in your repo and your local database, in open formats you can read
 with or without Lore.
 
 <figure>
-  <svg viewBox="0 0 460 460" xmlns="http://www.w3.org/2000/svg" style="max-width: 460px; width: 100%; margin: 1.5rem auto; display: block;" role="img" aria-label="Lore architecture: the harness on top, the model provider API on the bottom, and Lore sits between them as a local-first vendor-neutral proxy whose artifacts live on your machine.">
-    <defs>
-      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#1a1a1a" />
-      </marker>
-    </defs>
+```mermaid
+flowchart TB
+    H["Harness<br/>Claude Code · OpenCode · Pi · Codex"]
+    L["Lore<br/>local-first, vendor-neutral proxy<br/>.lore.md + ~/.local/share/lore/lore.db<br/>on your machine, in open formats"]
+    A["Model Provider API<br/>Anthropic · OpenAI · Google · others"]
 
-    <rect x="40" y="20" width="380" height="80" rx="8" fill="#fafafa" stroke="#1a1a1a" stroke-width="1.5" />
-    <text x="230" y="55" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="600" fill="#1a1a1a">Harness</text>
-    <text x="230" y="78" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#5a5a5a">Claude Code · OpenCode · Pi · Codex</text>
+    H --> L
+    L --> A
 
-    <line x1="230" y1="105" x2="230" y2="135" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arrow)" />
-
-    <rect x="20" y="140" width="420" height="170" rx="8" fill="#c4ddc7" stroke="#1a1a1a" stroke-width="2" />
-    <text x="230" y="175" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="20" font-weight="700" fill="#1a1a1a">Lore</text>
-    <text x="230" y="198" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" font-style="italic" fill="#1a1a1a">local-first, vendor-neutral proxy</text>
-
-    <rect x="60" y="225" width="340" height="55" rx="6" fill="#ffffff" stroke="#5a5a5a" stroke-width="1" />
-    <text x="230" y="245" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" fill="#1a1a1a">.lore.md  +  ~/.local/share/lore/lore.db</text>
-    <text x="230" y="265" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10" font-style="italic" fill="#5a5a5a">on your machine, in open formats</text>
-
-    <line x1="230" y1="315" x2="230" y2="345" stroke="#1a1a1a" stroke-width="1.5" marker-end="url(#arrow)" />
-
-    <rect x="40" y="350" width="380" height="80" rx="8" fill="#fafafa" stroke="#1a1a1a" stroke-width="1.5" />
-    <text x="230" y="385" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="600" fill="#1a1a1a">Model Provider API</text>
-    <text x="230" y="408" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#5a5a5a">Anthropic · OpenAI · Google · others</text>
-  </svg>
-  <figcaption style="text-align: center; font-size: 0.9em; opacity: 0.8; margin-top: 0.5rem;">
-    Lore is the brain. The harness is the body. The model provider API is the cognition.
-  </figcaption>
+    classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320
+    classDef ext fill:#ececec,stroke:#888,color:#333
+    class L lore
+    class H,A ext
+```
+<figcaption style="text-align: center; font-size: 0.9em; opacity: 0.8; margin-top: 0.5rem;">
+  Lore is the brain. The harness is the body. The model provider API is the cognition.
+</figcaption>
 </figure>
 
 What you actually own is two things:
@@ -113,12 +100,12 @@ The engine that ties them together is fair source
 (FSL-1.1-Apache-2.0). The code that touches your tokens is right
 there to read, and it turns into Apache 2.0 on a timer.
 
-The vector database lives inside Lore, on your machine. It is the
-runtime cache for semantic search, and it is the right tool for it.
-When a team changes a memory entry, the engine picks up the change
-on the next session and re-embeds the affected entries automatically
-— fast, transparent, and on your hardware. No batch job, no
-re-indexing window, no waiting for a vendor to apply your team's PR.
+The SQLite file is the vector database. The vectors ride alongside
+the temporal messages, the distillations, and the long-term memory
+entries, in one open file. No separate vector store, no separate
+process, no separate bill. When a team changes a memory entry, the
+engine picks up the change on the next session and re-embeds the
+affected entries. Fast and transparent, on your hardware.
 
 ## The vendor route vs the local-first route
 

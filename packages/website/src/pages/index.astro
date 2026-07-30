@@ -193,10 +193,12 @@ const base = import.meta.env.BASE_URL;
         <div class="step-n">02</div>
         <h3 class="step-t">It lives in your database</h3>
         <p class="step-b">Everything else Lore keeps for you — raw conversations,
-          distillations, long-term memory, entities — lives in a local SQLite database
-          with an open schema. Read it with <code class="code-inline">sqlite3</code>, query it,
-          export it, or build your own tools around it. Stop using Lore tomorrow and
-          your data is still there, in an open format.</p>
+          distillations, long-term memory, entities, and the vector embeddings
+          themselves — lives in a local SQLite database with an open schema. The
+          SQLite file is the vector database: no separate store, no separate bill.
+          Read it with <code class="code-inline">sqlite3</code>, query it, export it, or build
+          your own tools around it. Stop using Lore tomorrow and your data is
+          still there, in an open format.</p>
       </div>
       <div class="step sr">
         <div class="step-n">03</div>

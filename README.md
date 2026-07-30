@@ -30,8 +30,9 @@ What you actually own is two things, both open, both yours:
   human-readable Markdown at the root of your repo. The diff shows up next to
   the code change it covers.
 - **A local SQLite database** at `~/.local/share/lore/lore.db` with an open
-  schema. Raw conversations, distillations, long-term memory, entities — all
-  queryable with `sqlite3`, exportable, yours to read with or without Lore.
+  schema. Raw conversations, distillations, long-term memory, entities, and
+  the vector embeddings — all in one file, queryable with `sqlite3`,
+  exportable, yours to read with or without Lore.
 
 The engine itself is fair source (FSL-1.1-Apache-2.0) and runs locally.
 When you're ready to share with a team, sync is end-to-end encrypted, scoped
