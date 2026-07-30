@@ -6,6 +6,7 @@ import {
   generateAssetsEagerly,
 } from "./integrations/favicon-assets";
 import prefixBaseLinks from "./integrations/prefix-base-links.mjs";
+import mermaidRenderer from "./integrations/mermaid-renderer.mjs";
 import { publicationUri } from "./src/lib/standard-site";
 
 const prNumber = process.env.PR_NUMBER;
@@ -55,6 +56,10 @@ export default defineConfig({
     // (`/_preview/pr-<n>/`). No-op in production. Covers markdown body,
     // frontmatter hero links, and component links. See prefix-base-links.mjs.
     prefixBaseLinks(),
+    // Bundles the Mermaid renderer into every page so fenced ```mermaid
+    // blocks render on the blog AND the docs (the previous CDN script
+    // was scoped to Starlight pages only). See mermaid-renderer.mjs.
+    mermaidRenderer(),
     faviconAssets(),
     starlight({
       title: "Lore",
@@ -251,42 +256,10 @@ export default defineConfig({
             content: "@withLoreAI",
           },
         },
-        // Mermaid (architecture diagrams). Loaded from jsdelivr ESM build
-        // and rendered client-side. Starlight's expressive-code wraps
-        // fenced code blocks in styled <div>s without preserving line
-        // breaks in textContent, so we extract the source per-line from
-        // the .ec-line divs and call mermaid.render() directly. Mermaid's
-        // "neutral" theme is a safe default for both light and dark
-        // Starlight themes; theme-aware switching (reading
-        // document.documentElement.dataset.theme) is a follow-up. The
-        // version is pinned to an exact release for reproducible diagram
-        // output; SRI is not used because integrity hashes do not apply to
-        // bare ESM `import` URLs, and the render call already degrades
-        // gracefully to the source text on failure (see the catch below).
-        {
-          tag: "script",
-          attrs: { type: "module" },
-          content: [
-            'import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.esm.min.mjs";',
-            'mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "loose", fontFamily: "var(--sl-font)" });',
-            "const blocks = document.querySelectorAll('pre[data-language=\"mermaid\"]');",
-            "for (const pre of blocks) {",
-            "  const source = Array.from(pre.querySelectorAll('.ec-line')).map((l) => l.textContent).join('\\n');",
-            "  if (!source.trim()) continue;",
-            "  const id = 'mermaid-' + Math.random().toString(36).slice(2, 9);",
-            "  try {",
-            "    const { svg } = await mermaid.render(id, source);",
-            "    const wrap = document.createElement('div');",
-            "    wrap.className = 'mermaid';",
-            "    wrap.innerHTML = svg;",
-            "    pre.replaceWith(wrap);",
-            "  } catch (err) {",
-            "    console.error('Mermaid render failed:', err);",
-            "    pre.textContent = source;",
-            "  }",
-            "}",
-          ].join("\n"),
-        },
+        // Mermaid (architecture diagrams) is rendered by the
+        // `mermaidRenderer` integration, which bundles Mermaid into every
+        // page (including the blog, which the Starlight-scoped CDN script
+        // previously skipped). See ./integrations/mermaid-renderer.mjs.
       ],
     }),
   ],
