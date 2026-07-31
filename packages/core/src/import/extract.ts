@@ -12,6 +12,13 @@ import type { LLMClient } from "../types";
 import type { ConversationChunk } from "./types";
 
 /**
+ * Max length of `lastError` in `ExtractionResult`. Keeps diagnostic output
+ * bounded when a per-chunk throw produces a verbose HTTP body (e.g. an
+ * openrouter 400 with a 5KB JSON response). Truncated errors end with "…".
+ */
+const MAX_ERROR_LENGTH = 400;
+
+/**
  * System prompt for import extraction.
  * Extends the standard curator prompt with guidance for historical conversations.
  */
@@ -75,6 +82,19 @@ export type ExtractionResult = {
    * abortedByAuth means we CHOSE to stop, not that every chunk happened to fail.
    */
   abortedByAuth: boolean;
+  /**
+   * First non-abort error from the loop (the per-chunk try/catch swallows
+   * errors to keep the loop running; the first one is preserved here so the
+   * chain's diagnostic can surface it). undefined when every chunk succeeded
+   * (chunksAnswered === chunks.length) or the loop never started (empty
+   * chunks). Truncated to MAX_ERROR_LENGTH chars to keep diagnostic output
+   * bounded.
+   *
+   * Adm (Slack 2026-07-30) hit this with openrouter — the loop threw on
+   * every chunk but the diagnostic said only "openrouter did not answer"
+   * with zero detail.
+   */
+  lastError?: string;
 };
 
 /**
@@ -115,6 +135,7 @@ export async function extractKnowledge(input: {
     chunksFailed: 0,
     chunksAnswered: 0,
     abortedByAuth: false,
+    lastError: undefined,
   };
 
   if (input.chunks.length === 0) {
@@ -190,8 +211,20 @@ export async function extractKnowledge(input: {
       }
 
       result.chunksProcessed++;
-    } catch {
+    } catch (e) {
       result.chunksFailed++;
+      // Preserve the FIRST error so the chain's "no-response" diagnostic
+      // can surface it. Subsequent identical failures are folded into a
+      // count in the surface message. Truncate to keep diagnostic output
+      // bounded (a 304-chunk import with a verbose HTTP body would otherwise
+      // produce an unreadable error).
+      if (result.lastError === undefined) {
+        const msg = e instanceof Error ? e.message : String(e);
+        result.lastError =
+          msg.length > MAX_ERROR_LENGTH
+            ? msg.slice(0, MAX_ERROR_LENGTH) + "…"
+            : msg;
+      }
     }
 
     input.onProgress?.({

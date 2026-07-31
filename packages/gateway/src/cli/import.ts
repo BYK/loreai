@@ -667,6 +667,17 @@ export function buildAuthFallbackChain(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Truncate a string for inline log display. Used by the chain's diagnostic
+ * to inline per-candidate errors (e.g. "openrouter did not answer (HTTP 400:
+ * model not found) — falling through..."). Keeps log lines single-line and
+ * within a reasonable width even when the underlying error message is huge.
+ */
+function truncateForLog(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen - 1) + "…";
+}
+
 function formatDate(ts: number): string {
   return new Date(ts).toISOString().replace("T", " ").slice(0, 16);
 }
@@ -1456,6 +1467,8 @@ export async function commandImport(
         label: string;
         providerID: string;
         reason: "auth-rejected" | "no-response";
+        /** First per-chunk error from the loop, when no-response. undefined when auth-rejected. */
+        lastError?: string;
       }> = [];
 
       for (let i = 0; i < candidates.length; i++) {
@@ -1542,14 +1555,26 @@ export async function commandImport(
           label,
           providerID: auth.model.providerID,
           reason: attemptResult.abortedByAuth ? "auth-rejected" : "no-response",
+          // Preserve the underlying error so the final diagnostic can
+          // surface it (adm's openrouter silent-fail case, Slack 2026-07-30).
+          // Undefined when abortedByAuth (the upstream already told us why).
+          lastError: attemptResult.lastError,
         });
 
         if (i < candidates.length - 1) {
           const reasonText = attemptResult.abortedByAuth
             ? `rejected the credential`
             : `did not answer`;
+          // Surface the underlying error when known so adm (and similar users)
+          // can diagnose without needing to enable debug logging. The "no-response"
+          // diagnostic alone is opaque — could be auth, network, model-not-found,
+          // rate-limit, or a malformed response.
+          const detail =
+            !attemptResult.abortedByAuth && attemptResult.lastError
+              ? ` (${truncateForLog(attemptResult.lastError, 200)})`
+              : "";
           console.log(
-            `[lore]   ${auth.model.providerID} ${reasonText} — ` +
+            `[lore]   ${auth.model.providerID} ${reasonText}${detail} — ` +
               `falling through to next provider.`,
           );
         }
@@ -1575,9 +1600,20 @@ export async function commandImport(
             : "";
 
         if (allNonAuth) {
+          // Show the underlying error from the first no-response attempt so
+          // the user can diagnose without enabling --debug. The error is
+          // truncated because HTTP bodies can be huge (openrouter 4xx often
+          // returns a JSON blob with full request details).
+          const noResponseEntry = triedProviders.find(
+            (t) => t.reason === "no-response",
+          );
+          const lastError = noResponseEntry?.lastError?.trim() || undefined;
+          const errorDetail = lastError
+            ? `\n[lore] First error: ${truncateForLog(lastError, 300)}`
+            : "";
           console.error(
             `\n[lore] Can't import ${result.agentDisplayName}: tried ${triedList || "all available"} ` +
-              `and none answered (no HTTP 401 — likely transient network/timeout/model issue).\n` +
+              `and none answered (no HTTP 401 — likely transient network/timeout/model issue).${errorDetail}\n` +
               `[lore]\n` +
               `[lore] Re-run \`lore import\` after a moment. If this keeps happening, file an ` +
               `issue with the full output of \`lore import --debug\`.\n`,
