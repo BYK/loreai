@@ -1732,6 +1732,33 @@ function describeEmptyWorkerResponse(rawData: unknown): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Last error from a prompt() call that returned null. The LLMClient interface
+ * is `prompt(): string | null` — the null is opaque to callers. To preserve
+ * the interface while still surfacing the underlying error in the chain's
+ * diagnostic, we record the LAST non-empty error here and expose it via
+ * `getLastWorkerError()`. Reset at the START of every prompt() call.
+ *
+ * Single-threaded CLI assumption: the import command is sequential, so the
+ * "last" writer is also the "only" writer per chain run.
+ *
+ * The chain's diagnostic reads this AFTER the loop (after every prompt call
+ * has returned). If the loop produces 0 created/0 updated (every call returned
+ * null) and lastError is set, the user sees a concrete reason instead of
+ * the opaque "did not answer".
+ */
+let lastWorkerError: string | undefined;
+
+/** Read the last recorded error from a prompt() call that returned null. */
+export function getLastWorkerError(): string | undefined {
+  return lastWorkerError;
+}
+
+/** Test/utility hook — reset state between explicit runs. */
+export function _clearLastWorkerError(): void {
+  lastWorkerError = undefined;
+}
+
+/**
  * Create an LLMClient that sends single-turn prompts to the appropriate provider.
  *
  * Routes to Anthropic Messages API or OpenAI Chat Completions API based on
@@ -1757,6 +1784,10 @@ export function createGatewayLLMClient(
   const factoryVertexProject = opts?.vertexProject;
   return {
     async prompt(system, user, opts) {
+      // Reset at the START of every call so callers see only the last
+      // non-thrown failure from THIS call, not a stale one from a prior
+      // successful or different-failure call.
+      lastWorkerError = undefined;
       // `model` is mutable: on a 400 model-not-supported the retry loop swaps
       // in a same-provider backup (workerModelCandidates). Backups never change
       // provider, so target/protocol/credential stay valid — only the body's
@@ -2206,6 +2237,7 @@ export function createGatewayLLMClient(
                     code: 2,
                     message: "embedded error exhausted retries",
                   });
+                  lastWorkerError = `HTTP 200 with embedded error code ${bodyErrCode} exhausted retries`;
                   recordWorkerFailure(
                     opts?.sessionID ?? "_unknown",
                     opts?.workerID ?? "unknown",
@@ -2253,6 +2285,7 @@ export function createGatewayLLMClient(
                     opts?.workerID ?? "unknown",
                     "data-policy",
                   );
+                  lastWorkerError = `HTTP 200/404: data policy blocked — ${model.providerID}/${model.modelID} unavailable (account has not opted in)`;
                   return null;
                 }
 
@@ -2430,6 +2463,7 @@ export function createGatewayLLMClient(
                     opts?.workerID ?? "unknown",
                     "worker-incapable",
                   );
+                  lastWorkerError = `worker incapable: ${model.providerID}/${model.modelID} produced no usable text`;
                   return null;
                 }
 
@@ -2443,6 +2477,7 @@ export function createGatewayLLMClient(
                   opts?.workerID ?? "unknown",
                   "no-response",
                 );
+                lastWorkerError = `${model.providerID}/${model.modelID}: no usable text in response (finish=${finishReason ?? "n/a"})`;
                 return null;
               }
 
@@ -2576,6 +2611,7 @@ export function createGatewayLLMClient(
                   code: 2,
                   message: `HTTP ${response.status} credit`,
                 });
+                lastWorkerError = `HTTP ${response.status}: insufficient credit — add credits to your account or switch providers`;
                 return null;
               }
 
@@ -2902,6 +2938,10 @@ export function createGatewayLLMClient(
                 opts?.workerID ?? "unknown",
                 response.status === 429 ? "rate-limit" : "upstream-error",
               );
+              // Surface the final HTTP status + the sample of the body to the
+              // chain's diagnostic so the user sees WHY (e.g. "HTTP 400:
+              // model not found") instead of the opaque "did not answer".
+              lastWorkerError = `HTTP ${response.status}: ${response.statusText}`;
               return null;
             }
           },
@@ -2912,8 +2952,14 @@ export function createGatewayLLMClient(
         const isAbort = e instanceof DOMException && e.name === "AbortError";
         if (isAbort) {
           log.info("worker prompt aborted (client disconnect or shutdown)");
+          lastWorkerError = "client disconnect or shutdown";
         } else {
           log.error("worker prompt failed:", e);
+          // Surface the actual exception so the chain's diagnostic tells the
+          // user whether it's a network failure, timeout, or upstream 5xx —
+          // not just the opaque "did not answer". Adm hit this in Slack on
+          // 2026-07-30 with openrouter returning null with zero detail.
+          lastWorkerError = e instanceof Error ? e.message : String(e);
         }
         // Network/timeout error — no response was received. Record here so the
         // adapter remains the single owner of transport-failure attribution
