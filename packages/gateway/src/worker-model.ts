@@ -1092,8 +1092,33 @@ export function defaultModelForProvider(providerID?: string): {
 /**
  * Like `defaultModelForProvider` but also resolves a selectable model id for
  * providers that have no `WORKER_DEFAULTS` entry (openrouter, deepseek, groq,
- * opencode, …). Returns the cheapest selectable model id from the cached
- * models.dev snapshot that passes `isSelectableWorkerModel`.
+ * opencode, …). Returns the cheapest *reliably-usable* selectable model id from
+ * the cached models.dev snapshot that passes `isSelectableWorkerModel`.
+ *
+ * "Reliably usable" excludes two classes of model that make bad UNPROMPTED
+ * defaults (the user has NOT picked a model — we're guessing one):
+ *
+ *   1. `:free` tiers (e.g. `cohere/north-mini-code:free`). On aggregators like
+ *      OpenRouter the globally-cheapest model is almost always a `:free` model
+ *      priced at $0, but those are gated behind the provider's data-collection
+ *      policy: an account that hasn't opted into prompt logging gets a 404
+ *      ("no endpoints … data policy") on the very first call. As an unprompted
+ *      default that is a near-guaranteed failure, so we skip the whole `:free`
+ *      tier here. NOTE: this is distinct from `isSelectableWorkerModel`'s
+ *      runtime `:free` handling, which correctly never STATICALLY excludes
+ *      `:free` (a session whose model IS `:free` may work fine once opted in).
+ *      Here we're choosing a default, not honoring the user's own model.
+ *   2. Zero-output-cost entries (`cost.output` is 0 or absent). Aggregators
+ *      catalog non-chat models (audio/image/preview, e.g.
+ *      `google/lyria-3-*-preview`) at $0/$0; those aren't text-completion LLMs
+ *      and would 400/404 an extraction request. Real chat models charge for
+ *      output tokens, so a positive output cost is a cheap, data-driven proxy
+ *      for "this is a usable chat model".
+ *
+ * Falls back to the previous behavior (cheapest `isSelectableWorkerModel`
+ * candidate, `:free`/zero-output included) only when NO paid chat model
+ * qualifies, so a provider that genuinely only offers `:free` models is never
+ * regressed to an empty pick.
  *
  * Returns `{providerID, modelID: ""}` when no qualifying model is found —
  * callers should treat empty `modelID` the same as `defaultModelForProvider`'s
@@ -1117,16 +1142,35 @@ export function defaultSelectableModelForProvider(providerID?: string): {
   const providerModelIds = cachedProviderModels?.get(p);
   if (!providerModelIds || !cachedModelData) return base;
 
-  let cheapestId: string | undefined;
-  let cheapestCost = Number.POSITIVE_INFINITY;
+  // Pass 1: cheapest paid chat model (non-`:free`, positive output cost). This
+  // is the preferred default — it avoids the data-policy-404 `:free` trap and
+  // the zero-cost non-chat (audio/image/preview) entries aggregators publish.
+  let bestId: string | undefined;
+  let bestCost = Number.POSITIVE_INFINITY;
+  // Pass-2 fallback (any selectable model, `:free`/zero-output included), used
+  // only when no paid chat model qualifies so we never regress to empty.
+  let fallbackId: string | undefined;
+  let fallbackCost = Number.POSITIVE_INFINITY;
   for (const modelId of providerModelIds) {
     const entry = cachedModelData.get(modelId);
     if (entry?.cost?.input == null) continue;
-    if (entry.cost.input >= cheapestCost) continue;
     if (!isSelectableWorkerModel(p, modelId)) continue;
-    cheapestCost = entry.cost.input;
-    cheapestId = modelId;
+
+    if (entry.cost.input < fallbackCost) {
+      fallbackCost = entry.cost.input;
+      fallbackId = modelId;
+    }
+
+    // A reliably-usable default: not a `:free` tier, and priced for output
+    // (real chat models charge for output tokens).
+    const usableDefault =
+      !modelId.endsWith(":free") && (entry.cost.output ?? 0) > 0;
+    if (usableDefault && entry.cost.input < bestCost) {
+      bestCost = entry.cost.input;
+      bestId = modelId;
+    }
   }
+  const cheapestId = bestId ?? fallbackId;
   if (cheapestId) return { providerID: p, modelID: cheapestId };
   return base;
 }
