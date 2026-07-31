@@ -41,6 +41,7 @@ vi.mock("../src/cli/start", () => ({
 // "first candidate 401s, second succeeds" sequence without real network.
 const llmClientCalls: unknown[][] = [];
 let promptBehavior: () => Promise<string | null> = async () => "[]";
+let promptThrowsWith: Error | null = null;
 let promptCalls = 0;
 vi.mock("../src/llm-adapter", () => ({
   createGatewayLLMClient: (...args: unknown[]) => {
@@ -48,6 +49,7 @@ vi.mock("../src/llm-adapter", () => ({
     return {
       prompt: vi.fn(async () => {
         promptCalls++;
+        if (promptThrowsWith) throw promptThrowsWith;
         return promptBehavior();
       }),
     };
@@ -161,6 +163,7 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     logs.length = 0;
     errs.length = 0;
     llmClientCalls.length = 0;
+    promptThrowsWith = null;
     promptCalls = 0;
     logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
       logs.push(a.join(" "));
@@ -729,6 +732,91 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     expect(out()).toContain("transient network/timeout/model issue");
     expect(out()).not.toContain("export LORE_WORKER_API_KEY");
     expect(out()).not.toContain("opencode auth login");
+  });
+
+  test("per-candidate 'did not answer' surfaces the underlying error inline", async () => {
+    // The "did not answer" message should include the underlying error
+    // (from ExtractionResult.lastError) when known, so the user can diagnose
+    // without enabling --debug. Adm's openrouter case (Slack 2026-07-30)
+    // had this happen silently before this PR.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-ant-valid",
+          providerID: "anthropic",
+        },
+        {
+          scheme: "api-key",
+          value: "sk-or-valid",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    // anthropic returns null (no auth-rejected probe fires → "did not
+    // answer"); openrouter also throws so the chain's final diagnostic
+    // mentions both.
+    promptBehavior = async () => null;
+    promptThrowsWith = new Error("HTTP 429: rate limit exceeded");
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // First candidate prints its own "did not answer" line + falls through.
+    expect(info()).toContain("anthropic did not answer");
+    // The first candidate's per-line message includes the underlying error.
+    expect(info()).toContain("HTTP 429");
+    // Both candidates tried → final diagnostic surfaces the first error.
+    expect(out()).toContain("First error:");
+    expect(out()).toContain("HTTP 429");
+
+    promptThrowsWith = null;
+  });
+
+  test("per-chunk throw is surfaced in 'did not answer' diagnostic (adm's openrouter case)", async () => {
+    // Regression test for adm (Slack 2026-07-30): his openrouter cred threw
+    // on every chunk (no 401, just a silent error), the chain printed only
+    // "openrouter did not answer" with zero detail, and he had no way to
+    // diagnose without --debug. After this PR, the first error is captured
+    // in ExtractionResult.lastError and surfaced in the final combined
+    // diagnostic ("First error: <actual error>").
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-or-live",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    // openrouter has no WORKER_DEFAULTS entry — must set a model to route
+    // through it. Use the session model id from adm's case.
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    // Every prompt throws a realistic error — mimics what would happen when
+    // openrouter returns a 4xx with a JSON body, or the upstream times out.
+    promptBehavior = async () => null;
+    promptThrowsWith = new Error("HTTP 400: model 'gpt-5.6-luna' not found");
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // Only 1 candidate (openrouter) → no per-candidate "did not answer" line
+    // printed (it's only emitted when there are more candidates to fall
+    // through to). The FIRST error surfaces in the final combined diagnostic.
+    expect(out()).toContain("Can't import");
+    expect(out()).toContain("First error:");
+    expect(out()).toContain("HTTP 400");
+    expect(out()).toContain("model 'gpt-5.6-luna' not found");
+    // The error is truncated to fit on one line (HTTP bodies can be huge).
+    // Resets so subsequent tests don't throw.
+    promptThrowsWith = null;
   });
 
   test("tier-4 last-seen session credential for defaultless provider → needsModel signal (workerApiKey unset)", async () => {
