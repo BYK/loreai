@@ -390,12 +390,18 @@ function parseRecallInput(block: GatewayToolUseBlock): {
  *
  * Wraps `runRecall()` with error handling — on failure returns a
  * user-friendly error string rather than throwing.
+ *
+ * `alreadyInLtmIds` is forwarded to `runRecall` to surface a hint when the
+ * model's recall hits overlap with entries already in its LTM context (system
+ * catalog + knowledge-delta pair). Prevents silent 3-token agent loop exits
+ * when a query's hits are entirely redundant.
  */
 export async function executeRecall(
   block: GatewayToolUseBlock,
   projectPath: string,
   sessionID: string,
   llm?: LLMClient,
+  alreadyInLtmIds?: ReadonlySet<string>,
 ): Promise<{
   result: string;
   input: { query: string; scope?: RecallScope; id?: string };
@@ -415,6 +421,7 @@ export async function executeRecall(
       searchConfig: cfg.search,
       // Genuine agent recall — record cross-project transfer metrics (#506).
       recordTransfers: true,
+      ...(alreadyInLtmIds ? { alreadyInLtmIds } : {}),
     });
 
     return { result, input: { query, scope, id } };
