@@ -19,7 +19,7 @@ import {
 } from "@loreai/core";
 type DetectionResult =
   import("@loreai/core").conversationImport.DetectionResult;
-import { createGatewayLLMClient } from "../llm-adapter";
+import { createGatewayLLMClient, getLastWorkerError } from "../llm-adapter";
 import {
   resolveAuth,
   workerKeyScheme,
@@ -1453,7 +1453,10 @@ export async function commandImport(
         label: string;
         providerID: string;
         reason: "auth-rejected" | "no-response";
-        /** First per-chunk error from the loop, when no-response. undefined when auth-rejected. */
+        /** First per-chunk error from the loop or the LLM client, when
+         * no-response. undefined when auth-rejected. Source: the
+         * per-chunk try/catch (throw case) OR the LLM adapter's
+         * getLastWorkerError() (return-null case — most common). */
         lastError?: string;
       }> = [];
 
@@ -1537,6 +1540,14 @@ export async function commandImport(
         // diagnose the right thing. Only the auth-rejected case is
         // actionable for credential rotation; other failures might be
         // transient and resolve on the next attempt.
+        // For no-response, prefer the LLM adapter's getLastWorkerError() —
+        // it captures the actual error from every return-null path
+        // (4xx non-2xx, data-policy block, credit, retry exhausted, etc.)
+        // that the per-chunk try/catch in extract.ts doesn't see. Fall
+        // back to attemptResult.lastError for the throw case (PR #1541).
+        const noResponseErr = !attemptResult.abortedByAuth
+          ? (getLastWorkerError() ?? attemptResult.lastError)
+          : undefined;
         triedProviders.push({
           label,
           providerID: auth.model.providerID,
@@ -1544,7 +1555,9 @@ export async function commandImport(
           // Preserve the underlying error so the final diagnostic can
           // surface it (adm's openrouter silent-fail case, Slack 2026-07-30).
           // Undefined when abortedByAuth (the upstream already told us why).
-          lastError: attemptResult.lastError,
+          // Source: the per-chunk try/catch (PR #1541, throw case) OR
+          // the LLM adapter's getLastWorkerError() (return-null case).
+          lastError: noResponseErr,
         });
 
         if (i < candidates.length - 1) {
@@ -1554,11 +1567,11 @@ export async function commandImport(
           // Surface the underlying error when known so adm (and similar users)
           // can diagnose without needing to enable debug logging. The "no-response"
           // diagnostic alone is opaque — could be auth, network, model-not-found,
-          // rate-limit, or a malformed response.
-          const detail =
-            !attemptResult.abortedByAuth && attemptResult.lastError
-              ? ` (${truncateForLog(attemptResult.lastError, 200)})`
-              : "";
+          // rate-limit, or a malformed response. Source: per-chunk catch
+          // (PR #1541) OR the LLM adapter's getLastWorkerError() (this PR).
+          const detail = noResponseErr
+            ? ` (${truncateForLog(noResponseErr, 200)})`
+            : "";
           console.log(
             `[lore]   ${auth.model.providerID} ${reasonText}${detail} — ` +
               `falling through to next provider.`,

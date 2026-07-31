@@ -42,6 +42,7 @@ vi.mock("../src/cli/start", () => ({
 const llmClientCalls: unknown[][] = [];
 let promptBehavior: () => Promise<string | null> = async () => "[]";
 let promptThrowsWith: Error | null = null;
+let lastWorkerErrorForMock: string | undefined;
 let promptCalls = 0;
 vi.mock("../src/llm-adapter", () => ({
   createGatewayLLMClient: (...args: unknown[]) => {
@@ -49,11 +50,25 @@ vi.mock("../src/llm-adapter", () => ({
     return {
       prompt: vi.fn(async () => {
         promptCalls++;
-        if (promptThrowsWith) throw promptThrowsWith;
+        if (promptThrowsWith) {
+          // The real adapter sets lastWorkerError from the exception message
+          // before re-throwing. Mirror that here so the chain's diagnostic
+          // can surface the error in tests.
+          lastWorkerErrorForMock =
+            promptThrowsWith instanceof Error
+              ? promptThrowsWith.message
+              : String(promptThrowsWith);
+          throw promptThrowsWith;
+        }
         return promptBehavior();
       }),
     };
   },
+  // getLastWorkerError is read by the chain's diagnostic to surface the
+  // underlying error (HTTP status, model-not-found, etc.) when every
+  // prompt() call returns null. The test's promptBehavior mutates this
+  // mock variable directly to simulate the real adapter's behavior.
+  getLastWorkerError: () => lastWorkerErrorForMock,
 }));
 
 import { commandImport } from "../src/cli/import";
@@ -165,6 +180,7 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     llmClientCalls.length = 0;
     promptThrowsWith = null;
     promptCalls = 0;
+    lastWorkerErrorForMock = undefined;
     logSpy = vi.spyOn(console, "log").mockImplementation((...a) => {
       logs.push(a.join(" "));
     });
@@ -885,5 +901,47 @@ describe("commandImport — auto-fallback on 401 across credential candidates", 
     // equals the number of candidates, NOT chunks.length. (We use a
     // single-chunk fixture so this is also == 2.)
     expect(info()).toContain("2 chunks failed");
+  });
+
+  test("adapter's getLastWorkerError surfaces in 'did not answer' diagnostic (adm's openrouter silent fail)", async () => {
+    // Regression test for adm (Slack 2026-07-30, latest nightly): the LLM
+    // adapter sets `lastWorkerError` whenever prompt() returns null without
+    // throwing (e.g. on a 4xx non-2xx response from openrouter). The chain
+    // reads that via getLastWorkerError() and surfaces it in the per-
+    // candidate "did not answer" line + the final "First error:" line.
+    registerAuthProvider(
+      fakeAuthProvider("opencode-fake", [
+        {
+          scheme: "api-key",
+          value: "sk-or-live",
+          providerID: "openrouter",
+        },
+      ]),
+    );
+    registerProvider(
+      fakeProvider({ name: "opencode-fake", displayName: "OpenCode" }),
+    );
+    process.env.LORE_WORKER_MODEL = "openrouter/anthropic/claude-sonnet-5";
+
+    // promptBehavior returns null (no-response) and the mock adapter-side
+    // lastWorkerError is set to the realistic HTTP body openrouter returns
+    // when a model id isn't in its catalog. This is what the real adapter
+    // does on a 4xx non-2xx response.
+    promptBehavior = async () => {
+      lastWorkerErrorForMock =
+        "HTTP 400: model 'anthropic/claude-sonnet-5' not found in openrouter catalog";
+      return null;
+    };
+
+    await commandImport([], { project, agent: "opencode-fake", yes: true });
+
+    // Only 1 candidate (openrouter) → no per-candidate "did not answer"
+    // line printed (it's only emitted when there are more candidates to
+    // fall through to). The FIRST error surfaces in the final combined
+    // diagnostic.
+    expect(out()).toContain("Can't import");
+    expect(out()).toContain("First error:");
+    expect(out()).toContain("HTTP 400");
+    expect(out()).toContain("not found in openrouter catalog");
   });
 });
