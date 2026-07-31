@@ -1,4 +1,81 @@
 # Changelog
+## 0.40.0
+
+### New Features ✨
+
+#### Gateway
+
+- Delta apply bar shows percentage only (no GB scare) by @BYK in [#1519](https://github.com/BYK/loreai/pull/1519)
+- OAuth scopes bump, provider_token cache, hybrid OAuth, git-remote auto-detect by @BYK in [#1510](https://github.com/BYK/loreai/pull/1510)
+
+#### Provenance
+
+- D2c PR-2 — knowledge_file_refs sidecar + curator files-touched context + recall ↳ files: rendering by @BYK in [#1509](https://github.com/BYK/loreai/pull/1509)
+- Widen tool_calls.input_path to input_paths_json (bash-extracted) by @BYK in [#1504](https://github.com/BYK/loreai/pull/1504)
+
+#### Other
+
+- (discover --invite) Server-side mint+email in one round trip by @BYK in [#1532](https://github.com/BYK/loreai/pull/1532)
+- (invite-email) Server-side recipient resolution for bare invites by @BYK in [#1531](https://github.com/BYK/loreai/pull/1531)
+- (recall) Surface LTM-overlap hint when recall hits are already in context by @BYK in [#1547](https://github.com/BYK/loreai/pull/1547)
+- (supabase) Wire edge functions into Sentry (#1507) by @BYK in [#1516](https://github.com/BYK/loreai/pull/1516)
+
+### Bug Fixes 🐛
+
+#### Gateway
+
+- Use /contributors in discover; intuitive invite from linked cwd by @BYK in [#1527](https://github.com/BYK/loreai/pull/1527)
+- Drop throw in forcedExit — race against SIGKILL produces uncaught exception by @BYK in [#1521](https://github.com/BYK/loreai/pull/1521)
+- Skip NAPI teardown on forced shutdown to stop SIGABRT on Node SEA by @BYK in [#1520](https://github.com/BYK/loreai/pull/1520)
+- Drop injection-signature imperatives from knowledge-delta framing by @BYK in [#1514](https://github.com/BYK/loreai/pull/1514)
+- Paste-path TTL cap + githubOwnerRepo comment by @BYK in [#1512](https://github.com/BYK/loreai/pull/1512)
+- Split recall marker envelope for Anthropic-native clients by @BYK in [#1505](https://github.com/BYK/loreai/pull/1505)
+
+#### Import
+
+- Tone down auth-rejected log to warn + truncate body by @BYK in [#1548](https://github.com/BYK/loreai/pull/1548)
+- Re-run oxfmt on worker-model.test.ts to unblock nightly by @BYK in [#1546](https://github.com/BYK/loreai/pull/1546)
+- Skip :free/non-chat models when picking a default worker model by @MathurAditya724 in [#1545](https://github.com/BYK/loreai/pull/1545)
+- Use response body for lastWorkerError + don't overwrite in catch (Seer 15617969/0,15617969/1) by @BYK in [#1544](https://github.com/BYK/loreai/pull/1544)
+- Surface LLM adapter's lastWorkerError in chain diagnostic by @BYK in [#1542](https://github.com/BYK/loreai/pull/1542)
+- Surface per-chunk error in chain diagnostic by @BYK in [#1541](https://github.com/BYK/loreai/pull/1541)
+- Narrow cross-provider routing to OPENAI_COMPATIBLE_AGGREGATORS only by @BYK in [#1540](https://github.com/BYK/loreai/pull/1540)
+- Route cfgModel through OpenAI-compat aggregators by @BYK in [#1539](https://github.com/BYK/loreai/pull/1539)
+- Warm models.dev cache before buildAuthFallbackChain by @BYK in [#1538](https://github.com/BYK/loreai/pull/1538)
+- Per-credential default model lookup (adm's openrouter skip) by @BYK in [#1536](https://github.com/BYK/loreai/pull/1536)
+- Include OPENROUTER_API_KEY in shell env-vars remediation hint by @BYK in [#1535](https://github.com/BYK/loreai/pull/1535)
+- Tier-4 needsModel guard + totalFailed count accuracy (Seer 15586978) by @BYK in [#1534](https://github.com/BYK/loreai/pull/1534)
+- Auto-fallback to next auth provider on 401; prefer opencode.json active provider by @BYK in [#1533](https://github.com/BYK/loreai/pull/1533)
+- Pass sinceMs to api.ts auth probe (Seer HIGH-severity) by @BYK in [#1526](https://github.com/BYK/loreai/pull/1526)
+- Stop 401-storming on broken credentials + honor OpenCode's active provider by @BYK in [#1525](https://github.com/BYK/loreai/pull/1525)
+
+#### Other
+
+- (cache) Persist provider_token in 'lore login'; don't clear cache on transient setSession error by @BYK in [#1530](https://github.com/BYK/loreai/pull/1530)
+- (ci) Stop docs preview failing on non-website PRs by @BYK in [#1523](https://github.com/BYK/loreai/pull/1523)
+- (discover) Handle 204 empty response from /contributors (#1527 follow-up) by @BYK in [#1529](https://github.com/BYK/loreai/pull/1529)
+- (supabase) Flush Sentry events + normalize PostgrestError (#1516 follow-up) by @BYK in [#1518](https://github.com/BYK/loreai/pull/1518)
+- (upgrade) Actually pass pct to apply progress bar (#1519 follow-up) by @BYK in [#1522](https://github.com/BYK/loreai/pull/1522)
+
+### Documentation 📚
+
+- (gateway) Fix LORE_FORCED_EXIT_SENTINEL typo in forcedExit comment by @BYK in [#1524](https://github.com/BYK/loreai/pull/1524)
+- (readme) Simplify to point at docs site by @BYK in [#1506](https://github.com/BYK/loreai/pull/1506)
+- (website) Position Lore as infrastructure, not a plugin by @BYK in [#1528](https://github.com/BYK/loreai/pull/1528)
+
+### Internal Changes 🔧
+
+#### Gateway
+
+- Bump binpatch ^0.1.0 → ^0.3.1 by @BYK in [#1515](https://github.com/BYK/loreai/pull/1515)
+- Cover paste-path provider_token TTL cap by @BYK in [#1513](https://github.com/BYK/loreai/pull/1513)
+
+#### Other
+
+- (docs) Gate preview install/build on website changes by @BYK in [#1517](https://github.com/BYK/loreai/pull/1517)
+- Remove .DS_Store by @BYK in [#1537](https://github.com/BYK/loreai/pull/1537)
+- Bump lint timeout to 25 min for gpt-5-mini cold-start by @BYK in [#1501](https://github.com/BYK/loreai/pull/1501)
+
 ## 0.39.0
 
 ### New Features ✨
