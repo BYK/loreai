@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
-      models: read
+      copilot-requests: write
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -68,9 +68,11 @@ jobs:
           --concurrency 1
           ${{ inputs.baselines && format('--baselines {0}', inputs.baselines) || '' }}
         env:
-          # Use ANTHROPIC_API_KEY if available, fall back to GH Models PAT
+          # Use ANTHROPIC_API_KEY if available, fall back to the workflow's
+          # built-in GITHUB_TOKEN (which authenticates to GitHub Copilot under
+          # the `copilot-requests: write` permission below).
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -95,7 +97,7 @@ jobs:
     timeout-minutes: 120
     continue-on-error: true
     permissions:
-      models: read
+      copilot-requests: write
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -119,7 +121,7 @@ jobs:
           --concurrency 1
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_MODELS_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v7
         if: always()

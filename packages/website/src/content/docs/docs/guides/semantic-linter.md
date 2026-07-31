@@ -23,7 +23,7 @@ It is **not** a replacement for tests, type checking, or a linter. It has no gro
 
 ## Quick start (GitHub Actions)
 
-The repository ships a reusable composite action and a reference workflow. The zero-secret path uses [GitHub Models](https://models.github.ai) via the built-in `GITHUB_TOKEN`, so there is nothing to configure on a public or GitHub-Models-enabled repo.
+The repository ships a reusable composite action and a reference workflow. The zero-secret path uses [GitHub Copilot](https://docs.github.com/en/copilot) via the built-in `GITHUB_TOKEN`, so there is nothing to configure on a repo with Copilot access — just grant the `copilot-requests: write` workflow permission and the token authenticates to `api.githubcopilot.com` directly as a Bearer credential.
 
 Add `.github/workflows/semantic-linter.yml`:
 
@@ -41,7 +41,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
-  models: read # lets GITHUB_TOKEN call GitHub Models as the default judge
+  copilot-requests: write # lets GITHUB_TOKEN call GitHub Copilot as the default judge
 
 jobs:
   lint:
@@ -62,7 +62,7 @@ jobs:
         uses: ./.github/actions/lint
         with:
           lore-command: "node packages/gateway/dist/bin.cjs"
-          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-models/openai/gpt-5-mini' || '') }}
+          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5-mini' || '') }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}
 ```
 
@@ -78,7 +78,7 @@ The credential and the model are chosen independently.
 
 **Credential** (the `worker-api-key` input):
 
-- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `models: read`, calling GitHub Models. The free tier is rate-limited (~150 requests/day), which is fine for low-traffic repos. On fork PRs the token is read-only and may lack model inference, in which case the judge no-ops (advisory, still passes) rather than breaking CI.
+- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `copilot-requests: write`, calling GitHub Copilot. The token is sent as a Bearer credential to `api.githubcopilot.com/chat/completions` — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; the judge then no-ops (advisory → still passes) rather than breaking CI.
 - **Dedicated key (busy repos).** Set a `LORE_WORKER_API_KEY` secret. It takes precedence over the token.
 
 **Model** (the `model` input, `provider/id`):
@@ -86,11 +86,11 @@ The credential and the model are chosen independently.
 | Situation | Model used |
 | --- | --- |
 | `LORE_INVARIANT_MODEL` repo variable is set | that value (with either credential) |
-| No dedicated key, no variable | `github-models/openai/gpt-5-mini` |
+| No dedicated key, no variable | `github-copilot/gpt-5-mini` |
 | Dedicated key, no variable | your repo's configured default worker model |
 
 :::note
-The model id must match the credential. A GitHub token needs a `github-models/...` id (sent as a Bearer token to models.github.ai); pairing a dedicated Anthropic key with a forced `github-models` id would 401 and silently no-op. The precedence table above avoids that trap: leave `model` empty when using a dedicated key unless you set `LORE_INVARIANT_MODEL`.
+The model id must match the credential. A GitHub token needs a `github-copilot/...` id (sent as a Bearer token to `api.githubcopilot.com`); pairing a dedicated Anthropic key with a forced `github-copilot` id would 401 and silently no-op. The precedence table above avoids that trap: leave `model` empty when using a dedicated key unless you set `LORE_INVARIANT_MODEL`.
 :::
 
 ## How it works

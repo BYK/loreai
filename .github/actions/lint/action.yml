@@ -17,14 +17,14 @@ inputs:
     default: ""
   model:
     description: >-
-      Judge model (provider/id). Defaults to `github-models/openai/gpt-5-mini`
-      when the workflow uses the zero-secret GitHub Models path (the default).
+      Judge model (provider/id). Defaults to `github-copilot/gpt-5-mini` when
+      the workflow uses the zero-secret GitHub Copilot path (the default).
       In that case the CLI authenticates with the `github.token` built-in, no
       additional configuration needed. The reference workflow's model-precedence
       table still lets `LORE_INVARIANT_MODEL` (repo var) or a dedicated
       `LORE_WORKER_API_KEY` override this.
     required: false
-    default: "github-models/openai/gpt-5-mini"
+    default: "github-copilot/gpt-5-mini"
   effort:
     description: >-
       Reasoning effort for the judge (off|low|medium|high|xhigh). A cost/depth
@@ -37,8 +37,8 @@ inputs:
       Judge credential (sets LORE_WORKER_API_KEY). In CI the gateway has no
       client session to borrow auth from, so a credential is required to run the
       judge. The reference workflow defaults this to the built-in GITHUB_TOKEN
-      and uses GitHub Models (models.github.ai) with `github-models/...` model
-      ids — zero-secret onboarding — or a dedicated provider key when set.
+      and uses GitHub Copilot (api.githubcopilot.com) with `github-copilot/...`
+      model ids — zero-secret onboarding — or a dedicated provider key when set.
     required: false
     default: ""
   lore-command:

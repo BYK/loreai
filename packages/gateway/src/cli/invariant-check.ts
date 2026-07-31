@@ -127,7 +127,7 @@ export async function commandInvariantCheck(
   // null and every judge call is skipped as "no-auth". Honor LORE_WORKER_API_KEY
   // (the GHA sets it to the judge credential) the same way the pipeline's
   // getWorkerAuth does. Scheme is provider-aware via the shared workerKeyScheme:
-  // GitHub Models needs the key as `Authorization: Bearer`; every other provider
+  // GitHub Copilot needs the key as `Authorization: Bearer`; every other provider
   // uses api-key (x-api-key). Resolve per call on the worker model's provider,
   // falling back to the judge's default provider.
   const workerKey = config.workerApiKey;
