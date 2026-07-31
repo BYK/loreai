@@ -2542,13 +2542,30 @@ export function createGatewayLLMClient(
                   continue;
                 }
 
-                // No fresh credential or retry also failed — alert and bail
-                log.error(
+                // No fresh credential or retry also failed — bail.
+                //
+                // log.warn (not log.error) because 401/403 is expected,
+                // user-actionable state, NOT an outage. Adm hit this in
+                // Slack on 2026-07-30 with stale on-disk auth.json keys
+                // — that's a config issue, not a gateway failure. The
+                // chain's diagnostic already surfaces the actual HTTP
+                // status to the user via getLastWorkerError() (PR
+                // #1542/#1544); we don't need log.error to also scream.
+                //
+                // Truncate the response body (200 chars) — openrouter
+                // returns multi-KB JSON error blobs that produce
+                // unreadable log lines and bloat log files. The Sentry
+                // capture below keeps the truncated body for debugging
+                // but only the structured fields (status, model, etc.)
+                // are searchable.
+                const bodySample =
+                  text.length > 200 ? text.slice(0, 199) + "…" : text;
+                log.warn(
                   `worker upstream auth error: ${response.status} ${response.statusText}` +
                     ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
                     ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
                     ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
-                    ` — ${text}`,
+                    ` — ${bodySample}`,
                 );
                 Sentry.captureException(
                   new Error(
@@ -2567,6 +2584,7 @@ export function createGatewayLLMClient(
                       sessionID: opts?.sessionID?.slice(0, 16),
                       credentialChanged,
                       freshCredAvailable: !!freshCred,
+                      bodySample,
                     },
                   },
                 );
