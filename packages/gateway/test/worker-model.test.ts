@@ -2701,7 +2701,10 @@ describe("defaultSelectableModelForProvider", () => {
           cost: { input: 5, output: 15 },
         },
         "vendor/mid": { id: "vendor/mid", cost: { input: 1, output: 3 } },
-        "vendor/cheap": { id: "vendor/cheap", cost: { input: 0.1, output: 0.3 } },
+        "vendor/cheap": {
+          id: "vendor/cheap",
+          cost: { input: 0.1, output: 0.3 },
+        },
       },
       undefined,
       {
