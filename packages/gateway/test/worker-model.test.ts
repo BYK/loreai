@@ -20,6 +20,7 @@ import {
   resetWorkerModelState,
   clearModelDataCache,
   lookupProviderRoute,
+  defaultSelectableModelForProvider,
   _setModelDataForTest,
   type ModelsDevEntry,
 } from "../src/worker-model";
@@ -2590,5 +2591,148 @@ describe("provider-qualified pricing (getModelEntrySyncForProvider)", () => {
         "deepseek/deepseek-v4-flash",
       ).cost?.cache_read,
     ).toBe(0.0028);
+  });
+});
+
+describe("defaultSelectableModelForProvider", () => {
+  beforeEach(() => {
+    clearModelDataCache();
+    resetWorkerHealth();
+  });
+
+  afterEach(() => {
+    clearModelDataCache();
+    resetWorkerHealth();
+  });
+
+  test("providers WITH a WORKER_DEFAULTS entry keep their validated default", () => {
+    // anthropic has a WORKER_DEFAULTS entry — never touched by the
+    // cheapest-selectable scan (returns the offline family fallback).
+    expect(defaultSelectableModelForProvider("anthropic")).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-5",
+    });
+  });
+
+  test("cold cache (no models.dev data) returns the empty base signal", () => {
+    // No snapshot loaded → nothing to scan → empty modelID so the caller
+    // treats it the same as defaultModelForProvider (skip the candidate).
+    expect(defaultSelectableModelForProvider("openrouter")).toEqual({
+      providerID: "openrouter",
+      modelID: "",
+    });
+  });
+
+  test("skips :free tiers even when they are the globally cheapest (adm's data-policy 404)", () => {
+    // Regression for adm's `lore import` failure (Slack 2026-07-30): a fresh
+    // import process has no session model, so the openrouter credential falls
+    // to defaultSelectableModelForProvider. The globally-cheapest openrouter
+    // model is a `:free` tier ($0) that 404s with "data policy — account has
+    // not opted in". We must skip the whole `:free` tier and pick the cheapest
+    // PAID chat model instead, so the working openrouter key actually imports.
+    _setModelDataForTest(
+      {
+        "cohere/north-mini-code:free": {
+          id: "cohere/north-mini-code:free",
+          cost: { input: 0, output: 0 },
+        },
+        "mistralai/mistral-nemo": {
+          id: "mistralai/mistral-nemo",
+          cost: { input: 0.019, output: 0.03 },
+        },
+        "anthropic/claude-sonnet-5": {
+          id: "anthropic/claude-sonnet-5",
+          cost: { input: 2, output: 10 },
+        },
+      },
+      undefined,
+      {
+        openrouter: [
+          "cohere/north-mini-code:free",
+          "mistralai/mistral-nemo",
+          "anthropic/claude-sonnet-5",
+        ],
+      },
+    );
+
+    expect(defaultSelectableModelForProvider("openrouter")).toEqual({
+      providerID: "openrouter",
+      modelID: "mistralai/mistral-nemo",
+    });
+  });
+
+  test("skips zero-output (non-chat audio/preview) entries priced at $0", () => {
+    // Aggregators catalog non-chat models (audio/image/preview) at $0/$0 —
+    // e.g. google/lyria-3-*-preview. Those aren't text-completion LLMs and
+    // would 400/404 an extraction request. A positive OUTPUT cost is the
+    // data-driven proxy for "usable chat model", so the cheaper-by-input
+    // zero-output entry must be skipped in favor of the priced chat model.
+    _setModelDataForTest(
+      {
+        "google/lyria-3-pro-preview": {
+          id: "google/lyria-3-pro-preview",
+          cost: { input: 0, output: 0 },
+        },
+        "inclusionai/ling-2.6-flash": {
+          id: "inclusionai/ling-2.6-flash",
+          cost: { input: 0.01, output: 0.03 },
+        },
+      },
+      undefined,
+      {
+        openrouter: [
+          "google/lyria-3-pro-preview",
+          "inclusionai/ling-2.6-flash",
+        ],
+      },
+    );
+
+    expect(defaultSelectableModelForProvider("openrouter")).toEqual({
+      providerID: "openrouter",
+      modelID: "inclusionai/ling-2.6-flash",
+    });
+  });
+
+  test("picks the cheapest among multiple paid chat models", () => {
+    _setModelDataForTest(
+      {
+        "vendor/expensive": {
+          id: "vendor/expensive",
+          cost: { input: 5, output: 15 },
+        },
+        "vendor/mid": { id: "vendor/mid", cost: { input: 1, output: 3 } },
+        "vendor/cheap": { id: "vendor/cheap", cost: { input: 0.1, output: 0.3 } },
+      },
+      undefined,
+      {
+        openrouter: ["vendor/expensive", "vendor/mid", "vendor/cheap"],
+      },
+    );
+
+    expect(defaultSelectableModelForProvider("openrouter")).toEqual({
+      providerID: "openrouter",
+      modelID: "vendor/cheap",
+    });
+  });
+
+  test("falls back to a :free model only when NO paid chat model exists", () => {
+    // A provider that genuinely offers only `:free` models must not regress to
+    // an empty pick — we still return SOMETHING (the cheapest selectable), so
+    // the credential isn't silently dropped. The fallback pass covers this.
+    _setModelDataForTest(
+      {
+        "x/only-free:free": {
+          id: "x/only-free:free",
+          cost: { input: 0, output: 0 },
+        },
+      },
+      undefined,
+      { openrouter: ["x/only-free:free"] },
+    );
+
+    expect(defaultSelectableModelForProvider("openrouter")).toEqual({
+      providerID: "openrouter",
+      modelID: "x/only-free:free",
+    });
   });
 });
