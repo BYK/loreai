@@ -1821,6 +1821,7 @@ export function createGatewayLLMClient(
         }
       }
       if (candidateBlocked(model)) {
+        lastWorkerError = `all ${model.providerID} worker model candidates blocked (likely auth, model-not-supported, or worker-incapable)`;
         return null;
       }
 
@@ -1859,6 +1860,7 @@ export function createGatewayLLMClient(
           opts?.workerID ?? "unknown",
           "no-auth",
         );
+        lastWorkerError = `no auth credentials available for ${model.providerID} (set LORE_WORKER_API_KEY, ANTHROPIC_API_KEY, or similar)`;
         return null;
       }
       const target = resolveTarget(
@@ -1915,6 +1917,7 @@ export function createGatewayLLMClient(
           "cross-provider",
         );
         if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+        lastWorkerError = `no upstream route for ${model.providerID} — provider is unknown or unconfigured (check LORE_*_URL or models.dev cache)`;
         return null;
       }
 
@@ -1955,6 +1958,7 @@ export function createGatewayLLMClient(
             opts?.workerID ?? "unknown",
             "protocol-mismatch",
           );
+          lastWorkerError = `protocol mismatch: ${target.protocol} target but credential is not an Anthropic key (set ANTHROPIC_API_KEY or use an anthropic/* model)`;
           return null;
         }
         if (target.protocol === "openai" && isAnthropicKey) {
@@ -1966,6 +1970,7 @@ export function createGatewayLLMClient(
             opts?.workerID ?? "unknown",
             "protocol-mismatch",
           );
+          lastWorkerError = `protocol mismatch: ${target.protocol} target but credential is an Anthropic key (set OPENAI_API_KEY or use an anthropic/* model)`;
           return null;
         }
       }
@@ -2577,6 +2582,14 @@ export function createGatewayLLMClient(
                 // still lets one probe through per 5 min so a refreshed
                 // credential recovers automatically. Urgent calls are exempt.
                 if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+                // Surface the auth error to the chain's diagnostic. Even
+                // though the chain uses `abortedByAuth` (not lastError) for
+                // the per-candidate reason, including it here makes the
+                // FINAL "First error:" line more informative when a run
+                // is dominated by auth failures. Reuse the `text` variable
+                // already read at line 2491 (response body is a one-shot
+                // stream — calling .text() twice would return "").
+                lastWorkerError = `HTTP ${response.status}: ${text.slice(0, 200)}`;
                 return null;
               }
 
@@ -2767,6 +2780,7 @@ export function createGatewayLLMClient(
                   );
                   // Do NOT markWorkerPaused: the fix is re-resolution to a
                   // different model, not pausing the session's workers.
+                  lastWorkerError = `HTTP ${response.status}: data policy blocked — ${model.providerID}/${model.modelID} unavailable (account has not opted in)`;
                   return null;
                 }
 
@@ -2840,6 +2854,7 @@ export function createGatewayLLMClient(
                 // isWorkerCreditPaused() still probes once per 5 min so a fixed
                 // request recovers. Urgent calls are pause-exempt.
                 if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+                lastWorkerError = `HTTP ${response.status}: non-transient upstream error for ${model.providerID}/${model.modelID} — ${text.slice(0, 200)}`;
                 return null;
               }
 
@@ -2938,10 +2953,13 @@ export function createGatewayLLMClient(
                 opts?.workerID ?? "unknown",
                 response.status === 429 ? "rate-limit" : "upstream-error",
               );
-              // Surface the final HTTP status + the sample of the body to the
-              // chain's diagnostic so the user sees WHY (e.g. "HTTP 400:
-              // model not found") instead of the opaque "did not answer".
-              lastWorkerError = `HTTP ${response.status}: ${response.statusText}`;
+              // Surface the final HTTP status + a body sample to the chain's
+              // diagnostic so the user sees WHY (e.g. "HTTP 400: model not
+              // found") instead of the opaque "did not answer". Use `text`
+              // (the response body) rather than `response.statusText` —
+              // HTTP/2 responses don't include reason phrases, so
+              // statusText is empty and produces unhelpful messages.
+              lastWorkerError = `HTTP ${response.status}: ${text || response.statusText || "no body"}`;
               return null;
             }
           },
@@ -2950,17 +2968,6 @@ export function createGatewayLLMClient(
         // Client disconnect / abort is benign — downgrade from error to info
         // to avoid Sentry noise from normal connection lifecycle events.
         const isAbort = e instanceof DOMException && e.name === "AbortError";
-        if (isAbort) {
-          log.info("worker prompt aborted (client disconnect or shutdown)");
-          lastWorkerError = "client disconnect or shutdown";
-        } else {
-          log.error("worker prompt failed:", e);
-          // Surface the actual exception so the chain's diagnostic tells the
-          // user whether it's a network failure, timeout, or upstream 5xx —
-          // not just the opaque "did not answer". Adm hit this in Slack on
-          // 2026-07-30 with openrouter returning null with zero detail.
-          lastWorkerError = e instanceof Error ? e.message : String(e);
-        }
         // Network/timeout error — no response was received. Record here so the
         // adapter remains the single owner of transport-failure attribution
         // (core workers no longer record on a null return).
@@ -2969,6 +2976,21 @@ export function createGatewayLLMClient(
           opts?.workerID ?? "unknown",
           "no-response",
         );
+        // Surface the ACTUAL exception message to the chain's diagnostic. The
+        // catch block is reached on any uncaught throw — the message gives the
+        // user the real reason (timeout, DNS failure, fetch error, etc.)
+        // instead of a generic "network error" placeholder. We use
+        // `??=` to preserve any earlier specific error (e.g. set by the
+        // retry-loop or data-policy path) rather than overwriting it with
+        // something less informative.
+        if (isAbort) {
+          log.info("worker prompt aborted (client disconnect or shutdown)");
+          lastWorkerError ??= "client disconnect or shutdown";
+        } else {
+          log.error("worker prompt failed:", e);
+          const msg = e instanceof Error ? e.message : String(e);
+          lastWorkerError ??= `network error: no response from ${model.providerID} (${msg.slice(0, 200)})`;
+        }
         return null;
       } finally {
         activeWorkerCalls.delete(callID);
