@@ -1026,6 +1026,50 @@ export function buildKnowledgeCatalogText(
   return `## Project knowledge (recall by id for detail)\n\n${lines}${more}`;
 }
 
+/**
+ * Build the set of knowledge entry IDs that are already in the model's visible
+ * context, so recall can surface a "N of K results already in LTM" hint and the
+ * model doesn't treat a fully-redundant recall as new information.
+ *
+ * Sources combined (each contributes full UUIDs — the canonical recall form):
+ *   1. **Stable system[1] knowledge catalog** — `* [k:<uuid>] <title> (<cat>)`
+ *      lines emitted by `buildKnowledgeCatalogText`. Tells the model the title
+ *      exists but not the content.
+ *   2. **Durable prompt-delta pair** — entries appended by
+ *      `appendKnowledgePromptDelta` carry `[<shortId>]` prefixes (8 chars); we
+ *      only know the shortId from the conversation text, so this source would
+ *      miss full-ID dedup. To keep the contract simple, the caller passes the
+ *      *structured* `pendingKnowledgeDelta.entries` (full IDs) instead.
+ *
+ * Returns an empty set when either input is missing/empty.
+ */
+export function buildAlreadyInLtmIds(
+  stableLtmText: string | undefined,
+  pendingKnowledgeDelta:
+    | {
+        entries: Array<{ id: string }>;
+      }
+    | undefined,
+): Set<string> {
+  const ids = new Set<string>();
+
+  // 1) Catalog: extract full UUIDs from `[k:<uuid>]` catalog tokens.
+  if (stableLtmText) {
+    const re = /\[k:([0-9a-f]{8}-[0-9a-f-]{27,})\]/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(stableLtmText)) !== null) {
+      ids.add(m[1].toLowerCase());
+    }
+  }
+
+  // 2) Knowledge delta: structured entries carry full IDs — preferred source.
+  if (pendingKnowledgeDelta?.entries) {
+    for (const e of pendingKnowledgeDelta.entries) ids.add(e.id.toLowerCase());
+  }
+
+  return ids;
+}
+
 type MessageInsertSelector = {
   target: "messages";
   insertAt: number;
@@ -4543,6 +4587,25 @@ function buildStreamingResponse(
      *  is whether it lands as a distinct assistant message in the client's
      *  transcript (Anthropic native) or as inline text content (others). */
     clientSpeaksAnthropic: boolean;
+    /** Frozen system[1] baseline (Lore context capability note + preferences +
+     *  entities + project knowledge catalog). Used to compute which recall
+     *  hits are already in the model's LTM context so recall can hint
+     *  "N of K results already in LTM" and avoid silent agent loop exits on
+     *  fully-redundant recall queries. */
+    stableLtmText?: string;
+    /** Durable prompt-delta pair just appended to the conversation — entries
+     *  that are fully in context (full content, not just catalog titles). */
+    pendingKnowledgeDelta?: {
+      previousKeys: string[] | undefined;
+      nextKeys: string[] | undefined;
+      entries: Array<{
+        id: string;
+        category: string;
+        title: string;
+        content: string;
+      }>;
+      overflow?: Array<{ id: string; category: string; title: string }>;
+    };
   },
   /** When set, prepend a synthetic warning content block to the stream.
    *  Currently used for the worker-degradation warning (#797 removed the
@@ -4737,6 +4800,15 @@ function buildStreamingResponse(
           let currentModifiedReq = recallContext.modifiedReq;
           let recallDepth = 0;
 
+          // Snapshot IDs already in LTM context (system[1] catalog + durable
+          // delta) so recall can hint "N of K results already in LTM" when the
+          // model would otherwise treat redundant hits as new info and emit
+          // a silent 3-token stop.
+          const alreadyInLtmIds = buildAlreadyInLtmIds(
+            recallContext.stableLtmText,
+            recallContext.pendingKnowledgeDelta,
+          );
+
           // eslint-disable-next-line no-constant-condition
           while (true) {
             const recallBlock = findRecallToolUse(currentResp);
@@ -4748,6 +4820,7 @@ function buildStreamingResponse(
               recallContext.sessionState.projectPath,
               recallContext.sessionState.sessionID,
               getLLMClient(recallContext.config),
+              alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
             );
 
             const scope = input.scope ?? "all";
@@ -8967,6 +9040,15 @@ async function handleConversationTurn(
     // clamped below its ~167K auto-compact threshold (#910 regression).
     const longContext = requestEnablesLongContext(req);
 
+    // Snapshot LTM-in-context IDs once per request — system[1] catalog and
+    // durable delta entries are stable across the recall loop iterations, so
+    // reuse the same set for every recall (Seer 15623149/1). Mirrors the
+    // streaming path's pre-loop snapshot.
+    const alreadyInLtmIds = buildAlreadyInLtmIds(
+      stableLtmText,
+      pendingKnowledgeDelta,
+    );
+
     while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
       recallDepth++;
       const recallBlock = findRecallToolUse(currentResp);
@@ -8976,6 +9058,7 @@ async function handleConversationTurn(
         sessionState.projectPath,
         sessionState.sessionID,
         getLLMClient(config),
+        alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
       );
 
       // Store recall result for marker round-trip expansion
@@ -9275,6 +9358,8 @@ async function handleConversationTurn(
             sessionState,
             cacheOptions,
             clientSpeaksAnthropic: req.protocol === "anthropic",
+            stableLtmText,
+            ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
           }
         : undefined,
       warningText,

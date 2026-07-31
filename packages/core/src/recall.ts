@@ -82,6 +82,23 @@ export type RecallInput = {
    * don't inflate counts. Default false.
    */
   recordTransfers?: boolean;
+  /**
+   * Set of knowledge entry IDs (`019fxxxx-...` UUIDs — the canonical form
+   * without the `k:` prefix) that are already present in the model's visible
+   * context — the stable system[1] knowledge catalog and/or the durable
+   * prompt-delta pair appended by the pipeline.
+   *
+   * When set, `runRecall` appends a hint to the result footer telling the
+   * model how many returned hits were already in its context, so a recall
+   * query whose hits are entirely redundant doesn't trick the model into
+   * thinking it has new information (silent agent loop exit).
+   *
+   * Only knowledge entries are tracked — distillations/temporal/entities have
+   * their own IDs but the loop-exit failure mode is knowledge-specific (the
+   * LTM block is the dominant in-context source). Pass undefined to skip the
+   * dedup pass (dashboard/CLI/recallById callers don't need it).
+   */
+  alreadyInLtmIds?: ReadonlySet<string>;
 };
 
 /** Result of a full recall run — markdown-formatted string for the LLM. */
@@ -278,7 +295,12 @@ const DEFAULT_FORMAT_CONFIG = {
   absoluteFloor: 0,
 };
 
-type FormatConfig = typeof DEFAULT_FORMAT_CONFIG;
+type FormatConfig = Omit<typeof DEFAULT_FORMAT_CONFIG, "alreadyInLtmIds"> & {
+  // Optional, see RecallInput.alreadyInLtmIds — when set, formatFusedResults
+  // counts hits already in the model's LTM context and appends a hint line so
+  // the model doesn't treat redundant recall as new information.
+  alreadyInLtmIds?: ReadonlySet<string>;
+};
 
 /**
  * Truncate text at a sentence boundary within maxChars.
@@ -485,6 +507,45 @@ function formatFusedResults(
     );
   } else {
     lines.push(`*${kept.length} of ${totalFound} results shown.*`);
+  }
+
+  // LTM-overlap hint — only counts knowledge entries (the dominant in-context
+  // LTM source via system[1] catalog + prompt-delta pair). Surfaces the count
+  // when any kept hit is already in the model's visible context so it doesn't
+  // treat redundant recall as new information and emit a silent 3-token stop.
+  // Skipped entirely when no `alreadyInLtmIds` was passed (dashboard/CLI/drill-
+  // down callers don't have LTM in context) or when no knowledge hits overlap.
+  if (config.alreadyInLtmIds && config.alreadyInLtmIds.size > 0) {
+    const knowledgeKeptCount = tiered.reduce((n, r) => {
+      if (r.item.source !== "knowledge" && r.item.source !== "cross-knowledge")
+        return n;
+      return n + 1;
+    }, 0);
+    const inLtmCount = tiered.reduce((n, r) => {
+      if (r.item.source !== "knowledge" && r.item.source !== "cross-knowledge")
+        return n;
+      return config.alreadyInLtmIds!.has(r.item.item.id) ? n + 1 : n;
+    }, 0);
+    if (inLtmCount > 0) {
+      // Compare knowledge-vs-knowledge, not knowledge-vs-total — a recall
+      // returning 3 knowledge + 2 distillation should emit "All 3 knowledge
+      // entries are already in LTM", not "3 of 5 entries are already…"
+      // (Seer 15623149/0).
+      if (inLtmCount === knowledgeKeptCount) {
+        lines.push(
+          ``,
+          `> All ${inLtmCount} shown knowledge entries are already in your LTM context (system catalog or knowledge delta). No new information — consider whether recall is actually needed for this query.`,
+        );
+      } else {
+        // Seer 15623354/0: denominator must also be knowledge-only, matching
+        // the full-overlap case. Otherwise "2 of 5" looks like a small slice
+        // when in fact 2 of 2 knowledge entries are already in LTM.
+        lines.push(
+          ``,
+          `> ${inLtmCount} of ${knowledgeKeptCount} shown knowledge entries are already in your LTM context. Only the non-overlapping entries are new — re-call with \`id\` for full content of those.`,
+        );
+      }
+    }
   }
 
   return lines.join("\n");
@@ -1639,6 +1700,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
     maxResults: recallCfg?.maxResults ?? DEFAULT_FORMAT_CONFIG.maxResults,
     absoluteFloor:
       recallCfg?.absoluteFloor ?? DEFAULT_FORMAT_CONFIG.absoluteFloor,
+    alreadyInLtmIds: input.alreadyInLtmIds,
   });
 
   // Surface structured tool-failure stats for debugging. Appended outside the
