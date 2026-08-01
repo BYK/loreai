@@ -1,4 +1,215 @@
-<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Lore Blog</title><description>Product notes, engineering updates, and memory architecture deep dives from Lore.</description><link>https://withlore.ai/</link><language>en-us</language><atom:link href="https://withlore.ai/rss.xml" rel="self" type="application/rss+xml"/><item><title>The compaction tax</title><link>https://withlore.ai/blog/the-compaction-tax/</link><guid isPermaLink="true">https://withlore.ai/blog/the-compaction-tax/</guid><description>A real coding-agent memory benchmark, with receipts. The two taxes memory puts on your dollars and your focus, each with a number attached.</description><pubDate>Wed, 22 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;We have made two arguments on this blog. In
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Lore Blog</title><description>Product notes, engineering updates, and memory architecture deep dives from Lore.</description><link>https://withlore.ai/</link><language>en-us</language><atom:link href="https://withlore.ai/rss.xml" rel="self" type="application/rss+xml"/><item><title>The Agentic Memory Trap</title><link>https://withlore.ai/blog/the-agentic-memory-trap/</link><guid isPermaLink="true">https://withlore.ai/blog/the-agentic-memory-trap/</guid><description>Lore is a vendor-neutral proxy that runs on your machine. Plain Markdown and an open SQLite database, run by a fair-source engine.</description><pubDate>Thu, 30 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;In April, Harrison Chase wrote an essay called
+&lt;a href=&quot;https://blog.langchain.com/your-harness-your-memory/&quot;&gt;Your harness, your memory&lt;/a&gt;.
+He named what the AI tooling industry has been circling for a year.
+Memory is the new lock-in. The harness owns it by default, and the
+harness is what every platform is racing to be.&lt;/p&gt;
+&lt;p&gt;He was right about the diagnosis. He was not entirely accurate with
+the prescription. He builds LangChain, so he is primed to think in
+terms of harness-first. Broaden your thinking and there is a better,
+more independent way, and Lore is the proof.&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;“There is sometimes sentiment that memory is a standalone service,
+separate from any particular harness. At this point in time, that
+is not true.”
+— Harrison Chase, &lt;a href=&quot;https://blog.langchain.com/your-harness-your-memory/&quot;&gt;Your harness, your memory&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;The analogy is wrong on the merits too. Memory is part of your brain.
+Agent harnesses are like your body, the limbs and everything. You
+don’t move your memory to your limbs. You move your memory to your
+brain.&lt;/p&gt;
+&lt;p&gt;Our argument is equally self-serving as LangChain’s. The difference
+is: you can move away from Lore and keep your organized SQLite
+database to yourself. That is true open memory.&lt;/p&gt;
+&lt;p&gt;The time has come. Lore is the standalone memory service, and it is
+the architecture that gets you out of the trap.&lt;/p&gt;
+&lt;h2 id=&quot;the-platform-owns-your-data-you-should&quot;&gt;The platform owns your data. You should.&lt;/h2&gt;
+&lt;p&gt;When a closed platform builds “agent memory,” it stores your team’s
+decisions in a proprietary database behind an API. Retrieval shapes
+the agent, and the shape of the agent is the shape of the moat.
+Switch IDEs, switch models, switch anything, and the team rebuilds
+months of context from scratch. The lock-in is the product.&lt;/p&gt;
+&lt;p&gt;Harrison names three levels. The mild one stores state on the
+provider’s server so you cannot move threads between models. The bad
+one runs a closed harness that interacts with memory in ways you
+cannot see, and the artifacts are not portable. The worst one puts
+everything behind an API, including long-term memory, and you own
+none of it. Anthropic’s Claude Managed Agents lives in that worst
+camp. Codex’s open-source harness produces an encrypted compaction
+summary nothing outside OpenAI can read, so it creeps toward the
+worst too. The incentive is everywhere, and it points the same way.&lt;/p&gt;
+&lt;p&gt;Six months of careful work, six months of capturing a team’s taste,
+and a vendor change returns the team to zero.&lt;/p&gt;
+&lt;h2 id=&quot;lore-is-local-first-and-we-want-to-keep-it-that-way&quot;&gt;Lore is local-first and we want to keep it that way&lt;/h2&gt;
+&lt;p&gt;Lore is a vendor-neutral proxy that sits between your harness and
+your model. The whole engine runs on your machine. The memory lives
+in your repo and your local machine as plain Markdown and an open
+SQLite database. You can read, query, and edit it with or without
+Lore.&lt;/p&gt;
+&lt;div class=&quot;expressive-code&quot;&gt;&lt;link rel=&quot;stylesheet&quot; href=&quot;https://withlore.ai/_preview/pr-1211/_astro/ec.w36nc.css&quot;&gt;&lt;script type=&quot;module&quot; src=&quot;https://withlore.ai/_preview/pr-1211/_astro/ec.0vx5m.js&quot;&gt;&lt;/script&gt;&lt;figure class=&quot;frame not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;mermaid&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;flowchart LR&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;H[&quot;&amp;lt;b&amp;gt;Harness&amp;lt;/b&amp;gt;&amp;lt;br/&amp;gt;Claude Code · OpenCode · Pi · Codex&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;L[&quot;&amp;lt;b&amp;gt;Lore&amp;lt;/b&amp;gt;&amp;lt;br/&amp;gt;local-first, vendor-neutral&amp;lt;br/&amp;gt;.lore.md + lore.db&amp;lt;br/&amp;gt;local, sqlite &amp;amp; markdown&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;A[&quot;&amp;lt;b&amp;gt;Model Provider API&amp;lt;/b&amp;gt;&amp;lt;br/&amp;gt;Anthropic · OpenAI · Google · others&quot;]&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;
+&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;H --&amp;gt; L&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;L --&amp;gt; A&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;
+&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;classDef ext fill:#ececec,stroke:#888,color:#333&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class L lore&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span class=&quot;indent&quot;&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;    &lt;/span&gt;&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt;class H,A ext&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;flowchart LR    H[&amp;quot;&lt;b&gt;Harness&lt;/b&gt;&lt;br/&gt;Claude Code · OpenCode · Pi · Codex&amp;quot;]    L[&amp;quot;&lt;b&gt;Lore&lt;/b&gt;&lt;br/&gt;local-first, vendor-neutral&lt;br/&gt;.lore.md + lore.db&lt;br/&gt;local, sqlite &amp;amp; markdown&amp;quot;]    A[&amp;quot;&lt;b&gt;Model Provider API&lt;/b&gt;&lt;br/&gt;Anthropic · OpenAI · Google · others&amp;quot;]    H --&gt; L    L --&gt; A    classDef lore fill:#c4ddc7,stroke:#1a3320,stroke-width:2px,color:#1a3320    classDef ext fill:#ececec,stroke:#888,color:#333    class L lore    class H,A ext&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
+&lt;p&gt;&lt;em&gt;The LLM is the cognition, Lore is the memory layer. They form the brain. The harness is the body, the actuator.&lt;/em&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/strong&gt; at the root of your repo. The curated knowledge the
+team has reviewed and merged. Version-controlled, PR-reviewable,
+human-readable Markdown.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;A local SQLite database&lt;/strong&gt; at &lt;code&gt;~/.local/share/lore/lore.db&lt;/code&gt;. The
+full record: raw conversations, distillations, long-term memory,
+entities. Open schema, queryable with &lt;code&gt;sqlite3&lt;/code&gt;, exportable.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;The engine that ties them together is fair source
+(FSL-1.1-Apache-2.0). The code that touches your tokens is right
+there to read, and it turns into Apache 2.0 on a timer.&lt;/p&gt;
+&lt;p&gt;The SQLite file is the vector database. The vectors ride alongside
+the temporal messages, the distillations, and the long-term memory
+entries, in one open file. No separate vector store, no separate
+process, no separate bill. When a team changes a memory entry, the
+engine picks up the change on the next session and re-embeds the
+affected entries. Fast and transparent, on your hardware.&lt;/p&gt;
+&lt;p&gt;A few months after that initial post, Harrison himself claimed that
+memory systems sit beside the harness. In
+&lt;a href=&quot;https://blog.langchain.com/wiki-memory/&quot;&gt;Wiki Memory&lt;/a&gt;, he wrote:&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;“This pattern also sits adjacent to memory systems like LangMem,
+Letta, Mem0, and Zep. Those systems attack the broader agent-memory
+problem, while wiki memory is notable because it often uses the
+simplest possible substrate: files.”&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;p&gt;All these systems, including Mem0, don’t really solve the immediate
+context problem. Lore unifies this and, unsurprisingly, by fusing two
+approaches together: locality &amp;amp; files along with long-term memory.&lt;/p&gt;
+&lt;h2 id=&quot;the-vendor-route-vs-the-local-first-route&quot;&gt;The vendor route vs the local-first route&lt;/h2&gt;
+&lt;p&gt;Harrison is right. You shouldn’t put your memory into a vendor’s hands.
+The lock-in is real, and the way to escape it is to keep the data
+on your machine, local, sqlite &amp;amp; markdown, where you can read with
+&lt;code&gt;sqlite3&lt;/code&gt; and edit with any text editor. To change a memory entry,
+you edit the file. To delete an entry, you delete the row. To export
+the corpus, you copy the file. To move to a different vendor, you
+point the new tool at the same files.&lt;/p&gt;
+&lt;p&gt;The same logic applies to the harness. You wouldn’t lock yourself
+into a single LLM provider, and you shouldn’t lock yourself into a
+single harness either. Claude Code today, Pi tomorrow, Codex next
+quarter, something new next year. The memory should outlast the
+harness. The harness is the part you swap; the artifact is the part
+that stays.&lt;/p&gt;
+&lt;p&gt;When your team is ready to share, the sync engine works the way a
+good group chat does: end-to-end encrypted, scoped to the entries
+you explicitly approve, and the relay never sees plaintext. The
+keys stay with the participants. Sharing is opt-in, per entry, and
+reversible.&lt;/p&gt;
+&lt;h2 id=&quot;why-this-matters&quot;&gt;Why this matters&lt;/h2&gt;
+&lt;p&gt;We have talked before about
+&lt;a href=&quot;https://withlore.ai/blog/distill-your-own-knowledge/&quot;&gt;why knowledge lives in token space, not in weights&lt;/a&gt;.
+The same logic applies to where the token-space lives. A database in
+someone else’s cloud is halfway there. A database or engine tied to
+your harness might be better. A replaceable middle layer for memory,
+all data local and owned by you, is the rest of the way.&lt;/p&gt;
+&lt;p&gt;Models will keep changing. They always do. Every part of the AI
+tooling stack above the model is genuinely up for grabs right now.
+The part that should not be up for grabs is who owns your team’s
+data. That belongs to the team, on infrastructure the team controls.&lt;/p&gt;
+&lt;p&gt;Lore is local-first. We aim to keep it that way.&lt;/p&gt;
+&lt;h2 id=&quot;try-it&quot;&gt;Try it&lt;/h2&gt;
+&lt;div class=&quot;expressive-code&quot;&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;curl&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;-fsSL&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;https://withlore.ai/install&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#7FDBCA;--1:#096E72&quot;&gt;|&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;bash&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;run&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;curl -fsSL https://withlore.ai/install | bashlore run&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
+&lt;p&gt;After a few sessions, open &lt;code&gt;.lore.md&lt;/code&gt; and the database at
+&lt;code&gt;~/.local/share/lore/lore.db&lt;/code&gt;. Read what your agent has written
+down. Open a PR when it gets something wrong. That is the workflow.&lt;/p&gt;
+</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>infrastructure</category><category>open standards</category><category>data</category><category>ownership</category></item><item><title>The Semantic Linter: Automating reviews without losing touch</title><link>https://withlore.ai/blog/review-with-memory/</link><guid isPermaLink="true">https://withlore.ai/blog/review-with-memory/</guid><description>You can&apos;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</description><pubDate>Sun, 26 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;About ten years ago, when machine learning got good enough that you could train a real classifier
+without a research lab, I had a specific project in mind. I wanted to train something that reviewed
+code the way I did, so I could step back from reviewing every change without the codebase drifting.
+I never built it. I never had enough of the right data, and I never had the time.&lt;/p&gt;
+&lt;p&gt;The debate about review has finally caught up with the project I never built, and I think both
+sides are half right.&lt;/p&gt;
+&lt;h2 id=&quot;the-same-complaint-from-two-sides&quot;&gt;The same complaint from two sides&lt;/h2&gt;
+&lt;p&gt;One camp says the whole point of writing code with agents is that a human still reads every line
+before it ships. Slow down, look closely, stay in control. The other camp, often the same people
+on a different day, says the job has turned into something worse: you don’t write much anymore, you
+sit and read change after change the machine produced, and it is dull and a little soul-crushing.
+Reviewing slop, they call it.&lt;/p&gt;
+&lt;p&gt;Those are two views of one loss. Review used to be where judgment happened and where the
+team learned how the codebase was meant to work. Now it has shrunk to a checkpoint you sign off on.
+The “read every line” camp wants to protect what review was. The “this is soul-crushing” camp is
+telling you it has already gone. Both are reacting to one loss.&lt;/p&gt;
+&lt;p&gt;A colleague told me the human side of this a few months ago. When he joined the team, he said, he
+learned a lot from getting detailed reviews from me, the kind where you explain not just what to
+change but why the team works this way. What he picked up wasn’t a list of rules. It was a way of
+working. Now we mostly work on our own, agents write and review most of the code, and he misses it.
+He wasn’t complaining about speed. He was noticing that something had stopped passing between us.&lt;/p&gt;
+&lt;p&gt;Armin Ronacher &lt;a href=&quot;https://lucumr.pocoo.org/2026/7/13/the-tower/&quot;&gt;wrote about this&lt;/a&gt; from the other
+end. The shared understanding a team keeps of its own system used to be a byproduct of the friction
+in working together, and agents have quietly removed the friction. My colleague felt that up close.&lt;/p&gt;
+&lt;h2 id=&quot;what-review-was-really-passing-along&quot;&gt;What review was really passing along&lt;/h2&gt;
+&lt;p&gt;A review was never only a gate. It was how one person’s standard reached everyone else. You don’t
+mock the database in integration tests, and here’s the migration bug that taught us why. Deploys go
+from the release branch, because of the time they didn’t. The standard arrived with its reason, at
+the moment it mattered, to whoever was on the change.&lt;/p&gt;
+&lt;p&gt;When that stops, the standards don’t disappear. They stop showing up when they’re needed, and six
+months later a pull request quietly brings back the exact thing the team decided against. Nobody
+used bad judgment. The change looks reasonable on its own. What was missing was a reviewer who knew
+the standard and noticed, right then, that the change cut against it.&lt;/p&gt;
+&lt;h2 id=&quot;you-are-what-you-do-not-what-you-write-down&quot;&gt;You are what you do, not what you write down&lt;/h2&gt;
+&lt;p&gt;That is the hard part, and it’s why the project I never got to needed data I never had. A review
+teaches the person reading it, but it’s a poor thing to learn from at scale. It’s the verdict, not
+the reasoning: “don’t do this here” lands, and the thinking that led me there stays in my head. Most
+of what makes a good reviewer good is taste, built from years of doing the work, and you can’t write
+it down. Ask someone to put their standards in a document and you get a thin, lifeless version of
+what they actually do. But you keep doing it, review after review, and the standard is real even
+when the document isn’t.&lt;/p&gt;
+&lt;p&gt;That’s the shift that makes this possible now. Lore watches the work the way an apprentice does. It
+sits alongside your sessions, distills what you decide and why, and writes it down for you as
+&lt;a href=&quot;https://withlore.ai/docs/team-memory/&quot;&gt;&lt;code&gt;.lore.md&lt;/code&gt;&lt;/a&gt;, a version-controlled file of the team’s decisions and gotchas,
+reviewed in pull requests like any other file. We’ve written before about
+&lt;a href=&quot;https://withlore.ai/blog/distill-your-own-knowledge/&quot;&gt;why knowledge lives in text&lt;/a&gt;. You don’t write docs that go
+stale in a few weeks. You work, and it learns.&lt;/p&gt;
+&lt;p&gt;An apprentice is not you, and I want to be honest about the ceiling. It won’t learn your deepest
+judgment, the calls that come from taste you couldn’t explain if you tried. But it learns the
+standards you set often enough, and that turns out to be a lot of them.&lt;/p&gt;
+&lt;h2 id=&quot;the-apprentice-reviews-the-code&quot;&gt;The apprentice reviews the code&lt;/h2&gt;
+&lt;p&gt;This is the thing I wanted ten years ago, and it turns out the achievable part was the part that
+mattered. Not a machine that thinks like me. One that learned the standards and speaks up when a
+change goes against one.&lt;/p&gt;
+&lt;p&gt;So we built a check that reads the diff against what Lore has learned. On every pull request, the
+&lt;a href=&quot;https://withlore.ai/docs/guides/semantic-linter/&quot;&gt;semantic linter&lt;/a&gt; takes the changes and the standards from
+&lt;code&gt;.lore.md&lt;/code&gt; and asks, for the pairs that look related, one question: does this change go against
+something the team decided? When the answer looks like yes, it says so, as an annotation next to
+the line, with the reason attached. The reason is the point. It’s the part of the review that used
+to pass from person to person and stopped.&lt;/p&gt;
+&lt;p&gt;It’s a judge, not a rule engine. “Never mock the database in integration tests” isn’t a pattern you
+can match with a regex, and any lint rule that tried would be brittle and easy to route around. It’s
+a meaning, and you can only check it by understanding what the change does and what the standard
+intends. The honest cost is that a judge produces suspicions, not verdicts. It can be wrong, and we
+designed around that instead of pretending otherwise.&lt;/p&gt;
+&lt;h2 id=&quot;the-boring-part-handled&quot;&gt;The boring part, handled&lt;/h2&gt;
+&lt;p&gt;If you’re in the “read every line” camp, what you’re rightly afraid of is a noisy check that blocks
+work on a bad guess. We share that fear, so the linter ships advisory only. It never fails a build.
+It leaves a note and a human decides. A check that guesses and can break CI would teach everyone to
+ignore it inside a week.&lt;/p&gt;
+&lt;p&gt;And if you’re in the “this is soul-crushing” camp, look at what it takes off you: the dull part,
+checking every change against every standard the team ever set, which is the work no human does well
+or enjoys. What’s left is the judgment, the taste, whether this is even the right change. The part
+worth doing.&lt;/p&gt;
+&lt;p&gt;A ladder above advisory is designed in. Once a team has watched how often the check is wrong, a
+rule can graduate to a gate, with an override for the author who knows better. That part is still
+coming. Today everything stays advisory on purpose, because the system should earn trust before it
+can block anything.&lt;/p&gt;
+&lt;h2 id=&quot;wheres-the-limit&quot;&gt;Where’s the limit?&lt;/h2&gt;
+&lt;p&gt;I’m not claiming the reviewer goes away. On the contrary, we’re lightening the reviewer’s load so
+they can do more of what’s valuable: real judgment and taste. Here’s the line: no reviewer can hold
+every standard the team ever set and apply the right one at the right moment. That one job a system
+does well, and handing it over costs you none of the taste you were afraid to lose. It gives you
+back the attention for the parts that need a person, and brings back, a little, what used to pass
+between people when they reviewed each other’s work.&lt;/p&gt;
+&lt;p&gt;That’s the version of automated review I’d ask a doubter to try. Not a bot that approves or rejects
+your PRs. An apprentice that learned how you work and speaks up when a change breaks from that, and
+otherwise stays quiet.&lt;/p&gt;
+&lt;h2 id=&quot;try-it&quot;&gt;Try it&lt;/h2&gt;
+&lt;p&gt;Install Lore and let it learn from a few sessions:&lt;/p&gt;
+&lt;div class=&quot;expressive-code&quot;&gt;&lt;link rel=&quot;stylesheet&quot; href=&quot;https://withlore.ai/_preview/pr-1211/_astro/ec.w36nc.css&quot;&gt;&lt;script type=&quot;module&quot; src=&quot;https://withlore.ai/_preview/pr-1211/_astro/ec.0vx5m.js&quot;&gt;&lt;/script&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;curl&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;-fsSL&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;https://withlore.ai/install&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#7FDBCA;--1:#096E72&quot;&gt;|&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;bash&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;run&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;curl -fsSL https://withlore.ai/install | bashlore run&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
+&lt;p&gt;Then run the check against any range and see what it flags:&lt;/p&gt;
+&lt;div class=&quot;expressive-code&quot;&gt;&lt;figure class=&quot;frame is-terminal not-content&quot;&gt;&lt;figcaption class=&quot;header&quot;&gt;&lt;span class=&quot;title&quot;&gt;&lt;/span&gt;&lt;span class=&quot;sr-only&quot;&gt;Terminal window&lt;/span&gt;&lt;/figcaption&gt;&lt;pre data-language=&quot;bash&quot;&gt;&lt;code&gt;&lt;div class=&quot;ec-line&quot;&gt;&lt;div class=&quot;code&quot;&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;lore&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;lint&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;--base&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;main&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#82AAFF;--1:#3B61B0&quot;&gt;--head&lt;/span&gt;&lt;span style=&quot;--0:#D6DEEB;--1:#403F53&quot;&gt; &lt;/span&gt;&lt;span style=&quot;--0:#ECC48D;--1:#3B61B0&quot;&gt;HEAD&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;/code&gt;&lt;/pre&gt;&lt;div class=&quot;copy&quot;&gt;&lt;div aria-live=&quot;polite&quot;&gt;&lt;/div&gt;&lt;button title=&quot;Copy to clipboard&quot; data-copied=&quot;Copied!&quot; data-code=&quot;lore lint --base main --head HEAD&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;/button&gt;&lt;/div&gt;&lt;/figure&gt;&lt;/div&gt;
+&lt;p&gt;With no arguments it auto-detects the range. When you’re ready for CI, the
+&lt;a href=&quot;https://withlore.ai/docs/guides/semantic-linter/&quot;&gt;semantic linter guide&lt;/a&gt; has a copy-paste GitHub Action.&lt;/p&gt;
+</content:encoded><dc:creator>Burak Yigit Kaya</dc:creator><category>knowledge</category><category>code review</category><category>ci</category><category>agents</category></item><item><title>The compaction tax</title><link>https://withlore.ai/blog/the-compaction-tax/</link><guid isPermaLink="true">https://withlore.ai/blog/the-compaction-tax/</guid><description>A real coding-agent memory benchmark, with receipts. The two taxes memory puts on your dollars and your focus, each with a number attached.</description><pubDate>Wed, 22 Jul 2026 00:00:00 GMT</pubDate><content:encoded>&lt;p&gt;We have made two arguments on this blog. In
 &lt;a href=&quot;https://withlore.ai/blog/why-memory-is-not-enough&quot;&gt;Why memory is not enough&lt;/a&gt; we said a store off to the side
 cannot save the session overflowing right now, because compaction runs whether or not it
 is about to drop something you still need. In
