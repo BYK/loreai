@@ -26,6 +26,7 @@ import {
 import { createGatewayLLMClient } from "../llm-adapter";
 import { type AuthCredential, resolveAuth, workerKeyScheme } from "../auth";
 import { startGateway, type StartOptions } from "./start";
+import { fetchModelData } from "../worker-model";
 
 type CheckResult = invariantCheck.CheckResult;
 
@@ -95,6 +96,23 @@ export async function commandInvariantCheck(
   // Local gateway for LLM access (mirrors `lore import`).
   const startOpts: StartOptions = { quiet: true, local: true };
   const { config, owned, shutdown } = await startGateway(startOpts);
+  // Pre-warm the models.dev cache BEFORE the first judge call. `startGateway`
+  // (via pipeline init at pipeline.ts:2836) kicks off the pre-warm
+  // fire-and-forget, so the first batch of judge calls would otherwise race
+  // against an empty cache. With an empty cache `getModelEntrySync` returns
+  // the FALLBACK entry (no `reasoning_options`), `workerModelReasons` returns
+  // false (the `isAnthropicClaudeModel` heuristic misses non-Claude reasoning
+  // models like `gpt-5-mini` via GitHub Copilot), the worker's reasoning-
+  // headroom floor stays at 0, and the judge's tiny `judgeMaxTokens(off)=256`
+  // budget is burned entirely on hidden reasoning — emitting empty content →
+  // `parseInvariantVerdict` returns null → "20/20 unparseable". Awaiting here
+  // closes the race; mirrors the existing fallback in `cli/import.ts:1394-1401`.
+  try {
+    await fetchModelData();
+  } catch {
+    // fetchModelData handles its own errors; falling through keeps the
+    // empty-cache path (consistent with `lore import`'s fallback).
+  }
   const cfg = loreConfig();
 
   // Seed invariants from `.lore.md` when asked (CI). importLoreFile upserts
