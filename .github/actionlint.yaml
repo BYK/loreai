@@ -1,0 +1,17 @@
+# Configuration for actionlint (https://github.com/rhysd/actionlint).
+#
+# `copilot-requests` is a workflow permission scope GitHub added for GitHub
+# Copilot in GitHub Actions (see
+# https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli-in-actions).
+# actionlint's static allowlist predates it — track upstream:
+# https://github.com/rhysd/actionlint/blob/main/rule_permissions.go
+# Until then, ignore the spurious "unknown permission scope" finding on the
+# specific permission so the semantic-linter workflow can request Copilot
+# access for GITHUB_TOKEN.
+paths:
+  .github/workflows/semantic-linter.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
+  .github/workflows/eval.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'

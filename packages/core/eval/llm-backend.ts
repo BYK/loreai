@@ -1,16 +1,17 @@
 /**
  * LLM backend abstraction for the eval suite.
  *
- * Supports Anthropic (direct), GitHub Models API (free in CI), and
- * Azure OpenAI as backends. The harness and judge call `prompt()` on
- * the resolved backend without knowing which provider is active.
+ * Supports Anthropic (direct), GitHub Copilot API (free in CI under the
+ * workflow's `copilot-requests: write` permission), and OpenAI as backends.
+ * The harness and judge call `prompt()` on the resolved backend without
+ * knowing which provider is active.
  */
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type LLMBackendType = "anthropic" | "github-models" | "openai";
+export type LLMBackendType = "anthropic" | "github-copilot" | "openai";
 
 export interface BackendConfig {
   backend: LLMBackendType;
@@ -123,14 +124,17 @@ export function resolveBackend(
     };
   }
 
-  // GitHub Models API — free fallback in CI (150 req/day for low-tier models)
+  // GitHub Copilot API — free fallback in CI. The workflow's `copilot-requests:
+  // write` permission lets the built-in `GITHUB_TOKEN` call
+  // api.githubcopilot.com directly as a Bearer credential; no separate Copilot
+  // token exchange is needed.
   if (process.env.GITHUB_ACTIONS && process.env.GITHUB_TOKEN) {
     return {
-      backend: "github-models",
-      model: "openai/gpt-4o-mini",
-      judgeModel: "openai/gpt-4o-mini",
+      backend: "github-copilot",
+      model: "gpt-5-mini",
+      judgeModel: "gpt-5-mini",
       apiKey: process.env.GITHUB_TOKEN,
-      baseUrl: "https://models.github.ai/inference",
+      baseUrl: "https://api.githubcopilot.com",
       ...overrides,
     };
   }
@@ -195,7 +199,7 @@ async function promptAnthropic(
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI-compatible client (GitHub Models, OpenAI, Azure)
+// OpenAI-compatible client (GitHub Copilot, OpenAI)
 // ---------------------------------------------------------------------------
 
 async function promptOpenAI(
@@ -206,21 +210,25 @@ async function promptOpenAI(
 ): Promise<PromptResult> {
   const model = opts?.model ?? config.model;
 
-  // GitHub Models API uses /chat/completions path
-  const url =
-    config.backend === "github-models"
-      ? `${config.baseUrl}/chat/completions`
-      : `${config.baseUrl}/v1/chat/completions`;
+  // GitHub Copilot serves Chat Completions at `/chat/completions` (NO `/v1`).
+  // Matches the gateway's `OPENAI_HOST_CHAT_COMPLETIONS_PATHS` for github-copilot.
+  const isCopilot = config.backend === "github-copilot";
+  const url = isCopilot
+    ? `${config.baseUrl}/chat/completions`
+    : `${config.baseUrl}/v1/chat/completions`;
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
     authorization: `Bearer ${config.apiKey}`,
   };
 
-  // GitHub Models API requires additional headers
-  if (config.backend === "github-models") {
-    headers.accept = "application/vnd.github+json";
-    headers["x-github-api-version"] = "2022-11-28";
+  // GitHub Copilot wants the integration-id + api-version headers (matches the
+  // gateway's `copilotHeaders`). Without these the API still accepts the call
+  // today but rejects malformed ones intermittently — send them as the real
+  // Copilot clients do.
+  if (isCopilot) {
+    headers["copilot-integration-id"] = "vscode-chat";
+    headers["x-github-api-version"] = "2026-06-01";
   }
 
   const body: Record<string, unknown> = {
@@ -276,10 +284,11 @@ export function createEvalLLMClient(
 ): EvalLLMClient {
   const config = backendConfig ?? resolveBackend();
 
-  // Rate limits: very conservative for GitHub Models, generous for direct API
+  // Rate limits: very conservative for GitHub Copilot (CI quota), generous for
+  // direct API
   const limiter =
-    config.backend === "github-models"
-      ? new RateLimiter(1, 10_000) // ~6 req/min to stay well under limits
+    config.backend === "github-copilot"
+      ? new RateLimiter(1, 10_000) // ~6 req/min to stay well under Copilot's CI quota
       : new RateLimiter(5, 200);
 
   const promptFn =
@@ -306,17 +315,6 @@ export function createEvalLLMClient(
 
           // Handle 429 responses
           if (lastError.message.includes("429")) {
-            // Detect GitHub's anti-scraping / quota exhaustion page (HTML, not JSON).
-            // This is NOT a transient rate limit — it means daily quota is exhausted
-            // or the token lacks access. Retrying wastes quota.
-            if (lastError.message.includes("scraping")) {
-              throw new Error(
-                "GitHub Models daily quota exhausted or access denied. " +
-                  "The API returned GitHub's anti-scraping page instead of a JSON rate-limit error. " +
-                  "Wait for daily quota reset or check your token's 'models' scope.",
-              );
-            }
-
             // Transient rate limit — retry with exponential backoff
             const backoffMs = Math.min(
               30_000 * 2 ** attempt, // 30s, 60s, 120s, 240s, 480s

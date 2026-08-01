@@ -562,8 +562,8 @@ describe("global auth staleness", () => {
 });
 
 describe("workerKeyScheme (dedicated-key provider→scheme)", () => {
-  test("github-models needs a Bearer token", () => {
-    expect(workerKeyScheme("github-models")).toBe("bearer");
+  test("github-copilot needs a Bearer token", () => {
+    expect(workerKeyScheme("github-copilot")).toBe("bearer");
   });
 
   test("every other provider uses api-key (x-api-key)", () => {
