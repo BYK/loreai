@@ -24,6 +24,7 @@ function usable(res: ImportAuth | null): UsableAuth {
 }
 
 let tmp: string;
+const originalCwd = process.cwd();
 const saved: Record<string, string | undefined> = {};
 
 function setEnv(key: string, value: string | undefined): void {
@@ -43,6 +44,10 @@ beforeEach(() => {
   setEnv("HOME", tmp);
   setEnv("XDG_DATA_HOME", join(tmp, ".local", "share"));
   setEnv("XDG_CONFIG_HOME", join(tmp, ".config"));
+  // Active-provider lookup gives project config precedence over XDG config.
+  // Run each case in its disposable project so repository-level config cannot
+  // leak into this suite's isolated OpenCode fixture.
+  process.chdir(tmp);
   // Clear agent env credentials so each test starts from a known state
   // (the runner's own shell may have these set).
   setEnv("ANTHROPIC_BASE_URL", undefined);
@@ -55,6 +60,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) setEnv(k, v);
   for (const k of Object.keys(saved)) delete saved[k];
+  process.chdir(originalCwd);
   rmSync(tmp, { recursive: true, force: true });
 });
 

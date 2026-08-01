@@ -1,11 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { compactionBaseline } from "./baselines";
+import type { EvalLLMClient } from "./llm-backend";
 import type { ConversationTurn } from "./types";
 
 /** Mock LLM that returns a tiny summary and records every prompt it saw. */
 function mockLlm() {
   const prompts: string[] = [];
-  const client = {
+  const client: EvalLLMClient = {
     config: {
       backend: "anthropic" as const,
       model: "m",
@@ -22,7 +23,7 @@ function mockLlm() {
       };
     },
   };
-  return { client: client as never, prompts };
+  return { client, prompts };
 }
 
 /** N synthetic turns of `tokensEach` tokens (token field drives the math). */
@@ -69,5 +70,50 @@ describe("progressive compactionBaseline", () => {
     const big = mockLlm();
     await compactionBaseline(synthTurns(200, 5000), big.client, 200_000); // 1M
     expect(big.prompts.length).toBeGreaterThan(small.prompts.length);
+  });
+
+  test("preserves the accumulated anchor when a later fold returns empty text", async () => {
+    const { client, prompts } = mockLlm();
+    client.prompt = async (_system: string, user: string) => {
+      prompts.push(user);
+      return {
+        text: prompts.length === 1 ? "SURVIVING SUMMARY" : "",
+        inputTokens: 0,
+        outputTokens: 0,
+      };
+    };
+
+    const out = await compactionBaseline(
+      synthTurns(120, 5000),
+      client,
+      200_000,
+    );
+
+    expect(prompts.length).toBeGreaterThan(1);
+    expect(out).toContain("SURVIVING SUMMARY");
+  });
+
+  test("keeps compaction window accounting truncated after a fold", async () => {
+    const { client, prompts } = mockLlm();
+    const hugeToolResult = "x".repeat(100_000);
+    const turns: ConversationTurn[] = [
+      ...synthTurns(9, 1000),
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-1",
+            content: hugeToolResult,
+          },
+        ],
+      },
+      ...synthTurns(2, 1000),
+    ];
+
+    // The serializer keeps only 2K chars of a tool result. Re-counting the
+    // tail untruncated after a fold would trigger spurious extra compactions.
+    await compactionBaseline(turns, client, 30_000, 20_000);
+    expect(prompts).toHaveLength(1);
   });
 });

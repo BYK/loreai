@@ -11,6 +11,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // Lore's TRUE cost includes background work the answering model never sees:
 // distillation / curation / meta-distill LLM calls (worker model) + cache
@@ -73,6 +75,52 @@ function loreCost(dir) {
 // file-local facts (header, status) and ALL session-created files for
 // cross-file facts (money type, the cap value).
 const PROBE_FILE = "src/orders_v2.py";
+
+function scoreGeneratedRetention(dir, result) {
+  const facts = result.factMap;
+  if (!facts || typeof facts !== "object") return null;
+  const project = path.join(dir, "project");
+  const oracle = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "verify-retention-orders.py",
+  );
+  if (!fs.existsSync(oracle))
+    throw new Error(`retention oracle is missing: ${oracle}`);
+  const fields = ["status", "channel", "region", "warehouse"];
+  const probes = fields.map((field) => {
+    let held = false;
+    try {
+      execFileSync("python3", [oracle, project, field], {
+        env: { ...process.env, LORE_EVAL_FACTS: JSON.stringify(facts) },
+        stdio: "pipe",
+        timeout: 30000,
+      });
+      held = true;
+    } catch {}
+    return {
+      id: `behavior-${field}`,
+      axis: "incidental fact recall",
+      held,
+      leaked: false,
+    };
+  });
+  const changed = allPyFiles(project).filter((p) => {
+    const rel = path.relative(project, p);
+    return rel !== PROBE_FILE && p !== path.join(project, ".lore.json");
+  });
+  const leakedFacts = [];
+  for (const [field, value] of Object.entries(facts)) {
+    if (
+      changed.some((p) => fs.readFileSync(p, "utf8").includes(String(value)))
+    ) {
+      leakedFacts.push(field);
+    }
+  }
+  for (const probe of probes)
+    probe.leaked = leakedFacts.includes(probe.id.slice("behavior-".length));
+  return { probes, leakedFacts };
+}
+
 // Scan EVERY .py file the agent created (robust to whatever helper files a given
 // task produces), so cross-file facts (money type, the cap value) are checked
 // wherever they land.
@@ -220,6 +268,7 @@ function scoreArm(dir) {
   const result = JSON.parse(
     fs.readFileSync(path.join(dir, "result.json"), "utf8"),
   );
+  const generated = scoreGeneratedRetention(dir, result);
   const probePath = path.join(dir, "project", PROBE_FILE);
   const exists = fs.existsSync(probePath);
   const probe = exists ? fs.readFileSync(probePath, "utf8") : "";
@@ -323,12 +372,14 @@ function scoreArm(dir) {
     "superseded-uppercase-status": "status",
   };
 
-  const probes = PROBES.filter((p) => !p.applies || p.applies(cfg)).map((p) => {
-    const factName = LEAK_FACT[p.id];
-    const leaked = factName ? leakedFacts.includes(factName) : false;
-    const held = exists ? !!p.check({ probe, all, cfg }) : false;
-    return { id: p.id, axis: p.axis, held, ...(factName ? { leaked } : {}) };
-  });
+  const probes =
+    generated?.probes ??
+    PROBES.filter((p) => !p.applies || p.applies(cfg)).map((p) => {
+      const factName = LEAK_FACT[p.id];
+      const leaked = factName ? leakedFacts.includes(factName) : false;
+      const held = exists ? !!p.check({ probe, all, cfg }) : false;
+      return { id: p.id, axis: p.axis, held, ...(factName ? { leaked } : {}) };
+    });
   const held = probes.filter((p) => p.held).length;
   // A "clean" pass = held AND the fact did not leak into a readable file. This is
   // the memory-attributable count; use it (not probesHeld) for the A/B.
@@ -340,8 +391,8 @@ function scoreArm(dir) {
     probeFileCreated: exists,
     probesHeld: `${held}/${probes.length}`,
     probesHeldClean: `${heldClean}/${probes.length}`,
-    contaminated,
-    leakedFacts,
+    contaminated: generated ? generated.leakedFacts.length > 0 : contaminated,
+    leakedFacts: generated ? generated.leakedFacts : leakedFacts,
     probes,
     compactions: result.compactions,
     metrics: {
@@ -381,6 +432,35 @@ if (dirs.length === 0) {
   process.exit(2);
 }
 const rows = dirs.map(scoreArm);
+const groups = new Map();
+for (const row of rows) {
+  const result = JSON.parse(
+    fs.readFileSync(path.join(dirs[rows.indexOf(row)], "result.json"), "utf8"),
+  );
+  if (!result.valid)
+    throw new Error(
+      `invalid run must not be scored: ${dirs[rows.indexOf(row)]}`,
+    );
+  const key = `${result.task}:${result.model}:${result.agent}:${result.repetition}`;
+  const group = groups.get(key) || [];
+  group.push({ row, result });
+  groups.set(key, group);
+}
+for (const group of groups.values()) {
+  const maps = new Set(group.map(({ result }) => result.factMapId));
+  const arms = new Set(group.map(({ result }) => result.arm));
+  if (
+    group.length !== 2 ||
+    maps.size !== 1 ||
+    arms.size !== 2 ||
+    !arms.has("lore") ||
+    !arms.has("nolore")
+  ) {
+    throw new Error(
+      `retention scoring requires one paired lore/nolore run with one fact map for ${group[0].result.task}/${group[0].result.model}/${group[0].result.agent}/r${group[0].result.repetition}`,
+    );
+  }
+}
 console.log(JSON.stringify(rows, null, 2));
 console.log("\n=== SUMMARY ===");
 for (const r of rows) {

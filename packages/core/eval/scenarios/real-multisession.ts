@@ -66,25 +66,33 @@ function load(): ScenarioDefinition[] {
     .filter(Boolean);
   if (paths.length === 0 || !paths.every((p) => existsSync(p))) return [];
 
-  const sessions: SessionTranscript[] = paths.map((p, i) => {
-    const turns: ConversationTurn[] = JSON.parse(
-      gunzipSync(readFileSync(p)).toString(),
+  let sessions: SessionTranscript[];
+  let raw: RawQuestion[];
+  try {
+    sessions = paths.map((p, i) => {
+      const turns: ConversationTurn[] = JSON.parse(
+        gunzipSync(readFileSync(p)).toString(),
+      );
+      return {
+        id: `real-ms-${i + 1}`,
+        label: `Real session ${i + 1}`,
+        // Same project across all sessions so Lore accumulates one project's
+        // cross-session memory (that is what gets auto-injected later).
+        projectPath: "/eval/real-multisession",
+        turns,
+        metadata: {
+          totalTokens: turns.reduce((s, t) => s + (t.tokens ?? 0), 0),
+          description: `Real session ${i + 1}, ${turns.length} turns`,
+        },
+      };
+    });
+    raw = JSON.parse(readFileSync(questionsPath, "utf8"));
+  } catch (error) {
+    console.warn(
+      `[eval] skipping ${scenarioId}: could not load local fixture (${error instanceof Error ? error.message : String(error)})`,
     );
-    return {
-      id: `real-ms-${i + 1}`,
-      label: `Real session ${i + 1}`,
-      // Same project across all sessions so Lore accumulates one project's
-      // cross-session memory (that is what gets auto-injected later).
-      projectPath: "/eval/real-multisession",
-      turns,
-      metadata: {
-        totalTokens: turns.reduce((s, t) => s + (t.tokens ?? 0), 0),
-        description: `Real session ${i + 1}, ${turns.length} turns`,
-      },
-    };
-  });
-
-  const raw: RawQuestion[] = JSON.parse(readFileSync(questionsPath, "utf8"));
+    return [];
+  }
   const questions: EvalQuestion[] = raw.map((q) => ({
     id: q.id,
     dimension,
@@ -107,6 +115,7 @@ function load(): ScenarioDefinition[] {
   return [
     {
       id: scenarioId,
+      name: "Real multi-session",
       dimension,
       label:
         process.env.REAL_MULTI_LABEL ??

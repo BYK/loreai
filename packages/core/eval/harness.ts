@@ -14,6 +14,7 @@
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type {
   FixtureEntry,
@@ -103,7 +104,7 @@ export function applyUpstreamOverride(
   const upstream = process.env.EVAL_UPSTREAM_URL;
   if (upstream) headers["x-lore-upstream-url"] = upstream;
 
-  const body = upstream !== undefined ? { ...requestBody, model } : requestBody;
+  const body = upstream ? { ...requestBody, model } : requestBody;
   return { body, headers };
 }
 
@@ -837,7 +838,13 @@ export async function askQuestionViaGateway(
   gateway: GatewayHandle,
   model: string,
   loreContext?: string,
+  noMemory = false,
 ): Promise<{ hypothesis: string; tokens: TokenUsage; recallInvoked: boolean }> {
+  // A control question must not reuse the replayed session, whose gradient can
+  // reconstruct prior temporal/distillation context even with LTM reads disabled.
+  const noMemorySessionID = noMemory
+    ? `eval-no-memory-${randomUUID()}`
+    : undefined;
   // When loreContext is provided, include it in the user message so the model
   // has the distillation observations and raw conversation context (mimicking
   // real Lore sessions where the gradient context manager provides these).
@@ -866,7 +873,7 @@ export async function askQuestionViaGateway(
       model,
       system: QA_SYSTEM,
       messages,
-      tools: withTools ? STANDARD_TOOLS : [],
+      ...(withTools ? { tools: STANDARD_TOOLS } : {}),
       max_tokens: 2048,
       stream: false,
     };
@@ -880,24 +887,26 @@ export async function askQuestionViaGateway(
       }
       const resp = await gateway.chat(requestBody, {
         "x-lore-no-store": "true",
+        ...(noMemory ? { "x-lore-no-memory": "true" } : {}),
+        ...(noMemorySessionID
+          ? { "x-lore-session-id": noMemorySessionID }
+          : {}),
       });
       if (resp.headers.get("x-lore-recall-invoked") === "true") {
         recallInvoked = true;
       }
       const data = (await resp.json()) as AnthropicResponse;
-      tokens.input += data.usage?.input_tokens ?? 0;
-      tokens.output += data.usage?.output_tokens ?? 0;
-      tokens.cacheRead += data.usage?.cache_read_input_tokens ?? 0;
-      tokens.cacheWrite += data.usage?.cache_creation_input_tokens ?? 0;
       const text = extractText(data.content ?? []);
       const errType = data.error?.type ?? "";
       const transient =
         errType === "rate_limit_error" ||
         errType === "overloaded_error" ||
-        text.includes("rate limit") ||
-        text.includes("exceed") ||
         /\b(429|529|503)\b|overloaded/i.test(data.error?.message ?? "");
       if (transient && attempt < 2) continue;
+      tokens.input += data.usage?.input_tokens ?? 0;
+      tokens.output += data.usage?.output_tokens ?? 0;
+      tokens.cacheRead += data.usage?.cache_read_input_tokens ?? 0;
+      tokens.cacheWrite += data.usage?.cache_creation_input_tokens ?? 0;
       return data;
     }
     return {
@@ -917,7 +926,11 @@ export async function askQuestionViaGateway(
     const toolUses = content.filter((b) => b.type === "tool_use");
     if (!withTools || toolUses.length === 0) {
       return {
-        hypothesis: text || data.error?.message || "[No response from gateway]",
+        hypothesis:
+          text ||
+          lastText ||
+          data.error?.message ||
+          "[No response from gateway]",
         recallInvoked,
         tokens,
       };
@@ -941,6 +954,22 @@ export async function askQuestionViaGateway(
     recallInvoked,
     tokens,
   };
+}
+
+export function usesGatewayQuestionPath(
+  mode: BaselineMode,
+  isGatewayBaseline: boolean,
+): boolean {
+  return isGatewayBaseline || mode === "no-memory";
+}
+
+export function requiresRealGateway(mode: BaselineMode): boolean {
+  return (
+    mode === "lore" ||
+    mode === "lore-context-only" ||
+    mode === "lore-memory-only" ||
+    mode === "no-memory"
+  );
 }
 
 async function askQuestion(
@@ -1244,12 +1273,7 @@ export async function runScenario(
       // Gateway-based baselines require a real gateway with Lore processing.
       // Without it, distillation/LTM/recall haven't run, so testing "lore"
       // mode would just test an empty memory — not useful.
-      if (
-        gateway.isReal === false &&
-        (mode === "lore" ||
-          mode === "lore-context-only" ||
-          mode === "lore-memory-only")
-      ) {
+      if (gateway.isReal === false && requiresRealGateway(mode)) {
         console.log(
           `  Skipping baseline '${mode}' — requires gateway (no ANTHROPIC_API_KEY)`,
         );
@@ -1296,7 +1320,7 @@ export async function runScenario(
             cacheWrite: 0,
             totalCost: 0,
           };
-        } else if (isGatewayBaseline) {
+        } else if (usesGatewayQuestionPath(mode, isGatewayBaseline)) {
           // Gateway-based baselines: send the question through the gateway
           // so it gets Lore's LTM injection, recall tool, and distilled context.
           // EVAL_PASSIVE_RECALL=1: feed a per-question relevance-ranked context
@@ -1304,12 +1328,15 @@ export async function runScenario(
           const perQuestionContext =
             process.env.EVAL_PASSIVE_RECALL === "1" && mode === "lore"
               ? await buildRelevanceContext(q.question)
-              : loreContext;
+              : mode === "no-memory"
+                ? ""
+                : loreContext;
           const answer = await askQuestionViaGateway(
             q.question,
             gateway,
             config.model,
             perQuestionContext,
+            mode === "no-memory",
           );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;

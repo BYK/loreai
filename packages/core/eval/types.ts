@@ -287,6 +287,10 @@ export interface EvalConfig {
 export interface ScenarioDefinition {
   id: string;
   name: string;
+  /** Optional concise display label for reports and live-run selection. */
+  label?: string;
+  /** Human-readable scenario purpose. */
+  description?: string;
   dimension: Dimension;
   /** Which baselines are applicable to this scenario. */
   applicableBaselines: BaselineMode[];

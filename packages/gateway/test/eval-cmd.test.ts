@@ -1,9 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   formatScorecard,
+  pathEntries,
   parseScoreJson,
+  taskFixturePath,
   type ScoredArm,
 } from "../src/cli/eval-cmd";
+
+describe("pathEntries", () => {
+  it("splits Windows PATH values using the platform delimiter", () => {
+    expect(pathEntries("C:\\tools;C:\\bin", ";")).toEqual([
+      "C:\\tools",
+      "C:\\bin",
+    ]);
+  });
+});
+
+describe("taskFixturePath", () => {
+  it("explains a missing benchmark task fixture", () => {
+    expect(() =>
+      taskFixturePath("/missing-harness", "task-pref-long.json"),
+    ).toThrow("Benchmark task fixture not found");
+  });
+});
 
 const lore: ScoredArm = {
   arm: "lore",

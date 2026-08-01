@@ -701,6 +701,7 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "x-lore-git-remote",
   "x-lore-agent",
   "x-lore-no-store",
+  "x-lore-no-memory",
   "x-lore-recall-invoked",
   // Protocol version — set explicitly by each builder
   "anthropic-version",

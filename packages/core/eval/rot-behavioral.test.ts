@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { extractSignals } from "../src/degradation-signals.ts";
-import { stepsFromStream, toolCallTarget } from "./live/trace-extract.mjs";
+import {
+  stepsFromRun,
+  stepsFromStream,
+  toolCallTarget,
+} from "./live/trace-extract.mjs";
 import {
   analyzeBehavioralRotAB,
   formatBehavioralReport,
@@ -95,6 +99,26 @@ describe("trace-extract: stepsFromStream", () => {
     const sig = extractSignals(steps);
     expect(sig[0].tool_error).toBe(true);
     expect(sig[0].edit_failure).toBe(true);
+  });
+});
+
+describe("trace-extract: stepsFromRun", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "rotb-run-"));
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("excludes driver-issued curate streams from behavioral turns", () => {
+    writeStream(dir, "s1-task-t1.json", [stepStart(), stepFinish(100)]);
+    writeStream(dir, "s1-curate.json", [stepStart(), stepFinish(99999)]);
+    writeStream(dir, "s1-task-t2.json", [stepStart(), stepFinish(200)]);
+    expect(
+      (stepsFromRun(dir) as Array<{ promptTokens: number }>).map(
+        (step) => step.promptTokens,
+      ),
+    ).toEqual([100, 200]);
   });
 });
 

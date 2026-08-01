@@ -1,0 +1,55 @@
+{
+  "id": "iterative-orders-v1",
+  "seed": "./seed-min",
+  "verifier": "verify-iterative-orders.py",
+  "facts": {
+    "channel": { "prefix": "CHANNEL-" },
+    "region": { "prefix": "REGION-" },
+    "warehouse": { "prefix": "WH-" },
+    "status": { "prefix": "STATUS-" }
+  },
+  "sessions": [
+    {
+      "id": "iterative-orders",
+      "turns": [
+        {
+          "checkpoint": "c1",
+          "toolContext": { "path": "reference/catalog-v1.txt", "sizeKb": 90 },
+          "prompt": "Start the orderkit library. Inspect reference/catalog-v1.txt before coding: it is a vendor export you may need later. Create src/orders.py with create_order(customer, items), where items are (product_id, price_cents, qty). Return customer, total_cents, and line_count. Reject more than 100 items. Aside for a later order workflow, not something to write into code now: our orders use {{fact.channel}} for channel, {{fact.region}} for region, {{fact.warehouse}} for warehouse, and {{fact.status}} as the status."
+        },
+        {
+          "checkpoint": "c2",
+          "toolContext": {
+            "path": "reference/discount-rules.txt",
+            "sizeKb": 90
+          },
+          "prompt": "Checkpoint 2. Extend your existing implementation without breaking its public behavior. Inspect reference/discount-rules.txt, then add apply_discount(order, code). WELCOME10 reduces the order total by 10 percent using integer cents; unknown codes must fail; do not mutate the input order."
+        },
+        {
+          "checkpoint": "c3",
+          "toolContext": {
+            "path": "reference/shipping-zones.txt",
+            "sizeKb": 90
+          },
+          "prompt": "Checkpoint 3. Extend the existing API. create_order must accept shipping_zone. LOCAL ships free and REMOTE costs 799 cents. Preserve prior fields and add shipping_cents and grand_total_cents. Existing callers without shipping_zone must keep working."
+        },
+        {
+          "checkpoint": "c4",
+          "toolContext": {
+            "path": "reference/quote-contract.txt",
+            "sizeKb": 90
+          },
+          "prompt": "Checkpoint 4. The product now needs a reusable quote endpoint. Add quote_order(customer, items, shipping_zone) returning subtotal_cents, shipping_cents, and grand_total_cents. Make create_order use the same calculation while preserving every prior behavior."
+        },
+        {
+          "checkpoint": "c5",
+          "toolContext": {
+            "path": "reference/fulfillment-contract.txt",
+            "sizeKb": 90
+          },
+          "prompt": "Checkpoint 5. Extend create_order for fulfillment. Its returned order must now include status, channel, region, and warehouse as well as all prior fields. Build it the way this orderkit project is run. Preserve every earlier API behavior and calculation."
+        }
+      ]
+    }
+  ]
+}

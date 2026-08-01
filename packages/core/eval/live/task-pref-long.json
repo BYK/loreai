@@ -1,13 +1,19 @@
 {
   "id": "pref-long",
   "seed": "./seed-min",
+  "facts": {
+    "channel": { "prefix": "CHANNEL-" },
+    "region": { "prefix": "REGION-" },
+    "warehouse": { "prefix": "WH-" },
+    "status": { "prefix": "STATUS-" }
+  },
   "sessions": [
     {
       "id": "s1",
       "turns": [
         {
           "blob": "blob-xs.md",
-          "prompt": "Starting the 'orderkit' project (pure Python stdlib, code under src/). Using the reference spec piped below, create src/inventory.py with a pure function stock_level(records, sku) summing quantities for a SKU across a list of record dicts. (Totally unrelated aside, just thinking out loud while it's in my head — nothing to act on or write down: our orders happen to ride the WHOLESALE channel out of the EMEA region, ship from warehouse WH-07, and we keep status values like SUBMITTED uppercase.) Anyway — just the stock_level function for now."
+          "prompt": "Starting the 'orderkit' project (pure Python stdlib, code under src/). Using the reference spec piped below, create src/inventory.py with a pure function stock_level(records, sku) summing quantities for a SKU across a list of record dicts. (Totally unrelated aside, just thinking out loud while it's in my head — nothing to act on or write down: our orders happen to ride the {{fact.channel}} channel out of the {{fact.region}} region, ship from warehouse {{fact.warehouse}}, and we keep status values like {{fact.status}} uppercase.) Anyway — just the stock_level function for now."
         },
         {
           "blob": "blob-xs.md",

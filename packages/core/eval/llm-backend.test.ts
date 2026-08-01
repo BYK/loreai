@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { normalizeAnthropicBaseUrl, resolveBackend } from "./llm-backend";
+import {
+  normalizeAnthropicBaseUrl,
+  resolveBackend,
+  resolveJudgeBackend,
+} from "./llm-backend";
 
 describe("normalizeAnthropicBaseUrl", () => {
   test("passes a bare base through unchanged", () => {
@@ -20,6 +24,12 @@ describe("normalizeAnthropicBaseUrl", () => {
     ).toBe("https://api.minimax.io/anthropic");
     expect(
       normalizeAnthropicBaseUrl("https://api.minimax.io/anthropic/v1/"),
+    ).toBe("https://api.minimax.io/anthropic");
+  });
+
+  test("strips a full messages endpoint so it is not appended twice", () => {
+    expect(
+      normalizeAnthropicBaseUrl("https://api.minimax.io/anthropic/v1/messages"),
     ).toBe("https://api.minimax.io/anthropic");
   });
 });
@@ -64,5 +74,36 @@ describe("resolveBackend ANTHROPIC_BASE_URL", () => {
     expect(cfg.backend).toBe("anthropic");
     expect(cfg.baseUrl).toBe("https://api.minimax.io/anthropic");
     expect(cfg.model).toBe("MiniMax-M3");
+  });
+});
+
+describe("resolveJudgeBackend", () => {
+  const saved = {
+    key: process.env.JUDGE_API_KEY,
+    model: process.env.JUDGE_MODEL,
+  };
+
+  afterEach(() => {
+    for (const [key, value] of [
+      ["JUDGE_API_KEY", saved.key],
+      ["JUDGE_MODEL", saved.model],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  test("uses an Anthropic default rather than a non-Anthropic answer model", () => {
+    process.env.JUDGE_API_KEY = "judge-key";
+    delete process.env.JUDGE_MODEL;
+    const judge = resolveJudgeBackend({
+      backend: "openai",
+      model: "gpt-5.6-terra",
+      judgeModel: "gpt-5.6-terra",
+      apiKey: "answer-key",
+      baseUrl: "https://api.openai.com",
+    });
+    expect(judge.backend).toBe("anthropic");
+    expect(judge.model).toBe("claude-sonnet-4-6");
   });
 });

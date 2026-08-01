@@ -62,10 +62,17 @@ function load(): ScenarioDefinition[] {
     return [];
   }
 
-  const turns: ConversationTurn[] = JSON.parse(
-    gunzipSync(readFileSync(fixturePath)).toString(),
-  );
-  const raw: RawQuestion[] = JSON.parse(readFileSync(questionsPath, "utf8"));
+  let turns: ConversationTurn[];
+  let raw: RawQuestion[];
+  try {
+    turns = JSON.parse(gunzipSync(readFileSync(fixturePath)).toString());
+    raw = JSON.parse(readFileSync(questionsPath, "utf8"));
+  } catch (error) {
+    console.warn(
+      `[eval] skipping ${scenarioId}: could not load local fixture (${error instanceof Error ? error.message : String(error)})`,
+    );
+    return [];
+  }
   const totalTokens = turns.reduce((s, t) => s + (t.tokens ?? 0), 0);
 
   const questions: EvalQuestion[] = raw.map((q) => ({
@@ -88,6 +95,7 @@ function load(): ScenarioDefinition[] {
   return [
     {
       id: scenarioId,
+      name: "Real long session",
       dimension,
       label:
         process.env.REAL_SESSION_LABEL ??

@@ -4571,6 +4571,64 @@ function maxReportedUsageForModelID(
  *  - **Case 2 (mixed tools)**: suppresses recall blocks, stores the pending
  *    result for injection into the next request.
  */
+/**
+ * Anthropic-compatible providers occasionally emit incomplete content-block
+ * events. The gateway accumulator treats those as no-ops, so never forward
+ * them to clients that assume the protocol shape (notably Pi's parser).
+ */
+export function isForwardableAnthropicContentEvent(
+  event: string,
+  data: string,
+  rejectedBlockIndices: Set<number> = new Set(),
+): boolean {
+  if (
+    event !== "content_block_start" &&
+    event !== "content_block_delta" &&
+    event !== "content_block_stop"
+  ) {
+    return true;
+  }
+
+  try {
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    const index = parsed.index;
+    if (typeof index === "number" && rejectedBlockIndices.has(index)) {
+      if (event === "content_block_stop") rejectedBlockIndices.delete(index);
+      return false;
+    }
+    if (event === "content_block_stop") return true;
+    const block =
+      event === "content_block_start" ? parsed.content_block : parsed.delta;
+    const forwardable =
+      typeof block === "object" &&
+      block !== null &&
+      typeof (block as Record<string, unknown>).type === "string";
+    if (
+      !forwardable &&
+      event === "content_block_start" &&
+      typeof index === "number"
+    ) {
+      rejectedBlockIndices.add(index);
+    }
+    return forwardable;
+  } catch {
+    return true;
+  }
+}
+
+export function suppressesMemoryInjection(
+  rawHeaders: Record<string, string | undefined>,
+): boolean {
+  return rawHeaders["x-lore-no-memory"] === "true";
+}
+
+export function canInjectMemory(
+  knowledgeEnabled: boolean,
+  rawHeaders: Record<string, string | undefined>,
+): boolean {
+  return knowledgeEnabled && !suppressesMemoryInjection(rawHeaders);
+}
+
 function buildStreamingResponse(
   upstreamResponse: Response,
   onComplete: (response: GatewayResponse) => void,
@@ -4710,8 +4768,18 @@ function buildStreamingResponse(
 
         resetKeepalive();
         const eventStream = parseSSEStream(reader);
+        const rejectedBlockIndices = new Set<number>();
         for await (const { event, data } of eventStream) {
           resetKeepalive(); // upstream is alive — reset inactivity timer
+          if (
+            !isForwardableAnthropicContentEvent(
+              event,
+              data,
+              rejectedBlockIndices,
+            )
+          ) {
+            continue;
+          }
           const forwarded = accumulator.processEvent(event, data);
           if (forwarded) {
             // --- Warning injection: skip thinking blocks, inject before first text/tool block ---
@@ -5072,12 +5140,22 @@ function buildStreamingResponse(
             });
             const contReader = streamingFollowUp.reader;
             activeReader = contReader;
+            const rejectedContinuationBlockIndices = new Set<number>();
 
             for await (const {
               event: contEvent,
               data: contData,
             } of parseSSEStream(contReader)) {
               resetKeepalive(); // continuation stream alive — reset timer
+              if (
+                !isForwardableAnthropicContentEvent(
+                  contEvent,
+                  contData,
+                  rejectedContinuationBlockIndices,
+                )
+              ) {
+                continue;
+              }
               const forwarded = contAccum.processEvent(contEvent, contData);
               if (forwarded) {
                 // Forward non-recall, non-held-back events to client.
@@ -7836,7 +7914,7 @@ async function handleConversationTurn(
         overflow?: Array<{ id: string; category: string; title: string }>;
       }
     | undefined;
-  if (cfg.knowledge.enabled) {
+  if (canInjectMemory(cfg.knowledge.enabled, req.rawHeaders)) {
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
     let pinDirty = false;
@@ -8355,7 +8433,10 @@ async function handleConversationTurn(
   // (system[1]) is kept pinned — Layer 4 busts the prompt cache anyway, so
   // system[1] will be re-written, but keeping the same content means the
   // NEXT turn's prefix matches and gets a cache read.
-  if (result.refreshLtm && cfg.knowledge.enabled) {
+  if (
+    result.refreshLtm &&
+    canInjectMemory(cfg.knowledge.enabled, req.rawHeaders)
+  ) {
     try {
       const ltmFraction = cfg.budget.ltm;
       // Per-session overhead (Bug 1, lever 2). Sub-agents keep the smaller

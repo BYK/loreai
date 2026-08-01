@@ -11,7 +11,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 
 export interface ScoredArm {
   arm: string;
@@ -57,17 +57,34 @@ const BLOB_KB: Record<string, number> = {
   "blob-mid.md": 360,
 };
 
-function whichBin(bin: string): string | null {
+export function pathEntries(
+  pathValue: string,
+  separator = delimiter,
+): string[] {
+  return pathValue.split(separator).filter(Boolean);
+}
+
+export function whichBin(bin: string): string | null {
   // An explicit relative/absolute path (e.g. `--opencode ./bin/opencode` or
   // `/usr/local/bin/opencode`) is validated directly — PATH is only searched for
   // a bare binary name.
   if (bin.includes("/")) {
     return existsSync(bin) ? bin : null;
   }
-  for (const dir of (process.env.PATH || "").split(":")) {
-    if (dir && existsSync(join(dir, bin))) return join(dir, bin);
+  for (const dir of pathEntries(process.env.PATH || "")) {
+    if (existsSync(join(dir, bin))) return join(dir, bin);
   }
   return null;
+}
+
+export function taskFixturePath(harnessDir: string, task: string): string {
+  const file = join(harnessDir, task);
+  if (!existsSync(file)) {
+    throw new Error(
+      `Benchmark task fixture not found at ${file}. Reinstall the Lore package or pass --harness <dir>.`,
+    );
+  }
+  return file;
 }
 
 function findUp(rel: string): string | null {
@@ -167,6 +184,8 @@ export async function commandEval(
   values: Record<string, unknown>,
 ): Promise<void> {
   const model = (values.model as string) || positionals[0];
+  const opencodePath =
+    typeof values.opencode === "string" ? values.opencode : undefined;
   if (!model) {
     console.error(`Usage: lore eval --model <provider/model> [--scenario cross-session|single-long|both]
 
@@ -245,7 +264,7 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
     );
     process.exit(1);
   }
-  if (!whichBin((values.opencode as string) || "opencode")) {
+  if (!whichBin(opencodePath || "opencode")) {
     console.error(
       "`opencode` (the agent under test) was not found on PATH (pass --opencode <path>).",
     );
@@ -259,9 +278,8 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
   // Ensure any blob fixtures referenced by the chosen tasks exist (git-ignored).
   const neededBlobs = new Set<string>();
   for (const s of scenarioKeys) {
-    const task = JSON.parse(
-      readFileSync(join(harnessDir, SCENARIOS[s].task), "utf8"),
-    );
+    const taskPath = taskFixturePath(harnessDir, SCENARIOS[s].task);
+    const task = JSON.parse(readFileSync(taskPath, "utf8"));
     for (const sess of task.sessions || [])
       for (const t of sess.turns || []) if (t.blob) neededBlobs.add(t.blob);
   }
@@ -279,6 +297,7 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
   const allJson: ScoredArm[] = [];
   for (const s of scenarioKeys) {
     const sc = SCENARIOS[s];
+    const taskPath = taskFixturePath(harnessDir, sc.task);
     const outs: string[] = [];
     for (const arm of ["lore", "nolore"]) {
       const out = join(outBase, `${s}-${arm}`);
@@ -289,7 +308,7 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
         [
           join(harnessDir, "driver.mjs"),
           "--task",
-          join(harnessDir, sc.task),
+          taskPath,
           "--arm",
           arm,
           "--model",
@@ -306,6 +325,7 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
           capContext,
           "--session-timeout",
           String(sc.sessionTimeout),
+          ...(opencodePath ? ["--opencode", opencodePath] : []),
           "--keep",
         ],
         process.env,

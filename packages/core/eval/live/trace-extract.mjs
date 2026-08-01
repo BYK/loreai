@@ -25,7 +25,7 @@ import path from "node:path";
 
 // Re-use the production target extractors (#1424, tool-trace.ts). Import from
 // source so the eval never drifts from what the gateway records.
-import { extractFilePath, extractCommand } from "../../src/tool-trace.ts";
+import { extractFilePaths, extractCommand } from "../../src/tool-trace.ts";
 
 /**
  * Derive the salient `(tool, target)` identity for a tool call. File tools →
@@ -34,7 +34,7 @@ import { extractFilePath, extractCommand } from "../../src/tool-trace.ts";
  */
 export function toolCallTarget(toolName, input) {
   const name = String(toolName || "").toLowerCase();
-  const file = extractFilePath(input);
+  const file = extractFilePaths(input)[0];
   if (file) return file;
   // bash/shell/exec → command identity
   if (
@@ -137,6 +137,9 @@ export function stepsFromRun(runDir) {
   const files = fs
     .readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
+    // Curate is a driver-issued gateway command between sessions, not work the
+    // agent performed on the benchmark task. Including it creates phantom turn 0.
+    .filter((f) => !f.endsWith("-curate.json"))
     // Sort by (session index, turn index) parsed from `s{i}...-t{j}` / `s{i}-...`.
     .map((f) => {
       const sm = /^s(\d+)/.exec(f);

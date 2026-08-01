@@ -126,14 +126,12 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
       );
 
       // Compaction → gateway returns 404 session_not_found → graceful fallback.
-      // tokensBefore above the default cancel threshold so the cancel-when-small
-      // policy doesn't short-circuit and the request actually reaches /v1/compact.
       const result = await onCompact?.(
         {
           preparation: {
             previousSummary: "",
             firstKeptEntryId: "entry-1",
-            tokensBefore: 250_000,
+            tokensBefore: 100,
           },
         },
         {},

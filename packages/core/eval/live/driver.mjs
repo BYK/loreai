@@ -21,10 +21,12 @@
 //
 // Emits <out>/result.json with per-session + total metrics.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import net from "node:net";
+import { runVerifierProcess } from "./verifier.mjs";
 
 // ---- args ----------------------------------------------------------------
 const args = Object.fromEntries(
@@ -66,16 +68,10 @@ function defaultWorkerFor(model) {
 // (e.g. minimax) silently auth-fails the worker for every other provider, so
 // distillation never runs and Lore falls back to temporal-only recall (a
 // confounded, under-credited result). Map the worker provider -> auth.json entry.
-function workerKeyFor(workerModel, authSrc) {
+function workerKeyFor(workerModel, auth) {
   const prov = String(workerModel).split("/")[0];
   const authName = prov === "minimax" ? "minimax-coding-plan" : prov;
-  let auth;
-  try {
-    auth = JSON.parse(fs.readFileSync(authSrc, "utf8"));
-  } catch {
-    return "";
-  }
-  const entry = auth[authName];
+  const entry = auth[prov] || auth[authName];
   if (!entry) return ""; // anonymous provider (e.g. opencode/Zen) — no keyed worker
   return entry.key || entry.access || entry.apiKey || "";
 }
@@ -99,6 +95,70 @@ const WORKER_MODEL = args["worker-model"] || defaultWorkerFor(MODEL);
 const OPENCODE = args["opencode"] || "opencode";
 const SESSION_TIMEOUT = Number(args["session-timeout"] || "900"); // seconds per session
 
+function redactAuth(auth) {
+  return Object.fromEntries(
+    Object.keys(auth)
+      .sort()
+      .map((provider) => [provider, { present: true }]),
+  );
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function validateTask(task) {
+  if (!task || typeof task !== "object" || !Array.isArray(task.sessions)) {
+    throw new Error("task must contain a sessions array");
+  }
+  const seen = new Set();
+  for (const session of task.sessions) {
+    for (const turn of session.turns || []) {
+      if (!turn.checkpoint) continue;
+      if (typeof turn.checkpoint !== "string" || seen.has(turn.checkpoint)) {
+        throw new Error(`checkpoint ids must be unique: ${turn.checkpoint}`);
+      }
+      seen.add(turn.checkpoint);
+    }
+  }
+  if (task.verifier && (!task.id || seen.size === 0)) {
+    throw new Error(
+      "iterative tasks require an id and at least one checkpoint",
+    );
+  }
+}
+
+function factsForTask(task, seed) {
+  if (!task.facts) return {};
+  if (!seed) {
+    throw new Error(
+      "iterative tasks require --fact-seed so paired arms share facts",
+    );
+  }
+  const facts = {};
+  for (const [name, spec] of Object.entries(task.facts)) {
+    const digest = sha256(`${seed}:${name}`);
+    if (Array.isArray(spec) && spec.length > 0) {
+      facts[name] = spec[parseInt(digest.slice(0, 8), 16) % spec.length];
+    } else if (
+      spec &&
+      typeof spec === "object" &&
+      typeof spec.prefix === "string"
+    ) {
+      facts[name] = `${spec.prefix}${digest.slice(0, 8).toUpperCase()}`;
+    } else {
+      throw new Error(
+        `task fact '${name}' must be a non-empty list or token prefix`,
+      );
+    }
+  }
+  return facts;
+}
+
+validateTask(TASK);
+const FACT_SEED = args["fact-seed"] || "";
+const FACTS = factsForTask(TASK, FACT_SEED);
+
 // Which agent runtime drives the task: "opencode" (default) or "pi"
 // (@mariozechner/pi-coding-agent). Pi is a second driver so we can compare how a
 // different agent's transcript/compaction discipline behaves under the same
@@ -118,9 +178,7 @@ function resolvePiNodeBin() {
     const vers = fs
       .readdirSync(base)
       .filter((v) => /^\d+\./.test(v))
-      .sort((a, b) =>
-        b.localeCompare(a, undefined, { numeric: true }),
-      );
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
     for (const v of vers) {
       const bin = path.join(base, v, "bin");
       if (fs.existsSync(path.join(bin, "node"))) return bin;
@@ -183,6 +241,7 @@ function parseSession(jsonlPath) {
     toolsByName: {},
     text: "",
     peakContext: 0,
+    errors: [],
   };
   const raw = fs.existsSync(jsonlPath)
     ? fs.readFileSync(jsonlPath, "utf8")
@@ -196,7 +255,13 @@ function parseSession(jsonlPath) {
       continue;
     }
     const part = o.part || {};
-    if (o.type === "step_finish") {
+    if (o.type === "error") {
+      m.errors.push(
+        o.error?.data?.message ||
+          o.error?.message ||
+          "OpenCode emitted an error event",
+      );
+    } else if (o.type === "step_finish") {
       m.steps++;
       const t = part.tokens || {};
       m.tokensIn += t.input || 0;
@@ -228,12 +293,17 @@ function parseSession(jsonlPath) {
 // parts aren't emitted to the --format json stream, but a row is persisted.
 function countCompactions(dbPath) {
   try {
-    const out = require("node:child_process").execSync(
-      `python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); ` +
-        `n=0;` +
-        `n+=c.execute(\\"SELECT COUNT(*) FROM session_message WHERE type='compaction'\\").fetchone()[0];` +
-        `n+=c.execute(\\"SELECT COUNT(*) FROM part WHERE data LIKE '%\\\\\\"type\\\\\\":\\\\\\"compaction\\\\\\"%'\\").fetchone()[0];` +
-        `print(n)" ${dbPath}`,
+    const out = execFileSync(
+      "python3",
+      [
+        "-c",
+        `import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+n=c.execute("SELECT COUNT(*) FROM session_message WHERE type='compaction'").fetchone()[0]
+n+=c.execute("SELECT COUNT(*) FROM part WHERE data LIKE '%\\\"type\\\":\\\"compaction\\\"%'").fetchone()[0]
+print(n)`,
+        dbPath,
+      ],
       { encoding: "utf8" },
     );
     return Number(out.trim()) || 0;
@@ -262,6 +332,7 @@ function parsePiSession(jsonlPath) {
     toolsByName: {},
     text: "",
     peakContext: 0,
+    errors: [],
     // Pi-native cache accounting: count "significant misses" the way the
     // Earendil post frames them — a request that re-billed a large uncached
     // prefix. We flag any assistant request whose uncached `input` exceeds
@@ -283,8 +354,16 @@ function parsePiSession(jsonlPath) {
       continue;
     }
     // One assistant response == one message_end with role assistant.
-    if (o.type === "message_end" && o.message && o.message.role === "assistant") {
+    if (
+      o.type === "message_end" &&
+      o.message &&
+      o.message.role === "assistant"
+    ) {
       const msg = o.message;
+      if (msg.stopReason === "error") {
+        m.errors.push(msg.errorMessage || "Pi assistant response failed");
+        continue;
+      }
       const u = msg.usage || {};
       m.steps++;
       const input = u.input || 0;
@@ -352,7 +431,6 @@ function countPiCompactions(sessionDir) {
   return n;
 }
 
-
 fs.rmSync(OUT, { recursive: true, force: true });
 for (const d of [
   "config/opencode",
@@ -364,7 +442,36 @@ for (const d of [
 ]) {
   fs.mkdirSync(path.join(OUT, d), { recursive: true });
 }
-fs.copyFileSync(AUTH_SRC, path.join(OUT, "data/opencode/auth.json"));
+const sourceAuth = JSON.parse(fs.readFileSync(AUTH_SRC, "utf8"));
+function authEntryForProvider(provider) {
+  return (
+    sourceAuth[provider] ||
+    sourceAuth[provider === "minimax" ? "minimax-coding-plan" : provider]
+  );
+}
+const isolatedAuth = {};
+for (const provider of new Set([
+  String(MODEL).split("/")[0],
+  String(WORKER_MODEL).split("/")[0],
+])) {
+  const entry = authEntryForProvider(provider);
+  if (entry) isolatedAuth[provider] = entry;
+}
+// MiniMax's subscription credential is stored by OpenCode under its legacy
+// provider key. The benchmark uses the canonical `minimax/MiniMax-M3` route for
+// both agents and workers, so expose the same key under that canonical name.
+if (!isolatedAuth.minimax && isolatedAuth["minimax-coding-plan"]) {
+  isolatedAuth.minimax = isolatedAuth["minimax-coding-plan"];
+}
+fs.writeFileSync(
+  path.join(OUT, "data/opencode/auth.json"),
+  `${JSON.stringify(isolatedAuth, null, 2)}\n`,
+);
+const isolatedAuthPath = path.join(OUT, "data/opencode/auth.json");
+// Direct driver callers may hit a setup error before normal teardown. The
+// credential is only needed while this process is alive, so scrub it for every
+// ordinary process exit as well as the normal completion path below.
+process.on("exit", () => fs.rmSync(isolatedAuthPath, { force: true }));
 
 const project = path.join(OUT, "project");
 // Seed the project from a template repo (the benchmark codebase), if provided.
@@ -375,6 +482,69 @@ const SEED = args.seed
     : null;
 if (SEED && fs.existsSync(SEED)) {
   fs.cpSync(SEED, project, { recursive: true });
+}
+
+function projectManifest(root) {
+  const files = {};
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (
+        entry.name === ".git" ||
+        entry.name === "__pycache__" ||
+        entry.name.endsWith(".pyc")
+      )
+        continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) {
+        const rel = path.relative(root, full);
+        files[rel] = sha256(fs.readFileSync(full));
+      }
+    }
+  };
+  walk(root);
+  return files;
+}
+const SEED_MANIFEST = projectManifest(project);
+
+function findFactLeaks(root, facts, excluded = []) {
+  const excludedSet = new Set(excluded);
+  const leaks = {};
+  const after = projectManifest(root);
+  for (const [rel, digest] of Object.entries(after)) {
+    if (excludedSet.has(rel) || SEED_MANIFEST[rel] === digest) continue;
+    const text = fs.readFileSync(path.join(root, rel), "utf8");
+    for (const [fact, value] of Object.entries(facts)) {
+      if (text.includes(String(value))) (leaks[fact] ||= []).push(rel);
+    }
+  }
+  return leaks;
+}
+
+function interpolateFacts(prompt) {
+  return String(prompt).replace(
+    /{{fact\.([A-Za-z][A-Za-z0-9_]*)}}/g,
+    (_m, key) => {
+      if (!(key in FACTS)) throw new Error(`unknown task fact '${key}'`);
+      return String(FACTS[key]);
+    },
+  );
+}
+
+function writeToolContext(turn) {
+  if (!turn.toolContext) return;
+  const rel = String(turn.toolContext.path || "reference/context.txt");
+  const sizeKb = Number(turn.toolContext.sizeKb || 1);
+  if (rel.includes("..") || path.isAbsolute(rel)) {
+    throw new Error(`toolContext path must stay in project: ${rel}`);
+  }
+  const full = path.join(project, rel);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  const line = `reference context for ${turn.checkpoint || "turn"}: inspect this file before coding\n`;
+  fs.writeFileSync(
+    full,
+    line.repeat(Math.max(1, Math.ceil((sizeKb * 1024) / line.length))),
+  );
 }
 // Optional per-arm Lore config override so a single build can A/B one knob.
 // `--context-sources off` -> contextSources:[]; `--context-sources distillation`
@@ -705,16 +875,10 @@ const baseEnv = {
 // contaminating the vanilla arm), and (b) the lore arm loads OUR built extension
 // so Pi routes through the eval's isolated gateway.
 //
-// Fairness: Pi has no `--cap-context`. Its native compaction fires when
-// contextTokens > contextWindow - reserveTokens. To force compaction on the
-// same forced-blob task at a comparable threshold, we (1) tell Pi the model's
-// contextWindow is the cap (via a custom model registration is not exposed on
-// the CLI, so we rely on the provider's real window + a large reserveTokens) and
-// (2) set compaction.{reserveTokens,keepRecentTokens} so the trigger sits near
-// the OpenCode --cap-context threshold. We approximate: effective trigger =
-// contextWindow - reserveTokens ≈ cap - outputReserve - buffer. Since we cannot
-// override contextWindow via the CLI, we set reserveTokens = realWindow - cap +
-// outputReserve so the trigger lands at ~cap. keepRecentTokens mirrors OpenCode.
+// Pi has no `--cap-context`, but models.json supports a per-model contextWindow
+// override. We set that to the SAME cap OpenCode receives, then reserve output
+// plus the same safety buffer inside it. The result is independent of Pi's
+// mutable provider catalog and comparable across models.
 const PI_HOME = path.join(OUT, "pi-home");
 const PI_SESSION_DIR = path.join(OUT, "pi-sessions");
 if (AGENT === "pi") {
@@ -729,13 +893,24 @@ if (AGENT === "pi") {
   if (args["cap-context"]) {
     const cap = Number(args["cap-context"]);
     const outputReserve = Number(args["cap-output"] || 64000);
-    // Pi trigger = contextWindow - reserveTokens. We don't know the exact
-    // advertised window here, so express the reserve relative to a conservative
-    // 1M window ceiling; if the real window is smaller Pi still triggers earlier
-    // (safe). The goal is parity with OpenCode's ~cap trigger, not exactness —
-    // the eval leans on per-arm ratios, and compaction count is reported.
-    const ASSUMED_WINDOW = Number(args["pi-window"] || 1000000);
-    const reserveTokens = Math.max(16384, ASSUMED_WINDOW - cap + outputReserve);
+    const AUTOCOMPACT_BUFFER = 13000;
+    const reserveTokens = Math.max(16384, outputReserve + AUTOCOMPACT_BUFFER);
+    const [provider, ...modelParts] = MODEL.split("/");
+    const modelID = modelParts.join("/");
+    fs.writeFileSync(
+      path.join(PI_HOME, "models.json"),
+      `${JSON.stringify(
+        {
+          providers: {
+            [provider]: {
+              modelOverrides: { [modelID]: { contextWindow: cap } },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
     piSettings.compaction = {
       enabled: true,
       reserveTokens,
@@ -760,7 +935,7 @@ let gwPort = null;
 const loreDb = path.join(OUT, "data", "lore.db");
 if (ARM === "lore") {
   gwPort = await freePort();
-  const key = workerKeyFor(WORKER_MODEL, AUTH_SRC);
+  const key = workerKeyFor(WORKER_MODEL, isolatedAuth);
   if (!key)
     console.error(
       `[warn] no worker API key for provider '${WORKER_MODEL.split("/")[0]}' — background distillation will not run (temporal-only recall)`,
@@ -878,18 +1053,14 @@ function piProviderKeyEnv() {
     deepseek: "DEEPSEEK_API_KEY",
     xai: "XAI_API_KEY",
     groq: "GROQ_API_KEY",
-    "minimax-coding-plan": "ANTHROPIC_API_KEY", // minimax anthropic-compat
-    minimax: "ANTHROPIC_API_KEY",
+    "minimax-coding-plan": "MINIMAX_API_KEY",
+    minimax: "MINIMAX_API_KEY",
   };
   const envVar = envVarByProv[prov];
   if (!envVar) return {};
-  let auth;
-  try {
-    auth = JSON.parse(fs.readFileSync(AUTH_SRC, "utf8"));
-  } catch {
-    return {};
-  }
-  const entry = auth[prov] || auth[prov === "minimax" ? "minimax-coding-plan" : prov];
+  const entry =
+    isolatedAuth[prov] ||
+    isolatedAuth[prov === "minimax" ? "minimax-coding-plan" : prov];
   const key = entry && (entry.key || entry.access || entry.apiKey);
   return key ? { [envVar]: key } : {};
 }
@@ -949,6 +1120,41 @@ function runPi(prompt, sessionOut, { cont = false, stdin = null } = {}) {
 // Agent dispatch: the main loop calls runAgent() regardless of runtime.
 const runAgent = AGENT === "pi" ? runPi : runOpencode;
 const parseAgentSession = AGENT === "pi" ? parsePiSession : parseSession;
+
+function runVerifier(checkpoint, scope) {
+  if (!TASK.verifier || !checkpoint) return Promise.resolve(null);
+  const verifier = path.resolve(path.dirname(args.task), TASK.verifier);
+  if (!fs.existsSync(verifier)) {
+    throw new Error(`task verifier does not exist: ${verifier}`);
+  }
+  // The verifier runs on the host with facts, but it imports agent code only
+  // inside its own Docker child. That child has neither facts nor secrets.
+  return runVerifierProcess({
+    spawn,
+    verifier: fs.readFileSync(verifier),
+    checkpoint,
+    scope,
+    project,
+    image: args["verifier-image"] || "python:3.12-alpine",
+    facts: FACTS,
+  });
+}
+
+async function scoreCheckpoint(checkpoint) {
+  const startedAt = Date.now();
+  const [core, isolated, strict] = await Promise.all([
+    runVerifier(checkpoint, "core"),
+    runVerifier(checkpoint, "isolated"),
+    runVerifier(checkpoint, "strict"),
+  ]);
+  return {
+    id: checkpoint,
+    core,
+    isolated,
+    strict,
+    elapsedMs: Date.now() - startedAt,
+  };
+}
 
 const taskDir = path.dirname(path.resolve(args.task));
 const blobFor = (turn) =>
@@ -1097,6 +1303,9 @@ async function waitForMemoryReady(
 }
 
 const sessionMetrics = [];
+const checkpoints = [];
+const runErrors = [];
+let aborted = false;
 for (let i = 0; i < TASK.sessions.length; i++) {
   const s = TASK.sessions[i];
   const turns = s.turns || [{ prompt: s.prompt }];
@@ -1146,9 +1355,10 @@ for (let i = 0; i < TASK.sessions.length; i++) {
         `    [lore] in-session settle before probe turn: distillations=${ready?.distillations ?? "?"} embedded=${ready?.embedded ?? "?"} knowledge=${ready?.knowledge ?? "?"}`,
       );
     }
+    writeToolContext(turns[j]);
     const tOut = path.join(OUT, "sessions", `s${i + 1}-${s.id}-t${j + 1}.json`);
     const t0 = Date.now();
-    const code = await runAgent(turns[j].prompt || "", tOut, {
+    const code = await runAgent(interpolateFacts(turns[j].prompt || ""), tOut, {
       cont: j > 0,
       stdin: blobFor(turns[j]),
     });
@@ -1169,6 +1379,11 @@ for (let i = 0; i < TASK.sessions.length; i++) {
     merged.reBilledTokens += tm.reBilledTokens || 0;
     merged.reBilledCost += tm.reBilledCost || 0;
     merged.misses += tm.misses || 0;
+    const turnErrors = [...(tm.errors || [])];
+    if (code !== 0) turnErrors.push(`turn ${i + 1}/${j + 1} exited ${code}`);
+    if (tm.steps === 0)
+      turnErrors.push(`turn ${i + 1}/${j + 1} produced no assistant response`);
+    if (turnErrors.length) runErrors.push(...turnErrors);
     merged.exit = code || merged.exit;
     merged.turns.push({
       steps: tm.steps,
@@ -1180,10 +1395,27 @@ for (let i = 0; i < TASK.sessions.length; i++) {
     console.log(
       `    turn ${j + 1}/${turns.length}: exit=${code} steps=${tm.steps} peakCtx=${tm.peakContext} tools=${tm.toolCalls} wall=${wall.toFixed(0)}s`,
     );
+    if (turnErrors.length) {
+      aborted = true;
+      console.error(
+        `    aborting cell after failed agent turn: ${turnErrors.join("; ")}`,
+      );
+      break;
+    }
+    if (turns[j].checkpoint) {
+      const verdict = await scoreCheckpoint(turns[j].checkpoint);
+      checkpoints.push({ session: s.id, turn: j + 1, ...verdict });
+      // Deliberately do not expose any verifier output to the agent. The next
+      // checkpoint arrives as a new requirement, so defects carry forward.
+      console.log(
+        `    checkpoint ${verdict.id}: core=${verdict.core.passed} isolated=${verdict.isolated.passed} strict=${verdict.strict.passed}`,
+      );
+    }
   }
   merged.tokensTotal =
     merged.tokensIn + merged.tokensOut + merged.cacheRead + merged.cacheWrite;
   sessionMetrics.push(merged);
+  if (aborted) break;
 
   // Lore arm: distill this session's context into memory before the next (fresh)
   // session. Default flow FORCES curation (promotes facts -> knowledge, injected
@@ -1306,6 +1538,13 @@ const memoryToolCalls = sessionMetrics.reduce((n, m) => {
 }, 0);
 let valid = true;
 let invalidReason = null;
+if (runErrors.length) {
+  valid = false;
+  invalidReason = `agent execution failed: ${[...new Set(runErrors)].join("; ")}`;
+  console.error(
+    `[${ARM}] WARN INVALID RUN: ${invalidReason} — this run must be EXCLUDED, not scored as 0.`,
+  );
+}
 if (MCP_SERVERS[ARM] && memoryToolCalls === 0) {
   // Zero memory calls has TWO very different causes, and only one is an artifact:
   //   (a) DEAD backend — the MCP server never came up / exposed no tools. The
@@ -1315,13 +1554,13 @@ if (MCP_SERVERS[ARM] && memoryToolCalls === 0) {
   //       GENUINE behavioral 0% — and is precisely the thesis of the benchmark, so
   //       it MUST be scored, not excluded (excluding it hides the competitor's
   //       most on-thesis failure). We distinguish via the pre-run health probe.
-  if (mcpHealth && mcpHealth.healthy) {
+  if (valid && mcpHealth && mcpHealth.healthy) {
     // (b) real 0%: keep the run valid and let the scorer record 0/N.
     invalidReason = null;
     console.error(
       `[${ARM}] NOTE: backend healthy (${(mcpHealth.tools || []).length} tools exposed) but the model made ZERO memory_* calls — scoring as a GENUINE 0%, not excluding.`,
     );
-  } else {
+  } else if (valid) {
     // (a) dead backend artifact: exclude.
     valid = false;
     invalidReason = `competitor arm made zero memory_* tool calls AND backend probe failed (dead backend: ${mcpHealth ? mcpHealth.error || "no tools exposed" : "not probed"})`;
@@ -1339,6 +1578,18 @@ fs.writeFileSync(
       agent: AGENT,
       model: MODEL,
       task: TASK.id,
+      taskSha256: sha256(fs.readFileSync(args.task)),
+      factMapId: FACT_SEED
+        ? sha256(`${TASK.id}:${FACT_SEED}`).slice(0, 16)
+        : null,
+      repetition: args.repetition ? Number(args.repetition) : null,
+      factMap: FACTS,
+      seedManifest: SEED_MANIFEST,
+      authProviders: redactAuth(isolatedAuth),
+      factLeaks: findFactLeaks(project, FACTS, [
+        "src/orders.py",
+        "src/orders_v2.py",
+      ]),
       gwPort,
       compactions,
       memoryToolCalls,
@@ -1347,6 +1598,7 @@ fs.writeFileSync(
       valid,
       invalidReason,
       sessions: sessionMetrics,
+      checkpoints,
       totals,
     },
     null,
@@ -1376,4 +1628,7 @@ if (args.keep !== "true") {
   // keep project + sessions + result; drop bulky caches
   fs.rmSync(path.join(OUT, "cache"), { recursive: true, force: true });
 }
+// Never leave provider credentials in retained benchmark artifacts. The runtime
+// has finished before this point; result.json carries provider names only.
+fs.rmSync(isolatedAuthPath, { force: true });
 process.exit(0);

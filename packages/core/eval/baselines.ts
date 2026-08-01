@@ -48,14 +48,6 @@ export function renderConversation(turns: ConversationTurn[]): string {
   return turns.map(renderTurn).join("\n\n---\n\n");
 }
 
-/** Estimate total tokens for an array of turns. */
-function totalTokens(turns: ConversationTurn[]): number {
-  return turns.reduce(
-    (sum, t) => sum + (t.tokens ?? estimateTokens(renderTurn(t))),
-    0,
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Baseline 1: Tail Window
 // ---------------------------------------------------------------------------
@@ -273,7 +265,8 @@ export async function compactionBaseline(
         buildCompactionUser(current, renderConversationForCompaction(c)),
         { maxTokens: SUMMARY_OUTPUT_TOKENS, temperature: 0 },
       );
-      current = result.text;
+      // An empty response must not erase the summary accumulated by prior folds.
+      if (result.text) current = result.text;
     }
     return current ?? "";
   };
@@ -317,7 +310,13 @@ export async function compactionBaseline(
     anchor = await foldIntoAnchor(anchor, prefix);
     compactionCount++;
     window = tail;
-    windowTokens = totalTokens(tail);
+    // Keep the rolling-window measurement identical to the pre-compaction path:
+    // large tool output is truncated before it reaches the summarizer or window.
+    windowTokens = tail.reduce(
+      (sum, t) =>
+        sum + (t.tokens ?? estimateTokens(renderTurnForCompaction(t))),
+      0,
+    );
     console.log(
       `  [compaction] pass ${compactionCount}: folded ${prefix.length} turns → anchor ${estimateTokens(anchor)} tok; tail ${windowTokens} tok`,
     );

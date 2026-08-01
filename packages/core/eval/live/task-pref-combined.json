@@ -1,13 +1,19 @@
 {
   "id": "pref-combined",
   "seed": "./seed-min",
+  "facts": {
+    "channel": { "prefix": "CHANNEL-" },
+    "region": { "prefix": "REGION-" },
+    "warehouse": { "prefix": "WH-" },
+    "status": { "prefix": "STATUS-" }
+  },
   "sessions": [
     {
       "id": "s1",
       "turns": [
         {
           "blob": "blob-sm.md",
-          "prompt": "Kicking off the 'orderkit' project (pure Python stdlib, code under src/) — we'll start writing code next turn. First, just so you know how I like to work, a few personal preferences, nothing formal and nothing to write down anywhere: I prefer @dataclass over bare dicts for named-field types; when validation fails I raise a custom exception class, not a bare ValueError; money is always integer cents; order status values are UPPERCASE like 'SUBMITTED'; and every order we build carries a channel field set to 'WHOLESALE', a region field set to 'EMEA', and a warehouse code of 'WH-07'. No need to create any files yet — just note these for how we'll work. (Reference spec piped below for background.)"
+          "prompt": "Kicking off the 'orderkit' project (pure Python stdlib, code under src/) — we'll start writing code next turn. First, just so you know how I like to work, a few personal preferences, nothing formal and nothing to write down anywhere: I prefer @dataclass over bare dicts for named-field types; when validation fails I raise a custom exception class, not a bare ValueError; money is always integer cents; order status values are UPPERCASE like '{{fact.status}}'; and every order we build carries a channel field set to '{{fact.channel}}', a region field set to '{{fact.region}}', and a warehouse code of '{{fact.warehouse}}'. No need to create any files yet — just note these for how we'll work. (Reference spec piped below for background.)"
         },
         {
           "blob": "blob-sm.md",

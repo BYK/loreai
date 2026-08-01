@@ -17,6 +17,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
+import { setUpstreamInterceptor } from "../src/pipeline";
 
 function makeStreamBody(userMessage: string): Record<string, unknown> {
   return {
@@ -112,6 +113,66 @@ describe("Pipeline — streaming responses", () => {
     expect(sse).toContain('"type":"tool_use"');
     expect(sse).toContain('"name":"bash"');
     expect(sse).toContain("ls -la");
+    expect(sse).toContain("event: message_stop");
+  });
+
+  it("drops malformed provider content-block events but streams later valid blocks", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const event = (name: string, data: Record<string, unknown>) =>
+      `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+    const upstream = [
+      event("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_malformed",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: DEFAULT_MODEL,
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      event("content_block_start", { type: "content_block_start", index: 0 }),
+      event("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "Must not leak." },
+      }),
+      event("content_block_stop", { type: "content_block_stop", index: 0 }),
+      event("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "text", text: "" },
+      }),
+      event("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "text_delta", text: "Recovered response." },
+      }),
+      event("content_block_stop", { type: "content_block_stop", index: 1 }),
+      event("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 2 },
+      }),
+      event("message_stop", { type: "message_stop" }),
+    ].join("");
+    setUpstreamInterceptor(
+      async () =>
+        new Response(upstream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    const response = await harness.chat(makeStreamBody("Recover from bad SSE"));
+    const sse = await readSSE(response);
+
+    expect(sse).not.toContain('"index":0');
+    expect(sse).not.toContain("Must not leak.");
+    expect(sse).toContain("Recovered response.");
     expect(sse).toContain("event: message_stop");
   });
 });

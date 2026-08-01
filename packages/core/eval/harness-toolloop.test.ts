@@ -1,5 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { applyUpstreamOverride, askQuestionViaGateway } from "./harness";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  applyUpstreamOverride,
+  askQuestionViaGateway,
+  requiresRealGateway,
+  usesGatewayQuestionPath,
+} from "./harness";
 
 describe("applyUpstreamOverride", () => {
   const saved = {
@@ -43,6 +48,14 @@ describe("applyUpstreamOverride", () => {
     expect(r.headers["x-lore-project"]).toBe("/eval/cm-1");
     expect(r.headers["x-lore-upstream-url"]).toBeUndefined();
   });
+
+  test("an empty EVAL_UPSTREAM_URL is a no-op", () => {
+    process.env.EVAL_UPSTREAM_URL = "";
+    const body = { model: "claude-x", messages: [] };
+    const r = applyUpstreamOverride(body, "M3");
+    expect(r.body).toBe(body);
+    expect(r.headers["x-lore-upstream-url"]).toBeUndefined();
+  });
 });
 
 type Resp = {
@@ -56,11 +69,13 @@ type Resp = {
 /** Fake GatewayHandle whose chat() is scripted per call index / request body. */
 function fakeGateway(script: (call: number, body: any) => Resp) {
   const calls: any[] = [];
+  const headers: Array<Record<string, string>> = [];
   const handle = {
     baseURL: "http://fake",
-    async chat(requestBody: any) {
+    async chat(requestBody: any, requestHeaders: Record<string, string> = {}) {
       const idx = calls.length;
       calls.push(requestBody);
+      headers.push(requestHeaders);
       const data = script(idx, requestBody);
       return {
         headers: {
@@ -71,10 +86,31 @@ function fakeGateway(script: (call: number, body: any) => Resp) {
       } as unknown as Response;
     },
   };
-  return { handle: handle as any, calls };
+  return { handle: handle as any, calls, headers };
 }
 
 describe("askQuestionViaGateway tool loop", () => {
+  test("routes no-memory QA through the gateway for upstream parity", () => {
+    expect(usesGatewayQuestionPath("no-memory", false)).toBe(true);
+    expect(usesGatewayQuestionPath("tail-window", false)).toBe(false);
+  });
+
+  test("requires a real gateway for the no-memory control", () => {
+    expect(requiresRealGateway("no-memory")).toBe(true);
+    expect(requiresRealGateway("tail-window")).toBe(false);
+  });
+
+  test("marks only the no-memory control as read-suppressed", async () => {
+    const { handle, headers } = fakeGateway(() => ({
+      content: [{ type: "text", text: "answer" }],
+      usage: {},
+    }));
+
+    await askQuestionViaGateway("q", handle, "M", "", true);
+    expect(headers[0]["x-lore-no-memory"]).toBe("true");
+    expect(headers[0]["x-lore-session-id"]).toMatch(/^eval-no-memory-/);
+  });
+
   test("Claude-like: returns text on the first turn (single call)", async () => {
     const { handle, calls } = fakeGateway(() => ({
       content: [{ type: "text", text: "direct answer" }],
@@ -136,7 +172,44 @@ describe("askQuestionViaGateway tool loop", () => {
     expect(r.hypothesis).toBe("forced answer");
     // 4 tool rounds (with tools) + 1 forced tools-free round.
     expect(calls.length).toBe(5);
-    expect(calls[4].tools).toEqual([]);
+    expect(calls[4].tools).toBeUndefined();
+  });
+
+  test("does not count discarded transient-attempt usage", async () => {
+    vi.useFakeTimers();
+    const { handle, calls } = fakeGateway((i) =>
+      i === 0
+        ? {
+            error: { message: "429 rate limit" },
+            usage: { input_tokens: 100, output_tokens: 50 },
+          }
+        : {
+            content: [{ type: "text", text: "answer after retry" }],
+            usage: { input_tokens: 10, output_tokens: 5 },
+          },
+    );
+    const pending = askQuestionViaGateway("q", handle, "M");
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(calls).toHaveLength(2);
+    expect(result.tokens.input).toBe(10);
+    expect(result.tokens.output).toBe(5);
+    vi.useRealTimers();
+  });
+
+  test("does not retry a valid answer that mentions exceed", async () => {
+    const { handle, calls } = fakeGateway(() => ({
+      content: [
+        {
+          type: "text",
+          text: "The request must not exceed the warehouse limit.",
+        },
+      ],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }));
+    const result = await askQuestionViaGateway("q", handle, "M");
+    expect(result.hypothesis).toContain("must not exceed");
+    expect(calls).toHaveLength(1);
   });
 
   test("propagates recall-invoked and never returns empty on a tool-only reply", async () => {

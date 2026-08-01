@@ -36,6 +36,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 
 const packageDir = join(fileURLToPath(import.meta.url), "..", "..");
 const repoRoot = join(packageDir, "..", "..");
@@ -168,6 +169,39 @@ describe("bundle exports", () => {
     const content = readFileSync(join(distDir, "index.cjs"), "utf8");
     expect(content).toContain("node:sqlite");
     expect(content).not.toContain("bun:sqlite");
+  });
+
+  test("Bun embedding worker loads without unresolved runtime imports", async () => {
+    const worker = new Worker(
+      new URL("../dist/embedding-worker.js", import.meta.url),
+      {
+        workerData: {
+          modelId: "nomic-ai/nomic-embed-text-v1.5",
+          dimensions: 768,
+          maxTokens: 256,
+          vendorModel: null,
+          stderrSilenced: true,
+        },
+      },
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("Bun embedding worker did not start")),
+          5_000,
+        );
+        worker.once("online", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        worker.once("error", (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+      });
+    } finally {
+      await worker.terminate();
+    }
   });
 
   // -------------------------------------------------------------------------

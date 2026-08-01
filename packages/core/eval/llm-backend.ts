@@ -103,7 +103,7 @@ class RateLimiter {
  * callers pass either `https://host/anthropic` or `https://host/anthropic/v1`.
  */
 export function normalizeAnthropicBaseUrl(url: string): string {
-  return url.replace(/\/+$/, "").replace(/\/v1$/, "");
+  return url.replace(/\/+$/, "").replace(/\/v1(?:\/messages)?$/, "");
 }
 
 export function resolveBackend(
@@ -177,8 +177,7 @@ export function resolveBackend(
 export function resolveJudgeBackend(answer: BackendConfig): BackendConfig {
   const judgeKey = process.env.JUDGE_API_KEY;
   if (!judgeKey) return answer;
-  const judgeModel =
-    process.env.JUDGE_MODEL || answer.judgeModel || "claude-sonnet-4-5";
+  const judgeModel = process.env.JUDGE_MODEL || "claude-sonnet-4-6";
   return {
     backend: "anthropic",
     model: judgeModel,
@@ -354,10 +353,14 @@ export function createEvalLLMClient(
           lastError = err instanceof Error ? err : new Error(String(err));
           const msg = lastError.message;
 
-           // Detect GitHub's anti-scraping / quota exhaustion page (HTML, not
+          // Detect GitHub's anti-scraping / quota exhaustion page (HTML, not
           // JSON). NOT a transient limit — daily quota is exhausted or the
           // token lacks access. Retrying wastes quota.
-          if (msg.includes("429") && msg.includes("scraping")) {
+          if (
+            config.backend === "github-copilot" &&
+            msg.includes("429") &&
+            msg.includes("scraping")
+          ) {
             throw new Error(
               "GitHub Models daily quota exhausted or access denied. " +
                 "The API returned GitHub's anti-scraping page instead of a JSON rate-limit error. " +
@@ -369,10 +372,10 @@ export function createEvalLLMClient(
           // overloaded — common on MiniMax/Anthropic under load — and 500/502/
           // 503) with exponential backoff. A one-off 529 must not kill a
           // multi-hour run.
-           if (
-             /\b(429|529|500|502|503)\b/.test(msg) ||
-             /overloaded/i.test(msg)
-           ) {
+          if (
+            /\b(429|529|500|502|503)\b/.test(msg) ||
+            /overloaded/i.test(msg)
+          ) {
             const backoffMs = Math.min(
               30_000 * 2 ** attempt, // 30s, 60s, 120s, 240s, 480s
               600_000, // cap at 10 minutes
