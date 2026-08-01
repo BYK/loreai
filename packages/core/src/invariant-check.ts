@@ -73,12 +73,25 @@ export const MIN_CONFIDENCE = 0.2;
 const MAX_INVARIANTS_SCAN = 300;
 
 // Output budget for the judge's verdict JSON. Tiny without reasoning; with effort
-// ON, reasoning tokens are billed against the output budget. For OpenAI reasoning
-// models this max_completion_tokens IS the effective ceiling (the gateway does not
-// bump it), so it must cover reasoning + the verdict. For Anthropic the gateway
-// independently raises max_tokens above the thinking budget; we still send a
-// generous value here so the two paths agree. Headroom matches the gateway's
-// THINKING_OUTPUT_HEADROOM (8192) so the numbers don't diverge confusingly.
+// ON, reasoning tokens are billed against the output budget.
+//
+// Provider behavior at the gateway (packages/gateway/src/llm-adapter.ts):
+//   - Anthropic: the gateway independently raises max_tokens above the thinking
+//     budget. We still send a generous value here so the two paths agree.
+//   - OpenAI / Gemini reasoning models WITH populated reasoning_options in
+//     models.dev: the gateway applies `workerReasoningHeadroomFloor`
+//     (DEFAULT_REASONING_MODEL_BUDGET + THINKING_OUTPUT_HEADROOM = 24576) on top
+//     of any caller maxTokens, so this value is just the floor and the gateway
+//     bumps it for reasoning-capable models. This is the path `github-copilot/
+//     gpt-5-mini` (the default judge) takes once the CLI awaits fetchModelData
+//     before the first judge call (cli/invariant-check.ts:97).
+//   - OpenAI / Gemini models WITHOUT reasoning_options (or models absent from
+//     models.dev): the gateway falls back to the caller maxTokens. The 256
+//     below is the budget in that empty-cache fallback — small because the
+//     verdict is one line and the model has no reasoning to burn it on.
+//
+// Headroom matches the gateway's THINKING_OUTPUT_HEADROOM (8192) so the numbers
+// don't diverge confusingly.
 const JUDGE_VERDICT_TOKENS = 256;
 const JUDGE_VERDICT_HEADROOM = 8192;
 function judgeMaxTokens(effort: ReasoningEffort | undefined): number {
