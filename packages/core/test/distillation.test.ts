@@ -1559,12 +1559,18 @@ describe("run() expansion guard and tiny-segment handling", () => {
   });
 
   test("expansion guard: discards distillation when output > expansion limit, marks messages distilled", async () => {
-    // Insert 6 messages × 200 tokens = 1200 tokens (above minSegmentTokens=64)
+    // Insert 6 messages × 200 tokens = 1200 tokens (above minSegmentTokens=64).
+    // Tokens are set directly on the DB row, so the BPE-backed production
+    // estimator doesn't change the test setup.
     const ids = insertTemporalMessages(6, 200);
 
     // For large segments (>= 500 tokens), expansion limit = sourceTokens.
-    // LLM returns observations exceeding limit: 1201 tokens = 3603 chars
-    const expandedObs = "x".repeat(3603);
+    // LLM returns observations exceeding limit. Natural prose tokenizes ~1:1
+    // with the chars/3 heuristic — ~5000 chars yields ~1201 BPE tokens.
+    const expandedObs =
+      `The quick brown fox jumps over the lazy dog. The dog barks loudly at the brown fox. `.repeat(
+        95,
+      );
     const llm = makeStubLLM(`<observations>\n${expandedObs}\n</observations>`);
 
     const result = await run({
@@ -1673,8 +1679,12 @@ describe("run() expansion guard and tiny-segment handling", () => {
     // Insert 1 message × 80 tokens (tiny segment)
     const ids = insertTemporalMessages(1, 80);
 
-    // LLM returns 401 tokens = 1203 chars. Limit is 80 * 5 = 400, so 401 > 400 → discarded
-    const expandedObs = "x".repeat(1203);
+    // LLM returns ~401 BPE tokens (natural text of ~1700 chars tokenizes to
+    // ~401). Limit is 80 * 5 = 400, so 401 > 400 → discarded.
+    const expandedObs =
+      "The quick brown fox jumps over the lazy dog. The dog barks loudly at the brown fox while the wind rustles through the trees. ".repeat(
+        15,
+      );
     const llm = makeStubLLM(`<observations>\n${expandedObs}\n</observations>`);
 
     const result = await run({

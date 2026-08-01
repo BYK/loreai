@@ -23,13 +23,9 @@ import {
 import { extractTopTerms, runRelaxedSearchAsync } from "./search";
 import * as log from "./log";
 import { isHostedMode } from "./hosted";
+import { estimateTokens } from "./tokenize";
 
 const processor = remark();
-
-// ~3 chars per token — same heuristic as ltm.ts
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
 
 export type LatSection = {
   id: string;

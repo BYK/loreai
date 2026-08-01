@@ -13,7 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
-import { asString } from "@loreai/core";
+import { asString, estimateTokens as coreEstimateTokens } from "@loreai/core";
 import {
   load,
   config as loreConfig,
@@ -7974,7 +7974,7 @@ async function handleConversationTurn(
         // preferences/entities minted mid-session (curator/pattern-extract) out
         // of this block until the next session, so the prefix never grows
         // mid-session. This compute path only runs once per session (cache miss).
-        const tokenCount = formatted ? Math.ceil(formatted.length / 3) : 0;
+        const tokenCount = formatted ? coreEstimateTokens(formatted) : 0;
         stable = { formatted, tokenCount };
         stableLtmCache.set(sessionID, stable);
         saveSessionTracking(sessionID, {
@@ -8082,7 +8082,7 @@ async function handleConversationTurn(
               renderedIds,
             );
             if (formatted) {
-              const tokenCount = Math.ceil(formatted.length / 3);
+              const tokenCount = coreEstimateTokens(formatted);
               cached = { formatted, tokenCount };
               cachedKeys = ltmEntryKeys(contextEntries, renderedIds);
               ltmSessionCache.set(sessionID, cached);
@@ -8406,7 +8406,7 @@ async function handleConversationTurn(
         );
 
         if (formatted) {
-          const tokenCount = Math.ceil(formatted.length / 3);
+          const tokenCount = coreEstimateTokens(formatted);
           const entryKeys = ltmEntryKeys(contextEntries, renderedIds);
           // Always update the cache with freshly ranked entries.
           ltmSessionCache.delete(sessionID);
@@ -8878,7 +8878,7 @@ async function handleConversationTurn(
   if (dailyBudget > 0 || quotaPressure > 0) {
     const inputTokens =
       getLastTransformEstimate(sessionID) ||
-      Math.ceil(JSON.stringify(modifiedReq.messages).length / 3);
+      coreEstimateTokens(JSON.stringify(modifiedReq.messages));
     const estimatedCost = estimateRequestCost(req.model, inputTokens);
     const delay = getDailyThrottleDelay(
       dailyBudget,

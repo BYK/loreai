@@ -64,6 +64,55 @@ import { isToolPart, isTextPart } from "../src/types";
 
 const PROJECT = "/test/gradient/project";
 
+/**
+ * Build varied English text whose BPE token count approximates the legacy
+ * `Math.ceil(text.length / 3)` heuristic for a target character count.
+ * Use this in place of `"X".repeat(chars)` — single-character runs and
+ * repeated blocks degenerate BPE tokenization (e.g. 1000 'A' chars ≈ 125
+ * tokens, repeated phrases compress even harder, both well below the
+ * legacy ~333 token estimate).
+ *
+ * Returns text whose length is scaled by the empirically observed BPE
+ * compression factor so the resulting token count matches the chars/3
+ * heuristic to within ~5%. Real English prose at 1000 chars tokenizes to
+ * ~210-330 BPE tokens depending on sentence variety — we err slightly
+ * higher (longer text) so per-message counts are stable across tests.
+ */
+const NATURAL_FRAGMENTS = [
+  "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. ",
+  "Pack my box with five dozen liquor jugs and a small bag of assorted candies from the corner store. ",
+  "How vexingly quick daft zebras jump and dance beside the towering fountain in the park at midnight. ",
+  "Sphinx of black quartz, judge my vow, and grant safe passage through the valley of shadows and light. ",
+  "A wizard's job is to vex chumps quickly in fog and never share a secret with a stranger on the road. ",
+  "Blowzy night-frumps vexed Jaywalk. Query the archives for the full transcript at once, please. ",
+  "Glib jocks quiz nymph to vex dwarf as five quacking zephyrs jolt and wax the cozy foam pillows. ",
+  "Two driven jocks help fax my big quiz while five quacking zephyrs jolt and wax the floor by the oven. ",
+  "The jay, pig, fox, zebra, and my wolves quack past the lazy dog in a peculiar staggered formation. ",
+  "Quick zephyrs blow, vexing daft Jim, while two iconic dervishes whirl past the fountain at sundown. ",
+];
+
+/**
+ * For varied natural text on cl100k_base, BPE gives ~4.27 chars/token.
+ * To match the legacy `Math.ceil(text.length/3)` heuristic's token count
+ * for "effective chars" N, the text must be ~ N × 4.27 / 3 ≈ ~1.42×
+ * longer than N chars. Returns text of that longer length; callers treat
+ * the return value as "text that BPE-tokenizes to ~ceil(N/3)".
+ */
+const NATURAL_CHARS_PER_TOKEN = 4.27;
+/** Scale factor: natural chars-per-token / legacy chars-per-token (3). */
+const NATURAL_SCALE = NATURAL_CHARS_PER_TOKEN / 3.0;
+
+function naturalText(effectiveChars: number): string {
+  const targetLen = Math.ceil(effectiveChars * NATURAL_SCALE);
+  let out = "";
+  let i = 0;
+  while (out.length < targetLen) {
+    out += NATURAL_FRAGMENTS[i % NATURAL_FRAGMENTS.length];
+    i++;
+  }
+  return out;
+}
+
 // Test-local view of a tool part's state covering all status variants. Tests
 // assert across statuses (pending/running/completed/error) so we widen to a
 // single shape rather than narrowing per-status everywhere.
@@ -190,7 +239,7 @@ describe("gradient", () => {
     // assistants) is always included even when it alone exceeds the budget.
     const messages = Array.from({ length: 10 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      const text = `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`;
+      const text = `Message ${i}: ${naturalText(1800)}`;
       return makeMsg(`nuclear-${i}`, role, text);
     });
     setModelLimits({ context: 2_000, output: 500 }); // 1500 usable, rawBudget ~600
@@ -258,7 +307,7 @@ describe("gradient", () => {
     calibrate(0);
     const medMessages = Array.from({ length: 14 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      const text = `Message ${i}: ${"some content that fills the budget moderately well ".repeat(8)}`;
+      const text = `Message ${i}: ${naturalText(420)}`;
       return makeMsg(`ltm-flag-med-${i}`, role, text, "ltm-flag-med-sess");
     });
     const layerMidResult = transform({
@@ -275,7 +324,7 @@ describe("gradient", () => {
     calibrate(0);
     const bigMessages = Array.from({ length: 10 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      const text = `Message ${i}: ${"detailed content about various topics and implementation details that span across multiple concerns ".repeat(40)}`;
+      const text = `Message ${i}: ${naturalText(1800)}`;
       return makeMsg(`ltm-flag-big-${i}`, role, text, "ltm-flag-big-sess");
     });
     const layer4Result = transform({
@@ -312,7 +361,7 @@ describe("gradient", () => {
     calibrate(0);
     const messages = Array.from({ length: 6 }, (_, i) => {
       const role = i % 2 === 0 ? "user" : "assistant";
-      return makeMsg(`exhaust-${i}`, role, "X".repeat(2_000));
+      return makeMsg(`exhaust-${i}`, role, naturalText(2_000));
     });
     const result = transform({
       messages,
@@ -356,7 +405,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
       makeMsg(
         `le-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "A".repeat(1_000),
+        naturalText(1_000),
         SESSION,
       ),
     );
@@ -412,7 +461,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
       makeMsg(
         `tight-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "B".repeat(400),
+        naturalText(400),
         SESS2,
       ),
     );
@@ -432,7 +481,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     // rawBudget alone, but combined with pinned base messages forces re-scan.
     const withHuge = [
       ...base,
-      makeMsg(`tight-huge`, "user", "C".repeat(2_000), SESS2),
+      makeMsg(`tight-huge`, "user", naturalText(2_000), SESS2),
     ];
     const r2 = transform({
       messages: withHuge,
@@ -466,7 +515,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
       makeMsg(
         `sa-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "D".repeat(400),
+        naturalText(400),
         SESS_A,
       ),
     );
@@ -474,7 +523,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
       makeMsg(
         `sb-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "E".repeat(400),
+        naturalText(400),
         SESS_B,
       ),
     );
@@ -530,7 +579,7 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
       makeMsg(
         `march-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "A".repeat(1_000),
+        naturalText(1_000),
         SESS,
       ),
     );
@@ -552,8 +601,8 @@ describe("gradient — lazy raw window eviction (Approach B)", () => {
     const boundaries: (string | undefined)[] = [firstRawId(r0)];
     for (let turn = 0; turn < 12; turn++) {
       msgs.push(
-        makeMsg(`march-u-${turn}`, "user", "A".repeat(2_000), SESS),
-        makeMsg(`march-a-${turn}`, "assistant", "A".repeat(2_000), SESS),
+        makeMsg(`march-u-${turn}`, "user", naturalText(2_000), SESS),
+        makeMsg(`march-a-${turn}`, "assistant", naturalText(2_000), SESS),
       );
       const r = transform({
         messages: msgs,
@@ -695,8 +744,8 @@ describe("gradient — LTM budget coordination", () => {
     // usable before LTM = 8_000; after = 6_000
     // rawBudget = floor(6_000 * 0.4) = 2_400
     const messages = [
-      makeMsg("ltm-1", "user", "A".repeat(100)),
-      makeMsg("ltm-2", "assistant", "B".repeat(100)),
+      makeMsg("ltm-1", "user", naturalText(100)),
+      makeMsg("ltm-2", "assistant", naturalText(100)),
     ];
     const result = transform({
       messages,
@@ -934,8 +983,8 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
 
   test("uses exact lastKnownInput for layer 0 check when session matches", () => {
     const messages = [
-      makeMsg("et-1", "user", "A".repeat(500), SESSION),
-      makeMsg("et-2", "assistant", "B".repeat(500), SESSION),
+      makeMsg("et-1", "user", naturalText(500), SESSION),
+      makeMsg("et-2", "assistant", naturalText(500), SESSION),
     ];
     // Simulate a prior API response: 3000 tokens in, 2 messages
     // (overhead 0 so actual = message estimate)
@@ -944,7 +993,7 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     // Now add one new message
     const withNew = [
       ...messages,
-      makeMsg("et-3", "user", "C".repeat(500), SESSION),
+      makeMsg("et-3", "user", naturalText(500), SESSION),
     ];
     // expectedInput = 3000 + ~130 = ~3130 << maxInput (8000) → layer 0
     const result = transform({
@@ -962,8 +1011,8 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     calibrate(0);
     calibrate(3_000, SESSION, 2);
     const messages = [
-      makeMsg("diff-1", "user", "A".repeat(200), "other-sess"),
-      makeMsg("diff-2", "assistant", "B".repeat(200), "other-sess"),
+      makeMsg("diff-1", "user", naturalText(200), "other-sess"),
+      makeMsg("diff-2", "assistant", naturalText(200), "other-sess"),
     ];
     // Fallback: messageTokens + overhead(0) + ltm(0) = ~174 << 8000 → still layer 0
     const result = transform({
@@ -1014,7 +1063,7 @@ describe("gradient — exact token tracking (proactive layer 0)", () => {
     );
     const withHuge = [
       ...messages,
-      makeMsg("over-huge", "user", "Y".repeat(2_200), SESSION),
+      makeMsg("over-huge", "user", naturalText(2_200), SESSION),
     ];
     // expectedInput ≈ 7900 + 570 = 8470 > 8000 → escalate
     const result = transform({
@@ -1136,7 +1185,7 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     );
     const currentUser = makeMsg("tight-user", "user", "go", SESSION);
     const steps = Array.from({ length: 8 }, (_, i) =>
-      makeStep(`tight-step-${i}`, "tight-user", "R".repeat(400), SESSION),
+      makeStep(`tight-step-${i}`, "tight-user", naturalText(400), SESSION),
     );
     const messages = [...oldMsgs, currentUser, ...steps];
 
@@ -1168,7 +1217,7 @@ describe("gradient — current turn protection (agentic tool-call loop)", () => 
     const currentUser = makeMsg("huge-user", "user", "massive task", SESSION);
     // 8 steps × ~87 tokens (200 chars/3 + 20) = 696, + user 24 = 720 ≤ rawBudget(1000)
     const steps = Array.from({ length: 8 }, (_, i) =>
-      makeStep(`huge-step-${i}`, "huge-user", "W".repeat(200), SESSION),
+      makeStep(`huge-step-${i}`, "huge-user", naturalText(200), SESSION),
     );
     // 22 old messages to force gradient mode: 22 × 87 = 1914
     // Total = 1914 + 720 = 2634 > maxInput(2500) → gradient fires
@@ -1808,7 +1857,7 @@ describe("gradient — calibration oscillation fix", () => {
       makeMsg(
         `osc-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "A".repeat(600),
+        naturalText(600),
         SESSION,
       ),
     );
@@ -1851,7 +1900,7 @@ describe("gradient — calibration oscillation fix", () => {
       makeMsg(
         `comp-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "B".repeat(600),
+        naturalText(600),
         SESSION,
       ),
     );
@@ -1894,7 +1943,7 @@ describe("gradient — calibration oscillation fix", () => {
       makeMsg(
         `id-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "C".repeat(600),
+        naturalText(600),
         SESSION,
       ),
     );
@@ -1970,7 +2019,7 @@ describe("gradient — calibration oscillation fix", () => {
       makeMsg(
         `main-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "A".repeat(600),
+        naturalText(600),
         MAIN,
       ),
     );
@@ -3735,7 +3784,7 @@ describe("gradient — distillation snapshot caching", () => {
       makeMsg(
         `snap-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "X".repeat(1_000),
+        naturalText(1_000),
         SID,
       ),
     );
@@ -3790,7 +3839,7 @@ describe("gradient — distillation snapshot caching", () => {
       makeMsg(
         `ref-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "X".repeat(1_000),
+        naturalText(1_000),
         SID,
       ),
     );
@@ -3839,7 +3888,7 @@ describe("gradient — distillation snapshot caching", () => {
       makeMsg(
         `first-row-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "X".repeat(1_000),
+        naturalText(1_000),
         SID,
       ),
     );
@@ -3904,7 +3953,7 @@ describe("gradient — distillation snapshot caching", () => {
       makeMsg(
         `idle-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "X".repeat(1_000),
+        naturalText(1_000),
         SID,
       ),
     );
@@ -3956,7 +4005,7 @@ describe("gradient — distillation snapshot caching", () => {
       makeMsg(
         `warm-idle-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "X".repeat(1_000),
+        naturalText(1_000),
         SID,
       ),
     );
@@ -4022,7 +4071,7 @@ describe("gradient — distillation snapshot caching", () => {
       makeMsg(
         `cold-idle-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "X".repeat(1_000),
+        naturalText(1_000),
         SID,
       ),
     );
@@ -4106,7 +4155,7 @@ describe("gradient — distillation snapshot caching", () => {
       makeMsg(
         `tiebreak-${i}`,
         i % 2 === 0 ? "user" : "assistant",
-        "X".repeat(1_000),
+        naturalText(1_000),
         SID,
       ),
     );
@@ -4884,7 +4933,7 @@ describe("tier-based context management", () => {
         makeMsg(
           `l1win-${i}`,
           i % 2 === 0 ? "user" : "assistant",
-          "x".repeat(4_500),
+          naturalText(4_500),
           SID,
         ),
       );
@@ -5981,7 +6030,7 @@ describe("gradient — free-write session compresses earlier than normal", () =>
     // On FIRST turn (calibratedOverhead=null), UNCALIBRATED_SAFETY=1.5 applies:
     // layer0Input = (120,830 + FIRST_TURN_OVERHEAD=15,000) × 1.5 = ~203k → exceeds maxInput.
     // So we must not use uncalibrated mode. Instead, fake a prior calibrated turn.
-    const bigText = "x".repeat(9_000);
+    const bigText = naturalText(9_000);
 
     function buildMsgs(sid: string) {
       const msgs: ReturnType<typeof makeMsg>[] = [];
@@ -6234,7 +6283,7 @@ describe("gradient — prefix/raw boundary role alternation (#424)", () => {
         SESSION_424,
         "",
         "[]",
-        "x".repeat(500), // small distillation
+        naturalText(500), // small distillation
         "[]",
         0,
         170, // ~500 chars / 3
@@ -6249,7 +6298,7 @@ describe("gradient — prefix/raw boundary role alternation (#424)", () => {
     for (let i = 0; i < 15; i++) {
       messages.push(makeMsg(`u${i}`, "user", `Do step ${i}`, SESSION_424));
       messages.push(
-        makeToolAssistant(`a${i}`, "read", `call-${i}`, "x".repeat(1500)),
+        makeToolAssistant(`a${i}`, "read", `call-${i}`, naturalText(1500)),
       );
     }
     // Final user message (current turn)
@@ -6565,11 +6614,11 @@ describe("gradient — atomic tool_use/tool_result pair (no orphan on eviction)"
     setModelLimits({ context: 4_300, output: 2_000 });
     const messages: LoreMessageWithParts[] = [
       makeMsg("u-0", "user", "preamble", SID),
-      makeToolAssistant("a-0", "read", "call-0", "x".repeat(1500), SID),
-      makeToolResultUser("u-r-0", "call-0", "x".repeat(1500), SID),
+      makeToolAssistant("a-0", "read", "call-0", naturalText(1500), SID),
+      makeToolResultUser("u-r-0", "call-0", naturalText(1500), SID),
       makeMsg("u-1", "user", "step 1 done", SID),
-      makeToolAssistant("a-1", "read", "call-1", "x".repeat(1500), SID),
-      makeToolResultUser("u-r-1", "call-1", "x".repeat(1500), SID),
+      makeToolAssistant("a-1", "read", "call-1", naturalText(1500), SID),
+      makeToolResultUser("u-r-1", "call-1", naturalText(1500), SID),
       makeMsg("u-final", "user", "final turn", SID),
     ];
 
@@ -6921,7 +6970,7 @@ describe("issue #796: isLargeColdStart + cold-start force-compress", () => {
     // ~875K estimated tokens: between the 800K quality ceiling and the ~920K
     // maxInput*0.95 margin. estimateMessages ≈ chars/3; uncalibrated ×1.5 factor
     // pushes layer0Input higher (~850 msgs × 2000 chars → ~875K after ×1.5).
-    const pad = "x".repeat(2000);
+    const pad = naturalText(2000);
     const messages = Array.from({ length: 850 }, (_, i) =>
       makeMsg(`${sid}-${i}`, i % 2 === 0 ? "user" : "assistant", pad, sid),
     );

@@ -572,9 +572,12 @@ describe("buildCompactionResponse", () => {
   });
 
   test("has reasonable token estimate", () => {
-    const summary = "A".repeat(400); // 400 chars → ~100 tokens at 4 chars/token
+    // 400 'A' chars → 50 BPE tokens (single token repeated). Was 100 by the
+    // legacy chars/4 heuristic; the BPE-backed estimator in compaction.ts:71
+    // returns the real count.
+    const summary = "A".repeat(400);
     const response = buildCompactionResponse("s1", summary, "model-1");
-    expect(response.usage?.outputTokens).toBe(100);
+    expect(response.usage?.outputTokens).toBe(50);
     expect(response.usage?.inputTokens).toBe(0);
   });
 

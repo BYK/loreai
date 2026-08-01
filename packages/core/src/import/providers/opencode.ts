@@ -15,6 +15,7 @@ import type {
   DetectedSession,
 } from "../types";
 import { registerProvider } from "./index";
+import { estimateTokens } from "../../tokenize";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -31,10 +32,6 @@ const DEFAULT_MAX_TOKENS = 12288;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;

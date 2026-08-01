@@ -14,6 +14,7 @@ import type {
   SessionTranscript,
   ScenarioDefinition,
 } from "./types";
+import { estimateTokens } from "../src/tokenize";
 
 // ---------------------------------------------------------------------------
 // Types & Constants
@@ -32,8 +33,8 @@ interface FillerEntry {
   generate: FillerTemplate;
 }
 
-/** Tokens-per-char approximation (same as multi-session-recall scenario). */
-const CHARS_PER_TOKEN = 4;
+/** Tokens-per-char approximation (legacy — replaced by BPE-backed `estimateTokens`). */
+const _CHARS_PER_TOKEN_LEGACY = 4;
 
 /** Minimum tokens per filler exchange. */
 const _MIN_FILLER_TOKENS = 1800;
@@ -69,12 +70,20 @@ const FILLER_TOPICS = [
 // Token Estimation Utilities
 // ---------------------------------------------------------------------------
 
-/** Estimate token count from text content (chars / 4, min 50). */
+/** Estimate token count from text content (BPE-backed via shared `estimateTokens`, min 50). */
 function estimateTokensFromText(text: string): number {
-  return Math.max(50, Math.ceil(text.length / CHARS_PER_TOKEN));
+  return Math.max(50, estimateTokens(text));
 }
 
-/** Estimate total tokens for a turn array. */
+/** Estimate total tokens for a turn array.
+ *
+ * Note: aggregate char-totals from mixed content parts (text + tool_result +
+ * tool_use JSON). Falls back to the chars/4 heuristic here because BPE
+ * encoding is text-only — to get real BPE counts we'd need to flatten parts
+ * into a single string per turn, which inflates complexity for marginal
+ * accuracy gain on eval filler sizing. The shared BPE-backed `estimateTokens`
+ * is used elsewhere (single-string inputs).
+ */
 function estimateTurnTokens(turns: ConversationTurn[]): number {
   return turns.reduce((sum, t) => {
     if (t.tokens) return sum + t.tokens;
@@ -84,7 +93,7 @@ function estimateTurnTokens(turns: ConversationTurn[]): number {
       if (p.type === "tool_use") return s + JSON.stringify(p.input).length + 40;
       return s;
     }, 0);
-    return sum + Math.max(50, Math.ceil(chars / CHARS_PER_TOKEN));
+    return sum + Math.max(50, Math.ceil(chars / _CHARS_PER_TOKEN_LEGACY));
   }, 0);
 }
 
@@ -98,7 +107,10 @@ function stampTokens(turns: ConversationTurn[]): ConversationTurn[] {
       if (p.type === "tool_use") return s + JSON.stringify(p.input).length + 40;
       return s;
     }, 0);
-    return { ...t, tokens: Math.max(50, Math.ceil(chars / CHARS_PER_TOKEN)) };
+    return {
+      ...t,
+      tokens: Math.max(50, Math.ceil(chars / _CHARS_PER_TOKEN_LEGACY)),
+    };
   });
 }
 
@@ -147,7 +159,7 @@ function assistantToolUse(
     turn: {
       role: "assistant",
       content: parts,
-      tokens: Math.max(50, Math.ceil(chars / CHARS_PER_TOKEN)),
+      tokens: Math.max(50, Math.ceil(chars / _CHARS_PER_TOKEN_LEGACY)),
       timestamp,
       isFiller: true,
     },

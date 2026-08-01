@@ -1783,10 +1783,28 @@ describe("cache stability (e2e)", () => {
       // single-pair growth (~16K) exceeded the post-fix eviction chunk, forcing a
       // re-pin every turn — that was a knife-edge calibration to the old scale,
       // not a real per-turn-march regression).
+      //
+      // Repeat counts inflated for BPE: "lorem ipsum dolor ".repeat(N) tokenizes
+      // to ~4N BPE tokens (vs. ~7.3N by chars/3 because the repeated phrase is
+      // highly compressible). 1350 / 180 chars/3 → 8000 / 1100 tokens by BPE.
+      //
+      // `small` is sized so that ~13 small messages fill the layer-1 raw
+      // window's 75% eviction headroom (rawBudget × 0.75 / chars3scale). The
+      // 14th small message triggers a chunked eviction — that's the boundary
+      // advance the test observes (SOMETIMES, not every turn).
+      //
+      // NOTE: With the BPE-backed `estimateTokens`, the per-message token
+      // count is ~3.5x LOWER than the legacy chars/3 (because "lorem ipsum
+      // dolor" repeated is highly compressible). The 1000-repeat size (4001
+      // BPE tokens = ~2382 chars/3-scale tokens) is tuned for the post-BPE
+      // budget math (rawBudget = bodyUsable × 0.4 ≈ 40K chars/3-scale tokens;
+      // 40K × 0.75 / 2382 ≈ 13 messages fit before eviction kicks in). On
+      // non-repeating text the BPE ratio is closer to chars/3, so this
+      // tuning is conservative.
       const big = (label: string) =>
-        `${label} ${"lorem ipsum dolor ".repeat(1_350)}`;
+        `${label} ${"lorem ipsum dolor ".repeat(2_000)}`;
       const small = (label: string) =>
-        `${label} ${"lorem ipsum dolor ".repeat(180)}`;
+        `${label} ${"lorem ipsum dolor ".repeat(1_000)}`;
       const TOTAL_TURNS = 14;
       const BASE_PAIRS = 14; // ~28 base messages × ~8K ≈ 224K → well over budget
 

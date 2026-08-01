@@ -14,6 +14,7 @@ import type {
   DetectedSession,
 } from "../types";
 import { registerProvider } from "./index";
+import { estimateTokens } from "../../tokenize";
 
 // ---------------------------------------------------------------------------
 // JSONL line types (only the fields we read)
@@ -70,11 +71,6 @@ const DEFAULT_MAX_TOKENS = 12288;
 /** Mangle a project path for Claude Code's directory naming. */
 function manglePath(projectPath: string): string {
   return projectPath.replace(/\//g, "-");
-}
-
-/** Estimate tokens from text length. */
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
 }
 
 /** Truncate text to a max length, appending "..." if truncated. */

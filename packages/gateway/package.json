@@ -73,6 +73,7 @@
     "@types/bun": "^1.2.0",
     "@types/qrcode-terminal": "^0.12.2",
     "@types/semver": "^7.7.1",
+    "ai-tokenizer": "^1.0.6",
     "binpatch": "^0.3.1",
     "fossilize": "^0.10.1",
     "onnxruntime-node": "1.27.0",

@@ -315,6 +315,7 @@ export {
   _resetVecReadLatencyForTest,
 } from "./vec-latency";
 export { distillLimiter, curatorLimiter } from "./session-limiter";
+export { estimateTokens, encodingForModel } from "./tokenize";
 export {
   installFetchInterceptor,
   shouldIntercept,

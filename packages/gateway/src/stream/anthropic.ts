@@ -22,6 +22,9 @@ import {
   estimateTokens,
   scaleUsageForClient,
 } from "../compaction";
+// NOTE: `estimateTokens` re-exported from `compaction.ts` is now the BPE-backed
+// helper from @loreai/core (see packages/core/src/tokenize.ts), no longer the
+// legacy length/4 heuristic.
 
 // ---------------------------------------------------------------------------
 // SSE formatting

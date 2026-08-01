@@ -18,15 +18,19 @@ import { normalize } from "./markdown";
 import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import * as log from "./log";
+import { estimateTokens } from "./tokenize";
 
 type MessageWithParts = LoreMessageWithParts;
 
-// Token estimate: ~3 chars per token. Validated against real API data across
-// 200+ turn-pairs: chars/3 gives ~1.68x ratio (actual/estimate), best among
-// heuristics tested. The gap is overhead (system prompt, tool definitions,
-// conversation structure) which calibratedOverhead captures via EMA.
+// Token estimate using the shared ai-tokenizer-backed helper (cl100k_base by
+// default — gradient.ts intentionally does NOT thread the active provider/model
+// through all 21 internal call sites; per-encoding selection would balloon the
+// surface area without proportional accuracy gain for the budget decisions that
+// this file drives). The legacy chars/3 heuristic is gone; calibratedOverhead
+// continues to absorb the residual gap between any single BPE encoding and the
+// model's real tokenizer for the active session.
 function estimate(text: string): number {
-  return Math.ceil(text.length / 3);
+  return estimateTokens(text);
 }
 
 function estimateParts(parts: LorePart[]): number {
@@ -428,17 +432,27 @@ export const PREFIX_CHURN_WARM_BLOCK = 0.4;
 const FREE_WRITE_LAYER0_FRACTION = 0.65;
 
 /**
- * On uncalibrated turns, multiply the chars/3 estimate to approximate the real
- * token count. chars/3 undercounts by ~1.68x on real data, but the overhead EMA
- * captures most of the gap; 1.5 provides a safe margin. Module-scoped so the
- * layer-0 sizing helper (and isLargeColdStart) share one definition with the
- * transform path.
+ * On uncalibrated turns, multiply the (BPE-backed) estimate to approximate the
+ * real token count. BPE undercounts vs. any specific model tokenizer by a
+ * small residual factor, but the overhead EMA captures most of the gap; 1.5
+ * provides a safe margin. Module-scoped so the layer-0 sizing helper (and
+ * isLargeColdStart) share one definition with the transform path.
+ *
+ * (Legacy: this multiplier was originally calibrated against the chars/3
+ * heuristic, which undercounted by ~1.68x. With the BPE-backed estimator
+ * the gap to real provider tokens is smaller, so 1.5 is now a much safer
+ * margin than before — the EMA-driven calibrate() path will converge to
+ * the real per-session overhead within a few turns.)
  */
 export const UNCALIBRATED_SAFETY = 1.5;
 
 /**
- * Empirical ratio of REAL provider tokens to the gradient's chars/3 body
- * estimate (validated ~1.63–1.68 across 200+ turn-pairs). Used to keep the
+ * Empirical ratio of REAL provider tokens to the gradient's BPE-backed body
+ * estimate (validated ~1.63–1.68 against the legacy chars/3 heuristic across
+ * 200+ turn-pairs; with the BPE-backed estimator the gap to real tokens is
+ * smaller, but this constant is kept at its historical value to preserve the
+ * calibrated overhead math — any reduction in the ratio would shrink the
+ * usable budget and would need a follow-up calibration pass). Used to keep the
  * budget math on a single, consistent scale (issue: distilled-prefix churn from
  * usable-collapse):
  *
@@ -448,12 +462,12 @@ export const UNCALIBRATED_SAFETY = 1.5;
  *    growing sessions inflated overhead to ~125K on a 200K model, collapsed
  *    `usable` to ~25K, and forced the session to Layer 4 where the distilled
  *    prefix is re-rendered every turn (the messages[1] cache bust).
- *  - body budgets: a body of B_real real tokens has a chars/3 estimate
- *    B_real/RATIO, so a REAL-token budget is converted to the chars/3 scale the
- *    body estimates are measured in by dividing by RATIO (so the body occupies
- *    at most `fraction × usable` REAL tokens).
- *  - fitsWithSafetyMargin(): the acceptance gate inflates the chars/3 body back
- *    to real and adds overhead+ltm before comparing to maxInput.
+ *  - body budgets: a body of B_real real tokens has a bodyEstimate of
+ *    B_real/RATIO, so a REAL-token budget is converted to the body's scale by
+ *    dividing by RATIO (so the body occupies at most `fraction × usable`
+ *    REAL tokens).
+ *  - fitsWithSafetyMargin(): the acceptance gate inflates the body estimate
+ *    back to real and adds overhead+ltm before comparing to maxInput.
  */
 export const BODY_TOKEN_RATIO = 1.68;
 

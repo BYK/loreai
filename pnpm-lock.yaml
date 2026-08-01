@@ -133,6 +133,9 @@ importers:
       '@types/mdast':
         specifier: ^4.0.4
         version: 4.0.4
+      ai-tokenizer:
+        specifier: ^1.0.6
+        version: 1.0.6
     optionalDependencies:
       '@huggingface/transformers':
         specifier: ^3.7.1
@@ -180,6 +183,9 @@ importers:
       '@types/semver':
         specifier: ^7.7.1
         version: 7.7.1
+      ai-tokenizer:
+        specifier: ^1.0.6
+        version: 1.0.6
       binpatch:
         specifier: ^0.3.1
         version: 0.3.1
@@ -2406,6 +2412,14 @@ packages:
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
+
+  ai-tokenizer@1.0.6:
+    resolution: {integrity: sha512-GaakQFxen0pRH/HIA4v68ZM40llCH27HUYUSBLK+gVuZ57e53pYJe1xFvSTj4sJJjbWU92m1X6NjPWyeWkFDow==}
+    peerDependencies:
+      ai: ^5.0.0
+    peerDependenciesMeta:
+      ai:
+        optional: true
 
   ajv-draft-04@1.0.0:
     resolution: {integrity: sha512-mv00Te6nmYbRp5DCwclxtt7yV/joXJPGS7nM+97GdxvuttCOfgI3K4U25zboyeX0O+myI8ERluxQe5wljMmVIw==}
@@ -7427,6 +7441,8 @@ snapshots:
   adm-zip@0.6.0: {}
 
   agent-base@7.1.4: {}
+
+  ai-tokenizer@1.0.6: {}
 
   ajv-draft-04@1.0.0(ajv@8.20.0):
     optionalDependencies:

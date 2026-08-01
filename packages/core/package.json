@@ -45,7 +45,8 @@
   },
   "devDependencies": {
     "@types/bun": "^1.2.0",
-    "@types/mdast": "^4.0.4"
+    "@types/mdast": "^4.0.4",
+    "ai-tokenizer": "^1.0.6"
   },
   "files": [
     "src/",

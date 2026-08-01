@@ -19,6 +19,29 @@ import type { LoreMessage, LoreMessageWithParts } from "../src/types";
 
 const PROJECT = "/tmp/econ-evaluator-test";
 
+/**
+ * Build varied English text whose BPE token count approximates the legacy
+ * `Math.ceil(text.length / 3)` heuristic. Shared across gradient tests;
+ * see packages/core/test/gradient.test.ts for derivation rationale.
+ */
+function naturalText(effectiveChars: number): string {
+  const NATURAL_FRAGMENTS = [
+    "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. ",
+    "Pack my box with five dozen liquor jugs and a small bag of assorted candies from the corner store. ",
+    "How vexingly quick daft zebras jump and dance beside the towering fountain in the park at midnight. ",
+    "Sphinx of black quartz, judge my vow, and grant safe passage through the valley of shadows and light. ",
+    "A wizard's job is to vex chumps quickly in fog and never share a secret with a stranger on the road. ",
+  ];
+  const targetLen = Math.ceil((effectiveChars * 4.27) / 3);
+  let out = "";
+  let i = 0;
+  while (out.length < targetLen) {
+    out += NATURAL_FRAGMENTS[i % NATURAL_FRAGMENTS.length];
+    i++;
+  }
+  return out;
+}
+
 function makeMsg(
   id: string,
   role: "user" | "assistant",
@@ -239,7 +262,7 @@ describe("transform writes the size snapshot end-to-end", () => {
         makeMsg(
           `cmp-${i}`,
           i % 2 === 0 ? "user" : "assistant",
-          "A".repeat(1_000),
+          naturalText(1_000),
           session,
         ),
       );
@@ -279,7 +302,7 @@ describe("transform writes the size snapshot end-to-end", () => {
         makeMsg(
           `flr-${i}`,
           i % 2 === 0 ? "user" : "assistant",
-          "A".repeat(1_000),
+          naturalText(1_000),
           session,
         ),
       );
@@ -325,7 +348,7 @@ describe("transform writes the size snapshot end-to-end", () => {
         makeMsg(
           `cal-${i}`,
           i % 2 === 0 ? "user" : "assistant",
-          "A".repeat(1_000),
+          naturalText(1_000),
           session,
         ),
       );
@@ -384,7 +407,7 @@ describe("transform writes the size snapshot end-to-end", () => {
           makeMsg(
             `us-${i}`,
             i % 2 === 0 ? "user" : "assistant",
-            "A".repeat(1_000),
+            naturalText(1_000),
             session,
           ),
         );
@@ -435,7 +458,7 @@ describe("transform writes the size snapshot end-to-end", () => {
           makeMsg(
             `cs-${i}`,
             i % 2 === 0 ? "user" : "assistant",
-            "A".repeat(1_000),
+            naturalText(1_000),
             session,
           ),
         );
