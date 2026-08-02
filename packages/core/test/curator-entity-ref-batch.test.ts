@@ -22,6 +22,9 @@ function countingSink(counts: Record<string, number>): LogSink {
       if (sql.includes("FROM entity_aliases")) {
         counts.aliases = (counts.aliases ?? 0) + 1;
       }
+      if (sql.includes("INSERT OR IGNORE INTO knowledge_entity_refs")) {
+        counts.refInsert = (counts.refInsert ?? 0) + 1;
+      }
       return fn();
     },
   };
@@ -109,5 +112,71 @@ describe("curator entity-ref sync is batched (no N+1 registry reload)", () => {
     expect(entities.knowledgeForEntity(alpha)).toHaveLength(1);
     expect(entities.knowledgeForEntity(bravo)).toHaveLength(1);
     expect(entities.knowledgeForEntity(charlie)).toHaveLength(1);
+  });
+
+  test("knowledge_entity_refs INSERT runs once per entry, not once per matched entity (LOREAI-GATEWAY-3Y, LOREAI-GATEWAY-4Q)", () => {
+    // Three entities, each mentioned by canonical name in three knowledge
+    // entries → 3 entries × 3 entity matches = 9 refs total. Pre-fix this
+    // produced 9 separate INSERT statements. Post-fix it produces exactly 3
+    // (one multi-row INSERT per entry).
+    const e1 = entities.create({
+      projectPath: PROJECT,
+      entityType: "tool",
+      canonicalName: "DeltaWidget",
+    });
+    const e2 = entities.create({
+      projectPath: PROJECT,
+      entityType: "tool",
+      canonicalName: "EchoWidget",
+    });
+    const e3 = entities.create({
+      projectPath: PROJECT,
+      entityType: "tool",
+      canonicalName: "FoxtrotWidget",
+    });
+
+    const counts: Record<string, number> = {};
+    registerSink(countingSink(counts));
+
+    const result = applyOps(
+      [
+        {
+          op: "create",
+          category: "decision",
+          title: "Entry One",
+          content:
+            "DeltaWidget, EchoWidget, and FoxtrotWidget all participate in the first thing.",
+          scope: "project",
+        },
+        {
+          op: "create",
+          category: "decision",
+          title: "Entry Two",
+          content:
+            "DeltaWidget, EchoWidget, and FoxtrotWidget power the second thing.",
+          scope: "project",
+        },
+        {
+          op: "create",
+          category: "decision",
+          title: "Entry Three",
+          content:
+            "DeltaWidget, EchoWidget, and FoxtrotWidget handle the third thing.",
+          scope: "project",
+        },
+      ],
+      { projectPath: PROJECT, sessionID: "sess-multi-row" },
+    );
+
+    expect(result.created).toBe(3);
+
+    // Three entries → exactly three INSERT statements (one multi-row per entry).
+    // Pre-fix this was 9 (one per matched entity).
+    expect(counts.refInsert).toBe(3);
+
+    // Behavioral equivalence: every (entity, knowledge) pair is linked.
+    for (const entityId of [e1.id, e2.id, e3.id]) {
+      expect(entities.knowledgeForEntity(entityId)).toHaveLength(3);
+    }
   });
 });
