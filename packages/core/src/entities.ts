@@ -2104,19 +2104,62 @@ export function syncEntityRefs(
   }
 
   let count = 0;
-  for (const entityId of linkedEntityIds) {
+  if (linkedEntityIds.size) {
+    // Chunked multi-row INSERT — removes the per-entity N+1 Sentry detects on
+    // `lore.curator` / `lore.consolidation` (LOREAI-GATEWAY-3Y, LOREAI-GATEWAY-4Q).
+    // One statement per chunk (vs N per entry), one fsync per chunk, one span
+    // per chunk in the Sentry transaction tree. CHUNK = 450 keeps the bound
+    // parameter count at 900 (2 params × 450 = 900), well within SQLite's
+    // SQLITE_MAX_VARIABLE_NUMBER=999 default; mirrors the 900-param ceiling
+    // used by batchLoadAliases / batchLoadAliasesOffloaded / etc.
+    // Entity IDs come from the entities/aliases tables above and the
+    // knowledge_id is the resolved logical_id, so FK violations are not
+    // expected on this path. SQLite aborts the whole chunk on FK violation,
+    // so we fall back to per-row inserts to preserve the prior defensive
+    // contract (Seer 15652457 LOW). Per-row count/affected tracking inside
+    // the fallback mirrors the pre-refactor loop's semantics — only
+    // successfully-inserted rows count toward `count` and `affected`
+    // (Seer 15653378 LOW).
+    const ids = Array.from(linkedEntityIds);
+    const CHUNK = 450;
     try {
-      db()
-        .query(
-          "INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
-        )
-        .run(logicalId, entityId);
-      affected.add(entityId);
-      count++;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK);
+        const values = chunk.map(() => "(?, ?)").join(", ");
+        const params: string[] = [];
+        for (const entityId of chunk) params.push(logicalId, entityId);
+        db()
+          .query(
+            `INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES ${values}`,
+          )
+          .run(...params);
+      }
+      // Chunked INSERT succeeded — every row in the batch meets the
+      // INSERT OR IGNORE contract (FK-valid by construction, no
+      // duplicates after the pre-DELETE). All ids are linked.
+      for (const entityId of ids) affected.add(entityId);
+      count = ids.length;
     } catch (e: unknown) {
-      // FK violation (entity or knowledge entry doesn't exist) — skip
-      if (e instanceof Error && /FOREIGN KEY/i.test(e.message)) continue;
-      throw e;
+      if (!(e instanceof Error && /FOREIGN KEY/i.test(e.message))) throw e;
+      // Schema-impossible on this path (entity IDs are FK-valid by
+      // construction), but a hypothetical FK violation aborts the whole
+      // chunk. Fall back to per-row inserts so a single bad row doesn't
+      // tear down the rest.
+      for (const entityId of ids) {
+        try {
+          db()
+            .query(
+              "INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
+            )
+            .run(logicalId, entityId);
+          affected.add(entityId);
+          count++;
+        } catch (inner: unknown) {
+          if (inner instanceof Error && /FOREIGN KEY/i.test(inner.message))
+            continue;
+          throw inner;
+        }
+      }
     }
   }
 
