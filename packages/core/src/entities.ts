@@ -2104,23 +2104,20 @@ export function syncEntityRefs(
   }
 
   let count = 0;
-  if (linkedEntityIds.size) {
-    // Single multi-row INSERT — removes the per-entity N+1 Sentry detects on
-    // `lore.curator` / `lore.consolidation` (LOREAI-GATEWAY-3Y, LOREAI-GATEWAY-4Q).
-    // One statement, one fsync, one span in the transaction tree. Entity IDs come
-    // from the entities/aliases tables above and the knowledge_id is the resolved
-    // logical_id, so FK violations are not expected on this path.
-    const ids = Array.from(linkedEntityIds);
-    const values = ids.map(() => "(?, ?)").join(", ");
-    const params: string[] = [];
-    for (const entityId of ids) params.push(logicalId, entityId);
-    db()
-      .query(
-        `INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES ${values}`,
-      )
-      .run(...params);
-    for (const entityId of ids) affected.add(entityId);
-    count = ids.length;
+  for (const entityId of linkedEntityIds) {
+    try {
+      db()
+        .query(
+          "INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id) VALUES (?, ?)",
+        )
+        .run(logicalId, entityId);
+      affected.add(entityId);
+      count++;
+    } catch (e: unknown) {
+      // FK violation (entity or knowledge entry doesn't exist) — skip
+      if (e instanceof Error && /FOREIGN KEY/i.test(e.message)) continue;
+      throw e;
+    }
   }
 
   // Recompute sync_rank for every entity whose ref-count changed (lost or gained a ref).
