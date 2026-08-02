@@ -3,9 +3,9 @@
  * or directly via `bun run src/cli/bin.ts`.
  */
 import "../../instrument";
-import { _cli } from "./main";
+import { runCli } from "./cli";
 
-_cli().catch((e) => {
+runCli().catch((e) => {
   if (e) console.error(e);
   process.exit(1);
 });
