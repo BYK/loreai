@@ -9,9 +9,8 @@
  * Detection mirrors the patterns documented in the upstream
  * `packages/opencode/src/agent/prompt/compaction.txt` and the
  * `experimental.session.compacting` hook.
- *
- * This module has zero dependencies on `@loreai/core` — pure detection logic.
  */
+import { estimateTokens as coreEstimateTokens } from "@loreai/core";
 import type { GatewayRequest, GatewayResponse } from "./translate/types";
 
 // ---------------------------------------------------------------------------
@@ -68,9 +67,9 @@ function lastUserText(req: GatewayRequest): string {
   return "";
 }
 
-/** Rough token estimate: ~4 characters per token. */
+/** Rough token estimate (BPE-backed via @loreai/core — see tokenize.ts). */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return coreEstimateTokens(text);
 }
 
 // ---------------------------------------------------------------------------

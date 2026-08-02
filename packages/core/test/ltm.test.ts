@@ -1363,15 +1363,19 @@ describe("ltm.forSession — vector-path set stability (regression #727)", () =>
 
     // 8 equal-confidence project entries, each ~30 tokens. A tight budget fits
     // only ~4, so which 4 are selected is decided purely by the (shifting)
-    // vector scores. (~30 tok: title ~11 chars + "C "*45 = 90 chars →
-    // ceil(101/3)=34 +10 overhead ≈ 44; budget below tuned to fit exactly 4.)
+    // vector scores. (~30 tok: title ~11 chars + content with ~30 BPE tokens →
+    // ~10 overhead ≈ 40; budget below tuned to fit exactly 4.)
     for (let i = 0; i < 8; i++) {
       ids.push(
         ltm.create({
           projectPath: PROJ,
           category: "pattern",
           title: `Vec entry ${i}`,
-          content: "C ".repeat(45),
+          // Varied English text whose BPE token count approximates the legacy
+          // 90-char / 30-token budget. Avoids degenerate "C C C" tokenization
+          // (single-char runs collapse to ~12 BPE tokens instead of 30).
+          content:
+            "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. Sphinx of black quartz judge my vow.",
           scope: "project",
           crossProject: false,
         }),
@@ -1935,12 +1939,15 @@ describe("preference-only forSession fast path", () => {
   });
 
   test("respects token budget", async () => {
-    // Create many large preferences
+    // Create many large preferences. ~50 BPE tokens each (varied natural
+    // text; "A".repeat degenerate BPE was the historical seed).
+    const chunk =
+      "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead.";
     for (let i = 0; i < 20; i++) {
       ltm.create({
         category: "preference",
         title: `pref-test budget pref ${i}`,
-        content: "A ".repeat(200), // ~50 tokens each
+        content: chunk.repeat(3),
         scope: "global",
         crossProject: true,
       });

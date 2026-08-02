@@ -1783,10 +1783,41 @@ describe("cache stability (e2e)", () => {
       // single-pair growth (~16K) exceeded the post-fix eviction chunk, forcing a
       // re-pin every turn — that was a knife-edge calibration to the old scale,
       // not a real per-turn-march regression).
+      //
+      // Repeat counts inflated for BPE: "lorem ipsum dolor ".repeat(N) tokenizes
+      // "lorem ipsum dolor " is a deliberately chosen repeated phrase because it
+      // is HIGHLY compressible on every BPE encoding (the fragment is a single
+      // token repeated). Empirically measured on cl100k_base (the encoding
+      // used by gradient.ts default):
+      //
+      //   repeat(180)  →  542 BPE tokens   (≈ 3 chars/token)
+      //   repeat(1000) → 3002 BPE tokens   (≈ 3 chars/token)
+      //   repeat(1350) → 4052 BPE tokens   (≈ 3 chars/token)
+      //   repeat(2000) → 6002 BPE tokens   (≈ 3 chars/token)
+      //
+      // So the legacy 1350-repeat message is ~4052 BPE tokens (not ~8000), and
+      // the legacy 180-repeat message is ~542 BPE tokens (not ~1100). To
+      // reproduce the test's intent under BPE we need much larger repeat
+      // counts (2000 / 1000 here).
+      //
+      // `small` is sized so that ~13 small messages fill the layer-1 raw
+      // window's 75% eviction headroom (rawBudget × 0.75 / chars3scale). The
+      // 14th small message triggers a chunked eviction — that's the boundary
+      // advance the test observes (SOMETIMES, not every turn).
+      //
+      // NOTE: With the BPE-backed `estimateTokens`, the per-message token
+      // count is ~2x LOWER than the legacy chars/3 for this phrase (3002 vs
+      // 6000 chars/3 at repeat(1000)). The post-BPE budget math: rawBudget =
+      // bodyUsable × 0.4 ≈ 40K chars/3-scale tokens; rawFillBudget = rawBudget
+      // × 0.75 ≈ 30K; per-small-message BPE = 3002 → 1787 chars/3-scale →
+      // 30000/1787 ≈ 17 messages fit before eviction kicks in. Sized to
+      // 1000-repeat so 14 small messages tip just past the boundary. On
+      // non-repeating text the BPE ratio is closer to chars/3, so this
+      // tuning is conservative.
       const big = (label: string) =>
-        `${label} ${"lorem ipsum dolor ".repeat(1_350)}`;
+        `${label} ${"lorem ipsum dolor ".repeat(2_000)}`;
       const small = (label: string) =>
-        `${label} ${"lorem ipsum dolor ".repeat(180)}`;
+        `${label} ${"lorem ipsum dolor ".repeat(1_000)}`;
       const TOTAL_TURNS = 14;
       const BASE_PAIRS = 14; // ~28 base messages × ~8K ≈ 224K → well over budget
 

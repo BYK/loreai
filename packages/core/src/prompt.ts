@@ -1,5 +1,6 @@
 import type { Root } from "mdast";
 import { serialize, inline, h, ul, liph, strong, t, root } from "./markdown";
+import { estimateTokens } from "./tokenize";
 
 // All prompts are locked down — they are our core value offering.
 // Do not make these configurable.
@@ -949,9 +950,7 @@ ${knowledgeBlock}`;
 }
 
 // ~3 chars per token — validated as best heuristic against real API data.
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
+// (Replaced by ai-tokenizer-backed shared `estimateTokens` from "./tokenize".)
 
 export function formatKnowledge(
   entries: Array<{

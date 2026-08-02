@@ -188,7 +188,14 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     // no system[2] cache bust). Remove the sticky bonus (STICKY_RELEVANCE_BONUS)
     // and this test goes red — verified by mutation (M4).
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid); // drop arch entry
-    const pad = "x".repeat(300);
+    // ~135 BPE tokens. Use token-free text (digit-padded; each '1' is its own
+    // BPE token so the 67-char pad counts to 67 tokens, +prefix `distillation
+    // body ` (5 tokens) = ~135 total observations). The digit-only content
+    // guarantees the FTS5 BM25 index doesn't match noise words in the HINT
+    // context ("what", "how", "many", "earlier", "used"), which would inflate
+    // k2's score to 1.0 and tie with the synthetic — defeating the boundary
+    // the test asserts.
+    const pad = "1 ".repeat(68).trimEnd();
     db()
       .query("UPDATE distillations SET observations = ? WHERE id = ?")
       .run(`distillation body ${pad}`, distId);
@@ -292,7 +299,13 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     // Delete the guard (ltm.ts `if (entry.category === RECALLED_CONTEXT_CATEGORY)
     // continue;`) and this test goes red — verified by mutation (M3).
     db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid); // drop arch entry
-    const pad = "x".repeat(300);
+    // ~135 BPE tokens. Digit-padded (each '1' is one BPE token; the 67-char
+    // pad plus `distillation body ` prefix = ~135 tokens). No real words so the
+    // FTS5 BM25 index
+    // doesn't match noise words in the HINT context ("what", "how", "many",
+    // "earlier", "used") and inflate k2's score to 1.0 — which would tie with
+    // the synthetic and defeat the boundary the test asserts.
+    const pad = "1 ".repeat(68).trimEnd();
     db()
       .query("UPDATE distillations SET observations = ? WHERE id = ?")
       .run(`distillation body ${pad}`, distId);

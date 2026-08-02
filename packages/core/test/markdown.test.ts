@@ -10,6 +10,7 @@ import {
   renderMarkdown,
 } from "../src/markdown";
 import { formatDistillations, formatKnowledge } from "../src/prompt";
+import { estimateTokens } from "../src/tokenize";
 
 const proc = remark();
 
@@ -346,15 +347,23 @@ describe("formatKnowledge", () => {
     const entries = Array.from({ length: 20 }, (_, i) => ({
       category: "pattern",
       title: `Entry ${i}`,
-      content: "A".repeat(400), // ~133 tokens each at chars/3
+      // ~153 content BPE tokens (760 chars of varied natural text;
+      // measured with cl100k_base) + ~3 title + ~10 per-entry overhead =
+      // ~166 total per entry. Degenerate "A".repeat() would tokenize to ~50
+      // BPE tokens and fit more than expected.
+      content:
+        "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. ".repeat(
+          8,
+        ),
     }));
     // Budget of 500 tokens — should fit only a few
     const result = formatKnowledge(entries, 500);
     const items = countListItems(result);
     expect(items).toBeGreaterThan(0);
     expect(items).toBeLessThan(20);
-    // Total size should be roughly within budget (use /3 to match estimateTokens)
-    expect(Math.ceil(result.length / 3)).toBeLessThanOrEqual(600); // some slack for headers
+    // Total formatted size should be roughly within budget (BPE-based check).
+    const realTokens = estimateTokens(result);
+    expect(realTokens).toBeLessThanOrEqual(700); // some slack for headers
   });
 
   test("token budget — returns empty string when no entries fit", () => {

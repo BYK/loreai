@@ -15,6 +15,7 @@ import type {
   DetectedSession,
 } from "../types";
 import { registerProvider } from "./index";
+import { estimateTokens } from "../../tokenize";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -29,10 +30,6 @@ const ROLE_HEADER_RE = /^####\s+(user|assistant|system)\s*$/i;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
 
 type ParsedMessage = {
   role: string;

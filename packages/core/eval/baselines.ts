@@ -14,15 +14,9 @@
  */
 import type { ConversationTurn, ContentPart } from "./types";
 import type { EvalLLMClient } from "./llm-backend";
+import { estimateTokens } from "../src/tokenize";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Estimate tokens from text length (same heuristic as gradient.ts). */
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
+export { estimateTokens };
 
 /** Render a content part to text. */
 function renderContentPart(part: ContentPart): string {

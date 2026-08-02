@@ -13,11 +13,7 @@ import {
 } from "./tool-trace";
 import type { LoreMessage, LorePart, LoreToolState } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
-
-// ~3 chars per token — validated as best heuristic against real API data.
-function estimate(text: string): number {
-  return Math.ceil(text.length / 3);
-}
+import { estimateTokens } from "./tokenize";
 
 /**
  * Chunk-boundary terminator inserted between chunks by `partsToText`.
@@ -99,7 +95,7 @@ export function store(input: {
       )
       .run(
         content,
-        estimate(content),
+        estimateTokens(content),
         messageMetadata(input.info, input.parts),
         input.info.id,
       );
@@ -121,7 +117,7 @@ export function store(input: {
       input.info.sessionID,
       input.info.role,
       content,
-      estimate(content),
+      estimateTokens(content),
       input.info.time.created,
       messageMetadata(input.info, input.parts),
     );

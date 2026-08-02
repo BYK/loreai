@@ -25,6 +25,7 @@ import { toolStripAnnotation } from "./gradient";
 import { reduceBlob } from "./blob-select";
 import { workerSessionIDs } from "./worker";
 import { distillLimiter } from "./session-limiter";
+import { estimateTokens } from "./tokenize";
 import type { LLMClient } from "./types";
 
 // Re-export for backwards compat — index.ts and others may still import from here.
@@ -820,7 +821,10 @@ function storeDistillation(input: {
   const pid = ensureProject(input.projectPath);
   const id = crypto.randomUUID();
   const sourceJson = JSON.stringify(input.sourceIDs);
-  const tokens = Math.ceil(input.observations.length / 3);
+  const tokens = estimateTokens(input.observations, {
+    providerID: input.workerProviderID,
+    modelID: input.workerModelID,
+  });
   db()
     .query(
       `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type, worker_provider_id, worker_model_id)
@@ -1215,7 +1219,10 @@ async function distillSegment(input: {
   input.workerHealth?.recordSuccess();
 
   // Compute context health metrics before storing.
-  const distilledTokens = Math.ceil(result.observations.length / 3);
+  const distilledTokens = estimateTokens(result.observations, {
+    providerID: input.model?.providerID,
+    modelID: input.model?.modelID,
+  });
   const rComp = compressionRatio(distilledTokens, sourceTokens);
   const cNorm = temporal.temporalCnorm(input.messages.map((m) => m.created_at));
 
@@ -1552,7 +1559,10 @@ async function metaDistillInner(input: {
   // When model is undefined, the gateway's cross-provider guard validates
   // or skips the call before the adapter's defaultModel is used.
   const model = input.model;
-  const inputTokens = Math.ceil(userContent.length / 3);
+  const inputTokens = estimateTokens(userContent, {
+    providerID: input.model?.providerID,
+    modelID: input.model?.modelID,
+  });
   const maxTokens = workerTokenBudget(inputTokens, 0.25, 1024, 8192);
   const responseText = await input.llm.prompt(RECURSIVE_SYSTEM, userContent, {
     model,

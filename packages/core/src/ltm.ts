@@ -42,11 +42,7 @@ import {
   type ReferenceResolver,
 } from "./references";
 import * as log from "./log";
-
-// ~3 chars per token — validated as best heuristic against real API data.
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
+import { estimateTokens } from "./tokenize";
 
 /** Sensitivity classification — product hint guiding auto-promotion decisions. */
 export type Sensitivity = "normal" | "sensitive" | "restricted";

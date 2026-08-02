@@ -22,6 +22,9 @@ import {
   estimateTokens,
   scaleUsageForClient,
 } from "../compaction";
+// NOTE: `estimateTokens` re-exported from `compaction.ts` is now the BPE-backed
+// helper from @loreai/core (see packages/core/src/tokenize.ts), no longer the
+// legacy length/4 heuristic.
 
 // ---------------------------------------------------------------------------
 // SSE formatting
@@ -985,6 +988,17 @@ export function buildKeepaliveCompactionStream(
           JSON.stringify({
             type: "message_delta",
             delta: { stop_reason: "end_turn", stop_sequence: null },
+            // NOTE: `estimateTokens` here uses the default cl100k_base
+            // encoding, NOT the `claude` encoding — `compaction.estimateTokens`
+            // is provider-agnostic by design (avoids dragging a provider param
+            // through the SSE fabrication path). For Anthropic traffic this
+            // undercounts by ~10–30% vs. the real Claude tokenizer. The
+            // fabricated number is only consumed client-side by Claude Code's
+            // auto-compaction heuristics (it does NOT bill the upstream
+            // provider), so being in the right order of magnitude is enough.
+            // If accurate Anthropic fabrication becomes important, thread the
+            // active provider through here and call `coreEstimateTokens(text,
+            // { providerID: "anthropic", modelID })`.
             usage: { output_tokens: estimateTokens(text) },
           }),
         ),
