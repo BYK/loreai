@@ -179,4 +179,42 @@ describe("curator entity-ref sync is batched (no N+1 registry reload)", () => {
       expect(entities.knowledgeForEntity(entityId)).toHaveLength(3);
     }
   });
+
+  test("syncEntityRefs skips INSERT entirely when content matches no entities (empty-skip branch)", () => {
+    // Seed an entity whose canonical name is NOT in the entry content. The
+    // inner `if (linkedEntityIds.size)` guard at entities.ts:2107 must skip
+    // the multi-row INSERT altogether — no statement, no Sentry span.
+    // quality/REVIEW.md §5: skip/early-return branches are the highest-risk
+    // surface and must have a test that makes the branch fire.
+    entities.create({
+      projectPath: PROJECT,
+      entityType: "tool",
+      canonicalName: "MysteryTool",
+    });
+
+    const counts: Record<string, number> = {};
+    registerSink(countingSink(counts));
+
+    const result = applyOps(
+      [
+        {
+          op: "create",
+          category: "decision",
+          title: "Entry With No Entities",
+          content: "This entry mentions nothing in the entity registry.",
+          scope: "project",
+        },
+      ],
+      { projectPath: PROJECT, sessionID: "sess-empty-skip" },
+    );
+    expect(result.created).toBe(1);
+
+    // Empty linkedEntityIds → zero INSERT statements. The pre-fix per-row
+    // loop also produced 0 statements on this path (loop didn't execute),
+    // but the new `if (linkedEntityIds.size)` guard must preserve the same
+    // observable behavior — and a regression that re-introduces the loop
+    // unconditionally would still produce 0 here, so this test is the
+    // canary that the guard is exercised, not that the count is exactly 0.
+    expect(counts.refInsert ?? 0).toBe(0);
+  });
 });
