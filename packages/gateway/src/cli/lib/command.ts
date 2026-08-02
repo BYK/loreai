@@ -48,7 +48,11 @@ export interface LoreCommandSpec<
   /** Parameters (positional + flags). Omit for a parameterless command. */
   parameters?: TypedCommandParameters<FLAGS, ARGS, LoreCommandContext>;
   /** The handler. Receives flags, then positionals, with `this` = LoreCommandContext. */
-  handler: (this: LoreCommandContext, flags: FLAGS, ...args: ARGS) => void | Promise<void>;
+  handler: (
+    this: LoreCommandContext,
+    flags: FLAGS,
+    ...args: ARGS
+  ) => void | Promise<void>;
 }
 
 /**
@@ -57,14 +61,10 @@ export interface LoreCommandSpec<
 export function buildCommand<
   FLAGS extends Record<string, unknown> = Record<string, never>,
   ARGS extends readonly unknown[] = [],
->(
-  spec: LoreCommandSpec<FLAGS, ARGS>,
-): Command<LoreCommandContext> {
-  const parameters = spec.parameters ?? ({} as TypedCommandParameters<
-    FLAGS,
-    ARGS,
-    LoreCommandContext
-  >);
+>(spec: LoreCommandSpec<FLAGS, ARGS>): Command<LoreCommandContext> {
+  const parameters =
+    spec.parameters ??
+    ({} as TypedCommandParameters<FLAGS, ARGS, LoreCommandContext>);
   return buildStricliCommand<FLAGS, ARGS, LoreCommandContext>({
     parameters,
     docs: {
@@ -109,24 +109,27 @@ export interface OutputCommandSpec<
  * automatically. `--fields` (when the config provides `knownFields`) and
  * `--limit` follow in Phase 3 slices as commands migrate.
  */
-interface OutputCommandFlags extends Record<string, unknown> {
-  json: boolean;
-}
 
 /**
  * Build a command that returns a typed result and renders via the output
  * pipeline.
+ *
+ * The wrapper auto-injects a `json: boolean` flag into both the parameters
+ * schema and the inferred FLAGS type so callers don't have to redeclare it.
+ * Pass FLAGS as the parsed flag values (e.g. `{ verify: boolean }`) without
+ * the synthetic `json` field.
  */
 export function buildOutputCommand<
   T,
   FLAGS extends Record<string, unknown> = Record<string, never>,
   ARGS extends readonly unknown[] = [],
->(
-  spec: OutputCommandSpec<T, FLAGS, ARGS>,
-): Command<LoreCommandContext> {
+>(spec: OutputCommandSpec<T, FLAGS, ARGS>): Command<LoreCommandContext> {
+  // Augment FLAGS internally with `json: boolean` so the parameters
+  // schema's discriminator can resolve `kind: "boolean"` correctly.
+  type AugmentedFlags = FLAGS & { json: boolean };
   const userParameters = spec.parameters ?? ({} as Record<string, unknown>);
   const baseFlags =
-    ((userParameters as { flags?: Record<string, unknown> }).flags ?? {});
+    (userParameters as { flags?: Record<string, unknown> }).flags ?? {};
   const mergedParameters = {
     ...userParameters,
     flags: {
@@ -137,30 +140,29 @@ export function buildOutputCommand<
       },
       ...baseFlags,
     },
-  } as TypedCommandParameters<FLAGS, ARGS, LoreCommandContext>;
-  return buildStricliCommand<FLAGS, ARGS, LoreCommandContext>({
+  } as TypedCommandParameters<AugmentedFlags, ARGS, LoreCommandContext>;
+  return buildStricliCommand<AugmentedFlags, ARGS, LoreCommandContext>({
     parameters: mergedParameters,
     docs: {
       brief: spec.brief,
       fullDescription: spec.fullDescription,
     },
     func(flags, ...args): Promise<void> {
-      const json = Boolean((flags as unknown as OutputCommandFlags).json);
+      // AugmentedFlags already includes `json: boolean`, so no cast needed.
+      const json = Boolean(flags.json);
       try {
-        const output = spec.handler.call(
-          this,
-          flags,
-          ...args,
-        );
-        return Promise.resolve(output).then(async (resolved) => {
-          await emitOutput(resolved, spec.config, json, this, args);
-        }).catch((err: unknown) => {
-          if (err instanceof CliError) {
-            emitCliError(err, this, json);
-            return;
-          }
-          throw err;
-        });
+        const output = spec.handler.call(this, flags, ...args);
+        return Promise.resolve(output)
+          .then(async (resolved) => {
+            await emitOutput(resolved, spec.config, json, this, args);
+          })
+          .catch((err: unknown) => {
+            if (err instanceof CliError) {
+              emitCliError(err, this, json);
+              return;
+            }
+            throw err;
+          });
       } catch (err) {
         if (err instanceof CliError) {
           emitCliError(err, this, json);

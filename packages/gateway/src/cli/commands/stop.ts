@@ -98,22 +98,18 @@ function parseLegacyOutput(joined: string): {
   };
 }
 
-export const stopCommand = buildOutputCommand<StopResult, { json: boolean }, []>({
+export const stopCommand = buildOutputCommand<
+  StopResult,
+  Record<string, never>,
+  []
+>({
   brief: "Stop a background gateway started with `lore start --bg`",
   fullDescription:
     "Stop a Lore gateway started with `lore start --bg` (or any " +
     "`lore start` that wrote a PID file). Resolution order: a live PID " +
     "file is signaled, a foreground gateway without a PID file is reported " +
     "for Ctrl+C, stale PID files are cleaned, nothing running is a no-op.",
-  parameters: {
-    flags: {
-      json: {
-        kind: "boolean",
-        brief: "Emit a stable JSON payload (ok, action, pid, port)",
-        default: false,
-      },
-    },
-  },
+  parameters: { flags: {} },
   config: { renderHuman, toJson },
   async handler() {
     const { exitCode, captured } = await runLegacyAndCollect();

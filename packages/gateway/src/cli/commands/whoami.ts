@@ -7,14 +7,9 @@
  */
 import { buildOutputCommand } from "../lib/command";
 import { AuthError } from "../lib/errors";
-import {
-  clearSession,
-  getCurrentUser,
-  isLoggedIn,
-} from "../../supabase";
+import { clearSession, getCurrentUser, isLoggedIn } from "../../supabase";
 
 type WhoamiFlags = {
-  json: boolean;
   verify: boolean;
 };
 
@@ -53,11 +48,7 @@ function formatIdentity(user: {
   return user.user_id || "unknown";
 }
 
-export const whoamiCommand = buildOutputCommand<
-  WhoamiResult,
-  WhoamiFlags,
-  []
->({
+export const whoamiCommand = buildOutputCommand<WhoamiResult, WhoamiFlags, []>({
   brief: "Show the signed-in account",
   fullDescription:
     "Print the Folk Lore account currently signed in to this machine. " +
@@ -68,11 +59,6 @@ export const whoamiCommand = buildOutputCommand<
       verify: {
         kind: "boolean",
         brief: "Round-trip to the server to verify the session is still valid",
-        default: false,
-      },
-      json: {
-        kind: "boolean",
-        brief: "Emit the account as JSON (otherwise just the @login / email)",
         default: false,
       },
     },
@@ -86,9 +72,10 @@ export const whoamiCommand = buildOutputCommand<
     if (!user) {
       if (flags.verify && hadSession) clearSession();
       throw new AuthError({
-        message: flags.verify && hadSession
-          ? "Session expired. Run `lore login` to sign in again."
-          : "Not logged in. Run `lore login` to sign in.",
+        message:
+          flags.verify && hadSession
+            ? "Session expired. Run `lore login` to sign in again."
+            : "Not logged in. Run `lore login` to sign in.",
         tryCommand: "lore login",
       });
     }

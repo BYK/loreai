@@ -116,11 +116,11 @@ describe("Phase 3B — typed lore stop", () => {
     process.env.LORE_NO_UPDATE_CHECK = "1";
     // Stub process.kill so the legacy command signals our fake PID without
     // affecting the test runner.
-    process.kill = ((pid: number, signal?: NodeJS.Signals): true => {
+    process.kill = (pid, signal) => {
       state.killed.push(pid);
       if (signal === "SIGTERM" && pid === state.pid) state.pidAlive = false;
       return true;
-    }) as typeof process.kill;
+    };
   });
 
   afterEach(() => {
@@ -129,7 +129,8 @@ describe("Phase 3B — typed lore stop", () => {
   });
 
   afterAll(() => {
-    if (origNoUpdateCheck === undefined) delete process.env.LORE_NO_UPDATE_CHECK;
+    if (origNoUpdateCheck === undefined)
+      delete process.env.LORE_NO_UPDATE_CHECK;
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 

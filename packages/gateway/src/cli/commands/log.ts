@@ -6,15 +6,10 @@
  * sink their stdout/stderr so the typed envelope is the only thing emitted.
  */
 import { buildOutputCommand } from "../lib/command";
-import {
-  CliError,
-  ResolutionError,
-  UsageError,
-} from "../lib/errors";
+import { CliError, ResolutionError, UsageError } from "../lib/errors";
 import { commandLog, commandDiff } from "../history-cmd";
 
 type LogFlags = {
-  json: boolean;
   limit: number;
   project: string;
 };
@@ -42,6 +37,10 @@ async function runLegacyAndCollect(
   const captured: string[] = [];
   const realLog = console.log;
   const realError = console.error;
+  // The legacy `commandLog` and `commandDiff` call `process.exit(1)`
+  // directly on error. Replace `process.exit` with a throwing shim so
+  // we capture the failure as an exception instead of killing the test
+  // runner (or the process) mid-run.
   const realExit = process.exit;
   const priorExitCode = process.exitCode;
   process.exitCode = 0;
@@ -55,6 +54,9 @@ async function runLegacyAndCollect(
       captured.push(typeof a === "string" ? a : String(a));
     }
   };
+  process.exit = (code?: number): never => {
+    throw new Error(`__legacy_exit:${code ?? "undefined"}`);
+  };
   let thrown: unknown;
   try {
     await call();
@@ -67,6 +69,11 @@ async function runLegacyAndCollect(
   }
   const exitCode = process.exitCode ?? 0;
   process.exitCode = priorExitCode;
+  if (thrown instanceof Error && /__legacy_exit:/.test(thrown.message)) {
+    // Legacy handler called `process.exit(1)` — surface it through the
+    // typed output pipeline as a typed error rather than rethrowing.
+    return { exitCode: 1, captured: captured.join("") };
+  }
   if (thrown) throw thrown;
   return { exitCode, captured: captured.join("") };
 }
@@ -76,10 +83,7 @@ function classify(text: string): LogResult["kind"] {
   return "recent";
 }
 
-function translateError(
-  text: string,
-  exitCode: number,
-): CliError {
+function translateError(text: string, exitCode: number): CliError {
   if (exitCode !== 0 || /No knowledge entry/.test(text)) {
     return new ResolutionError({
       message: text.trim() || "No knowledge entry found.",
@@ -95,12 +99,9 @@ function translateError(
   return new UsageError({ message: text.trim() || "Unknown error." });
 }
 
-export const logCommand = buildOutputCommand<
-  LogResult,
-  LogFlags,
-  [string?]
->({
-  brief: "Show knowledge version history (an entry's timeline, or recent changes)",
+export const logCommand = buildOutputCommand<LogResult, LogFlags, [string?]>({
+  brief:
+    "Show knowledge version history (an entry's timeline, or recent changes)",
   fullDescription:
     "With no ID, prints recent knowledge changes for the project. " +
     "With an ID, prints the version timeline for that knowledge entry. " +
@@ -108,11 +109,6 @@ export const logCommand = buildOutputCommand<
     "count (default 20); --project targets a specific project directory.",
   parameters: {
     flags: {
-      json: {
-        kind: "boolean",
-        brief: "Emit structured JSON",
-        default: false,
-      },
       limit: {
         kind: "parsed",
         parse: Number,
@@ -139,7 +135,7 @@ export const logCommand = buildOutputCommand<
   config: { renderHuman, toJson },
   async handler(flags, id) {
     const values: Record<string, unknown> = {
-      json: flags.json,
+      json: (flags as { json?: boolean }).json,
       limit: flags.limit.toString(),
     };
     if (flags.project) values.project = flags.project;
@@ -158,9 +154,7 @@ export const logCommand = buildOutputCommand<
   },
 });
 
-type DiffFlags = {
-  json: boolean;
-};
+type DiffFlags = Record<string, never>;
 
 interface DiffResult {
   id: string | null;
@@ -178,13 +172,7 @@ export const diffCommand = buildOutputCommand<
     "If only one ID is supplied, defaults to the latest superseded version " +
     "versus the current. Use --json for the structured envelope.",
   parameters: {
-    flags: {
-      json: {
-        kind: "boolean",
-        brief: "Emit structured JSON",
-        default: false,
-      },
-    },
+    flags: {},
     positional: {
       kind: "tuple",
       parameters: [
@@ -209,7 +197,7 @@ export const diffCommand = buildOutputCommand<
     if (v1) args.push(v1);
     if (v2) args.push(v2);
     const { exitCode, captured } = await runLegacyAndCollect(() =>
-      commandDiff(args, { json: flags.json }),
+      commandDiff(args, { json: (flags as { json?: boolean }).json }),
     );
     if (exitCode !== 0) throw translateError(captured, exitCode);
     return {

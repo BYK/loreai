@@ -112,7 +112,8 @@ describe("Phase 3A — typed lore logs", () => {
   });
 
   afterAll(() => {
-    if (origNoUpdateCheck === undefined) delete process.env.LORE_NO_UPDATE_CHECK;
+    if (origNoUpdateCheck === undefined)
+      delete process.env.LORE_NO_UPDATE_CHECK;
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 
@@ -144,6 +145,18 @@ describe("Phase 3A — typed lore logs", () => {
       "line 99",
       "line 100",
     ]);
+  });
+
+  // Stricli's `aliases` map only resolves single-character shorthands
+  // (`-n`); the long form (`--n`) is treated as an unknown positional and
+  // rejected with a "Too many arguments" error. This pins the documented
+  // behavior so a future Stricli upgrade that changes alias semantics
+  // trips the test.
+  test("--n (long form) is rejected as unknown positional (Stricli alias semantics)", async () => {
+    const { stderr } = await runWith(["logs", "--n", "5"]);
+    // Stricli's parser rejects the long form as a positional it didn't
+    // expect. The diagnostic goes to stderr.
+    expect(stderr).toMatch(/Too many arguments|Unknown|unexpected|--n/i);
   });
 
   test("--path prints just the path", async () => {

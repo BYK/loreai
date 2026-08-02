@@ -57,8 +57,7 @@ const helpCommand = buildLoreCommand<HelpFlags, [string?]>({
     flags: {
       json: {
         kind: "boolean",
-        brief:
-          "Emit a stable structured JSON introspection of the route tree",
+        brief: "Emit a stable structured JSON introspection of the route tree",
         default: false,
       },
     },
@@ -79,8 +78,7 @@ const helpCommand = buildLoreCommand<HelpFlags, [string?]>({
         schemaVersion: 1,
         name: "lore",
         version: VERSION,
-        note:
-          "Structured JSON help is planned for Phase 4. Run `lore help` for human output.",
+        note: "Structured JSON help is planned for Phase 4. Run `lore help` for human output.",
         path: path ?? null,
       };
       this.process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);

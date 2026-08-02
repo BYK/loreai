@@ -60,7 +60,8 @@ describe("Phase 1 — Stricli app contract", () => {
   });
 
   afterAll(() => {
-    if (origNoUpdateCheck === undefined) delete process.env.LORE_NO_UPDATE_CHECK;
+    if (origNoUpdateCheck === undefined)
+      delete process.env.LORE_NO_UPDATE_CHECK;
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 
@@ -72,9 +73,7 @@ describe("Phase 1 — Stricli app contract", () => {
     // prose shows up in our collected stdout buffer.
     const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
       for (const a of args) {
-        stdoutChunks.push(
-          Buffer.isBuffer(a) ? a : Buffer.from(String(a)),
-        );
+        stdoutChunks.push(Buffer.isBuffer(a) ? a : Buffer.from(String(a)));
       }
     });
     const stdoutSpy = vi

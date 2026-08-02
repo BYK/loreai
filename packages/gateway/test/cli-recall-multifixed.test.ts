@@ -10,15 +10,7 @@
  * assert the *query string* the command passes through to the search
  * engine, not the search itself.
  */
-import {
-  afterAll,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  test,
-  vi,
-} from "vitest";
+import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("../src/cli/lib/version-check", () => ({
   shouldSuppressNotification: () => true,
@@ -30,7 +22,6 @@ vi.mock("../src/cli/lib/version-check", () => ({
 // Capture the query string that the legacy command hands to runRecall so we
 // can assert positional joining. Hoisted so the mock factory can populate it.
 let lastQuery: string | undefined;
-let lastSearchConfig: unknown;
 let lastScope: string | undefined;
 let lastSessionID: string | undefined;
 
@@ -49,7 +40,6 @@ vi.mock("@loreai/core", async (importOriginal) => {
       lastQuery = input.query;
       lastScope = input.scope;
       lastSessionID = input.sessionID;
-      lastSearchConfig = input.searchConfig;
       // No DB hit: return an empty RecallResult shape that the legacy
       // command will JSON.stringify without further IO.
       return {
@@ -72,37 +62,15 @@ vi.mock("@loreai/core", async (importOriginal) => {
 
 import { commandRecall } from "../src/cli/recall-cmd";
 
-function captureStdout(): string {
-  const chunks: Buffer[] = [];
-  const spy = vi
-    .spyOn(process.stdout, "write")
-    .mockImplementation((chunk) => {
-      chunks.push(
-        Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
-      );
-      return true;
-    });
-  try {
-    return ""; // returned in finally via the captured chunks
-  } finally {
-    spy.mockRestore();
-  }
-  return chunks.join("");
-}
-
 async function runRecall(
   positionals: string[],
   values: Record<string, unknown>,
 ): Promise<{ stdout: string; exitCode: number | null }> {
   const chunks: Buffer[] = [];
-  const spy = vi
-    .spyOn(process.stdout, "write")
-    .mockImplementation((chunk) => {
-      chunks.push(
-        Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
-      );
-      return true;
-    });
+  const spy = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    return true;
+  });
   const priorExitCode = process.exitCode;
   process.exitCode = 0;
   try {
@@ -112,7 +80,6 @@ async function runRecall(
   }
   const exitCode = process.exitCode;
   process.exitCode = priorExitCode;
-  void captureStdout; // referenced for the future
   return { stdout: Buffer.concat(chunks).toString("utf8"), exitCode };
 }
 
@@ -121,7 +88,6 @@ describe("Phase 3A.3 — recall multiword fix", () => {
     lastQuery = undefined;
     lastScope = undefined;
     lastSessionID = undefined;
-    lastSearchConfig = undefined;
   });
 
   afterAll(() => {});
@@ -144,15 +110,15 @@ describe("Phase 3A.3 — recall multiword fix", () => {
   test("--scope session without --session returns UsageError-shape exitCode=1", async () => {
     const priorExitCode = process.exitCode;
     process.exitCode = 0;
-    const exitSpy = vi
-      .spyOn(process, "exit")
-      .mockImplementation(((code?: number) => {
-        throw new Error(`__exit:${code}`);
-      }) as never);
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(((
+      code?: number,
+    ) => {
+      throw new Error(`__exit:${code}`);
+    }) as never);
     try {
-      await expect(
-        runRecall(["auth"], { scope: "session" }),
-      ).rejects.toThrow("__exit:1");
+      await expect(runRecall(["auth"], { scope: "session" })).rejects.toThrow(
+        "__exit:1",
+      );
     } finally {
       exitSpy.mockRestore();
       process.exitCode = priorExitCode;
@@ -160,10 +126,7 @@ describe("Phase 3A.3 — recall multiword fix", () => {
   });
 
   test("--scope session with --session reaches runRecall with both values", async () => {
-    await runRecall(
-      ["auth"],
-      { scope: "session", session: "session-abc" },
-    );
+    await runRecall(["auth"], { scope: "session", session: "session-abc" });
     expect(lastScope).toBe("session");
     expect(lastSessionID).toBe("session-abc");
   });

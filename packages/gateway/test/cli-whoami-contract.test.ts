@@ -28,7 +28,11 @@ vi.mock("../src/cli/lib/version-check", () => ({
   abortPendingVersionCheck: () => {},
 }));
 
-let mockSession: { user_id: string; github_login: string; email: string } | null = null;
+let mockSession: {
+  user_id: string;
+  github_login: string;
+  email: string;
+} | null = null;
 let mockVerify: boolean = false;
 
 vi.mock("../src/supabase", () => ({
@@ -59,9 +63,7 @@ async function runWith(argv: string[]): Promise<{
   const stderrChunks: Buffer[] = [];
   const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
     for (const a of args) {
-      stdoutChunks.push(
-        Buffer.isBuffer(a) ? a : Buffer.from(String(a)),
-      );
+      stdoutChunks.push(Buffer.isBuffer(a) ? a : Buffer.from(String(a)));
     }
   });
   const stdoutSpy = vi
@@ -113,7 +115,8 @@ describe("Phase 3A — typed lore whoami", () => {
   });
 
   afterAll(() => {
-    if (origNoUpdateCheck === undefined) delete process.env.LORE_NO_UPDATE_CHECK;
+    if (origNoUpdateCheck === undefined)
+      delete process.env.LORE_NO_UPDATE_CHECK;
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 

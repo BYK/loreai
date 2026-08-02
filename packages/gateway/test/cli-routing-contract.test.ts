@@ -14,7 +14,15 @@
  *  - Stubs every lazy command module so we can assert which handler was
  *    dispatched, with which `(startOpts, agentName, agentArgs)` payload.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 
 // Hoisted mocks run before module imports. Each test can steer what `commandRun`
 // reports, then assert which argv reached it.
@@ -79,7 +87,8 @@ describe("Phase 0 — lore run argv forwarding contract", () => {
   });
 
   afterAll(() => {
-    if (origNoUpdateCheck === undefined) delete process.env.LORE_NO_UPDATE_CHECK;
+    if (origNoUpdateCheck === undefined)
+      delete process.env.LORE_NO_UPDATE_CHECK;
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 
@@ -169,9 +178,7 @@ describe("Phase 0 — lore run argv forwarding contract", () => {
   // opaque agent-argv preprocessor) MUST fix this; until then the test
   // records the regression so the migration cannot ship without addressing it.
   test("`--` alone with no agent: forwards everything after the terminator (KNOWN LIMITATION)", async () => {
-    const errSpy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       await runWith(["--", "--verbose", "--debug"]);
       // Today this prints "Unknown command `--verbose`" to stderr and does
@@ -202,7 +209,12 @@ describe("Phase 0 — lore run argv forwarding contract", () => {
   test("value-bearing flag value is NOT split into a positional", async () => {
     // `lore --port 8080 claude` — lore consumes --port (the value becomes
     // 8080), and claude should still receive the trailing flag-forwarded args.
-    await runWith(["--port", "8080", "claude", "--dangerously-skip-permissions"]);
+    await runWith([
+      "--port",
+      "8080",
+      "claude",
+      "--dangerously-skip-permissions",
+    ]);
     const call = lastRunCall();
     expect(call.agent).toEqual(["claude"]);
     expect(call.args).toEqual(["--dangerously-skip-permissions"]);

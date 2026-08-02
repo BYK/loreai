@@ -138,7 +138,8 @@ describe("Phase 0 — root command surface contract", () => {
   });
 
   afterAll(() => {
-    if (origNoUpdateCheck === undefined) delete process.env.LORE_NO_UPDATE_CHECK;
+    if (origNoUpdateCheck === undefined)
+      delete process.env.LORE_NO_UPDATE_CHECK;
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 
@@ -220,7 +221,10 @@ describe("Phase 0 — root command surface contract", () => {
 
   test("log <id>", async () => {
     await runWith(["log", "abc"]);
-    expect(spies.log).toHaveBeenCalledWith(["abc"], expect.objectContaining({}));
+    expect(spies.log).toHaveBeenCalledWith(
+      ["abc"],
+      expect.objectContaining({}),
+    );
   });
 
   test("diff <id>", async () => {
@@ -253,7 +257,10 @@ describe("Phase 0 — root command surface contract", () => {
 
   test("team list", async () => {
     await runWith(["team", "list"]);
-    expect(spies.team).toHaveBeenCalledWith(["list"], expect.objectContaining({}));
+    expect(spies.team).toHaveBeenCalledWith(
+      ["list"],
+      expect.objectContaining({}),
+    );
   });
 
   test("admin grant", async () => {

@@ -8,20 +8,13 @@
  */
 import { buildOutputCommand } from "../lib/command";
 import { ContextError, StorageError } from "../lib/errors";
-import {
-  readFileSync,
-  statSync,
-  existsSync,
-} from "node:fs";
+import { readFileSync, statSync, existsSync } from "node:fs";
 import { log } from "@loreai/core";
 
 type LogsFlags = {
-  json: boolean;
   path: boolean;
   follow: boolean;
-  /** `-n` — number of lines to show. */
-  n: number;
-  /** `--lines` — number of lines to show. */
+  /** `--lines` / `-n` — number of lines to show. */
   lines: number;
 };
 
@@ -46,26 +39,18 @@ function toJson(data: LogsResult): unknown {
   };
 }
 
-export const logsCommand = buildOutputCommand<
-  LogsResult,
-  LogsFlags,
-  []
->({
+export const logsCommand = buildOutputCommand<LogsResult, LogsFlags, []>({
   brief: "Show lore activity log (last N lines by default)",
   fullDescription:
     "Print the last 50 lines of the gateway activity log by default. " +
     "Use `--lines <n>` / `-n <n>` to change the count, `--path` to print " +
-    "the log file path and exit, and `--follow` / `-f` to stream new entries. " +
-    "JSON output includes the path, total line count, and the returned lines.",
+    "the log file path and exit. " +
+    "JSON output includes the path, total line count, and the returned lines. " +
+    "Note: `--follow` / `-f` is not yet implemented in this build; " +
+    "until it is, the flag is accepted and silently ignored. " +
+    "Use a shell pipe (`tail -f`) when you need streaming.",
   parameters: {
     flags: {
-      // `--json` is auto-injected by buildOutputCommand but we declare it
-      // here so the FLAGS type matches the parameter schema's expectation.
-      json: {
-        kind: "boolean",
-        brief: "Emit a stable JSON payload",
-        default: false,
-      },
       path: {
         kind: "boolean",
         brief: "Print the log file path and exit",
@@ -73,19 +58,15 @@ export const logsCommand = buildOutputCommand<
       },
       follow: {
         kind: "boolean",
-        brief: "Follow log output in real-time (Ctrl-C to exit)",
+        brief:
+          "Accepted for compatibility; not implemented — output is one snapshot, not a stream",
+        hidden: true,
         default: false,
-      },
-      n: {
-        kind: "parsed",
-        parse: Number,
-        brief: "Number of lines to show (alias of --lines)",
-        default: "50",
       },
       lines: {
         kind: "parsed",
         parse: Number,
-        brief: "Number of lines to show (alias of -n)",
+        brief: "Number of lines to show (alias: -n)",
         default: "50",
       },
     },
@@ -119,7 +100,7 @@ export const logsCommand = buildOutputCommand<
         tryCommand: "lore start",
       });
     }
-    const requested = flags.lines ?? flags.n;
+    const requested = flags.lines;
     const stat = statSync(filePath);
     if (!stat.isFile()) {
       throw new StorageError({
@@ -130,8 +111,8 @@ export const logsCommand = buildOutputCommand<
     const allLines = content.split("\n").filter(Boolean);
     const tail = allLines.slice(-requested);
     const hint = flags.follow
-      ? "Streaming — press Ctrl-C to stop."
-      : `Showing last ${tail.length} of ${allLines.length} lines. Run \`lore logs -f\` to follow.`;
+      ? "`--follow` is not yet implemented; output is a one-shot snapshot."
+      : `Showing last ${tail.length} of ${allLines.length} lines.`;
     return {
       kind: "value" as const,
       data: { path: filePath, totalLines: allLines.length, lines: tail },
