@@ -347,8 +347,10 @@ describe("formatKnowledge", () => {
     const entries = Array.from({ length: 20 }, (_, i) => ({
       category: "pattern",
       title: `Entry ${i}`,
-      // ~133 BPE tokens each (varied natural text). Degenerate "A".repeat()
-      // would tokenize to ~50 BPE tokens and fit more than expected.
+      // ~153 content BPE tokens (760 chars of varied natural text;
+      // measured with cl100k_base) + ~3 title + ~10 per-entry overhead =
+      // ~166 total per entry. Degenerate "A".repeat() would tokenize to ~50
+      // BPE tokens and fit more than expected.
       content:
         "The quick brown fox jumps over the lazy dog while a gentle breeze rustles the leaves overhead. ".repeat(
           8,

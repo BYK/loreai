@@ -26,9 +26,16 @@ type MessageWithParts = LoreMessageWithParts;
 // default — gradient.ts intentionally does NOT thread the active provider/model
 // through all 21 internal call sites; per-encoding selection would balloon the
 // surface area without proportional accuracy gain for the budget decisions that
-// this file drives). The legacy chars/3 heuristic is gone; calibratedOverhead
-// continues to absorb the residual gap between any single BPE encoding and the
-// model's real tokenizer for the active session.
+// this file drives). The legacy chars/3 heuristic is gone.
+//
+// NB: with the BPE-backed estimator the per-message cost is now much closer to
+// the model's real provider tokens than chars/3 was (BPE undercounts by ~1% on
+// natural prose vs chars/3's ~33% undercount). This changes calibrate() math
+// — see BODY_TOKEN_RATIO comment below and the inline note at the bodyUsable
+// derivation (line ~3420) for the deferred per-encoding calibration work. The
+// "calibratedOverhead absorbs the residual" framing is no longer accurate: with
+// BPE + 1.68 inflate, calibratedOverhead clamps to 0 once body_real exceeds
+// ~overhead_real / 0.68.
 function estimate(text: string): number {
   return estimateTokens(text);
 }
@@ -433,39 +440,45 @@ const FREE_WRITE_LAYER0_FRACTION = 0.65;
 
 /**
  * On uncalibrated turns, multiply the (BPE-backed) estimate to approximate the
- * real token count. BPE undercounts vs. any specific model tokenizer by a
- * small residual factor, but the overhead EMA captures most of the gap; 1.5
- * provides a safe margin. Module-scoped so the layer-0 sizing helper (and
- * isLargeColdStart) share one definition with the transform path.
- *
- * (Legacy: this multiplier was originally calibrated against the chars/3
- * heuristic, which undercounted by ~1.68x. With the BPE-backed estimator
- * the gap to real provider tokens is smaller, so 1.5 is now a much safer
- * margin than before — the EMA-driven calibrate() path will converge to
- * the real per-session overhead within a few turns.)
+ * real token count. BPE matches real tokens closely (within ~1% for matched
+ * encodings, ~30% under for mismatched ones), but the overhead EMA captures
+ * most of the residual gap; 1.5 provides a safe margin on the uncalibrated
+ * path. Module-scoped so the layer-0 sizing helper (and isLargeColdStart)
+ * share one definition with the transform path.
  */
 export const UNCALIBRATED_SAFETY = 1.5;
 
 /**
- * Empirical ratio of REAL provider tokens to the gradient's BPE-backed body
- * estimate (validated ~1.63–1.68 against the legacy chars/3 heuristic across
- * 200+ turn-pairs; with the BPE-backed estimator the gap to real tokens is
- * smaller, but this constant is kept at its historical value to preserve the
- * calibrated overhead math — any reduction in the ratio would shrink the
- * usable budget and would need a follow-up calibration pass). Used to keep the
- * budget math on a single, consistent scale (issue: distilled-prefix churn from
- * usable-collapse):
+ * Multiplier used in two places:
  *
- *  - calibrate(): overhead = actualInput(REAL) − messageEstimate×RATIO − ltm, so
- *    `overhead` is TRUE system+tools and does NOT silently absorb the body
- *    undercount. Previously overhead absorbed ~0.40·body_real, which for large
- *    growing sessions inflated overhead to ~125K on a 200K model, collapsed
- *    `usable` to ~25K, and forced the session to Layer 4 where the distilled
- *    prefix is re-rendered every turn (the messages[1] cache bust).
- *  - body budgets: a body of B_real real tokens has a bodyEstimate of
- *    B_real/RATIO, so a REAL-token budget is converted to the body's scale by
- *    dividing by RATIO (so the body occupies at most `fraction × usable`
- *    REAL tokens).
+ *   1. bodyUsable = usable / BODY_TOKEN_RATIO  (line ~3420) — converts the
+ *      REAL-token usable budget to the bodyEstimate scale so cfg.budget.*
+ *      fractions remain meaningful when compared against BPE estimates.
+ *   2. calibrate() (line ~1553) — inflates the per-message bodyEstimate
+ *      before subtracting from actualInput: overhead = max(0, actualInput
+ *      − messageEstimate × RATIO − ltm).
+ *
+ * Historical value (validated against the chars/3 heuristic which
+ * undercounted by ~1.68x): 1.68. With the BPE-backed estimator the gap
+ * between bodyEstimate and body_real shrunk from ~33% (chars/3) to ~1%
+ * (matched-encoding BPE), so the inflate-factor in (2) is now a known
+ * over-correction: it drives `overhead` toward 0 (clamped at 0) once
+ * body_real exceeds ~overhead_real / 0.68, which under-reports true
+ * system+tools overhead for non-trivial sessions and leads to an
+ * over-sized `usable` that softens compression triggers.
+ *
+ * The constant is KEPT at 1.68 to preserve the historical budget semantics
+ * (cfg.budget.* fractions) through the chars/3 → BPE migration. A separate
+ * per-encoding calibration pass is tracked as a follow-up: it should
+ * replace the hardcoded 1.68 with a per-session fitted ratio (initial seed
+ * 1.0 for matched encodings, ~1.3 for mismatched). Until that ships, the
+ * known over-estimate bias in `overhead` is a production behavior change
+ * vs. the chars/3 era — flagged here so future readers don't misinterpret
+ * the calibrate math.
+ *
+ * (See also the inline note at the bodyUsable derivation, line ~3420,
+ *  for the cross-reference to this deferred-calibration debt.)
+ *
  *  - fitsWithSafetyMargin(): the acceptance gate inflates the body estimate
  *    back to real and adds overhead+ltm before comparing to maxInput.
  */
@@ -3409,13 +3422,23 @@ function transformInner(input: {
   const usable = usableRaw;
 
   // `usable` is REAL provider tokens (contextLimit/overhead/ltm are all real,
-  // and `overhead` is now TRUE system+tools — it no longer absorbs the chars/3
-  // body undercount). The body budgets below are compared against chars/3 body
-  // estimates (estimateMessage), so convert the real body space to the chars/3
-  // scale by dividing by BODY_TOKEN_RATIO. This makes the distilled/raw windows
-  // occupy at most `fraction × usable` REAL tokens — honoring cfg.budget.* — and
-  // keeps the comparison apples-to-apples. (Overflow is guarded separately by
-  // fitsWithSafetyMargin, which inflates back to real and adds overhead+ltm.)
+  // and `overhead` is now TRUE system+tools). The body budgets below are
+  // compared against the BPE-backed body estimates (estimateMessage →
+  // estimateTokens, see tokenize.ts). For cl100k_base / claude encodings the
+  // BPE estimate is close to real provider tokens (within ~1% on natural
+  // prose), so the BODY_TOKEN_RATIO = 1.68 multiplier is now an OVER-estimate
+  // rather than the chars/3-era correction factor. The body-budget math still
+  // divides usable by BODY_TOKEN_RATIO so the cfg.budget.* fractions honor the
+  // "fraction × usable REAL tokens" semantics, then the body-size math uses
+  // the BPE estimate as-is. NOTE: calibrate() (see line ~1544) inflates the
+  // per-message estimate by BODY_TOKEN_RATIO before subtracting from real
+  // actualInput to compute `overhead` — under BPE this inflate factor is now
+  // a known over-correction that drives `overhead` toward 0 (clamped at 0)
+  // for any non-trivial body. A separate per-encoding calibration pass is
+  // tracked as a follow-up; until then calibratedOverhead will under-report
+  // for large sessions (oversized usable → softer compression triggers). The
+  // PR keeps the 1.68 constant to preserve budget semantics across the
+  // chars/3 → BPE migration window.
   const bodyUsable = Math.floor(usable / BODY_TOKEN_RATIO);
 
   const distilledBudget = Math.floor(bodyUsable * cfg.budget.distilled);

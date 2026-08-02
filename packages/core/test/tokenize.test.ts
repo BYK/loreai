@@ -87,6 +87,25 @@ describe("tokenize / estimateTokens", () => {
     ).toBe(0);
   });
 
+  it("guards against null/undefined callers (defensive boundary)", () => {
+    // Internal callers (ltm.ts, prompt.ts, gradient.ts) rely on TS signatures,
+    // but JSON-parsed joins or untyped shims can escape the typing and pass
+    // null/undefined to estimateTokens. The `if (!text) return 0` guard at
+    // tokenize.ts prevents a throw. Pin the behavior so the guard doesn't
+    // silently regress.
+    expect(
+      estimateTokens(undefined as unknown as string, {
+        providerID: "anthropic",
+      }),
+    ).toBe(0);
+    expect(
+      estimateTokens(null as unknown as string, {
+        providerID: "openai",
+        modelID: "gpt-4o",
+      }),
+    ).toBe(0);
+  });
+
   it("returns a positive count for non-empty input (default cl100k_base)", () => {
     const n = estimateTokens("hello world");
     expect(n).toBeGreaterThan(0);
