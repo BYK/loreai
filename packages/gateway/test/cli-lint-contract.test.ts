@@ -150,25 +150,46 @@ describe("Phase 3D.1 — typed lore lint", () => {
   // Seer #1 on PR #1559 (auth): interactive flows like login use
   // readline/promises which writes prompts directly to process.stdout
   // (NOT via console.log). The bridge must capture process.stdout.write
-  // too, otherwise --json mode leaks prompt text into the JSON envelope.
-  test("runLegacyAndCollect captures process.stdout.write (readline prompts)", async () => {
+  // too (otherwise --json mode leaks prompt text into the JSON envelope).
+  // Seer follow-on: capture-only would hang interactive flows because
+  // the user never sees the prompt. Fix: tee through to original
+  // stdout so prompts are visible AND captured for the envelope.
+  test("runLegacyAndCollect captures process.stdout.write (readline prompts) AND tees through to original", async () => {
     const { runLegacyAndCollect } =
       await import("../src/cli/lib/legacy-bridge");
-    const result = await runLegacyAndCollect(() => {
-      // Simulate readline writing a prompt directly via
-      // process.stdout.write — bypasses console.log entirely.
-      process.stdout.write("Enter the code: ");
-      console.log("abc123");
-    });
-    expect(result.captured).toBe("Enter the code: abc123\n");
+    const sink: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk: unknown): boolean => {
+      sink.push(typeof chunk === "string" ? chunk : String(chunk));
+      return true;
+    };
+    try {
+      const result = await runLegacyAndCollect(() => {
+        // Simulate readline writing a prompt directly via
+        // process.stdout.write — bypasses console.log entirely.
+        process.stdout.write("Enter the code: ");
+        console.log("abc123");
+      });
+      // Captured envelope includes the prompt so --json output is
+      // self-contained.
+      expect(result.captured).toBe("Enter the code: abc123\n");
+      // AND the user actually saw the prompt (it teed through to
+      // the outer sink). The console.log("abc123") bypassed the
+      // outer sink entirely (it goes through the bridge's console
+      // mock, which doesn't tee to the original).
+      expect(sink).toEqual(["Enter the code: "]);
+    } finally {
+      process.stdout.write = origWrite;
+    }
   });
 
   // Bridge must restore process.stdout.write after the call so the
   // outer test runtime is unaffected. (We can't use Object.is
   // equality on bound function refs — each reassignment to
   // process.stdout.write wraps with another `bind` layer. Instead,
-  // verify behavior: a write after the bridge returns reaches the
-  // outside, not the captured array.)
+  // verify behavior: writes from inside the bridge tee through to
+  // the outer sink; writes from after the bridge reach the outer
+  // sink WITHOUT going through the bridge's capture array.)
   test("runLegacyAndCollect restores process.stdout.write after the call", async () => {
     const { runLegacyAndCollect } =
       await import("../src/cli/lib/legacy-bridge");
@@ -182,10 +203,11 @@ describe("Phase 3D.1 — typed lore lint", () => {
       await runLegacyAndCollect(() => {
         process.stdout.write("inside-bridge");
       });
-      // Bridge restored stdout.write — this write must reach `sink`,
-      // not be captured by the bridge's shim (which is now gone).
+      // Bridge restored stdout.write — both inside-bridge (via tee)
+      // and outside-bridge reach the outer sink. The bridge's
+      // capture array is no longer in effect.
       process.stdout.write("outside-bridge");
-      expect(sink).toEqual(["outside-bridge"]);
+      expect(sink).toEqual(["inside-bridge", "outside-bridge"]);
     } finally {
       process.stdout.write = origWrite;
     }
