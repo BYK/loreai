@@ -44,55 +44,85 @@ vi.mock("@loreai/core", async (importOriginal) => {
 });
 
 // Exercise the runLegacyAndCollect console.log/error stubs directly so we
-// can pin the zero-arg contract (Seer finding #6).
-describe("Phase 3A.4 — runLegacyAndCollect zero-arg console hooks (Seer #6)", () => {
-  test("console.log() with zero args still captures a blank line", async () => {
-    const { translateError } = await import("../src/cli/commands/log");
+// can pin the zero-arg + trailing-newline contract (Seer findings #6 + #7).
+describe("Phase 3A.4 — runLegacyAndCollect console hooks (Seer #6 + #7)", () => {
+  // Mirror of `commands/log.ts:runLegacyAndCollect` so we can pin the
+  // captured output contract directly. When the production helper
+  // changes, mirror the change here too.
+  function mirrorRunLegacyAndCollect(call: () => void): {
+    exitCode: number;
+    captured: string;
+  } {
+    const captured: string[] = [];
     const realLog = console.log;
     const realError = console.error;
-    const captured: string[] = [];
     const realExit = process.exit;
-    process.exit = (code?: number): never => {
-      throw new Error(`__legacy_exit:${code ?? "undefined"}`);
-    };
     const priorExitCode = process.exitCode;
     process.exitCode = 0;
     console.log = (...args: unknown[]) => {
       if (args.length === 0) {
-        captured.push("");
+        captured.push("\n");
         return;
       }
       for (const a of args)
         captured.push(typeof a === "string" ? a : String(a));
+      captured.push("\n");
     };
     console.error = (...args: unknown[]) => {
       if (args.length === 0) {
-        captured.push("");
+        captured.push("\n");
         return;
       }
       for (const a of args)
         captured.push(typeof a === "string" ? a : String(a));
+      captured.push("\n");
     };
+    process.exit = (code?: number): never => {
+      throw new Error(`__legacy_exit:${code ?? "undefined"}`);
+    };
+    let thrown: unknown;
     try {
-      // Simulate the legacy handler calling console.log() (no args)
-      // before erroring out with "No knowledge entry found" + exit(1).
-      console.log();
-      console.log("No knowledge entry found: abc");
-      throw new Error("__legacy_exit:1");
-    } catch {
-      // simulate runLegacyAndCollect's exit-code branch
+      call();
+    } catch (err) {
+      thrown = err;
     } finally {
       console.log = realLog;
       console.error = realError;
       process.exit = realExit;
-      process.exitCode = priorExitCode;
     }
-    expect(captured).toEqual(["", "No knowledge entry found: abc"]);
-    // runLegacyAndCollect joins with "" so blank-line separators from
-    // console.log() survive verbatim (Seer finding #6). translateError
-    // then matches the leading "No knowledge entry" prefix.
-    const err = translateError(captured.join(""));
+    const exitCode = process.exitCode ?? 0;
+    process.exitCode = priorExitCode;
+    if (thrown instanceof Error && /__legacy_exit:/.test(thrown.message)) {
+      return { exitCode: 1, captured: captured.join("") };
+    }
+    if (thrown) throw thrown;
+    return { exitCode, captured: captured.join("") };
+  }
+
+  test("console.log() with zero args still captures a blank line (Seer #6)", async () => {
+    const { translateError } = await import("../src/cli/commands/log");
+    const result = mirrorRunLegacyAndCollect(() => {
+      console.log();
+      console.log("No knowledge entry found: abc");
+      process.exit(1);
+    });
+    expect(result.exitCode).toBe(1);
+    // Mirror pushes: "\n" (from console.log()), "No knowledge entry
+    // found: abc", "\n" (trailing newline), joined as "".
+    expect(result.captured).toBe("\nNo knowledge entry found: abc\n");
+    const err = translateError(result.captured);
     expect(err.name).toBe("ResolutionError");
+  });
+
+  // Seer finding #7 (MEDIUM follow-on): each console.log call must
+  // append a trailing newline, matching Node's behavior. Without this,
+  // two consecutive `log("foo"); log("bar");` collapse into "foobar".
+  test("consecutive console.log calls produce a newline-separated capture (Seer #7)", () => {
+    const result = mirrorRunLegacyAndCollect(() => {
+      console.log("foo");
+      console.log("bar");
+    });
+    expect(result.captured).toBe("foo\nbar\n");
   });
 });
 

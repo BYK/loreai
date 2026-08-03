@@ -152,6 +152,33 @@ describe("Phase 2 — CliError human format", () => {
     const e = new CliError(20, { message: "bare" });
     expect(e.formatHuman()).toBe("bare");
   });
+
+  // Seer finding #7 (LOW): when alternatives are present without a
+  // tryCommand, the "Or:" block must be preceded by a blank line so the
+  // first alternative reads as its own section. The previous shape
+  // glued "Or:" directly to the message line.
+  test("alternatives without tryCommand are preceded by a blank line (Seer #7)", () => {
+    const e = new UsageError({
+      message: "Missing scope",
+      alternatives: ["lore doctor"],
+    });
+    expect(e.formatHuman()).toBe("Missing scope\n\nOr:\n  lore doctor");
+  });
+
+  // Seer finding #7 follow-on: when note follows alternatives directly,
+  // ensure the blank line is preserved (not double-blanked). Without
+  // the pushBlank() guard, two consecutive `lines.push("")` calls would
+  // emit "\n\n" between sections.
+  test("note after alternatives uses a single blank line (Seer #7 follow-on)", () => {
+    const e = new UsageError({
+      message: "Missing scope",
+      alternatives: ["lore doctor"],
+      note: "scoped to current project",
+    });
+    expect(e.formatHuman()).toBe(
+      "Missing scope\n\nOr:\n  lore doctor\n\nNote: scoped to current project",
+    );
+  });
 });
 
 describe("Phase 2 — CliError JSON shape", () => {

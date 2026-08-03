@@ -65,17 +65,35 @@ export class CliError extends Error {
    */
   formatHuman(): string {
     const lines: string[] = [this.message];
+    // Track whether the previous line is blank so we don't double up when
+    // multiple sections are present (Seer finding #7 follow-on).
+    let lastBlank = false;
+    const push = (line: string) => {
+      lines.push(line);
+      lastBlank = line === "";
+    };
+    const pushBlank = () => {
+      if (!lastBlank) {
+        lines.push("");
+        lastBlank = true;
+      }
+    };
     if (this.tryCommand) {
-      lines.push("", `Try: ${this.tryCommand}`);
+      pushBlank();
+      push(`Try: ${this.tryCommand}`);
     }
     if (this.alternatives && this.alternatives.length > 0) {
-      lines.push("Or:");
+      // Always precede the alternatives block with a blank line so the
+      // first alternative reads as its own section (Seer finding #7).
+      pushBlank();
+      push("Or:");
       for (const alt of this.alternatives) {
-        lines.push(`  ${alt}`);
+        push(`  ${alt}`);
       }
     }
     if (this.note) {
-      lines.push("", `Note: ${this.note}`);
+      pushBlank();
+      push(`Note: ${this.note}`);
     }
     return lines.join("\n");
   }
