@@ -11,7 +11,7 @@ import { commandLog, commandDiff } from "../history-cmd";
 
 type LogFlags = {
   limit: number;
-  project: string;
+  project?: string;
 };
 
 interface LogResult {
@@ -130,6 +130,7 @@ export const logCommand = buildOutputCommand<LogResult, LogFlags, [string?]>({
         kind: "parsed",
         parse: String,
         brief: "Target project directory (default: cwd)",
+        optional: true,
       },
     },
     positional: {

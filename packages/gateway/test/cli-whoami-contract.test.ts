@@ -33,20 +33,29 @@ let mockSession: {
   github_login: string;
   email: string;
 } | null = null;
+let mockServerUser: {
+  user_id: string;
+  github_login: string;
+  email: string;
+} | null = null;
 let mockVerify: boolean = false;
+let mockClearSessionCalls = 0;
 
 vi.mock("../src/supabase", () => ({
+  // Local session presence is independent of the server's view so we can
+  // simulate "logged in locally but the server rejected the session".
   isLoggedIn: () => mockSession !== null,
   clearSession: () => {
+    mockClearSessionCalls++;
     mockSession = null;
   },
   getCurrentUser: async (opts: { verify?: boolean }) => {
     mockVerify = Boolean(opts?.verify);
-    return mockSession;
+    return mockServerUser;
   },
   createSupabaseClient: () => ({
     auth: {
-      getUser: async () => ({ data: { user: mockSession } }),
+      getUser: async () => ({ data: { user: mockServerUser } }),
     },
   }),
 }));
@@ -106,7 +115,9 @@ describe("Phase 3A — typed lore whoami", () => {
 
   beforeEach(() => {
     mockSession = null;
+    mockServerUser = null;
     mockVerify = false;
+    mockClearSessionCalls = 0;
     process.env.LORE_NO_UPDATE_CHECK = "1";
   });
 
@@ -126,6 +137,7 @@ describe("Phase 3A — typed lore whoami", () => {
       github_login: "byk",
       email: "ben@byk.im",
     };
+    mockServerUser = mockSession;
     const { stdout, exitCode } = await runWith(["whoami"]);
     expect(stdout.trim()).toBe("@byk");
     expect(exitCode).toBe(0);
@@ -137,6 +149,7 @@ describe("Phase 3A — typed lore whoami", () => {
       github_login: "byk",
       email: "ben@byk.im",
     };
+    mockServerUser = mockSession;
     const { stdout, exitCode } = await runWith(["whoami", "--json"]);
     expect(exitCode).toBe(0);
     // Extract just the JSON object — `--json` may also emit hints on stderr.
@@ -157,6 +170,7 @@ describe("Phase 3A — typed lore whoami", () => {
       github_login: "byk",
       email: "ben@byk.im",
     };
+    mockServerUser = mockSession;
     const { stdout } = await runWith(["whoami", "--json", "--verify"]);
     const parsed = JSON.parse(stdout.trim());
     expect(parsed.verified).toBe(true);
@@ -169,15 +183,43 @@ describe("Phase 3A — typed lore whoami", () => {
       github_login: "",
       email: "ben@byk.im",
     };
+    mockServerUser = mockSession;
     const { stdout } = await runWith(["whoami"]);
     expect(stdout.trim()).toBe("ben@byk.im");
   });
 
   test("not logged in → AuthError with try: lore login and exitCode 10", async () => {
     mockSession = null;
+    mockServerUser = null;
     const { stderr, exitCode } = await runWith(["whoami"]);
     expect(exitCode).toBe(10);
     expect(stderr).toContain("Not logged in");
     expect(stderr).toContain("Try: lore login");
+  });
+
+  // M-NEW-2 (independent review agent): the verified-stale-session path
+  // must (a) clear the local session, (b) surface "Session expired…"
+  // rather than "Not logged in…", and (c) preserve AuthError(10).
+  // This pins the divergence between the local store (hadSession=true)
+  // and the server (mockServerUser=null under verify=true).
+  test("verified=true with stale local session → AuthError + clears local + exit 10", async () => {
+    mockSession = {
+      user_id: "user-stale",
+      github_login: "byk",
+      email: "ben@byk.im",
+    };
+    mockServerUser = null; // server rejected the session
+    const { stderr, exitCode } = await runWith(["whoami", "--verify"]);
+    expect(exitCode).toBe(10);
+    expect(stderr).toContain("Session expired");
+    expect(stderr).toContain("Try: lore login");
+    expect(mockClearSessionCalls).toBe(1);
+  });
+
+  test("verified=true with no local session at all → AuthError without clearSession", async () => {
+    mockSession = null;
+    mockServerUser = null;
+    await runWith(["whoami", "--verify"]);
+    expect(mockClearSessionCalls).toBe(0);
   });
 });

@@ -27,6 +27,22 @@ vi.mock("../src/cli/lib/version-check", () => ({
   abortPendingVersionCheck: () => {},
 }));
 
+// Mock @loreai/core so the legacy commandLog path doesn't actually touch
+// the database or embeddings. We return an empty version history for the
+// missing-id test so commandLog hits the "No knowledge entry found" branch
+// and process.exit(1)s.
+vi.mock("@loreai/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@loreai/core")>();
+  return {
+    ...actual,
+    ltm: {
+      versionHistory: () => [],
+      recentKnowledgeChanges: () => [],
+    },
+    projectId: () => "test-project",
+  };
+});
+
 // Capture stdout/stderr so the test can assert envelope shape.
 async function runWith(
   argv: string[],
@@ -104,5 +120,19 @@ describe("Phase 3A.4 — typed lore log / diff error paths (C-2)", () => {
     expect(exitCode).toBe(20); // UsageError
     expect(stderr).toContain("Usage: lore diff <id>");
     expect(stderr).toContain("Try: lore diff --help");
+  });
+
+  // M-NEW-3 (independent review agent): the doc-comment on this file
+  // promises `lore log <missing-id>` returns ResolutionError(22), but
+  // until now nothing exercised the legacy → translateError path. With
+  // @loreai/core mocked to return an empty version history, the legacy
+  // commandLog prints "No knowledge entry found…" and process.exit(1)s;
+  // runLegacyAndCollect catches the exit and translateError dispatches
+  // on the captured text to ResolutionError(22), Try: lore recall.
+  test("lore log <missing-id> returns ResolutionError envelope (M-NEW-3)", async () => {
+    const { stderr, exitCode } = await runWith(["log", "no-such-entry"]);
+    expect(exitCode).toBe(22); // ResolutionError
+    expect(stderr).toContain("No knowledge entry");
+    expect(stderr).toContain("Try: lore recall");
   });
 });

@@ -150,8 +150,8 @@ importers:
   packages/gateway:
     dependencies:
       '@stricli/auto-complete':
-        specifier: ^1.3.0
-        version: 1.3.0
+        specifier: 1.2.8
+        version: 1.2.8
       '@stricli/core':
         specifier: 1.2.8
         version: 1.2.8
@@ -2104,15 +2104,12 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@stricli/auto-complete@1.3.0':
-    resolution: {integrity: sha512-egN+fdP2USbP08DkhSH+y9XsiXSrJMgbR1E5SuOD2kqI4AckufhOIKokDzmzmUT6yMa7j0jmWu29phT/jXwzqQ==}
+  '@stricli/auto-complete@1.2.8':
+    resolution: {integrity: sha512-N5CdahYKdi4lg9ekvugZFg85UgBa+4cDkPjQZkVa7DUF3VD+l4ZsY6jDGA2xi8eS4i+YBKFDUwibWKOHfr9Yvg==}
     hasBin: true
 
   '@stricli/core@1.2.8':
     resolution: {integrity: sha512-zqEZu9x+UAAZrzQlfD/iDXIyb6Y3560MzfvFpNfWXJdZuJ0SSxGOGse+0P/5kwlufsSXQF8Wn5jK1NZF4vcqnw==}
-
-  '@stricli/core@1.3.0':
-    resolution: {integrity: sha512-LnBe2HntygaLDU5trtjiC3J4C/YkmIZuM0XB52IF4qaLqJH09kgD1fnZiS2gaYUnt0nAN2a+1b4PSOBcfPrN4Q==}
 
   '@stryker-mutator/api@9.6.1':
     resolution: {integrity: sha512-g8VNoFWQWbx0pdal3Vt8jVCZW+v3sc3gi94iI0GVtVgUGTqphAjJF6EAruPTx0lqvtonsaAxn5TD36hcG1d6Wg==}
@@ -7025,13 +7022,11 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@stricli/auto-complete@1.3.0':
+  '@stricli/auto-complete@1.2.8':
     dependencies:
-      '@stricli/core': 1.3.0
+      '@stricli/core': 1.2.8
 
   '@stricli/core@1.2.8': {}
-
-  '@stricli/core@1.3.0': {}
 
   '@stryker-mutator/api@9.6.1':
     dependencies:
@@ -8302,7 +8297,7 @@ snapshots:
 
   fossilize@0.10.1:
     dependencies:
-      '@stricli/auto-complete': 1.3.0
+      '@stricli/auto-complete': 1.2.8
       '@stricli/core': 1.2.8
       binpunch: 1.0.0
       esbuild: 0.28.1
