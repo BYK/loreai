@@ -78,19 +78,30 @@ async function runLegacyAndCollect(
   return { exitCode, captured: captured.join("") };
 }
 
-function classify(text: string): LogResult["kind"] {
-  if (text.startsWith("No knowledge entry")) return "timeline";
+/**
+ * Classify the legacy command's captured output into a `LogResult.kind`.
+ * Only invoked on the happy path (exitCode === 0, no id); the error path
+ * uses `translateError` which throws a typed CliError.
+ */
+function classify(_text: string): LogResult["kind"] {
   return "recent";
 }
 
-function translateError(text: string, exitCode: number): CliError {
-  if (exitCode !== 0 || /No knowledge entry/.test(text)) {
+/**
+ * Map a legacy failure into a typed CliError. Always called with
+ * `exitCode !== 0` (see `logCommand.handler`), so we dispatch purely on
+ * the captured text — no need for the exitCode term in the conditional.
+ *
+ * Exported for unit testing (Phase 3A.4 Seer finding #2).
+ */
+export function translateError(text: string): CliError {
+  if (text.startsWith("No knowledge entry")) {
     return new ResolutionError({
       message: text.trim() || "No knowledge entry found.",
       tryCommand: "lore recall",
     });
   }
-  if (/Usage:/.test(text)) {
+  if (text.startsWith("Usage:")) {
     return new UsageError({
       message: text.trim(),
       tryCommand: "lore diff --help",
@@ -142,7 +153,7 @@ export const logCommand = buildOutputCommand<LogResult, LogFlags, [string?]>({
     const { exitCode, captured } = await runLegacyAndCollect(() =>
       commandLog(id ? [id] : [], values),
     );
-    if (exitCode !== 0) throw translateError(captured, exitCode);
+    if (exitCode !== 0) throw translateError(captured);
     return {
       kind: "value" as const,
       data: {
@@ -199,7 +210,7 @@ export const diffCommand = buildOutputCommand<
     const { exitCode, captured } = await runLegacyAndCollect(() =>
       commandDiff(args, { json: (flags as { json?: boolean }).json }),
     );
-    if (exitCode !== 0) throw translateError(captured, exitCode);
+    if (exitCode !== 0) throw translateError(captured);
     return {
       kind: "value" as const,
       data: { id, text: captured },

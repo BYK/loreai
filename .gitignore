@@ -60,3 +60,6 @@ __pycache__/
 
 # Sentry CLI RC File
 .sentryclirc
+
+# Local opencode worktree config (agent rules, etc.)
+opencode.json

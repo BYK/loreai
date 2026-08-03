@@ -215,3 +215,44 @@ describe("Phase 2 — emitCliError sets process exitCode", () => {
     }
   });
 });
+
+describe("Phase 3A.4 — translateError dispatches on captured text alone (Seer #2)", () => {
+  // Seer finding #2 (MEDIUM): the old translateError had
+  // `if (exitCode !== 0 || /No knowledge entry/.test(text))`, which
+  // always returned ResolutionError because translateError is only
+  // called from logCommand.handler when exitCode !== 0. The /Usage:/
+  // and default branches were unreachable. The fix dispatches purely
+  // on the captured text. These tests pin the three branches.
+  test("`No knowledge entry ...` → ResolutionError(22)", async () => {
+    const { translateError } = await import("../src/cli/commands/log");
+    const err = translateError("No knowledge entry found: abc");
+    expect(err.name).toBe("ResolutionError");
+    expect(err.exitCode).toBe(22);
+    expect(err.tryCommand).toBe("lore recall");
+  });
+
+  test("`Usage: ...` → UsageError(20), Try: lore diff --help", async () => {
+    const { translateError } = await import("../src/cli/commands/log");
+    const err = translateError("Usage: lore log --project <dir> <id>");
+    expect(err.name).toBe("UsageError");
+    expect(err.exitCode).toBe(20);
+    expect(err.tryCommand).toBe("lore diff --help");
+  });
+
+  test("unknown text → UsageError(20), no tryCommand", async () => {
+    const { translateError } = await import("../src/cli/commands/log");
+    const err = translateError("Something went sideways");
+    expect(err.name).toBe("UsageError");
+    expect(err.exitCode).toBe(20);
+    expect(err.tryCommand).toBeUndefined();
+  });
+
+  test("empty text → falls back to 'No knowledge entry found.'", async () => {
+    const { translateError } = await import("../src/cli/commands/log");
+    const err = translateError("");
+    // Empty text matches none of the patterns, so the default branch
+    // runs with the fallback message.
+    expect(err.name).toBe("UsageError");
+    expect(err.message).toBe("Unknown error.");
+  });
+});
