@@ -172,6 +172,7 @@ describe("bundle exports", () => {
   });
 
   test("Bun embedding worker loads without unresolved runtime imports", async () => {
+    expect(existsSync(join(distDir, "embedding-worker.js"))).toBe(true);
     const worker = new Worker(
       new URL("../dist/embedding-worker.js", import.meta.url),
       {

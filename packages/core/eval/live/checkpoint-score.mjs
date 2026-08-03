@@ -47,12 +47,16 @@ const rows = dirs.map((dir) => {
     taskSha256: result.taskSha256,
     factMapId: result.factMapId,
     valid: result.valid,
+    terminalOutcome: result.terminalOutcome || null,
     repetition: result.repetition,
     checkpoints: checkpoints.length,
+    expectedCheckpoints: result.expectedCheckpoints || 5,
     strict: `${strictPassed}/${checkpoints.length}`,
     isolated: `${isolatedPassed}/${checkpoints.length}`,
     core: `${corePassed}/${checkpoints.length}`,
-    allStrict: checkpoints.length > 0 && strictPassed === checkpoints.length,
+    allStrict:
+      checkpoints.length === (result.expectedCheckpoints || 5) &&
+      strictPassed === checkpoints.length,
     metrics: result.totals,
   };
 });
@@ -60,8 +64,13 @@ const rows = dirs.map((dir) => {
 for (const row of rows) {
   if (!row.valid)
     throw new Error(`invalid run must not be aggregated: ${row.dir}`);
-  if (row.checkpoints !== 5) {
-    throw new Error(`incomplete checkpoint run (expected c1-c5): ${row.dir}`);
+  if (
+    row.checkpoints !== row.expectedCheckpoints &&
+    row.terminalOutcome !== "agent-timeout"
+  ) {
+    throw new Error(
+      `incomplete checkpoint run (expected ${row.expectedCheckpoints} checkpoints): ${row.dir}`,
+    );
   }
 }
 
@@ -146,7 +155,7 @@ console.log(JSON.stringify(rows, null, 2));
 console.log("\n=== CHECKPOINT SUMMARY ===");
 for (const row of rows) {
   console.log(
-    `${row.agent.padEnd(8)} ${row.arm.padEnd(7)} ${row.model} | core ${row.core} | isolated ${row.isolated} | strict ${row.strict} | final ${row.allStrict ? "PASS" : "FAIL"}`,
+    `${row.agent.padEnd(8)} ${row.arm.padEnd(7)} ${row.model} | core ${row.core} | isolated ${row.isolated} | strict ${row.strict} | completion ${row.checkpoints}/${row.expectedCheckpoints} | final ${row.allStrict ? "PASS" : row.terminalOutcome ? "PARTIAL" : "FAIL"}${row.terminalOutcome ? ` | terminal ${row.terminalOutcome}` : ""}`,
   );
 }
 console.log("\n=== AGGREGATES (Wilson 95% CI) ===");

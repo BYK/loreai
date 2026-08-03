@@ -7,8 +7,8 @@
  * assert the bytes the client receives.
  *
  * Two protocols are exercised:
- *   1. Anthropic native (`req.protocol === "anthropic"`) — the marker is
- *      emitted as its OWN `message_start`/`message_stop` envelope (split).
+ *   1. Anthropic native (`req.protocol === "anthropic"`) — the marker is an
+ *      inline text block inside the single legal message envelope.
  *   2. OpenAI Chat Completions (`req.protocol === "openai"`) — the marker
  *      is emitted as an inline synthetic `content_block_start`/`delta`/`stop`
  *      triple in the Anthropic SSE, which the OpenAI translator forwards as
@@ -209,8 +209,8 @@ function teardownAll(
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("Streaming recall marker — Anthropic native (split envelope)", () => {
-  test("client receives marker as its own message envelope with lore_marker_* id", async () => {
+describe("Streaming recall marker — Anthropic native (single envelope)", () => {
+  test("keeps the marker inline and suppresses continuation message_start", async () => {
     const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
@@ -269,9 +269,6 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
 
     const sse = await resp.text();
 
-    // The marker envelope has a synthetic lore_marker_* id.
-    expect(sse).toMatch(/"id":"lore_marker_[a-f0-9]+"/);
-
     // The upstream preamble's message_start is preserved.
     expect(sse).toMatch(/"id":"msg_upstream_001"/);
 
@@ -281,14 +278,15 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
     // Two upstream calls — recall interception ran (follow-up was issued).
     expect(call).toBe(2);
 
-    // At least 2 message_start envelopes: upstream preamble + marker.
-    // (Continuation may or may not be in the SSE depending on follow-up
-    // timing — we just assert the split shape is present.)
+    // Anthropic Messages permits exactly one response envelope. Pi rejects a
+    // continuation message_start before the original message_stop (#1211).
     const startCount = (sse.match(/^event: message_start/gm) ?? []).length;
-    expect(startCount).toBeGreaterThanOrEqual(2);
+    const stopCount = (sse.match(/^event: message_stop/gm) ?? []).length;
+    expect(startCount).toBe(1);
+    expect(stopCount).toBe(1);
   });
 
-  test("marker envelope is positioned AFTER the preamble text and BEFORE the preamble's held-back message_stop", async () => {
+  test("marker is positioned after the preamble text inside its envelope", async () => {
     const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
@@ -344,9 +342,9 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
 
     const sse = await resp.text();
 
-    // Position order: preamble text < marker envelope < preamble close.
+    // Position order: preamble text < inline marker < final continuation.
     const preamblePos = sse.indexOf("Let me search memory first.");
-    const markerPos = sse.indexOf('"id":"lore_marker_');
+    const markerPos = sse.indexOf("Searching");
     expect(preamblePos).toBeGreaterThan(-1);
     expect(markerPos).toBeGreaterThan(preamblePos);
   });
@@ -439,16 +437,11 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
       }
     }
 
-    // Balance check: every message_start must be matched by a message_stop.
+    // Balance check: the response is one Anthropic message envelope.
     expect(messageStartPositions.length).toBe(messageStopPositions.length);
-    // We expect preamble + marker + continuation = 3 envelopes.
-    expect(messageStartPositions.length).toBe(3);
+    expect(messageStartPositions.length).toBe(1);
 
-    // For every message_start at position p, find the next message_start
-    // (or end-of-stream) at position q. There must be exactly one
-    // message_stop in the range [p, q). This catches wrong-order emission
-    // (preamble's stops landing after the marker's start) AND duplicate
-    // emission (more than one stop between two starts).
+    // The only response envelope has one terminal message_stop.
     for (let i = 0; i < messageStartPositions.length; i++) {
       const start = messageStartPositions[i];
       const nextStart = messageStartPositions[i + 1] ?? eventOrder.length;
@@ -713,8 +706,8 @@ describe("Streaming recall marker — mixed tools (recall + Read)", () => {
     expect(resp.ok).toBe(true);
     const sse = await resp.text();
 
-    // The marker envelope is present.
-    expect(sse).toMatch(/"id":"lore_marker_[a-f0-9]+"/);
+    // The inline marker is present without opening another message envelope.
+    expect(sse).toContain("Searching");
 
     // The OTHER tool_use (read) is forwarded through the accumulator after
     // re-indexing. Its id must be present in the response.
@@ -956,7 +949,7 @@ describe("Streaming recall marker — non-Anthropic mixed tools (recall + Read)"
 });
 
 describe("Streaming recall marker — multi-recall drill-down", () => {
-  test("each iteration emits a marker with a unique lore_marker_* id", async () => {
+  test("each iteration emits an inline marker in one response envelope", async () => {
     const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
@@ -1013,23 +1006,15 @@ describe("Streaming recall marker — multi-recall drill-down", () => {
     expect(resp.ok).toBe(true);
     const sse = await resp.text();
 
-    // Each marker must have a unique lore_marker_* id. The 12-hex suffix
-    // comes from crypto.randomUUID() and is unique per call.
-    const markerIds = [...sse.matchAll(/"id":"(lore_marker_[a-f0-9]+)"/g)].map(
-      (m) => m[1],
-    );
-    const uniqueMarkers = new Set(markerIds);
-    expect(markerIds.length).toBeGreaterThanOrEqual(2);
-    expect(uniqueMarkers.size).toBe(markerIds.length);
+    // Both recall markers are inline text blocks. A nested message envelope
+    // would make Pi reject the response before it can consume the follow-up.
+    expect(sse).toContain('Searching all archives for \\"patterns\\"');
+    expect(sse).toContain("Fetching detail for t:abc123");
 
     // Both upstream call results (recalls) were consumed: call counter >= 3.
     expect(call).toBeGreaterThanOrEqual(3);
 
-    // Wire-shape invariants: across the full drill-down (preamble + N
-    // markers + N continuations + final), every message_start must be
-    // matched by a message_stop AND no double-emission occurred. Catches
-    // regressions in the currentAccum = contAccum reassignment or in the
-    // held-back forwarding that would create nested envelopes.
+    // A multi-recall turn is still exactly one Anthropic response envelope.
     const eventOrder: string[] = [];
     for (const line of sse.split("\n")) {
       if (line.startsWith("event: ")) {
@@ -1049,6 +1034,7 @@ describe("Streaming recall marker — multi-recall drill-down", () => {
       }
     }
     expect(messageStartPositions.length).toBe(messageStopPositions.length);
+    expect(messageStartPositions.length).toBe(1);
     for (let i = 0; i < messageStartPositions.length; i++) {
       const start = messageStartPositions[i];
       const nextStart = messageStartPositions[i + 1] ?? eventOrder.length;

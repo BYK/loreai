@@ -10,6 +10,7 @@
 // entry point: run it from a Lore checkout to reproduce our numbers.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 
@@ -85,6 +86,10 @@ export function taskFixturePath(harnessDir: string, task: string): string {
     );
   }
   return file;
+}
+
+export function factSeed(taskID: string, model: string): string {
+  return createHash("sha256").update(`${taskID}:${model}`).digest("hex");
 }
 
 function findUp(rel: string): string | null {
@@ -298,6 +303,11 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
   for (const s of scenarioKeys) {
     const sc = SCENARIOS[s];
     const taskPath = taskFixturePath(harnessDir, sc.task);
+    const task = JSON.parse(readFileSync(taskPath, "utf8"));
+    if (typeof task.id !== "string" || task.id.length === 0) {
+      throw new Error(`Benchmark task must define a non-empty id: ${taskPath}`);
+    }
+    const seed = factSeed(task.id, model);
     const outs: string[] = [];
     for (const arm of ["lore", "nolore"]) {
       const out = join(outBase, `${s}-${arm}`);
@@ -323,6 +333,8 @@ Full protocol + competitor arms (mem0, mnemonic): packages/core/eval/live/METHOD
           repoRoot,
           "--cap-context",
           capContext,
+          "--fact-seed",
+          seed,
           "--session-timeout",
           String(sc.sessionTimeout),
           ...(opencodePath ? ["--opencode", opencodePath] : []),

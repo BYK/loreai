@@ -998,6 +998,7 @@ function runOpencode(
   { isCommand = false, cont = false, stdin = null } = {},
 ) {
   return new Promise((res) => {
+    let timedOut = false;
     const env = { ...baseEnv, PWD: project };
     if (ARM === "lore") env.LORE_GATEWAY_URL = `http://127.0.0.1:${gwPort}`;
     const a = [
@@ -1027,13 +1028,14 @@ function runOpencode(
       } catch {}
     }
     const timer = setTimeout(() => {
+      timedOut = true;
       try {
         p.kill("SIGKILL");
       } catch {}
     }, SESSION_TIMEOUT * 1000);
     p.on("exit", (code) => {
       clearTimeout(timer);
-      res(code ?? 1);
+      res({ code: code ?? 1, timedOut });
     });
   });
 }
@@ -1072,6 +1074,7 @@ function piProviderKeyEnv() {
 // The pi bin is a Volta shim that needs a node on PATH, so we prepend PI_NODE_BIN.
 function runPi(prompt, sessionOut, { cont = false, stdin = null } = {}) {
   return new Promise((res) => {
+    let timedOut = false;
     const env = {
       ...baseEnv,
       PWD: project,
@@ -1106,13 +1109,14 @@ function runPi(prompt, sessionOut, { cont = false, stdin = null } = {}) {
       } catch {}
     }
     const timer = setTimeout(() => {
+      timedOut = true;
       try {
         p.kill("SIGKILL");
       } catch {}
     }, SESSION_TIMEOUT * 1000);
     p.on("exit", (code) => {
       clearTimeout(timer);
-      res(code ?? 1);
+      res({ code: code ?? 1, timedOut });
     });
   });
 }
@@ -1304,7 +1308,16 @@ async function waitForMemoryReady(
 
 const sessionMetrics = [];
 const checkpoints = [];
+const expectedCheckpoints = TASK.sessions.reduce(
+  (count, session) =>
+    count +
+    (session.turns || [{ prompt: session.prompt }]).filter(
+      (turn) => !!turn.checkpoint,
+    ).length,
+  0,
+);
 const runErrors = [];
+let terminalOutcome = null;
 let aborted = false;
 for (let i = 0; i < TASK.sessions.length; i++) {
   const s = TASK.sessions[i];
@@ -1358,10 +1371,12 @@ for (let i = 0; i < TASK.sessions.length; i++) {
     writeToolContext(turns[j]);
     const tOut = path.join(OUT, "sessions", `s${i + 1}-${s.id}-t${j + 1}.json`);
     const t0 = Date.now();
-    const code = await runAgent(interpolateFacts(turns[j].prompt || ""), tOut, {
-      cont: j > 0,
-      stdin: blobFor(turns[j]),
-    });
+    const execution = await runAgent(
+      interpolateFacts(turns[j].prompt || ""),
+      tOut,
+      { cont: j > 0, stdin: blobFor(turns[j]) },
+    );
+    const { code, timedOut } = execution;
     const wall = (Date.now() - t0) / 1000;
     const tm = parseAgentSession(tOut);
     merged.steps += tm.steps;
@@ -1379,8 +1394,16 @@ for (let i = 0; i < TASK.sessions.length; i++) {
     merged.reBilledTokens += tm.reBilledTokens || 0;
     merged.reBilledCost += tm.reBilledCost || 0;
     merged.misses += tm.misses || 0;
-    const turnErrors = [...(tm.errors || [])];
-    if (code !== 0) turnErrors.push(`turn ${i + 1}/${j + 1} exited ${code}`);
+    // A watchdog timeout after the agent made progress is an observed terminal
+    // capability outcome (for example, a native-compaction runaway), not an
+    // infrastructure failure. Preserve completed checkpoints and score them.
+    const scoredTimeout = timedOut && (tm.steps > 0 || tm.toolCalls > 0);
+    // Killing a live agent can leave a truncated session event behind. That is
+    // expected for a scored timeout, but the same parser error is still fatal
+    // for every other exit path.
+    const turnErrors = scoredTimeout ? [] : [...(tm.errors || [])];
+    if (code !== 0 && !scoredTimeout)
+      turnErrors.push(`turn ${i + 1}/${j + 1} exited ${code}`);
     if (tm.steps === 0)
       turnErrors.push(`turn ${i + 1}/${j + 1} produced no assistant response`);
     if (turnErrors.length) runErrors.push(...turnErrors);
@@ -1391,6 +1414,7 @@ for (let i = 0; i < TASK.sessions.length; i++) {
       tools: tm.toolCalls,
       exit: code,
       wallSec: wall,
+      timedOut,
     });
     console.log(
       `    turn ${j + 1}/${turns.length}: exit=${code} steps=${tm.steps} peakCtx=${tm.peakContext} tools=${tm.toolCalls} wall=${wall.toFixed(0)}s`,
@@ -1410,6 +1434,14 @@ for (let i = 0; i < TASK.sessions.length; i++) {
       console.log(
         `    checkpoint ${verdict.id}: core=${verdict.core.passed} isolated=${verdict.isolated.passed} strict=${verdict.strict.passed}`,
       );
+    }
+    if (scoredTimeout) {
+      terminalOutcome = "agent-timeout";
+      aborted = true;
+      console.error(
+        `    terminal scored timeout after agent activity on turn ${i + 1}/${j + 1}; preserving ${checkpoints.length} completed checkpoint(s)`,
+      );
+      break;
     }
   }
   merged.tokensTotal =
@@ -1597,8 +1629,10 @@ fs.writeFileSync(
       mcpTools: mcpHealth ? mcpHealth.tools || [] : null,
       valid,
       invalidReason,
+      terminalOutcome,
       sessions: sessionMetrics,
       checkpoints,
+      expectedCheckpoints,
       totals,
     },
     null,

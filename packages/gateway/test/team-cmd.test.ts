@@ -56,6 +56,7 @@ import {
   projectScope,
   setProjectScope,
 } from "@loreai/core";
+import * as core from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "../src/supabase";
 import { commandTeam } from "../src/cli/team-cmd";
 import { acquireGitHubProviderToken } from "../src/cli/login";
@@ -804,6 +805,7 @@ describe("review / approve / reject / policy (E-5-F3-2)", () => {
 
 describe("discover --invite (E-5-d-2)", () => {
   beforeEach(() => {
+    vi.spyOn(core, "getGitRemote").mockReturnValue(null);
     db().exec("DELETE FROM scopes");
     db().exec("DELETE FROM scope_members");
     db()
@@ -915,12 +917,11 @@ describe("discover --invite (E-5-d-2)", () => {
 
   it("without --invite, only lists (no invites minted)", async () => {
     await commandTeam(["discover"], {});
-    // The 3rd arg is `repos` — undefined when no explicit positional AND no git remote in cwd;
-    // some test CWDs DO have a remote, in which case it's a one-element array. Accept either.
+    // The 3rd arg is `repos` — undefined when no explicit positional or git remote exists.
     expect(vi.mocked(team.discoverGitHubContributors)).toHaveBeenCalledWith(
       FAKE_CLIENT,
       "gho_x",
-      expect.anything(),
+      undefined,
       undefined,
     );
     expect(logs.join("\n")).toMatch(/already on Lore/);

@@ -17,7 +17,10 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
-import { setUpstreamInterceptor } from "../src/pipeline";
+import {
+  isForwardableAnthropicContentEvent,
+  setUpstreamInterceptor,
+} from "../src/pipeline";
 
 function makeStreamBody(userMessage: string): Record<string, unknown> {
   return {
@@ -35,6 +38,37 @@ async function readSSE(resp: Response): Promise<string> {
 }
 
 describe("Pipeline — streaming responses", () => {
+  it("quarantines orphaned malformed deltas without stranding valid blocks", () => {
+    const rejected = new Set<number>();
+    const forwarded = new Set<number>();
+    const frame = (event: string, data: Record<string, unknown>) =>
+      isForwardableAnthropicContentEvent(
+        event,
+        JSON.stringify(data),
+        rejected,
+        forwarded,
+      );
+
+    expect(
+      frame("content_block_delta", {
+        index: 0,
+        delta: { text: "orphaned" },
+      }),
+    ).toBe(false);
+    expect(frame("content_block_stop", { index: 0 })).toBe(false);
+
+    expect(
+      frame("content_block_start", {
+        index: 1,
+        content_block: { type: "text", text: "" },
+      }),
+    ).toBe(true);
+    expect(
+      frame("content_block_delta", { index: 1, delta: { text: "bad" } }),
+    ).toBe(false);
+    expect(frame("content_block_stop", { index: 1 })).toBe(true);
+  });
+
   let harness: Harness;
 
   afterEach(() => harness?.teardown());

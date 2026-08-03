@@ -243,8 +243,10 @@ function ensureGatewayBundle() {
   }
 }
 
-ensureGeneratedInputs();
-ensureGatewayBundle();
+if (!DRY_RUN) {
+  ensureGeneratedInputs();
+  ensureGatewayBundle();
+}
 
 if (!DRY_RUN) {
   fs.copyFileSync(manifestPath, path.join(root, "manifest.json"));
@@ -385,9 +387,10 @@ for (const task of tasks) {
             ],
             path.dirname(manifestPath),
           );
-          // A driver crash can bypass its own teardown. Never preserve its
-          // isolated OpenCode credential, whether the cell passed or failed.
+          // A driver crash can bypass its own teardown. Never preserve either
+          // runtime's isolated credential, whether the cell passed or failed.
           fs.rmSync(path.join(out, "data/opencode/auth.json"), { force: true });
+          fs.rmSync(path.join(out, "pi-home/auth.json"), { force: true });
           if (code !== 0)
             throw new Error(
               `matrix cell failed: ${taskId}/${model.name}/${runtime}/${arm}`,

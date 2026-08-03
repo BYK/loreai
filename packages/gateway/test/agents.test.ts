@@ -1,4 +1,5 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import * as core from "@loreai/core";
 import { AGENTS, captureUserUpstream } from "../src/cli/agents";
 
 // ---------------------------------------------------------------------------
@@ -12,11 +13,14 @@ describe("Claude Code agent envVars", () => {
   // appendCustomHeader reads env[key] ?? process.env[key] to merge with
   // existing headers. Save and restore to avoid test pollution.
   let savedHeaders: string | undefined;
+  let gitRemote: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     savedHeaders = process.env.ANTHROPIC_CUSTOM_HEADERS;
     delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+    gitRemote = vi.spyOn(core, "getGitRemote");
   });
   afterEach(() => {
+    gitRemote.mockRestore();
     if (savedHeaders !== undefined) {
       process.env.ANTHROPIC_CUSTOM_HEADERS = savedHeaders;
     } else {
@@ -35,7 +39,7 @@ describe("Claude Code agent envVars", () => {
   });
 
   test("both X-Lore-Project and X-Lore-Git-Remote coexist when git remote is available", () => {
-    // Use the actual repo cwd so safeRemote() finds a real git remote.
+    gitRemote.mockReturnValue("git@github.com:BYK/loreai.git");
     const env = claude.envVars("http://127.0.0.1:3207", process.cwd());
     const headers = env.ANTHROPIC_CUSTOM_HEADERS ?? "";
     expect(headers).toContain("X-Lore-Project:");

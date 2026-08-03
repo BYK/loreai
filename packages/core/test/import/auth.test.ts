@@ -1,5 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +23,7 @@ import { piAuth } from "../../src/import/auth/pi";
 // ---------------------------------------------------------------------------
 
 let tmp: string;
+const originalCwd = process.cwd();
 const saved: Record<string, string | undefined> = {};
 
 function setEnv(key: string, value: string | undefined): void {
@@ -30,6 +37,9 @@ beforeEach(() => {
   setEnv("HOME", tmp);
   setEnv("XDG_DATA_HOME", join(tmp, ".local", "share"));
   setEnv("XDG_CONFIG_HOME", join(tmp, ".config"));
+  // Project-local OpenCode config has precedence over XDG config. Keep that
+  // fixture inside the disposable directory instead of writing to the repo.
+  process.chdir(tmp);
   // Registry is module-global; reset and repopulate deterministically.
   clearAuthProviders();
   registerAuthProvider(opencodeAuth);
@@ -41,6 +51,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) setEnv(k, v);
   for (const k of Object.keys(saved)) delete saved[k];
+  process.chdir(originalCwd);
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -383,8 +394,10 @@ describe("getOpenCodeActiveProvider", () => {
     // as a HIGH-severity bug; the fix is to swap the candidate order.
     const globalCfg = configFile();
     const projectCfg = join(process.cwd(), "opencode.json");
+    expect(projectCfg).toBe(join(tmp, "opencode.json"));
     writeJson(globalCfg, { model: "anthropic/claude-sonnet-5" });
     writeJson(projectCfg, { model: "openrouter/anthropic/claude-sonnet-5" });
+    expect(existsSync(projectCfg)).toBe(true);
     expect(getOpenCodeActiveProvider()).toBe("openrouter");
     // Flip: project overrides global regardless of file mtime.
     writeJson(projectCfg, { model: "anthropic/claude-haiku-4-5" });

@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   formatScorecard,
+  factSeed,
   pathEntries,
   parseScoreJson,
   taskFixturePath,
@@ -21,6 +24,30 @@ describe("taskFixturePath", () => {
     expect(() =>
       taskFixturePath("/missing-harness", "task-pref-long.json"),
     ).toThrow("Benchmark task fixture not found");
+  });
+});
+
+describe("factSeed", () => {
+  it("is stable for paired arms and changes across task/model cells", () => {
+    expect(factSeed("pref-long", "openrouter/model")).toBe(
+      factSeed("pref-long", "openrouter/model"),
+    );
+    expect(factSeed("pref-long", "openrouter/model")).not.toBe(
+      factSeed("pref-combined", "openrouter/model"),
+    );
+    expect(factSeed("pref-long", "openrouter/model")).not.toBe(
+      factSeed("pref-long", "other/model"),
+    );
+  });
+
+  it("forwards the paired seed to driver runs", () => {
+    const source = readFileSync(
+      join(import.meta.dirname, "../src/cli/eval-cmd.ts"),
+      "utf8",
+    );
+
+    expect(source).toContain('"--fact-seed",');
+    expect(source).toContain("seed,");
   });
 });
 

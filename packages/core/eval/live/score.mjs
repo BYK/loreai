@@ -10,7 +10,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { execSync } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -34,13 +33,15 @@ function loreCost(dir) {
   const db = path.join(dir, "data/lore.db");
   if (fs.existsSync(db)) {
     try {
-      // Pass the db path as argv (sys.argv[1]) rather than interpolating it into
-      // the Python source, so paths with quotes/special chars can't break or
-      // inject into the command (Seer #961).
-      const raw = execSync(
-        'python3 -c "import sqlite3,json,sys;c=sqlite3.connect(sys.argv[1]);print(json.dumps(c.execute(\'SELECT bucket,SUM(cost) FROM daily_costs GROUP BY bucket\').fetchall()))" "$LORE_DB"',
-        { env: { ...process.env, LORE_DB: db } },
-      ).toString();
+      const raw = execFileSync(
+        "python3",
+        [
+          "-c",
+          "import sqlite3,json,sys;c=sqlite3.connect(sys.argv[1]);print(json.dumps(c.execute('SELECT bucket,SUM(cost) FROM daily_costs GROUP BY bucket').fetchall()))",
+          db,
+        ],
+        { encoding: "utf8" },
+      );
       for (const [bucket, cost] of JSON.parse(raw)) {
         if (bucket === "conversation") out.conversationUsd = cost;
         else if (bucket === "worker") out.workerUsd = cost;
@@ -268,6 +269,8 @@ function scoreArm(dir) {
   const result = JSON.parse(
     fs.readFileSync(path.join(dir, "result.json"), "utf8"),
   );
+  if (!result.valid || !result.totals)
+    throw new Error(`invalid run must not be scored: ${dir}`);
   const generated = scoreGeneratedRetention(dir, result);
   const probePath = path.join(dir, "project", PROBE_FILE);
   const exists = fs.existsSync(probePath);
@@ -437,10 +440,6 @@ for (const row of rows) {
   const result = JSON.parse(
     fs.readFileSync(path.join(dirs[rows.indexOf(row)], "result.json"), "utf8"),
   );
-  if (!result.valid)
-    throw new Error(
-      `invalid run must not be scored: ${dirs[rows.indexOf(row)]}`,
-    );
   const key = `${result.task}:${result.model}:${result.agent}:${result.repetition}`;
   const group = groups.get(key) || [];
   group.push({ row, result });
