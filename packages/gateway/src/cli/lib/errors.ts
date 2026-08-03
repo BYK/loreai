@@ -214,10 +214,11 @@ export function emitCliError(
     ctx.process.stderr.write(`${err.formatHuman()}\n`);
   }
   // Type-narrowing: `process` is `WritableStreams` per Stricli's
-  // CommandContext, but the real Node process has `exitCode`. Cast through
-  // the runtime value (always NodeJS.Process in production, and tests use
-  // a real process too).
-  (ctx.process as unknown as { exitCode?: number }).exitCode = err.exitCode;
+  // CommandContext, but the real Node process has `exitCode`. The runtime
+  // value is always the global NodeJS.Process (Stricli binds it as
+  // `this.process`), so reaching for the well-known property directly
+  // keeps the cast explicit and lint-clean.
+  (ctx.process as NodeJS.Process).exitCode = err.exitCode;
 }
 
 /**

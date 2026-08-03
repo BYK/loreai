@@ -52,9 +52,9 @@ describe("Phase 3A.4 — runLegacyAndCollect zero-arg console hooks (Seer #6)", 
     const realError = console.error;
     const captured: string[] = [];
     const realExit = process.exit;
-    process.exit = ((code?: number) => {
+    process.exit = (code?: number): never => {
       throw new Error(`__legacy_exit:${code ?? "undefined"}`);
-    }) as typeof process.exit;
+    };
     const priorExitCode = process.exitCode;
     process.exitCode = 0;
     console.log = (...args: unknown[]) => {
