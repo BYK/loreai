@@ -23,6 +23,7 @@ import { stopCommand } from "./commands/stop";
 import { logCommand, diffCommand } from "./commands/log";
 import { doctorCommand } from "./commands/doctor";
 import { lintCommand } from "./commands/lint";
+import { loginCommand, logoutCommand } from "./commands/auth";
 
 /**
  * Routes that are still served by the legacy dispatcher.
@@ -37,8 +38,6 @@ export const LEGACY_ROUTES: ReadonlySet<string> = new Set([
   "setup",
   "data",
   "recall",
-  "login",
-  "logout",
   "sync",
   "team",
   "admin",
@@ -119,6 +118,8 @@ export const routes = buildRouteMap({
     diff: diffCommand,
     doctor: doctorCommand,
     lint: lintCommand,
+    login: loginCommand,
+    logout: logoutCommand,
   },
 });
 
