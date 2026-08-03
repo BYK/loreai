@@ -29,16 +29,25 @@ vi.mock("../src/cli/lib/version-check", () => ({
   abortPendingVersionCheck: () => {},
 }));
 
-const fakeState = vi.hoisted(() => ({
-  port: 3207 as number | null,
+interface MemoryHealth {
+  embeddings: { available: boolean; state: string; detail: string };
+  worker: { ok: boolean; detail: string };
+}
+
+interface FakeState {
+  port: number | null;
+  alive: boolean;
+  memory: MemoryHealth | null;
+  opencodeInstalled: boolean;
+}
+
+const fakeState = vi.hoisted<FakeState>(() => ({
+  port: 3207,
   alive: true,
   memory: {
     embeddings: { available: true, state: "loaded", detail: "ok" },
     worker: { ok: true, detail: "ok" },
-  } as {
-    embeddings: { available: boolean; state: string; detail: string };
-    worker: { ok: boolean; detail: string };
-  } | null,
+  },
   opencodeInstalled: true,
 }));
 
