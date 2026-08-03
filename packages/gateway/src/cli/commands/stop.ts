@@ -60,14 +60,28 @@ async function runLegacyAndCollect(): Promise<{
   const priorExitCode = process.exitCode;
   process.exitCode = 0;
   console.log = (...args: unknown[]) => {
+    // Mirror Node's behavior: each console.log call appends a trailing
+    // newline, and console.log() with zero args emits just a newline.
+    // Keeps parity with the equivalent helper in commands/log.ts
+    // (Seer findings #6 and #7).
+    if (args.length === 0) {
+      captured.push("\n");
+      return;
+    }
     for (const a of args) {
       captured.push(typeof a === "string" ? a : String(a));
     }
+    captured.push("\n");
   };
   console.error = (...args: unknown[]) => {
+    if (args.length === 0) {
+      captured.push("\n");
+      return;
+    }
     for (const a of args) {
       captured.push(typeof a === "string" ? a : String(a));
     }
+    captured.push("\n");
   };
   try {
     await legacyCommandStop();

@@ -50,9 +50,11 @@ async function runLegacyAndCollect(
   const priorExitCode = process.exitCode;
   process.exitCode = 0;
   console.log = (...args: unknown[]) => {
-    // Mirror Node's behavior: `console.log()` with zero args prints a
-    // newline. Without this guard, blank-line separators in the legacy
-    // output collapse during capture (Seer finding #6).
+    // Mirror Node's behavior: each `console.log` call appends a trailing
+    // newline, and `console.log()` with zero args emits just a newline.
+    // Without the trailing newline per call, two consecutive console.log
+    // calls (`log("foo"); log("bar");`) collapse into "foobar" instead
+    // of "foo\nbar" (Seer finding #7 follow-on).
     if (args.length === 0) {
       captured.push("\n");
       return;
@@ -60,6 +62,7 @@ async function runLegacyAndCollect(
     for (const a of args) {
       captured.push(typeof a === "string" ? a : String(a));
     }
+    captured.push("\n");
   };
   console.error = (...args: unknown[]) => {
     if (args.length === 0) {
@@ -69,6 +72,7 @@ async function runLegacyAndCollect(
     for (const a of args) {
       captured.push(typeof a === "string" ? a : String(a));
     }
+    captured.push("\n");
   };
   process.exit = (code?: number): never => {
     throw new Error(`__legacy_exit:${code ?? "undefined"}`);
