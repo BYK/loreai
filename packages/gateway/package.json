@@ -27,6 +27,8 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
+    "@stricli/auto-complete": "1.2.8",
+    "@stricli/core": "1.2.8",
     "@supabase/supabase-js": "^2.58.0",
     "google-auth-library": "^10.9.0",
     "p-limit": "7",

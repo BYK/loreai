@@ -1,7 +1,7 @@
 /**
  * Lore Gateway — package entry point.
  *
- * Library exports for programmatic use, plus `_cli()` for the CLI binary.
+ * Library exports for programmatic use, plus `runCli()` for the CLI binary.
  *
  * Library usage:
  *   import { startServer, loadConfig } from "@loreai/gateway";
@@ -26,9 +26,16 @@ export { startGateway, probeGateway } from "./cli/start";
 export type { GatewayHandle, StartOptions } from "./cli/start";
 
 // ---------------------------------------------------------------------------
-// CLI entry — called by dist/bin.cjs or `bun run src/index.ts`
+// CLI entry — called by dist/bin.cjs or `bun run src/index.ts`.
+//
+// `runCli` is the new Stricli-driven entry: it dispatches help/version/whoami
+// /logs/stop/log/diff through the typed tree and falls back to the legacy
+// `_cli()` for commands that have not yet been migrated. The legacy `_cli()`
+// remains exported so callers that wired against it (or library consumers
+// using the same module) keep working during the migration window.
 // ---------------------------------------------------------------------------
 
+export { runCli } from "./cli/cli";
 export { _cli } from "./cli/main";
 
 // ---------------------------------------------------------------------------

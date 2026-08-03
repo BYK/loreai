@@ -18,7 +18,11 @@ export async function commandRecall(
   positionals: string[],
   values: Record<string, unknown>,
 ): Promise<void> {
-  const query = positionals[0];
+  // Join all positional tokens so multiword queries (e.g.
+  // `lore recall "error handling"` or `lore recall error handling`)
+  // preserve every word. Pre-3A.3 the command took only
+  // `positionals[0]`, silently dropping every token after the first.
+  const query = positionals.join(" ");
 
   if (!query) {
     console.error(`Usage: lore recall <query> [options]

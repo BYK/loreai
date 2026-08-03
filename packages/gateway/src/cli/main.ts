@@ -410,6 +410,27 @@ export async function _cli(): Promise<void> {
     maybeCheckForUpdateInBackground();
   }
 
+  // ---------------------------------------------------------------------------
+  // Per-slice removal rule (quality/plans/lore-cli-stricli-agent-experience.md):
+  //
+  // Migrated routes in `STRICLI_ROUTES` (lib/argv.ts) never reach this
+  // dispatcher via the production bundle path — `runCli` short-circuits to
+  // the Stricli app first. The case blocks below for migrated commands
+  // exist ONLY as a safety net for programmatic callers that invoke `_cli()`
+  // directly (existing tests, library consumers). The bundled CLI in
+  // `dist/bin.cjs` routes through `runCli` and never reaches this fallback.
+  //
+  // Status:
+  //   - help / version: migrated (Phase 1) — Stricli tree.
+  //   - whoami: migrated (Phase 3A.1) — typed command.
+  //   - logs:  migrated (Phase 3A.2) — typed command.
+  //   - log:   migrated (Phase 3A.4) — typed command.
+  //   - diff:  migrated (Phase 3A.4) — typed command.
+  //   - stop:  migrated (Phase 3B.1) — typed command.
+  //
+  // Removal milestone: delete the migrated case blocks once programmatic
+  // callers migrate to `runCli()` AND a deletion test passes for each.
+  // ---------------------------------------------------------------------------
   try {
     switch (command) {
       case "start":

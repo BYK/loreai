@@ -427,7 +427,7 @@ const binScript = `#!/usr/bin/env node
     return _emit.apply(this, [name, ...args]);
   };
 }
-require("./index.cjs")._cli().catch((e) => {
+require("./index.cjs").runCli().catch((e) => {
   if (e) console.error(e);
   process.exitCode = 1;
 });
