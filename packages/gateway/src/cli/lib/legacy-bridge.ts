@@ -41,6 +41,7 @@ export async function runLegacyAndCollect(
   const captured: string[] = [];
   const realLog = console.log;
   const realError = console.error;
+  const realStdoutWrite = process.stdout.write.bind(process.stdout);
   const realExit = process.exit;
   const priorExitCode = process.exitCode;
   process.exitCode = 0;
@@ -60,6 +61,24 @@ export async function runLegacyAndCollect(
     for (const a of args) captured.push(typeof a === "string" ? a : String(a));
     captured.push("\n");
   };
+  // Capture process.stdout.write too — `readline/promises` writes
+  // interactive prompts directly via process.stdout.write (not via
+  // console.log), so without this shim, login flows would leak prompt
+  // text into the JSON envelope when `--json` is active (Seer finding
+  // on PR #1559). We tee each write through to the original stdout
+  // so the user actually sees the prompt (and can answer it) —
+  // capture-only would hang interactive flows (Seer follow-on).
+  process.stdout.write = (chunk: unknown): boolean => {
+    const text =
+      typeof chunk === "string"
+        ? chunk
+        : Buffer.isBuffer(chunk)
+          ? chunk.toString("utf8")
+          : String(chunk);
+    captured.push(text);
+    realStdoutWrite(chunk as Parameters<typeof process.stdout.write>[0]);
+    return true;
+  };
   process.exit = (code?: number): never => {
     throw new Error(`__legacy_exit:${code ?? "undefined"}`);
   };
@@ -71,6 +90,7 @@ export async function runLegacyAndCollect(
   } finally {
     console.log = realLog;
     console.error = realError;
+    process.stdout.write = realStdoutWrite;
     process.exit = realExit;
   }
   const exitCode = process.exitCode ?? 0;
