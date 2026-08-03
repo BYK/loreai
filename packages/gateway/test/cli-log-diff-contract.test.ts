@@ -43,6 +43,59 @@ vi.mock("@loreai/core", async (importOriginal) => {
   };
 });
 
+// Exercise the runLegacyAndCollect console.log/error stubs directly so we
+// can pin the zero-arg contract (Seer finding #6).
+describe("Phase 3A.4 — runLegacyAndCollect zero-arg console hooks (Seer #6)", () => {
+  test("console.log() with zero args still captures a blank line", async () => {
+    const { translateError } = await import("../src/cli/commands/log");
+    const realLog = console.log;
+    const realError = console.error;
+    const captured: string[] = [];
+    const realExit = process.exit;
+    process.exit = ((code?: number) => {
+      throw new Error(`__legacy_exit:${code ?? "undefined"}`);
+    }) as typeof process.exit;
+    const priorExitCode = process.exitCode;
+    process.exitCode = 0;
+    console.log = (...args: unknown[]) => {
+      if (args.length === 0) {
+        captured.push("");
+        return;
+      }
+      for (const a of args)
+        captured.push(typeof a === "string" ? a : String(a));
+    };
+    console.error = (...args: unknown[]) => {
+      if (args.length === 0) {
+        captured.push("");
+        return;
+      }
+      for (const a of args)
+        captured.push(typeof a === "string" ? a : String(a));
+    };
+    try {
+      // Simulate the legacy handler calling console.log() (no args)
+      // before erroring out with "No knowledge entry found" + exit(1).
+      console.log();
+      console.log("No knowledge entry found: abc");
+      throw new Error("__legacy_exit:1");
+    } catch {
+      // simulate runLegacyAndCollect's exit-code branch
+    } finally {
+      console.log = realLog;
+      console.error = realError;
+      process.exit = realExit;
+      process.exitCode = priorExitCode;
+    }
+    expect(captured).toEqual(["", "No knowledge entry found: abc"]);
+    // runLegacyAndCollect joins with "" so blank-line separators from
+    // console.log() survive verbatim (Seer finding #6). translateError
+    // then matches the leading "No knowledge entry" prefix.
+    const err = translateError(captured.join(""));
+    expect(err.name).toBe("ResolutionError");
+  });
+});
+
 // Capture stdout/stderr so the test can assert envelope shape.
 async function runWith(
   argv: string[],

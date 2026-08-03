@@ -239,6 +239,20 @@ describe("Phase 3A.4 — translateError dispatches on captured text alone (Seer 
     expect(err.tryCommand).toBe("lore diff --help");
   });
 
+  // Seer finding #5 (LOW): "No tracked project ..." represents missing
+  // context, not user error. Must classify as ContextError(21), not
+  // UsageError(20). Legacy commandLog emits this exact text when the
+  // user's cwd has no project record.
+  test("`No tracked project ...` → ContextError(21), Try: lore run", async () => {
+    const { translateError } = await import("../src/cli/commands/log");
+    const err = translateError(
+      "No tracked project at /home/runner/loreai yet (nothing has been stored here).",
+    );
+    expect(err.name).toBe("ContextError");
+    expect(err.exitCode).toBe(21);
+    expect(err.tryCommand).toBe("lore run");
+  });
+
   test("unknown text → UsageError(20), no tryCommand", async () => {
     const { translateError } = await import("../src/cli/commands/log");
     const err = translateError("Something went sideways");

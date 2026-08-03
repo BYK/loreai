@@ -6,7 +6,12 @@
  * sink their stdout/stderr so the typed envelope is the only thing emitted.
  */
 import { buildOutputCommand } from "../lib/command";
-import { CliError, ResolutionError, UsageError } from "../lib/errors";
+import {
+  CliError,
+  ContextError,
+  ResolutionError,
+  UsageError,
+} from "../lib/errors";
 import { commandLog, commandDiff } from "../history-cmd";
 
 type LogFlags = {
@@ -45,11 +50,22 @@ async function runLegacyAndCollect(
   const priorExitCode = process.exitCode;
   process.exitCode = 0;
   console.log = (...args: unknown[]) => {
+    // Mirror Node's behavior: `console.log()` with zero args prints a
+    // newline. Without this guard, blank-line separators in the legacy
+    // output collapse during capture (Seer finding #6).
+    if (args.length === 0) {
+      captured.push("\n");
+      return;
+    }
     for (const a of args) {
       captured.push(typeof a === "string" ? a : String(a));
     }
   };
   console.error = (...args: unknown[]) => {
+    if (args.length === 0) {
+      captured.push("\n");
+      return;
+    }
     for (const a of args) {
       captured.push(typeof a === "string" ? a : String(a));
     }
@@ -93,15 +109,31 @@ function classify(_text: string): LogResult["kind"] {
  * the captured text — no need for the exitCode term in the conditional.
  *
  * Exported for unit testing (Phase 3A.4 Seer finding #2).
+ *
+ * Mapping (Phase 3A.4 Seer findings #2, #5):
+ *   - `No knowledge entry …`  → ResolutionError(22) — Try: lore recall
+ *   - `No tracked project …`   → ContextError(21)   — Try: lore run (start tracking)
+ *   - `Usage: …`               → UsageError(20)     — Try: lore diff --help
+ *   - anything else             → UsageError(20)     — generic fallback
  */
 export function translateError(text: string): CliError {
-  if (text.startsWith("No knowledge entry")) {
+  // Trim leading whitespace/newlines so blank-line separators from
+  // `console.log()` (captured as "\n" by runLegacyAndCollect) don't
+  // break the prefix-dispatch (Seer finding #6 follow-on).
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("No knowledge entry")) {
     return new ResolutionError({
       message: text.trim() || "No knowledge entry found.",
       tryCommand: "lore recall",
     });
   }
-  if (text.startsWith("Usage:")) {
+  if (trimmed.startsWith("No tracked project")) {
+    return new ContextError({
+      message: text.trim() || "No tracked project at the current directory.",
+      tryCommand: "lore run",
+    });
+  }
+  if (trimmed.startsWith("Usage:")) {
     return new UsageError({
       message: text.trim(),
       tryCommand: "lore diff --help",
