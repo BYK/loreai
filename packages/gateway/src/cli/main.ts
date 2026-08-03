@@ -430,9 +430,12 @@ export async function _cli(): Promise<void> {
   //   - stop:  migrated (Phase 3B.1) — typed command.
   //   - lint:  migrated (Phase 3D.1) — typed command (flag parsing
   //     still delegated to legacy; see Phase 3D.1b follow-up).
-  //   - login, logout: migrated (Phase 3D.2) — typed command.
-  //   - sync, team, admin, import: migrated (Phase 3D.3) — typed
-  //     command (still delegates flag parsing to legacy handler).
+//   - login, logout: migrated (Phase 3D.2) — typed command.
+//   - sync, team, admin, import: NOT YET — Phase 3D.3 reverted.
+//     These commands declare positional args + many flags in the
+//     legacy handler that Stricli's strict parser rejects when the
+//     typed adapter declares no schema. Re-migrate one-by-one with
+//     explicit schemas in Phase 3D.3b follow-up PRs.
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
