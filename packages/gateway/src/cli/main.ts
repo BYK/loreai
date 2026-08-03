@@ -431,6 +431,8 @@ export async function _cli(): Promise<void> {
   //   - lint:  migrated (Phase 3D.1) — typed command (flag parsing
   //     still delegated to legacy; see Phase 3D.1b follow-up).
   //   - login, logout: migrated (Phase 3D.2) — typed command.
+  //   - sync, team, admin, import: migrated (Phase 3D.3) — typed
+  //     command (still delegates flag parsing to legacy handler).
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
