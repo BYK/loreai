@@ -94,9 +94,21 @@ const MAX_INVARIANTS_SCAN = 300;
 // don't diverge confusingly.
 const JUDGE_VERDICT_TOKENS = 256;
 const JUDGE_VERDICT_HEADROOM = 8192;
+// Self-contained minimum — survives an empty models.dev cache (or any CI where
+// the fetchModelData pre-warm times out before the first judge call). Matches
+// the gateway's workerReasoningHeadroomFloor (16384 + 8192 = 24576) rounded up
+// to 25600 so the linter never produces empty-content / length-truncated judge
+// responses regardless of models.dev availability. The gateway's
+// `Math.max(callerMax, floor)` honors caller values, so passing this explicitly
+// is a floor-on-the-caller-side that doesn't depend on `workerModelReasons`.
+// Cheap for non-reasoning models (a floor, never a charge — they bill only
+// what they emit), strict for reasoning ones.
+const JUDGE_VERDICT_MIN_BUDGET = 25_600;
 function judgeMaxTokens(effort: ReasoningEffort | undefined): number {
   const budget = anthropicThinkingBudget(effort) ?? 0;
-  return budget > 0 ? budget + JUDGE_VERDICT_HEADROOM : JUDGE_VERDICT_TOKENS;
+  const thinking =
+    budget > 0 ? budget + JUDGE_VERDICT_HEADROOM : JUDGE_VERDICT_TOKENS;
+  return Math.max(thinking, JUDGE_VERDICT_MIN_BUDGET);
 }
 
 // If more than this fraction of judge calls come back unparseable, warn: the

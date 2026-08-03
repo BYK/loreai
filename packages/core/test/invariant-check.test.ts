@@ -1160,4 +1160,60 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     });
     expect(result.findings).toHaveLength(0);
   });
+
+  it("passes a self-contained minimum judge budget that survives an empty models.dev cache", async () => {
+    // The gateway's `workerReasoningHeadroomFloor` only applies for OpenAI/Gemini
+    // protocols when `workerModelReasons(model)` returns true — which itself
+    // depends on `getModelEntrySync` returning an entry with non-empty
+    // `reasoning_options`. When models.dev is unreachable (CI pre-warm timeout,
+    // 503, etc.), `getModelEntrySync` falls back to a stripped entry with no
+    // reasoning_options and the floor collapses to 0. Without a self-contained
+    // caller maxTokens, the linter's tiny default budget (256 tokens) would be
+    // entirely burned on hidden reasoning by OpenAI reasoning models like
+    // gpt-5-mini → empty content → "unparseable". The judge MUST therefore pass
+    // a budget that wins regardless of the gateway's reasoning-floor logic.
+    const captured: Array<{ maxTokens?: number; reasoningEffort?: string }> =
+      [];
+    const prompt = vi.fn(
+      async (
+        _system: string,
+        _user: string,
+        opts?: { maxTokens?: number; reasoningEffort?: string },
+      ) => {
+        captured.push(opts ?? {});
+        return JSON.stringify({ violates: false, reason: "ok" });
+      },
+    );
+    const llm: LLMClient = { prompt };
+
+    for (const effort of [undefined, "off", "low", "medium", "high"] as const) {
+      const project = `/tmp/ic-test-proj-budget-floor-${effort ?? "default"}`;
+      await seed(
+        project,
+        "node:sqlite import boundary",
+        "node:sqlite must never be imported outside driver.node.ts",
+        v(1, 0, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([
+        v(1, 0, 0),
+      ]);
+      captured.length = 0;
+      await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/other.ts",
+            text: '@@\n+import { X } from "node:sqlite"',
+          },
+        ],
+        range: FAKE_RANGE,
+        llm,
+        sessionID: `s-budget-${effort ?? "default"}`,
+        ...(effort !== undefined ? { effort } : {}),
+      });
+      expect(captured).toHaveLength(1);
+      // Floor MUST clear 25600 so the verdict is parseable even with no models.dev data.
+      expect(captured[0].maxTokens).toBeGreaterThanOrEqual(25_600);
+    }
+  });
 });

@@ -154,6 +154,16 @@ runs:
         $LORE_CMD "${args[@]}" > /tmp/lore-ic.json 2> /tmp/lore-ic.err
         rc=$?
         set -e
+        # Always surface stderr from the CLI run as a collapsible group — on
+        # success (rc=0) this was previously hidden, which masked useful
+        # diagnostics like the models.dev pre-warm status (`[lore] models.dev:
+        # loaded data for N models across M providers`), the invariant-seed
+        # timing line, and judge-budget logs. On failure (rc != 0) it's the
+        # only signal we have to explain a TOOLING skip. Cheap on a green run
+        # (a few progress lines folded into a group), invaluable on red.
+        echo "::group::lore lint stderr"
+        cat /tmp/lore-ic.err || true
+        echo "::endgroup::"
         if [ $rc -eq 2 ] && [ "${LORE_IC_GATE}" = "true" ]; then
           # Gate block — report findings, then fail the job on purpose.
           echo "skipped=false" >> "$GITHUB_OUTPUT"
@@ -162,7 +172,6 @@ runs:
         fi
         if [ $rc -ne 0 ]; then
           echo "::notice title=Lore lint::skipped (tooling: exit $rc)"
-          cat /tmp/lore-ic.err || true
           echo "skipped=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
