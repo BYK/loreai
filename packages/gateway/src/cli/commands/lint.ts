@@ -1,14 +1,11 @@
 /**
  * `lore lint` — typed Stricli command (Phase 3D.1).
  *
- * Wraps the legacy `commandInvariantCheck` from `./invariant-check` via
- * the shared `runLegacyAndCollect` bridge in `../lib/legacy-bridge`.
- *
- * The legacy handler reads from `process.argv` and accepts positionals
- * + values. Stricli parses flags into a typed shape, so we map the
- * typed flags back into the legacy `Record<string, unknown>` shape and
- * call the legacy command. The bridge captures all legacy output and
- * surfaces failures as __legacy_exit sentinels.
+ * The typed adapter wraps the legacy `commandInvariantCheck` from
+ * `./invariant-check` via the shared `runLegacyAndCollect` bridge.
+ * Stricli parses the typed flags into a `LintFlags` shape; the adapter
+ * maps that into the legacy `Record<string, unknown>` shape the legacy
+ * handler expects.
  *
  * Output shape:
  *   - human: rendered per-candidate verdicts (legacy format)
@@ -17,17 +14,28 @@
  * Exit codes: legacy semantics preserved.
  *   - 0  normal completion (advisory mode — always 0 even on findings)
  *   - 1  the legacy handler called process.exit(1) (e.g. invalid --effort)
- *   - 2  --gate mode + a strict/soft invariant violation
+ *   - 2  --gate mode + a strict/soft invariant violation (handled by
+ *          `invariant-check.ts` setting process.exitCode directly;
+ *          the bridge preserves the value via the M-1 sentinel fix)
  *
- * Phase 3D.1 ships a thin pass-through wrapper. Flag parsing is still
- * delegated to the legacy handler (which reads process.argv). The
- * full flag-migration pass is Phase 3D.1b.
+ * Phase 3D.1b will swap the legacy handler for a pure typed
+ * implementation; this slice just routes the typed command through
+ * Stricli with the legacy parsing layered on top.
  */
 import { buildOutputCommand } from "../lib/command";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandInvariantCheck } from "../invariant-check";
 
-type LintFlags = Record<string, never>;
+type LintFlags = {
+  base?: string;
+  head?: string;
+  model?: string;
+  project?: string;
+  effort?: string;
+  gate: boolean;
+  "import-lore-md": boolean;
+  jsonLines: boolean;
+};
 
 export const lintCommand = buildOutputCommand<
   string,
@@ -39,21 +47,87 @@ export const lintCommand = buildOutputCommand<
     "Surfaces PR/commit candidates that violate documented team " +
     "invariants. Always advisory by default (exit 0 even on findings) " +
     "to keep the false-positive feedback loop honest; use --gate to " +
-    "enforce via process.exit(2).",
+    "enforce via process.exit(2). Base/head are auto-detected (Craft-style) " +
+    "from git + CI env, or overridden with --base/--head. --model " +
+    "sweeps a specific worker model for the eval. --effort overrides " +
+    "the `invariantCheck.effort` config (default off).",
   parameters: {
-    flags: {},
-    positional: {
-      kind: "array",
-      parameter: { parse: String, brief: "lint argument", optional: true },
+    flags: {
+      base: {
+        kind: "parsed",
+        parse: String,
+        brief: "Base commit SHA (default: auto-detect from git + CI env)",
+        optional: true,
+      },
+      head: {
+        kind: "parsed",
+        parse: String,
+        brief: "Head commit SHA (default: auto-detect from git + CI env)",
+        optional: true,
+      },
+      model: {
+        kind: "parsed",
+        parse: String,
+        brief: "Worker model to evaluate (provider/modelID or bare modelID)",
+        optional: true,
+      },
+      project: {
+        kind: "parsed",
+        parse: String,
+        brief: "Project directory (default: cwd)",
+        optional: true,
+      },
+      effort: {
+        kind: "parsed",
+        parse: String,
+        brief: "Reasoning effort: off, low, medium, high, xhigh",
+        optional: true,
+      },
+      gate: {
+        kind: "boolean",
+        brief: "Enforce strict/soft invariants (exit 2 on violation)",
+        default: false,
+      },
+      "import-lore-md": {
+        kind: "boolean",
+        brief:
+          "Re-import the repository's AGENTS.md / *.lore.md files before linting",
+        default: false,
+      },
+      jsonLines: {
+        kind: "boolean",
+        brief: "Emit JSON Lines (one finding per line) instead of human output",
+        default: false,
+      },
     },
+    // No positionals declared — the legacy handler accepts none, and
+    // declaring them here would let Stricli accept but ignore them
+    // (L-2 review finding). Drop until the legacy handler is replaced.
   },
   config: {
     renderHuman: (data) => data,
     toJson: (data) => ({ output: data }),
   },
-  async handler() {
+  async handler(flags) {
+    // Map the Stricli flags into the legacy `values` dict the
+    // `commandInvariantCheck` handler expects. Only forward booleans
+    // when the user actually set them (skip the `default: false`
+    // values so the legacy handler's `=== true` checks don't trip on
+    // a forwarded `false` it never asked for).
+    const values: Record<string, unknown> = {
+      base: flags.base,
+      head: flags.head,
+      model: flags.model,
+      project: flags.project,
+      effort: flags.effort,
+    };
+    if (flags.gate) values.gate = true;
+    if (flags["import-lore-md"]) values["import-lore-md"] = true;
+    if (flags.jsonLines) values.jsonLines = true;
+    // `json` is auto-injected by buildOutputCommand; pass it through.
+    values.json = (flags as { json?: boolean }).json;
     const { exitCode, captured } = await runLegacyAndCollect(() =>
-      commandInvariantCheck([], {}),
+      commandInvariantCheck([], values),
     );
     if (exitCode !== 0) {
       process.exitCode = exitCode;

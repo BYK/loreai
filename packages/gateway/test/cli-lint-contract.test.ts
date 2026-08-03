@@ -108,6 +108,45 @@ describe("Phase 3D.1 — typed lore lint", () => {
     expect(result.captured).toBe("about to exit\n");
   });
 
+  // M-1: the sentinel must carry the actual exit code, not just be
+  // hardcoded to 1. The bridge is used by `commands/lint.ts` to
+  // surface --gate-mode exit code 2 from the legacy invariant-check
+  // handler; if the bridge drops the code, the gate failure becomes a
+  // silent 1 instead of the expected 2.
+  test("runLegacyAndCollect preserves process.exit(2) as exitCode=2", async () => {
+    const { runLegacyAndCollect } =
+      await import("../src/cli/lib/legacy-bridge");
+    const result = await runLegacyAndCollect(() => {
+      process.exit(2);
+    });
+    expect(result.exitCode).toBe(2);
+  });
+
+  test("runLegacyAndCollect preserves process.exit(undefined) as exitCode=1", async () => {
+    const { runLegacyAndCollect } =
+      await import("../src/cli/lib/legacy-bridge");
+    const result = await runLegacyAndCollect(() => {
+      process.exit();
+    });
+    expect(result.exitCode).toBe(1);
+  });
+
+  // L-1: process.exitCode is preserved across bridge invocations.
+  test("runLegacyAndCollect restores caller's process.exitCode on success", async () => {
+    const { runLegacyAndCollect } =
+      await import("../src/cli/lib/legacy-bridge");
+    const priorExitCode = process.exitCode;
+    process.exitCode = 7;
+    try {
+      const result = await runLegacyAndCollect(() => {});
+      expect(result.exitCode).toBe(0);
+      // Bridge restored the caller's pre-call exit code.
+      expect(process.exitCode).toBe(7);
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+  });
+
   test("runLegacyAndCollect rethrows non-legacy errors", async () => {
     const { runLegacyAndCollect } =
       await import("../src/cli/lib/legacy-bridge");
@@ -118,35 +157,60 @@ describe("Phase 3D.1 — typed lore lint", () => {
     ).rejects.toThrow("synthetic");
   });
 
-  test("buildOutputCommand end-to-end on a synthetic legacy command", async () => {
-    const { buildOutputCommand } = await import("../src/cli/lib/command");
-    const { runLegacyAndCollect } =
-      await import("../src/cli/lib/legacy-bridge");
+  // H-2: regression coverage for the lint flag schema. Stricli parses
+  // each flag from the command line; without an explicit schema, every
+  // user-provided flag was rejected as "unknown". Pin each flag name
+  // so a future refactor that drops one of them trips this test.
+  test("lint declares the full flag schema (base, head, model, project, effort, gate, import-lore-md, jsonLines)", async () => {
+    const { buildApplication, buildRouteMap, run } =
+      await import("@stricli/core");
+    const { lintCommand } = await import("../src/cli/commands/lint");
+    const { buildContext } = await import("../src/cli/context");
 
-    const captureSpy = vi.spyOn(process.stdout, "write");
-    captureSpy.mockImplementation(() => true);
-
+    const app = buildApplication(
+      buildRouteMap({
+        routes: { lint: lintCommand },
+        docs: { brief: "lore" },
+      }),
+      { name: "lore" },
+    );
+    const seen = new Set<string>();
+    const origWrite = process.stdout.write;
+    const writeSpy = ((chunk: string | Buffer) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+      for (const m of text.matchAll(/--[a-z][a-zA-Z0-9-]*/g)) {
+        seen.add(m[0]);
+      }
+      return true;
+    }) as never;
+    process.stdout.write = writeSpy;
     try {
-      const handler = buildOutputCommand<string, Record<string, never>, []>({
-        brief: "test command",
-        parameters: { flags: {} },
-        config: {
-          renderHuman: (data) => data,
-          toJson: (data) => ({ output: data }),
-        },
-        async handler() {
-          const { captured } = await runLegacyAndCollect(() => {
-            console.log("hello");
-            console.log("world");
-          });
-          return { kind: "value" as const, data: captured };
-        },
-      });
-
-      // Sanity: the handler returns the wrapped Stricli command object.
-      expect(handler).toBeDefined();
+      await run(app, ["lint", "--help"], buildContext(process));
     } finally {
-      captureSpy.mockRestore();
+      process.stdout.write = origWrite;
+    }
+    // Each flag below must appear in the help text. If a refactor
+    // drops one of them, this list will mismatch.
+    const expected = [
+      "--base",
+      "--head",
+      "--model",
+      "--project",
+      "--effort",
+      "--gate",
+      "--import-lore-md",
+      "--jsonLines",
+      "--json",
+    ];
+    for (const flag of expected) {
+      expect(seen.has(flag), `lint help should advertise ${flag}`).toBe(true);
     }
   });
+
+  // Integration with `buildOutputCommand` is exercised end-to-end by
+  // `cli-doctor-contract.test.ts` (which goes through runCli) and
+  // `cli-log-diff-contract.test.ts` (which exercises the same
+  // runLegacyAndCollect → translateError → CliError envelope chain
+  // that commands/lint.ts uses). The bridge unit tests above pin the
+  // contract that this integration depends on.
 });

@@ -28,7 +28,9 @@ export interface LegacyRunResult {
   captured: string;
   /**
    * The exit code the legacy handler wanted. `0` if it returned
-   * normally, `1` if it called `process.exit(1)`, etc.
+   * normally, the actual code passed to `process.exit(N)` if it called
+   * it (parsed from the `__legacy_exit:<code>` sentinel), or the value
+   * the legacy handler stamped on `process.exitCode` before returning.
    */
   exitCode: number;
 }
@@ -73,8 +75,18 @@ export async function runLegacyAndCollect(
   }
   const exitCode = process.exitCode ?? 0;
   process.exitCode = priorExitCode;
-  if (thrown instanceof Error && /__legacy_exit:/.test(thrown.message)) {
-    return { exitCode: 1, captured: captured.join("") };
+  if (thrown instanceof Error) {
+    // Parse the exit code the legacy handler asked for. The shim
+    // emits `__legacy_exit:<code>` (or `__legacy_exit:undefined` if
+    // no code was passed to process.exit). Anything not parseable as
+    // a finite number falls back to 1 (the default Node behavior when
+    // a handler exits without specifying a code).
+    const sentinelMatch = thrown.message.match(/^__legacy_exit:(.+)$/);
+    if (sentinelMatch) {
+      const parsed = Number(sentinelMatch[1]);
+      const code = Number.isFinite(parsed) ? parsed : 1;
+      return { exitCode: code, captured: captured.join("") };
+    }
   }
   if (thrown) throw thrown;
   return { exitCode, captured: captured.join("") };

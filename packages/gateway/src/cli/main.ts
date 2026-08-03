@@ -428,6 +428,8 @@ export async function _cli(): Promise<void> {
   //   - diff:  migrated (Phase 3A.4) — typed command.
   //   - doctor: migrated (Phase 3A.5) — typed command.
   //   - stop:  migrated (Phase 3B.1) — typed command.
+  //   - lint:  migrated (Phase 3D.1) — typed command (flag parsing
+  //     still delegated to legacy; see Phase 3D.1b follow-up).
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
