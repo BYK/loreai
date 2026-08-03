@@ -66,8 +66,12 @@ export async function runLegacyAndCollect(
   // console.log), so without this shim, login flows would leak prompt
   // text into the JSON envelope when `--json` is active (Seer finding
   // on PR #1559). We tee each write through to the original stdout
-  // so the user actually sees the prompt (and can answer it) —
-  // capture-only would hang interactive flows (Seer follow-on).
+  // ONLY when stdin is a TTY (interactive session) so the user actually
+  // sees the prompt and can answer it. For non-interactive sessions
+  // (CI, `--json`, `makeSyncProgress` progress bars) we capture-only
+  // to avoid double-output — `emitOutput` will write the captured text
+  // once on stdout (Seer finding on PR #1561).
+  const shouldTee = Boolean(process.stdin.isTTY);
   process.stdout.write = (chunk: unknown): boolean => {
     const text =
       typeof chunk === "string"
@@ -76,7 +80,9 @@ export async function runLegacyAndCollect(
           ? chunk.toString("utf8")
           : String(chunk);
     captured.push(text);
-    realStdoutWrite(chunk as Parameters<typeof process.stdout.write>[0]);
+    if (shouldTee) {
+      realStdoutWrite(chunk as Parameters<typeof process.stdout.write>[0]);
+    }
     return true;
   };
   process.exit = (code?: number): never => {

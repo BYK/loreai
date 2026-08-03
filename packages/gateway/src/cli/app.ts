@@ -11,7 +11,7 @@
  * `main.ts` until the corresponding phase migrates it. The route tree in
  * this module intentionally grows one route per phase.
  */
-import { buildApplication } from "@stricli/core";
+import { ArgumentScannerError, buildApplication } from "@stricli/core";
 import { VERSION } from "./version";
 import { printHelp } from "./help";
 import { buildCommand as buildLoreCommand } from "./lib/command";
@@ -133,6 +133,15 @@ export const app = buildApplication(routes, {
   scanner: {
     caseStyle: "allow-kebab-for-camel",
     allowArgumentEscapeSequence: true,
+  },
+  // Map Stricli scanner errors (unknown flag, extra positional) to
+  // exit code 2 (UsageError convention) instead of the default -4
+  // (InvalidArgument). Without this, `lore sync enable extra-arg`
+  // exits 252 (= -4 & 0xff) instead of 2, breaking agents/scripts
+  // that branch on `[ $? -eq 2 ]` for usage errors.
+  determineExitCode: (exc) => {
+    if (exc instanceof ArgumentScannerError) return 2;
+    return 1;
   },
 });
 
