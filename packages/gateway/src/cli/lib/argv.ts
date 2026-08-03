@@ -23,7 +23,7 @@ const HIDDEN_DIAGNOSTICS = new Set([
  * keep going through the legacy `_cli()` dispatcher. Subsequent phases
  * extend this list as each command family migrates.
  */
-const STRICLI_ROUTES: ReadonlySet<string> = new Set([
+export const STRICLI_ROUTES: ReadonlySet<string> = new Set([
   "help",
   "version",
   "whoami",
@@ -31,6 +31,7 @@ const STRICLI_ROUTES: ReadonlySet<string> = new Set([
   "stop",
   "log",
   "diff",
+  "doctor",
 ]);
 
 export interface PreprocessResult {

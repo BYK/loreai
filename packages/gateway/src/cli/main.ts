@@ -426,6 +426,7 @@ export async function _cli(): Promise<void> {
   //   - logs:  migrated (Phase 3A.2) — typed command.
   //   - log:   migrated (Phase 3A.4) — typed command.
   //   - diff:  migrated (Phase 3A.4) — typed command.
+  //   - doctor: migrated (Phase 3A.5) — typed command.
   //   - stop:  migrated (Phase 3B.1) — typed command.
   //
   // Removal milestone: delete the migrated case blocks once programmatic
