@@ -49,10 +49,10 @@ export const loginCommand = buildOutputCommand<
         optional: true,
       },
     },
-    positional: {
-      kind: "array",
-      parameter: { parse: String, brief: "login argument", optional: true },
-    },
+    // No positionals declared — the legacy handler accepts none, and
+    // declaring them here would let Stricli accept but silently drop
+    // unknown args (review finding F-1). Drop until the legacy handler
+    // is replaced.
   },
   config: {
     renderHuman: (data) => data,
@@ -84,10 +84,7 @@ export const logoutCommand = buildOutputCommand<
     "matters.",
   parameters: {
     flags: {},
-    positional: {
-      kind: "array",
-      parameter: { parse: String, brief: "logout argument", optional: true },
-    },
+    // No positionals declared — see F-1 above.
   },
   config: {
     renderHuman: (data) => data,

@@ -147,6 +147,50 @@ describe("Phase 3D.1 — typed lore lint", () => {
     }
   });
 
+  // Seer #1 on PR #1559 (auth): interactive flows like login use
+  // readline/promises which writes prompts directly to process.stdout
+  // (NOT via console.log). The bridge must capture process.stdout.write
+  // too, otherwise --json mode leaks prompt text into the JSON envelope.
+  test("runLegacyAndCollect captures process.stdout.write (readline prompts)", async () => {
+    const { runLegacyAndCollect } =
+      await import("../src/cli/lib/legacy-bridge");
+    const result = await runLegacyAndCollect(() => {
+      // Simulate readline writing a prompt directly via
+      // process.stdout.write — bypasses console.log entirely.
+      process.stdout.write("Enter the code: ");
+      console.log("abc123");
+    });
+    expect(result.captured).toBe("Enter the code: abc123\n");
+  });
+
+  // Bridge must restore process.stdout.write after the call so the
+  // outer test runtime is unaffected. (We can't use Object.is
+  // equality on bound function refs — each reassignment to
+  // process.stdout.write wraps with another `bind` layer. Instead,
+  // verify behavior: a write after the bridge returns reaches the
+  // outside, not the captured array.)
+  test("runLegacyAndCollect restores process.stdout.write after the call", async () => {
+    const { runLegacyAndCollect } =
+      await import("../src/cli/lib/legacy-bridge");
+    const sink: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk: unknown): boolean => {
+      sink.push(typeof chunk === "string" ? chunk : String(chunk));
+      return true;
+    };
+    try {
+      await runLegacyAndCollect(() => {
+        process.stdout.write("inside-bridge");
+      });
+      // Bridge restored stdout.write — this write must reach `sink`,
+      // not be captured by the bridge's shim (which is now gone).
+      process.stdout.write("outside-bridge");
+      expect(sink).toEqual(["outside-bridge"]);
+    } finally {
+      process.stdout.write = origWrite;
+    }
+  });
+
   test("runLegacyAndCollect rethrows non-legacy errors", async () => {
     const { runLegacyAndCollect } =
       await import("../src/cli/lib/legacy-bridge");
