@@ -34,7 +34,7 @@ export async function runCli(): Promise<void> {
   if (result.useStricli) {
     const priorStderrWrite = process.stderr.write.bind(process.stderr);
     let scannerErrorDetected = false;
-    process.stderr.write = ((chunk: unknown, ...args: unknown[]) => {
+    process.stderr.write = (chunk: unknown, ...args: unknown[]) => {
       // Stricli's scanner-error path writes to stderr via
       // formatException -> formatMessageForArgumentScannerError.
       // Catch the message text as a signal that a scanner error
@@ -56,7 +56,7 @@ export async function runCli(): Promise<void> {
         chunk as Parameters<typeof process.stderr.write>[0],
         ...(args as []),
       );
-    });
+    };
     try {
       await run(app, userArgv, {
         process,
@@ -67,7 +67,14 @@ export async function runCli(): Promise<void> {
     } finally {
       process.stderr.write = priorStderrWrite;
     }
-    if (scannerErrorDetected && process.exitCode !== 0) {
+    if (
+      scannerErrorDetected &&
+      // Only remap when process.exitCode is still the Stricli default
+      // (-4, InvalidArgument). The `determineExitCode` callback in
+      // app.ts may have already remapped this to 2 (UsageError); in
+      // that case leave it alone (Seer finding on PR #1561).
+      (process.exitCode === -4 || process.exitCode === undefined)
+    ) {
       // Stricli's scanner error path sets process.exitCode = -4
       // (InvalidArgument). Node would truncate to 252 on exit.
       // We remap to 20 (UsageError) for our exit-code convention.
