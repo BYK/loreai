@@ -2,13 +2,16 @@
  * `lore doctor` — run inventory + diagnostics.
  *
  * Phase 3A.5: typed Stricli command. The typed handler delegates to the
- * legacy `runDoctorDiagnostics` (pure, takes injected inputs) and adds
- * a `collectDoctorInput` shim that gathers the IO it needs. The legacy
+ * legacy `runDoctorDiagnostics` (pure, takes injected inputs) and does
+ * its own thin IO shell for `collectInventory()` / `probeGateway()` /
+ * `fetchMemoryHealth()` / `isNpmPackageInstalledSafe()`. The legacy
  * `commandDoctor` remains in place for programmatic callers that
  * import it directly (tests, library users).
  *
  * Output shape:
- *   - human: inventory + findings (matches legacy format byte-for-byte)
+ *   - human: inventory + findings (matches legacy format byte-for-byte
+ *     via the exported `formatInventoryRow` shared with the legacy
+ *     printer — Seer finding #1)
  *   - JSON:  { inventory, findings, summary }
  *
  * Exit codes:
