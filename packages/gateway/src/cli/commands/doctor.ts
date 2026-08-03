@@ -26,6 +26,7 @@ import {
   type Finding,
   type AppInventory,
   formatFinding,
+  formatInventoryRow,
 } from "../inventory";
 
 type DoctorFlags = Record<string, never>;
@@ -63,7 +64,8 @@ function renderInventory(inventory: AppInventory[]): string[] {
   // but rendered as strings so we can emit them through buildOutputCommand's
   // stdout/stderr pipeline. Format is intentionally byte-for-byte identical
   // to the legacy command so consumers that grep `lore doctor` output keep
-  // working.
+  // working. Uses the exported `formatInventoryRow` so the legacy and
+  // typed paths stay in lockstep (Seer finding #1 on this PR).
   const lines: string[] = [];
   for (const inv of inventory) {
     lines.push(`[lore] ${inv.app}  (${inv.file})`);
@@ -75,7 +77,7 @@ function renderInventory(inventory: AppInventory[]): string[] {
       lines.push(`[lore]   no lore-managed keys found.`);
     }
     for (const row of inv.rows) {
-      const trimmed = formatInventoryRowCompat(row).trim();
+      const trimmed = formatInventoryRow(row).trim();
       lines.push(`[lore]   ${trimmed}`);
     }
     if (inv.hasBackup) {
@@ -87,23 +89,6 @@ function renderInventory(inventory: AppInventory[]): string[] {
     lines.push("");
   }
   return lines;
-}
-
-/**
- * Local mirror of `formatInventoryRow` so we don't depend on internal
- * rendering drift. (The legacy inventory printer uses
- * `formatInventoryRow(row).trim()` and pads columns; we replicate the
- * shape but inline it to avoid leaking the helper signature.)
- */
-function formatInventoryRowCompat(row: {
-  app: string;
-  file: string;
-  fileExists: boolean;
-  key: string;
-  routing: { kind: string; value?: string };
-  priorValue?: string;
-}): string {
-  return `  ${row.app}   ${row.key}   ${row.routing.kind}  ${row.routing.value ?? ""}`;
 }
 
 function renderHuman(data: DoctorResult): string {

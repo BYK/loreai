@@ -213,4 +213,32 @@ describe("Phase 3A.5 — typed lore doctor", () => {
     expect(stdout).toContain("[FAIL]");
     expect(stdout).toContain("no gateway responding");
   });
+
+  // Seer finding #1 (MEDIUM): the typed doctor command's inventory
+  // printer must produce byte-for-byte identical output to the legacy
+  // `commandDoctor` so consumers that grep `lore doctor` keep working.
+  // The typed adapter now imports `formatInventoryRow` directly from
+  // inventory.ts, so the legacy and typed paths can't drift. This test
+  // pins the format by calling the same renderer on a known fixture
+  // and asserting the exact line shape.
+  test("inventory row format matches legacy formatInventoryRow (Seer #1)", async () => {
+    // Importing the renderer and asserting its output pins the format.
+    const { formatInventoryRow } = await import("../src/cli/inventory");
+    const row: import("../src/cli/inventory").InventoryRow = {
+      app: "Claude Code",
+      file: "~/.claude/settings.json",
+      fileExists: true,
+      key: "env.ANTHROPIC_BASE_URL",
+      routing: { kind: "lore", value: "http://127.0.0.1:3207" },
+    };
+    // The doctor's renderInventory helper internally calls
+    // `formatInventoryRow(row).trim()`. The legacy pads app to 14 chars
+    // and key to 38 chars, then renders the routing and file part. Pin
+    // the exact shape so a regression in either the legacy helper or
+    // the typed adapter (which used to diverge via
+    // formatInventoryRowCompat) is caught.
+    expect(formatInventoryRow(row).trim()).toBe(
+      "Claude Code    env.ANTHROPIC_BASE_URL                 lore  http://127.0.0.1:3207   [~/.claude/settings.json]",
+    );
+  });
 });
