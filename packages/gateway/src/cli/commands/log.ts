@@ -12,6 +12,7 @@ import {
   ResolutionError,
   UsageError,
 } from "../lib/errors";
+import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandLog, commandDiff } from "../history-cmd";
 
 type LogFlags = {
@@ -34,68 +35,6 @@ function renderHuman(data: LogResult): string {
 
 function toJson(data: LogResult): unknown {
   return data;
-}
-
-async function runLegacyAndCollect(
-  call: () => Promise<void>,
-): Promise<{ exitCode: number; captured: string }> {
-  const captured: string[] = [];
-  const realLog = console.log;
-  const realError = console.error;
-  // The legacy `commandLog` and `commandDiff` call `process.exit(1)`
-  // directly on error. Replace `process.exit` with a throwing shim so
-  // we capture the failure as an exception instead of killing the test
-  // runner (or the process) mid-run.
-  const realExit = process.exit;
-  const priorExitCode = process.exitCode;
-  process.exitCode = 0;
-  console.log = (...args: unknown[]) => {
-    // Mirror Node's behavior: each `console.log` call appends a trailing
-    // newline, and `console.log()` with zero args emits just a newline.
-    // Without the trailing newline per call, two consecutive console.log
-    // calls (`log("foo"); log("bar");`) collapse into "foobar" instead
-    // of "foo\nbar" (Seer finding #7 follow-on).
-    if (args.length === 0) {
-      captured.push("\n");
-      return;
-    }
-    for (const a of args) {
-      captured.push(typeof a === "string" ? a : String(a));
-    }
-    captured.push("\n");
-  };
-  console.error = (...args: unknown[]) => {
-    if (args.length === 0) {
-      captured.push("\n");
-      return;
-    }
-    for (const a of args) {
-      captured.push(typeof a === "string" ? a : String(a));
-    }
-    captured.push("\n");
-  };
-  process.exit = (code?: number): never => {
-    throw new Error(`__legacy_exit:${code ?? "undefined"}`);
-  };
-  let thrown: unknown;
-  try {
-    await call();
-  } catch (err) {
-    thrown = err;
-  } finally {
-    console.log = realLog;
-    console.error = realError;
-    process.exit = realExit;
-  }
-  const exitCode = process.exitCode ?? 0;
-  process.exitCode = priorExitCode;
-  if (thrown instanceof Error && /__legacy_exit:/.test(thrown.message)) {
-    // Legacy handler called `process.exit(1)` — surface it through the
-    // typed output pipeline as a typed error rather than rethrowing.
-    return { exitCode: 1, captured: captured.join("") };
-  }
-  if (thrown) throw thrown;
-  return { exitCode, captured: captured.join("") };
 }
 
 /**

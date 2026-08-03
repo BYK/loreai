@@ -11,6 +11,7 @@
  *   1 — foreground gateway (can't signal by PID) or deadline exceeded
  */
 import { buildOutputCommand } from "../lib/command";
+import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandStop as legacyCommandStop } from "../stop";
 
 interface StopResult {
@@ -50,50 +51,6 @@ function toJson(data: StopResult): unknown {
  * those into a local buffer so the typed envelope is the only thing
  * the wrapper renders — both human and JSON mode stay clean.
  */
-async function runLegacyAndCollect(): Promise<{
-  exitCode: number;
-  captured: string;
-}> {
-  const captured: string[] = [];
-  const realLog = console.log;
-  const realError = console.error;
-  const priorExitCode = process.exitCode;
-  process.exitCode = 0;
-  console.log = (...args: unknown[]) => {
-    // Mirror Node's behavior: each console.log call appends a trailing
-    // newline, and console.log() with zero args emits just a newline.
-    // Keeps parity with the equivalent helper in commands/log.ts
-    // (Seer findings #6 and #7).
-    if (args.length === 0) {
-      captured.push("\n");
-      return;
-    }
-    for (const a of args) {
-      captured.push(typeof a === "string" ? a : String(a));
-    }
-    captured.push("\n");
-  };
-  console.error = (...args: unknown[]) => {
-    if (args.length === 0) {
-      captured.push("\n");
-      return;
-    }
-    for (const a of args) {
-      captured.push(typeof a === "string" ? a : String(a));
-    }
-    captured.push("\n");
-  };
-  try {
-    await legacyCommandStop();
-  } finally {
-    console.log = realLog;
-    console.error = realError;
-  }
-  const exitCode = process.exitCode ?? 0;
-  process.exitCode = priorExitCode;
-  return { exitCode, captured: captured.join("") };
-}
-
 function parseLegacyOutput(joined: string): {
   action: StopResult["action"];
   pid: number | null;
@@ -126,7 +83,9 @@ export const stopCommand = buildOutputCommand<
   parameters: { flags: {} },
   config: { renderHuman, toJson },
   async handler() {
-    const { exitCode, captured } = await runLegacyAndCollect();
+    const { exitCode, captured } = await runLegacyAndCollect(() =>
+      legacyCommandStop(),
+    );
     const parsed = parseLegacyOutput(captured);
     const result: StopResult = {
       action: parsed.action,
