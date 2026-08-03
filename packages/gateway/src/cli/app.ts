@@ -21,6 +21,7 @@ import { whoamiCommand } from "./commands/whoami";
 import { logsCommand } from "./commands/logs";
 import { stopCommand } from "./commands/stop";
 import { logCommand, diffCommand } from "./commands/log";
+import { doctorCommand } from "./commands/doctor";
 
 /**
  * Routes that are still served by the legacy dispatcher.
@@ -33,7 +34,6 @@ export const LEGACY_ROUTES: ReadonlySet<string> = new Set([
   "start",
   "run",
   "setup",
-  "doctor",
   "data",
   "recall",
   "lint",
@@ -117,6 +117,7 @@ export const routes = buildRouteMap({
     stop: stopCommand,
     log: logCommand,
     diff: diffCommand,
+    doctor: doctorCommand,
   },
 });
 

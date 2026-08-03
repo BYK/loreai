@@ -31,6 +31,7 @@ const STRICLI_ROUTES: ReadonlySet<string> = new Set([
   "stop",
   "log",
   "diff",
+  "doctor",
 ]);
 
 export interface PreprocessResult {

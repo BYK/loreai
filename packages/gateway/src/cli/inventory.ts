@@ -657,7 +657,7 @@ export async function fetchMemoryHealth(base: string): Promise<{
 
 // Local copy to avoid importing the private isNpmPackageInstalled from setup.ts.
 // Mirrors its behavior; kept here so doctor doesn't grow setup.ts's surface.
-function isNpmPackageInstalledSafe(pkg: string): boolean {
+export function isNpmPackageInstalledSafe(pkg: string): boolean {
   try {
     // Lazy require so this file loads even if npm isn't on PATH.
     const { execFileSync } =
