@@ -1484,23 +1484,37 @@ describe("cross-provider collusion guard", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Beta-vs-model capability validation + runtime 400-retry-without-beta
+// Worker beta stripping — `context-1m` is NEVER carried on worker calls.
 //
 // The client's `anthropic-beta` (incl. a `context-1m` long-context beta) is
-// replayed onto worker calls. A 1M beta is a logical error for a model whose
-// context window is < 1M (e.g. claude-haiku-4-5, 200K) and Anthropic rejects it
-// with a 400. We (1) validate betas against the selected model's capability
-// matrix and drop incompatible ones up front, and (2) as a runtime safety net,
-// retry once with all beta headers removed on a beta-related 400.
+// replayed verbatim onto worker calls. Workers operate on bounded message
+// segments (a distillation segment is capped at 16K tokens, the whole session
+// is typically well under 200K) and never need the 1M window — so we strip
+// the `context-1m` beta UNCONDITIONALLY on the worker build path. This used
+// to be capability-conditional (drop only for sub-1M models like haiku), but
+// that left the default worker model (claude-sonnet-4-6, 1M-capable) carrying
+// the beta on subscription auth accounts without purchased usage credits, where
+// Anthropic rejects any call carrying `context-1m` with a 429 — "Usage credits
+// are required for long context requests." — and that 429 is permanent, so
+// workers exhaust their retry budget, the circuit breaker trips, and
+// distillation/curation/cache-warming stop forever (issue #1571). Other betas
+// (oauth-2025-04-20, fine-grained-tool-streaming, extended-cache-ttl,
+// prompt-caching-scope) are always preserved. A runtime 400-retry-without-beta
+// safety net remains in the retry loop for any future beta the upstream rejects.
 // ---------------------------------------------------------------------------
 
-describe("worker beta capability validation", () => {
+describe("worker beta stripping (#1571)", () => {
   const mockFetch = vi.mocked(upstreamFetch);
 
   const UPSTREAMS = {
     anthropic: "https://api.anthropic.com",
     openai: "https://api.openai.com",
   };
+
+  beforeEach(() => {
+    vi.mocked(recordWorkerFailure).mockClear();
+    vi.mocked(markWorkerPaused).mockClear();
+  });
 
   afterEach(() => {
     mockFetch.mockReset();
@@ -1557,7 +1571,7 @@ describe("worker beta capability validation", () => {
     expect(beta).toContain("fine-grained-tool-streaming-2025-05-14");
   });
 
-  test("keeps the context-1m beta for a 1M-capable model (opus)", async () => {
+  test("drops the context-1m beta for a 1M-capable worker model (opus) — issue #1571", async () => {
     mockFetch.mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -1568,6 +1582,13 @@ describe("worker beta capability validation", () => {
       ),
     );
 
+    // The user's session is on a 1M-capable model (claude-opus-4-8) and opted
+    // into the long-context beta. The default worker model is also 1M-capable
+    // (claude-sonnet-4-6, the model that actually triggered the bug). The
+    // worker MUST drop the context-1m beta — otherwise the call 429s on
+    // subscription auth accounts without usage credits and the session's
+    // background work stops forever. The OAuth gate is preserved so the bearer
+    // token still authenticates.
     captureBillingPrefix("sess-opus-beta", BILLING_SYSTEM);
     captureSessionHeaders("sess-opus-beta", {
       "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
@@ -1585,68 +1606,219 @@ describe("worker beta capability validation", () => {
       model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
     });
 
-    // opus-4 has a 1M context window in the fallback table → beta retained.
-    expect(betaOf(0)).toContain("context-1m");
+    const beta = betaOf(0);
+    expect(beta).toBeDefined();
+    // The long-context beta is dropped — workers never need 1M. The OAuth gate
+    // is preserved so the request still authenticates.
+    expect(beta).not.toContain("context-1m");
+    expect(beta).toContain("oauth-2025-04-20");
   });
 
-  test("retries once without beta headers on a beta-related 400, then succeeds", async () => {
-    let call = 0;
-    mockFetch.mockImplementation(async () => {
-      call++;
-      if (call === 1) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              type: "invalid_request_error",
-              message:
-                "The long context beta is not yet available for this subscription.",
-            },
-          }),
-          { status: 400 },
-        );
-      }
-      return new Response(
+  test("drops the context-1m beta on the default worker model (claude-sonnet-4-6) — reproduces #1571", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
         JSON.stringify({
-          content: [{ type: "text", text: "recovered" }],
+          content: [{ type: "text", text: "ok" }],
           usage: { input_tokens: 1, output_tokens: 1 },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
-      );
-    });
+      ),
+    );
 
-    // Use a 1M-capable model (opus) so the capability filter KEEPS the beta —
-    // then simulate the real scenario where the model supports 1M but the
-    // SUBSCRIPTION isn't entitled, so Anthropic still 400s. The runtime
-    // beta-stripped retry is what recovers. The sniffed beta also carries the
-    // OAuth gate (oauth-2025-04-20) which MUST survive the retry — stripping it
-    // would turn the recoverable 400 into a 401.
-    captureBillingPrefix("sess-400-beta", BILLING_SYSTEM);
-    captureSessionHeaders("sess-400-beta", {
+    // This is the exact setup from the bug report: the user is on a 1M
+    // session model, the worker resolves to claude-sonnet-4-6 (1M-capable),
+    // and the upstream is subscription auth without usage credits. Without the
+    // fix, the worker call carries context-1m and 429s permanently. With the
+    // fix, the beta is stripped upfront and the call succeeds.
+    captureBillingPrefix("sess-sonnet46", BILLING_SYSTEM);
+    captureSessionHeaders("sess-sonnet46", {
       "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
     });
 
     const client = createGatewayLLMClient(
       UPSTREAMS,
       () => ({ scheme: "bearer", value: "oauth-token" }),
-      { providerID: "anthropic", modelID: "claude-opus-4-8" },
+      { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
     );
 
-    const result = await client.prompt("system", "user", {
-      sessionID: "sess-400-beta",
+    await client.prompt("system", "user", {
+      sessionID: "sess-sonnet46",
       workerID: "lore-distill",
-      model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
     });
 
-    expect(result).toBe("recovered");
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    // First attempt carried the long-context beta.
-    expect(betaOf(0)).toContain("context-1m");
-    expect(betaOf(0)).toContain("oauth-2025-04-20");
-    // Retry dropped ONLY the long-context beta — the OAuth gate is preserved
-    // (stripping it would 401 the retry).
-    expect(betaOf(1)).toBeDefined();
-    expect(betaOf(1)).not.toContain("context-1m");
-    expect(betaOf(1)).toContain("oauth-2025-04-20");
+    const beta = betaOf(0);
+    expect(beta).toBeDefined();
+    expect(beta).not.toContain("context-1m");
+    expect(beta).toContain("oauth-2025-04-20");
+  });
+
+  test("drops the context-1m beta even when the user opted in with a date-suffixed variant", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    // The date suffix on context-1m-* changes over time; the strip must match
+    // any variant of the stem so a future release doesn't suddenly start
+    // carrying the beta again.
+    captureBillingPrefix("sess-suffix", BILLING_SYSTEM);
+    captureSessionHeaders("sess-suffix", {
+      "anthropic-beta": "oauth-2025-04-20,context-1m-2099-12-31",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-suffix",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    });
+
+    const beta = betaOf(0);
+    expect(beta).toBeDefined();
+    expect(beta).not.toContain("context-1m");
+    expect(beta).toContain("oauth-2025-04-20");
+  });
+
+  test("removes the entire anthropic-beta header when stripping context-1m leaves no other betas", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    // Mark the session as billing/OAuth so `captureSessionHeaders` actually
+    // persists the snapshot (it returns early otherwise — `buildOAuthWorkerHeaders`
+    // would then return `null` and the worker request would never carry
+    // `anthropic-beta` at all, making the test a no-op).
+    captureBillingPrefix("sess-only-context", BILLING_SYSTEM);
+    // If the sniffed beta IS the long-context beta, `buildOAuthWorkerHeaders`
+    // replays it directly (not the WORKER_BETAS fallback). The upfront strip
+    // removes context-1m and leaves no betas — so the header is dropped
+    // entirely rather than echoed back as an empty value. This is the
+    // end-to-end integration of the `delete headers[betaKey]` branch
+    // (covered directly as a unit test on `stripBetaHeaders` in
+    // `long-context-beta.test.ts`).
+    captureSessionHeaders("sess-only-context", {
+      "anthropic-beta": "context-1m-2025-08-07",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-only-context",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    });
+
+    // The header should be absent entirely — no `anthropic-beta` key in the
+    // outbound request (regardless of case).
+    const init = mockFetch.mock.calls[0]?.[1];
+    const headers = init?.headers as Record<string, string> | undefined;
+    const key =
+      headers &&
+      Object.keys(headers).find((k) => k.toLowerCase() === "anthropic-beta");
+    expect(key).toBeUndefined();
+  });
+
+  test("matches the anthropic-beta header case-insensitively (e.g. Anthropic-Beta key)", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    // The header key match uses `k.toLowerCase() === "anthropic-beta"`, so a
+    // header keyed `Anthropic-Beta` is normalized. Lock this down so a future
+    // refactor that switches to a case-sensitive match doesn't silently start
+    // carrying context-1m again on mis-keyed sessions.
+    captureBillingPrefix("sess-case-key", BILLING_SYSTEM);
+    captureSessionHeaders("sess-case-key", {
+      "Anthropic-Beta": "oauth-2025-04-20,context-1m-2025-08-07",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-case-key",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    });
+
+    // Find the surviving anthropic-beta value across any case-variant key
+    // (the worker request may normalize or preserve the key); verify the
+    // context-1m token is gone in all cases.
+    const init = mockFetch.mock.calls[0]?.[1];
+    const headers = init?.headers as Record<string, string> | undefined;
+    const beta =
+      headers &&
+      Object.values(headers).find(
+        (v) => typeof v === "string" && v.includes("oauth-2025-04-20"),
+      );
+    expect(beta).toBeDefined();
+    expect(beta).not.toContain("context-1m");
+  });
+
+  test("does not crash on an empty anthropic-beta header value (no-op)", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "ok" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    // An empty value should not crash and should not be turned into anything
+    // weird. The guard `if (!betaValue)` short-circuits, leaving the header
+    // exactly as-is. This is a defensive pin against a future refactor that
+    // might drop the guard and accidentally create an empty header value.
+    captureBillingPrefix("sess-empty-beta", BILLING_SYSTEM);
+    captureSessionHeaders("sess-empty-beta", {
+      "anthropic-beta": "",
+    });
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "oauth-token" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-empty-beta",
+      workerID: "lore-distill",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    });
+
+    // The call succeeded without crashing; one outbound fetch (no retry).
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1999,28 +2171,16 @@ describe("worker temperature capability", () => {
     expect(bodyOf(1)).not.toHaveProperty("temperature");
   });
 
-  test("a model needing BOTH a beta strip AND a temperature strip recovers (temperature rebuild does not resurrect the stripped beta)", async () => {
-    // Server returns the beta error FIRST, then the temperature error — the
-    // adversarial order: the temperature rebuild goes through buildWorkerRequest
-    // whose upfront filter KEEPS context-1m for a 1M-capable model, so without
-    // re-applying the runtime beta strip the third attempt would carry the beta
-    // again and 400-loop (betaStripped already latched).
+  test("temperature rebuild does not resurrect the context-1m beta (upfront strip is unconditional across rebuilds)", async () => {
+    // Verify the temperature rebuild path also keeps context-1m stripped.
+    // The upfront filter strips context-1m UNCONDITIONALLY for workers
+    // (issue #1571), so the rebuild through buildWorkerRequest cannot
+    // resurrect the beta — the same invariant as before, but now enforced
+    // at build time rather than via the runtime `if (betaStripped)` latch.
     let call = 0;
     mockFetch.mockImplementation(async () => {
       call++;
       if (call === 1) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              type: "invalid_request_error",
-              message:
-                "The long context beta is not yet available for this subscription.",
-            },
-          }),
-          { status: 400 },
-        );
-      }
-      if (call === 2) {
         return new Response(TEMP_DEPRECATED_400, { status: 400 });
       }
       return new Response(
@@ -2032,10 +2192,11 @@ describe("worker temperature capability", () => {
       );
     });
 
-    // opus-4-8 is 1M-capable in the fallback table, so the upfront filter keeps
-    // context-1m; the OAuth session replays the beta + oauth gate.
-    captureBillingPrefix("sess-both", BILLING_SYSTEM);
-    captureSessionHeaders("sess-both", {
+    // The user opted into context-1m on a 1M-capable session model. The
+    // upfront filter strips the beta for workers regardless of the session
+    // model — and the rebuild through buildWorkerRequest keeps the strip.
+    captureBillingPrefix("sess-rebuild", BILLING_SYSTEM);
+    captureSessionHeaders("sess-rebuild", {
       "anthropic-beta": "oauth-2025-04-20,context-1m-2025-08-07",
     });
 
@@ -2046,19 +2207,23 @@ describe("worker temperature capability", () => {
     );
 
     const result = await client.prompt("system", "user", {
-      sessionID: "sess-both",
+      sessionID: "sess-rebuild",
       workerID: "lore-distill",
       model: { providerID: "anthropic", modelID: "claude-opus-4-8" },
       temperature: 0,
     });
 
     expect(result).toBe("recovered");
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    // Final attempt: neither the context-1m beta nor temperature is present,
-    // and the OAuth gate is preserved so it still authenticates.
-    expect(betaOf(2)).not.toContain("context-1m");
-    expect(betaOf(2)).toContain("oauth-2025-04-20");
-    expect(bodyOf(2)).not.toHaveProperty("temperature");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // First attempt: context-1m already stripped upfront, OAuth gate present.
+    expect(betaOf(0)).not.toContain("context-1m");
+    expect(betaOf(0)).toContain("oauth-2025-04-20");
+    expect(bodyOf(0)).toHaveProperty("temperature");
+    // Rebuild after temperature 400: still no context-1m (upfront strip is
+    // unconditional across rebuilds), no temperature, OAuth gate preserved.
+    expect(betaOf(1)).not.toContain("context-1m");
+    expect(betaOf(1)).toContain("oauth-2025-04-20");
+    expect(bodyOf(1)).not.toHaveProperty("temperature");
   });
 });
 
@@ -2084,6 +2249,8 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
 
   beforeEach(() => {
     _resetThinkingUnsupportedModels();
+    vi.mocked(recordWorkerFailure).mockClear();
+    vi.mocked(markWorkerPaused).mockClear();
   });
 
   afterEach(() => {

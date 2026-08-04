@@ -107,10 +107,7 @@ const INSUFFICIENT_CREDIT_CODES = new Set([402]);
  * `context-1m` stem (optionally followed by `-<suffix>`), anchored on a
  * trimmed token so it can't match a substring inside another beta name.
  */
-const LONG_CONTEXT_BETA_RE = /^context-1m(?:-.*)?$/;
-
-/** Minimum model context window (tokens) required to keep a `context-1m` beta. */
-const LONG_CONTEXT_MIN_WINDOW = 1_000_000;
+const LONG_CONTEXT_BETA_RE = /^context-1m(?:-.*)?$/i;
 
 /**
  * Does this header set carry an `anthropic-beta` whose value contains a
@@ -127,6 +124,18 @@ function hasLongContextBeta(headers: Record<string, string>): boolean {
   }
   return false;
 }
+
+// Exported for unit testing in `long-context-beta.test.ts`. The runtime
+// safety net in the worker retry loop is dead code for `context-1m`
+// specifically after the upfront strip (#1571), but the helpers remain as
+// the explicit fallback for any future beta the upstream rejects. Tests pin
+// the helper behavior so a future refactor doesn't accidentally drop the
+// OAuth gate or accept unrelated betas.
+export const __testing = {
+  hasLongContextBeta,
+  stripBetaHeaders,
+  isBetaRelated400,
+};
 
 /**
  * Return a copy of the headers with ONLY the long-context (`context-1m`) beta
@@ -971,16 +980,22 @@ function buildAnthropicWorkerRequest(
     ...oauthHeaders,
   };
 
-  // Capability-aware beta filtering (primary defense against the long-context
-  // 400 loop). The client's `anthropic-beta` is replayed verbatim onto worker
-  // calls, but a sniffed `context-1m` long-context beta is meaningless — and
-  // rejected with a 400 — for a worker model that doesn't support a 1M context
-  // window (e.g. claude-haiku-4-5, whose limit is 200K and will likely never
-  // support 1M). Requesting 1M on such a model is a logical error, so we drop
-  // the long-context beta unless the SELECTED worker model actually supports
-  // a 1M+ context window. (A runtime 400-retry-without-beta fallback in the
-  // retry loop covers any beta we couldn't validate here.)
-  applyModelBetaCapabilityFilter(headers, model.modelID);
+  // Worker calls never need the 1M context window — workers operate on bounded
+  // message segments (a distillation segment is capped at 16K tokens; the whole
+  // session is typically well under 200K). The user's `anthropic-beta` is
+  // replayed verbatim onto worker calls, so a sniffed `context-1m` long-context
+  // beta rides along UNLESS we strip it here. On a subscription auth account
+  // without purchased usage credits, Anthropic rejects any call carrying the
+  // `context-1m` beta with a 429 ("Usage credits are required for long context
+  // requests.") regardless of payload size, and that 429 is permanent — workers
+  // exhaust their retry budget, the circuit breaker trips, and distillation /
+  // curation / cache-warming stop forever (issue #1571). The earlier
+  // capability-conditional filter was wrong: it asked "can this worker model
+  // handle 1M", but the right question is "does this call need 1M", and the
+  // answer is always no for a background worker. Strip it unconditionally.
+  // (A runtime 400-retry-without-beta fallback in the retry loop covers any
+  // other beta we couldn't validate here.)
+  stripLongContextBetaForWorker(headers);
 
   return {
     url: `${target.url}/v1/messages`,
@@ -990,27 +1005,36 @@ function buildAnthropicWorkerRequest(
 }
 
 /**
- * Drop beta tokens that the selected worker model cannot honor. Currently
- * removes the long-context (`context-1m`) beta when the model's context window
- * is below 1M — requesting 1M context on, e.g., haiku is a logical error that
- * Anthropic rejects with a 400. Mutates `headers` in place. Other betas are
- * preserved. If stripping leaves no betas, the header is removed entirely.
+ * Drop the long-context (`context-1m`) beta token from worker calls.
+ *
+ * Workers operate on bounded message segments (distillation, curation, cache
+ * warming, query expansion) — never on the full 1M window the user opted into
+ * for their conversation turn. Carrying the `context-1m` beta on a worker call
+ * is never useful, and on a subscription auth account without purchased usage
+ * credits it is actively harmful: Anthropic rejects any call carrying the beta
+ * with a 429 ("Usage credits are required for long context requests."),
+ * regardless of how small the worker payload is, and that 429 is permanent.
+ * The call exhausts its retry budget, the circuit breaker trips, and the
+ * session's background work stops forever (issue #1571).
+ *
+ * The previous capability-conditional filter only stripped the beta when the
+ * worker model's catalog context window was below 1M — which never fired for
+ * the default worker model (claude-sonnet-4-6, 1M-capable) and so produced the
+ * exact failure described above. Strip unconditionally for workers and let
+ * capability be a runtime concern (the 400-retry-without-beta fallback in the
+ * retry loop remains as a safety net for any future beta we couldn't validate).
+ *
+ * Other betas (oauth-2025-04-20, fine-grained-tool-streaming, extended-cache-ttl,
+ * prompt-caching-scope, etc.) are preserved. If stripping leaves no betas,
+ * the header is removed entirely. Mutates `headers` in place.
  */
-function applyModelBetaCapabilityFilter(
-  headers: Record<string, string>,
-  modelID: string,
-): void {
+function stripLongContextBetaForWorker(headers: Record<string, string>): void {
   const betaKey = Object.keys(headers).find(
     (k) => k.toLowerCase() === "anthropic-beta",
   );
   if (!betaKey) return;
   const betaValue = headers[betaKey];
   if (!betaValue || !/context-1m/i.test(betaValue)) return;
-
-  // Look up the model's real context window (models.dev-backed, with a
-  // conservative fallback table). Unknown models default to 200K.
-  const contextWindow = getModelEntrySync(modelID).limit?.context ?? 200_000;
-  if (contextWindow >= LONG_CONTEXT_MIN_WINDOW) return; // model supports 1M
 
   const kept = betaValue
     .split(",")
@@ -2647,12 +2671,13 @@ export function createGatewayLLMClient(
                 const text = await response.text().catch(() => "(no body)");
 
                 // 400 + a beta-related complaint → the request carries a beta
-                // header the model/subscription doesn't support (e.g. a
-                // `context-1m` long-context beta sniffed from the client turn
-                // and replayed onto a worker call to a non-1M model like
-                // haiku). The upfront capability check (buildWorkerRequest)
-                // should already strip incompatible betas, but this is the
-                // runtime safety net: retry ONCE with the long-context beta
+                // header the model/subscription doesn't support. The upfront
+                // filter (buildAnthropicWorkerRequest) strips the long-context
+                // `context-1m` beta unconditionally for workers (issue #1571:
+                // a 1M-capable worker model on a subscription auth without
+                // usage credits 429s permanently because the beta rides along),
+                // but this is the runtime safety net for any OTHER beta the
+                // upstream refuses: retry ONCE with the long-context beta
                 // removed (preserving oauth-2025-04-20 et al. so OAuth calls
                 // still authenticate) before giving up. Bounded to one retry.
                 if (
@@ -2702,12 +2727,14 @@ export function createGatewayLLMClient(
                     reasoningEffort,
                   );
                   // Rebuilding restores the freshly-built header set, which
-                  // resurrects a beta we may have already stripped at runtime
-                  // (the upfront capability filter KEEPS context-1m for a
-                  // 1M-capable model like sonnet-5, so a subscription-not-
-                  // entitled beta 400 is only cured by the runtime strip). If a
-                  // model needed BOTH fixes, re-apply the beta strip so the
-                  // temperature rebuild doesn't regress it into a beta-400 loop.
+                  // resurrects a beta we may have already stripped at runtime.
+                  // The upfront filter strips `context-1m` unconditionally for
+                  // workers (issue #1571), so a 400 β-loop on that specific
+                  // beta can't happen — but the runtime strip is still in
+                  // place for any future beta the upstream rejects, and the
+                  // `if (betaStripped)` latch re-applies it after the rebuild
+                  // so a model that needed BOTH fixes doesn't regress into a
+                  // beta-400 loop.
                   if (betaStripped) {
                     req = { ...req, headers: stripBetaHeaders(req.headers) };
                   }
