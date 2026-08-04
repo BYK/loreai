@@ -27,6 +27,7 @@ import { loginCommand, logoutCommand } from "./commands/auth";
 import { syncCommand } from "./commands/sync";
 import { teamCommand } from "./commands/team";
 import { adminCommand } from "./commands/admin";
+import { importCommand } from "./commands/import";
 
 /**
  * Routes that are still served by the legacy dispatcher.
@@ -41,7 +42,6 @@ export const LEGACY_ROUTES: ReadonlySet<string> = new Set([
   "setup",
   "data",
   "recall",
-  "import",
   "entity",
   "upgrade",
 ]);
@@ -123,6 +123,7 @@ export const routes = buildRouteMap({
     sync: syncCommand,
     team: teamCommand,
     admin: adminCommand,
+    import: importCommand,
   },
 });
 

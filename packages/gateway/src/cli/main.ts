@@ -438,8 +438,10 @@ export async function _cli(): Promise<void> {
   //     positionals[0]).
   //   - admin: migrated (Phase 3D.3d) — typed command (3 positional
   //     tuple: sub, target, tier; no flags).
-  //   - import: NOT YET — pending Phase 3D.3e with explicit flag
-  //     schema.
+  //   - import: migrated (Phase 3D.3e) — typed command (14 flags:
+  //     dry-run, yes, agent, source, file, global, no-worktrees,
+  //     project, mem0-{qdrant,collection,server,token,path,user};
+  //     no positionals).
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
