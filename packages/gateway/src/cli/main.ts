@@ -446,6 +446,12 @@ export async function _cli(): Promise<void> {
   //     positional + 10 flags + --json; destructive subcommands
   //     delete/merge/dedup flagged for central confirmation policy
   //     follow-up).
+  //   - data: migrated (Phase 3C slice 1) — typed command (variadic
+  //     positional + 9 flags + --json; read-only subcommands list/show/
+  //     cache-stats route via typed tree; destructive subcommands
+  //     delete/clear/merge/dedup/reground-entities/move/split reach the
+  //     legacy dispatcher's commandData via the variadic positional
+  //     fallback; central confirmation policy deferred to slice 2).
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
