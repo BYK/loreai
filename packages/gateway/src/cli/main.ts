@@ -442,6 +442,9 @@ export async function _cli(): Promise<void> {
   //     dry-run, yes, agent, source, file, global, no-worktrees,
   //     project, mem0-{qdrant,collection,server,token,path,user};
   //     no positionals).
+  //   - entity: migrated (Phase 3D.4) — typed command (variadic
+  //     positional + 8 flags; destructive subcommands delete/merge/
+  //     dedup flagged for central confirmation policy follow-up).
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
