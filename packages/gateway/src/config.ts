@@ -46,8 +46,9 @@ export interface GatewayConfig {
   upstreamAnthropic: string;
   /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
   upstreamOpenAI: string;
-  /** AWS Bedrock region (selects the bedrock-mantle endpoint). Default: from
-   *  AWS_REGION/AWS_DEFAULT_REGION env or "us-east-1". */
+  /** AWS Bedrock region (selects both the bedrock-mantle Anthropic endpoint
+   * and the bedrock-runtime Converse/InvokeModel endpoint). Default: "us-east-1".
+   * Env: LORE_BEDROCK_REGION */
   bedrockRegion: string;
   /** Google Vertex AI project ID. From GOOGLE_CLOUD_PROJECT env; when empty it
    *  is derived from Application Default Credentials at request time. */

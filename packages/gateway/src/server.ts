@@ -8,6 +8,7 @@
  *   POST /v1/codex/responses     → Codex (ChatGPT) ingress (Responses format)
  *   POST /v1/responses/compact   → Codex compaction (Responses API)
  *   POST /v1/compact             → Explicit compaction summary (Pi plugin, etc.)
+ *   POST /v1/model/{modelId}/{verb} → Bedrock Runtime API passthrough (Converse/InvokeModel)
  *   GET  /v1/models              → Passthrough to upstream
  *   GET  /health                 → Health check
  *
@@ -43,6 +44,10 @@ import {
 } from "./pipeline";
 import { upstreamFetch } from "./fetch";
 import { decodeRequestBody } from "./http-body";
+import {
+  BEDROCK_RUNTIME_PATH_RE,
+  proxyBedrockRuntimeRequest,
+} from "./translate/bedrock-runtime";
 
 // ---------------------------------------------------------------------------
 // Version — best-effort from package.json, falls back gracefully
@@ -546,6 +551,18 @@ export async function startServer(config: GatewayConfig): Promise<{
       // POST /v1/compact — explicit compaction summary (Pi plugin, etc.)
       if (method === "POST" && pathname === "/v1/compact") {
         return withCors(await handleCompactEndpoint(req, config));
+      }
+
+      // POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough.
+      // Routes the four Bedrock Runtime verbs (converse, converse-stream,
+      // invoke, invoke-with-response-stream) to bedrock-runtime.<region>.amazonaws.com
+      // verbatim — no translation, no pipeline processing (the AWS SDK
+      // already owns retries, streaming, and credential rotation). Region
+      // comes from LORE_BEDROCK_REGION / AWS_REGION (loaded into config).
+      if (method === "POST" && BEDROCK_RUNTIME_PATH_RE.test(pathname)) {
+        return withCors(
+          await proxyBedrockRuntimeRequest(req, config.bedrockRegion),
+        );
       }
 
       // GET /v1/models — passthrough
