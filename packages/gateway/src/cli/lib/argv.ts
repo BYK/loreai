@@ -37,6 +37,7 @@ export const STRICLI_ROUTES: ReadonlySet<string> = new Set([
   "logout",
   "sync",
   "team",
+  "admin",
 ]);
 
 export interface PreprocessResult {
