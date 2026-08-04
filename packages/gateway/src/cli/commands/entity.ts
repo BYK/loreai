@@ -11,9 +11,9 @@
  *                      `entity alias add <alias> <target>`,
  *                      `entity relation add <from> <to>`)
  *
- * Flags forwarded to the legacy values dict (all optional):
- *   --all, --cross, --interactive, --json, --metadata, --name,
- *   --project, --relation, --type, --value
+ * Flags forwarded to the legacy values dict (10 + auto-injected --json):
+ *   --all, --cross, --interactive/-i, --json, --metadata,
+ *   --name, --project, --relation, --type, --value, --yes/-y
  *
  * Destructive subcommands: `delete`, `merge`, `dedup`. The plan
  * mandates a central destructive-operation confirmation policy
@@ -35,12 +35,13 @@ type EntityFlags = {
   all: boolean;
   cross: boolean;
   interactive: boolean;
-  metadata: boolean;
+  metadata?: string;
   name?: string;
   project?: string;
   relation?: string;
   type?: string;
   value?: string;
+  yes: boolean;
 };
 
 export const entityCommand = buildOutputCommand<
@@ -54,11 +55,14 @@ export const entityCommand = buildOutputCommand<
     "Knowledge entity CRUD + alias/relation/merge/dedup/search. " +
     "First positional is the subcommand; subsequent positionals " +
     "are subcommand-specific args. Flags: --all, --cross, " +
-    "--interactive, --json, --metadata, --name, --project, " +
-    "--relation, --type, --value. Destructive subcommands: " +
-    "delete, merge, dedup. Confirmation policy for destructive " +
-    "operations is deferred (Phase 3D.4 follow-up).",
+    "--interactive/-i, --json, --metadata, --name, --project, " +
+    "--relation, --type, --value, --yes/-y. Destructive " +
+    "subcommands: delete, merge, dedup. Confirmation policy for " +
+    "destructive operations is deferred (Phase 3D.4 follow-up).",
   parameters: {
+    // Single-character flag aliases: -i → --interactive, -y → --yes
+    // (matching the legacy OPTIONS table at packages/gateway/src/cli/main.ts).
+    aliases: { i: "interactive", y: "yes" },
     flags: {
       all: {
         kind: "boolean",
@@ -72,13 +76,21 @@ export const entityCommand = buildOutputCommand<
       },
       interactive: {
         kind: "boolean",
-        brief: "Prompt for missing fields (entity add/edit)",
+        brief: "Prompt for missing fields (entity add/edit, alias: -i)",
         default: false,
       },
+      // The legacy `cmdAdd`/`cmdEdit`/`cmdRelationAdd` parse this as
+      // a JSON string (e.g., --metadata '{"k":"v"}'). The legacy
+      // command-line parser treats unknown flags as boolean — so the
+      // JSON string gets passed as a positional, which fails. We
+      // fix this here by declaring metadata as a parsed string flag
+      // with `parse: String` so it accepts any value as a single
+      // string, then forwards as values.metadata.
       metadata: {
-        kind: "boolean",
-        brief: "Show metadata (entity show)",
-        default: false,
+        kind: "parsed",
+        parse: String,
+        brief: "JSON metadata string (entity add/edit/relation add)",
+        optional: true,
       },
       name: {
         kind: "parsed",
@@ -110,6 +122,11 @@ export const entityCommand = buildOutputCommand<
         brief: "Entity value (entity add)",
         optional: true,
       },
+      yes: {
+        kind: "boolean",
+        brief: "Apply auto-merges (entity dedup, alias: -y)",
+        default: false,
+      },
     },
     positional: {
       kind: "array",
@@ -128,17 +145,22 @@ export const entityCommand = buildOutputCommand<
     if (flags.all) values.all = true;
     if (flags.cross) values.cross = true;
     if (flags.interactive) values.interactive = true;
-    if (flags.metadata) values.metadata = true;
+    if (flags.metadata !== undefined) values.metadata = flags.metadata;
     if (flags.name !== undefined) values.name = flags.name;
     if (flags.project !== undefined) values.project = flags.project;
     if (flags.relation !== undefined) values.relation = flags.relation;
     if (flags.type !== undefined) values.type = flags.type;
     if (flags.value !== undefined) values.value = flags.value;
-    const positionalsArr = positionals.filter(
-      (p): p is string => typeof p === "string",
-    );
+    if (flags.yes) values.yes = true;
+    // F-4 (HIGH): forward --json (auto-injected by buildOutputCommand)
+    // to the legacy handler. Legacy cmdList gates JSON output on
+    // `flags.json` — without this, the legacy emits human table text
+    // even when the typed pipeline's --json envelope is active.
+    if ((flags as { json?: boolean }).json) values.json = true;
+    // Stricli spreads the variadic positional array into individual
+    // handler params; collect back into the legacy string[].
     const { exitCode, captured } = await runLegacyAndCollect(() =>
-      commandEntity(positionalsArr, values),
+      commandEntity([...positionals], values),
     );
     if (exitCode !== 0) {
       process.exitCode = exitCode;

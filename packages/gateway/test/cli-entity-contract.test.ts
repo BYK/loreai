@@ -1,10 +1,23 @@
 /**
- * Phase 3D.4 — typed `lore entity` with variadic positional + 8 flags.
+ * Phase 3D.4 — typed `lore entity` with variadic positional + 10 flags.
  *
  * Pins the typed wrapper for `lore entity`. The legacy handler takes a
  * subcommand as `positionals[0]` plus subcommand-specific args, and
- * reads 8 flags from the values dict (all, cross, interactive,
- * metadata, name, project, relation, type, value).
+ * reads 10 flags from the values dict (all, cross, interactive, json,
+ * metadata, name, project, relation, type, value, yes) — 11 total
+ * including --json auto-injection.
+ *
+ * Review findings addressed:
+ *   - F-1: --yes flag added (was missing — entity dedup uses it)
+ *   - F-2: -y alias added for --yes (matching legacy OPTIONS short)
+ *   - F-3: -i alias added for --interactive
+ *   - F-4: --json forwarded to legacy values.json (was missing —
+ *     legacy cmdList gates JSON output on flags.json)
+ *   - F-5: flag-count strings corrected to 10 (+ --json)
+ *   - F-6: --metadata changed to parsed String (was boolean; legacy
+ *           parses it as JSON.stringify)
+ *   - F-7: dead defensive positionals.filter removed (ARGS = string[]
+ *     means the filter is a no-op)
  */
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -38,7 +51,7 @@ describe("Phase 3D.4 — typed lore entity", () => {
     expect(LEGACY_ROUTES.has("entity")).toBe(false);
   });
 
-  test("entity declares 8 flags (all, cross, interactive, metadata, name, project, relation, type, value)", async () => {
+  test("entity declares 10 flags + --json (all, cross, interactive, json, metadata, name, project, relation, type, value, yes)", async () => {
     const { buildApplication, buildRouteMap, run } =
       await import("@stricli/core");
     const { entityCommand } = await import("../src/cli/commands/entity");
@@ -68,12 +81,14 @@ describe("Phase 3D.4 — typed lore entity", () => {
       "--all",
       "--cross",
       "--interactive",
+      "--json",
       "--metadata",
       "--name",
       "--project",
       "--relation",
       "--type",
       "--value",
+      "--yes",
     ];
     for (const flag of expected) {
       expect(seen.has(flag), `entity help should advertise ${flag}`).toBe(true);
@@ -207,11 +222,26 @@ describe("Phase 3D.4 — typed lore entity", () => {
     vi.resetModules();
   });
 
-  test("entity --json produces the structured envelope", async () => {
+  // F-4 (HIGH): --json must reach the legacy handler as values.json
+  // = true. Without this forwarding, legacy cmdList's `asJson` check
+  // stays false and the human table is emitted under the --json
+  // envelope (silently breaking CI/eval pipelines that parse the
+  // legacy JSON array/object).
+  test("entity --json forwards values.json=true to legacy handler", async () => {
     vi.resetModules();
-    const entityImpl = vi.fn(async () => {
-      console.log("json-mode ok");
-    });
+    const calls: EntityCall[] = [];
+    const entityImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        // Mimic what the legacy handler does: branch on values.json
+        // to emit either JSON or human output.
+        if (values.json === true) {
+          console.log('{"entities":[]}');
+        } else {
+          console.log("human table here");
+        }
+      },
+    );
     vi.doMock("../src/cli/entity", () => ({
       commandEntity: entityImpl,
     }));
@@ -240,8 +270,140 @@ describe("Phase 3D.4 — typed lore entity", () => {
       stdoutSpy.mockRestore();
       process.exitCode = priorExitCode;
     }
-    const parsed = JSON.parse(Buffer.concat(stdoutChunks).toString("utf8"));
-    expect(parsed).toEqual({ output: "json-mode ok\n" });
+    // Assert the legacy handler received the json flag.
+    expect(calls[0]?.values.json).toBe(true);
+    // Parse the typed envelope and verify the legacy's JSON branch
+    // ran (the output field contains the legacy's JSON array/object,
+    // not the human table).
+    const envelope = JSON.parse(Buffer.concat(stdoutChunks).toString("utf8"));
+    expect(envelope.output).toContain('{"entities":[]}');
+    expect(envelope.output).not.toContain("human table");
+    vi.resetModules();
+  });
+
+  // F-1 + F-2 (HIGH): --yes must be declared AND -y short alias must
+  // route to it. The legacy entity dedup subcommand gates its apply
+  // on `flags.yes` (`entity.ts:627`). Without the alias, `lore
+  // entity dedup -y` was rejected with "No alias registered for -y".
+  test("entity forwards --yes and -y short alias as values.yes = true", async () => {
+    vi.resetModules();
+    const calls: EntityCall[] = [];
+    const entityImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        if (values.yes !== true) {
+          console.error("yes flag missing");
+          process.exitCode = 1;
+        }
+        console.log("dedup ok");
+      },
+    );
+    vi.doMock("../src/cli/entity", () => ({
+      commandEntity: entityImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = ["node", "lore", "entity", "dedup", "-y"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values.yes).toBe(true);
+    expect(capturedExitCode).toBe(0);
+    vi.resetModules();
+  });
+
+  // F-3 (HIGH): -i short alias for --interactive. Legacy OPTIONS
+  // table has `interactive: { short: "i" }` (`main.ts:99`).
+  test("entity forwards -i short alias as values.interactive = true", async () => {
+    vi.resetModules();
+    const calls: EntityCall[] = [];
+    const entityImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        if (values.interactive !== true) {
+          console.error("interactive flag missing");
+          process.exitCode = 1;
+        }
+        console.log("add ok");
+      },
+    );
+    vi.doMock("../src/cli/entity", () => ({
+      commandEntity: entityImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = ["node", "lore", "entity", "add", "-i"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values.interactive).toBe(true);
+    expect(capturedExitCode).toBe(0);
+    vi.resetModules();
+  });
+
+  // F-6 (LOW): --metadata as parsed string (legacy parses JSON.stringify
+  // metadata). Without this fix, --metadata '{"k":"v"}' was treated as
+  // a boolean by the legacy CLI and the JSON string fell into the
+  // positional array.
+  test("entity forwards --metadata JSON string to legacy handler", async () => {
+    vi.resetModules();
+    const calls: EntityCall[] = [];
+    const entityImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("metadata ok");
+      },
+    );
+    vi.doMock("../src/cli/entity", () => ({
+      commandEntity: entityImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = [
+      "node",
+      "lore",
+      "entity",
+      "add",
+      "--name",
+      "alice",
+      "--metadata",
+      '{"role":"engineer"}',
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values.metadata).toBe('{"role":"engineer"}');
     vi.resetModules();
   });
 
