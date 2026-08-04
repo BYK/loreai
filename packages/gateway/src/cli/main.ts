@@ -433,8 +433,11 @@ export async function _cli(): Promise<void> {
   //   - login, logout: migrated (Phase 3D.2) — typed command.
   //   - sync: migrated (Phase 3D.3b) — typed command (positional
   //     schema declared; flags still handled by legacy).
-  //   - team, admin, import: NOT YET — pending Phase 3D.3c, d, e
-  //     follow-ups with explicit flag schemas.
+  //   - team: migrated (Phase 3D.3c) — typed command (variadic
+  //     positional + 5 flag schema; legacy handles dispatch by
+  //     positionals[0]).
+  //   - admin, import: NOT YET — pending Phase 3D.3d, e follow-ups
+  //     with explicit flag schemas.
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
