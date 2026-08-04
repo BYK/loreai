@@ -1,55 +1,41 @@
 /**
  * `lore logs` — view the persistent activity log.
  *
- * Phase 3A: typed Stricli command. The follow-mode is not exercised by the
- * typed wrapper (it blocks indefinitely); it stays available through the
- * legacy dispatcher. Future phases can add a dedicated `logs follow`
- * subcommand to the Stricli tree.
+ * Phase 3D.4b fix: delegates to the legacy `commandLogs` via the shared
+ * `runLegacyAndCollect` bridge. The legacy handler implements the
+ * follow-mode (`-f` / `--follow`) using `fs.watchFile` polling at 300ms
+ * intervals and emits new content as it arrives. The typed wrapper
+ * used to re-implement a one-shot `readFileSync` snapshot that silently
+ * dropped `--follow`, which made the advertised `-f` alias reject.
+ *
+ * Output shape:
+ *   - human: rendered legacy text
+ *   - JSON:  { output: <captured stdout> }
+ *
+ * Exit codes: legacy semantics preserved.
  */
 import { buildOutputCommand } from "../lib/command";
-import { ContextError, StorageError } from "../lib/errors";
-import { readFileSync, statSync, existsSync } from "node:fs";
-import { log } from "@loreai/core";
+import { runLegacyAndCollect } from "../lib/legacy-bridge";
+import { commandLogs } from "../logs";
 
 type LogsFlags = {
   path: boolean;
   follow: boolean;
-  /** `--lines` / `-n` — number of lines to show. */
   lines: number;
 };
 
-interface LogsResult {
-  /** Path of the log file. */
-  path: string;
-  /** Total lines in the file (after filtering empties). */
-  totalLines: number;
-  /** The lines returned (always at most `--lines`). */
-  lines: string[];
-}
-
-function renderHuman(data: LogsResult): string {
-  return data.lines.join("\n");
-}
-
-function toJson(data: LogsResult): unknown {
-  return {
-    path: data.path,
-    totalLines: data.totalLines,
-    lines: data.lines,
-  };
-}
-
-export const logsCommand = buildOutputCommand<LogsResult, LogsFlags, []>({
+export const logsCommand = buildOutputCommand<string, LogsFlags, []>({
   brief: "Show lore activity log (last N lines by default)",
   fullDescription:
     "Print the last 50 lines of the gateway activity log by default. " +
     "Use `--lines <n>` / `-n <n>` to change the count, `--path` to print " +
-    "the log file path and exit. " +
-    "JSON output includes the path, total line count, and the returned lines. " +
-    "Note: `--follow` / `-f` is not yet implemented in this build; " +
-    "until it is, the flag is accepted and silently ignored. " +
-    "Use a shell pipe (`tail -f`) when you need streaming.",
+    "the log file path and exit. `--follow` / `-f` tails the log and " +
+    "prints new lines as they arrive (Ctrl-C to stop). " +
+    "--json emits a structured envelope.",
   parameters: {
+    // Single-character aliases: -n → --lines, -f → --follow
+    // (matching the legacy OPTIONS table at packages/gateway/src/cli/main.ts).
+    aliases: { n: "lines", f: "follow" },
     flags: {
       path: {
         kind: "boolean",
@@ -59,8 +45,7 @@ export const logsCommand = buildOutputCommand<LogsResult, LogsFlags, []>({
       follow: {
         kind: "boolean",
         brief:
-          "Accepted for compatibility; not implemented — output is one snapshot, not a stream",
-        hidden: true,
+          "Tail the log and print new lines as they arrive (Ctrl-C to stop)",
         default: false,
       },
       lines: {
@@ -70,53 +55,28 @@ export const logsCommand = buildOutputCommand<LogsResult, LogsFlags, []>({
         default: "50",
       },
     },
-    aliases: { n: "lines" },
   },
-  config: { renderHuman, toJson },
-  handler(flags) {
-    const filePath = log.logFilePath();
-    if (!filePath) {
-      throw new StorageError({
-        message: "Log file path could not be resolved.",
-        tryCommand: "lore start",
-      });
+  config: {
+    renderHuman: (data) => data,
+    toJson: (data) => ({ output: data }),
+  },
+  async handler(flags) {
+    // Forward all flags to the legacy handler, which reads `flags.n`
+    // OR `flags.lines` AND `flags.f` OR `flags.follow`. We populate
+    // BOTH kebab-case and camelCase forms so the legacy handler's
+    // existing `values.f || values.follow` checks work unchanged.
+    const values: Record<string, unknown> = {};
+    values.path = flags.path;
+    values.follow = flags.follow;
+    values.f = flags.follow;
+    values.lines = flags.lines;
+    values.n = flags.lines;
+    const { exitCode, captured } = await runLegacyAndCollect(() =>
+      commandLogs([], values),
+    );
+    if (exitCode !== 0) {
+      process.exitCode = exitCode;
     }
-    if (flags.path) {
-      // `--path` is a side-channel exit: the user asked for the path,
-      // not the log contents.
-      return {
-        kind: "value" as const,
-        data: {
-          path: filePath,
-          totalLines: 0,
-          lines: [filePath],
-        },
-      };
-    }
-    if (!existsSync(filePath)) {
-      throw new ContextError({
-        message: `No log file found at ${filePath}`,
-        note: "Logs are created when lore starts processing requests.",
-        tryCommand: "lore start",
-      });
-    }
-    const requested = flags.lines;
-    const stat = statSync(filePath);
-    if (!stat.isFile()) {
-      throw new StorageError({
-        message: `Log path ${filePath} is not a regular file.`,
-      });
-    }
-    const content = readFileSync(filePath, "utf-8");
-    const allLines = content.split("\n").filter(Boolean);
-    const tail = allLines.slice(-requested);
-    const hint = flags.follow
-      ? "`--follow` is not yet implemented; output is a one-shot snapshot."
-      : `Showing last ${tail.length} of ${allLines.length} lines.`;
-    return {
-      kind: "value" as const,
-      data: { path: filePath, totalLines: allLines.length, lines: tail },
-      hint,
-    };
+    return { kind: "value" as const, data: captured };
   },
 });

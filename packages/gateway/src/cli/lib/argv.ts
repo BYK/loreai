@@ -39,6 +39,7 @@ export const STRICLI_ROUTES: ReadonlySet<string> = new Set([
   "team",
   "admin",
   "import",
+  "entity",
 ]);
 
 export interface PreprocessResult {
