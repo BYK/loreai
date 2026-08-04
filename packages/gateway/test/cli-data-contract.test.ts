@@ -42,7 +42,7 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
     expect(LEGACY_ROUTES.has("data")).toBe(false);
   });
 
-  test("data declares 9 flags (all, distillations, interactive, json, knowledge, limit, project, temporal, to, yes)", async () => {
+  test("data declares 14 flags (all, distillations, interactive, json, knowledge, limit, project, temporal, to, yes, dry-run, no-children, no-backup, min-confidence)", async () => {
     const { buildApplication, buildRouteMap, run } =
       await import("@stricli/core");
     const { dataCommand } = await import("../src/cli/commands/data");
@@ -79,6 +79,10 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
       "--temporal",
       "--to",
       "--yes",
+      "--dry-run",
+      "--no-children",
+      "--no-backup",
+      "--min-confidence",
     ];
     for (const flag of expected) {
       expect(seen.has(flag), `data help should advertise ${flag}`).toBe(true);
@@ -277,5 +281,193 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
       process.exitCode = priorExitCode;
     }
     expect(capturedExitCode).toBe(20);
+  });
+
+  // F-1 (HIGH): per-flag forwarding tests for the 4 destructive-subcommand
+  // flags. A regression that drops the forwarding line in the handler
+  // for any of these would silently break `data split --no-backup`,
+  // `data move session X --no-children`, etc.
+  test("data forwards --dry-run as values['dry-run']+dryRun", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("dry-run ok");
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = [
+      "node",
+      "lore",
+      "data",
+      "move",
+      "session",
+      "x",
+      "--dry-run",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values["dry-run"]).toBe(true);
+    expect(calls[0]?.values.dryRun).toBe(true);
+    vi.resetModules();
+  });
+
+  test("data forwards --no-children as values['no-children']+noChildren", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("no-children ok");
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = [
+      "node",
+      "lore",
+      "data",
+      "move",
+      "session",
+      "x",
+      "--no-children",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values["no-children"]).toBe(true);
+    expect(calls[0]?.values.noChildren).toBe(true);
+    vi.resetModules();
+  });
+
+  test("data forwards --no-backup as values['no-backup']+noBackup", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("no-backup ok");
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = ["node", "lore", "data", "split", "session", "--no-backup"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values["no-backup"]).toBe(true);
+    expect(calls[0]?.values.noBackup).toBe(true);
+    vi.resetModules();
+  });
+
+  test("data forwards --min-confidence as values['min-confidence']", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("min-confidence ok");
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = [
+      "node",
+      "lore",
+      "data",
+      "split",
+      "session",
+      "--min-confidence",
+      "low",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values["min-confidence"]).toBe("low");
+    vi.resetModules();
+  });
+
+  // F-4 (MEDIUM): 0-positionals reach the legacy handler with []. The
+  // variadic positional schema should accept zero inputs.
+  test("data with no positional reaches legacy handler with []", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("no-positional ok");
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = ["node", "lore", "data"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.positionals).toEqual([]);
+    vi.resetModules();
   });
 });

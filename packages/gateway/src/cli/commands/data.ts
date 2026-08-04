@@ -35,6 +35,15 @@ type DataFlags = {
   temporal: boolean;
   to?: string;
   yes: boolean;
+  // Reviewer F-1 (HIGH): flags read by destructive subcommands.
+  // Without these in the schema, `data split --no-backup` or
+  // `data move session <id> --to /tmp --no-children` would be
+  // rejected with "No flag registered" (exit 20) before reaching
+  // the legacy commandData dispatcher.
+  "dry-run"?: boolean;
+  "no-children"?: boolean;
+  "no-backup"?: boolean;
+  "min-confidence"?: string;
 };
 
 export const dataCommand = buildOutputCommand<
@@ -103,6 +112,31 @@ export const dataCommand = buildOutputCommand<
         brief: "Skip confirmation prompts",
         default: false,
       },
+      // Reviewer F-1 (HIGH): flags used by destructive subcommands.
+      // Declared optional+boolean/string so the legacy OPTIONS table
+      // accepts them without breakage.
+      "dry-run": {
+        kind: "boolean",
+        brief:
+          "Show what would change without writing (data move/split/consolidate/reground)",
+        optional: true,
+      },
+      "no-children": {
+        kind: "boolean",
+        brief: "Don't move/split child entities (data move)",
+        optional: true,
+      },
+      "no-backup": {
+        kind: "boolean",
+        brief: "Don't back up before destructive operations (data split)",
+        optional: true,
+      },
+      "min-confidence": {
+        kind: "parsed",
+        parse: String,
+        brief: "Minimum confidence threshold for split operations (data split)",
+        optional: true,
+      },
     },
     positional: {
       kind: "array",
@@ -127,6 +161,25 @@ export const dataCommand = buildOutputCommand<
     if (flags.temporal) values.temporal = true;
     if (flags.to !== undefined) values.to = flags.to;
     if (flags.yes) values.yes = true;
+    // F-1 (HIGH): forward the 4 flags used by destructive subcommands.
+    // Populate BOTH kebab-case and camelCase forms so the legacy
+    // handler's existing checks work unchanged (matches the import.ts
+    // dual-form pattern established in PR #1570).
+    if (flags["dry-run"]) {
+      values["dry-run"] = true;
+      values.dryRun = true;
+    }
+    if (flags["no-children"]) {
+      values["no-children"] = true;
+      values.noChildren = true;
+    }
+    if (flags["no-backup"]) {
+      values["no-backup"] = true;
+      values.noBackup = true;
+    }
+    if (flags["min-confidence"] !== undefined) {
+      values["min-confidence"] = flags["min-confidence"];
+    }
     // --json auto-injection forwarded (legacy gates JSON output on flags.json).
     if ((flags as { json?: boolean }).json) values.json = true;
     const { exitCode, captured } = await runLegacyAndCollect(() =>
