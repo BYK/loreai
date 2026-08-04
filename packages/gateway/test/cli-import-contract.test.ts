@@ -281,4 +281,99 @@ describe("Phase 3D.3e — typed lore import", () => {
     expect(capturedExitCode).toBe(1);
     vi.resetModules();
   });
+
+  // F-1 (HIGH wire-level): -y short alias must reach the legacy
+  // handler as values.yes = true. The legacy OPTIONS table declares
+  // `yes: { type: "boolean", short: "y" }`; the typed schema must
+  // include `aliases: { y: "yes" }` to match.
+  test("import forwards -y short alias as values.yes = true", async () => {
+    vi.resetModules();
+    const calls: ImportCall[] = [];
+    const importImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("yes-via-short-alias");
+      },
+    );
+    vi.doMock("../src/cli/import", () => ({
+      commandImport: importImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = ["node", "lore", "import", "-y", "--dry-run"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(importImpl).toHaveBeenCalledTimes(1);
+    expect(calls[0]?.values.yes).toBe(true);
+    // CamelCase alias of `dry-run` flag also forwarded.
+    expect(calls[0]?.values["dry-run"]).toBe(true);
+    expect(calls[0]?.values.dryRun).toBe(true);
+    vi.resetModules();
+  });
+
+  // F-2: wire-level coverage for the remaining 5 mem0-* flags. The
+  // main forwarding test exercises mem0-qdrant only; this test
+  // asserts the other 5 reach the legacy handler.
+  test("import forwards all 5 mem0-* string flags", async () => {
+    vi.resetModules();
+    const calls: ImportCall[] = [];
+    const importImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+        console.log("mem0 ok");
+      },
+    );
+    vi.doMock("../src/cli/import", () => ({
+      commandImport: importImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = [
+      "node",
+      "lore",
+      "import",
+      "--mem0-qdrant",
+      "http://q",
+      "--mem0-collection",
+      "coll",
+      "--mem0-server",
+      "http://s",
+      "--mem0-token",
+      "tk",
+      "--mem0-path",
+      "/tmp/p",
+      "--mem0-user",
+      "u",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(importImpl).toHaveBeenCalledTimes(1);
+    expect(calls[0]?.values["mem0-qdrant"]).toBe("http://q");
+    expect(calls[0]?.values["mem0-collection"]).toBe("coll");
+    expect(calls[0]?.values["mem0-server"]).toBe("http://s");
+    expect(calls[0]?.values["mem0-token"]).toBe("tk");
+    expect(calls[0]?.values["mem0-path"]).toBe("/tmp/p");
+    expect(calls[0]?.values["mem0-user"]).toBe("u");
+    vi.resetModules();
+  });
 });

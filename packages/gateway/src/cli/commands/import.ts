@@ -53,6 +53,9 @@ export const importCommand = buildOutputCommand<string, ImportFlags, []>({
     "and --mem0-* provider config. No positionals. " +
     "--json emits a structured envelope.",
   parameters: {
+    // Single-character flag alias: -y → --yes (matching the legacy
+    // OPTIONS table's `yes: { type: "boolean", short: "y" }`).
+    aliases: { y: "yes" },
     flags: {
       "dry-run": {
         kind: "boolean",
@@ -61,7 +64,7 @@ export const importCommand = buildOutputCommand<string, ImportFlags, []>({
       },
       yes: {
         kind: "boolean",
-        brief: "Skip confirmation prompts",
+        brief: "Skip confirmation prompts (alias: -y)",
         default: false,
       },
       agent: {
