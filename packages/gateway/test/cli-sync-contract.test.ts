@@ -37,6 +37,17 @@ describe("Phase 3D.3b — typed lore sync", () => {
     expect(LEGACY_ROUTES.has("sync")).toBe(false);
   });
 
+  // M4 attempt: pin the actual binding in app.ts (catches typos like
+  // `sync: synCommand` that pass the STRICLI_ROUTES assertion).
+  // Stricli's RouteMap wraps the children-routes object via a
+  // closure / prototype lookup rather than an own property, so direct
+  // property access (`routes.sync`) returns undefined. Skip this
+  // assertion — the integration test below (forwarding positional
+  // subcommand to legacy handler) catches the binding at runtime by
+  // asserting `syncImpl` was called, which is only possible if the
+  // route is correctly wired.
+  test.skip("app.routes.sync is wired to syncCommand (skip: Stricli RouteMap is opaque)", async () => {});
+
   test("sync declares a positional schema (one optional positional)", async () => {
     const { buildApplication, buildRouteMap, run } =
       await import("@stricli/core");
@@ -208,5 +219,46 @@ describe("Phase 3D.3b — typed lore sync", () => {
     }
     // The remapping sets process.exitCode = 20 (UsageError).
     expect(capturedExitCode).toBe(20);
+  });
+
+  // H1: the typed sync wrapper must propagate the legacy handler's
+  // exit code (e.g., `lore sync bogus` exits 1, not 0). The bridge
+  // clears process.exitCode before returning, so the wrapper must use
+  // the returned exitCode value (not read process.exitCode).
+  test("sync propagates the legacy handler's exit code (H1)", async () => {
+    vi.resetModules();
+    const syncImpl = vi.fn(async () => {
+      // commandSync stamps process.exitCode = 1 for unknown
+      // subcommands (sync-cmd.ts:41). The bridge captures the
+      // exitCode value before restoring process.exitCode.
+      process.exitCode = 1;
+      console.error('Unknown sync subcommand "bogus".');
+    });
+    vi.doMock("../src/cli/sync-cmd", () => ({
+      commandSync: syncImpl,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    process.argv = ["node", "lore", "sync", "bogus"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      logSpy.mockRestore();
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(syncImpl).toHaveBeenCalledTimes(1);
+    // The legacy handler stamped exit code 1 — the typed wrapper
+    // must surface this so CI pipelines and agents detect the
+    // failure.
+    expect(capturedExitCode).toBe(1);
+    vi.resetModules();
   });
 });

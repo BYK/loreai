@@ -55,7 +55,15 @@ export const syncCommand = buildOutputCommand<string, SyncFlags, [string?]>({
     const { exitCode, captured } = await runLegacyAndCollect(() =>
       commandSync(typeof sub === "string" ? [sub] : [], {}),
     );
-    if (exitCode !== 0 && process.exitCode === 0) {
+    // Propagate the legacy handler's exit code. runLegacyAndCollect
+    // restores process.exitCode to its prior value (typically
+    // undefined) before returning, so we must use the exitCode returned
+    // by the bridge — NOT process.exitCode (which is now restored).
+    // The earlier `if (... && process.exitCode === 0)` guard silently
+    // dropped every non-zero exit code because the bridge always
+    // clears process.exitCode to undefined before returning (H1 +
+    // Seer MEDIUM #3708574324).
+    if (exitCode !== 0) {
       process.exitCode = exitCode;
     }
     return { kind: "value" as const, data: captured };

@@ -46,9 +46,20 @@ export async function runCli(): Promise<void> {
             ? chunk.toString("utf8")
             : String(chunk);
       if (
+        // Stricli 1.2.8's actual scanner-error wordings (verified in
+        // node_modules/.pnpm/@stricli+core@1.2.8/dist/index.cjs lines
+        // 312–507, 1134–1135):
+        //   FlagNotFoundError:        "No flag registered for --X"
+        //   UnsatisfiedFlagError:      "Expected input for flag --X"
+        //   UnsatisfiedFlagError:      "...but encountered --Y instead"
+        //   UnexpectedPositionalError: "Too many arguments, expected N but encountered \"X\""
+        //   UnsatisfiedPositionalError:"Expected at least N argument(s) for X"
+        //   AliasNotFoundError:        "No alias registered for -X"
+        // We match the substring of the first two and a tail of the
+        // third because the full wording wraps the user's input.
+        /No (flag|alias) registered for/i.test(text) ||
         /expected (at most|.*but encountered)/i.test(text) ||
-        /No flag registered for --/.test(text) ||
-        /Unknown (flag|positional|argument)/i.test(text)
+        /expected (input for (flag|argument)|.*argument(s)? for )/i.test(text)
       ) {
         scannerErrorDetected = true;
       }
