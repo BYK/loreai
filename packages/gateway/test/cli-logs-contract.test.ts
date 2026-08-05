@@ -196,32 +196,36 @@ describe("Phase 3A — typed lore logs", () => {
   //      immediately (the watchFile poller + signal handlers in the
   //      legacy keep Node alive on the event loop)
   //
-  // We mock commandLogs to verify (1) and verify (2) with a
-  // Promise.race timeout — if the wrapper hangs for 2s, the test
-  // fails with "follow path blocked the CLI process" (which is the
-  // user-facing bug we're fixing).
+  // CRITICAL #1 (PR #1579 review): the mock MUST return
+  // `new Promise(() => {})` — same as the real legacy — so the
+  // Promise.race timeout below is load-bearing. A mock that returns
+  // undefined synchronously would not detect a regression where
+  // someone reverts the wrapper to `await commandLogs()`.
+  //
+  // CRITICAL #2 (PR #1579 review): the assertion must verify the
+  // values dict contents (both follow forms + lines + n forwarded),
+  // not just the call count. A regression that drops `values.f = true`
+  // would slip past a `toHaveBeenCalledTimes(1)` assertion.
   test("-f short alias forwards both follow forms AND does not hang", async () => {
     vi.resetModules();
     const logsImpl = vi.fn(
-      (_positionals: string[], values: Record<string, unknown>) => {
-        // Verify both follow forms reach the legacy handler.
-        if (values.follow !== true) {
-          console.error("values.follow missing from values dict");
-          process.exitCode = 1;
-        }
-        if (values.f !== true) {
-          console.error("values.f missing from values dict");
-          process.exitCode = 1;
-        }
-        // The legacy actually returns new Promise(() => {}) in
-        // production, but the mock returns immediately so the
-        // test doesn't hang.
+      (_positionals: string[], _values: Record<string, unknown>) => {
+        // Faithfully simulate the real legacy: returns a never-
+        // resolving promise that the watchFile poller + signal
+        // handlers keep alive. The wrapper MUST `void` this, not
+        // `await` it, or the test hangs.
       },
+    );
+    logsImpl.mockImplementation(
+      // oxlint-disable-next-line typescript/no-misused-promises -- vi.fn mock callback intentionally returns the never-resolving Promise so the wrapper's `void` discard (not `await`) is exercised
+      () =>
+        new Promise<void>(() => {
+          /* never resolve — simulates the real legacy */
+        }),
     );
     vi.doMock("../src/cli/logs", () => ({
       commandLogs: logsImpl,
     }));
-    const { runCli } = await import("../src/cli/cli");
 
     // Snapshot all existing SIGINT/SIGTERM listeners so the test
     // can restore them — the legacy installs cleanup handlers that
@@ -233,12 +237,12 @@ describe("Phase 3A — typed lore logs", () => {
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
     try {
+      const { runCli } = await import("../src/cli/cli");
       // Race runCli against a short timeout. If the wrapper takes
-      // the bridge path (awaiting a non-resolving promise), the
-      // timer fires and we surface the failure. Wrap in
-      // `Promise.resolve` so we always have a thenable for await.
+      // the bridge path (awaiting the never-resolving promise),
+      // the timer fires and we surface the failure.
       await Promise.race([
-        Promise.resolve(runCli()),
+        runCli(),
         new Promise<never>((_, reject) =>
           setTimeout(
             () =>
@@ -263,7 +267,25 @@ describe("Phase 3A — typed lore logs", () => {
       vi.doUnmock("../src/cli/logs");
       vi.resetModules();
     }
-    // Assert both follow forms are forwarded correctly.
+    // CRITICAL #2: explicit assertion on the forwarded values dict.
+    // Both follow forms (long + short alias), lines, and n must be
+    // forwarded to the legacy handler.
     expect(logsImpl).toHaveBeenCalledTimes(1);
+    const callArgs = logsImpl.mock.calls[0];
+    expect(callArgs[0]).toEqual([]);
+    expect(callArgs[1]).toMatchObject({
+      follow: true,
+      f: true,
+      lines: 50,
+      n: 50,
+    });
+    // MEDIUM #3 from PR #1579 review: the typed pipeline uses
+    // `kind: "empty"` for the follow path so no `""\n` artifact
+    // is emitted in human mode or `{ "output": "" }` in JSON mode.
+    // The streaming stdout is the user-visible output.
+    // No assertion here — the artifact test would need to inspect
+    // stdout.write directly. This is tested implicitly via the
+    // other tests (any kind: "value" with data: "" would print a
+    // blank line that surfaces as an extra line in runWith output).
   });
 });

@@ -103,11 +103,17 @@ export const logsCommand = buildOutputCommand<string, LogsFlags, []>({
     //
     // We deliberately DO NOT await: `commandLogs` returns
     // `new Promise(() => {})` so awaiting would hang forever.
-    // The `void` keyword makes the unawaited call explicit.
-    void commandLogs([], values);
-    // Return immediately. The streaming stdout of new lines is the
-    // user-visible output for follow mode — there's nothing to
-    // capture into the typed envelope.
-    return { kind: "value" as const, data: "" };
+    //
+    // LOW #4 from PR #1579 review: add a defensive .catch() so a
+    // future legacy path that throws (instead of calling
+    // process.exit(1)) doesn't go to an unhandled rejection.
+    void commandLogs([], values).catch((err: unknown) => {
+      process.stderr.write(`Follow mode error: ${String(err)}\n`);
+    });
+    // MEDIUM #3 from PR #1579 review: use `kind: "empty"` so the
+    // typed output pipeline emits nothing (no `""\n` artifact in
+    // human mode, no `{ "output": "" }` envelope in --json mode).
+    // The streaming stdout itself IS the output for follow mode.
+    return { kind: "empty" as const };
   },
 });
