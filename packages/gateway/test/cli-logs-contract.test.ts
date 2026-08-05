@@ -186,44 +186,106 @@ describe("Phase 3A — typed lore logs", () => {
     expect(stdout).toContain("No log file found");
   });
 
-  // Phase 3D.4b: -f short alias must reach the legacy handler as
-  // values.follow=true AND values.f=true. Without `aliases: { f:
-  // "follow" }` at parameters level, Stricli rejects -f with "No
-  // alias registered for -f" (the bug the user hit).
-  test("-f short alias reaches legacy handler as follow=true", async () => {
-    // Mock the legacy handler to track what flags reach it. We
-    // can't actually run a 5-second follow loop in a unit test, so
-    // we mock commandLogs to immediately exit.
+  // Phase 3D.4b (-f fix): the follow path bypasses the bridge because
+  // the legacy returns `new Promise(() => {})` (never-resolving)
+  // which would hang `runLegacyAndCollect` forever. The typed
+  // wrapper should:
+  //   1. Forward values.follow=true AND values.f=true to the legacy
+  //      (matches what the legacy CLI has always accepted)
+  //   2. Invoke the legacy WITHOUT awaiting so control returns
+  //      immediately (the watchFile poller + signal handlers in the
+  //      legacy keep Node alive on the event loop)
+  //
+  // CRITICAL #1 (PR #1579 review): the mock MUST return
+  // `new Promise(() => {})` — same as the real legacy — so the
+  // Promise.race timeout below is load-bearing. A mock that returns
+  // undefined synchronously would not detect a regression where
+  // someone reverts the wrapper to `await commandLogs()`.
+  //
+  // CRITICAL #2 (PR #1579 review): the assertion must verify the
+  // values dict contents (both follow forms + lines + n forwarded),
+  // not just the call count. A regression that drops `values.f = true`
+  // would slip past a `toHaveBeenCalledTimes(1)` assertion.
+  test("-f short alias forwards both follow forms AND does not hang", async () => {
+    vi.resetModules();
     const logsImpl = vi.fn(
-      async (_positionals: string[], values: Record<string, unknown>) => {
-        // Verify both follow forms are forwarded by the typed wrapper.
-        if (values.follow !== true) {
-          console.error("follow flag missing from values dict");
-          process.exitCode = 1;
-        }
-        if (values.f !== true) {
-          console.error("f (short alias) flag missing from values dict");
-          process.exitCode = 1;
-        }
-        console.log("follow-mode would start here");
+      (_positionals: string[], _values: Record<string, unknown>) => {
+        // Faithfully simulate the real legacy: returns a never-
+        // resolving promise that the watchFile poller + signal
+        // handlers keep alive. The wrapper MUST `void` this, not
+        // `await` it, or the test hangs.
       },
     );
-    vi.resetModules();
+    logsImpl.mockImplementation(
+      // oxlint-disable-next-line typescript/no-misused-promises -- vi.fn mock callback intentionally returns the never-resolving Promise so the wrapper's `void` discard (not `await`) is exercised
+      () =>
+        new Promise<void>(() => {
+          /* never resolve — simulates the real legacy */
+        }),
+    );
     vi.doMock("../src/cli/logs", () => ({
       commandLogs: logsImpl,
     }));
-    const { runCli } = await import("../src/cli/cli");
+
+    // Snapshot all existing SIGINT/SIGTERM listeners so the test
+    // can restore them — the legacy installs cleanup handlers that
+    // would otherwise pollute the process.
+    const priorSigint = process.listeners("SIGINT").slice();
+    const priorSigterm = process.listeners("SIGTERM").slice();
+
     process.argv = ["node", "lore", "logs", "-f"];
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
-    let capturedExitCode: number | undefined;
     try {
-      await runCli();
-      capturedExitCode = process.exitCode;
+      const { runCli } = await import("../src/cli/cli");
+      // Race runCli against a short timeout. If the wrapper takes
+      // the bridge path (awaiting the never-resolving promise),
+      // the timer fires and we surface the failure.
+      await Promise.race([
+        runCli(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "follow path blocked the CLI process >2s — typed wrapper is awaiting the legacy's non-resolving watchFile promise",
+                ),
+              ),
+            2000,
+          ),
+        ),
+      ]);
     } finally {
+      // Strip any signal handlers the legacy installed.
+      for (const l of process.listeners("SIGINT")) {
+        if (!priorSigint.includes(l)) process.removeListener("SIGINT", l);
+      }
+      for (const l of process.listeners("SIGTERM")) {
+        if (!priorSigterm.includes(l)) process.removeListener("SIGTERM", l);
+      }
       process.exitCode = priorExitCode;
+      vi.doUnmock("../src/cli/logs");
+      vi.resetModules();
     }
+    // CRITICAL #2: explicit assertion on the forwarded values dict.
+    // Both follow forms (long + short alias), lines, and n must be
+    // forwarded to the legacy handler.
     expect(logsImpl).toHaveBeenCalledTimes(1);
-    expect(capturedExitCode).toBe(0);
+    const callArgs = logsImpl.mock.calls[0];
+    expect(callArgs[0]).toEqual([]);
+    expect(callArgs[1]).toMatchObject({
+      follow: true,
+      f: true,
+      lines: 50,
+      n: 50,
+    });
+    // MEDIUM #3 from PR #1579 review: the typed pipeline uses
+    // `kind: "empty"` for the follow path so no `""\n` artifact
+    // is emitted in human mode or `{ "output": "" }` in JSON mode.
+    // The streaming stdout is the user-visible output.
+    // No assertion here — the artifact test would need to inspect
+    // stdout.write directly. This is tested implicitly via the
+    // other tests (any kind: "value" with data: "" would print a
+    // blank line that surfaces as an extra line in runWith output).
   });
 });
