@@ -1,18 +1,21 @@
 /**
  * `lore logs` — view the persistent activity log.
  *
- * Phase 3D.4b fix: delegates to the legacy `commandLogs` via the shared
- * `runLegacyAndCollect` bridge. The legacy handler implements the
- * follow-mode (`-f` / `--follow`) using `fs.watchFile` polling at 300ms
- * intervals and emits new content as it arrives. The typed wrapper
- * used to re-implement a one-shot `readFileSync` snapshot that silently
- * dropped `--follow`, which made the advertised `-f` alias reject.
+ * Two execution paths:
  *
- * Output shape:
- *   - human: rendered legacy text
- *   - JSON:  { output: <captured stdout> }
+ * 1. Default / non-follow: delegates to the legacy `commandLogs` via
+ *    the shared `runLegacyAndCollect` bridge. The legacy's initial
+ *    read is fully synchronous, so the bridge awaits cleanly.
  *
- * Exit codes: legacy semantics preserved.
+ * 2. Follow (`-f` / `--follow`): the legacy returns
+ *    `new Promise(() => {})` after installing watchFile + signal
+ *    handlers to block forever. The bridge can't await a
+ *    non-resolving promise, so we invoke the legacy WITHOUT the
+ *    bridge wrapper. The initial tail is printed synchronously to
+ *    stdout; the watchFile poller streams new lines; the default
+ *    SIGINT handler exits on Ctrl-C.
+ *
+ * Both paths accept the documented flags.
  */
 import { buildOutputCommand } from "../lib/command";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
@@ -61,22 +64,50 @@ export const logsCommand = buildOutputCommand<string, LogsFlags, []>({
     toJson: (data) => ({ output: data }),
   },
   async handler(flags) {
-    // Forward all flags to the legacy handler, which reads `flags.n`
-    // OR `flags.lines` AND `flags.f` OR `flags.follow`. We populate
-    // BOTH kebab-case and camelCase forms so the legacy handler's
-    // existing `values.f || values.follow` checks work unchanged.
+    // Forward both kebab-case and camelCase forms so the legacy
+    // handler's existing `values.f || values.follow` /
+    // `values.n || values.lines` checks work unchanged.
     const values: Record<string, unknown> = {};
     values.path = flags.path;
     values.follow = flags.follow;
     values.f = flags.follow;
     values.lines = flags.lines;
     values.n = flags.lines;
-    const { exitCode, captured } = await runLegacyAndCollect(() =>
-      commandLogs([], values),
-    );
-    if (exitCode !== 0) {
-      process.exitCode = exitCode;
+
+    if (!flags.follow) {
+      // Non-follow path: bridge wrapper. The legacy's initial read is
+      // synchronous and returns cleanly.
+      const { exitCode, captured } = await runLegacyAndCollect(() =>
+        commandLogs([], values),
+      );
+      if (exitCode !== 0) {
+        process.exitCode = exitCode;
+      }
+      return { kind: "value" as const, data: captured };
     }
-    return { kind: "value" as const, data: captured };
+
+    // Follow path: the legacy `commandLogs` returns
+    // `new Promise(() => {})` to block forever — the watchFile
+    // poller + SIGINT/SIGTERM handlers (in the legacy itself) keep
+    // Node alive on the event loop. The bridge can't await a
+    // non-resolving promise, so we run the legacy WITHOUT the
+    // bridge wrapper. The legacy's initial read is fully
+    // synchronous (lines 62-68 of packages/gateway/src/cli/logs.ts):
+    // it reads the file, splits on \n, and console.logs the tail
+    // before returning the watchFile promise. By the time we reach
+    // the void-call below, the initial-tail output has already
+    // written to stdout (real stdout, not the bridge's captured
+    // channel — because we bypassed it). The watchFile poll
+    // continues in the background, and the default SIGINT handler
+    // exits the process when the user presses Ctrl-C.
+    //
+    // We deliberately DO NOT await: `commandLogs` returns
+    // `new Promise(() => {})` so awaiting would hang forever.
+    // The `void` keyword makes the unawaited call explicit.
+    void commandLogs([], values);
+    // Return immediately. The streaming stdout of new lines is the
+    // user-visible output for follow mode — there's nothing to
+    // capture into the typed envelope.
+    return { kind: "value" as const, data: "" };
   },
 });
