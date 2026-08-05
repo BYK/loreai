@@ -53,7 +53,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
-| `LORE_BEDROCK_REGION` | AWS Bedrock region (selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint). Default: "us-east-1". Env: LORE_BEDROCK_REGION |
+| `LORE_BEDROCK_REGION` | AWS Bedrock region. Selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint. Resolves from `LORE_BEDROCK_REGION` first, then falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`, finally defaulting to `"us-east-1"`. Env: LORE_BEDROCK_REGION |
 | `LORE_DEBUG`<br>**Parser:** `isTruthy` | Whether to log requests. Default: false. Env: LORE_DEBUG |
 | `LORE_IDLE_TIMEOUT`<br>**Default:** `parsePositiveInt(60)`<br>**Parser:** `parsePositiveInt` | Idle timeout in seconds. After this many seconds with no active request, the gateway stops the per-session in-memory cache warmer and distillation loop to free resources. State is preserved in the DB so a new request resumes from where the session left off. Default: 60. Env: `LORE_IDLE_TIMEOUT`. |
 | `LORE_LISTEN_HOST`<br>**Parser:** `parseHosts` | Hosts to bind to. Default: ["127.0.0.1"]. Env: LORE_LISTEN_HOST (comma-separated for multiple addresses). CLI: --host (can be specified multiple times, or comma-separated). |

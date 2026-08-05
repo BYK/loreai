@@ -61,6 +61,15 @@ describe("BEDROCK_RUNTIME_PATH_RE", () => {
       "/v1/model/us.anthropic.claude-haiku-4-5/invoke-with-response-stream",
       "invoke-with-response-stream",
     ],
+    // Version-suffix colons — provisioned-throughput / custom-model-import
+    // IDs always carry a `:vN` suffix. The regex must accept `:` in the
+    // modelId segment; otherwise these requests 404 at the gateway instead
+    // of reaching the upstream (regression that shipped in #1575, fixed by
+    // widening the modelId class to `[a-zA-Z0-9._:-]`).
+    [
+      "/v1/model/anthropic.claude-opus-4-5-20251101-v1:0/converse-stream",
+      "converse-stream",
+    ],
   ])("matches %s (verb=%s)", (path) => {
     expect(BEDROCK_RUNTIME_PATH_RE.test(path)).toBe(true);
   });
@@ -70,6 +79,14 @@ describe("BEDROCK_RUNTIME_PATH_RE", () => {
       "/v1/model/google.gemma-3-4b-it/converse-stream",
     );
     expect(m?.[1]).toBe("google.gemma-3-4b-it");
+    expect(m?.[2]).toBe("converse-stream");
+  });
+
+  test("captures modelId with version-suffix colon", () => {
+    const m = BEDROCK_RUNTIME_PATH_RE.exec(
+      "/v1/model/anthropic.claude-opus-4-5-20251101-v1:0/converse-stream",
+    );
+    expect(m?.[1]).toBe("anthropic.claude-opus-4-5-20251101-v1:0");
     expect(m?.[2]).toBe("converse-stream");
   });
 
@@ -95,6 +112,23 @@ describe("BEDROCK_RUNTIME_PATH_RE", () => {
     expect(BEDROCK_RUNTIME_PATH_RE.test("/v1/model/foo/bar/converse")).toBe(
       false,
     );
+  });
+
+  // Each row is a path that MUST be rejected. The colon widening in
+  // [a-zA-Z0-9._:-] is intentional — AWS permits version-suffix colons at
+  // ANY position in the modelId segment (e.g. `foo:`, `:foo`, `foo::bar`),
+  // and the regex does not enforce positional semantics. So those rows
+  // are NOT included here; only paths the gateway must reject because
+  // they introduce path-breaking characters (`/`, whitespace, `%`, etc.)
+  // or break the `/v1/model/<modelId>/<verb>` shape.
+  test.each([
+    ["empty modelId", "/v1/model//converse"],
+    ["whitespace in modelId", "/v1/model/foo bar/converse"],
+    ["percent in modelId", "/v1/model/foo%3Abar/converse"],
+    ["trailing slash after verb", "/v1/model/foo/converse/"],
+    ["trailing colon and missing verb", "/v1/model/foo:converse-stream"],
+  ])("rejects %s (%s)", (_label, path) => {
+    expect(BEDROCK_RUNTIME_PATH_RE.test(path)).toBe(false);
   });
 
   test("exposes the verb allowlist", () => {
@@ -262,6 +296,109 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
     // The client receives the upstream response verbatim.
     const text = await resp.text();
     expect(text).toContain("ok from runtime");
+  });
+
+  test("forwards a modelId with version-suffix colon (e2e regression for #1575 follow-up)", async () => {
+    const dbPath = `/tmp/lore-bedrock-runtime-colon-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    process.env.LORE_DB_PATH = dbPath;
+    process.env.LORE_LISTEN_PORT = "0";
+    process.env.LORE_BEDROCK_REGION = "us-east-1";
+    if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
+
+    const upstreamOrigin = "https://bedrock-runtime.us-east-1.amazonaws.com";
+    // Provisioned-throughput / custom-model-import IDs always carry a `:vN`
+    // suffix. The original PR #1575 shipped a regex character class that
+    // excluded `:`, so requests for these IDs 404'd at the gateway before
+    // reaching the upstream. The follow-up widened the class to
+    // `[a-zA-Z0-9._:-]` — this test pins the end-to-end path through the
+    // URL builder + forwarder so the regression cannot re-ship silently.
+    const modelId = "anthropic.claude-opus-4-5-20251101-v1:0";
+    const verb = "converse";
+    const captured: {
+      method?: string;
+      path?: string;
+      auth?: string;
+      body?: string;
+    } = {};
+
+    mock = new MockAgent();
+    mock.disableNetConnect();
+    mock
+      .get(upstreamOrigin)
+      .intercept({ path: () => true, method: "POST" })
+      .reply((opts) => {
+        captured.method = opts.method;
+        captured.path = opts.path;
+        const h = opts.headers as Record<string, string>;
+        captured.auth = h.authorization ?? h.Authorization;
+        captured.body =
+          opts.body == null
+            ? ""
+            : Buffer.isBuffer(opts.body)
+              ? opts.body.toString("utf8")
+              : opts.body instanceof Uint8Array
+                ? Buffer.from(opts.body).toString("utf8")
+                : JSON.stringify(opts.body);
+        return {
+          statusCode: 200,
+          data: JSON.stringify({
+            output: {
+              message: { role: "assistant", content: [{ text: "ok" }] },
+            },
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          }),
+          responseOptions: { headers: { "content-type": "application/json" } },
+        };
+      })
+      .persist();
+    setUpstreamDispatcherForTest(mock);
+
+    closeDB();
+    await resetPipelineState();
+
+    const config = loadConfig();
+    const server = await startServer(config);
+    const baseURL = `http://127.0.0.1:${server.port}`;
+
+    teardownFn = () => {
+      server.stop();
+      closeDB();
+      for (const suffix of ["", "-shm", "-wal"]) {
+        const f = `${dbPath}${suffix}`;
+        try {
+          if (existsSync(f)) unlinkSync(f);
+        } catch {
+          // best-effort
+        }
+      }
+    };
+
+    const resp = await fetch(`${baseURL}/v1/model/${modelId}/${verb}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer bedrock-api-key-test",
+      },
+      body: "{}",
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(
+        `expected ok=true but got status=${resp.status} body=${text}`,
+      );
+    }
+    expect(resp.ok).toBe(true);
+
+    // The colon in the modelId is preserved verbatim into the upstream path.
+    // The AWS-runtime destination URL is structurally `/model/<id>/<verb>`
+    // with no URL-encoding of the colon — verify the builder + forwarder
+    // emit the same shape the AWS SDK would produce.
+    expect(captured.method).toBe("POST");
+    expect(captured.path).toBe(`/model/${modelId}/${verb}`);
+    expect(captured.auth).toBe("Bearer bedrock-api-key-test");
+    expect(captured.body).toBe("{}");
   });
 
   test("streams a converse-stream response (AWS event-stream passthrough)", async () => {
