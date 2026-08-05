@@ -188,7 +188,7 @@
 <tbody>
 <tr>
 <td><code dir="auto">LORE_BEDROCK_REGION</code></td>
-<td>AWS Bedrock region (selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint). Default: “us-east-1”. Env: LORE_BEDROCK_REGION</td>
+<td>AWS Bedrock region. Selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint. Resolves from <code dir="auto">LORE_BEDROCK_REGION</code> first, then falls back to <code dir="auto">AWS_REGION</code> / <code dir="auto">AWS_DEFAULT_REGION</code>, finally defaulting to <code dir="auto">"us-east-1"</code>. Env: LORE_BEDROCK_REGION</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_DEBUG</code><br><strong>Parser:</strong> <code dir="auto">isTruthy</code></td>
