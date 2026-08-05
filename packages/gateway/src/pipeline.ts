@@ -174,6 +174,12 @@ import {
   accumulateResponsesSSEStream,
   streamResponsesPassthrough,
   translateAnthropicStreamToResponses,
+  applyResponsesEvent,
+  finalizeResponsesAcc,
+  formatResponsesEvent,
+  makeResponsesAccState,
+  mapStatusFromStopReason,
+  type ResponsesAccState,
 } from "./stream/openai-responses";
 import {
   accumulateOpenAISSEStream,
@@ -5192,6 +5198,655 @@ function buildStreamingResponse(
 }
 
 /**
+ * True-streaming, recall-aware variant of `streamResponsesPassthrough` for the
+ * OpenAI Responses API (codex/ChatGPT) — used when the request carries the
+ * gateway-injected `recall` tool but the client speaks the Responses API.
+ *
+ * Unlike the buffered `accumulateResponsesSSEStream` path (which withholds ALL
+ * client bytes until the entire slow reasoning-heavy upstream completes — the
+ * cause of opencode's 10s `ProviderHeaderTimeoutError`), this function forwards
+ * every upstream SSE event to the client AS IT ARRIVES, while transparently
+ * intercepting a `recall` `function_call` output item:
+ *
+ *  - **No recall**: forwards everything unchanged (identical to
+ *    `streamResponsesPassthrough`).
+ *  - **Recall + other tools (mixed)**: suppresses the recall item and its
+ *    flow events, emits a synthetic marker text item, then rebuilds the
+ *    terminal `response.completed` reflecting only client-visible output.
+ *  - **Recall only**: suppresses the recall item, emits a synthetic marker
+ *    text item, runs the (streaming) recall follow-up, pipes the continuation
+ *    events inline continuing the `output_index` numbering, then rebuilds the
+ *    terminal `response.completed` reflecting marker + continuation.
+ *
+ * `onComplete` mirrors `streamResponsesPassthrough` (invoked exactly once with
+ * the accumulated internal response for `postResponse`/calibration).
+ *
+ * The recall execution callback abstracts the pipeline-scope dependencies
+ * (`executeRecall` + follow-up forwarding + recall store), so this function
+ * stays a self-contained streamer in the Responses module.
+ */
+export function streamResponsesRecallAware(
+  upstreamResponse: Response,
+  opts: {
+    onComplete: (response: GatewayResponse) => void;
+    sessionID?: string;
+    /**
+     * Called when a `recall` function_call is fully parsed. Runs the recall
+     * (LTM search + optional LLM result) and returns the pieces needed to
+     * deliver the marker + continuation to the client:
+     *  - `markerText`: the `buildRecallMarker(...)` text emission.
+     *  - `resultText`: the raw recall result string (for the follow-up).
+     * Return null to abort (emits a marker-only response).
+     */
+    onRecall: (input: {
+      query: string;
+      scope?: string;
+      id?: string;
+      /** The accumulated response INCLUDING the recall tool_use, so the caller
+       *  can build the follow-up request from the same accumulation the
+       *  streamer uses. */
+      acc: GatewayResponse;
+    }) => Promise<{
+      markerText: string;
+      resultText: string;
+    } | null>;
+    /** Streaming follow-up stage: build + forward + assert-SSE + reader. */
+    runFollowUp: (ctx: {
+      markerText: string;
+      resultText: string;
+      acc: GatewayResponse;
+    }) => Promise<{
+      reader: ReadableStreamDefaultReader<Uint8Array>;
+    }>;
+  },
+): Response {
+  const state = makeResponsesAccState();
+  const encoder = new TextEncoder();
+  const sessionID = opts.sessionID;
+
+  let cancelled = false;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  // --- Keepalive (same as streamResponsesPassthrough) ---
+  const KEEPALIVE_INACTIVITY_MS = 30_000;
+  const keepaliveComment = encoder.encode(`: keepalive\n\n`);
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+  let completed = false;
+
+  const finish = (resp: GatewayResponse): void => {
+    if (completed) return;
+    completed = true;
+    try {
+      opts.onComplete(resp);
+    } catch (err) {
+      log.error("openai-responses recall-aware onComplete error:", err);
+    }
+  };
+
+  /**
+   * Serialize a synthetic Responses output_text item as its SSE flow events
+   * (`output_item.added`, `content_part.added`, repeated `output_text.delta`,
+   * `output_text.done`, `content_part.done`, `output_item.done`).
+   */
+  function emitTextItem(
+    outputIndex: number,
+    text: string,
+    itemId = `msg_${state.id || "lore"}_${outputIndex}`,
+  ): string {
+    return (
+      formatResponsesEvent(
+        "response.output_item.added",
+        JSON.stringify({
+          type: "response.output_item.added",
+          output_index: outputIndex,
+          item: {
+            type: "message",
+            id: itemId,
+            role: "assistant",
+            status: "in_progress",
+            content: [],
+          },
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.content_part.added",
+        JSON.stringify({
+          type: "response.content_part.added",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          part: { type: "output_text", text: "", annotations: [] },
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.output_text.delta",
+        JSON.stringify({
+          type: "response.output_text.delta",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          delta: text,
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.output_text.done",
+        JSON.stringify({
+          type: "response.output_text.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          text,
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.content_part.done",
+        JSON.stringify({
+          type: "response.content_part.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          part: { type: "output_text", text, annotations: [] },
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.output_item.done",
+        JSON.stringify({
+          type: "response.output_item.done",
+          output_index: outputIndex,
+          item: {
+            type: "message",
+            id: itemId,
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text, annotations: [] }],
+          },
+        }),
+      )
+    );
+  }
+
+  /**
+   * Rebuild the terminal `response.completed` event from the given completion
+   * state (used instead of the suppressed original when recall was detected).
+   */
+  function buildCompleted(res: GatewayResponse): string {
+    const finalOutput: Array<Record<string, unknown>> = [];
+    for (const block of res.content) {
+      if (block.type === "text") {
+        finalOutput.push({
+          type: "message",
+          id: `msg_${state.id || "resp"}_${finalOutput.length}`,
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: block.text, annotations: [] }],
+        });
+      } else if (block.type === "tool_use") {
+        finalOutput.push({
+          type: "function_call",
+          id: `fc_${block.id}`,
+          call_id: block.id,
+          name: block.name,
+          arguments: JSON.stringify(block.input),
+          status: "completed",
+        });
+      }
+    }
+    const finalStatus = mapStatusFromStopReason(res.stopReason);
+    const ru = res.usage ?? ZERO_USAGE;
+    const usageData: Record<string, unknown> = {
+      input_tokens: ru.inputTokens,
+      output_tokens: ru.outputTokens,
+      total_tokens: ru.inputTokens + ru.outputTokens,
+    };
+    if (ru.cacheReadInputTokens != null) {
+      usageData.prompt_tokens_details = {
+        cached_tokens: ru.cacheReadInputTokens,
+      };
+    }
+    return formatResponsesEvent(
+      "response.completed",
+      JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: state.id,
+          object: "response",
+          created_at: Math.floor(Date.now() / 1000),
+          model: res.model || state.model,
+          status: finalStatus,
+          output: finalOutput,
+          usage: usageData,
+        },
+      }),
+    );
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const safeEnqueue = (chunk: Uint8Array): boolean => {
+        if (cancelled) return false;
+        try {
+          controller.enqueue(chunk);
+          return true;
+        } catch {
+          cancelled = true;
+          return false;
+        }
+      };
+      const safeClose = (): void => {
+        if (cancelled) return;
+        try {
+          controller.close();
+        } catch {
+          // Already closed/cancelled
+        }
+      };
+
+      const resetKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = setTimeout(function tick() {
+          if (cancelled) return;
+          safeEnqueue(keepaliveComment);
+          keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+        }, KEEPALIVE_INACTIVITY_MS);
+      };
+      const clearKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = null;
+      };
+
+      try {
+        if (!upstreamResponse.body) {
+          throw new Error("Upstream response has no body");
+        }
+        const reader = upstreamResponse.body.getReader();
+        activeReader = reader;
+
+        // --- Recall interception state ---
+        // `output_index` values whose item is a suppressed `recall` function_call.
+        const recallIndices = new Set<number>();
+        // Set of recall indices whose full args have been collected (so we run
+        // the recall exactly once per recall call).
+        const recallExecuted = new Set<number>();
+        // Ordered list of parsed recall invocations: { outputIndex, block }.
+        const pendingRecalls: Array<{
+          outputIndex: number;
+          query: string;
+          scope?: string;
+          id?: string;
+        }> = [];
+        // Whether any NON-recall function_call appeared (mixed-tools case).
+        let otherToolSeen = false;
+
+        resetKeepalive();
+        for await (const { event, data } of parseSSEStream(reader)) {
+          resetKeepalive(); // upstream alive — reset inactivity timer
+
+          if (!data || data === "[DONE]") continue;
+
+          let parsed: Record<string, unknown>;
+          try {
+            parsed = JSON.parse(data) as Record<string, unknown>;
+          } catch {
+            // Non-JSON (keepalive etc.) — forward as-is
+            if (event !== "message") {
+              safeEnqueue(encoder.encode(formatResponsesEvent(event, data)));
+            }
+            continue;
+          }
+
+          const outputIndex = parsed.output_index as number | undefined;
+
+          // Detect a recall function_call item from its `added` event.
+          if (
+            event === "response.output_item.added" &&
+            outputIndex !== undefined
+          ) {
+            const item = parsed.item as Record<string, unknown> | undefined;
+            const isRecallCall =
+              item?.type === "function_call" && item?.name === "recall";
+            if (isRecallCall) {
+              recallIndices.add(outputIndex);
+            } else if (item?.type === "function_call") {
+              otherToolSeen = true;
+            }
+          }
+
+          const isRecallEvent =
+            outputIndex !== undefined && recallIndices.has(outputIndex);
+
+          // Always accumulate into the internal state for postResponse.
+          applyResponsesEvent(state, event, parsed);
+
+          // Suppress all events belonging to a recall item.
+          if (isRecallEvent && outputIndex !== undefined) {
+            // Collect the recall arguments once the function_call_arguments.done
+            // arrives for a recall index.
+            if (
+              event === "response.function_call_arguments.done" &&
+              !recallExecuted.has(outputIndex)
+            ) {
+              const args = parsed.arguments as string | undefined;
+              let input: Record<string, unknown> = {};
+              if (args) {
+                try {
+                  input = JSON.parse(args) as Record<string, unknown>;
+                } catch {
+                  /* keep empty */
+                }
+              }
+              const query = asString(input.query);
+              pendingRecalls.push({
+                outputIndex,
+                query,
+                scope: asString(input.scope) || undefined,
+                id: asString(input.id) || undefined,
+              });
+              recallExecuted.add(outputIndex);
+            }
+            // Don't forward recall-item events to the client.
+            continue;
+          }
+
+          // Terminal events: handle recall interception before forwarding.
+          if (
+            event === "response.completed" ||
+            event === "response.done" ||
+            event === "response.incomplete"
+          ) {
+            if (pendingRecalls.length === 0) {
+              // No recall — forward the terminal event verbatim.
+              if (
+                !safeEnqueue(encoder.encode(formatResponsesEvent(event, data)))
+              )
+                break;
+              continue;
+            }
+
+            // Recall was detected. Drive the recall loop.
+            // Marker items already emitted at non-conflicting output indices.
+            let markerTexts: string[] = [];
+            // Continuation items accumulated from a recall-only follow-up, in
+            // their OWN state (never merged into `state` to avoid index
+            // collisions). undefined when no follow-up ran (e.g. mixed tools).
+            let appliedContinuation: ResponsesAccState | undefined;
+            // Offset applied to continuation items when merging into `state`:
+            // the marker slot + 1 (next free position).
+            let contIndexBase = 0;
+
+            for (const recall of pendingRecalls) {
+              const recallAcc = finalizeResponsesAcc(state);
+              const executed = await opts.onRecall({
+                query: recall.query,
+                scope: recall.scope,
+                id: recall.id,
+                acc: recallAcc,
+              });
+              if (!executed) {
+                // Abort path — emit nothing more; rely on the final rebuild.
+                continue;
+              }
+              markerTexts.push(executed.markerText);
+
+              // Emit a synthetic marker output_text item at a non-conflicting
+              // output_index (reuse the suppressed recall index slot — the item
+              // is absent from the client, so its position is free).
+              if (
+                !safeEnqueue(
+                  encoder.encode(
+                    emitTextItem(
+                      recall.outputIndex,
+                      executed.markerText,
+                      `msg_${state.id || "lore"}_${recall.outputIndex}`,
+                    ),
+                  ),
+                )
+              ) {
+                break;
+              }
+
+              if (
+                !otherToolSeen &&
+                recall === pendingRecalls[pendingRecalls.length - 1]
+              ) {
+                // Recall-only: run the streaming follow-up and pipe the
+                // continuation inline before the final completion.
+                try {
+                  const follow = await opts.runFollowUp({
+                    markerText: executed.markerText,
+                    resultText: executed.resultText,
+                    acc: recallAcc,
+                  });
+                  activeReader = follow.reader;
+                  // Accumulate the continuation into its OWN state so indices
+                  // never collide with the marker/reply items in `state`.
+                  const contState = makeResponsesAccState();
+                  // Continue the output_index numbering past all suppressed
+                  // markers and the currently-emitted marker.
+                  let contIndex = recall.outputIndex + 1;
+                  contIndexBase = contIndex;
+                  for await (const { event: ce, data: cd } of parseSSEStream(
+                    follow.reader,
+                  )) {
+                    if (cancelled) break;
+                    if (!cd || cd === "[DONE]") continue;
+                    let cparsed: Record<string, unknown>;
+                    try {
+                      cparsed = JSON.parse(cd) as Record<string, unknown>;
+                    } catch {
+                      if (ce !== "message") {
+                        safeEnqueue(
+                          encoder.encode(formatResponsesEvent(ce, cd)),
+                        );
+                      }
+                      continue;
+                    }
+                    // Accumulate continuation into contState for the final rebuild.
+                    applyResponsesEvent(contState, ce, cparsed);
+                    const ci = cparsed.output_index as number | undefined;
+                    // Re-index continuation items so they don't collide with the
+                    // marker text item(s) already emitted. The continuation's own
+                    // output numbering starts at 0; shift every index by
+                    // contIndex (the next free slot after the marker).
+                    if (ci !== undefined) {
+                      const shifted = {
+                        ...cparsed,
+                        output_index: ci + contIndex,
+                      };
+                      if (
+                        !safeEnqueue(
+                          encoder.encode(
+                            formatResponsesEvent(ce, JSON.stringify(shifted)),
+                          ),
+                        )
+                      ) {
+                        break;
+                      }
+                    } else if (ce !== "message") {
+                      // Follow-up terminal events stop the continuation loop —
+                      // we rebuild the terminal (response.completed) below.
+                      if (
+                        ce === "response.completed" ||
+                        ce === "response.done" ||
+                        ce === "response.incomplete" ||
+                        ce === "response.failed"
+                      ) {
+                        break;
+                      }
+                      // Follow-up lifecycle events must never reach the client:
+                      // the principal stream already emitted response.created /
+                      // response.in_progress, and we rebuild the terminal below.
+                      // Forwarding them would duplicate init/terminal events and
+                      // violate the Responses SSE protocol.
+                      if (
+                        ce === "response.created" ||
+                        ce === "response.in_progress"
+                      ) {
+                        continue;
+                      }
+                      if (
+                        !safeEnqueue(
+                          encoder.encode(formatResponsesEvent(ce, cd)),
+                        )
+                      )
+                        break;
+                    }
+                    // Terminal for continuation — we rebuild below, so stop here.
+                    if (
+                      ce === "response.completed" ||
+                      ce === "response.done" ||
+                      ce === "response.incomplete" ||
+                      ce === "response.failed"
+                    ) {
+                      break;
+                    }
+                  }
+                  appliedContinuation = contState;
+                  // The follow-up has reached its terminal event; cancel its
+                  // reader so the upstream body is released promptly.
+                  void follow.reader.cancel().catch(() => {});
+                } catch (err) {
+                  log.error(
+                    `recall follow-up stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
+                    err,
+                  );
+                }
+              }
+            }
+
+            // Merge the continuation (if any) into `state` at the correct
+            // offset. The continuation's `contState.items` are keyed by its
+            // OWN 0-based output indices; shift each by contIndex (the marker
+            // slot + 1, the next free position after the emitted marker item)
+            // when a recall-only follow-up ran.
+            if (appliedContinuation) {
+              const offset = contIndexBase;
+              // Shift continuation usage accumulation onto the total for the
+              // internal postResponse response (usage is index-independent).
+              state.usage.inputTokens += appliedContinuation.usage.inputTokens;
+              state.usage.outputTokens +=
+                appliedContinuation.usage.outputTokens;
+              state.usage.cacheReadInputTokens =
+                (state.usage.cacheReadInputTokens ?? 0) +
+                (appliedContinuation.usage.cacheReadInputTokens ?? 0);
+              state.usage.cacheCreationInputTokens =
+                (state.usage.cacheCreationInputTokens ?? 0) +
+                (appliedContinuation.usage.cacheCreationInputTokens ?? 0);
+              for (const [idx, item] of appliedContinuation.items) {
+                state.items.set(idx + offset, item);
+              }
+              // Merge stop reason from the continuation (it is the final leg).
+              if (appliedContinuation.stopReason) {
+                state.stopReason = appliedContinuation.stopReason;
+              }
+            }
+
+            // Rebuild the terminal response.completed reflecting marker +
+            // continuation (recall-only) OR marker + other tools (mixed).
+            const finalResp = finalizeResponsesAcc(state);
+            // Replace ONLY the recall tool_use(s) with their marker text, so
+            // non-recall tool_use (which the client must act on) is preserved.
+            const markedResp = {
+              ...finalResp,
+              content: [
+                ...finalResp.content.filter(
+                  (b) => b.type !== "tool_use" || b.name !== "recall",
+                ),
+                ...markerTexts.map((t) => ({ type: "text" as const, text: t })),
+              ],
+            };
+            clearKeepalive();
+            finish(markedResp);
+            if (!safeEnqueue(encoder.encode(buildCompleted(markedResp)))) {
+              safeClose();
+              return;
+            }
+            safeClose();
+            return;
+          }
+
+          // Non-terminal, non-recall event: forward verbatim.
+          if (!safeEnqueue(encoder.encode(formatResponsesEvent(event, data)))) {
+            break;
+          }
+        }
+
+        // Stream ended without a terminal event (e.g. reader closed early).
+        if (!completed) {
+          clearKeepalive();
+          finish(finalizeResponsesAcc(state));
+        }
+        safeClose();
+      } catch (err) {
+        clearKeepalive();
+        const isAbort =
+          err instanceof DOMException && err.name === "AbortError";
+        if (isAbort) {
+          log.info(
+            `openai-responses recall-aware stream aborted${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+          );
+        } else {
+          log.error(
+            `openai-responses recall-aware stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
+            err,
+          );
+        }
+        safeEnqueue(
+          encoder.encode(
+            formatResponsesEvent(
+              "response.failed",
+              JSON.stringify({
+                type: "response.failed",
+                response: {
+                  id: state.id || "resp_error",
+                  object: "response",
+                  created_at: Math.floor(Date.now() / 1000),
+                  model: state.model,
+                  status: "failed",
+                  output: [],
+                  usage: null,
+                  error: {
+                    type: "server_error",
+                    message:
+                      err instanceof Error
+                        ? err.message
+                        : "upstream stream error",
+                  },
+                },
+              }),
+            ),
+          ),
+        );
+        finish(finalizeResponsesAcc(state));
+        safeClose();
+      }
+    },
+
+    cancel() {
+      cancelled = true;
+      if (keepaliveTimer) clearTimeout(keepaliveTimer);
+      try {
+        if (activeReader) {
+          void activeReader.cancel();
+        } else {
+          void upstreamResponse.body?.cancel();
+        }
+      } catch {
+        // Best-effort cancellation
+      }
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
+/**
  * Accumulate a non-streaming upstream response into a GatewayResponse.
  *
  * Dispatches to the correct parser based on the upstream wire protocol:
@@ -9303,11 +9958,94 @@ async function handleConversationTurn(
       const hasRecallTool = modifiedReq.tools.some(
         (t) => t.name === RECALL_TOOL_NAME,
       );
-      if (
-        req.protocol === "openai-responses" &&
-        !hasRecallTool &&
-        !shouldInjectWarning
-      ) {
+
+      // Only stream through recall-aware when the client ALSO speaks the
+      // Responses API AND no warning needs to be layered in. The recall-aware
+      // streamer forwards events live (fixing the header-timeout hang) while
+      // transparently intercepting a recall `function_call` — the buffered
+      // path (used otherwise) can't, so a recall tool_use would leak to the
+      // client.
+      if (req.protocol === "openai-responses" && !shouldInjectWarning) {
+        if (hasRecallTool) {
+          return streamResponsesRecallAware(upstreamResponse, {
+            onComplete: (resp) =>
+              postResponse(
+                req,
+                resp,
+                sessionState,
+                config,
+                requestBody,
+                genAiSpan,
+              ),
+            sessionID: sessionState.sessionID,
+            onRecall: async ({ query, scope, id }) => {
+              const alreadyInLtm = buildAlreadyInLtmIds(
+                stableLtmText,
+                pendingKnowledgeDelta,
+              );
+              const { result, input } = await executeRecall(
+                {
+                  type: "tool_use",
+                  id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
+                  name: RECALL_TOOL_NAME,
+                  input: { query, scope, id },
+                },
+                sessionState.projectPath,
+                sessionState.sessionID,
+                getLLMClient(config),
+                alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
+              );
+              const scopeVal = input.scope ?? "all";
+              const storeKey = recallStoreKey(query, scopeVal, input.id);
+              const markerText = buildRecallMarker(query, scopeVal, input.id);
+              sessionState.recallStore.set(storeKey, {
+                toolUseId: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
+                input,
+                position: -1,
+                result,
+              });
+              saveSessionTracking(sessionState.sessionID, {
+                recallStore: serializeRecallStore(sessionState.recallStore),
+              });
+              return { markerText, resultText: result };
+            },
+            runFollowUp: async ({ acc, resultText }) => {
+              // Reconstruct the recall tool_use block for the follow-up request.
+              const recallBlock = findRecallToolUse(acc);
+              if (!recallBlock) {
+                throw new Error(
+                  "recall follow-up: recall block not found in accumulated response",
+                );
+              }
+              const followUpCtx: RecallFollowUpCtx = {
+                forward: (r) =>
+                  forwardToUpstream(r, config, undefined, {
+                    ...cacheOptions,
+                    cacheConversation: false,
+                  }),
+                parseJSON: () => {
+                  throw new Error(
+                    "parseJSON must not be called on the streaming recall path",
+                  );
+                },
+              };
+              const follow = await runRecallFollowUpStreaming(
+                followUpCtx,
+                modifiedReq,
+                acc,
+                resultText,
+                recallBlock,
+              );
+              if (!follow.ok) {
+                throw new Error(
+                  `recall follow-up upstream error: ${follow.status ?? "?"} ${follow.detail}`,
+                );
+              }
+              return { reader: follow.reader };
+            },
+          });
+        }
+        // No recall tool — plain passthrough.
         return streamResponsesPassthrough(
           upstreamResponse,
           (resp) =>
@@ -9322,8 +10060,8 @@ async function handleConversationTurn(
           sessionState.sessionID,
         );
       }
-      // Recall tool present, warning to inject, or a non-Responses client:
-      // buffer the full upstream, run recall interception, then re-emit.
+      // Warning to inject, or a non-Responses client: buffer the full
+      // upstream, run recall interception, then re-emit.
       const resp = await accumulateResponsesSSEStream(upstreamResponse);
       return finalizeWithRecall(resp);
     }
