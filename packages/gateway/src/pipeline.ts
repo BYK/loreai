@@ -2348,10 +2348,15 @@ const stableLtmInFlight = new Map<string, Promise<void>>();
  * clear the in-flight entry. The cache is always populated BEFORE the in-flight
  * promise resolves, so a concurrent awaiter re-reads it race-free.
  */
-async function singleFlightStableLtm(
+export async function singleFlightStableLtm(
   sessionID: string,
   compute: () => Promise<{ formatted: string; tokenCount: number } | undefined>,
 ): Promise<{ formatted: string; tokenCount: number } | undefined> {
+  // Cache hit — fast path. Reading the cache FIRST is essential: a previous
+  // caller may have already settled and deleted its in-flight entry, so a
+  // cache-only check avoids a redundant recompute on the next call.
+  const cached = stableLtmCache.get(sessionID);
+  if (cached) return cached;
   const inFlight = stableLtmInFlight.get(sessionID);
   if (inFlight) {
     await inFlight;
@@ -2469,6 +2474,11 @@ async function computeStableLtm(
  *    shared rather than duplicated.
  *  - Fire-and-forget: never rejects into the idle handler; a failure just
  *    leaves the cache cold and the next turn computes on demand.
+ *  - The precompute omits `contextHint` (there's no last user message at idle).
+ *    The cache-first design is intentional: a session idling past the resume
+ *    threshold has no recent turn context, so the coarse ranking is the best
+ *    available signal. The next turn's per-turn compute will land on the
+ *    warmed cache (one DB hit instead of two).
  */
 async function precomputeStableLtmForIdleSession(
   sessionID: string,
@@ -10928,10 +10938,36 @@ function errorResponse(status: number, message: string): Response {
  */
 export function earlyFlushStreamingResponse(
   run: () => Promise<Response>,
-  protocol: "openai-responses" | "anthropic" | "openai" | "gemini",
+  modelId: string,
 ): Response {
   const encoder = new TextEncoder();
   const keepalive = encoder.encode(`: lore preparing\n\n`);
+
+  /**
+   * Emit a canonical `response.failed` envelope matching the shape used by
+   * stream/openai-responses.ts and the recall-aware streamer:
+   *   { type: "response.failed", response: { id, object, created_at, model,
+   *     status: "failed", output: [], usage: null, error: { type, message } } }
+   */
+  function emitFailed(message: string): Uint8Array {
+    const envelope = {
+      type: "response.failed",
+      response: {
+        id: `resp_error_${Date.now()}`,
+        object: "response",
+        created_at: Math.floor(Date.now() / 1000),
+        model: modelId,
+        status: "failed",
+        output: [],
+        usage: null,
+        error: { type: "server_error", message },
+      },
+    };
+    return encoder.encode(
+      `event: response.failed\ndata: ${JSON.stringify(envelope)}\n\n`,
+    );
+  }
+
   return new Response(
     new ReadableStream({
       async start(controller) {
@@ -10945,26 +10981,15 @@ export function earlyFlushStreamingResponse(
             !inner.headers.get("content-type")?.includes("text/event-stream")
           ) {
             // The inner response has no streamable SSE body (e.g. an error
-            // Response with a plain string body). Surface the status/body to
-            // the client instead of a silent empty stream.
+            // Response with a plain string body). Surface as response.failed.
             const status = inner.status;
             const text = await inner.text().catch(() => "");
-            if (protocol === "openai-responses") {
+            try {
               controller.enqueue(
-                encoder.encode(
-                  `event: response.failed\ndata: ${JSON.stringify({
-                    type: "response.failed",
-                    error: {
-                      type: "server_error",
-                      message: `${status}: ${text.slice(0, 500)}`,
-                    },
-                  })}\n\n`,
-                ),
+                emitFailed(`${status}: ${text.slice(0, 500)}`),
               );
-            } else {
-              controller.enqueue(
-                encoder.encode(`: lore upstream error ${status}\n\n`),
-              );
+            } catch {
+              /* client gone */
             }
             try {
               controller.close();
@@ -10974,14 +10999,28 @@ export function earlyFlushStreamingResponse(
             return;
           }
           const reader = inner.body.getReader();
+          let cancelled = false;
           try {
             for (;;) {
               const { done, value } = await reader.read();
               if (done) break;
-              controller.enqueue(value);
+              if (cancelled) continue;
+              try {
+                controller.enqueue(value);
+              } catch {
+                // Client disconnected — cancel the upstream stream so the
+                // gateway doesn't keep reading until the OS times out.
+                cancelled = true;
+                reader.cancel().catch(() => {});
+                break;
+              }
             }
           } finally {
-            reader.releaseLock();
+            try {
+              reader.cancel().catch(() => {});
+            } catch {
+              /* already released */
+            }
           }
           try {
             controller.close();
@@ -10992,20 +11031,7 @@ export function earlyFlushStreamingResponse(
           const message =
             err instanceof Error ? err.message : "unknown gateway error";
           try {
-            if (protocol === "openai-responses") {
-              controller.enqueue(
-                encoder.encode(
-                  `event: response.failed\ndata: ${JSON.stringify({
-                    type: "response.failed",
-                    error: { type: "server_error", message },
-                  })}\n\n`,
-                ),
-              );
-            } else {
-              controller.enqueue(
-                encoder.encode(`: lore pipeline error: ${message}\n\n`),
-              );
-            }
+            controller.enqueue(emitFailed(message));
           } catch {
             /* client gone */
           }
@@ -11126,7 +11152,7 @@ export async function handleRequest(
     if (req.stream && req.protocol === "openai-responses") {
       return earlyFlushStreamingResponse(
         () => handleConversationTurn(req, config),
-        req.protocol,
+        req.model,
       );
     }
     return await handleConversationTurn(req, config);
