@@ -9,7 +9,12 @@
  *
  * Output shape:
  *   - human: rendered per-candidate verdicts (legacy format)
- *   - JSON:  { output: <captured stdout> }
+ *   - JSON:  unwrapped trailing CheckResult object (so `report.mjs`
+ *            reads top-level `hunks`/`invariants`/`candidates`/
+ *            `judgeCalls`/`findings` directly). Falls back to
+ *            `{ output: <captured stdout> }` when no parseable
+ *            trailing JSON object is found in the captured buffer
+ *            (loud-but-diagnosable, vs. silent `undefined` fields).
  *
  * Exit codes: legacy semantics preserved.
  *   - 0  normal completion (advisory mode — always 0 even on findings)
@@ -23,6 +28,7 @@
  * Stricli with the legacy parsing layered on top.
  */
 import { buildOutputCommand } from "../lib/command";
+import { extractTrailingJsonObject } from "../lib/extract";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandInvariantCheck } from "../invariant-check";
 
@@ -106,7 +112,23 @@ export const lintCommand = buildOutputCommand<
   },
   config: {
     renderHuman: (data) => data,
-    toJson: (data) => ({ output: data }),
+    // The legacy handler emits console.error (range header, models.dev
+    // status, embedding progress, judging heartbeat) and console.log
+    // (the final JSON.stringify result) into the same stdout buffer
+    // via `runLegacyAndCollect`. We unwrap the trailing JSON object so
+    // `--json` callers (CI's report.mjs, eval scripts) receive the flat
+    // `{hunks, invariants, candidates, judgeCalls, findings, ...}`
+    // shape they parse — not `{output: "<mixed stdout/stderr string>"}`.
+    // The legacy bridge had no separate stdout/stderr channels; the only
+    // way to recover the JSON envelope is to scan for it. Falls back to
+    // the wrapped form if no parseable object is found (which would also
+    // break parse-in-place but is loud about the malformed shape, vs.
+    // silent undefined-field render that the previous default produced).
+    toJson: (data) => {
+      if (typeof data !== "string") return data;
+      const parsed = extractTrailingJsonObject(data);
+      return parsed ?? { output: data };
+    },
   },
   async handler(flags) {
     // Map the Stricli flags into the legacy `values` dict the
