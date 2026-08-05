@@ -259,7 +259,15 @@ async function ensurePipeline(): Promise<void> {
               return;
             }
             if (!stderrSilenced) {
-              console.warn(
+              // Recoverable: on-disk model files are intact (a fresh
+              // download would still parse and the retry typically
+              // succeeds). This is the "warm-up hiccup" path, not a
+              // failure — there is no user action available. Demote
+              // to `console.debug` per the warn-vs-debug escalation
+              // rule (only Sentry-warning-worthy events go through
+              // `console.warn`). Real init failures still surface via
+              // the .catch below.
+              console.debug(
                 `[embedding-worker] model parse failed but on-disk files look intact (${msg}); retrying load without purging`,
               );
             }
