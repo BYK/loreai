@@ -642,6 +642,7 @@ export async function resetPipelineState(opts?: {
   ltmPinnedText.clear();
   lastSavedDedupDecisions.clear();
   stableLtmCache.clear();
+  stableLtmInFlight.clear();
   // Shut down the batch queue before clearing the client. On process exit
   // (`fast`), skip the synchronous LLM drain — replaying queued background
   // prompts through retries/backoff is what made Ctrl+C hang for minutes; they
@@ -2318,6 +2319,188 @@ const stableLtmCache = new Map<
   { formatted: string; tokenCount: number }
 >();
 
+/**
+ * Single-flight memoizer for the per-session stable-LTM recompute.
+ *
+ * The stable-LTM block (preferences + known entities + project-knowledge
+ * catalog) is computed once per session, then pinned for ≥1h. The compute is
+ * heavy (ltm.forSession ×2, entity fetch, catalog scan — all read-worker pool
+ * jobs). When a gateway restarts, the in-memory cache is cold, and the client's
+ * header-timeout retries can fire THREE concurrent identical turns at the same
+ * session BEFORE any of them has populated the cache. Without dedup, all three
+ * recompute the block independently and thrash the DB — which compounds the
+ * very latency that caused the retries.
+ *
+ * The settled cache (stableLtmCache) only helps the NEXT turn. This map dedups
+ * concurrent in-flight recomputes so a burst of retries shares ONE compute and
+ * the session recovers (headers flush, retries stop) instead of re-entering the
+ * slow path.
+ *
+ * Keyed by sessionID. Entries are deleted on settle (the settled value goes
+ * into stableLtmCache), so a LATER miss after a restart recomputes fresh.
+ */
+const stableLtmInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Run a stable-LTM compute under single-flight dedup for a session. If a
+ * compute is already in flight for the session, await it and return its
+ * settled cache value; otherwise run `compute`, set the settled cache, and
+ * clear the in-flight entry. The cache is always populated BEFORE the in-flight
+ * promise resolves, so a concurrent awaiter re-reads it race-free.
+ */
+async function singleFlightStableLtm(
+  sessionID: string,
+  compute: () => Promise<{ formatted: string; tokenCount: number } | undefined>,
+): Promise<{ formatted: string; tokenCount: number } | undefined> {
+  const inFlight = stableLtmInFlight.get(sessionID);
+  if (inFlight) {
+    await inFlight;
+    return stableLtmCache.get(sessionID);
+  }
+  const promise = (async () => {
+    try {
+      const result = await compute();
+      if (result) stableLtmCache.set(sessionID, result);
+    } finally {
+      stableLtmInFlight.delete(sessionID);
+    }
+  })();
+  stableLtmInFlight.set(sessionID, promise);
+  await promise;
+  return stableLtmCache.get(sessionID);
+}
+
+/**
+ * Compute the stable-LTM system[1] block (preferences + known entities +
+ * project-knowledge catalog) for a session. Extracted from the turn pipeline so
+ * it can be single-flighted across concurrent retries. Sets stableLtmCache +
+ * persisted tracking before returning (matching the original inline behavior).
+ */
+async function computeStableLtm(
+  sessionID: string,
+  projectPath: string,
+  cfg: ReturnType<typeof loreConfig>,
+  contextHint: string | undefined,
+  prefBudget: number,
+): Promise<{ formatted: string; tokenCount: number } | undefined> {
+  const prefEntries = await ltm.forSession(projectPath, sessionID, prefBudget, {
+    categories: ["preference"],
+    ...(contextHint ? { contextHint } : {}),
+  });
+  const prefText = prefEntries.length
+    ? formatKnowledge(
+        prefEntries.map((e) => ({
+          id: e.id,
+          category: e.category,
+          title: e.title,
+          content: e.content,
+        })),
+        prefBudget,
+      )
+    : "";
+
+  // Known-entities block — folded into the stable system[1] block so it is
+  // present from turn 1. Visibility is intentionally conservative:
+  // entitiesForSession() returns only the current project's + genuinely-global
+  // (cross_project) entities. Discoverable on demand via the recall tool.
+  let entitiesText = "";
+  if (cfg.knowledge.maxEntityInject > 0) {
+    try {
+      const sessionEntities = await entities.entitiesForSessionOffloaded(
+        projectPath,
+        cfg.knowledge.maxEntityInject,
+      );
+      if (sessionEntities.length) {
+        const formattedEntities = entities.formatForPrompt(sessionEntities);
+        if (formattedEntities) {
+          entitiesText = `${formattedEntities}\n\n(Partial list — use the recall tool to resolve any name not shown here, including repositories, people, or services from your other projects.)`;
+        }
+      }
+    } catch (err) {
+      log.warn("entity injection failed (non-fatal):", err);
+    }
+  }
+
+  // Project-knowledge catalog (#917 "A") — compact recall-by-id index.
+  let knowledgeTocText = "";
+  try {
+    const catalog = (await ltm.forProjectOffloaded(projectPath, false))
+      .filter((e) => e.category !== "preference")
+      .map((e) => ({ id: e.id, category: e.category, title: e.title }));
+    knowledgeTocText = buildKnowledgeCatalogText(
+      catalog,
+      STABLE_KNOWLEDGE_TOC_MAX,
+    );
+  } catch (err) {
+    log.warn("knowledge catalog injection failed (non-fatal):", err);
+  }
+
+  const formatted = [
+    buildLoreContextCapabilityNote(loreSessionToken(sessionID)),
+    prefText,
+    entitiesText,
+    knowledgeTocText,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  const tokenCount = formatted ? coreEstimateTokens(formatted) : 0;
+  const stable = { formatted, tokenCount };
+  stableLtmCache.set(sessionID, stable);
+  saveSessionTracking(sessionID, {
+    stableLtmText: formatted,
+    stableLtmTokens: tokenCount,
+  });
+  return stable;
+}
+
+/**
+ * Background precompute of the stable-LTM cache for an idle session.
+ *
+ * Runs from the idle handler (fire-and-forget) so that when a session idles
+ * past the resume threshold, the next (cold post-idle) turn reads the stable
+ * block from `stableLtmCache` instead of recomputing the heavy
+ * ltm.forSession/entity/catalog chain on the request's critical path — the
+ * exact path that pushed the gateway past opencode's 10s header timeout.
+ *
+ * Guards:
+ *  - Only computes when the cache is genuinely missing (a warm cache is left
+ *    alone — the 1h pinned bytes must not churn).
+ *  - Reuses `singleFlightStableLtm`, so a concurrent in-flight turn compute is
+ *    shared rather than duplicated.
+ *  - Fire-and-forget: never rejects into the idle handler; a failure just
+ *    leaves the cache cold and the next turn computes on demand.
+ */
+async function precomputeStableLtmForIdleSession(
+  sessionID: string,
+  state: SessionState,
+): Promise<void> {
+  try {
+    if (stableLtmCache.has(sessionID)) return;
+    const cfg = loreConfig();
+    if (!cfg.knowledge.enabled) return;
+    const projectPath = state.projectPath;
+    if (!projectPath) return;
+    const ltmBudgetOpts = { isSubagent: !!state.isSubagent };
+    const prefBudget = getPreferenceLtmBudget(
+      cfg.budget.preferenceLtm,
+      sessionID ?? undefined,
+      ltmBudgetOpts,
+    );
+    log.info(
+      `idle precompute: warming stable LTM for session ${sessionID.slice(0, 16)} (pref=${prefBudget})`,
+    );
+    await singleFlightStableLtm(sessionID, () =>
+      computeStableLtm(sessionID, projectPath, cfg, undefined, prefBudget),
+    );
+  } catch (err) {
+    log.warn(
+      `idle precompute: stable LTM warm failed for ${sessionID.slice(0, 16)}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
 /** Whether the batch queue wrapper is active (set once in getLLMClient). */
@@ -2846,7 +3029,20 @@ async function initIfNeeded(
   // session whose lastRequestTime exceeds the idle timeout.
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
-    const idleHandler = buildIdleWorkHandler(llm);
+    const baseIdleHandler = buildIdleWorkHandler(llm);
+    // Wrap the idle handler to ALSO precompute the stable-LTM cache for idle
+    // sessions. When a session idles long enough that the next turn is a cold
+    // post-idle resume, the gateway's LTM injection would otherwise recompute
+    // the heavy stable block (ltm.forSession ×2 + entity fetch + catalog scan)
+    // on the request's critical path — compounding the client header-timeout
+    // latency. Precomputing at idle warms stableLtmCache (and the persisted
+    // session tracking) so the resume turn reads it from cache instead. The
+    // compute is single-flighted per session; a concurrent turn's
+    // `singleFlightStableLtm` shares the same in-flight promise.
+    const idleHandler = async (sessionID: string, state: SessionState) => {
+      void precomputeStableLtmForIdleSession(sessionID, state);
+      await baseIdleHandler(sessionID, state);
+    };
     stopIdleScheduler = startIdleScheduler(
       config,
       sessions,
@@ -2862,6 +3058,7 @@ async function initIfNeeded(
         ltmPinnedText.delete(sessionID);
         lastSavedDedupDecisions.delete(sessionID);
         stableLtmCache.delete(sessionID);
+        stableLtmInFlight.delete(sessionID);
         cwdWarned.delete(sessionID);
         staleHeaderWarned.delete(sessionID);
         // Clear subagent parent-pending dedup entries for this session —
@@ -8536,106 +8733,28 @@ async function handleConversationTurn(
       // turn 1.
       let stable = stableLtmCache.get(sessionID);
       if (!stable) {
-        const prefEntries = await ltm.forSession(
-          projectPath,
-          sessionID,
-          prefBudget,
-          {
-            categories: ["preference"],
-            ...(contextHint ? { contextHint } : {}),
-          },
-        );
-        const prefText = prefEntries.length
-          ? formatKnowledge(
-              prefEntries.map((e) => ({
-                id: e.id,
-                category: e.category,
-                title: e.title,
-                content: e.content,
-              })),
-              prefBudget,
-            )
-          : "";
-
-        // Known-entities block — folded into the stable system[1] block so it
-        // is present from turn 1 (system[2] is deferred to turn 2+, but the
-        // user may reference an entity on their very first message). Visibility
-        // is intentionally conservative: entitiesForSession() returns only the
-        // current project's + genuinely-global (cross_project) entities. Other
-        // projects' repos are NOT injected here — that would re-introduce the
-        // cross-project context leak repaired by DB migration 38. Those are
-        // discoverable on demand via the recall tool instead, which is why the
-        // caveat line below points the agent at recall for names not shown.
-        let entitiesText = "";
-        if (cfg.knowledge.maxEntityInject > 0) {
-          try {
-            const sessionEntities = await entities.entitiesForSessionOffloaded(
+        // Single-flight: a client header-timeout retry burst can fire several
+        // concurrent identical turns at a cold session. Without dedup they ALL
+        // recompute the heavy stable block (ltm.forSession ×2 + entity fetch +
+        // catalog scan) independently, compounding the very latency that caused
+        // the retries. Share one in-flight compute; the settled value lands in
+        // stableLtmCache before the promise resolves, so re-reading is race-free.
+        const pending = stableLtmInFlight.get(sessionID);
+        if (pending) {
+          await pending;
+          stable = stableLtmCache.get(sessionID);
+        }
+        if (!stable) {
+          stable = await singleFlightStableLtm(sessionID, () =>
+            computeStableLtm(
+              sessionID,
               projectPath,
-              cfg.knowledge.maxEntityInject,
-            );
-            if (sessionEntities.length) {
-              const formattedEntities =
-                entities.formatForPrompt(sessionEntities);
-              if (formattedEntities) {
-                entitiesText = `${formattedEntities}\n\n(Partial list — use the recall tool to resolve any name not shown here, including repositories, people, or services from your other projects.)`;
-              }
-            }
-          } catch (err) {
-            log.warn("entity injection failed (non-fatal):", err);
-          }
-        }
-
-        // Project-knowledge catalog (#917 "A") — a compact, recall-by-id index
-        // of this project's knowledge titles, folded into the frozen system[1]
-        // baseline so it is present from turn 1 (system[2] full content is
-        // deferred to turn 2+). Conservative visibility mirrors the entities
-        // block: project-owned entries only (includeCross=false), preferences
-        // excluded (already shown above). Frozen with the rest of the baseline,
-        // so it never churns the cache; the dynamic relevance-overflow tail is
-        // handled separately by the knowledge delta (#917 "B").
-        let knowledgeTocText = "";
-        try {
-          const catalog = (await ltm.forProjectOffloaded(projectPath, false))
-            .filter((e) => e.category !== "preference")
-            .map((e) => ({ id: e.id, category: e.category, title: e.title }));
-          knowledgeTocText = buildKnowledgeCatalogText(
-            catalog,
-            STABLE_KNOWLEDGE_TOC_MAX,
+              cfg,
+              contextHint,
+              prefBudget,
+            ),
           );
-        } catch (err) {
-          log.warn("knowledge catalog injection failed (non-fatal):", err);
         }
-
-        // The context-capability note is a per-session preamble, always
-        // present so the agent knows from turn 1 that Lore manages the window
-        // and that in-session "Lore knowledge update" blocks are legitimate
-        // Lore-originated memory, not prompt-injection (see
-        // `buildLoreContextCapabilityNote`, issue #1502). Varies only with the
-        // session token (stable across all turns in a session) and frozen with
-        // this baseline, so system[1] stays byte-stable per session.
-        const formatted = [
-          buildLoreContextCapabilityNote(loreSessionToken(sessionID)),
-          prefText,
-          entitiesText,
-          knowledgeTocText,
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-        // Freeze this baseline durably (v45). The in-memory cache is lost on
-        // process restart / session eviction; persisting lets getOrCreateSession
-        // restore the exact bytes so system[1] is never recomputed from the live
-        // knowledge table mid-session (which is what let a consolidation delete
-        // bust the cached prefix — ses_14b9bf3d… incident). The freeze also pins
-        // preferences/entities minted mid-session (curator/pattern-extract) out
-        // of this block until the next session, so the prefix never grows
-        // mid-session. This compute path only runs once per session (cache miss).
-        const tokenCount = formatted ? coreEstimateTokens(formatted) : 0;
-        stable = { formatted, tokenCount };
-        stableLtmCache.set(sessionID, stable);
-        saveSessionTracking(sessionID, {
-          stableLtmText: formatted,
-          stableLtmTokens: tokenCount,
-        });
       }
       stableLtmText = stable?.formatted;
 
@@ -10779,6 +10898,133 @@ function errorResponse(status: number, message: string): Response {
 // ---------------------------------------------------------------------------
 
 /**
+ * Early-flush wrapper for streaming Requests/Codex responses.
+ *
+ * The gateway's pre-upstream pipeline (LTM injection, gradient transform,
+ * cache-TTL resolution) can take tens of seconds on a cold post-restart
+ * session with a large transcript. opencode's client aborts with
+ * `ProviderHeaderTimeoutError` if no response headers arrive within 10s, and
+ * its retries fire concurrent identical turns — each re-running the same slow
+ * pre-upstream path.
+ *
+ * `handleConversationTurn` only constructs the streaming `Response` AFTER that
+ * work completes (it needs `modifiedReq`/`cacheOptions` to build the stream),
+ * so no headers go out until the upstream is already streaming. This wrapper
+ * breaks that ordering: it returns a `Response` whose body is a `ReadableStream`
+ * SYNCHRONOUSLY, so the server flushes `HTTP/1.1 200 OK` + `text/event-stream`
+ * immediately. The actual pipeline (including the pre-upstream work) runs
+ * inside the stream's `start()`; an SSE keepalive comment keeps the connection
+ * alive while it prepares, then the inner streaming response's bytes are
+ * re-piped to the client.
+ *
+ * A keepalive comment (": lore preparing\n\n") is enqueued as the FIRST chunk —
+ * this forces the header flush and gives the client a live signal during the
+ * pre-upstream window. SSE comment lines are a no-op for every OpenAI/Responses
+ * SSE parser (they are skipped), so the client sees a clean event stream.
+ *
+ * When the pipeline fails before producing a stream, emit a `response.failed`
+ * event (Responses protocol) or an SSE error comment and close — the client
+ * treats it as a failed generation, not a dropped connection.
+ */
+export function earlyFlushStreamingResponse(
+  run: () => Promise<Response>,
+  protocol: "openai-responses" | "anthropic" | "openai" | "gemini",
+): Response {
+  const encoder = new TextEncoder();
+  const keepalive = encoder.encode(`: lore preparing\n\n`);
+  return new Response(
+    new ReadableStream({
+      async start(controller) {
+        try {
+          // Enqueue the keepalive comment FIRST so the server flushes headers
+          // before the (potentially slow) pipeline work below runs.
+          controller.enqueue(keepalive);
+          const inner = await run();
+          if (
+            !inner.body ||
+            !inner.headers.get("content-type")?.includes("text/event-stream")
+          ) {
+            // The inner response has no streamable SSE body (e.g. an error
+            // Response with a plain string body). Surface the status/body to
+            // the client instead of a silent empty stream.
+            const status = inner.status;
+            const text = await inner.text().catch(() => "");
+            if (protocol === "openai-responses") {
+              controller.enqueue(
+                encoder.encode(
+                  `event: response.failed\ndata: ${JSON.stringify({
+                    type: "response.failed",
+                    error: {
+                      type: "server_error",
+                      message: `${status}: ${text.slice(0, 500)}`,
+                    },
+                  })}\n\n`,
+                ),
+              );
+            } else {
+              controller.enqueue(
+                encoder.encode(`: lore upstream error ${status}\n\n`),
+              );
+            }
+            try {
+              controller.close();
+            } catch {
+              /* already closed */
+            }
+            return;
+          }
+          const reader = inner.body.getReader();
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              controller.enqueue(value);
+            }
+          } finally {
+            reader.releaseLock();
+          }
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : "unknown gateway error";
+          try {
+            if (protocol === "openai-responses") {
+              controller.enqueue(
+                encoder.encode(
+                  `event: response.failed\ndata: ${JSON.stringify({
+                    type: "response.failed",
+                    error: { type: "server_error", message },
+                  })}\n\n`,
+                ),
+              );
+            } else {
+              controller.enqueue(
+                encoder.encode(`: lore pipeline error: ${message}\n\n`),
+              );
+            }
+          } catch {
+            /* client gone */
+          }
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        }
+      },
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  );
+}
+
+/**
  * Process an incoming gateway request through the full Lore pipeline.
  *
  * Returns a standard `Response` object — either a streaming SSE response
@@ -10871,6 +11117,18 @@ export async function handleRequest(
     }
 
     // --- Case 3: Normal conversation turn → full pipeline ---
+    // For streaming openai-responses (codex/ChatGPT) requests, wrap the
+    // pipeline in an early-flush stream so response headers reach the client
+    // before the (potentially slow) pre-upstream LTM/gradient work completes.
+    // opencode aborts with ProviderHeaderTimeoutError when no headers arrive
+    // within 10s; this guarantees they flush immediately and the client sees a
+    // keepalive while the gateway prepares.
+    if (req.stream && req.protocol === "openai-responses") {
+      return earlyFlushStreamingResponse(
+        () => handleConversationTurn(req, config),
+        req.protocol,
+      );
+    }
     return await handleConversationTurn(req, config);
   } catch (err) {
     const message =
