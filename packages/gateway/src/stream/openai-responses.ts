@@ -33,7 +33,7 @@ import { parseSSEStream, createStreamAccumulator } from "./anthropic";
  * pass-through streamer (`streamResponsesPassthrough`) so both derive an
  * identical `GatewayResponse` from the same event-handling logic.
  */
-interface ResponsesAccState {
+export interface ResponsesAccState {
   id: string;
   model: string;
   stopReason: string;
@@ -52,7 +52,7 @@ interface ResponsesAccState {
   >;
 }
 
-function makeResponsesAccState(): ResponsesAccState {
+export function makeResponsesAccState(): ResponsesAccState {
   return {
     id: "",
     model: "",
@@ -66,7 +66,7 @@ function makeResponsesAccState(): ResponsesAccState {
  * Apply one parsed Responses SSE event to the accumulation state. Never touches
  * I/O — safe to call while forwarding the same event verbatim to the client.
  */
-function applyResponsesEvent(
+export function applyResponsesEvent(
   state: ResponsesAccState,
   event: string,
   parsed: Record<string, unknown>,
@@ -205,7 +205,9 @@ function applyResponsesEvent(
 }
 
 /** Build the final GatewayResponse from accumulated state. */
-function finalizeResponsesAcc(state: ResponsesAccState): GatewayResponse {
+export function finalizeResponsesAcc(
+  state: ResponsesAccState,
+): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const sortedIndices = Array.from(state.items.keys()).sort((a, b) => a - b);
 
@@ -296,7 +298,7 @@ export async function accumulateResponsesSSEStream(
  * dropped or re-serialized — `reasoning_summary`, content_part annotations,
  * etc. survive intact because we forward the original `data` string).
  */
-function reserializeSSE(event: string, data: string): string {
+export function formatResponsesEvent(event: string, data: string): string {
   const dataLines = data
     .split("\n")
     .map((line) => `data: ${line}`)
@@ -412,7 +414,7 @@ export function streamResponsesPassthrough(
             event !== "message" && !!data && data !== "[DONE]";
           if (
             forwardable &&
-            !safeEnqueue(encoder.encode(reserializeSSE(event, data)))
+            !safeEnqueue(encoder.encode(formatResponsesEvent(event, data)))
           ) {
             break;
           }
@@ -442,7 +444,7 @@ export function streamResponsesPassthrough(
         // terminal event, then still run onComplete with what we accumulated.
         safeEnqueue(
           encoder.encode(
-            reserializeSSE(
+            formatResponsesEvent(
               "response.failed",
               JSON.stringify({
                 type: "response.failed",
@@ -1028,7 +1030,7 @@ export function translateAnthropicStreamToResponses(
 // Internal helpers for the streaming translator
 // ---------------------------------------------------------------------------
 
-function mapStatusFromStopReason(reason: string): string {
+export function mapStatusFromStopReason(reason: string): string {
   switch (reason) {
     case "end_turn":
     case "stop":

@@ -1,23 +1,23 @@
 /**
- * Integration test: recall follow-up on the `openai-codex` (ChatGPT) path.
+ * Integration test: recall follow-up on the `openai-responses` streaming path
+ * (including the `openai-codex` / ChatGPT case).
  *
- * Regression for the bug where the recall follow-up was always issued
- * non-streaming (`runRecallFollowUpJSON` hardcodes `stream: false`). The
- * `openai-codex` provider routes to ChatGPT's `/backend-api/codex/responses`
- * backend, which MANDATES streaming and rejects a non-streaming request with
- * `400 {"detail":"Stream must be set to true"}`. The initial request streams
- * fine (so the model loads and calls `recall` at startup), but the follow-up
- * was forced to `stream: false` and the backend 400'd — surfacing as
- * `[lore] recall follow-up upstream error: 400 {"detail":"Stream must be set
- * to true"}`. The continuation was lost and the conversation stalled right
- * after the first recall.
+ * The recall follow-up is issued STREAMING (`stream: true`) for all
+ * `openai-responses` clients. This unifies two requirements:
+ *  - `openai-codex` (ChatGPT) MANDATES streaming: its
+ *    `/backend-api/codex/responses` backend rejects a non-streaming request
+ *    with `400 {"detail":"Stream must be set to true"}`.
+ *  - The true-streaming resume avoids the header-timeout hang on slow
+ *    reasoning-heavy upstreams (opencode's 10s `ProviderHeaderTimeoutError`):
+ *    a *buffered* `stream:false` follow-up re-introduces the wait.
  *
  * We drive a Codex ingress request (`POST /v1/codex/responses`, Responses wire
  * format) whose upstream interceptor mimics ChatGPT: it returns
  * `400 {"detail":"Stream must be set to true"}` for ANY non-streaming upstream
  * request. The first (streaming) call returns a `recall` function_call; the
- * follow-up must ALSO be streamed (forced by the fix) to get the final answer.
- * We assert the follow-up was streamed and the client received the answer.
+ * follow-up must ALSO be streamed to get the final answer. A second test
+ * drives the standard `/v1/responses` path and asserts its follow-up is also
+ * streamed (unified behavior).
  */
 import { describe, test, expect, afterEach } from "vitest";
 import {
@@ -107,27 +107,6 @@ function codexStreamRequiredError(): Response {
       headers: { "content-type": "application/json" },
     },
   );
-}
-
-/** Non-streaming Responses-API JSON with a final text answer. */
-function responsesFinalJSON(): Response {
-  const body = {
-    id: "resp_final",
-    model: "gpt-5.5",
-    status: "completed",
-    output: [
-      {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Here is the answer." }],
-      },
-    ],
-    usage: { input_tokens: 120, output_tokens: 5 },
-  };
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
 }
 
 let teardownFn: (() => void) | undefined;
@@ -276,11 +255,12 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     await resetPipelineState();
     await loadLoreConfig(projectDir);
 
-    // Initial streaming call → recall tool_use. Follow-up MUST be non-streaming
-    // (stream:false) for standard Responses, so we return JSON for it. If the
-    // gate were widened to force streaming here, the follow-up would arrive
-    // streamed and we'd return SSE — but assertJSONResponse expects JSON, so
-    // the followUpStreamFlag assertion below catches the regression directly.
+    // Initial streaming call → recall tool_use. Follow-up is ALSO streamed for
+    // standard Responses (unified streaming resume — fixes the header-timeout
+    // hang on slow reasoning-heavy upstreams), so we return an SSE stream for
+    // it. The standard Responses API accepts stream:true; only ChatGPT's codex
+    // backend MANDATES it, but the unified behavior is identical from the
+    // client's perspective.
     let upstreamCalls = 0;
     let followUpStreamFlag: boolean | undefined;
     setUpstreamInterceptor(async (upstreamBody) => {
@@ -288,7 +268,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       upstreamCalls++;
       if (upstreamCalls === 1) return codexRecallStream();
       followUpStreamFlag = streaming;
-      return responsesFinalJSON();
+      return codexFinalStream();
     });
 
     const config = loadConfig();
@@ -340,10 +320,11 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     expect(resp.ok).toBe(true);
     const bodyText = await resp.text();
 
-    // The follow-up was issued NON-streaming (stream:false) — the standard
-    // Responses path is unchanged by the codex fix.
+    // The follow-up was ALSO issued streaming — standard Responses now uses
+    // the same streaming resume as codex (unified behavior; the client sees an
+    // identical continuation either way).
     expect(upstreamCalls).toBe(2);
-    expect(followUpStreamFlag).toBe(false);
+    expect(followUpStreamFlag).toBe(true);
 
     // The continuation still reaches the client.
     expect(bodyText).toContain("Here is the answer.");
