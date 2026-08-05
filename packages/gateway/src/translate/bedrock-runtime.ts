@@ -38,14 +38,15 @@ export type BedrockRuntimeVerb = (typeof BEDROCK_RUNTIME_VERBS)[number];
  * Bedrock Runtime API operations. Captures modelId and verb for downstream
  * URL building.
  *
- * The `[a-zA-Z0-9._-]` class on modelId is intentionally permissive: AWS
+ * The `[a-zA-Z0-9._:-]` class on modelId is intentionally permissive: AWS
  * catalog ids routinely contain dots (e.g. `anthropic.claude-opus-4-6-v1`,
- * `google.gemma-3-4b-it`, `us.anthropic.claude-haiku-4-5`) and dashes.
+ * `google.gemma-3-4b-it`, `us.anthropic.claude-haiku-4-5`), dashes, and
+ * version-suffix colons (e.g. `anthropic.claude-opus-4-5-20251101-v1:0`).
  * A bare `model/{modelId}/{verb}` segment is enough specificity that this
  * cannot accidentally collide with `/v1/models` (plural) or `/v1/messages`.
  */
 export const BEDROCK_RUNTIME_PATH_RE =
-  /^\/v1\/model\/([a-zA-Z0-9._-]+)\/(converse|converse-stream|invoke|invoke-with-response-stream)$/;
+  /^\/v1\/model\/([a-zA-Z0-9._:-]+)\/(converse|converse-stream|invoke|invoke-with-response-stream)$/;
 
 /**
  * Build the Bedrock Runtime API origin for a region. No trailing slash — the
