@@ -452,6 +452,8 @@ export async function _cli(): Promise<void> {
   //     delete/clear/merge/dedup/reground-entities/move/split reach the
   //     legacy dispatcher's commandData via the variadic positional
   //     fallback; central confirmation policy deferred to slice 2).
+  //   - recall: migrated (Phase 3A.3 follow-up) — typed command (variadic
+  //     query + project/scope/session/limit/json flags).
   //
   // Removal milestone: delete the migrated case blocks once programmatic
   // callers migrate to `runCli()` AND a deletion test passes for each.
