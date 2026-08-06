@@ -119,6 +119,9 @@ export const recallCommand = buildCommand<RecallFlags, readonly string[]>({
         this,
         Boolean(flags.json),
       );
+      return;
     }
+
+    this.process.stdout.write(captured);
   },
 });

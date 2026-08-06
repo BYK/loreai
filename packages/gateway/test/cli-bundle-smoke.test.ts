@@ -13,6 +13,8 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer, type Server } from "node:http";
 
 const BUNDLE = resolve(process.cwd(), "packages/gateway/dist/bin.cjs");
 
@@ -48,6 +50,27 @@ async function runBundle(
       });
     });
   });
+}
+
+async function startRecallServer(): Promise<{ server: Server; url: string }> {
+  const server = createServer((_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(
+      JSON.stringify({
+        query: "query",
+        scope: "project",
+        projectPath: "/tmp/project",
+        result: "recalled result",
+      }),
+    );
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected TCP recall server address");
+  }
+  return { server, url: `http://127.0.0.1:${address.port}` };
 }
 
 describe("Phase 1 — bundled CLI reaches the typed commands", () => {
@@ -138,4 +161,21 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
     },
     15_000,
   );
+
+  test("`lore recall --json` preserves successful remote JSON output", async () => {
+    const { server, url } = await startRecallServer();
+    try {
+      const { stdout, stderr, code } = await runBundle(
+        ["recall", "query", "--json"],
+        { LORE_REMOTE_URL: url },
+      );
+
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout)).toMatchObject({ result: "recalled result" });
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
+  });
 });
