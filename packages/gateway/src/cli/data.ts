@@ -2252,6 +2252,7 @@ async function cmdMoveRemote(
   const type = args[0];
   const rawIds = args.slice(1);
   const skipConfirm = !!flags.yes;
+  const dryRun = !!flags["dry-run"];
   const rawTo = flags.to as string | undefined;
   const projectPath = resolve((flags.project as string) ?? process.cwd());
 
@@ -2283,6 +2284,13 @@ async function cmdMoveRemote(
         toProject = { id: rawTo };
       } else {
         toProject = { path: resolve(rawTo) };
+      }
+
+      if (dryRun) {
+        console.log(
+          `Would move ${rawIds.length} session(s) from ${projectPath} to ${rawTo}`,
+        );
+        return;
       }
 
       if (!skipConfirm) {
@@ -2326,6 +2334,11 @@ async function cmdMoveRemote(
         toProject = { id: rawTo };
       } else {
         toProject = { path: resolve(rawTo) };
+      }
+
+      if (dryRun) {
+        console.log(`Would move knowledge entry ${rawId} to ${rawTo}`);
+        return;
       }
 
       if (!skipConfirm) {

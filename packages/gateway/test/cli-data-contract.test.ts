@@ -11,6 +11,7 @@
  * variadic positional forwards them by subcommand name.
  */
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { WRITE_DATA_SUBCOMMANDS } from "../src/cli/commands/data";
 
 const origNoUpdateCheck = process.env.LORE_NO_UPDATE_CHECK;
 const origArgv = process.argv;
@@ -313,7 +314,7 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
     vi.resetModules();
   });
 
-  test("interactive confirmation forwards yes to avoid a second legacy prompt", async () => {
+  test("interactive legacy-confirmed commands retain their operation-specific prompt", async () => {
     vi.resetModules();
     const calls: DataCall[] = [];
     const confirm = vi.fn(async () => true);
@@ -342,9 +343,57 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
       else Reflect.deleteProperty(process.stdin, "isTTY");
       process.exitCode = priorExitCode;
     }
+    expect(confirm).not.toHaveBeenCalled();
+    expect(calls[0]?.values.yes).toBeUndefined();
+    vi.resetModules();
+  });
+
+  test("interactive confirmation supplies yes only for write commands without a legacy prompt", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const confirm = vi.fn(async () => true);
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({ commandData: dataImpl, confirm }));
+    const isTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "data", "vacuum"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      if (isTTY) Object.defineProperty(process.stdin, "isTTY", isTTY);
+      else Reflect.deleteProperty(process.stdin, "isTTY");
+      process.exitCode = priorExitCode;
+    }
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(calls[0]?.values.yes).toBe(true);
     vi.resetModules();
+  });
+
+  test("write registry classifies every default-mutating subcommand", () => {
+    expect(WRITE_DATA_SUBCOMMANDS).toEqual(
+      new Set([
+        "clear",
+        "delete",
+        "export",
+        "merge",
+        "move",
+        "recover",
+        "reindex",
+        "rerank",
+        "reground-entities",
+        "vacuum",
+      ]),
+    );
   });
 
   test("data propagates legacy exit code", async () => {

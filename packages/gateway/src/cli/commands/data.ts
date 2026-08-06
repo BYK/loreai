@@ -26,10 +26,26 @@ import { UsageError } from "../lib/errors";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandData, confirm } from "../data";
 
-// These commands mutate immediately. Preview-first operations such as
-// dedup, split, and consolidate retain their legacy --yes-to-apply
-// behavior and must not be promoted into mutations by this wrapper.
-export const DESTRUCTIVE_DATA_SUBCOMMANDS = new Set([
+// These commands write by default. Preview-first operations such as dedup,
+// split, and consolidate retain their legacy --yes-to-apply behavior and
+// must not be promoted into mutations by this wrapper.
+export const WRITE_DATA_SUBCOMMANDS = new Set([
+  "clear",
+  "delete",
+  "export",
+  "merge",
+  "move",
+  "recover",
+  "reindex",
+  "rerank",
+  "reground-entities",
+  "vacuum",
+]);
+
+// These legacy commands already show an operation-specific preview and ask
+// for confirmation. Keep that richer prompt rather than replacing it with a
+// generic wrapper prompt.
+const LEGACY_CONFIRMED_DATA_SUBCOMMANDS = new Set([
   "clear",
   "delete",
   "merge",
@@ -38,9 +54,8 @@ export const DESTRUCTIVE_DATA_SUBCOMMANDS = new Set([
   "reground-entities",
 ]);
 
-// These are the only immediate-mutation commands whose legacy handlers
-// implement a true no-write dry-run. Do not infer this from accepting a
-// --dry-run flag: other legacy handlers may ignore it.
+// These are the only write commands whose handlers implement a true no-write
+// dry-run. Do not infer this from merely accepting a --dry-run flag.
 const DRY_RUN_DATA_SUBCOMMANDS = new Set(["move", "reground-entities"]);
 
 type DataFlags = {
@@ -171,12 +186,13 @@ export const dataCommand = buildOutputCommand<
   async handler(flags, ...positionals) {
     const subcommand = positionals[0];
     const json = (flags as { json?: boolean }).json === true;
-    const requiresConfirmation =
+    const writesByDefault =
       subcommand !== undefined &&
-      DESTRUCTIVE_DATA_SUBCOMMANDS.has(subcommand) &&
+      WRITE_DATA_SUBCOMMANDS.has(subcommand) &&
       !(flags["dry-run"] && DRY_RUN_DATA_SUBCOMMANDS.has(subcommand));
+    let wrapperConfirmed = false;
 
-    if (requiresConfirmation && !flags.yes) {
+    if (writesByDefault && !flags.yes) {
       if (json || !process.stdin.isTTY) {
         throw new UsageError({
           message: `Refusing non-interactive \`lore data ${subcommand}\` without --yes.`,
@@ -184,6 +200,7 @@ export const dataCommand = buildOutputCommand<
         });
       }
       if (
+        !LEGACY_CONFIRMED_DATA_SUBCOMMANDS.has(subcommand) &&
         !(await confirm(
           `This runs \`lore data ${subcommand}\` and may permanently change Lore data.`,
         ))
@@ -191,6 +208,7 @@ export const dataCommand = buildOutputCommand<
         console.log("Cancelled.");
         return { kind: "empty" as const };
       }
+      wrapperConfirmed = !LEGACY_CONFIRMED_DATA_SUBCOMMANDS.has(subcommand);
     }
 
     const values: Record<string, unknown> = {};
@@ -202,9 +220,10 @@ export const dataCommand = buildOutputCommand<
     if (flags.project !== undefined) values.project = flags.project;
     if (flags.temporal) values.temporal = true;
     if (flags.to !== undefined) values.to = flags.to;
-    // A successful central confirmation suppresses legacy prompts so
-    // each destructive command asks the user exactly once.
-    if (flags.yes || requiresConfirmation) values.yes = true;
+    // Keep legacy operation-specific prompts. Only suppress a prompt when
+    // the caller explicitly opted in, or when this wrapper supplied the only
+    // confirmation for a command without one.
+    if (flags.yes || wrapperConfirmed) values.yes = true;
     // F-1 (HIGH): forward the 4 flags used by destructive subcommands.
     // Populate BOTH kebab-case and camelCase forms so the legacy
     // handler's existing checks work unchanged (matches the import.ts
