@@ -6,6 +6,17 @@ import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import {
+  MATRIX_STATE_FILE,
+  cellKey,
+  createMatrixState,
+  hasMatchingTerminalResult,
+  readMatrixState,
+  returnCellToPending,
+  startCell,
+  writeMatrixState,
+} from "./matrix-state.mjs";
+
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((out, value, index, values) => {
     if (value.startsWith("--")) {
@@ -23,8 +34,14 @@ const manifestPath = path.resolve(
   args.manifest || "matrix-iterative-orders.json",
 );
 const root = path.resolve(args.out || "./runs");
-const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const DRY_RUN = args["dry-run"] === "true";
+const RESUME = args.resume === "true";
+const manifestSnapshotPath = path.join(root, "manifest.json");
+if (RESUME && !fs.existsSync(manifestSnapshotPath)) {
+  throw new Error(`matrix manifest snapshot is required to resume: ${root}`);
+}
+const manifestSourcePath = RESUME ? manifestSnapshotPath : manifestPath;
+const manifest = JSON.parse(fs.readFileSync(manifestSourcePath, "utf8"));
 const REQUIRED_MODELS = new Set([
   "sonnet-5",
   "deepseek-v4-flash",
@@ -143,6 +160,34 @@ for (const model of manifest.models) {
 }
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
+function requireMatchingRunInputs(runManifest) {
+  const requireFiles = (inputs, label) => {
+    for (const input of inputs) {
+      const file =
+        input.path || path.join(path.dirname(manifestPath), input.name);
+      if (!fs.existsSync(file) || sha(fs.readFileSync(file)) !== input.sha256) {
+        throw new Error(`cannot resume: ${label} changed: ${file}`);
+      }
+    }
+  };
+  requireFiles(runManifest.tasks, "task input");
+  requireFiles(runManifest.generatedInputs, "generated input");
+  requireFiles(runManifest.harnessInputs, "harness input");
+  if (
+    treeHash(path.join(path.dirname(manifestPath), "seed-min")) !==
+    runManifest.seedManifestSha256
+  ) {
+    throw new Error("cannot resume: seed manifest changed");
+  }
+  if (loreRevision !== runManifest.loreRevision) {
+    throw new Error("cannot resume: Lore build revision changed");
+  }
+  for (const [runtime, version] of Object.entries(runManifest.runtimes)) {
+    if (runtimeVersion(runtime) !== version) {
+      throw new Error(`cannot resume: ${runtime} version changed`);
+    }
+  }
+}
 function treeHash(root) {
   const entries = [];
   const walk = (dir) => {
@@ -158,7 +203,7 @@ function treeHash(root) {
   walk(root);
   return sha(entries.sort().join("\n"));
 }
-const manifestSha = sha(fs.readFileSync(manifestPath));
+const manifestSha = sha(fs.readFileSync(manifestSourcePath));
 const runtimeVersion = (command, commandArgs = ["--version"]) => {
   try {
     return execFileSync(command, commandArgs, { encoding: "utf8" }).trim();
@@ -167,7 +212,11 @@ const runtimeVersion = (command, commandArgs = ["--version"]) => {
   }
 };
 if (!DRY_RUN) {
-  if (fs.existsSync(root)) {
+  if (RESUME) {
+    if (!fs.existsSync(path.join(root, MATRIX_STATE_FILE))) {
+      throw new Error(`matrix state is required to resume: ${root}`);
+    }
+  } else if (fs.existsSync(root)) {
     if (fs.readdirSync(root).length > 0) {
       throw new Error(
         `output directory must be empty for a from-scratch run: ${root}`,
@@ -185,6 +234,7 @@ function run(command, commandArgs, cwd) {
       env: process.env,
     });
     child.on("exit", (code) => resolve(code ?? 1));
+    child.on("error", () => resolve(1));
   });
 }
 
@@ -243,12 +293,18 @@ function ensureGatewayBundle() {
   }
 }
 
-if (!DRY_RUN) {
+if (!DRY_RUN && RESUME) {
+  requireMatchingRunInputs(
+    JSON.parse(fs.readFileSync(path.join(root, "run-manifest.json"), "utf8")),
+  );
+}
+
+if (!DRY_RUN && !RESUME) {
   ensureGeneratedInputs();
   ensureGatewayBundle();
 }
 
-if (!DRY_RUN) {
+if (!DRY_RUN && !RESUME) {
   fs.copyFileSync(manifestPath, path.join(root, "manifest.json"));
   fs.writeFileSync(
     path.join(root, "run-manifest.json"),
@@ -319,6 +375,7 @@ for (const task of tasks) {
             arm,
             repetition: repetition + 1,
             factMapId: sha(`${taskId}:${factSeed}`).slice(0, 16),
+            out: `${taskId}-${model.name}-${runtime}-${arm}-r${repetition + 1}`,
           });
         }
       }
@@ -332,7 +389,31 @@ if (DRY_RUN) {
   process.exit(0);
 }
 
+const statePath = path.join(root, MATRIX_STATE_FILE);
+const runManifestSha = sha(
+  fs.readFileSync(path.join(root, "run-manifest.json")),
+);
+const state = RESUME
+  ? readMatrixState(statePath)
+  : createMatrixState({ manifestSha, runManifestSha, cells: plannedCells });
+if (
+  state.manifestSha !== manifestSha ||
+  state.runManifestSha !== runManifestSha
+) {
+  throw new Error("matrix state does not match this manifest and run inputs");
+}
+for (const cell of plannedCells) {
+  const record = state.cells[cellKey(cell)];
+  if (!record || JSON.stringify(record.input) !== JSON.stringify(cell)) {
+    throw new Error(
+      `matrix state does not match planned cell: ${cellKey(cell)}`,
+    );
+  }
+}
+if (!RESUME) writeMatrixState(statePath, state);
+
 const dirs = [];
+const invalidCells = [];
 for (const task of tasks) {
   const taskId = taskIDs.get(task);
   if (typeof taskId !== "string" || taskId.length === 0) {
@@ -353,6 +434,26 @@ for (const task of tasks) {
             root,
             `${taskId}-${model.name}-${runtime}-${arm}-r${repetition + 1}`,
           );
+          const cell = plannedCells.find(
+            (candidate) =>
+              candidate.task === taskId &&
+              candidate.model === model.name &&
+              candidate.runtime === runtime &&
+              candidate.arm === arm &&
+              candidate.repetition === repetition + 1,
+          );
+          const record = state.cells[cellKey(cell)];
+          if (hasMatchingTerminalResult(root, record, sha)) {
+            console.error(`[resume] skipping terminal cell ${cellKey(cell)}`);
+            const result = JSON.parse(
+              fs.readFileSync(path.join(out, "result.json"), "utf8"),
+            );
+            if (result.valid) dirs.push(out);
+            else invalidCells.push(cellKey(cell));
+            continue;
+          }
+          startCell(record);
+          writeMatrixState(statePath, state);
           const code = await run(
             "bun",
             [
@@ -391,22 +492,34 @@ for (const task of tasks) {
           // runtime's isolated credential, whether the cell passed or failed.
           fs.rmSync(path.join(out, "data/opencode/auth.json"), { force: true });
           fs.rmSync(path.join(out, "pi-home/auth.json"), { force: true });
-          if (code !== 0)
+          const resultPath = path.join(out, "result.json");
+          if (code !== 0 && !fs.existsSync(resultPath)) {
+            returnCellToPending(record);
+            writeMatrixState(statePath, state);
             throw new Error(
               `matrix cell failed: ${taskId}/${model.name}/${runtime}/${arm}`,
             );
-          const result = JSON.parse(
-            fs.readFileSync(path.join(out, "result.json"), "utf8"),
-          );
-          if (!result.valid)
-            throw new Error(
-              `matrix cell is invalid: ${taskId}/${model.name}/${runtime}/${arm}: ${result.invalidReason || "unknown reason"}`,
-            );
-          dirs.push(out);
+          }
+          const result = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+          record.state = "terminal";
+          record.terminalOutcome =
+            result.terminalOutcome ||
+            (result.valid ? "completed" : "infrastructure-failure");
+          record.resultSha256 = sha(fs.readFileSync(resultPath));
+          record.updatedAt = new Date().toISOString();
+          writeMatrixState(statePath, state);
+          if (result.valid) dirs.push(out);
+          else invalidCells.push(cellKey(cell));
         }
       }
     }
   }
+}
+
+if (invalidCells.length > 0) {
+  throw new Error(
+    `matrix contains invalid terminal cells: ${invalidCells.join(", ")}`,
+  );
 }
 
 const checkpointDirs = [];
