@@ -39,7 +39,7 @@ Options:
   const projectPath = resolve((values.project as string) ?? process.cwd());
   const scope = (values.scope as string) ?? "all";
   const sessionID = values.session as string | undefined;
-  const limit = values.limit ? Number(values.limit) : 10;
+  const limit = values.limit === undefined ? 10 : Number(values.limit);
   const asJson = !!values.json;
 
   if (scope === "session" && !sessionID) {
