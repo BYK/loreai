@@ -113,6 +113,16 @@ runs:
         LORE_DB_PATH: ${{ steps.key.outputs.db }}
         CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         LORE_IC_GATE: ${{ inputs.gate }}
+        # Enable log.info/log.warn to surface on stderr. The action's bash already
+        # captures stderr unconditionally (per PR #1555), but the @loreai/core
+        # logger is debug-gated — without LORE_DEBUG=1 the only stderr we ever see
+        # on a successful lint run is the per-call judging progress lines. When
+        # a judge call returns null text (routing miss, auth failure, encrypted
+        # content, etc.) the unparseable++ count surfaces in the report but the
+        # underlying cause stays silent. Surfacing it here lets the next CI run
+        # pinpoint which path failed, instead of treating "20/20 unparseable" as
+        # the symptom we guess about in PR comments.
+        LORE_DEBUG: "1"
       run: |
         set -euo pipefail
         mkdir -p "$(dirname "$LORE_DB_PATH")"
