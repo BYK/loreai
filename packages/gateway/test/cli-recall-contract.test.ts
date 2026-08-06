@@ -95,6 +95,46 @@ describe("lore recall typed route", () => {
     expect(process.exitCode).toBe(20);
   });
 
+  test.each([
+    [[], {}, "Please provide a search query."],
+    [
+      ["auth"],
+      { scope: "session" },
+      "--scope session requires --session <id>.",
+    ],
+  ])(
+    "rejects semantic recall misuse before legacy handling",
+    async (positionals, values, message) => {
+      const { runCli } = await import("../src/cli/cli");
+      const originalStderrWrite = process.stderr.write;
+      const stderr: string[] = [];
+      process.stderr.write = (chunk: unknown) => {
+        stderr.push(String(chunk));
+        return true;
+      };
+      process.argv = [
+        "node",
+        "lore",
+        "recall",
+        ...positionals,
+        ...Object.entries(values).flatMap(([flag, value]) => [
+          `--${flag}`,
+          value,
+        ]),
+      ];
+
+      try {
+        await runCli();
+      } finally {
+        process.stderr.write = originalStderrWrite;
+      }
+
+      expect(state.calls).toEqual([]);
+      expect(process.exitCode).toBe(20);
+      expect(stderr.join("")).toContain(message);
+    },
+  );
+
   test("is no longer routed through the legacy dispatcher", async () => {
     const { LEGACY_ROUTES } = await import("../src/cli/app");
     expect(LEGACY_ROUTES.has("recall")).toBe(false);

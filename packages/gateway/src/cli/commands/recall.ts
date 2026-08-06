@@ -7,6 +7,7 @@
  */
 import { commandRecall } from "../recall-cmd";
 import { buildCommand } from "../lib/command";
+import { emitCliError, UsageError } from "../lib/errors";
 
 const RECALL_SCOPES = new Set(["all", "session", "project", "knowledge"]);
 
@@ -80,6 +81,29 @@ export const recallCommand = buildCommand<RecallFlags, readonly string[]>({
     },
   },
   async handler(flags, ...positionals) {
+    if (positionals.length === 0) {
+      emitCliError(
+        new UsageError({
+          message: "Please provide a search query.",
+          tryCommand: "lore recall <query>",
+        }),
+        this,
+        flags.json,
+      );
+      return;
+    }
+    if (flags.scope === "session" && !flags.session) {
+      emitCliError(
+        new UsageError({
+          message: "--scope session requires --session <id>.",
+          tryCommand: "lore recall <query> --scope session --session <id>",
+        }),
+        this,
+        flags.json,
+      );
+      return;
+    }
+
     const values: Record<string, unknown> = { json: flags.json };
     if (flags.project) values.project = flags.project;
     if (flags.scope) values.scope = flags.scope;
