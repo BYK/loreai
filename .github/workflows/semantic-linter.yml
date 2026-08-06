@@ -26,9 +26,11 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    # gpt-5-mini is the default judge (PR #1493 cross-model validation:
+    # gpt-5.6-luna is the default judge (PR #1493 cross-model validation:
     # 6/6 control PRs clean, 0 unparseable). Reachable via GitHub Copilot's
-    # chat-completions endpoint (NOT /responses-only — see worker-model.ts).
+    # /responses endpoint (NOT /chat/completions — see worker-model.ts and
+    # PR #1582's `openai-responses` worker adapter, gated by
+    # `isResponsesOnlyModel` in llm-adapter.ts).
     # Warm cache ~2-4 min; cold start with a fresh GITHUB_TOKEN + Copilot
     # quota lookup can take ~10-15 min on a PR with many hunks and many
     # invariants. 25 min gives ~10 min of headroom for cold-start variation,
@@ -61,12 +63,14 @@ jobs:
           # Judge model + credential. Two supported setups:
           #  1. Zero-secret (default): GitHub Copilot via the built-in
           #     GITHUB_TOKEN + `copilot-requests: write` above. Uses
-          #     github-copilot/gpt-5-mini as the default judge — highest
-          #     precision across the OpenAI model family on this task
-          #     (measured on the 6-PR control corpus in PR #1493; 0 false
-          #     positives, 0 unparseable). The token is sent as a Bearer
-          #     credential to api.githubcopilot.com/chat/completions; no
-          #     Copilot-specific token exchange needed in CI.
+          #     github-copilot/gpt-5.6-luna as the default judge — best
+          #     cost/quality point across the OpenAI model family on this
+          #     task (measured on the 6-PR control corpus in PR #1493; 0
+          #     false positives, 0 unparseable). The token is sent as a Bearer
+          #     credential to api.githubcopilot.com/responses (the openai-
+          #     responses worker adapter routes gpt-5.6-* via this endpoint
+          #     — see PR #1582 / `isResponsesOnlyModel` in llm-adapter.ts);
+          #     no Copilot-specific token exchange needed in CI.
           #     On fork PRs the token is read-only and may lack inference
           #     quota; the judge then no-ops (advisory → still passes),
           #     never breaks CI.
@@ -78,12 +82,12 @@ jobs:
           #
           # Model precedence (independent of the credential):
           #   - `LORE_INVARIANT_MODEL` var set     → use it (either credential).
-          #   - else no dedicated key              → github-copilot/gpt-5-mini
+          #   - else no dedicated key              → github-copilot/gpt-5.6-luna
           #     (the token is a GitHub token; a github-copilot id is required so
-          #     the CLI sends it as Bearer to api.githubcopilot.com).
+          #     the CLI sends it as Bearer to api.githubcopilot.com/responses).
           #   - else (dedicated key, no var)       → empty → CLI's configured
           #     default worker model, authed with the dedicated key.
           # This avoids the trap of pairing a dedicated (e.g. Anthropic) key with
           # a forced github-copilot id, which would 401 and silently no-op.
-          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5-mini' || '') }}
+          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5.6-luna' || '') }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}

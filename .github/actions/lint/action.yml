@@ -17,14 +17,14 @@ inputs:
     default: ""
   model:
     description: >-
-      Judge model (provider/id). Defaults to `github-copilot/gpt-5-mini` when
+      Judge model (provider/id). Defaults to `github-copilot/gpt-5.6-luna` when
       the workflow uses the zero-secret GitHub Copilot path (the default).
       In that case the CLI authenticates with the `github.token` built-in, no
       additional configuration needed. The reference workflow's model-precedence
       table still lets `LORE_INVARIANT_MODEL` (repo var) or a dedicated
       `LORE_WORKER_API_KEY` override this.
     required: false
-    default: "github-copilot/gpt-5-mini"
+    default: "github-copilot/gpt-5.6-luna"
   effort:
     description: >-
       Reasoning effort for the judge (off|low|medium|high|xhigh). A cost/depth
