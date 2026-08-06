@@ -94,4 +94,22 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
     expect(stderr).toContain("Try: lore login");
     expect(code).toBe(10);
   }, 15_000);
+
+  test.each([
+    [[], "Please provide a search query."],
+    [["auth", "--scope", "bogus"], "Invalid command arguments."],
+  ])(
+    "`lore recall --json` through the bundle emits a stable UsageError envelope",
+    async (args, message) => {
+      const { stderr, code } = await runBundle(["recall", ...args, "--json"]);
+
+      expect(code).toBe(20);
+      expect(JSON.parse(stderr)).toMatchObject({
+        error: "UsageError",
+        code: 20,
+        message,
+      });
+    },
+    15_000,
+  );
 });

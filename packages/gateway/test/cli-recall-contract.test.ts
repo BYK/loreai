@@ -136,6 +136,42 @@ describe("lore recall typed route", () => {
   );
 
   test.each([
+    ["scope", "bogus"],
+    ["limit", "nope"],
+  ])("renders invalid --%s as a JSON usage error", async (flag, value) => {
+    const { runCli } = await import("../src/cli/cli");
+    const originalStderrWrite = process.stderr.write;
+    const stderr: string[] = [];
+    process.stderr.write = (chunk: unknown) => {
+      stderr.push(String(chunk));
+      return true;
+    };
+    process.argv = [
+      "node",
+      "lore",
+      "recall",
+      "auth",
+      `--${flag}`,
+      value,
+      "--json",
+    ];
+
+    try {
+      await runCli();
+    } finally {
+      process.stderr.write = originalStderrWrite;
+    }
+
+    expect(state.calls).toEqual([]);
+    expect(process.exitCode).toBe(20);
+    expect(JSON.parse(stderr.join(""))).toMatchObject({
+      error: "UsageError",
+      code: 20,
+      message: "Invalid command arguments.",
+    });
+  });
+
+  test.each([
     [[], {}, "Please provide a search query."],
     [
       ["auth"],

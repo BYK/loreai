@@ -11,6 +11,7 @@ import { run } from "@stricli/core";
 import { app } from "./app";
 import { preprocessArgv } from "./lib/argv";
 import { buildContext } from "./context";
+import { emitCliError, UsageError } from "./lib/errors";
 
 /**
  * Top-level entry point used by `bin.ts`.
@@ -34,6 +35,8 @@ export async function runCli(): Promise<void> {
   if (result.useStricli) {
     const priorStderrWrite = process.stderr.write.bind(process.stderr);
     let scannerErrorDetected = false;
+    const json = userArgv.includes("--json");
+    const stderrWrites: Array<[unknown, unknown[]]> = [];
     process.stderr.write = (chunk: unknown, ...args: unknown[]) => {
       // Stricli's scanner-error path writes to stderr via
       // formatException -> formatMessageForArgumentScannerError.
@@ -66,6 +69,10 @@ export async function runCli(): Promise<void> {
       ) {
         scannerErrorDetected = true;
       }
+      if (json) {
+        stderrWrites.push([chunk, args]);
+        return true;
+      }
       return priorStderrWrite(
         chunk as Parameters<typeof process.stderr.write>[0],
         ...(args as []),
@@ -83,16 +90,33 @@ export async function runCli(): Promise<void> {
     }
     if (
       scannerErrorDetected &&
-      // Only remap when process.exitCode is still the Stricli default
-      // (-4, InvalidArgument). The `determineExitCode` callback in
-      // app.ts may have already remapped this to 2 (UsageError); in
-      // that case leave it alone (Seer finding on PR #1561).
-      (process.exitCode === -4 || process.exitCode === undefined)
+      (json ||
+        // Only remap when process.exitCode is still the Stricli default
+        // (-4, InvalidArgument). The `determineExitCode` callback in
+        // app.ts may have already remapped this to 2 (UsageError); in
+        // that case leave it alone (Seer finding on PR #1561).
+        process.exitCode === -4 ||
+        process.exitCode === undefined)
     ) {
-      // Stricli's scanner error path sets process.exitCode = -4
-      // (InvalidArgument). Node would truncate to 252 on exit.
-      // We remap to 20 (UsageError) for our exit-code convention.
-      process.exitCode = 20;
+      if (json) {
+        emitCliError(
+          new UsageError({ message: "Invalid command arguments." }),
+          buildContext(process),
+          true,
+        );
+      } else {
+        // Stricli's scanner error path sets process.exitCode = -4
+        // (InvalidArgument). Node would truncate to 252 on exit.
+        // We remap to 20 (UsageError) for our exit-code convention.
+        process.exitCode = 20;
+      }
+    } else if (json) {
+      for (const [chunk, args] of stderrWrites) {
+        priorStderrWrite(
+          chunk as Parameters<typeof process.stderr.write>[0],
+          ...(args as []),
+        );
+      }
     }
     return;
   }
