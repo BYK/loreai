@@ -120,4 +120,22 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
     },
     15_000,
   );
+
+  test.each([["--json"], ["--json=true"]])(
+    "`lore recall` runtime failures emit one JSON error envelope through the bundle with %s",
+    async (jsonFlag) => {
+      const { stdout, stderr, code } = await runBundle(
+        ["recall", "query", jsonFlag],
+        { LORE_REMOTE_URL: "http://127.0.0.1:1" },
+      );
+
+      expect(code).toBe(30);
+      expect(stdout).toBe("");
+      expect(JSON.parse(stderr)).toMatchObject({
+        error: "NetworkError",
+        code: 30,
+      });
+    },
+    15_000,
+  );
 });

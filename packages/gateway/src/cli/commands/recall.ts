@@ -7,7 +7,8 @@
  */
 import { commandRecall } from "../recall-cmd";
 import { buildCommand } from "../lib/command";
-import { emitCliError, UsageError } from "../lib/errors";
+import { emitCliError, NetworkError, UsageError } from "../lib/errors";
+import { runLegacyAndCollect } from "../lib/legacy-bridge";
 
 const RECALL_SCOPES = new Set(["all", "session", "project", "knowledge"]);
 
@@ -109,6 +110,15 @@ export const recallCommand = buildCommand<RecallFlags, readonly string[]>({
     if (flags.scope) values.scope = flags.scope;
     if (flags.session) values.session = flags.session;
     if (flags.limit !== undefined) values.limit = flags.limit;
-    await commandRecall([...positionals], values);
+    const { captured, exitCode } = await runLegacyAndCollect(() =>
+      commandRecall([...positionals], values),
+    );
+    if (exitCode !== 0) {
+      emitCliError(
+        new NetworkError({ message: captured.trim() || "Recall failed." }),
+        this,
+        Boolean(flags.json),
+      );
+    }
   },
 });
