@@ -527,12 +527,12 @@ describe("Phase 3D.1 — typed lore lint", () => {
 
     const chunks: string[] = [];
     const origWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((chunk: string | Buffer): boolean => {
+    process.stdout.write = (chunk: string | Buffer): boolean => {
       chunks.push(
         Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk),
       );
       return true;
-    });
+    };
     try {
       const { buildApplication, buildRouteMap, run } =
         await import("@stricli/core");
