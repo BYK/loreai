@@ -278,8 +278,50 @@ describe("resolveWorkerProtocol", () => {
     expect(resolveWorkerProtocol("anthropic", "openai")).toBe("openai");
   });
 
-  test("explicit 'openai-responses' collapses to 'openai'", () => {
+  test("explicit 'openai-responses' is preserved (does NOT collapse to 'openai')", () => {
+    // As of PR B (gpt-5.6-* Responses API routing for github-copilot),
+    // `openai-responses` is a first-class worker protocol — collapsing it to
+    // `openai` would route gpt-5.6-luna to /chat/completions where Copilot
+    // returns `unsupported_api_for_model`. The explicit hint is honored.
+    expect(resolveWorkerProtocol("github-copilot", "openai-responses")).toBe(
+      "openai-responses",
+    );
+    // Even for an unrelated provider id (no per-model override), an explicit
+    // openai-responses hint is preserved through — caller wired it on
+    // purpose and the upstream snapshot sets the canonical protocol field.
     expect(resolveWorkerProtocol("anthropic", "openai-responses")).toBe(
+      "openai-responses",
+    );
+  });
+
+  test("per-model override: github-copilot + gpt-5.6-* resolves to 'openai-responses'", () => {
+    expect(
+      resolveWorkerProtocol("github-copilot", undefined, "gpt-5.6-luna"),
+    ).toBe("openai-responses");
+    expect(
+      resolveWorkerProtocol("github-copilot", undefined, "gpt-5.6-sol"),
+    ).toBe("openai-responses");
+    expect(
+      resolveWorkerProtocol("github-copilot", undefined, "gpt-5.6-terra"),
+    ).toBe("openai-responses");
+  });
+
+  test("per-model override: github-copilot + non-gpt-5.6 stays 'openai' (chat-completions)", () => {
+    // gpt-5-mini, claude-sonnet-4.5, etc. are reachable on /chat/completions;
+    // the routing layer must not flip them to /responses speculatively.
+    expect(
+      resolveWorkerProtocol("github-copilot", undefined, "gpt-5-mini"),
+    ).toBe("openai");
+    expect(
+      resolveWorkerProtocol("github-copilot", undefined, "claude-sonnet-4.5"),
+    ).toBe("openai");
+  });
+
+  test("per-model override does NOT trigger for non-github-copilot providers", () => {
+    // Real api.openai.com has no /responses-routes-only model; even if a
+    // model id matches the prefix, the provider id is the authority and
+    // wins.
+    expect(resolveWorkerProtocol("openai", undefined, "gpt-5.6-luna")).toBe(
       "openai",
     );
   });

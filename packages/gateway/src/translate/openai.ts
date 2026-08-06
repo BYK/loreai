@@ -525,6 +525,12 @@ function buildOpenAIStreamResponse(resp: GatewayResponse): Response {
 const DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
 
 /**
+ * Default OpenAI **Responses** API path appended to a bare provider origin.
+ * Most OpenAI Responses-compatible providers serve at `<base>/v1/responses`.
+ */
+export const DEFAULT_OPENAI_RESPONSES_PATH = "/v1/responses";
+
+/**
  * Hosts whose OpenAI-compatible Chat Completions endpoint is NOT served at the
  * conventional `<base>/v1/chat/completions`. Maps hostname → the exact path the
  * gateway must append to the provider origin instead:
@@ -548,6 +554,22 @@ const OPENAI_HOST_CHAT_COMPLETIONS_PATHS: ReadonlyMap<string, string> = new Map(
   [["generativelanguage.googleapis.com", "/v1beta/openai/chat/completions"]],
 );
 
+/**
+ * Hosts whose OpenAI Responses API endpoint is NOT served at the bare
+ * `<base>${DEFAULT_OPENAI_RESPONSES_PATH}` shape. Same shape as the
+ * Chat-Completions map; keep them side-by-side to make the per-host quirks easy
+ * to read in one place.
+ *
+ * Currently EMPTY — GitHub Copilot's `/responses` is handled by the
+ * `isGitHubCopilotHost` short-circuit inside `buildOpenAIResponsesUrl`
+ * (mirroring `buildOpenAIChatCompletionsUrl`'s path for `/chat/completions`,
+ * issue #1052). Real OpenAI (`api.openai.com`) uses the default `/v1/responses`
+ * path and needs NO entry here.
+ *
+ * Keyed by hostname so the override holds regardless of which routing tier
+ * produced the base URL. Reserved for future per-host Responses quirks.
+ */
+const OPENAI_HOST_RESPONSES_PATHS: ReadonlyMap<string, string> = new Map();
 /** The API version pinned for GitHub Copilot requests (matches Copilot CLI). */
 export const GITHUB_COPILOT_API_VERSION = "2026-06-01";
 
@@ -632,6 +654,50 @@ export function buildOpenAIChatCompletionsUrl(base: string): string {
     // Unparseable base (e.g. a bare placeholder) — keep the default `/v1` path.
   }
   return `${base}${DEFAULT_OPENAI_CHAT_COMPLETIONS_PATH}`;
+}
+
+/**
+ * Build the OpenAI **Responses API** upstream URL for an upstream base.
+ *
+ * Mirror of {@link buildOpenAIChatCompletionsUrl}, used by background worker
+ * calls for providers/models that require the Responses wire shape (currently
+ * the `gpt-5.6-{sol,terra,luna}` family on `github-copilot`, which Copilot
+ * rolled out on 2026-07-09 — those return
+ * `unsupported_api_for_model` on `/chat/completions` and are ONLY reachable
+ * via `/responses`, per `earendil-works/pi#6475`).
+ *
+ * Routing rules mirror the chat-completions builder:
+ *  1. GitHub Copilot hosts (any `*.githubcopilot.com`, issue #1052) serve at
+ *     `/responses` with no `/v1` prefix.
+ *  2. Hosts in `OPENAI_HOST_RESPONSES_PATHS` (currently empty) use a fixed
+ *     non-`/v1` endpoint path. Reserved for future per-host Responses quirks
+ *     (no real provider needs it today).
+ *  3. A base whose pathname already ends in a version segment serves
+ *     `/responses` at `<base>/responses`; a default `/v1/responses` prefix
+ *     would duplicate the version.
+ *  4. Falls back to `${base}${DEFAULT_OPENAI_RESPONSES_PATH}` (`/v1/responses`).
+ */
+export function buildOpenAIResponsesUrl(base: string): string {
+  try {
+    const { hostname, pathname } = new URL(base);
+    // GitHub Copilot (all hosts, incl. api.individual/business/enterprise.*)
+    // serves /responses with no /v1 prefix — issue #1052.
+    if (isGitHubCopilotHost(hostname)) {
+      return `${base}/responses`;
+    }
+    const hostPath = OPENAI_HOST_RESPONSES_PATHS.get(hostname);
+    if (hostPath !== undefined) {
+      return `${base}${hostPath}`;
+    }
+    // Base already ends in a version segment (`/v4`, `/v1`, …) → the API path
+    // is just `/responses`; a `/v1` prefix would double the version.
+    if (/\/v\d+$/.test(pathname)) {
+      return `${base}/responses`;
+    }
+  } catch {
+    // Unparseable base — keep the default `/v1/responses` path.
+  }
+  return `${base}${DEFAULT_OPENAI_RESPONSES_PATH}`;
 }
 
 export function buildOpenAIUpstreamRequest(
