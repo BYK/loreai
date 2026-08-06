@@ -508,6 +508,7 @@ for (const task of tasks) {
               model.workerModel,
               "--agent-runtime",
               runtime,
+              ...(args.opencode ? ["--opencode", args.opencode] : []),
               "--auth",
               authPath,
               "--out",
