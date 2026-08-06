@@ -36,6 +36,18 @@ const manifestPath = path.resolve(
 const root = path.resolve(args.out || "./runs");
 const DRY_RUN = args["dry-run"] === "true";
 const RESUME = args.resume === "true";
+const shardCount = Number(args["shard-count"] || 1);
+const shardIndex = Number(args["shard-index"] || 0);
+if (
+  !Number.isInteger(shardCount) ||
+  shardCount < 1 ||
+  !Number.isInteger(shardIndex) ||
+  shardIndex < 0 ||
+  shardIndex >= shardCount
+) {
+  throw new Error("shard index must be a zero-based integer below shard count");
+}
+const shard = { index: shardIndex, count: shardCount };
 const manifestSnapshotPath = path.join(root, "manifest.json");
 if (RESUME && !fs.existsSync(manifestSnapshotPath)) {
   throw new Error(`matrix manifest snapshot is required to resume: ${root}`);
@@ -161,6 +173,12 @@ for (const model of manifest.models) {
 
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 function requireMatchingRunInputs(runManifest) {
+  if (
+    runManifest.shard?.index !== shard.index ||
+    runManifest.shard?.count !== shard.count
+  ) {
+    throw new Error("cannot resume: shard assignment changed");
+  }
   const requireFiles = (inputs, label) => {
     for (const input of inputs) {
       const file =
@@ -339,6 +357,7 @@ if (!DRY_RUN && !RESUME) {
         ),
         loreBuild,
         loreRevision,
+        shard,
         startedAt: new Date().toISOString(),
         runtimes: {
           opencode: runtimeVersion("opencode"),
@@ -351,7 +370,7 @@ if (!DRY_RUN && !RESUME) {
   );
 }
 
-const plannedCells = [];
+const allPlannedCells = [];
 for (const task of tasks) {
   const taskId = taskIDs.get(task);
   if (typeof taskId !== "string" || taskId.length === 0) {
@@ -368,7 +387,7 @@ for (const task of tasks) {
           `${manifestSha}:${taskId}:${model.name}:${runtime}:${repetition}`,
         );
         for (const arm of manifest.arms) {
-          plannedCells.push({
+          allPlannedCells.push({
             task: taskId,
             model: model.name,
             runtime,
@@ -382,9 +401,21 @@ for (const task of tasks) {
     }
   }
 }
+const plannedCells = allPlannedCells.filter(
+  (_, index) => index % shard.count === shard.index,
+);
 if (DRY_RUN) {
   console.log(
-    JSON.stringify({ manifest: manifestPath, cells: plannedCells }, null, 2),
+    JSON.stringify(
+      {
+        manifest: manifestPath,
+        shard,
+        totalCells: allPlannedCells.length,
+        cells: plannedCells,
+      },
+      null,
+      2,
+    ),
   );
   process.exit(0);
 }
@@ -395,12 +426,20 @@ const runManifestSha = sha(
 );
 const state = RESUME
   ? readMatrixState(statePath)
-  : createMatrixState({ manifestSha, runManifestSha, cells: plannedCells });
+  : createMatrixState({
+      manifestSha,
+      runManifestSha,
+      shard,
+      cells: plannedCells,
+    });
 if (
   state.manifestSha !== manifestSha ||
   state.runManifestSha !== runManifestSha
 ) {
   throw new Error("matrix state does not match this manifest and run inputs");
+}
+if (state.shard?.index !== shard.index || state.shard?.count !== shard.count) {
+  throw new Error("matrix state does not match this shard assignment");
 }
 for (const cell of plannedCells) {
   const record = state.cells[cellKey(cell)];
@@ -442,6 +481,7 @@ for (const task of tasks) {
               candidate.arm === arm &&
               candidate.repetition === repetition + 1,
           );
+          if (!cell) continue;
           const record = state.cells[cellKey(cell)];
           if (hasMatchingTerminalResult(root, record, sha)) {
             console.error(`[resume] skipping terminal cell ${cellKey(cell)}`);

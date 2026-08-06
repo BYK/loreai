@@ -36,6 +36,7 @@ test("writes state atomically and recognizes an unchanged terminal result", () =
   const state = createMatrixState({
     manifestSha: "manifest",
     runManifestSha: "run-manifest",
+    shard: { index: 0, count: 4 },
     cells: [cell],
   });
   const record = state.cells[cellKey(cell)];
@@ -60,6 +61,7 @@ test("reruns terminal records whose result is missing or changed", () => {
   const state = createMatrixState({
     manifestSha: "manifest",
     runManifestSha: "run-manifest",
+    shard: { index: 0, count: 4 },
     cells: [cell],
   });
   const record = state.cells[cellKey(cell)];
@@ -79,6 +81,7 @@ test("retries an interrupted cell without preserving its terminal claim", () => 
   const state = createMatrixState({
     manifestSha: "manifest",
     runManifestSha: "run-manifest",
+    shard: { index: 0, count: 4 },
     cells: [cell],
   });
   const record = state.cells[cellKey(cell)];

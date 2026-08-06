@@ -13,12 +13,18 @@ export function cellKey(cell) {
   ].join("/");
 }
 
-export function createMatrixState({ manifestSha, runManifestSha, cells }) {
+export function createMatrixState({
+  manifestSha,
+  runManifestSha,
+  shard,
+  cells,
+}) {
   const createdAt = new Date().toISOString();
   return {
     version: 1,
     manifestSha,
     runManifestSha,
+    shard,
     createdAt,
     cells: Object.fromEntries(
       cells.map((cell) => [
