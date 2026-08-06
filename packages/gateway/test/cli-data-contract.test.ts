@@ -348,6 +348,30 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
     vi.resetModules();
   });
 
+  test("explicit --yes forwards to legacy-confirmed commands without a wrapper prompt", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const confirm = vi.fn(async () => true);
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({ commandData: dataImpl, confirm }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "data", "delete", "entry-id", "--yes"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(confirm).not.toHaveBeenCalled();
+    expect(calls[0]?.values.yes).toBe(true);
+    vi.resetModules();
+  });
+
   test("interactive confirmation supplies yes only for write commands without a legacy prompt", async () => {
     vi.resetModules();
     const calls: DataCall[] = [];
