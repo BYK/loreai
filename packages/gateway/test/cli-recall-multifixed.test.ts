@@ -24,9 +24,6 @@ vi.mock("../src/cli/lib/version-check", () => ({
 let lastQuery: string | undefined;
 let lastScope: string | undefined;
 let lastSessionID: string | undefined;
-let lastLimit: number | undefined;
-let remoteUrl: string | undefined;
-let lastRemotePath: string | undefined;
 
 vi.mock("@loreai/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@loreai/core")>();
@@ -43,7 +40,6 @@ vi.mock("@loreai/core", async (importOriginal) => {
       lastQuery = input.query;
       lastScope = input.scope;
       lastSessionID = input.sessionID;
-      lastLimit = (input.searchConfig as { recallLimit?: number })?.recallLimit;
       // No DB hit: return an empty RecallResult shape that the legacy
       // command will JSON.stringify without further IO.
       return {
@@ -63,15 +59,6 @@ vi.mock("@loreai/core", async (importOriginal) => {
     }),
   };
 });
-
-vi.mock("../src/cli/remote", () => ({
-  getRemoteUrl: () => remoteUrl,
-  projectQueryParams: () => "project=test",
-  remoteGet: async (_remote: string, path: string) => {
-    lastRemotePath = path;
-    return { result: "remote result" };
-  },
-}));
 
 import { commandRecall } from "../src/cli/recall-cmd";
 
@@ -101,9 +88,6 @@ describe("Phase 3A.3 — recall multiword fix", () => {
     lastQuery = undefined;
     lastScope = undefined;
     lastSessionID = undefined;
-    lastLimit = undefined;
-    remoteUrl = undefined;
-    lastRemotePath = undefined;
   });
 
   afterAll(() => {});
@@ -121,19 +105,6 @@ describe("Phase 3A.3 — recall multiword fix", () => {
   test("three-word query is joined (the documented limitation)", async () => {
     await runRecall(["how", "do", "I", "remember"], {});
     expect(lastQuery).toBe("how do I remember");
-  });
-
-  test("preserves an explicit zero limit for local recall", async () => {
-    await runRecall(["zero", "limit"], { limit: 0 });
-    expect(lastLimit).toBe(0);
-  });
-
-  test("preserves an explicit zero limit for remote recall", async () => {
-    remoteUrl = "https://gateway.example";
-
-    await runRecall(["zero", "limit"], { limit: 0 });
-
-    expect(lastRemotePath).toContain("limit=0");
   });
 
   test("--scope session without --session returns UsageError-shape exitCode=1", async () => {

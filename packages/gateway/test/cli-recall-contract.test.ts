@@ -78,16 +78,21 @@ describe("lore recall typed route", () => {
     });
   });
 
-  test("preserves an explicit zero limit", async () => {
+  test.each([
+    ["--scope", "bogus"],
+    ["--limit", "0"],
+    ["--limit", "-1"],
+    ["--limit", "1.5"],
+    ["--limit", "51"],
+    ["--limit", "abc"],
+  ])("rejects invalid recall input: %s %s", async (flag, value) => {
     const { runCli } = await import("../src/cli/cli");
-    process.argv = ["node", "lore", "recall", "auth", "--limit", "0"];
+    process.argv = ["node", "lore", "recall", "auth", flag, value];
 
     await runCli();
 
-    expect(state.calls[0]).toEqual({
-      positionals: ["auth"],
-      values: { json: false, limit: 0 },
-    });
+    expect(state.calls).toEqual([]);
+    expect(process.exitCode).toBe(20);
   });
 
   test("is no longer routed through the legacy dispatcher", async () => {

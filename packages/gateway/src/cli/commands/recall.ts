@@ -8,6 +8,23 @@
 import { commandRecall } from "../recall-cmd";
 import { buildCommand } from "../lib/command";
 
+const RECALL_SCOPES = new Set(["all", "session", "project", "knowledge"]);
+
+function parseScope(input: string): string {
+  if (!RECALL_SCOPES.has(input)) {
+    throw new Error(`Invalid recall scope: ${input}`);
+  }
+  return input;
+}
+
+function parseLimit(input: string): number {
+  const limit = Number(input);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new Error("Recall limit must be an integer from 1 to 50");
+  }
+  return limit;
+}
+
 type RecallFlags = {
   project?: string;
   scope?: string;
@@ -32,7 +49,7 @@ export const recallCommand = buildCommand<RecallFlags, readonly string[]>({
       },
       scope: {
         kind: "parsed",
-        parse: String,
+        parse: parseScope,
         brief: "Search scope (all | session | project | knowledge)",
         optional: true,
       },
@@ -44,8 +61,8 @@ export const recallCommand = buildCommand<RecallFlags, readonly string[]>({
       },
       limit: {
         kind: "parsed",
-        parse: Number,
-        brief: "Maximum results (default: 10)",
+        parse: parseLimit,
+        brief: "Maximum results, from 1 to 50 (default: 10)",
         optional: true,
       },
       json: {

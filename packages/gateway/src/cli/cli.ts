@@ -55,11 +55,14 @@ export async function runCli(): Promise<void> {
         //   UnexpectedPositionalError: "Too many arguments, expected N but encountered \"X\""
         //   UnsatisfiedPositionalError:"Expected at least N argument(s) for X"
         //   AliasNotFoundError:        "No alias registered for -X"
-        // We match the substring of the first two and a tail of the
-        // third because the full wording wraps the user's input.
+        //   ParsedParameterError:      "Failed to parse --X: ..."
+        // We match stable fragments because full wording wraps user input.
         /No (flag|alias) registered for/i.test(text) ||
         /expected (at most|.*but encountered)/i.test(text) ||
-        /expected (input for (flag|argument)|.*argument(s)? for )/i.test(text)
+        /expected (input for (flag|argument)|.*argument(s)? for )/i.test(
+          text,
+        ) ||
+        /failed to parse/i.test(text)
       ) {
         scannerErrorDetected = true;
       }
