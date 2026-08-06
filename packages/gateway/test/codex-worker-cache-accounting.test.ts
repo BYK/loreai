@@ -57,4 +57,29 @@ describe("parseResponsesWorkerResponse cache accounting", () => {
     const { usage } = parseResponsesWorkerResponse({ output_text: "ok" });
     expect(usage).toBeNull();
   });
+
+  test("falls back to output[].content[].text when output_text aggregate is null", () => {
+    // GitHub Copilot's /responses endpoint echoes back `output_text: null` in
+    // its convenience aggregate and instead nests the text under
+    // `output[].content[].text` (verified by live probe against
+    // api.githubcopilot.com/responses on gpt-5.6-luna). The parser MUST
+    // fall back to the item walk — otherwise every Copilot /responses worker
+    // call would return text=null and fail the parseInvariantVerdict step.
+    //
+    // The function's parameter type declares `output_text?: string`, but
+    // Copilot returns null in practice; the parser's `typeof === "string"`
+    // guard at `parseResponsesWorkerResponse:1447` already handles null
+    // correctly. The cast here pins the production behavior without forcing
+    // a (potentially-confusing) widening of the public parameter type.
+    const { text } = parseResponsesWorkerResponse({
+      output_text: null as unknown as string,
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "fallback via item walk" }],
+        },
+      ],
+    });
+    expect(text).toBe("fallback via item walk");
+  });
 });

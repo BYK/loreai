@@ -194,7 +194,10 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
       { scheme: "bearer", value: "tok" },
       "gpt-5.6-luna",
     );
+    // Defense against a regression that omits or hardcodes the field:
+    // assert the value flows through, not just the key's presence.
     expect(body.max_output_tokens).toBeDefined();
+    expect(body.max_output_tokens).toBeGreaterThan(0);
     expect(body.max_completion_tokens).toBeUndefined();
   });
 

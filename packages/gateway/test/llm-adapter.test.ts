@@ -304,6 +304,14 @@ describe("resolveWorkerProtocol", () => {
     expect(
       resolveWorkerProtocol("github-copilot", undefined, "gpt-5.6-terra"),
     ).toBe("openai-responses");
+    // Dashless branch — defensive coverage. models.dev currently only lists
+    // the three-member `gpt-5.6-{sol,terra,luna}` family, but the resolver
+    // also accepts the bare slug. If the family ever gets a name without
+    // a hyphen (e.g. a renaming), this branch should keep working without
+    // a code change.
+    expect(resolveWorkerProtocol("github-copilot", undefined, "gpt-5.6")).toBe(
+      "openai-responses",
+    );
   });
 
   test("per-model override: github-copilot + non-gpt-5.6 stays 'openai' (chat-completions)", () => {
