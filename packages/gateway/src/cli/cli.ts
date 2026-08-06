@@ -35,7 +35,9 @@ export async function runCli(): Promise<void> {
   if (result.useStricli) {
     const priorStderrWrite = process.stderr.write.bind(process.stderr);
     let scannerErrorDetected = false;
-    const json = userArgv.includes("--json");
+    const json = userArgv.some(
+      (arg) => arg === "--json" || arg === "--json=true",
+    );
     const stderrWrites: Array<[unknown, unknown[]]> = [];
     process.stderr.write = (chunk: unknown, ...args: unknown[]) => {
       // Stricli's scanner-error path writes to stderr via

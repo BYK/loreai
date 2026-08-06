@@ -98,12 +98,20 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
   test.each([
     [[], "Please provide a search query."],
     [["auth", "--scope", "bogus"], "Invalid command arguments."],
+    [["auth", "--scope", "bogus", "--json=true"], "Invalid command arguments."],
+    [["auth", "--unexpected", "--json=true"], "Invalid command arguments."],
   ])(
     "`lore recall --json` through the bundle emits a stable UsageError envelope",
     async (args, message) => {
-      const { stderr, code } = await runBundle(["recall", ...args, "--json"]);
+      const jsonFlag = args.includes("--json=true") ? [] : ["--json"];
+      const { stdout, stderr, code } = await runBundle([
+        "recall",
+        ...args,
+        ...jsonFlag,
+      ]);
 
       expect(code).toBe(20);
+      expect(stdout).toBe("");
       expect(JSON.parse(stderr)).toMatchObject({
         error: "UsageError",
         code: 20,
