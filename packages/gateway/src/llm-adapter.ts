@@ -749,8 +749,29 @@ export function resolveWorkerProtocol(
   if (explicit) {
     // Per-model override beats an explicit openai hint (caller likely did
     // not know about the gpt-5.6 routing); but an explicit openai-responses
-    // hint is authoritative — caller wired it on purpose.
-    if (explicit === "openai-responses") return "openai-responses";
+    // hint is authoritative — IF the provider actually supports the
+    // Responses API. The pre-PR-#1582 behavior collapsed
+    // `openai-responses` → `openai` UNCONDITIONALLY (defensive guard
+    // against misconfigured snapshots where upstreamProviderID and
+    // protocol disagree); PR #1582 loosened that to preserve the hint
+    // UNCONDITIONALLY, which would silently misroute a misconfigured
+    // anthropic/vertex/gemini snapshot to `/v1/responses` on api.anthropic.com
+    // (404). Restore the guard: only preserve `openai-responses` when the
+    // route table says the provider supports it (real OpenAI: api.openai.com
+    // — config.ts:573-578) OR the per-model override (github-copilot +
+    // gpt-5.6-*) triggers. Other providers' openai-responses hints fall
+    // through to chat-completions (`"openai"`), matching the prior collapse.
+    if (explicit === "openai-responses") {
+      if (
+        resolveProviderRoute(providerID)?.protocol === "openai-responses" ||
+        (providerID === "github-copilot" &&
+          modelID &&
+          isResponsesOnlyModel(modelID))
+      ) {
+        return "openai-responses";
+      }
+      return "openai";
+    }
     if (
       providerID === "github-copilot" &&
       modelID &&

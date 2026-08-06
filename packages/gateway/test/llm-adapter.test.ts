@@ -278,20 +278,68 @@ describe("resolveWorkerProtocol", () => {
     expect(resolveWorkerProtocol("anthropic", "openai")).toBe("openai");
   });
 
-  test("explicit 'openai-responses' is preserved (does NOT collapse to 'openai')", () => {
-    // As of PR B (gpt-5.6-* Responses API routing for github-copilot),
-    // `openai-responses` is a first-class worker protocol — collapsing it to
-    // `openai` would route gpt-5.6-luna to /chat/completions where Copilot
-    // returns `unsupported_api_for_model`. The explicit hint is honored.
-    expect(resolveWorkerProtocol("github-copilot", "openai-responses")).toBe(
+  test("explicit 'openai-responses' is preserved for providers that support it", () => {
+    // Real api.openai.com natively speaks /v1/responses — its route table
+    // declares `protocol: "openai-responses"` (config.ts:573-578). An
+    // explicit hint on the openai provider is honored through.
+    expect(resolveWorkerProtocol("openai", "openai-responses")).toBe(
       "openai-responses",
     );
-    // Even for an unrelated provider id (no per-model override), an explicit
-    // openai-responses hint is preserved through — caller wired it on
-    // purpose and the upstream snapshot sets the canonical protocol field.
+    // openai-codex: its route table also declares `protocol: "openai-responses"`
+    // (config.ts:581-586), and the early-return at the top of the function
+    // unconditionally maps openai-codex → openai-codex-responses.
+    // github-copilot supports /responses for the gpt-5.6-* family via the
+    // per-model override (no `protocol: "openai-responses"` in its route
+    // table entry, but `isResponsesOnlyModel(modelID)` gates it). The
+    // production call site (llm-adapter.ts:2021) ALWAYS passes modelID;
+    // the no-modelID branch is unreachable from the worker pipeline.
+    expect(
+      resolveWorkerProtocol(
+        "github-copilot",
+        "openai-responses",
+        "gpt-5.6-luna",
+      ),
+    ).toBe("openai-responses");
+    expect(
+      resolveWorkerProtocol(
+        "github-copilot",
+        "openai-responses",
+        "gpt-5.6-sol",
+      ),
+    ).toBe("openai-responses");
+  });
+
+  test("explicit 'openai-responses' collapses to 'openai' for providers that don't support it (defensive guard)", () => {
+    // Seer inline review (PR #1582#discussion_r3725297559) flagged that
+    // PR #1582's unconditional `if (explicit === "openai-responses") return
+    // "openai-responses"` weakened the pre-existing defensive collapse.
+    // A misconfigured snapshot where upstreamProviderID="anthropic" but
+    // protocol="openai-responses" would silently route to /v1/responses on
+    // api.anthropic.com (404). Restore the guard: only providers whose
+    // route table declares `protocol: "openai-responses"` (or the per-model
+    // override triggers) get the hint preserved.
     expect(resolveWorkerProtocol("anthropic", "openai-responses")).toBe(
-      "openai-responses",
+      "openai",
     );
+    expect(resolveWorkerProtocol("vertex", "openai-responses")).toBe("openai");
+    expect(resolveWorkerProtocol("google", "openai-responses")).toBe("openai");
+    expect(resolveWorkerProtocol("deepseek", "openai-responses")).toBe(
+      "openai",
+    );
+    expect(resolveWorkerProtocol("minimax", "openai-responses")).toBe("openai");
+    // github-copilot with a NON-gpt-5.6-* model (where the per-model
+    // override doesn't trigger) also collapses — the route table says
+    // `protocol: "openai"`, not "openai-responses".
+    expect(
+      resolveWorkerProtocol("github-copilot", "openai-responses", "gpt-5-mini"),
+    ).toBe("openai");
+    expect(
+      resolveWorkerProtocol(
+        "github-copilot",
+        "openai-responses",
+        "claude-sonnet-4.5",
+      ),
+    ).toBe("openai");
   });
 
   test("per-model override: github-copilot + gpt-5.6-* resolves to 'openai-responses'", () => {
