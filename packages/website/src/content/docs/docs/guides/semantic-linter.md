@@ -62,7 +62,7 @@ jobs:
         uses: ./.github/actions/lint
         with:
           lore-command: "node packages/gateway/dist/bin.cjs"
-          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5-mini' || '') }}
+          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5.6-luna' || '') }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}
 ```
 
@@ -78,7 +78,7 @@ The credential and the model are chosen independently.
 
 **Credential** (the `worker-api-key` input):
 
-- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `copilot-requests: write`, calling GitHub Copilot. The token is sent as a Bearer credential to `api.githubcopilot.com/chat/completions` — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; the judge then no-ops (advisory → still passes) rather than breaking CI.
+- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `copilot-requests: write`, calling GitHub Copilot. The token is sent as a Bearer credential to `api.githubcopilot.com/responses` (the openai-responses worker adapter routes `gpt-5.6-*` via this endpoint — see PR #1582 / `isResponsesOnlyModel` in `llm-adapter.ts`) — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; the judge then no-ops (advisory → still passes) rather than breaking CI.
 - **Dedicated key (busy repos).** Set a `LORE_WORKER_API_KEY` secret. It takes precedence over the token.
 
 **Model** (the `model` input, `provider/id`):
@@ -86,7 +86,7 @@ The credential and the model are chosen independently.
 | Situation | Model used |
 | --- | --- |
 | `LORE_INVARIANT_MODEL` repo variable is set | that value (with either credential) |
-| No dedicated key, no variable | `github-copilot/gpt-5-mini` |
+| No dedicated key, no variable | `github-copilot/gpt-5.6-luna` |
 | Dedicated key, no variable | your repo's configured default worker model |
 
 :::note
