@@ -52,8 +52,11 @@ async function runBundle(
   });
 }
 
-async function startRecallServer(): Promise<{ server: Server; url: string }> {
+async function startRecallServer(
+  statusCode = 200,
+): Promise<{ server: Server; url: string }> {
   const server = createServer((_request, response) => {
+    response.statusCode = statusCode;
     response.setHeader("content-type", "application/json");
     response.end(
       JSON.stringify({
@@ -71,6 +74,12 @@ async function startRecallServer(): Promise<{ server: Server; url: string }> {
     throw new Error("Expected TCP recall server address");
   }
   return { server, url: `http://127.0.0.1:${address.port}` };
+}
+
+async function stopRecallServer(server: Server): Promise<void> {
+  await new Promise<void>((resolveClose, reject) => {
+    server.close((error) => (error ? reject(error) : resolveClose()));
+  });
 }
 
 describe("Phase 1 — bundled CLI reaches the typed commands", () => {
@@ -147,17 +156,22 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
   test.each([["--json"], ["--json=true"]])(
     "`lore recall` runtime failures emit one JSON error envelope through the bundle with %s",
     async (jsonFlag) => {
-      const { stdout, stderr, code } = await runBundle(
-        ["recall", "query", jsonFlag],
-        { LORE_REMOTE_URL: "http://127.0.0.1:1" },
-      );
+      const { server, url } = await startRecallServer(503);
+      try {
+        const { stdout, stderr, code } = await runBundle(
+          ["recall", "query", jsonFlag],
+          { LORE_REMOTE_URL: url },
+        );
 
-      expect(code).toBe(30);
-      expect(stdout).toBe("");
-      expect(JSON.parse(stderr)).toMatchObject({
-        error: "NetworkError",
-        code: 30,
-      });
+        expect(code).toBe(30);
+        expect(stdout).toBe("");
+        expect(JSON.parse(stderr)).toMatchObject({
+          error: "NetworkError",
+          code: 30,
+        });
+      } finally {
+        await stopRecallServer(server);
+      }
     },
     15_000,
   );
@@ -174,8 +188,22 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
       expect(stderr).toBe("");
       expect(JSON.parse(stdout)).toMatchObject({ result: "recalled result" });
     } finally {
-      server.close();
-      await once(server, "close");
+      await stopRecallServer(server);
+    }
+  });
+
+  test("`lore recall` preserves successful remote raw output", async () => {
+    const { server, url } = await startRecallServer();
+    try {
+      const { stdout, stderr, code } = await runBundle(["recall", "query"], {
+        LORE_REMOTE_URL: url,
+      });
+
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toBe("recalled result\n");
+    } finally {
+      await stopRecallServer(server);
     }
   });
 });
