@@ -82,7 +82,7 @@
 <p>The credential and the model are chosen independently.</p>
 <p><strong>Credential</strong> (the <code dir="auto">worker-api-key</code> input):</p>
 <ul>
-<li><strong>Zero-secret (default).</strong> The reference workflow falls back to the built-in <code dir="auto">GITHUB_TOKEN</code> with <code dir="auto">copilot-requests: write</code>, calling GitHub Copilot. The token is sent as a Bearer credential to <code dir="auto">api.githubcopilot.com/chat/completions</code> — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; the judge then no-ops (advisory → still passes) rather than breaking CI.</li>
+<li><strong>Zero-secret (default).</strong> The reference workflow falls back to the built-in <code dir="auto">GITHUB_TOKEN</code> with <code dir="auto">copilot-requests: write</code>, calling GitHub Copilot. The token is sent as a Bearer credential to <code dir="auto">api.githubcopilot.com/responses</code> (the openai-responses worker adapter routes <code dir="auto">gpt-5.6-*</code> via this endpoint — see PR #1582 / <code dir="auto">isResponsesOnlyModel</code> in <code dir="auto">llm-adapter.ts</code>) — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; the judge then no-ops (advisory → still passes) rather than breaking CI.</li>
 <li><strong>Dedicated key (busy repos).</strong> Set a <code dir="auto">LORE_WORKER_API_KEY</code> secret. It takes precedence over the token.</li>
 </ul>
 <p><strong>Model</strong> (the <code dir="auto">model</code> input, <code dir="auto">provider/id</code>):</p>
