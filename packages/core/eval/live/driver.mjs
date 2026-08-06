@@ -22,6 +22,7 @@
 // Emits <out>/result.json with per-session + total metrics.
 
 import { execFileSync, spawn } from "node:child_process";
+import { waitForAgentProcess } from "./agent-process.mjs";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -1027,16 +1028,7 @@ function runOpencode(
         p.stdin.end();
       } catch {}
     }
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        p.kill("SIGKILL");
-      } catch {}
-    }, SESSION_TIMEOUT * 1000);
-    p.on("exit", (code) => {
-      clearTimeout(timer);
-      res({ code: code ?? 1, timedOut });
-    });
+    waitForAgentProcess(p, SESSION_TIMEOUT * 1000).then(res);
   });
 }
 
@@ -1108,16 +1100,7 @@ function runPi(prompt, sessionOut, { cont = false, stdin = null } = {}) {
         p.stdin.end();
       } catch {}
     }
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        p.kill("SIGKILL");
-      } catch {}
-    }, SESSION_TIMEOUT * 1000);
-    p.on("exit", (code) => {
-      clearTimeout(timer);
-      res({ code: code ?? 1, timedOut });
-    });
+    waitForAgentProcess(p, SESSION_TIMEOUT * 1000).then(res);
   });
 }
 
