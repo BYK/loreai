@@ -734,10 +734,24 @@ export function resolveWorkerProtocol(
   providerID: string,
   explicit?: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
   modelID?: string,
+  targetUrl?: string | URL,
 ): WorkerProtocol {
   // openai-codex MUST use the Responses API — its backend has no Chat
   // Completions endpoint. This takes precedence over the explicit hint.
   if (providerID === "openai-codex") {
+    return "openai-codex-responses";
+  }
+  // A `providerID="openai"` worker targeting the ChatGPT subscription
+  // backend (chatgpt.com/backend-api) MUST also use the Responses API —
+  // that backend serves ONLY `/backend-api/codex/responses` and 404s on
+  // `/chat/completions`. Without this guard the worker storm keeps
+  // retrying against a dead URL and trips `workerHealthSummary`'s
+  // 5min-degradation threshold (session-level "background workers
+  // unhealthy"). This collapses the two openai-codex-style providers
+  // (the explicit codex providerID and the openai+ChatGPT-backend case)
+  // into the same wire path so `buildCodexWorkerRequest` builds the
+  // correct `${target.url}/codex/responses` URL.
+  if (providerID === "openai" && isChatGPTBackend(targetUrl)) {
     return "openai-codex-responses";
   }
   // 1. Explicit protocol from caller (threaded from UpstreamSnapshot) — only
@@ -826,6 +840,25 @@ export function resolveWorkerProtocol(
  */
 function isResponsesOnlyModel(modelID: string): boolean {
   return modelID.startsWith("gpt-5.6-") || modelID === "gpt-5.6";
+}
+
+/**
+ * True when the upstream URL is the ChatGPT subscription backend
+ * (https://chatgpt.com/backend-api). That backend serves ONLY the Responses
+ * API at `/backend-api/codex/responses` — it has NO Chat Completions
+ * endpoint, so any `providerID="openai"` worker request routed via
+ * `buildOpenAIChatCompletionsUrl` will 404. Detecting this at protocol-
+ * resolution time lets `resolveWorkerProtocol` route the worker to
+ * `openai-codex-responses`, which builds the correct URL (`${url}/codex/responses`).
+ */
+function isChatGPTBackend(url: string | URL | undefined): boolean {
+  if (!url) return false;
+  try {
+    const host = typeof url === "string" ? new URL(url).hostname : url.hostname;
+    return host === "chatgpt.com";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2022,6 +2055,15 @@ export function createGatewayLLMClient(
         model.providerID,
         sameProviderAsSession ? opts?.protocol : undefined,
         model.modelID,
+        // Pass the session's upstream URL so a `providerID="openai"` worker
+        // targeting the ChatGPT subscription backend is routed to
+        // `openai-codex-responses` (see `isChatGPTBackend` in this module).
+        // Cross-provider workers (sameProviderAsSession === false) use the
+        // model's own route, not the session override, so passing the
+        // override here is safe — the URL we test against is the URL the
+        // worker would actually hit. This preserves the pre-existing
+        // cross-provider safety from `resolveTarget` below.
+        upstreamOverride,
       );
 
       // Vertex authenticates with lore's own GCP OAuth2 bearer token (minted

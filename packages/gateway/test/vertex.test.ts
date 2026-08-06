@@ -205,6 +205,85 @@ describe("resolveWorkerProtocol — vertex (distinct, not collapsed)", () => {
   });
 });
 
+describe("resolveWorkerProtocol — ChatGPT backend (openai → openai-codex-responses)", () => {
+  // Regression for the "background workers unhealthy" storm on OpenAI
+  // ChatGPT-subscription sessions: workers reused the session's exact model
+  // (correct) but resolveWorkerProtocol collapsed `providerID="openai"` to
+  // Chat Completions, and `buildOpenAIChatCompletionsUrl("chatgpt.com/backend-api")`
+  // → `/v1/chat/completions` → 404. The fix routes the worker to
+  // `openai-codex-responses` whenever the target URL is the ChatGPT backend.
+
+  test("openai providerID + ChatGPT backend URL → openai-codex-responses", () => {
+    expect(
+      resolveWorkerProtocol(
+        "openai",
+        undefined,
+        "gpt-5.6-terra",
+        "https://chatgpt.com/backend-api",
+      ),
+    ).toBe("openai-codex-responses");
+  });
+
+  test("accepts URL objects as well as strings", () => {
+    expect(
+      resolveWorkerProtocol(
+        "openai",
+        undefined,
+        "gpt-5.6-terra",
+        new URL("https://chatgpt.com/backend-api"),
+      ),
+    ).toBe("openai-codex-responses");
+  });
+
+  test("openai providerID + api.openai.com URL → openai (no collapse)", () => {
+    // The real OpenAI endpoint serves BOTH Chat Completions and Responses —
+    // the legacy Chat Completions path is correct here. The guard must NOT
+    // misroute api.openai.com sessions.
+    expect(
+      resolveWorkerProtocol(
+        "openai",
+        undefined,
+        "gpt-5.6-terra",
+        "https://api.openai.com/v1",
+      ),
+    ).toBe("openai");
+  });
+
+  test("openai-codex providerID + any URL → openai-codex-responses (precedence)", () => {
+    // The pre-existing precedence (providerID === "openai-codex") wins even
+    // when the URL is NOT the ChatGPT backend — covers aggregator sessions
+    // that mount the codex provider over a custom endpoint.
+    expect(
+      resolveWorkerProtocol(
+        "openai-codex",
+        undefined,
+        "gpt-5.6-terra",
+        "https://example.com",
+      ),
+    ).toBe("openai-codex-responses");
+  });
+
+  test("openai providerID with no URL → route-table default (openai)", () => {
+    // Backward-compat: callers that don't pass a URL still get the legacy
+    // behavior (route-table lookup → openai).
+    expect(resolveWorkerProtocol("openai")).toBe("openai");
+  });
+
+  test("non-openai providerID is unaffected by a ChatGPT backend URL", () => {
+    // A github-copilot session routed via an upstream override that happens
+    // to be chatgpt.com/backend-api (extreme edge case) must NOT pick up
+    // the codex route.
+    expect(
+      resolveWorkerProtocol(
+        "github-copilot",
+        "openai-responses",
+        "gpt-5-mini",
+        "https://chatgpt.com/backend-api",
+      ),
+    ).not.toBe("openai-codex-responses");
+  });
+});
+
 describe("resolveProfile — vertex warming", () => {
   // Bare host = the global endpoint (NOT global-aiplatform; see vertexHost).
   const vertexBase = "https://aiplatform.googleapis.com";
