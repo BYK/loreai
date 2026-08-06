@@ -11,6 +11,7 @@
  * variadic positional forwards them by subcommand name.
  */
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { WRITE_DATA_SUBCOMMANDS } from "../src/cli/commands/data";
 
 const origNoUpdateCheck = process.env.LORE_NO_UPDATE_CHECK;
 const origArgv = process.argv;
@@ -145,11 +146,11 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
     vi.resetModules();
   });
 
-  test("data forwards destructive subcommand to legacy (variadic positional)", async () => {
+  test("data forwards destructive subcommand with explicit --yes (variadic positional)", async () => {
     // The variadic positional schema accepts any subcommand name and
     // forwards it to the legacy commandData. The destructive
-    // confirmation policy is deferred to Phase 3C slice 2; this
-    // slice only routes through the typed tree.
+    // central confirmation policy requires --yes in non-interactive
+    // runs. The variadic schema still forwards all subcommand args.
     vi.resetModules();
     const calls: DataCall[] = [];
     const dataImpl = vi.fn(
@@ -173,6 +174,7 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
       "delete",
       "entry-id-1",
       "entry-id-2",
+      "--yes",
     ];
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
@@ -188,7 +190,234 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
       "entry-id-1",
       "entry-id-2",
     ]);
+    expect(calls[0]?.values.yes).toBe(true);
     vi.resetModules();
+  });
+
+  test("data blocks a destructive command without --yes when non-interactive", async () => {
+    vi.resetModules();
+    const dataImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+      confirm: vi.fn(),
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const stderrChunks: Buffer[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        stderrChunks.push(
+          Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+        );
+        return true;
+      });
+    process.argv = ["node", "lore", "data", "delete", "entry-id"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      stderrSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(dataImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    expect(Buffer.concat(stderrChunks).toString("utf8")).toContain("--yes");
+    vi.resetModules();
+  });
+
+  test("data --json never prompts and requires --yes for destructive commands", async () => {
+    vi.resetModules();
+    const dataImpl = vi.fn(async () => {});
+    const confirm = vi.fn(async () => true);
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+      confirm,
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "data", "delete", "entry-id", "--json"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(dataImpl).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("data --dry-run stays non-mutating and needs no --yes", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+      confirm: vi.fn(),
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = [
+      "node",
+      "lore",
+      "data",
+      "move",
+      "session",
+      "entry-id",
+      "--dry-run",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(calls[0]?.values["dry-run"]).toBe(true);
+    expect(calls[0]?.values.yes).toBeUndefined();
+    vi.resetModules();
+  });
+
+  test("data clear --dry-run still requires --yes", async () => {
+    vi.resetModules();
+    const dataImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+      confirm: vi.fn(),
+    }));
+    const { runCli } = await import("../src/cli/cli");
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    process.argv = ["node", "lore", "data", "clear", "--dry-run"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      stderrSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(dataImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("interactive legacy-confirmed commands retain their operation-specific prompt", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const confirm = vi.fn(async () => true);
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({
+      commandData: dataImpl,
+      confirm,
+    }));
+    const isTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "data", "delete", "entry-id"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      if (isTTY) Object.defineProperty(process.stdin, "isTTY", isTTY);
+      else Reflect.deleteProperty(process.stdin, "isTTY");
+      process.exitCode = priorExitCode;
+    }
+    expect(confirm).not.toHaveBeenCalled();
+    expect(calls[0]?.values.yes).toBeUndefined();
+    vi.resetModules();
+  });
+
+  test("explicit --yes forwards to legacy-confirmed commands without a wrapper prompt", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const confirm = vi.fn(async () => true);
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({ commandData: dataImpl, confirm }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "data", "delete", "entry-id", "--yes"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(confirm).not.toHaveBeenCalled();
+    expect(calls[0]?.values.yes).toBe(true);
+    vi.resetModules();
+  });
+
+  test("interactive confirmation supplies yes only for write commands without a legacy prompt", async () => {
+    vi.resetModules();
+    const calls: DataCall[] = [];
+    const confirm = vi.fn(async () => true);
+    const dataImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/data", () => ({ commandData: dataImpl, confirm }));
+    const isTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "data", "vacuum"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      if (isTTY) Object.defineProperty(process.stdin, "isTTY", isTTY);
+      else Reflect.deleteProperty(process.stdin, "isTTY");
+      process.exitCode = priorExitCode;
+    }
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(calls[0]?.values.yes).toBe(true);
+    vi.resetModules();
+  });
+
+  test("write registry classifies every default-mutating subcommand", () => {
+    expect(WRITE_DATA_SUBCOMMANDS).toEqual(
+      new Set([
+        "clear",
+        "delete",
+        "export",
+        "merge",
+        "move",
+        "recover",
+        "reindex",
+        "rerank",
+        "reground-entities",
+        "vacuum",
+      ]),
+    );
   });
 
   test("data propagates legacy exit code", async () => {
@@ -352,6 +581,7 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
       "session",
       "x",
       "--no-children",
+      "--dry-run",
     ];
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
