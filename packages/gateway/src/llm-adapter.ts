@@ -49,6 +49,7 @@ import {
 } from "./translate/types";
 import {
   buildOpenAIChatCompletionsUrl,
+  buildOpenAIResponsesUrl,
   copilotHeaders,
 } from "./translate/openai";
 import { accumulateOpenAISSEStream } from "./stream/openai";
@@ -691,6 +692,7 @@ export function normalizeOpenAIUsage(
 type WorkerProtocol =
   | "anthropic"
   | "openai"
+  | "openai-responses"
   | "openai-codex-responses"
   | "vertex"
   | "gemini";
@@ -708,26 +710,54 @@ type ProviderTarget = {
  *
  * Priority:
  *  1. Explicit protocol from caller (threaded from UpstreamSnapshot)
- *  2. Route table lookup via PROVIDER_ROUTES
- *  3. Default: "anthropic" (safest — most aggregators speak Anthropic)
+ *  2. Per-model protocol override (only one case today: github-copilot +
+ *     `gpt-5.6-*` family → Responses API; those models return
+ *     `unsupported_api_for_model` on `/chat/completions` and are only
+ *     reachable via `/responses`, per `earendil-works/pi#6475`)
+ *  3. Route table lookup via PROVIDER_ROUTES
+ *  4. Default: "anthropic" (safest — most aggregators speak Anthropic)
  *
- * `openai-responses` is collapsed to `"openai"` because workers only use
- * simple prompt→response via Chat Completions, not the Responses API — EXCEPT
- * for `openai-codex`, whose ChatGPT backend serves only the Responses API and
- * therefore maps to `"openai-codex-responses"`.
+ * Pass an optional `modelID` to enable per-model routing for hosts that serve
+ * the same provider on BOTH chat-completions and responses (e.g. github-copilot
+ * serves gpt-5-mini via /chat/completions but gpt-5.6-luna only via
+ * /responses). Without `modelID`, behavior matches the prior collapse — all
+ * openai-shape providers keep the default chat-completions path.
+ *
+ * `openai-responses` is preserved (NOT collapsed to `"openai"`) when step 2
+ * selects it for a model that needs the Responses wire shape. The Codex path
+ * (`openai-codex-responses`) is a separate distinct string because ChatGPT
+ * Codex's `/codex/responses` server-side requirements differ (no
+ * `max_output_tokens`, mandatory `store:false`, ChatGPT fingerprint headers)
+ * from generic openai-responses and deserves its own builder.
  */
 export function resolveWorkerProtocol(
   providerID: string,
   explicit?: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
+  modelID?: string,
 ): WorkerProtocol {
   // openai-codex MUST use the Responses API — its backend has no Chat
-  // Completions endpoint. This takes precedence over the explicit hint
-  // (which would otherwise collapse openai-responses → openai).
+  // Completions endpoint. This takes precedence over the explicit hint.
   if (providerID === "openai-codex") {
     return "openai-codex-responses";
   }
-  // 1. Explicit protocol from caller (threaded from UpstreamSnapshot)
+  // 1. Explicit protocol from caller (threaded from UpstreamSnapshot) — only
+  //    honored when the route does not have a per-model override. A caller
+  //    thread that explicitly pins "openai" for a github-copilot+gpt-5.6
+  //    worker is a misconfig (the model is unreachable on that path) and we
+  //    still honor the per-model override for safety; an explicit
+  //    "openai-responses" hint must be preserved through (do NOT collapse).
   if (explicit) {
+    // Per-model override beats an explicit openai hint (caller likely did
+    // not know about the gpt-5.6 routing); but an explicit openai-responses
+    // hint is authoritative — caller wired it on purpose.
+    if (explicit === "openai-responses") return "openai-responses";
+    if (
+      providerID === "github-copilot" &&
+      modelID &&
+      isResponsesOnlyModel(modelID)
+    ) {
+      return "openai-responses";
+    }
     // Vertex is a DISTINCT worker protocol: it speaks the Anthropic Messages
     // body but to a :rawPredict URL (model in the path) authenticated with a
     // GCP OAuth2 token — buildVertexWorkerRequest handles all three. It must
@@ -742,15 +772,39 @@ export function resolveWorkerProtocol(
     if (explicit === "gemini") return "gemini";
     return explicit === "anthropic" ? "anthropic" : "openai";
   }
-  // 2. Route table lookup
+  // 2. Per-model override (no explicit hint from caller) — github-copilot +
+  //    gpt-5.6-* is the only case today; adding a new family here means
+  //    adding the family string to the constant.
+  if (
+    providerID === "github-copilot" &&
+    modelID &&
+    isResponsesOnlyModel(modelID)
+  ) {
+    return "openai-responses";
+  }
+  // 3. Route table lookup
   const route = resolveProviderRoute(providerID);
   if (route?.protocol) {
     if (route.protocol === "vertex") return "vertex";
     if (route.protocol === "gemini") return "gemini";
     return route.protocol === "anthropic" ? "anthropic" : "openai";
   }
-  // 3. Default: anthropic (safest for unknown/aggregator providers)
+  // 4. Default: anthropic (safest for unknown/aggregator providers)
   return "anthropic";
+}
+
+/**
+ * Model ids that are reachable ONLY on the OpenAI **Responses** API endpoint
+ * (NOT on `/chat/completions`) on GitHub Copilot. Probed by direct API call
+ * (returns `{"code":"unsupported_api_for_model"}` on /chat/completions) and
+ * confirmed available on /responses. Added in Copilot's
+ * 2026-07-09 rollout (Sol/Terra/Luna). When models.dev grows the family on
+ * github-copilot (per `anomalyco/models.dev#3178`), extend the prefix check
+ * — the current set is the three-member gpt-5.6 generation. Mirror of the
+ * `alreadyCheap` checks in `WORKER_DEFAULTS` for the same family.
+ */
+function isResponsesOnlyModel(modelID: string): boolean {
+  return modelID.startsWith("gpt-5.6-") || modelID === "gpt-5.6";
 }
 
 /**
@@ -1231,6 +1285,70 @@ function buildCodexWorkerRequest(
   };
 }
 
+/**
+ * Build an OpenAI **Responses API** worker request for a generic openai-responses
+ * target (NOT Codex). Used for `github-copilot` workers on the `gpt-5.6-*`
+ * family — those models return `unsupported_api_for_model` on `/chat/completions`
+ * and are ONLY reachable on `/responses`, per `earendil-works/pi#6475`. Other
+ * GitHub-Copilot models (gpt-5-mini, claude-sonnet-4.5, etc.) continue to use
+ * the chat-completions path (see `buildOpenAIWorkerRequest`).
+ *
+ * Wire-format differences vs Chat Completions:
+ *   - `input: [{ role, content }]` items array (NOT `messages`)
+ *   - top-level `instructions: "..."` (NOT a `{role:"system",...}` first message)
+ *   - `max_output_tokens` (NOT `max_completion_tokens`)
+ *   - `reasoning: { effort: ... }` (NOT `reasoning_effort: "..."`)
+ *   - `store: false` — required by Copilot's `/responses` endpoint (observed)
+ *   - URL: host-aware via `buildOpenAIResponsesUrl` (github-copilot omits /v1,
+ *     issue #1052; mirrors the chat-completions URL builder)
+ *
+ * Unlike Codex, this path allows `max_output_tokens` (Copilot's `/responses`
+ * honors it just like the Responses API spec) and threads `reasoningEffort`
+ * through to nested `reasoning.{effort}`. Same `openAIReasoningEffort` returns
+ * null on `off`/undefined so we omit both forms when the caller did not set it.
+ */
+function buildOpenAIResponsesWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature?: number,
+  reasoningEffort?: ReasoningEffort,
+): { url: string; headers: Record<string, string>; body: string } {
+  const effort = openAIReasoningEffort(reasoningEffort);
+
+  return {
+    // Host-aware URL construction: github-copilot omits /v1 (issue #1052),
+    // mirrors buildOpenAIChatCompletionsUrl. Other openai-responses hosts
+    // (currently none in our route table) get the default `/v1/responses`.
+    url: buildOpenAIResponsesUrl(target.url),
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(cred),
+      // GitHub Copilot wants Copilot-Integration-Id + X-GitHub-Api-Version;
+      // no-op for other hosts (matches the chat-completions path).
+      ...copilotHeaders(target.url),
+    },
+    body: JSON.stringify({
+      model: model.modelID,
+      store: false,
+      stream: false,
+      max_output_tokens: maxTokens,
+      ...(temperature != null && { temperature }),
+      ...(effort != null && { reasoning: { effort } }),
+      instructions: system,
+      input: [
+        {
+          role: "user",
+          content: user,
+        },
+      ],
+    }),
+  };
+}
+
 /** Extract text response from an Anthropic Messages API response. */
 export function parseAnthropicResponse(data: {
   content?: Array<{ type: string; text?: string; thinking?: string }>;
@@ -1475,6 +1593,17 @@ async function buildWorkerRequest(
         sessionID,
         temperature,
       );
+    case "openai-responses":
+      return buildOpenAIResponsesWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+        reasoningEffort,
+      );
     case "openai":
       return buildOpenAIWorkerRequest(
         target,
@@ -1534,6 +1663,13 @@ function parseWorkerResponse(
       return parseResponsesWorkerResponse(
         rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
       );
+    case "openai-responses":
+      // Same wire shape as the Codex path — reuse the existing Responses-API
+      // worker parser; openai-responses and openai-codex-responses both
+      // produce `{ output: [...], usage: { input_tokens, output_tokens, ... } }`.
+      return parseResponsesWorkerResponse(
+        rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
+      );
     case "openai":
       return parseOpenAIResponse(rawData as OpenAIChatResponse);
     case "gemini":
@@ -1561,6 +1697,11 @@ function accumulateWorkerSSE(
 ): Promise<GatewayResponse> {
   switch (protocol) {
     case "openai-codex-responses":
+      return accumulateResponsesSSEStream(response);
+    case "openai-responses":
+      // OpenAI Responses API uses the same wire-shape SSE stream as the
+      // Codex-Responses path (`event: response.*` deltas). Reuse the existing
+      // accumulator.
       return accumulateResponsesSSEStream(response);
     case "gemini":
       return accumulateGeminiSSEStream(response);
@@ -1859,6 +2000,7 @@ export function createGatewayLLMClient(
       const protocol = resolveWorkerProtocol(
         model.providerID,
         sameProviderAsSession ? opts?.protocol : undefined,
+        model.modelID,
       );
 
       // Vertex authenticates with lore's own GCP OAuth2 bearer token (minted
