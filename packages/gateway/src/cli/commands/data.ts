@@ -22,8 +22,26 @@
  * Exit codes: legacy semantics preserved.
  */
 import { buildOutputCommand } from "../lib/command";
+import { UsageError } from "../lib/errors";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
-import { commandData } from "../data";
+import { commandData, confirm } from "../data";
+
+// These commands mutate immediately. Preview-first operations such as
+// dedup, split, and consolidate retain their legacy --yes-to-apply
+// behavior and must not be promoted into mutations by this wrapper.
+export const DESTRUCTIVE_DATA_SUBCOMMANDS = new Set([
+  "clear",
+  "delete",
+  "merge",
+  "move",
+  "recover",
+  "reground-entities",
+]);
+
+// These are the only immediate-mutation commands whose legacy handlers
+// implement a true no-write dry-run. Do not infer this from accepting a
+// --dry-run flag: other legacy handlers may ignore it.
+const DRY_RUN_DATA_SUBCOMMANDS = new Set(["move", "reground-entities"]);
 
 type DataFlags = {
   all: boolean;
@@ -151,6 +169,30 @@ export const dataCommand = buildOutputCommand<
     toJson: (data) => ({ output: data }),
   },
   async handler(flags, ...positionals) {
+    const subcommand = positionals[0];
+    const json = (flags as { json?: boolean }).json === true;
+    const requiresConfirmation =
+      subcommand !== undefined &&
+      DESTRUCTIVE_DATA_SUBCOMMANDS.has(subcommand) &&
+      !(flags["dry-run"] && DRY_RUN_DATA_SUBCOMMANDS.has(subcommand));
+
+    if (requiresConfirmation && !flags.yes) {
+      if (json || !process.stdin.isTTY) {
+        throw new UsageError({
+          message: `Refusing non-interactive \`lore data ${subcommand}\` without --yes.`,
+          tryCommand: `lore data ${subcommand} --yes`,
+        });
+      }
+      if (
+        !(await confirm(
+          `This runs \`lore data ${subcommand}\` and may permanently change Lore data.`,
+        ))
+      ) {
+        console.log("Cancelled.");
+        return { kind: "empty" as const };
+      }
+    }
+
     const values: Record<string, unknown> = {};
     if (flags.all) values.all = true;
     if (flags.distillations) values.distillations = true;
@@ -160,7 +202,9 @@ export const dataCommand = buildOutputCommand<
     if (flags.project !== undefined) values.project = flags.project;
     if (flags.temporal) values.temporal = true;
     if (flags.to !== undefined) values.to = flags.to;
-    if (flags.yes) values.yes = true;
+    // A successful central confirmation suppresses legacy prompts so
+    // each destructive command asks the user exactly once.
+    if (flags.yes || requiresConfirmation) values.yes = true;
     // F-1 (HIGH): forward the 4 flags used by destructive subcommands.
     // Populate BOTH kebab-case and camelCase forms so the legacy
     // handler's existing checks work unchanged (matches the import.ts

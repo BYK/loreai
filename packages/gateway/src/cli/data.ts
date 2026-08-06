@@ -56,7 +56,7 @@ function printTable(
   }
 }
 
-async function confirm(message: string): Promise<boolean> {
+export async function confirm(message: string): Promise<boolean> {
   if (!process.stdin.isTTY) {
     console.error(
       "Error: Cannot prompt for confirmation in non-TTY mode. Use --yes to skip.",
