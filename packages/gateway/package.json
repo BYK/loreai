@@ -80,6 +80,6 @@
     "fossilize": "^0.10.1",
     "onnxruntime-node": "1.27.0",
     "tar": "^7.5.21",
-    "undici": "^7.29.0"
+    "undici": "^8.9.0"
   }
 }
