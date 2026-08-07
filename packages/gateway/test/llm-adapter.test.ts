@@ -13,6 +13,7 @@ vi.mock("../src/worker-health", async (importOriginal) => {
     recordWorkerFailure: vi.fn(actual.recordWorkerFailure),
     markWorkerPaused: vi.fn(actual.markWorkerPaused),
     markWorkerIncapable: vi.fn(actual.markWorkerIncapable),
+    recordEmptyWorkerResponse: vi.fn(actual.recordEmptyWorkerResponse),
     markFreeModelsDataBlocked: vi.fn(actual.markFreeModelsDataBlocked),
   };
 });
@@ -20,6 +21,7 @@ vi.mock("../src/worker-health", async (importOriginal) => {
 import {
   backoffMs,
   createGatewayLLMClient,
+  getLastWorkerError,
   maxRetriesFor,
   normalizeOpenAIUsage,
   resolveWorkerProtocol,
@@ -44,7 +46,11 @@ import {
 } from "../src/background-limiter";
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
-import { recordWorkerFailure, markWorkerPaused } from "../src/worker-health";
+import {
+  recordWorkerFailure,
+  markWorkerPaused,
+  recordEmptyWorkerResponse,
+} from "../src/worker-health";
 import {
   markWorkerIncapable,
   markFreeModelsDataBlocked,
@@ -658,6 +664,7 @@ describe("createGatewayLLMClient.prompt", () => {
 
   afterEach(() => {
     mockFetch.mockReset();
+    vi.mocked(recordEmptyWorkerResponse).mockClear();
     clearAllCosts();
     resetBackgroundLimiter();
   });
@@ -726,19 +733,34 @@ describe("createGatewayLLMClient.prompt", () => {
       "openai-beta": "responses=experimental",
     });
 
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     mockFetch.mockResolvedValue(
       new Response(
-        JSON.stringify({
-          output: [
-            {
-              type: "message",
-              content: [{ type: "output_text", text: "codex worker reply" }],
+        event("response.created", {
+          response: { id: "resp_worker", model: "gpt-5.1-codex-mini" },
+        }) +
+          event("response.output_item.added", {
+            output_index: 0,
+            item: { type: "message", id: "msg_worker", role: "assistant" },
+          }) +
+          event("response.output_text.delta", {
+            output_index: 0,
+            delta: "codex worker ",
+          }) +
+          event("response.output_text.delta", {
+            output_index: 0,
+            delta: "reply",
+          }) +
+          event("response.completed", {
+            response: {
+              id: "resp_worker",
+              model: "gpt-5.1-codex-mini",
+              status: "completed",
+              usage: { input_tokens: 12, output_tokens: 3 },
             },
-          ],
-          model: "gpt-5.1-codex-mini",
-          usage: { input_tokens: 12, output_tokens: 3 },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
+          }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
       ),
     );
 
@@ -765,11 +787,129 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(headers.originator).toBe("pi");
     const body = JSON.parse(init?.body as string) as Record<string, unknown>;
     expect(body.store).toBe(false);
+    expect(body.stream).toBe(true);
     expect(body.model).toBe("gpt-5.1-codex-mini");
     expect(Array.isArray(body.input)).toBe(true);
     // ChatGPT Codex rejects max_output_tokens — worker calls must omit it.
     expect(body.max_output_tokens).toBeUndefined();
+    const distillationCost =
+      getSessionCosts("sess-codex")?.workers.distillation;
+    expect(distillationCost?.calls).toBe(1);
+    expect(distillationCost?.cost).toBeGreaterThan(0);
   });
+
+  test.each([
+    [
+      "failed terminal",
+      `event: response.failed\ndata: ${JSON.stringify({
+        response: { status: "failed", error: { message: "upstream failed" } },
+      })}\n\n`,
+      "response.failed terminal",
+    ],
+    [
+      "malformed event",
+      "event: response.output_text.delta\ndata: {not-json}\n\n",
+      "malformed response.output_text.delta event",
+    ],
+    [
+      "missing terminal",
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        output_index: 0,
+        delta: "partial",
+      })}\n\n`,
+      "missing terminal response status",
+    ],
+    [
+      "failed status",
+      `event: response.completed\ndata: ${JSON.stringify({
+        response: { status: "failed" },
+      })}\n\n`,
+      "terminal response status=failed",
+    ],
+    [
+      "cancelled status",
+      `event: response.completed\ndata: ${JSON.stringify({
+        response: { status: "cancelled" },
+      })}\n\n`,
+      "terminal response status=cancelled",
+    ],
+  ])(
+    "openai-codex worker classifies %s SSE as upstream-error, never model incapability",
+    async (_case, stream, diagnostic) => {
+      mockFetch.mockResolvedValue(
+        new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+      );
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "bearer", value: "jwt-token" }),
+        { providerID: "openai-codex", modelID: "gpt-5.1-codex-mini" },
+      );
+
+      const text = await client.prompt("system", "user", {
+        sessionID: "sess-codex-failed-stream",
+        workerID: "lore-distill",
+        upstreamUrl: "https://chatgpt.com/backend-api",
+        protocol: "openai-responses",
+      });
+
+      expect(text).toBeNull();
+      expect(recordWorkerFailure).toHaveBeenCalledWith(
+        "sess-codex-failed-stream",
+        "lore-distill",
+        "upstream-error",
+      );
+      expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+      expect(markWorkerIncapable).not.toHaveBeenCalled();
+      expect(getLastWorkerError()).toContain(diagnostic);
+    },
+  );
+
+  test.each(["response.done", "response.incomplete"])(
+    "openai-codex worker accepts %s with CRLF framing",
+    async (terminalEvent) => {
+      const event = (type: string, data: Record<string, unknown>) =>
+        `event: ${type}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`;
+      mockFetch.mockResolvedValue(
+        new Response(
+          event("response.output_item.added", {
+            output_index: 0,
+            item: { type: "message", id: "msg_worker", role: "assistant" },
+          }) +
+            event("response.output_text.delta", {
+              output_index: 0,
+              delta: "codex CRLF reply",
+            }) +
+            event(terminalEvent, {
+              response: {
+                status:
+                  terminalEvent === "response.incomplete"
+                    ? "incomplete"
+                    : "completed",
+              },
+            }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "bearer", value: "jwt-token" }),
+        { providerID: "openai-codex", modelID: "gpt-5.1-codex-mini" },
+      );
+
+      const text = await client.prompt("system", "user", {
+        sessionID: `sess-codex-${terminalEvent}`,
+        workerID: "lore-distill",
+        upstreamUrl: "https://chatgpt.com/backend-api",
+        protocol: "openai-responses",
+      });
+
+      expect(text).toBe("codex CRLF reply");
+      expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    },
+  );
 
   test("bedrock-mantle worker remaps body.model to the mantle catalog id", async () => {
     // A Bedrock session's worker (distillation/curation) routes to the session's

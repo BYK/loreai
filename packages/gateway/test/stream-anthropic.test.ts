@@ -98,6 +98,28 @@ describe("parseSSEStream", () => {
     expect(events).toEqual([{ event: "message_start", data: '{"x":1}' }]);
   });
 
+  test.each([1, 2, 3])(
+    "handles a CRLF delimiter split after byte %i",
+    async (split) => {
+      const prefix = 'event: message_start\r\ndata: {"x":1}';
+      const delimiter = "\r\n\r\n";
+      const events = await collect(
+        readerFromChunks([
+          prefix + delimiter.slice(0, split),
+          delimiter.slice(split),
+        ]),
+      );
+      expect(events).toEqual([{ event: "message_start", data: '{"x":1}' }]);
+    },
+  );
+
+  test("flushes a trailing CRLF block without a final blank line", async () => {
+    const events = await collect(
+      readerFromChunks(["event: message_stop\r\ndata: {}"]),
+    );
+    expect(events).toEqual([{ event: "message_stop", data: "{}" }]);
+  });
+
   test("flushes a trailing block that lacks a final blank line", async () => {
     const events = await collect(
       readerFromChunks(["event: message_stop\ndata: {}"]),

@@ -1325,7 +1325,8 @@ function buildCodexWorkerRequest(
       model: model.modelID,
       // Codex REQUIRES store:false (rejects store:true).
       store: false,
-      stream: false,
+      // ChatGPT's Codex backend rejects non-streaming requests.
+      stream: true,
       ...(temperature != null && { temperature }),
       instructions: system,
       input: [
@@ -1765,6 +1766,58 @@ function accumulateWorkerSSE(
       // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
       return accumulateSSEResponse(response);
   }
+}
+
+/**
+ * Validate a buffered Responses worker stream before treating an empty result
+ * as a model-capability signal. The shared accumulator deliberately tolerates
+ * malformed events for foreground pass-through, but workers must fail closed:
+ * skipped deltas or a response.failed terminal are upstream failures, never
+ * evidence that the model cannot answer.
+ */
+function validateResponsesWorkerSSE(body: string): string | null {
+  let terminalStatus: string | null = null;
+
+  for (const frame of body.split(/\r?\n\r?\n/)) {
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith("event:")) {
+        event = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+
+    const data = dataLines.join("\n");
+    if (!data || data === "[DONE]") continue;
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return `malformed ${event || "unnamed"} event`;
+    }
+
+    if (event === "response.failed") {
+      return "response.failed terminal";
+    }
+    if (
+      event === "response.completed" ||
+      event === "response.done" ||
+      event === "response.incomplete"
+    ) {
+      const response = parsed.response as Record<string, unknown> | undefined;
+      terminalStatus =
+        typeof response?.status === "string" ? response.status : null;
+    }
+  }
+
+  if (!terminalStatus) return "missing terminal response status";
+  if (terminalStatus === "failed" || terminalStatus === "cancelled") {
+    return `terminal response status=${terminalStatus}`;
+  }
+  return null;
 }
 
 /**
@@ -2363,9 +2416,9 @@ export function createGatewayLLMClient(
                 // model.
                 if (thinkingStripped) markThinkingUnsupported(model);
 
-                // Guard: some providers (the ChatGPT/Copilot/Codex backend,
-                // DeepSeek) return an SSE stream even when stream: false was
-                // sent — sometimes WITHOUT the text/event-stream content-type.
+                // Guard: Codex workers request streaming, and some other
+                // providers stream even when stream:false was sent — sometimes
+                // WITHOUT the text/event-stream content-type.
                 // Sniff the body: if it's SSE, accumulate the whole stream via
                 // the protocol's accumulator (multi-chunk safe) instead of
                 // JSON-parsing it (which would throw on "data: {...}" / "event:
@@ -2375,6 +2428,32 @@ export function createGatewayLLMClient(
                 const ct = response.headers.get("content-type") ?? "";
                 const bodyText = await response.text();
                 const isSSE = looksLikeSSE(ct, bodyText);
+                if (
+                  isSSE &&
+                  (target.protocol === "openai-codex-responses" ||
+                    target.protocol === "openai-responses")
+                ) {
+                  const streamFailure = validateResponsesWorkerSSE(bodyText);
+                  if (streamFailure) {
+                    log.error(
+                      `worker upstream returned invalid Responses SSE — ${streamFailure}` +
+                        ` — model=${model.providerID}/${model.modelID}` +
+                        ` worker=${opts?.workerID ?? "unknown"}` +
+                        ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
+                    );
+                    span.setStatus({
+                      code: 2,
+                      message: "invalid Responses SSE",
+                    });
+                    recordWorkerFailure(
+                      opts?.sessionID ?? "_unknown",
+                      opts?.workerID ?? "unknown",
+                      "upstream-error",
+                    );
+                    lastWorkerError = `${model.providerID}/${model.modelID}: invalid Responses SSE (${streamFailure})`;
+                    return null;
+                  }
+                }
                 const rawData: Record<string, unknown> = isSSE
                   ? {}
                   : (JSON.parse(bodyText) as Record<string, unknown>);

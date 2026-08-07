@@ -60,12 +60,12 @@ export async function* parseSSEStream(
       buffer += decoder.decode(value, { stream: true });
     }
 
-    // Process complete events (delimited by blank lines: \n\n)
+    // Process complete events (blank-line delimiter; accept LF and CRLF).
     for (;;) {
-      const boundary = buffer.indexOf("\n\n");
-      if (boundary === -1) break;
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
+      const boundary = /\r?\n\r?\n/.exec(buffer);
+      if (!boundary) break;
+      const block = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary[0].length);
 
       // Skip empty blocks
       if (block.trim() === "") continue;
@@ -73,7 +73,7 @@ export async function* parseSSEStream(
       let eventType = "message";
       const dataLines: string[] = [];
 
-      for (const line of block.split("\n")) {
+      for (const line of block.split(/\r?\n/)) {
         if (line.startsWith("event:")) {
           eventType = line.slice(6).trim();
         } else if (line.startsWith("data:")) {
@@ -93,7 +93,7 @@ export async function* parseSSEStream(
       if (buffer.trim()) {
         let eventType = "message";
         const dataLines: string[] = [];
-        for (const line of buffer.split("\n")) {
+        for (const line of buffer.split(/\r?\n/)) {
           if (line.startsWith("event:")) {
             eventType = line.slice(6).trim();
           } else if (line.startsWith("data:")) {
