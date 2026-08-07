@@ -364,7 +364,7 @@ async function runFossilize(
           // `NODE_OPTIONS=--max-old-space-size=8192`, common for Claude Code)
           // don't change V8's flag-hash and reject our embedded code cache
           // ("Code cache data rejected"). process.env is untouched, so the
-          // user's flags still reach the agent lore launches.
+          // user's flags still reach the agent Lore launches.
           ignoreNodeOptions: true,
           outputName: "lore",
           outDir: targetOutDir,
@@ -739,8 +739,9 @@ async function buildBinary() {
   // so we key each file as `ort-<target>-<file>`; native-loader.cjs extracts
   // only the set matching the running platform into one dir (replicating the
   // package's sibling layout so the addon's $ORIGIN/@loader_path/DLL-search
-  // resolution finds libonnxruntime). ~22–37 MB per target — meaningful but
-  // dwarfed by the ~137 MB embedded model. See vendor-ort-native.ts.
+  // resolution finds libonnxruntime). SEA selection omits optional GPU provider
+  // libraries because Lore always uses the CPU execution provider. See
+  // vendor-ort-native.ts.
   const ortAssets = ortNativeAssets(targets);
   for (const files of ortAssets.values()) {
     for (const { assetKey, srcPath } of files) {
