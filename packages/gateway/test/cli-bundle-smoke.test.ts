@@ -13,6 +13,8 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer, type Server } from "node:http";
 
 const BUNDLE = resolve(process.cwd(), "packages/gateway/dist/bin.cjs");
 
@@ -47,6 +49,36 @@ async function runBundle(
         code,
       });
     });
+  });
+}
+
+async function startRecallServer(
+  statusCode = 200,
+): Promise<{ server: Server; url: string }> {
+  const server = createServer((_request, response) => {
+    response.statusCode = statusCode;
+    response.setHeader("content-type", "application/json");
+    response.end(
+      JSON.stringify({
+        query: "query",
+        scope: "project",
+        projectPath: "/tmp/project",
+        result: "recalled result",
+      }),
+    );
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected TCP recall server address");
+  }
+  return { server, url: `http://127.0.0.1:${address.port}` };
+}
+
+async function stopRecallServer(server: Server): Promise<void> {
+  await new Promise<void>((resolveClose, reject) => {
+    server.close((error) => (error ? reject(error) : resolveClose()));
   });
 }
 
@@ -94,4 +126,84 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
     expect(stderr).toContain("Try: lore login");
     expect(code).toBe(10);
   }, 15_000);
+
+  test.each([
+    [[], "Please provide a search query."],
+    [["auth", "--scope", "bogus"], "Invalid command arguments."],
+    [["auth", "--scope", "bogus", "--json=true"], "Invalid command arguments."],
+    [["auth", "--unexpected", "--json=true"], "Invalid command arguments."],
+  ])(
+    "`lore recall --json` through the bundle emits a stable UsageError envelope",
+    async (args, message) => {
+      const jsonFlag = args.includes("--json=true") ? [] : ["--json"];
+      const { stdout, stderr, code } = await runBundle([
+        "recall",
+        ...args,
+        ...jsonFlag,
+      ]);
+
+      expect(code).toBe(20);
+      expect(stdout).toBe("");
+      expect(JSON.parse(stderr)).toMatchObject({
+        error: "UsageError",
+        code: 20,
+        message,
+      });
+    },
+    15_000,
+  );
+
+  test.each([["--json"], ["--json=true"]])(
+    "`lore recall` runtime failures emit one JSON error envelope through the bundle with %s",
+    async (jsonFlag) => {
+      const { server, url } = await startRecallServer(503);
+      try {
+        const { stdout, stderr, code } = await runBundle(
+          ["recall", "query", jsonFlag],
+          { LORE_REMOTE_URL: url },
+        );
+
+        expect(code).toBe(30);
+        expect(stdout).toBe("");
+        expect(JSON.parse(stderr)).toMatchObject({
+          error: "NetworkError",
+          code: 30,
+        });
+      } finally {
+        await stopRecallServer(server);
+      }
+    },
+    15_000,
+  );
+
+  test("`lore recall --json` preserves successful remote JSON output", async () => {
+    const { server, url } = await startRecallServer();
+    try {
+      const { stdout, stderr, code } = await runBundle(
+        ["recall", "query", "--json"],
+        { LORE_REMOTE_URL: url },
+      );
+
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout)).toMatchObject({ result: "recalled result" });
+    } finally {
+      await stopRecallServer(server);
+    }
+  });
+
+  test("`lore recall` preserves successful remote raw output", async () => {
+    const { server, url } = await startRecallServer();
+    try {
+      const { stdout, stderr, code } = await runBundle(["recall", "query"], {
+        LORE_REMOTE_URL: url,
+      });
+
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toBe("recalled result\n");
+    } finally {
+      await stopRecallServer(server);
+    }
+  });
 });

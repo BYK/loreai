@@ -30,6 +30,7 @@ export interface CliErrorInit {
 
 export class CliError extends Error {
   readonly exitCode: number;
+  readonly errorType: string;
   readonly tryCommand?: string;
   readonly alternatives?: ReadonlyArray<string>;
   readonly note?: string;
@@ -37,7 +38,11 @@ export class CliError extends Error {
   /** Machine-readable reason code. */
   readonly reason?: string;
 
-  constructor(exitCode: number, initOrMessage: CliErrorInit | string) {
+  constructor(
+    exitCode: number,
+    initOrMessage: CliErrorInit | string,
+    errorType = "CliError",
+  ) {
     const init: CliErrorInit =
       typeof initOrMessage === "string"
         ? { message: initOrMessage }
@@ -45,6 +50,7 @@ export class CliError extends Error {
     super(init.message);
     this.name = this.constructor.name;
     this.exitCode = exitCode;
+    this.errorType = errorType;
     this.tryCommand = init.tryCommand;
     this.alternatives = init.alternatives;
     this.note = init.note;
@@ -104,7 +110,7 @@ export class CliError extends Error {
    */
   toJson(): Record<string, unknown> {
     const out: Record<string, unknown> = {
-      error: this.name,
+      error: this.errorType,
       code: this.exitCode,
       message: this.message,
     };
@@ -126,77 +132,77 @@ export class CliError extends Error {
 /** 10-19: authentication / account failures. */
 export class AuthError extends CliError {
   constructor(init: CliErrorInit) {
-    super(10, init);
+    super(10, init, "AuthError");
   }
 }
 
 /** 20-29: usage, validation, configuration failures. */
 export class UsageError extends CliError {
   constructor(init: CliErrorInit) {
-    super(20, init);
+    super(20, init, "UsageError");
   }
 }
 
 /** 20-29: missing required context. */
 export class ContextError extends CliError {
   constructor(init: CliErrorInit) {
-    super(21, init);
+    super(21, init, "ContextError");
   }
 }
 
 /** 20-29: identifier could not be resolved. */
 export class ResolutionError extends CliError {
   constructor(init: CliErrorInit) {
-    super(22, init);
+    super(22, init, "ResolutionError");
   }
 }
 
 /** 20-29: malformed input. */
 export class ValidationError extends CliError {
   constructor(init: CliErrorInit) {
-    super(23, init);
+    super(23, init, "ValidationError");
   }
 }
 
 /** 30-39: gateway, network, provider reachability. */
 export class NetworkError extends CliError {
   constructor(init: CliErrorInit) {
-    super(30, init);
+    super(30, init, "NetworkError");
   }
 }
 
 /** 30-39: provider rejected the request (4xx). */
 export class ProviderError extends CliError {
   constructor(init: CliErrorInit) {
-    super(31, init);
+    super(31, init, "ProviderError");
   }
 }
 
 /** 40-49: feature unavailable in this environment. */
 export class UnsupportedError extends CliError {
   constructor(init: CliErrorInit) {
-    super(40, init);
+    super(40, init, "UnsupportedError");
   }
 }
 
 /** 50-59: filesystem / database / import / sync / upgrade operations. */
 export class StorageError extends CliError {
   constructor(init: CliErrorInit) {
-    super(50, init);
+    super(50, init, "StorageError");
   }
 }
 
 /** 50-59: import-specific failures. */
 export class ImportError extends CliError {
   constructor(init: CliErrorInit) {
-    super(51, init);
+    super(51, init, "ImportError");
   }
 }
 
 /** 50-59: sync-specific failures. */
 export class SyncError extends CliError {
   constructor(init: CliErrorInit) {
-    super(52, init);
+    super(52, init, "SyncError");
   }
 }
 
@@ -206,9 +212,13 @@ export class UpgradeError extends CliError {
   constructor(reason: string, message: string);
   constructor(initOrReason: CliErrorInit | string, maybeMessage?: string) {
     if (typeof initOrReason === "string") {
-      super(53, { message: maybeMessage ?? "", reason: initOrReason });
+      super(
+        53,
+        { message: maybeMessage ?? "", reason: initOrReason },
+        "UpgradeError",
+      );
     } else {
-      super(53, initOrReason);
+      super(53, initOrReason, "UpgradeError");
     }
   }
 }
