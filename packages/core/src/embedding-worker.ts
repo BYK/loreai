@@ -248,8 +248,16 @@ async function ensurePipeline(): Promise<void> {
             // (respawn wouldn't change the already-WASM backend). Do NOT post
             // init-error — that's the main thread's break signal.
             if (usedNativeBinding) {
+              // Recoverable: native-binding parse failure on an intact model
+              // triggers an automatic WASM respawn — no user action available.
+              // Demote to `console.debug` per the warn-vs-debug escalation rule
+              // (only Sentry-warning-worthy events go through `console.warn`).
+              // `console.warn` is Node-aliased to `console.error`, which the
+              // lint CLI's legacy-bridge shim captures into its stdout stream —
+              // a `[embedding-…]` prefix then breaks `--json` parsing in CI
+              // (lore CI run 31192441316, run 31156866927).
               if (!stderrSilenced) {
-                console.warn(
+                console.debug(
                   `[embedding-worker] native ONNX could not parse an intact model (${msg}); ` +
                     `requesting WASM respawn`,
                 );
@@ -278,9 +286,13 @@ async function ensurePipeline(): Promise<void> {
             if (healed) {
               // Diagnostic only — do NOT post `init-error` here; the main thread
               // treats it as a break. Only the .catch below (a genuine final
-              // failure) may post init-error.
+              // failure) may post init-error. Recoverable: the purge-then-redownload
+              // retry typically succeeds — no user action available. Demote to
+              // `console.debug` per the warn-vs-debug escalation rule. See the
+              // rationale on the line above for why `console.warn` is hostile in
+              // the lint CLI's stdout-shimmed context.
               if (!stderrSilenced) {
-                console.warn(
+                console.debug(
                   `[embedding-worker] model corrupt (${msg}); purged cache, retrying download once`,
                 );
               }
@@ -767,8 +779,12 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
       if (isOomError(raw)) {
         // Silenced in host-TUI mode (see WorkerInitData.stderrSilenced); the
         // main thread reconstructs OOM telemetry, so nothing diagnostic is lost.
+        // Demote to `console.debug` per the warn-vs-debug escalation rule:
+        // `console.warn` is Node-aliased to `console.error`, which the lint CLI's
+        // legacy-bridge shim captures into its stdout stream — a `[lore]` prefix
+        // then breaks `--json` parsing in CI.
         if (!stderrSilenced) {
-          console.warn(
+          console.debug(
             `[lore] ONNX OOM at ≤${effectiveMax} tokens (batch=${req.texts.length}, ` +
               `longest≈${longest} chars) — respawning worker at a lower cap`,
           );
