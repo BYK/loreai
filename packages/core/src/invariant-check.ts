@@ -1075,12 +1075,37 @@ export async function checkInvariants(input: {
       continue;
     }
     judgeCalls++;
+    if (responseText === null) {
+      // Worker returned no text at all. This is the silent failure mode that
+      // bit PR #1587's CI run (20/20 unparseable on github-copilot/gpt-5.6-luna):
+      // the call completed (no exception) but the parser got nothing back,
+      // usually because the model is not accessible on the protocol the worker
+      // routed to (e.g. github-copilot/gpt-5.6-* on /chat/completions instead
+      // of /responses → upstream returns `unsupported_api_for_model`), or auth
+      // was rejected (non-Copilot bearer on api.githubcopilot.com → 400 plain
+      // text), or the response was entirely encrypted. None of these surface
+      // through `log.info` because the logger is debug-gated, so a successful
+      // CI run reporting "20/20 unparseable" used to give us no actionable
+      // signal. Log at `notice` (always visible on stderr, sink warn severity)
+      // — never `error` (this is expected failure-mode recovery, not an outage).
+      log.notice(
+        `invariant-check: judge returned null text for ${input.model?.providerID ?? "?"}/${input.model?.modelID ?? "?"} — likely cause: model not accessible on the routed protocol, auth rejected, or encrypted-only response (no parseable text in any output item)`,
+      );
+      unparseable++;
+      continue;
+    }
     const verdict = parseInvariantVerdict(responseText);
     if (!verdict) {
-      // Response was not parseable into a verdict (prose instead of JSON, a
-      // truncated object, etc.). Degrade safely to "no finding" — but COUNT it,
-      // so a systemically-broken judge is visible rather than silently
-      // indistinguishable from a genuine clean run.
+      // Response was a string but not parseable into a verdict (prose instead of
+      // JSON, a truncated object, a fenced markdown wrapper the heuristic
+      // couldn't peel, etc.). Degrade safely to "no finding" — but COUNT it, so
+      // a systemically-broken judge is visible rather than silently
+      // indistinguishable from a genuine clean run. Debug-gated because this
+      // is a model-behavior signal, not actionable for the operator — once
+      // LORE_DEBUG=1 is set the truncated text is logged for offline triage.
+      log.info(
+        `invariant-check: judge returned unparseable text for ${input.model?.providerID ?? "?"}/${input.model?.modelID ?? "?"}: ${responseText.slice(0, 200)}`,
+      );
       unparseable++;
       continue;
     }

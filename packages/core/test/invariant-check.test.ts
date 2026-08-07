@@ -3,6 +3,7 @@ import { db } from "../src/db";
 import { storeEmbedding } from "../src/db/vec-store";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
+import * as log from "../src/log";
 import {
   changedFiles,
   checkInvariants,
@@ -807,6 +808,50 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.judgeCalls).toBe(1);
     expect(result.unparseable).toBe(1);
     expect(result.findings).toHaveLength(0); // safe degrade, no crash
+  });
+
+  it("emits a notice log when the judge returns null text (so 20/20 unparseable in CI is actionable)", async () => {
+    // Regression for PR #1587's CI run (run 31099868171): github-copilot/gpt-5.6-luna
+    // routed to /chat/completions (instead of /responses) returned
+    // `unsupported_api_for_model` as plain JSON, the parser walked
+    // output[].content[].text (empty) → null text, and the CLI silently
+    // counted all 20 calls as unparseable with NO stderr detail to diagnose
+    // the routing miss. The fix: when `responseText === null` after a
+    // successful call (no exception), surface a `log.notice` so the operator
+    // sees the model + provider + likely cause on the next CI run, even
+    // without LORE_DEBUG=1.
+    const project = "/tmp/ic-test-proj-null-text";
+    await seed(
+      project,
+      "sqlite boundary",
+      "node:sqlite must never be imported outside driver.node.ts",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
+    // Judge completes (no throw) but returns null text — the "silent failure"
+    // shape: the worker pipeline swallowed an empty/encrypted/incompatible
+    // response and the parser got nothing back.
+    const { llm } = stubLLM(() => null);
+    const noticeSpy = vi.spyOn(log, "notice").mockImplementation(() => {});
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [{ file: "src/other.ts", text: '@@\n+import "node:sqlite"' }],
+      range: FAKE_RANGE,
+      llm,
+      sessionID: "s-null-text",
+      model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    });
+
+    expect(result.unparseable).toBe(1);
+    expect(result.findings).toHaveLength(0); // safe degrade, no crash
+    // The notice log names the model so an operator staring at "20/20 unparseable"
+    // in CI stderr can immediately identify the routing/compat issue.
+    expect(noticeSpy).toHaveBeenCalledTimes(1);
+    const call = noticeSpy.mock.calls[0][0] as string;
+    expect(call).toContain("github-copilot/gpt-5.6-luna");
+    expect(call).toContain("null text");
+    noticeSpy.mockRestore();
   });
 
   it("prose-wrapped JSON verdict still flags (prose-tolerant parse)", async () => {
