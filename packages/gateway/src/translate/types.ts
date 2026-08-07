@@ -342,6 +342,8 @@ export type StoredRecall = {
   input: { query: string; scope?: string };
   /** Position (content block index) in the original assistant message. */
   position: number;
+  /** Original content index of the hidden recall within the assistant turn. */
+  anchorPosition?: number;
   /** Executed recall result (formatted markdown). */
   result: string;
 };

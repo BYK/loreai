@@ -5449,6 +5449,7 @@ export function streamResponsesRecallAware(
       query: string;
       scope?: string;
       id?: string;
+      toolUseId: string;
       /** The accumulated response INCLUDING the recall tool_use, so the caller
        *  can build the follow-up request from the same accumulation the
        *  streamer uses. */
@@ -5479,6 +5480,7 @@ export function streamResponsesRecallAware(
   const keepaliveComment = encoder.encode(`: keepalive\n\n`);
   let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
   let completed = false;
+  let terminalSeen = false;
 
   const finish = (resp: GatewayResponse): void => {
     if (completed) return;
@@ -5674,9 +5676,11 @@ export function streamResponsesRecallAware(
         // Set of recall indices whose full args have been collected (so we run
         // the recall exactly once per recall call).
         const recallExecuted = new Set<number>();
+        const recallToolUseIds = new Map<number, string>();
         // Ordered list of parsed recall invocations: { outputIndex, block }.
         const pendingRecalls: Array<{
           outputIndex: number;
+          toolUseId: string;
           query: string;
           scope?: string;
           id?: string;
@@ -5713,6 +5717,10 @@ export function streamResponsesRecallAware(
               item?.type === "function_call" && item?.name === "recall";
             if (isRecallCall) {
               recallIndices.add(outputIndex);
+              const toolUseId = item?.call_id ?? item?.id;
+              if (typeof toolUseId === "string") {
+                recallToolUseIds.set(outputIndex, toolUseId);
+              }
             } else if (item?.type === "function_call") {
               otherToolSeen = true;
             }
@@ -5744,6 +5752,8 @@ export function streamResponsesRecallAware(
               const query = asString(input.query);
               pendingRecalls.push({
                 outputIndex,
+                toolUseId:
+                  recallToolUseIds.get(outputIndex) ?? String(outputIndex),
                 query,
                 scope: asString(input.scope) || undefined,
                 id: asString(input.id) || undefined,
@@ -5762,6 +5772,7 @@ export function streamResponsesRecallAware(
           ) {
             if (pendingRecalls.length === 0) {
               // No recall — forward the terminal event verbatim.
+              terminalSeen = true;
               if (
                 !safeEnqueue(encoder.encode(formatResponsesEvent(event, data)))
               )
@@ -5786,6 +5797,7 @@ export function streamResponsesRecallAware(
                 query: recall.query,
                 scope: recall.scope,
                 id: recall.id,
+                toolUseId: recall.toolUseId,
                 acc: recallAcc,
               });
               if (!executed) {
@@ -5978,7 +5990,7 @@ export function streamResponsesRecallAware(
         }
 
         // Stream ended without a terminal event (e.g. reader closed early).
-        if (!completed) {
+        if (!terminalSeen) {
           clearKeepalive();
           finish(finalizeResponsesAcc(state));
         }
@@ -10107,7 +10119,7 @@ async function handleConversationTurn(
                 genAiSpan,
               ),
             sessionID: sessionState.sessionID,
-            onRecall: async ({ query, scope, id }) => {
+            onRecall: async ({ query, scope, id, toolUseId, acc }) => {
               const alreadyInLtm = buildAlreadyInLtmIds(
                 stableLtmText,
                 pendingKnowledgeDelta,
@@ -10126,9 +10138,13 @@ async function handleConversationTurn(
               );
               const scopeVal = input.scope ?? "all";
               const storeKey = recallStoreKey(query, scopeVal, input.id);
+              const anchorPosition = acc.content.findIndex(
+                (block) => block.type === "tool_use" && block.id === toolUseId,
+              );
               const markerText = buildRecallMarker(query, scopeVal, input.id);
               sessionState.recallStore.set(storeKey, {
-                toolUseId: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
+                toolUseId,
+                anchorPosition,
                 input,
                 position: -1,
                 result,
