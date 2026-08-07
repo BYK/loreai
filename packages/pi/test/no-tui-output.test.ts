@@ -30,10 +30,16 @@ import lorePiExtension from "../src/index";
 type AnyHandler = (...args: unknown[]) => unknown;
 
 function createMockPi() {
-  const providers: Array<{ name: string; config: unknown }> = [];
+  const providers: Array<{
+    name: string;
+    config: { baseUrl: string; headers: Record<string, string> };
+  }> = [];
   const handlers = new Map<string, AnyHandler>();
   const pi = {
-    registerProvider(name: string, config: unknown): void {
+    registerProvider(
+      name: string,
+      config: { baseUrl: string; headers: Record<string, string> },
+    ): void {
       providers.push({ name, config });
     },
     on(event: string, handler: AnyHandler): void {
@@ -48,6 +54,9 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
   let baseUrl: string;
   const originalFetch = globalThis.fetch;
   const originalEnv = { ...process.env };
+  const compactCapture: {
+    headers: Record<string, string | undefined> | undefined;
+  } = { headers: undefined };
 
   beforeAll(async () => {
     // Minimal fake gateway: healthy, but rejects compaction as a session that
@@ -60,6 +69,10 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
         return;
       }
       if (url.pathname === "/v1/compact") {
+        compactCapture.headers = {
+          "x-api-key": req.headers["x-api-key"] as string | undefined,
+          authorization: req.headers.authorization,
+        };
         res.writeHead(404, { "content-type": "application/json" });
         res.end(
           JSON.stringify({
@@ -104,7 +117,8 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
     );
 
     try {
-      const { pi, handlers } = createMockPi();
+      compactCapture.headers = undefined;
+      const { pi, providers, handlers } = createMockPi();
 
       await lorePiExtension(
         pi as unknown as Parameters<typeof lorePiExtension>[0],
@@ -116,6 +130,11 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
       expect(onStart).toBeTypeOf("function");
       expect(onCompact).toBeTypeOf("function");
 
+      const staleRegistration = providers.find(
+        ({ name }) => name === "anthropic",
+      );
+      expect(staleRegistration).toBeDefined();
+
       // session_start: updates the session id and re-registers providers.
       await onStart?.(
         {},
@@ -124,6 +143,18 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
           sessionManager: { getSessionFile: () => "/tmp/lore-pi-session" },
         },
       );
+
+      // A delayed request from a provider registration created before the
+      // session switch must not repopulate compaction auth for the new session.
+      await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          ...staleRegistration?.config.headers,
+          "content-type": "application/json",
+          "x-api-key": "stale-session-key",
+        },
+        body: JSON.stringify({ model: "claude", messages: [] }),
+      });
 
       // Compaction → gateway returns 404 session_not_found → graceful fallback.
       const result = await onCompact?.(
@@ -137,6 +168,10 @@ describe("pi extension — no TUI (stdout/stderr) output", () => {
         {},
       );
       expect(result).toBeUndefined();
+      expect(compactCapture.headers).toEqual({
+        "x-api-key": undefined,
+        authorization: undefined,
+      });
 
       // The whole point: zero raw terminal writes on success + fallback paths.
       expect(stdoutSpy).not.toHaveBeenCalled();

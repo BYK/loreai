@@ -32,7 +32,11 @@ import { join } from "node:path";
 
 /** One Responses-API SSE event (`event:` + `data:` framing). */
 function sseEvent(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const payload =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? { type: event, ...(data as Record<string, unknown>) }
+      : data;
+  return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
 }
 
 /** Responses SSE stream emitting a single `recall` function_call. */
@@ -52,7 +56,19 @@ function codexRecallStream(): Response {
     }) +
     sseEvent("response.function_call_arguments.done", {
       output_index: 0,
+      item_id: "fc_recall",
       arguments: JSON.stringify({ query: "decide" }),
+    }) +
+    sseEvent("response.output_item.done", {
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: "fc_recall",
+        call_id: "call_recall1",
+        name: "recall",
+        arguments: JSON.stringify({ query: "decide" }),
+        status: "completed",
+      },
     }) +
     sseEvent("response.completed", {
       response: {
@@ -77,11 +93,23 @@ function codexFinalStream(): Response {
     }) +
     sseEvent("response.output_item.added", {
       output_index: 0,
-      item: { type: "message" },
+      item: { type: "message", id: "msg_final", role: "assistant" },
     }) +
     sseEvent("response.output_text.done", {
       output_index: 0,
+      item_id: "msg_final",
+      content_index: 0,
       text: "Here is the answer.",
+    }) +
+    sseEvent("response.output_item.done", {
+      output_index: 0,
+      item: {
+        type: "message",
+        id: "msg_final",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Here is the answer." }],
+      },
     }) +
     sseEvent("response.completed", {
       response: {
@@ -149,8 +177,14 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // like the real backend.
     let upstreamCalls = 0;
     let followUpStreamFlag: boolean | undefined;
+    const parallelToolCallFlags: unknown[] = [];
     setUpstreamInterceptor(async (upstreamBody) => {
-      const streaming = (upstreamBody as { stream?: unknown }).stream === true;
+      const body = upstreamBody as {
+        stream?: unknown;
+        parallel_tool_calls?: unknown;
+      };
+      const streaming = body.stream === true;
+      parallelToolCallFlags.push(body.parallel_tool_calls);
       upstreamCalls++;
       if (upstreamCalls === 1) {
         // Initial request — Pi's codex provider always streams.
@@ -197,6 +231,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       body: JSON.stringify({
         model: "gpt-5.5",
         stream: true,
+        parallel_tool_calls: true,
         input: "what did we decide?",
         // Non-empty tools so the gateway injects the recall tool.
         tools: [
@@ -217,6 +252,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // was sent with stream:false and ChatGPT 400'd.
     expect(upstreamCalls).toBe(2);
     expect(followUpStreamFlag).toBe(true);
+    expect(parallelToolCallFlags).toEqual([false, false]);
 
     // The continuation must reach the client — proving the follow-up succeeded
     // instead of falling back to the bare recall marker.
@@ -226,13 +262,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     expect(bodyText).not.toContain('"name": "recall"');
   });
 
-  // Guard the gate direction: the forced-streaming follow-up is keyed on the
-  // `codex` flag, NOT the `openai-responses` protocol. The standard OpenAI
-  // Responses API (`/v1/responses`) accepts `stream: false`, so its recall
-  // follow-up MUST stay on the non-streaming JSON path. This kills any mutation
-  // that widens the gate (e.g. "always force streaming" or "force when protocol
-  // === openai-responses"), which would needlessly change non-codex behavior.
-  test("non-codex openai-responses keeps the non-streaming JSON follow-up", async () => {
+  test("non-codex openai-responses also streams the follow-up", async () => {
     const dbPath = `/tmp/lore-recall-resp-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
@@ -263,8 +293,14 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // client's perspective.
     let upstreamCalls = 0;
     let followUpStreamFlag: boolean | undefined;
+    const parallelToolCallFlags: unknown[] = [];
     setUpstreamInterceptor(async (upstreamBody) => {
-      const streaming = (upstreamBody as { stream?: unknown }).stream === true;
+      const body = upstreamBody as {
+        stream?: unknown;
+        parallel_tool_calls?: unknown;
+      };
+      const streaming = body.stream === true;
+      parallelToolCallFlags.push(body.parallel_tool_calls);
       upstreamCalls++;
       if (upstreamCalls === 1) return codexRecallStream();
       followUpStreamFlag = streaming;
@@ -305,6 +341,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       body: JSON.stringify({
         model: "gpt-5.5",
         stream: true,
+        parallel_tool_calls: true,
         input: "what did we decide?",
         tools: [
           {
@@ -325,6 +362,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // identical continuation either way).
     expect(upstreamCalls).toBe(2);
     expect(followUpStreamFlag).toBe(true);
+    expect(parallelToolCallFlags).toEqual([false, false]);
 
     // The continuation still reaches the client.
     expect(bodyText).toContain("Here is the answer.");

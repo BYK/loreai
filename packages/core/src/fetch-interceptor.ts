@@ -20,6 +20,8 @@ export type FetchInterceptorConfig = {
    * Called per-request so values can change (e.g., session ID).
    */
   getHeaders: () => Record<string, string>;
+  /** Observe LLM request headers in memory before gateway routing. */
+  onRequestHeaders?: (headers: Headers) => void;
 };
 
 /**
@@ -404,6 +406,18 @@ function buildGatewayHeaders(
   return headers;
 }
 
+function observeRequestHeaders(
+  headers: Headers,
+  config: FetchInterceptorConfig,
+): void {
+  if (!config.onRequestHeaders) return;
+  try {
+    config.onRequestHeaders(headers);
+  } catch (e) {
+    log.error("fetch-interceptor: onRequestHeaders() failed:", e);
+  }
+}
+
 export function installFetchInterceptor(
   config: FetchInterceptorConfig,
 ): () => void {
@@ -454,8 +468,18 @@ export function installFetchInterceptor(
       return originalFetch(input, init);
     }
 
-    // Never intercept requests already going to the gateway
-    if (url.startsWith(gatewayBase)) return originalFetch(input, init);
+    // Never intercept requests already going to the gateway, but still observe
+    // their auth so in-process extensions can scope side-channel requests.
+    if (url.startsWith(gatewayBase)) {
+      const directHeaders = new Headers(
+        init?.headers ??
+          (typeof input !== "string" && !(input instanceof URL)
+            ? input.headers
+            : undefined),
+      );
+      observeRequestHeaders(directHeaders, config);
+      return originalFetch(input, init);
+    }
 
     // Never intercept local requests (could be local LLM or gateway itself)
     const host = upstream.hostname;
@@ -485,6 +509,7 @@ export function installFetchInterceptor(
         rewrite.upstreamPath,
         config,
       );
+      observeRequestHeaders(headers, config);
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
@@ -508,6 +533,7 @@ export function installFetchInterceptor(
           rewrite.upstreamPath,
           config,
         );
+        observeRequestHeaders(headers, config);
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );

@@ -177,6 +177,25 @@ describe("pi extension — e2e against a real gateway", () => {
     expect(sid).toMatch(/^pi-[0-9a-f]{24}$/);
   });
 
+  test("re-registers when cwd changes without changing the session id", async () => {
+    const before = mock.registrations.length;
+    const onStart = mock.handlers.get("session_start");
+    await onStart?.(
+      {},
+      {
+        cwd: "/tmp/lore-pi-other-project",
+        sessionManager: {
+          getSessionFile: () => "/tmp/lore-pi-e2e-session.json",
+        },
+      },
+    );
+    const after = mock.registrations.slice(before);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after[0].config.headers["x-lore-project"]).toBe(
+      "/tmp/lore-pi-other-project",
+    );
+  });
+
   test("compaction for an unrouted session falls back gracefully (real /v1/compact)", async () => {
     const onCompact = mock.handlers.get("session_before_compact");
     const result = await onCompact?.(

@@ -584,8 +584,57 @@ export function backoffMs(
   return base + Math.random() * 0.25 * base;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export function abortableSleep(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function readWorkerResponseText(
+  response: Response,
+  signal?: AbortSignal,
+  maxBytes = 64 * 1024,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  const onAbort = (): void => {
+    void reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    while (bytes < maxBytes) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      if (!value) continue;
+      const chunk = value.subarray(0, maxBytes - bytes);
+      chunks.push(chunk);
+      bytes += chunk.byteLength;
+    }
+  } catch (_err) {
+    if (signal?.aborted) throw signal.reason;
+    return "(no body)";
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    void reader.cancel().catch(() => {});
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
 // ---------------------------------------------------------------------------
@@ -2375,12 +2424,14 @@ export function createGatewayLLMClient(
                 response = await upstreamFetch(req.url, {
                   method: "POST",
                   headers: req.headers,
+                  signal: opts?.signal,
                   // The request body may carry `thinking:{type:"disabled"}` for
                   // Claude workers (built above) to SUPPRESS thinking — it never
                   // ENABLES it. opts.thinking is not forwarded.
                   body: req.body,
                 });
               } catch (e) {
+                if (opts?.signal?.aborted) throw opts.signal.reason;
                 // Network/fetch error — retry if attempts remain
                 if (attempt < maxRetries) {
                   const delay = backoffMs(attempt, null);
@@ -2389,7 +2440,7 @@ export function createGatewayLLMClient(
                   log.warn(
                     `worker request network error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms`,
                   );
-                  await sleep(delay);
+                  await abortableSleep(delay, opts?.signal);
                   continue;
                 }
                 // Enrich span before rethrowing
@@ -2426,7 +2477,10 @@ export function createGatewayLLMClient(
                 // success, so the JSON error-envelope check below never applies
                 // to it (bodyErrCode stays null → the block is skipped).
                 const ct = response.headers.get("content-type") ?? "";
-                const bodyText = await response.text();
+                const bodyText = await readWorkerResponseText(
+                  response,
+                  opts?.signal,
+                );
                 const isSSE = looksLikeSSE(ct, bodyText);
                 if (
                   isSSE &&
@@ -2492,7 +2546,7 @@ export function createGatewayLLMClient(
                         `error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms ` +
                         `— model=${model.providerID}/${model.modelID} worker=${opts?.workerID ?? "unknown"}`,
                     );
-                    await sleep(delay);
+                    await abortableSleep(delay, opts?.signal);
                     continue;
                   }
                   // Exhausted. Mirror the HTTP-level exhaustion path for full
@@ -2792,7 +2846,10 @@ export function createGatewayLLMClient(
 
               // --- Auth error: 401/403 — mark stale, re-resolve, retry once ---
               if (AUTH_ERROR_CODES.has(response.status)) {
-                const text = await response.text().catch(() => "(no body)");
+                const text = await readWorkerResponseText(
+                  response,
+                  opts?.signal,
+                );
 
                 // Always record the auth failure so the worker-health ladder
                 // sees it even for session-less paths (the adapter is the
@@ -2925,7 +2982,10 @@ export function createGatewayLLMClient(
               //    so the distiller/curator stop retrying every turn (a probe
               //    is allowed once per circuit interval to detect a top-up).
               if (INSUFFICIENT_CREDIT_CODES.has(response.status)) {
-                const text = await response.text().catch(() => "(no body)");
+                const text = await readWorkerResponseText(
+                  response,
+                  opts?.signal,
+                );
                 log.warn(
                   `worker upstream insufficient credit: ${response.status} ${response.statusText}` +
                     ` — model=${model.providerID}/${model.modelID}` +
@@ -2952,7 +3012,10 @@ export function createGatewayLLMClient(
 
               // Non-transient error — fail immediately, no retry
               if (!TRANSIENT_CODES.has(response.status)) {
-                const text = await response.text().catch(() => "(no body)");
+                const text = await readWorkerResponseText(
+                  response,
+                  opts?.signal,
+                );
 
                 // 400 + a beta-related complaint → the request carries a beta
                 // header the model/subscription doesn't support. The upfront
@@ -3213,7 +3276,7 @@ export function createGatewayLLMClient(
                       ? ` (retry-after: ${Math.round(retryAfter / 1000)}s)`
                       : ""),
                 );
-                await sleep(delay);
+                await abortableSleep(delay, opts?.signal);
                 continue;
               }
 
@@ -3227,7 +3290,7 @@ export function createGatewayLLMClient(
               // LORE_DEBUG) to avoid alarming red `[lore]` noise; non-urgent
               // background exhaustion stays at `error` since it can indicate a
               // sustained problem worth investigating.
-              const text = await response.text().catch(() => "(no body)");
+              const text = await readWorkerResponseText(response, opts?.signal);
               const exhaustionMsg =
                 `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText}` +
                 ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
@@ -3293,6 +3356,7 @@ export function createGatewayLLMClient(
         // Client disconnect / abort is benign — downgrade from error to info
         // to avoid Sentry noise from normal connection lifecycle events.
         const isAbort = e instanceof DOMException && e.name === "AbortError";
+        if (isAbort && opts?.signal?.aborted) throw e;
         // Network/timeout error — no response was received. Record here so the
         // adapter remains the single owner of transport-failure attribution
         // (core workers no longer record on a null return).

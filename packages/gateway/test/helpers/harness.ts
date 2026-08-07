@@ -44,6 +44,8 @@ export interface HarnessOptions {
   budget?: { maxLayer0Tokens?: number };
   /** Project path to bind requests to (and where `budget` .lore.json is written). */
   projectPath?: string;
+  /** Test-only race hook: runs after selecting the port, before loadConfig(). */
+  beforeConfigLoad?: () => void;
 }
 
 export interface Harness {
@@ -162,8 +164,18 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   }
 
   // --- 5. Start gateway ---
+  opts.beforeConfigLoad?.();
   const config = loadConfig();
+  // Vitest files share process.env within a worker. Another file can clobber
+  // LORE_LISTEN_PORT between the assignment above and this loadConfig() call,
+  // so pin the requested harness port on the config object itself.
+  config.port = port;
+  config.portExplicit = port !== 0;
   const server = await startServer(config);
+  if (server.port <= 0) {
+    server.stop();
+    throw new Error(`test gateway resolved invalid port ${server.port}`);
+  }
 
   const baseURL = `http://127.0.0.1:${server.port}`;
 

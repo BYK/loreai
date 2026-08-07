@@ -158,6 +158,30 @@ function parseInputItems(input: unknown): GatewayMessage[] {
   if (!Array.isArray(input)) return [];
 
   const messages: GatewayMessage[] = [];
+  let pendingReasoning: GatewayContentBlock[] = [];
+
+  const appendAssistant = (
+    content: GatewayContentBlock[],
+    provenanceContent?: GatewayContentBlock[],
+    provenancePositions?: number[],
+  ): GatewayMessage => {
+    const message: GatewayMessage = { role: "assistant", content };
+    if (provenanceContent) {
+      message.provenanceContent = [...pendingReasoning, ...provenanceContent];
+      message.provenancePositions = (provenancePositions ?? []).map(
+        (position) => pendingReasoning.length + position,
+      );
+      pendingReasoning = [];
+    } else if (pendingReasoning.length > 0) {
+      message.provenanceContent = [...pendingReasoning, ...content];
+      message.provenancePositions = content.map(
+        (_block, index) => pendingReasoning.length + index,
+      );
+      pendingReasoning = [];
+    }
+    messages.push(message);
+    return message;
+  };
 
   for (const item of input as Array<Record<string, unknown>>) {
     const itemType = item.type as string | undefined;
@@ -179,7 +203,12 @@ function parseInputItems(input: unknown): GatewayMessage[] {
           messages.push({ role: "user", content });
         }
       } else if (msgRole === "assistant") {
-        messages.push({ role: "assistant", content });
+        const parsed = parseAssistantMessageContent(item);
+        appendAssistant(
+          parsed.content,
+          parsed.provenanceContent,
+          parsed.provenancePositions,
+        );
       } else {
         if (content.length > 0) {
           messages.push({ role: "user", content });
@@ -213,9 +242,21 @@ function parseInputItems(input: unknown): GatewayMessage[] {
         last.content.length > 0 &&
         last.content.every((b) => b.type === "tool_use");
       if (lastIsToolUseMessage) {
+        const provenance = last.provenanceContent ?? [...last.content];
+        const positions =
+          last.provenancePositions ??
+          last.content.map((_block, index) => index);
+        const position = provenance.length + pendingReasoning.length;
+        provenance.push(...pendingReasoning, toolUseBlock);
+        positions.push(position);
         last.content.push(toolUseBlock);
+        if (last.provenanceContent || pendingReasoning.length > 0) {
+          last.provenanceContent = provenance;
+          last.provenancePositions = positions;
+        }
+        pendingReasoning = [];
       } else {
-        messages.push({ role: "assistant", content: [toolUseBlock] });
+        appendAssistant([toolUseBlock]);
       }
       continue;
     }
@@ -249,6 +290,11 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       continue;
     }
 
+    if (itemType === "reasoning") {
+      pendingReasoning.push({ type: "opaque", raw: item, responsesItem: true });
+      continue;
+    }
+
     // Other item types — skip, but warn about ones that can carry conversation
     // content the gateway cannot reconstruct.
     //
@@ -265,7 +311,22 @@ function parseInputItems(input: unknown): GatewayMessage[] {
         `dropping unresolvable Responses API item_reference (id=${asString(item.id, "?")}); ` +
           `gateway is stateless full-history and cannot resolve server-side item references`,
       );
+      continue;
     }
+
+    // Preserve every self-contained item in request-only provenance. The
+    // gateway may not render an unknown item, but canonical replay must hash
+    // the same full transcript on both the producing and consuming turns.
+    pendingReasoning.push({ type: "opaque", raw: item, responsesItem: true });
+  }
+
+  if (pendingReasoning.length > 0) {
+    messages.push({
+      role: "assistant",
+      content: [],
+      provenanceContent: pendingReasoning,
+      provenancePositions: [],
+    });
   }
 
   return messages;
@@ -294,6 +355,48 @@ function parseMessageContent(content: unknown): GatewayContentBlock[] {
     }
   }
   return blocks;
+}
+
+function parseAssistantMessageContent(item: Record<string, unknown>): {
+  content: GatewayContentBlock[];
+  provenanceContent: GatewayContentBlock[];
+  provenancePositions: number[];
+} {
+  if (typeof item.content === "string") {
+    const content = item.content
+      ? [{ type: "text" as const, text: item.content }]
+      : [];
+    return {
+      content,
+      provenanceContent: [...content],
+      provenancePositions: content.map((_block, index) => index),
+    };
+  }
+
+  const content: GatewayContentBlock[] = [];
+  const provenanceContent: GatewayContentBlock[] = [];
+  const provenancePositions: number[] = [];
+  if (!Array.isArray(item.content)) {
+    return { content, provenanceContent, provenancePositions };
+  }
+  for (const part of item.content as Array<Record<string, unknown>>) {
+    const isText = part.type === "output_text" || part.type === "text";
+    const text = isText ? asString(part.text) : "";
+    const visible: GatewayContentBlock | undefined = text
+      ? { type: "text", text }
+      : !isText
+        ? { type: "opaque", raw: part }
+        : undefined;
+    if (!visible) continue;
+    provenancePositions.push(provenanceContent.length);
+    content.push(visible);
+    provenanceContent.push({
+      type: "opaque",
+      raw: { ...item, content: [part] },
+      responsesItem: true,
+    });
+  }
+  return { content, provenanceContent, provenancePositions };
 }
 
 function parseArguments(args: unknown): unknown {
@@ -346,12 +449,39 @@ export function buildOpenAIResponsesUpstreamRequest(
 
   // Add tools in Responses API format
   if (req.tools.length > 0) {
-    body.tools = req.tools.map((t) => ({
-      type: "function",
-      name: t.name,
-      description: t.description,
-      parameters: t.inputSchema,
-    }));
+    body.tools = req.tools.map((t) => {
+      if (t.name !== "recall" || t.inputSchema.additionalProperties !== false) {
+        return {
+          type: "function",
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        };
+      }
+      const properties = t.inputSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      return {
+        type: "function",
+        name: t.name,
+        description: t.description,
+        strict: true,
+        parameters: {
+          ...t.inputSchema,
+          properties: {
+            ...properties,
+            scope: {
+              ...properties.scope,
+              type: ["string", "null"],
+              enum: [...((properties.scope.enum as unknown[]) ?? []), null],
+            },
+            id: { ...properties.id, type: ["string", "null"] },
+          },
+          required: Object.keys(properties),
+        },
+      };
+    });
   }
 
   // Forward extras
@@ -396,6 +526,9 @@ export function buildOpenAIResponsesUpstreamRequest(
     }
     if (req.extras.truncation !== undefined) {
       body.truncation = req.extras.truncation;
+    }
+    if (req.extras.parallel_tool_calls !== undefined) {
+      body.parallel_tool_calls = req.extras.parallel_tool_calls;
     }
   }
 
@@ -457,11 +590,27 @@ function buildResponsesInput(
   messages: GatewayMessage[],
 ): Array<Record<string, unknown>> {
   const items: Array<Record<string, unknown>> = [];
+  const appendItem = (item: Record<string, unknown>): void => {
+    const previous = items[items.length - 1];
+    if (item.type === "message" && previous?.type === "message") {
+      const { content: itemContent, ...itemEnvelope } = item;
+      const { content: previousContent, ...previousEnvelope } = previous;
+      if (
+        JSON.stringify(itemEnvelope) === JSON.stringify(previousEnvelope) &&
+        Array.isArray(itemContent) &&
+        Array.isArray(previousContent)
+      ) {
+        previous.content = [...previousContent, ...itemContent];
+        return;
+      }
+    }
+    items.push(item);
+  };
 
   for (const msg of messages) {
-    for (const block of msg.content) {
+    for (const block of msg.provenanceContent ?? msg.content) {
       if (block.type === "text") {
-        items.push({
+        appendItem({
           type: "message",
           role: msg.role === "assistant" ? "assistant" : "user",
           content: [
@@ -472,7 +621,7 @@ function buildResponsesInput(
           ],
         });
       } else if (block.type === "tool_use") {
-        items.push({
+        appendItem({
           type: "function_call",
           call_id: block.id,
           name: block.name,
@@ -483,18 +632,25 @@ function buildResponsesInput(
         // text projection. (Non-text tool-result sub-blocks can't be
         // represented on this wire format; Anthropic-native clients are
         // unaffected.)
-        items.push({
+        appendItem({
           type: "function_call_output",
           call_id: block.toolUseId,
           output: blocksToText(block.content),
         });
       } else if (block.type === "opaque") {
-        // Re-emit opaque blocks as message content parts (e.g. input_image).
-        items.push({
-          type: "message",
-          role: msg.role === "assistant" ? "assistant" : "user",
-          content: [block.raw],
-        });
+        if (block.responsesItem) {
+          if (block.raw.type === "item_reference") continue;
+          // Stateless follow-ups must replay complete top-level output items
+          // verbatim, including encrypted reasoning, refusals, and future types.
+          appendItem(block.raw);
+        } else {
+          // Re-emit opaque blocks as message content parts (e.g. input_image).
+          appendItem({
+            type: "message",
+            role: msg.role === "assistant" ? "assistant" : "user",
+            content: [block.raw],
+          });
+        }
       }
     }
   }

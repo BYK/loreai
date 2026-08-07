@@ -597,30 +597,30 @@ export async function expandQuery(
   query: string,
   model?: { providerID: string; modelID: string },
   sessionID?: string,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const TIMEOUT_MS = 3000;
 
   try {
-    // Race the LLM call against a timeout
-    const responseText = await Promise.race([
-      llm.prompt(
-        QUERY_EXPANSION_SYSTEM,
-        `Input: "${query}"`,
-        // temperature: 0 trades expansion diversity for eval reproducibility
-        {
-          model,
-          workerID: "lore-query-expand",
-          thinking: false,
-          urgent: true,
-          sessionID,
-          maxTokens: 256,
-          temperature: 0,
-        },
-      ),
-      new Promise<null>((resolve) =>
-        setTimeout(() => resolve(null), TIMEOUT_MS),
-      ),
-    ]);
+    signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(TIMEOUT_MS);
+    const promptSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const responseText = await llm.prompt(
+      QUERY_EXPANSION_SYSTEM,
+      `Input: "${query}"`,
+      // temperature: 0 trades expansion diversity for eval reproducibility
+      {
+        model,
+        signal: promptSignal,
+        workerID: "lore-query-expand",
+        thinking: false,
+        urgent: true,
+        sessionID,
+        maxTokens: 256,
+        temperature: 0,
+      },
+    );
+    signal?.throwIfAborted();
 
     if (!responseText) {
       log.info("query expansion timed out or failed, using original query");
@@ -642,6 +642,11 @@ export async function expandQuery(
 
     return [query, ...expanded.slice(0, 3)]; // cap at 3 expansions
   } catch (err) {
+    if (signal?.aborted) throw signal.reason;
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      log.info("query expansion timed out, using original query");
+      return [query];
+    }
     log.info("query expansion failed, using original query:", err);
     return [query];
   }

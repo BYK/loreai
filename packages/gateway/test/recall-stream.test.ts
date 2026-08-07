@@ -20,6 +20,7 @@ import {
   expandRecallMarkers,
   recallStoreKey,
   buildRecallMarker,
+  recallAnchorContext,
 } from "../src/recall";
 import type {
   GatewayRequest,
@@ -936,6 +937,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       position: accum.recallBlockIndex(),
       result:
         "Found: gateway uses Anthropic protocol, recall interception is transparent",
+      anchorContextId: "0".repeat(64),
     });
 
     // --- Step 6: Expand markers in next request ---
@@ -987,6 +989,13 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       metadata: {},
       rawHeaders: {},
     };
+    const storedRecall = store.get(storeKey);
+    if (!storedRecall) throw new Error("missing stored recall fixture");
+    storedRecall.anchorContextId = recallAnchorContext(
+      nextReq.messages,
+      1,
+      nextReq.messages[1].content.slice(0, 1),
+    );
 
     const expanded = expandRecallMarkers(nextReq, store);
     expect(expanded).toBe(true);
@@ -1065,6 +1074,7 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       input: { query: "patterns" },
       position: accum.recallBlockIndex(),
       result: "Found patterns info",
+      anchorContextId: "0".repeat(64),
     });
 
     // Next request: client provides tool_results for Read and Bash,
@@ -1115,6 +1125,13 @@ describe("Case 2 integration — mixed tools end-to-end", () => {
       metadata: {},
       rawHeaders: {},
     };
+    const storedRecall = store.get(storeKey);
+    if (!storedRecall) throw new Error("missing stored recall fixture");
+    storedRecall.anchorContextId = recallAnchorContext(
+      nextReq.messages,
+      1,
+      nextReq.messages[1].content.slice(0, 1),
+    );
 
     const expanded = expandRecallMarkers(nextReq, store);
     expect(expanded).toBe(true);
@@ -1567,9 +1584,13 @@ describe("Recall streaming marker emission — Anthropic split vs non-Anthropic 
           input: { query: "patterns", scope: "all" },
           position: 0,
           result: '[{"title":"pattern X","content":"..."}]',
+          anchorContextId: "0".repeat(64),
         },
       ],
     ]);
+    const storedRecall = store.get(recallStoreKey("patterns", "all"));
+    if (!storedRecall) throw new Error("missing stored recall fixture");
+    storedRecall.anchorContextId = recallAnchorContext(req.messages, 2);
 
     const expanded = expandRecallMarkers(req, store);
     expect(expanded).toBe(true);

@@ -38,10 +38,22 @@ export interface ResponsesAccState {
   model: string;
   stopReason: string;
   usage: GatewayUsage;
+  terminalEvent?:
+    | "response.completed"
+    | "response.incomplete"
+    | "response.failed";
+  /** Original upstream output items, retained for terminal rebuilds. */
+  rawItems: Map<number, Record<string, unknown>>;
   /** Accumulating output items indexed by output_index. */
   items: Map<
     number,
-    | { type: "text"; text: string }
+    | {
+        type: "text";
+        id: string;
+        text: string;
+        refusal?: string;
+        content?: Array<Record<string, unknown>>;
+      }
     | {
         type: "tool_use";
         id: string;
@@ -59,6 +71,7 @@ export function makeResponsesAccState(): ResponsesAccState {
     stopReason: "end_turn",
     usage: { inputTokens: 0, outputTokens: 0 },
     items: new Map(),
+    rawItems: new Map(),
   };
 }
 
@@ -86,9 +99,14 @@ export function applyResponsesEvent(
       const outputIndex = parsed.output_index as number;
       const item = parsed.item as Record<string, unknown> | undefined;
       if (typeof outputIndex !== "number" || !item) break;
+      state.rawItems.set(outputIndex, { ...item });
 
       if (item.type === "message") {
-        state.items.set(outputIndex, { type: "text", text: "" });
+        state.items.set(outputIndex, {
+          type: "text",
+          id: asString(item.id),
+          text: "",
+        });
       } else if (item.type === "function_call") {
         state.items.set(outputIndex, {
           type: "tool_use",
@@ -97,6 +115,21 @@ export function applyResponsesEvent(
           name: asString(item.name),
           args: "",
         });
+      }
+      break;
+    }
+
+    case "response.output_item.done": {
+      const outputIndex = parsed.output_index as number;
+      const item = parsed.item as Record<string, unknown> | undefined;
+      if (typeof outputIndex === "number" && item) {
+        state.rawItems.set(outputIndex, { ...item });
+        if (item.type === "message" && Array.isArray(item.content)) {
+          const normalized = state.items.get(outputIndex);
+          if (normalized?.type === "text") {
+            normalized.content = item.content as Array<Record<string, unknown>>;
+          }
+        }
       }
       break;
     }
@@ -122,6 +155,26 @@ export function applyResponsesEvent(
       if (item?.type === "text" && typeof text === "string") {
         // Replace accumulated text with the final version (more reliable)
         item.text = text;
+      }
+      break;
+    }
+
+    case "response.refusal.delta": {
+      const outputIndex = parsed.output_index as number;
+      const delta = parsed.delta as string | undefined;
+      const item = state.items.get(outputIndex);
+      if (item?.type === "text" && typeof delta === "string") {
+        item.refusal = (item.refusal ?? "") + delta;
+      }
+      break;
+    }
+
+    case "response.refusal.done": {
+      const outputIndex = parsed.output_index as number;
+      const refusal = parsed.refusal as string | undefined;
+      const item = state.items.get(outputIndex);
+      if (item?.type === "text" && typeof refusal === "string") {
+        item.refusal = refusal;
       }
       break;
     }
@@ -155,10 +208,20 @@ export function applyResponsesEvent(
     // gateway sees the RAW upstream stream, so finalize on them here too.
     // `resp.status` ("incomplete"/"completed"/…) drives the stop reason via
     // `mapStatusToStopReason`.
+    case "response.failed":
     case "response.done":
     case "response.incomplete":
     case "response.completed": {
       const resp = parsed.response as Record<string, unknown> | undefined;
+      const status = typeof resp?.status === "string" ? resp.status : "";
+      state.terminalEvent =
+        event === "response.failed" ||
+        status === "failed" ||
+        status === "cancelled"
+          ? "response.failed"
+          : event === "response.incomplete" || status === "incomplete"
+            ? "response.incomplete"
+            : "response.completed";
       if (resp) {
         if (typeof resp.id === "string") state.id = resp.id;
         if (typeof resp.model === "string") state.model = resp.model;
@@ -199,7 +262,7 @@ export function applyResponsesEvent(
       break;
     }
 
-    // Other events (response.output_item.done, response.content_part.*,
+    // Other events (response.content_part.*,
     // response.reasoning_summary_*, etc.) — ignored for accumulation
   }
 }
@@ -215,6 +278,41 @@ export function finalizeResponsesAcc(
     const item = state.items.get(index);
     if (!item) continue;
     if (item.type === "text") {
+      if (item.content) {
+        for (const part of item.content) {
+          if (part.type === "output_text" && typeof part.text === "string") {
+            content.push({ type: "text", text: part.text });
+          } else {
+            content.push({
+              type: "opaque",
+              responsesItem: true,
+              raw: {
+                ...(state.rawItems.get(index) ?? {
+                  type: "message",
+                  id: item.id,
+                  role: "assistant",
+                  status: "completed",
+                }),
+                content: [part],
+              },
+            });
+          }
+        }
+        continue;
+      }
+      if (item.refusal !== undefined) {
+        content.push({
+          type: "opaque",
+          responsesItem: true,
+          raw: {
+            type: "message",
+            id: item.id,
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "refusal", refusal: item.refusal }],
+          },
+        });
+      }
       if (item.text) {
         content.push({ type: "text", text: item.text });
       }
@@ -246,6 +344,10 @@ export function finalizeResponsesAcc(
     id: state.id,
     model: state.model,
     content,
+    rawOutputItems: Array.from(state.rawItems.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([, item]) => item)
+      .filter((item) => item.type !== "item_reference"),
     stopReason,
     usage: state.usage,
   };

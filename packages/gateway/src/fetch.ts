@@ -94,6 +94,10 @@ function nodeHttpFetch(
   init?: RequestInit,
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
+    if (init?.signal?.aborted) {
+      reject(init.signal.reason);
+      return;
+    }
     const url = new URL(
       typeof input === "string"
         ? input
@@ -168,7 +172,17 @@ function nodeHttpFetch(
       },
     );
 
+    const onAbort = (): void => {
+      const reason =
+        init?.signal?.reason ?? new DOMException("Aborted", "AbortError");
+      req.destroy(reason);
+    };
+    init?.signal?.addEventListener("abort", onAbort, { once: true });
+
     req.on("error", reject);
+    req.on("close", () => {
+      init?.signal?.removeEventListener("abort", onAbort);
+    });
 
     if (init?.body) {
       req.write(init.body);

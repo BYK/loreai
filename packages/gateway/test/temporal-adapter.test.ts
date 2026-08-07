@@ -6,6 +6,7 @@ import {
 import type { GatewayMessage } from "../src/translate/types";
 import type { LorePart } from "@loreai/core";
 import { isToolPart } from "@loreai/core";
+import { estimateMessages } from "../../core/src/gradient";
 
 // Test-local view of a tool part's state covering all status variants.
 type TestToolState = {
@@ -313,5 +314,33 @@ describe("resolveToolResults", () => {
     const toolState = toolStateOf(toolPart);
     expect(toolState.status).toBe("error");
     expect(toolState.error).toBe("command failed with exit code 1");
+  });
+
+  test("counts hidden Responses provenance without persisting it as parts", () => {
+    const messages = gatewayMessagesToLore(
+      [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "anchor" }],
+          provenanceContent: [
+            {
+              type: "opaque",
+              responsesItem: true,
+              raw: {
+                type: "reasoning",
+                id: "rs_large",
+                encrypted_content: "x".repeat(16_000),
+              },
+            },
+            { type: "text", text: "anchor" },
+          ],
+        },
+      ],
+      "sess-hidden",
+    );
+
+    expect(messages[0].parts).toHaveLength(1);
+    expect(messages[0].hiddenInputTokens).toBeGreaterThan(1_000);
+    expect(estimateMessages(messages)).toBeGreaterThan(1_000);
   });
 });

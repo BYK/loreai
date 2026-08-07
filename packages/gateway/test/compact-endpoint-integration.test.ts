@@ -23,17 +23,16 @@ async function postCompact(
   baseURL: string,
   body: string,
   sessionID: string,
+  apiKey: string | null = "test-key",
 ): Promise<Response> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-lore-session-id": sessionID,
+  };
+  if (apiKey) headers["x-api-key"] = apiKey;
   return fetch(`${baseURL}/v1/compact`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      // Tier-1 session header: ensures both the chat and the compact POST
-      // resolve to the SAME session (otherwise the compact POST, with
-      // empty messages, has a different fingerprint and would mint a new
-      // session with no lastUpstream).
-      "x-lore-session-id": sessionID,
-    },
+    headers,
     body,
   });
 }
@@ -147,6 +146,168 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     expect(body.cancel).toBe(true);
     expect(body.summary).toBeUndefined();
   });
+
+  it.each([
+    ["cancel", 50_000],
+    ["summary", 873_000],
+  ])(
+    "rejects a mismatched project before the %s branch",
+    async (_branch, tokensBefore) => {
+      harness = await createHarness({
+        fixtures: [
+          makeFixtureEntry({
+            seq: 0,
+            requestMessages: [{ role: "user", content: "hello" }],
+            responseText: "hi",
+            model: "claude-sonnet-4-6",
+          }),
+        ],
+        projectPath: PROJECT_PATH,
+      });
+
+      const sessionID = `test-session-project-mismatch-${_branch}`;
+      const chatResp = await chatWithSession(
+        harness,
+        realConversationBody("claude-sonnet-4-6"),
+        sessionID,
+      );
+      expect(chatResp.status).toBe(200);
+
+      const mismatchedProject = `${PROJECT_PATH}-other-tenant`;
+      const compactResp = await postCompact(
+        harness.baseURL,
+        JSON.stringify({
+          project_path: mismatchedProject,
+          tokens_before: tokensBefore,
+        }),
+        sessionID,
+      );
+      expect(compactResp.status).toBe(403);
+      expect(await compactResp.json()).toEqual({
+        error: "project_mismatch",
+        message: "project_path does not match the authenticated session",
+      });
+      expect(harness.upstreamBodies()).toHaveLength(1);
+      expect(
+        harness.queryDB<{ path: string }>(
+          "SELECT path FROM projects WHERE path = ?",
+          [mismatchedProject],
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it("rejects a compact request without a provider credential", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({ seq: 0, requestMessages: [], responseText: "hi" }),
+      ],
+      projectPath: PROJECT_PATH,
+    });
+    const sessionID = "test-session-compact-no-auth";
+    expect(
+      (
+        await chatWithSession(
+          harness,
+          realConversationBody("claude-sonnet-4-6"),
+          sessionID,
+        )
+      ).status,
+    ).toBe(200);
+
+    const response = await postCompact(
+      harness.baseURL,
+      JSON.stringify({ project_path: PROJECT_PATH, tokens_before: 50_000 }),
+      sessionID,
+      null,
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: "unauthorized",
+      message: "A provider credential is required",
+    });
+  });
+
+  it.each([
+    ["cancel", 50_000],
+    ["summary", 873_000],
+  ])(
+    "does not adopt a session under the wrong credential before the %s branch",
+    async (_branch, tokensBefore) => {
+      harness = await createHarness({
+        fixtures: [
+          makeFixtureEntry({ seq: 0, requestMessages: [], responseText: "hi" }),
+        ],
+        projectPath: PROJECT_PATH,
+      });
+      const sessionID = `test-session-compact-wrong-auth-${_branch}`;
+      expect(
+        (
+          await chatWithSession(
+            harness,
+            realConversationBody("claude-sonnet-4-6"),
+            sessionID,
+          )
+        ).status,
+      ).toBe(200);
+
+      const response = await postCompact(
+        harness.baseURL,
+        JSON.stringify({
+          project_path: PROJECT_PATH,
+          tokens_before: tokensBefore,
+        }),
+        sessionID,
+        "other-tenant-key",
+      );
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        error: "session_not_found",
+      });
+      expect(harness.upstreamBodies()).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["cancel", 1, true],
+    ["summary", Number.MAX_SAFE_INTEGER, false],
+  ])(
+    "restores the authenticated session and model after restart for the %s branch",
+    async (_branch, tokensBefore, shouldCancel) => {
+      harness = await createHarness({
+        fixtures: [
+          makeFixtureEntry({ seq: 0, requestMessages: [], responseText: "hi" }),
+        ],
+        projectPath: PROJECT_PATH,
+      });
+      const sessionID = `test-session-compact-restart-${_branch}`;
+      expect(
+        (
+          await chatWithSession(
+            harness,
+            realConversationBody("claude-sonnet-4-6"),
+            sessionID,
+          )
+        ).status,
+      ).toBe(200);
+      await harness.restartPipeline();
+
+      const response = await postCompact(
+        harness.baseURL,
+        JSON.stringify({
+          project_path: PROJECT_PATH,
+          tokens_before: tokensBefore,
+        }),
+        sessionID,
+      );
+      expect(response.status).toBe(200);
+      const result = (await response.json()) as {
+        cancel?: boolean;
+        summary?: string;
+      };
+      expect(result.cancel === true).toBe(shouldCancel);
+    },
+  );
 
   it("cancels at the exact budget boundary (872K for Sonnet 1M / 128K output)", async () => {
     // models.dev: claude-sonnet-4-6 (anthropic) has limit { context: 1_000_000,

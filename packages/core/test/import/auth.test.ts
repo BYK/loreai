@@ -382,13 +382,14 @@ describe("getOpenCodeActiveProvider", () => {
     // or the global setting shadows the project override. Seer flagged this
     // as a HIGH-severity bug; the fix is to swap the candidate order.
     const globalCfg = configFile();
-    const projectCfg = join(process.cwd(), "opencode.json");
+    const projectDir = join(tmp, "project");
+    const projectCfg = join(projectDir, "opencode.json");
     writeJson(globalCfg, { model: "anthropic/claude-sonnet-5" });
     writeJson(projectCfg, { model: "openrouter/anthropic/claude-sonnet-5" });
-    expect(getOpenCodeActiveProvider()).toBe("openrouter");
+    expect(getOpenCodeActiveProvider(projectDir)).toBe("openrouter");
     // Flip: project overrides global regardless of file mtime.
     writeJson(projectCfg, { model: "anthropic/claude-haiku-4-5" });
-    expect(getOpenCodeActiveProvider()).toBe("anthropic");
+    expect(getOpenCodeActiveProvider(projectDir)).toBe("anthropic");
   });
 });
 

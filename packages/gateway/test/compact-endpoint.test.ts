@@ -12,7 +12,10 @@ import { shouldCancelCompactionFromBudget } from "../src/pipeline";
 async function postCompact(baseURL: string, body: string): Promise<Response> {
   return fetch(`${baseURL}/v1/compact`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": "test-key",
+    },
     body,
   });
 }

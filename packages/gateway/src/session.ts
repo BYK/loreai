@@ -500,13 +500,14 @@ export interface RotationCandidate {
  * for re-indexing the header mapping and persisting the change.
  */
 export function findRotationPredecessor(
+  credentialFingerprint: string,
   headerName: string,
   newHeaderValue: string,
   headerIndex: ReadonlyMap<string, string>,
   getCandidate: (sid: string) => RotationCandidate | null,
   now: number = Date.now(),
 ): { sid: string; oldHeaderValue: string } | null {
-  const headerPrefix = `${headerName}:`;
+  const headerPrefix = `${credentialFingerprint}\x1f${headerName}\x1f`;
   const newKey = headerPrefix + newHeaderValue;
   let predecessor: { sid: string; oldHeaderValue: string } | null = null;
 

@@ -114,10 +114,9 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
 
   let projectPath = process.cwd();
   let currentSessionID = sessionIDFor(undefined);
+  let compactAuthHeaders: Record<string, string> = {};
 
-  // Cache git remote once at init — avoid spawning `git remote -v` on every
-  // intercepted fetch call.
-  const cachedGitRemote = getGitRemote(projectPath) ?? "";
+  let cachedGitRemote = getGitRemote(projectPath) ?? "";
 
   // Install fetch-level interceptor — transparently reroutes LLM API calls
   // through the gateway while preserving original auth headers and URLs.
@@ -137,6 +136,21 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         };
         if (cachedGitRemote) headers["x-lore-git-remote"] = cachedGitRemote;
         return headers;
+      },
+      onRequestHeaders: (headers) => {
+        if (
+          headers.get("x-lore-session-id") !== currentSessionID ||
+          headers.get("x-lore-project") !== projectPath
+        ) {
+          return;
+        }
+        const apiKey = headers.get("x-api-key");
+        const authorization = headers.get("authorization");
+        compactAuthHeaders = apiKey
+          ? { "x-api-key": apiKey }
+          : authorization
+            ? { authorization }
+            : {};
       },
     });
     fetchInterceptorInstalled = true;
@@ -165,10 +179,13 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   registerProviders();
 
   pi.on("session_start", async (_event: SessionStartEvent, ctx) => {
-    projectPath = ctx.cwd;
+    const nextProjectPath = ctx.cwd;
     const newID = sessionIDFor(ctx.sessionManager.getSessionFile());
-    if (newID !== currentSessionID) {
+    if (newID !== currentSessionID || nextProjectPath !== projectPath) {
       currentSessionID = newID;
+      projectPath = nextProjectPath;
+      cachedGitRemote = getGitRemote(projectPath) ?? "";
+      compactAuthHeaders = {};
       // Re-register with the real session ID so all subsequent provider
       // requests carry the correct x-lore-session-id header.
       registerProviders();
@@ -198,6 +215,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         previousSummary: event.preparation.previousSummary,
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
+        authHeaders: compactAuthHeaders,
       }),
   );
 }
