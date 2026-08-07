@@ -124,6 +124,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain("hello world");
     expect(out).not.toContain('"recall"');
     expect(out).not.toContain("lore_marker");
+    expect(out).not.toContain("response.failed");
   });
 
   test("suppresses a recall function_call and emits a marker (mixed tools)", async () => {
@@ -251,6 +252,33 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out.match(/response\.completed/g)).toHaveLength(1);
     expect(out).not.toContain("lore_marker");
+  });
+
+  test("tracks repeated recalls by their own tool IDs", async () => {
+    const seen: string[] = [];
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_repeated", "gpt-5.6-terra"),
+        recallCall(0, { query: "same" }),
+        recallCall(1, { query: "same" }),
+        completed("resp_repeated"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async ({ toolUseId }) => {
+          seen.push(toolUseId);
+          return { markerText: `marker:${toolUseId}`, resultText: "results" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run for multiple recalls");
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(seen).toEqual(["call_0", "call_1"]);
+    expect(out).toContain("marker:call_0");
+    expect(out).toContain("marker:call_1");
   });
 });
 

@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 import {
   dropVersionedLibAliases,
   ORT_BINDING_FILE,
+  collectOrtFiles,
   ortAssetKey,
   ortNativeAssets,
 } from "../script/vendor-ort-native";
@@ -99,6 +100,18 @@ describe("vendor-ort-native asset selection (real package)", () => {
     expect(linux).toContain("libonnxruntime.so.1");
     // The identical, longer-versioned alias must NOT be embedded twice.
     expect(linux).not.toContain("libonnxruntime.so.1.27.0");
+  });
+
+  test("SEA assets omit optional Linux GPU providers", () => {
+    const linux = assets.get("linux-x64")!.map((f) => f.file);
+    expect(linux).not.toContain("libonnxruntime_providers_cuda.so");
+    expect(linux).not.toContain("libonnxruntime_providers_tensorrt.so");
+  });
+
+  test("npm package assets retain optional Linux GPU providers", () => {
+    const linux = collectOrtFiles("linux/x64").map((f) => f.file);
+    expect(linux).toContain("libonnxruntime_providers_cuda.so");
+    expect(linux).toContain("libonnxruntime_providers_tensorrt.so");
   });
 
   test("darwin keeps the addon's install-name dylib, drops the versioned duplicate", () => {

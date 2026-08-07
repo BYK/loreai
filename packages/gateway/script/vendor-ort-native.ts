@@ -52,6 +52,12 @@ const ORT_TARGET_SUBDIR: Record<VendorTarget, string> = {
  *  runtime loader points `__LORE_ORT_BINDING_PATH__` at the extracted copy. */
 export const ORT_BINDING_FILE = "onnxruntime_binding.node";
 
+/** Native provider libraries that Lore does not need in its CPU-only SEA. */
+const OPTIONAL_GPU_PROVIDER_FILES = new Set([
+  "libonnxruntime_providers_cuda.so",
+  "libonnxruntime_providers_tensorrt.so",
+]);
+
 /** The SEA asset key for one of a target's native files. `native-loader.cjs`
  *  recomputes the same key from `process.platform`/`process.arch` at runtime,
  *  so keep the two in sync. Filenames are flat (no path separators) so a simple
@@ -169,6 +175,7 @@ export function dropVersionedLibAliases(all: readonly string[]): string[] {
  */
 export function collectOrtFiles(
   binSubdir: string,
+  options: { includeOptionalProviders?: boolean } = {},
 ): Array<{ file: string; srcPath: string }> {
   const dir = join(ortNodeBinRoot(), binSubdir);
   if (!existsSync(dir)) {
@@ -177,7 +184,11 @@ export function collectOrtFiles(
     );
   }
   const all = readdirSync(dir).filter((f) => !f.startsWith("."));
-  const kept = dropVersionedLibAliases(all);
+  const kept = dropVersionedLibAliases(all).filter(
+    (file) =>
+      options.includeOptionalProviders !== false ||
+      !OPTIONAL_GPU_PROVIDER_FILES.has(file),
+  );
   if (!kept.includes(ORT_BINDING_FILE)) {
     throw new Error(
       `vendor-ort-native: ${ORT_BINDING_FILE} not found in ${dir}`,
@@ -202,7 +213,9 @@ export function ortNativeAssets(
   for (const target of targets) {
     out.set(
       target,
-      collectOrtFiles(ORT_TARGET_SUBDIR[target]).map(({ file, srcPath }) => ({
+      collectOrtFiles(ORT_TARGET_SUBDIR[target], {
+        includeOptionalProviders: false,
+      }).map(({ file, srcPath }) => ({
         file,
         srcPath,
         assetKey: ortAssetKey(target, file),
