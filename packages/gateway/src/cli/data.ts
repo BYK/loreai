@@ -1047,6 +1047,12 @@ async function cmdDedup(
   }> = [];
 
   for (const project of projects) {
+    if (!apply && !getProjectId(project.path)) {
+      console.log(
+        `[${project.name}] No tracked project found; nothing to scan.`,
+      );
+      continue;
+    }
     let result: Awaited<ReturnType<typeof ltm.deduplicate>>;
     try {
       result = await ltm.deduplicate(project.path, { dryRun: !apply });
@@ -2121,7 +2127,12 @@ async function cmdMove(
       const includeChildren = flags["no-children"] !== true;
 
       // Resolve session IDs via prefix matching
-      const allSessions = data.listSessions(projectPath, 10000);
+      const sourceProject = data
+        .listProjects()
+        .find((project) => project.path === projectPath);
+      const allSessions = sourceProject
+        ? data.listSessions(projectPath, 10000)
+        : [];
       const resolved: string[] = [];
       for (const rawId of rawIds) {
         const match = allSessions.find((s) => s.session_id.startsWith(rawId));
@@ -2511,16 +2522,17 @@ async function cmdSplit(
   const minConfidence = (flags["min-confidence"] as string) ?? "high";
   const projectPath = resolve((flags.project as string) ?? process.cwd());
 
-  const sessions = data.listSessions(projectPath, 10000);
+  const sourceProject = data
+    .listProjects()
+    .find((project) => project.path === projectPath);
+  const sessions = sourceProject ? data.listSessions(projectPath, 10000) : [];
 
   if (!sessions.length) {
     if (!asJson) console.log("No sessions found in project.");
     return;
   }
 
-  const sourceProjectId = data
-    .listProjects()
-    .find((project) => project.path === projectPath)?.id;
+  const sourceProjectId = sourceProject?.id;
 
   // Suggest targets for all sessions
   const suggestions = suggestProjectsForSessions(
