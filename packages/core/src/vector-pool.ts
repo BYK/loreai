@@ -781,7 +781,17 @@ export async function checkReadOffload(
 
 /** Tear down the pool (test teardown + process reset). Idempotent. The
  *  shuttingDown guard keeps the terminate()-induced worker exits below from
- *  being counted as structural failures. */
+ *  being counted as structural failures.
+ *
+ *  This is the SYNCHRONOUS variant: it posts `shutdown` and immediately calls
+ *  `terminate()` without waiting for the cooperative handler in
+ *  `vector-worker.ts` to flush its reader `close()` + `process.exit(0)`. That
+ *  is fine for test teardown (the next test opens a fresh pool) but WRONG for
+ *  graceful gateway shutdown: the readers each hold a WAL read-mark, and the
+ *  writer's TRUNCATE checkpoint (#1221) cannot reset the WAL while any reader
+ *  is alive — so leaving the readers up while we try to close the writer
+ *  leaves a stranded `-wal` that must be recovered on next boot (#1599).
+ *  Use {@link shutdownVectorPoolAsync} on the graceful path. */
 export function shutdownVectorPool(): void {
   shuttingDown = true;
   for (const pw of workers) {
@@ -798,6 +808,123 @@ export function shutdownVectorPool(): void {
     }
   }
   workers = [];
+}
+
+/** Default budget for {@link shutdownVectorPoolAsync} — the wait is bounded so
+ *  a stuck worker can never hang process shutdown. Tuned to fit comfortably
+ *  under the gateway's 4000ms SHUTDOWN_DEADLINE_MS after the embedding drain
+ *  (≈60%) and writer close (best-effort, ≈50ms with busy_timeout=0). */
+export const DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS = 1500;
+
+/** Cooperative "exit" listener signature — the only `Worker` event
+ *  {@link shutdownVectorPoolAsync} cares about. Matches the real
+ *  `node:worker_threads` Worker `exit` event and lets tests inject a fake. */
+type ExitListener = (code: number) => void;
+
+/** Minimal worker surface needed by {@link shutdownVectorPoolAsync}. The real
+ *  `node:worker_threads` Worker has more; tests inject a fake. */
+interface ShutdownableVectorWorker {
+  /** Real Worker#on("exit", listener); the real Worker also fires "error" but
+   *  that's handled inside the pool's normal exit handler, not here. */
+  on(event: "exit", listener: ExitListener): unknown;
+  /** Posts the cooperative shutdown message. May throw if the worker is gone. */
+  postMessage(value: VectorWorkerInbound): void;
+  /** Force-kills the worker thread. May reject; we ignore that. */
+  terminate(): Promise<number>;
+}
+
+/**
+ * Tear down every worker in the pool and wait for each to exit, bounded by
+ * `deadlineMs`. Each worker:
+ *
+ *   1. Has its in-flight requests rejected with "vector pool shutting down"
+ *      (so any caller awaiting a result gets routed to the in-process
+ *      fallback — which will itself fail fast because `shuttingDown` latches
+ *      the pool off);
+ *   2. Receives a cooperative `shutdown` message so `vector-worker.ts` can
+ *      run its `reader.db.close()` flush + `process.exit(0)`;
+ *   3. If the deadline fires before the worker emits `exit`, is force-
+ *      `terminate()`d so its reader cannot outlive the budget.
+ *
+ * Always resolves — never rejects. Idempotent (a second call after the first
+ * resolves is a no-op). Designed for graceful gateway shutdown (#1599): the
+ * writer's TRUNCATE checkpoint requires no reader WAL read-marks, so the
+ * readers MUST be gone before the writer `close()`s — otherwise the WAL is
+ * stranded and the next boot pays the WAL-recovery tax.
+ */
+export function shutdownVectorPoolAsync(
+  deadlineMs: number = DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
+): Promise<void> {
+  shuttingDown = true;
+  // Snapshot the current worker list, then drop our reference so a stray
+  // postMessage from a dead worker can't see the pool as "still alive".
+  const live = workers;
+  workers = [];
+  if (live.length === 0) return Promise.resolve();
+
+  // Reject in-flight requests FIRST so callers stop awaiting results — that
+  // also lets the cooperative `shutdown` message reach the worker ahead of any
+  // inflight reply the worker is preparing to post.
+  for (const pw of live) {
+    failAll(pw, new Error("vector pool shutting down"));
+  }
+
+  return Promise.all(
+    live.map((pw) => waitForOneWorkerExit(pw.worker, deadlineMs)),
+  )
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .then(() => undefined);
+}
+
+/** Cooperative shutdown for one worker: post `shutdown`, wait for its `exit`
+ *  event up to `deadlineMs`, then force-terminate. Always resolves. Exported
+ *  only for tests. */
+export function awaitVectorWorkerShutdown(
+  worker: ShutdownableVectorWorker,
+  deadlineMs: number,
+): Promise<void> {
+  return waitForOneWorkerExit(worker, deadlineMs);
+}
+
+function waitForOneWorkerExit(
+  worker: ShutdownableVectorWorker,
+  deadlineMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(killTimer);
+      resolve();
+    };
+    // Hard cap: a worker whose reader open is wedged or whose `shutdown`
+    // handler never flushes would otherwise hang the gateway's bounded
+    // shutdown. Terminate is safe — the reader's SQLite state lives on a
+    // per-thread connection; the main thread's WAL just has to recover any
+    // uncheckpointed read on next open, which SQLite handles natively.
+    const killTimer = setTimeout(() => {
+      worker
+        .terminate()
+        .catch(() => {})
+        .finally(finish);
+    }, deadlineMs);
+    // Don't keep the event loop alive for this timer — `runShutdownWithDeadline`
+    // already has its own hard cap at SHUTDOWN_DEADLINE_MS, and the worker is
+    // unref'd so its termination already won't block exit. See review #989.
+    killTimer.unref?.();
+
+    worker.on("exit", finish);
+    try {
+      worker.postMessage({ type: "shutdown" });
+    } catch {
+      // Worker already exited — desired end state reached.
+      finish();
+    }
+  });
 }
 
 /** For tests: reset all pool state (workers, latches, counters, request ids). */
