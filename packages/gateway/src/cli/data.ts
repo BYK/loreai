@@ -954,7 +954,7 @@ async function cmdDedup(
     projectId: getProjectId,
     embedding: emb,
   } = await import("@loreai/core");
-  const apply = !!flags.yes;
+  const apply = !!flags.yes && flags["dry-run"] !== true;
   const interactive = !!flags.interactive;
   const asJson = !!flags.json;
   const explicitProject =
@@ -988,10 +988,8 @@ async function cmdDedup(
     return;
   }
 
-  // Auto-reindex if embedding config changed (e.g. model migration)
-  // or if there are entries missing embeddings. backfillEmbeddings()
-  // calls checkConfigChange() internally — no need to call it separately.
-  if (emb.isAvailable()) {
+  // Reindexing changes persistent state, so previews never perform it.
+  if (apply && emb.isAvailable()) {
     try {
       const knowledgeCount = await emb.backfillEmbeddings();
       // Also backfill distillations — checkConfigChange() inside
@@ -2119,8 +2117,6 @@ async function cmdMove(
 
   switch (type) {
     case "session": {
-      const { ensureProject } = await import("@loreai/core");
-      const sourceProjectId = ensureProject(projectPath);
       const targetPath = await resolveTargetPath(rawTo);
       const includeChildren = flags["no-children"] !== true;
 
@@ -2176,6 +2172,9 @@ async function cmdMove(
         console.log("\nDry run — no changes made.");
         return;
       }
+
+      const { ensureProject } = await import("@loreai/core");
+      const sourceProjectId = ensureProject(projectPath);
 
       if (!skipConfirm) {
         const confirmed = await confirm(
@@ -2501,7 +2500,7 @@ async function cmdSplit(
     process.exit(1);
   }
 
-  const { data, ensureProject } = await import("@loreai/core");
+  const { data } = await import("@loreai/core");
   const { suggestProjectsForSessions } = await import("../suggest");
 
   const skipConfirm = !!flags.yes;
@@ -2512,7 +2511,6 @@ async function cmdSplit(
   const minConfidence = (flags["min-confidence"] as string) ?? "high";
   const projectPath = resolve((flags.project as string) ?? process.cwd());
 
-  const sourceProjectId = ensureProject(projectPath);
   const sessions = data.listSessions(projectPath, 10000);
 
   if (!sessions.length) {
@@ -2520,10 +2518,14 @@ async function cmdSplit(
     return;
   }
 
+  const sourceProjectId = data
+    .listProjects()
+    .find((project) => project.path === projectPath)?.id;
+
   // Suggest targets for all sessions
   const suggestions = suggestProjectsForSessions(
     sessions.map((s) => s.session_id),
-    sourceProjectId,
+    sourceProjectId ?? "",
     projectPath,
   );
 
@@ -2631,6 +2633,10 @@ async function cmdSplit(
       );
     }
     return;
+  }
+
+  if (!sourceProjectId) {
+    throw new Error(`Project not found for sessions at ${projectPath}`);
   }
 
   // --- Interactive review (item 2): let the operator inspect and confirm/skip
@@ -3202,14 +3208,21 @@ async function cmdCacheStats(
     process.exit(1);
   }
 
-  const { getCacheBustStats, summarizeCacheBustStats, ensureProject } =
+  const { data, getCacheBustStats, summarizeCacheBustStats } =
     await import("@loreai/core");
 
   let projectID: string | undefined;
   let scopeLabel = "all projects";
   if (flags.project) {
     const projectPath = resolve(flags.project as string);
-    projectID = ensureProject(projectPath);
+    projectID = data
+      .listProjects()
+      .find((project) => project.path === projectPath)?.id;
+    if (!projectID) {
+      console.error(`No tracked project found at ${projectPath}.`);
+      process.exitCode = 1;
+      return;
+    }
     scopeLabel = projectPath;
   }
 
