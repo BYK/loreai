@@ -1,14 +1,12 @@
 /**
- * Phase 3C slice 1 — typed `lore data` with variadic positional + 9 flags.
+ * Phase 3C slice 2 — typed `lore data` with variadic positional + 14 flags.
  *
  * Pins the typed wrapper for `lore data`. The legacy handler takes a
  * subcommand as `positionals[0]` plus subcommand-specific args, and
- * reads 9 flags from the values dict.
+ * reads 14 flags from the values dict.
  *
- * Slice 1 covers the read-only subcommands (list, show, cache-stats).
- * Destructive subcommands (delete, clear, merge, dedup, etc.) remain
- * in LEGACY_ROUTES via the legacy commandData dispatcher; the typed
- * variadic positional forwards them by subcommand name.
+ * The typed wrapper owns machine-mode confirmation while preserving each
+ * legacy handler's own prompt and preview behavior.
  */
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { WRITE_DATA_SUBCOMMANDS } from "../src/cli/commands/data";
@@ -250,6 +248,39 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
     expect(dataImpl).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("data --json rejects interactive flows before the legacy handler", async () => {
+    vi.resetModules();
+    const dataImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/data", () => ({ commandData: dataImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    const stderrChunks: Buffer[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk) => {
+        stderrChunks.push(
+          Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+        );
+        return true;
+      });
+    process.argv = ["node", "lore", "data", "dedup", "--interactive", "--json"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      stderrSpy.mockRestore();
+      process.exitCode = priorExitCode;
+    }
+    expect(dataImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    expect(Buffer.concat(stderrChunks).toString("utf8")).toContain(
+      "--interactive cannot be used with --json",
+    );
     vi.resetModules();
   });
 

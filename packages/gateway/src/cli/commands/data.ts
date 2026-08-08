@@ -26,9 +26,8 @@ import { UsageError } from "../lib/errors";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandData, confirm } from "../data";
 
-// These commands write by default. Preview-first operations such as dedup,
-// split, and consolidate retain their legacy --yes-to-apply behavior and
-// must not be promoted into mutations by this wrapper.
+// Commands which write on their normal path. Preview-first operations remain
+// separate so a missing --yes continues to select their proven no-write path.
 export const WRITE_DATA_SUBCOMMANDS = new Set([
   "clear",
   "delete",
@@ -186,6 +185,12 @@ export const dataCommand = buildOutputCommand<
   async handler(flags, ...positionals) {
     const subcommand = positionals[0];
     const json = (flags as { json?: boolean }).json === true;
+    if (json && flags.interactive) {
+      throw new UsageError({
+        message: "--interactive cannot be used with --json.",
+        tryCommand: `lore data ${subcommand ?? "<command>"} --yes`,
+      });
+    }
     const writesByDefault =
       subcommand !== undefined &&
       WRITE_DATA_SUBCOMMANDS.has(subcommand) &&
