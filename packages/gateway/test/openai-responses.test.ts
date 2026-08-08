@@ -177,6 +177,154 @@ describe("parseOpenAIResponsesRequest", () => {
     ]);
   });
 
+  test("binds incoming reasoning to provenance without normalizing it as content", () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_1",
+      encrypted_content: "encrypted",
+      summary: [],
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6",
+        input: [
+          { type: "message", role: "user", content: "continue" },
+          reasoning,
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "answer" }],
+          },
+        ],
+      },
+      headers,
+    );
+
+    expect(req.messages[1].content).toEqual([{ type: "text", text: "answer" }]);
+    const assistantProvenance = req.messages
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) => message.provenanceContent ?? message.content);
+    expect(assistantProvenance).toEqual([
+      { type: "opaque", raw: reasoning, responsesItem: true },
+      {
+        type: "opaque",
+        raw: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "answer" }],
+        },
+        responsesItem: true,
+      },
+    ]);
+    expect(req.messages[1].provenancePositions).toEqual([1]);
+  });
+
+  test("binds unknown self-contained output items to provenance", () => {
+    const unknown = {
+      type: "computer_screenshot",
+      id: "screen_1",
+      image_url: "data:image/png;base64,AAA",
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6",
+        input: [
+          { type: "message", role: "user", content: "continue" },
+          unknown,
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "answer" }],
+          },
+        ],
+      },
+      headers,
+    );
+
+    expect(req.messages[1].content).toEqual([{ type: "text", text: "answer" }]);
+    const assistantProvenance = req.messages
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) => message.provenanceContent ?? message.content);
+    expect(assistantProvenance).toEqual([
+      { type: "opaque", raw: unknown, responsesItem: true },
+      {
+        type: "opaque",
+        raw: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "answer" }],
+        },
+        responsesItem: true,
+      },
+    ]);
+  });
+
+  test("round-trips refusal and unknown output as top-level Responses items", () => {
+    const refusal = {
+      type: "message",
+      id: "msg_refusal",
+      role: "assistant",
+      content: [{ type: "refusal", refusal: "cannot comply" }],
+    };
+    const unknown = {
+      type: "computer_screenshot",
+      id: "screen_1",
+      image_url: "data:image/png;base64,AAA",
+    };
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6",
+        input: [
+          { type: "message", role: "user", content: "continue" },
+          refusal,
+          unknown,
+        ],
+      },
+      headers,
+    );
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+
+    expect(
+      req.messages
+        .filter((message) => message.role === "assistant")
+        .flatMap((message) => message.provenanceContent ?? message.content),
+    ).toEqual([
+      { type: "opaque", raw: refusal, responsesItem: true },
+      { type: "opaque", raw: unknown, responsesItem: true },
+    ]);
+    expect(body.input).toContainEqual(refusal);
+    expect(body.input).toContainEqual(unknown);
+    expect(body.input).not.toContainEqual(
+      expect.objectContaining({ content: [refusal] }),
+    );
+  });
+
+  test("coalesces canonical fragments from one assistant message", () => {
+    const message = {
+      type: "message",
+      id: "msg_mixed",
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: "preamble" },
+        { type: "refusal", refusal: "cannot continue" },
+      ],
+    };
+    const req = parseOpenAIResponsesRequest(
+      { model: "gpt-5.6", input: [message] },
+      headers,
+    );
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+
+    expect(body.input).toEqual([message]);
+  });
+
   test("coalesces parallel function_call items into one assistant message", () => {
     const req = parseOpenAIResponsesRequest(
       {
@@ -447,6 +595,7 @@ describe("parseOpenAIResponsesRequest", () => {
   });
 
   test("drops item_reference items without breaking surrounding messages", () => {
+    const reference = { type: "item_reference", id: "msg_server_123" };
     const req = parseOpenAIResponsesRequest(
       {
         model: "gpt-5.5",
@@ -454,7 +603,7 @@ describe("parseOpenAIResponsesRequest", () => {
           { type: "message", role: "user", content: "hello" },
           // Server-side reference the gateway cannot resolve — must be dropped,
           // not crash, and not corrupt the surrounding messages.
-          { type: "item_reference", id: "msg_server_123" },
+          reference,
           {
             type: "message",
             role: "assistant",
@@ -468,6 +617,16 @@ describe("parseOpenAIResponsesRequest", () => {
     expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     expect(req.messages[0].content).toEqual([{ type: "text", text: "hello" }]);
     expect(req.messages[1].content).toEqual([{ type: "text", text: "hi" }]);
+    expect(
+      req.messages.flatMap(
+        (message) => message.provenanceContent ?? message.content,
+      ),
+    ).not.toContainEqual(reference);
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+    expect(body.input).not.toContainEqual(reference);
   });
 
   test("extracts instructions as system prompt", () => {
@@ -655,6 +814,54 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(tools[0].parameters).toEqual({ type: "object", properties: {} });
   });
 
+  test("marks the closed recall schema strict without changing client tools", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-4o",
+        input: "Hello",
+        tools: [
+          {
+            type: "function",
+            name: "read",
+            description: "Read a file",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      },
+      {},
+    );
+    req.tools.push({
+      name: "recall",
+      description: "Recall memory",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          scope: { type: "string" },
+          id: { type: "string" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    });
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { tools: Array<Record<string, unknown>> };
+
+    expect(body.tools[0]).not.toHaveProperty("strict");
+    expect(body.tools[1]).toMatchObject({ name: "recall", strict: true });
+    expect(body.tools[1].parameters).toMatchObject({
+      required: ["query", "scope", "id"],
+      additionalProperties: false,
+      properties: {
+        scope: { type: ["string", "null"], enum: [null] },
+        id: { type: ["string", "null"] },
+      },
+    });
+  });
+
   test("does NOT forward previous_response_id (gateway is stateless full-history)", () => {
     // The gateway always sends the complete conversation as `input`. Forwarding
     // previous_response_id would make the upstream ALSO prepend its server-stored
@@ -716,6 +923,44 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(input[2].type).toBe("function_call_output");
     expect(input[2].call_id).toBe("call_1");
     expect(input[2].output).toBe("cats found");
+  });
+
+  test("emits preserved reasoning as a top-level Responses input item", () => {
+    const req = parseOpenAIResponsesRequest(
+      { model: "gpt-5.6", input: "continue", stream: true },
+      {},
+    );
+    req.messages.push({
+      role: "assistant",
+      content: [
+        {
+          type: "opaque",
+          responsesItem: true,
+          raw: {
+            type: "reasoning",
+            id: "rs_1",
+            encrypted_content: "encrypted",
+          },
+        },
+      ],
+    });
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as { input: Array<Record<string, unknown>> };
+
+    expect(body.input).toContainEqual({
+      type: "reasoning",
+      id: "rs_1",
+      encrypted_content: "encrypted",
+    });
+    expect(body.input).not.toContainEqual(
+      expect.objectContaining({
+        type: "message",
+        content: [expect.objectContaining({ type: "reasoning" })],
+      }),
+    );
   });
 });
 

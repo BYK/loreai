@@ -20,9 +20,13 @@ describe("installFetchInterceptor — end-to-end routing", () => {
   let cleanup: () => void;
   let captured: Captured | null;
   let realFetch: typeof globalThis.fetch;
+  let observedAuthorization: string | null;
+  let observedApiKey: string | null;
 
   beforeEach(() => {
     captured = null;
+    observedAuthorization = null;
+    observedApiKey = null;
     // Stub the underlying fetch so the interceptor calls into our capture.
     realFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       captured = {
@@ -44,6 +48,10 @@ describe("installFetchInterceptor — end-to-end routing", () => {
         "x-lore-session-id": "sess-123",
         "x-lore-project": "/home/me/proj",
       }),
+      onRequestHeaders: (headers) => {
+        observedAuthorization = headers.get("authorization");
+        observedApiKey = headers.get("x-api-key");
+      },
     });
   });
 
@@ -90,6 +98,32 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       expect(headerVal("authorization")).toBe("Bearer sk-test");
       expect(headerVal("x-lore-session-id")).toBe("sess-123");
       expect(headerVal("x-lore-project")).toBe("/home/me/proj");
+      expect(observedAuthorization).toBe("Bearer sk-test");
+    });
+
+    test("observes auth on requests already targeting the gateway", async () => {
+      await fetch(`${GATEWAY}/v1/messages`, {
+        method: "POST",
+        headers: { authorization: "Bearer direct" },
+        body: JSON.stringify({ model: "claude", messages: [] }),
+      });
+      expect(observedAuthorization).toBe("Bearer direct");
+      expect(captured?.url).toBe(`${GATEWAY}/v1/messages`);
+    });
+
+    test("observes both auth schemes without altering either", async () => {
+      await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer secondary",
+          "x-api-key": "primary-key",
+        },
+        body: JSON.stringify({ model: "claude", messages: [] }),
+      });
+      expect(observedApiKey).toBe("primary-key");
+      expect(observedAuthorization).toBe("Bearer secondary");
+      expect(headerVal("x-api-key")).toBe("primary-key");
+      expect(headerVal("authorization")).toBe("Bearer secondary");
     });
 
     test("forwards the original body intact", async () => {

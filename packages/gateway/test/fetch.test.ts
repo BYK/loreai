@@ -113,6 +113,43 @@ describe("upstreamFetch runtime split", () => {
     }
   });
 
+  test("Bun: abort destroys a request waiting for response headers", async () => {
+    let requestStartedResolve: (() => void) | undefined;
+    const requestStarted = new Promise<void>((resolve) => {
+      requestStartedResolve = resolve;
+    });
+    let requestClosedResolve: (() => void) | undefined;
+    const requestClosed = new Promise<void>((resolve) => {
+      requestClosedResolve = resolve;
+    });
+    const server: Server = await new Promise((resolve) => {
+      const s = createServer((req) => {
+        requestStartedResolve?.();
+        req.on("close", () => requestClosedResolve?.());
+      });
+      s.listen(0, () => resolve(s));
+    });
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
+      vi.resetModules();
+      vi.doMock("undici", () => ({ fetch: vi.fn(), Agent: class {} }));
+      const { upstreamFetch } = await import("../src/fetch");
+      const controller = new AbortController();
+      const pending = upstreamFetch(`http://localhost:${port}/wait`, {
+        signal: controller.signal,
+      });
+      await requestStarted;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      await requestClosed;
+    } finally {
+      server.close();
+    }
+  });
+
   test("Node: uses undici fetch with a timeout-disabled dispatcher", async () => {
     delete (globalThis as { Bun?: unknown }).Bun;
     vi.resetModules();

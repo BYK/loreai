@@ -300,6 +300,7 @@ export async function runCompaction(opts: {
   previousSummary: string | undefined;
   firstKeptEntryId: string;
   tokensBefore: number;
+  authHeaders?: Readonly<Record<string, string>>;
   fetchImpl?: typeof fetch;
 }): Promise<SessionBeforeCompactResult | undefined> {
   const {
@@ -309,6 +310,7 @@ export async function runCompaction(opts: {
     previousSummary,
     firstKeptEntryId,
     tokensBefore,
+    authHeaders,
     fetchImpl = fetch,
   } = opts;
 
@@ -318,6 +320,7 @@ export async function runCompaction(opts: {
       headers: {
         "content-type": "application/json",
         "x-lore-session-id": sessionID,
+        ...authHeaders,
       },
       body: JSON.stringify({
         project_path: projectPath,

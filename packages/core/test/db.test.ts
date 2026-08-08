@@ -119,7 +119,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(77);
+    expect(row.version).toBe(79);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -176,7 +176,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(77);
+    expect(ver.version).toBe(79);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -213,7 +213,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(77);
+    expect(ver.version).toBe(79);
   });
 
   test("v56: knowledge_ref_validity table + projects.last_refcheck_at exist after recovery", () => {
@@ -1365,6 +1365,7 @@ describe("db", () => {
       recallStore: JSON.stringify([["all:q", { toolUseId: "t1" }]]),
       dedupDecisions: JSON.stringify([["m1:p1", true]]),
       lastKnownMessageCount: 137,
+      lastUpstream: JSON.stringify({ model: "gpt-test" }),
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
@@ -1384,6 +1385,7 @@ describe("db", () => {
     expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
     // v43: persisted for accurate calibrated-delta estimation after restart.
     expect(loaded?.lastKnownMessageCount).toBe(137);
+    expect(loaded?.lastUpstream).toBe(JSON.stringify({ model: "gpt-test" }));
   });
 
   test("stable LTM (system[1]) freeze round-trips and survives partial updates (v45)", () => {
@@ -1462,12 +1464,14 @@ describe("db", () => {
       fingerprint: "abc123hash",
       headerSessionId: "uuid-4567",
       headerName: "x-claude-code-session-id",
+      credentialFingerprint: "0123456789abcdef",
     });
     const loaded = loadSessionTracking(sid);
     expect(loaded).not.toBeNull();
     expect(loaded?.fingerprint).toBe("abc123hash");
     expect(loaded?.headerSessionId).toBe("uuid-4567");
     expect(loaded?.headerName).toBe("x-claude-code-session-id");
+    expect(loaded?.credentialFingerprint).toBe("0123456789abcdef");
   });
 
   test("saveSessionTracking v24 cache warming round-trip", () => {
@@ -1541,6 +1545,7 @@ describe("db", () => {
     expect(loaded?.fingerprint).toBe("");
     expect(loaded?.headerSessionId).toBeNull();
     expect(loaded?.headerName).toBeNull();
+    expect(loaded?.credentialFingerprint).toBe("");
     expect(loaded?.resolvedConversationTTL).toBe("5m");
     expect(loaded?.warmupState).toBeNull();
     expect(loaded?.dynamicContextCap).toBe(0);
@@ -1610,10 +1615,12 @@ describe("db", () => {
     saveSessionTracking(sid1, {
       headerSessionId: "uuid-aaa",
       headerName: "x-claude-code-session-id",
+      credentialFingerprint: "credential-a",
     });
     saveSessionTracking(sid2, {
       headerSessionId: "uuid-bbb",
       headerName: "x-session-affinity",
+      credentialFingerprint: "credential-b",
     });
     // Session without headers should NOT appear
     const sid3 = `test-hsi-3-${crypto.randomUUID()}`;
@@ -1627,9 +1634,11 @@ describe("db", () => {
     expect(found1).toBeDefined();
     expect(found1?.headerSessionId).toBe("uuid-aaa");
     expect(found1?.headerName).toBe("x-claude-code-session-id");
+    expect(found1?.credentialFingerprint).toBe("credential-a");
     expect(found2).toBeDefined();
     expect(found2?.headerSessionId).toBe("uuid-bbb");
     expect(found2?.headerName).toBe("x-session-affinity");
+    expect(found2?.credentialFingerprint).toBe("credential-b");
     expect(found3).toBeUndefined();
   });
 
@@ -2118,6 +2127,26 @@ describe("db", () => {
 
       // Empty query never matches the empty-fingerprint rows.
       expect(findSessionStatesByFingerprint("")).toEqual([]);
+    });
+
+    test("findSessionStatesByFingerprint can restrict legacy candidates to unowned rows", () => {
+      const fp = `legacy-fp-${crypto.randomUUID().slice(0, 8)}`;
+      const unowned = `legacy-unowned-${crypto.randomUUID()}`;
+      const owned = `legacy-owned-${crypto.randomUUID()}`;
+      saveSessionTracking(unowned, {
+        fingerprint: fp,
+        credentialFingerprint: "",
+      });
+      saveSessionTracking(owned, {
+        fingerprint: fp,
+        credentialFingerprint: "credential-a",
+      });
+
+      expect(
+        findSessionStatesByFingerprint(fp, { legacyUnownedOnly: true }).map(
+          (row) => row.session_id,
+        ),
+      ).toEqual([unowned]);
     });
 
     test("countMatchingTemporalIds counts only same-project, same-session ids", () => {

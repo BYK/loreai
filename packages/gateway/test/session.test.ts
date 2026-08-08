@@ -698,10 +698,14 @@ describe("findRotationPredecessor", () => {
   /** Helper to build a simple header index map. */
   function buildIndex(
     entries: Array<[string, string, string]>,
+    credentialFingerprint = "cred-a",
   ): Map<string, string> {
     const index = new Map<string, string>();
     for (const [headerName, headerValue, sid] of entries) {
-      index.set(`${headerName}:${headerValue}`, sid);
+      index.set(
+        `${credentialFingerprint}\x1f${headerName}\x1f${headerValue}`,
+        sid,
+      );
     }
     return index;
   }
@@ -729,6 +733,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -747,6 +752,7 @@ describe("findRotationPredecessor", () => {
     const candidates = new Map<string, RotationCandidate>();
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "first-nanoid-abc",
       index,
@@ -782,6 +788,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -808,6 +815,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -835,6 +843,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -871,6 +880,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -905,6 +915,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -944,6 +955,7 @@ describe("findRotationPredecessor", () => {
 
     // Rotating x-session-affinity should only find the opencode session, not claude
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -965,6 +977,7 @@ describe("findRotationPredecessor", () => {
     const candidates = new Map<string, RotationCandidate>();
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -993,6 +1006,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -1024,6 +1038,7 @@ describe("findRotationPredecessor", () => {
     ]);
 
     const result = findRotationPredecessor(
+      "cred-a",
       "x-session-affinity",
       "new-nanoid-xyz",
       index,
@@ -1032,6 +1047,34 @@ describe("findRotationPredecessor", () => {
     );
 
     expect(result).toBeNull();
+  });
+
+  test("ignores predecessors owned by another credential", () => {
+    const index = buildIndex(
+      [["x-session-affinity", "old-nanoid", "other-session"]],
+      "cred-b",
+    );
+    const candidates = new Map<string, RotationCandidate>([
+      [
+        "other-session",
+        {
+          sid: "other-session",
+          isSubagent: false,
+          lastActiveAt: now - 60_000,
+        },
+      ],
+    ]);
+
+    expect(
+      findRotationPredecessor(
+        "cred-a",
+        "x-session-affinity",
+        "new-nanoid",
+        index,
+        buildLookup(candidates),
+        now,
+      ),
+    ).toBeNull();
   });
 });
 

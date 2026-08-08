@@ -73,6 +73,8 @@ export type RecallInput = {
   knowledgeEnabled?: boolean;
   /** Optional LLM client for query expansion (if `config.search.queryExpansion`). */
   llm?: LLMClient;
+  /** Abort in-flight query expansion when the owning client disconnects. */
+  signal?: AbortSignal;
   /** Search config — provides recallLimit, queryExpansion, ftsWeights, etc. */
   searchConfig?: LoreConfig["search"];
   /**
@@ -764,6 +766,26 @@ function renderResultLine(
 export async function searchRecall(
   input: RecallInput,
 ): Promise<ScoredTaggedResult[]> {
+  input.signal?.throwIfAborted();
+  const abortable = async <T>(promise: Promise<T>): Promise<T> => {
+    const signal = input.signal;
+    if (!signal) return promise;
+    signal.throwIfAborted();
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+      void promise.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (err) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(err);
+        },
+      );
+    });
+  };
   const {
     query,
     scope = "all",
@@ -808,10 +830,14 @@ export async function searchRecall(
     queryTermCount <= expansionMaxTerms
   ) {
     try {
-      queries = await timer.await(
-        expandQuery(llm, query, undefined, sessionID),
+      queries = await abortable(
+        timer.await(
+          expandQuery(llm, query, undefined, sessionID, input.signal),
+        ),
       );
+      input.signal?.throwIfAborted();
     } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason;
       log.info("recall: query expansion failed, using original:", err);
     }
   }
@@ -861,18 +887,23 @@ export async function searchRecall(
   let primaryListEnd = 0;
 
   for (const q of queries) {
+    input.signal?.throwIfAborted();
     const knowledgeResults: ltm.ScoredKnowledgeEntry[] = [];
     if (knowledgeEnabled && scope !== "session") {
       try {
+        input.signal?.throwIfAborted();
         knowledgeResults.push(
-          ...(await ltm.searchScored({
-            query: q,
-            projectPath,
-            limit,
-            termWeights: idfWeights,
-          })),
+          ...(await abortable(
+            ltm.searchScored({
+              query: q,
+              projectPath,
+              limit,
+              termWeights: idfWeights,
+            }),
+          )),
         );
       } catch (err) {
+        if (input.signal?.aborted) throw input.signal.reason;
         log.error("recall: knowledge search failed:", err);
       }
     }
@@ -880,16 +911,20 @@ export async function searchRecall(
     const distillationResults: ScoredDistillation[] = [];
     if (scope !== "knowledge") {
       try {
+        input.signal?.throwIfAborted();
         distillationResults.push(
-          ...(await searchDistillationsScored({
-            projectPath,
-            query: q,
-            sessionID: scope === "session" ? sessionID : undefined,
-            limit,
-            termWeights: idfWeights,
-          })),
+          ...(await abortable(
+            searchDistillationsScored({
+              projectPath,
+              query: q,
+              sessionID: scope === "session" ? sessionID : undefined,
+              limit,
+              termWeights: idfWeights,
+            }),
+          )),
         );
       } catch (err) {
+        if (input.signal?.aborted) throw input.signal.reason;
         log.error("recall: distillation search failed:", err);
       }
     }
@@ -897,16 +932,20 @@ export async function searchRecall(
     const temporalResults: temporal.ScoredTemporalMessage[] = [];
     if (scope !== "knowledge") {
       try {
+        input.signal?.throwIfAborted();
         temporalResults.push(
-          ...(await temporal.searchScored({
-            projectPath,
-            query: q,
-            sessionID: scope === "session" ? sessionID : undefined,
-            limit,
-            termWeights: idfWeights,
-          })),
+          ...(await abortable(
+            temporal.searchScored({
+              projectPath,
+              query: q,
+              sessionID: scope === "session" ? sessionID : undefined,
+              limit,
+              termWeights: idfWeights,
+            }),
+          )),
         );
       } catch (err) {
+        if (input.signal?.aborted) throw input.signal.reason;
         log.error("recall: temporal search failed:", err);
       }
     }
@@ -1022,9 +1061,8 @@ export async function searchRecall(
   // Vector search on the original query (not expansions — avoid redundant embeds).
   if (embedding.isAvailable() && scope !== "session") {
     try {
-      const [queryVec] = await timer.await(
-        embedding.embed([query], "query"),
-        "embed",
+      const [queryVec] = await abortable(
+        timer.await(embedding.embed([query], "query"), "embed"),
       );
 
       // Knowledge vector search
@@ -1037,16 +1075,16 @@ export async function searchRecall(
         // vector path mirrors the main, project-scoped search. Mirrors the
         // entity-vector visibility filter below.
         const knowledgePid = ensureProject(projectPath);
-        const vectorHits = await timer.await(
-          embedding.vectorSearch(queryVec, limit),
-          "vectorSearch",
+        const vectorHits = await abortable(
+          timer.await(embedding.vectorSearch(queryVec, limit), "vectorSearch"),
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit ltm.get().
-        const entryMap = await timer.await(
-          ltm.getManyOffloaded(vectorHits.map((h) => h.id)),
+        const entryMap = await abortable(
+          timer.await(ltm.getManyOffloaded(vectorHits.map((h) => h.id))),
         );
         const vectorTagged: TaggedResult[] = [];
         for (const hit of vectorHits) {
+          input.signal?.throwIfAborted();
           const entry = entryMap.get(hit.id);
           if (entry) {
             const visible =
@@ -1075,15 +1113,19 @@ export async function searchRecall(
 
       // Distillation vector search
       if (scope !== "knowledge") {
-        const distVectorHits = await timer.await(
-          embedding.vectorSearchDistillations(queryVec, limit),
-          "vectorSearch",
+        const distVectorHits = await abortable(
+          timer.await(
+            embedding.vectorSearchDistillations(queryVec, limit),
+            "vectorSearch",
+          ),
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit point reads.
-        const distMap = await timer.await(
-          hydrateVectorRows<Distillation>(
-            distVectorHits,
-            "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id IN",
+        const distMap = await abortable(
+          timer.await(
+            hydrateVectorRows<Distillation>(
+              distVectorHits,
+              "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id IN",
+            ),
           ),
         );
         const distVectorTagged: TaggedResult[] = distVectorHits
@@ -1108,15 +1150,19 @@ export async function searchRecall(
       // Temporal vector search (includes distilled — embeddings preserved by markDistilled)
       if (scope !== "knowledge") {
         const pid = ensureProject(projectPath);
-        const temporalVectorHits = await timer.await(
-          embedding.vectorSearchTemporal(queryVec, pid, limit),
-          "vectorSearch",
+        const temporalVectorHits = await abortable(
+          timer.await(
+            embedding.vectorSearchTemporal(queryVec, pid, limit),
+            "vectorSearch",
+          ),
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit point reads.
-        const temporalMap = await timer.await(
-          hydrateVectorRows<temporal.TemporalMessage>(
-            temporalVectorHits,
-            "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id IN",
+        const temporalMap = await abortable(
+          timer.await(
+            hydrateVectorRows<temporal.TemporalMessage>(
+              temporalVectorHits,
+              "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id IN",
+            ),
           ),
         );
         const temporalVectorTagged: TaggedResult[] = temporalVectorHits
@@ -1150,15 +1196,19 @@ export async function searchRecall(
         // user references by name from another project resolves semantically
         // too. `infra` stays project-scoped.
         const entPid = ensureProject(projectPath);
-        const entityVectorHits = await timer.await(
-          embedding.vectorSearchEntities(queryVec, limit),
-          "vectorSearch",
+        const entityVectorHits = await abortable(
+          timer.await(
+            embedding.vectorSearchEntities(queryVec, limit),
+            "vectorSearch",
+          ),
         );
         // Batch-hydrate hits off-thread (#966) instead of N per-hit
         // getWithAliases() calls (entity row + alias load each).
-        const entMap = await timer.await(
-          entities.getManyWithAliasesOffloaded(
-            entityVectorHits.map((h) => h.id),
+        const entMap = await abortable(
+          timer.await(
+            entities.getManyWithAliasesOffloaded(
+              entityVectorHits.map((h) => h.id),
+            ),
           ),
         );
         const entityVectorTagged: TaggedResult[] = entityVectorHits
@@ -1186,19 +1236,23 @@ export async function searchRecall(
         }
       }
     } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason;
       log.info("recall: vector search failed:", err);
     }
   }
 
   // lat.md section search
   if (scope !== "session" && latReader.hasLatDir(projectPath)) {
+    input.signal?.throwIfAborted();
     try {
-      const latResults = await latReader.searchScored({
-        query,
-        projectPath,
-        limit,
-        termWeights: idfWeights,
-      });
+      const latResults = await abortable(
+        latReader.searchScored({
+          query,
+          projectPath,
+          limit,
+          termWeights: idfWeights,
+        }),
+      );
       if (latResults.length) {
         allRrfLists.push({
           items: latResults.map((item) => ({
@@ -1210,19 +1264,23 @@ export async function searchRecall(
         });
       }
     } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason;
       log.info("recall: lat.md section search failed:", err);
     }
   }
 
   // Cross-project knowledge discovery — only in "all" scope.
   if (knowledgeEnabled && scope === "all") {
+    input.signal?.throwIfAborted();
     try {
-      const crossProjectResults = await ltm.searchScoredOtherProjects({
-        query,
-        excludeProjectPath: projectPath,
-        limit,
-        termWeights: idfWeights,
-      });
+      const crossProjectResults = await abortable(
+        ltm.searchScoredOtherProjects({
+          query,
+          excludeProjectPath: projectPath,
+          limit,
+          termWeights: idfWeights,
+        }),
+      );
       if (crossProjectResults.length) {
         allRrfLists.push({
           items: crossProjectResults.map((item: ltm.ScoredKnowledgeEntry) => {
@@ -1239,6 +1297,7 @@ export async function searchRecall(
         });
       }
     } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason;
       log.info("recall: cross-project knowledge search failed:", err);
     }
   }
@@ -1249,9 +1308,10 @@ export async function searchRecall(
   // alias query-expansion above. Cross-session/cross-project, so excluded from
   // "session" and "knowledge" scopes.
   if (scope === "all" || scope === "project") {
+    input.signal?.throwIfAborted();
     try {
-      const entityResults = await timer.await(
-        entities.searchAsync({ query, projectPath, limit }),
+      const entityResults = await abortable(
+        timer.await(entities.searchAsync({ query, projectPath, limit })),
       );
       if (entityResults.length) {
         allRrfLists.push({
@@ -1263,6 +1323,7 @@ export async function searchRecall(
         });
       }
     } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason;
       log.info("recall: entity search failed (non-fatal):", err);
     }
   }
@@ -1274,13 +1335,16 @@ export async function searchRecall(
   // working elsewhere — is otherwise unreachable. Surface those here. Same
   // `e:` key as the entity list so RRF merges them. `infra` stays excluded.
   if (scope === "all") {
+    input.signal?.throwIfAborted();
     try {
-      const crossRepos = await timer.await(
-        entities.searchCrossProjectReposAsync({
-          query,
-          excludeProjectPath: projectPath,
-          limit,
-        }),
+      const crossRepos = await abortable(
+        timer.await(
+          entities.searchCrossProjectReposAsync({
+            query,
+            excludeProjectPath: projectPath,
+            limit,
+          }),
+        ),
       );
       if (crossRepos.length) {
         allRrfLists.push({
@@ -1292,6 +1356,7 @@ export async function searchRecall(
         });
       }
     } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason;
       log.info("recall: cross-project repo search failed (non-fatal):", err);
     }
   }
@@ -1309,6 +1374,7 @@ export async function searchRecall(
     (searchConfig?.graphExpansion ?? true) &&
     (scope === "all" || scope === "project")
   ) {
+    input.signal?.throwIfAborted();
     try {
       // Seeds = entities matched lexically/semantically (entity FTS + vector +
       // cross-repo). They were already visibility-filtered at their source, so
@@ -1342,9 +1408,11 @@ export async function searchRecall(
         // lists so RRF merges, not duplicates. The list is already empty when
         // knowledge is disabled (gated via includeKnowledge at graphExpand).
         if (expansion.knowledge.length) {
-          const knowledgeMap = await timer.await(
-            ltm.getManyByLogicalOffloaded(
-              expansion.knowledge.map((gk) => gk.logicalId),
+          const knowledgeMap = await abortable(
+            timer.await(
+              ltm.getManyByLogicalOffloaded(
+                expansion.knowledge.map((gk) => gk.logicalId),
+              ),
             ),
           );
           const graphKnowledge: TaggedResult[] = [];
@@ -1378,9 +1446,11 @@ export async function searchRecall(
         // visibility-filtered (same predicate entities.search uses). Same `e:`
         // key as the entity FTS/vector lists so RRF merges them.
         if (expansion.entities.length) {
-          const neighborMap = await timer.await(
-            entities.getManyWithAliasesOffloaded(
-              expansion.entities.map((e) => e.id),
+          const neighborMap = await abortable(
+            timer.await(
+              entities.getManyWithAliasesOffloaded(
+                expansion.entities.map((e) => e.id),
+              ),
             ),
           );
           const graphEntities: TaggedResult[] = [];
@@ -1407,6 +1477,7 @@ export async function searchRecall(
         }
       }
     } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason;
       log.info("recall: entity-graph expansion failed (non-fatal):", err);
     }
   }
@@ -1540,6 +1611,7 @@ export async function searchRecall(
   // while dropping the long tail of single-list noise.
   const maxResults = limit * 3;
   timer.emit("recall", fused.length, scope);
+  input.signal?.throwIfAborted();
   return fused.slice(0, maxResults);
 }
 
@@ -1653,9 +1725,12 @@ export function recallById(id: string): string {
 
 /** Full recall run: search every relevant source, fuse with RRF, format as markdown. */
 export async function runRecall(input: RecallInput): Promise<RecallResult> {
+  input.signal?.throwIfAborted();
   // ID-based detail retrieval — bypass search entirely.
   if (input.id) {
-    return recallById(input.id);
+    const result = recallById(input.id);
+    input.signal?.throwIfAborted();
+    return result;
   }
 
   const fused = await searchRecall(input);

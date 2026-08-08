@@ -18,8 +18,11 @@
  * (clears in-memory maps, keeps the DB), and assert on session_state rows.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { DatabaseSync } from "node:sqlite";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
+import { fingerprintMessages } from "../src/session";
+import { deterministicID } from "../src/temporal-adapter";
 import {
   makeFixtureEntry,
   STANDARD_TOOLS,
@@ -58,6 +61,26 @@ function loreSessionRows(h: Harness): Row[] {
   return h.queryDB<Row>(
     "SELECT session_id, header_session_id FROM session_state WHERE header_name = 'x-lore-session-id'",
   );
+}
+
+async function makeSessionLegacy(
+  h: Harness,
+  sessionId: string,
+  firstUserContent = U0,
+): Promise<void> {
+  const fingerprint = await fingerprintMessages([
+    { role: "user", content: firstUserContent },
+  ]);
+  const db = new DatabaseSync(h.dbPath);
+  try {
+    db.prepare(
+      `UPDATE session_state
+          SET fingerprint = ?, credential_fingerprint = ''
+        WHERE session_id = ?`,
+    ).run(fingerprint, sessionId);
+  } finally {
+    db.close();
+  }
 }
 
 describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
@@ -202,5 +225,291 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
 
     const rows = loreSessionRows(harness);
     expect(rows.length).toBe(2);
+  });
+
+  it("adopts a pre-credential session only after same-project transcript overlap", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    const legacyHeader = "legacy-exact-header";
+
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": legacyHeader,
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": legacyHeader },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+
+    const before = loreSessionRows(harness);
+    expect(before).toHaveLength(1);
+    await makeSessionLegacy(harness, before[0].session_id);
+    await harness.restartPipeline();
+
+    const migratedHeader = "legacy-after-credential-scope";
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": migratedHeader },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+
+    const after = harness.queryDB<Row & { credential_fingerprint: string }>(
+      `SELECT session_id, header_session_id, credential_fingerprint
+         FROM session_state
+        WHERE header_name = 'x-lore-session-id'`,
+    );
+    expect(after).toHaveLength(1);
+    expect(after[0].session_id).toBe(before[0].session_id);
+    expect(after[0].header_session_id).toBe(migratedHeader);
+    expect(after[0].credential_fingerprint).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("does NOT let another transcript claim an exact legacy header", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    const legacyHeader = "legacy-copied-header";
+
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": legacyHeader,
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": legacyHeader },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    const before = loreSessionRows(harness);
+    await makeSessionLegacy(harness, before[0].session_id);
+    await harness.restartPipeline();
+
+    r = await harness.chat(
+      body([
+        { role: "user", content: "attacker opening" },
+        { role: "assistant", content: "unrelated" },
+        { role: "user", content: "attacker follow-up" },
+      ]),
+      "key-B",
+      { "x-lore-session-id": legacyHeader },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+
+    const after = loreSessionRows(harness);
+    expect(after).toHaveLength(2);
+    expect(new Set(after.map((row) => row.session_id)).size).toBe(2);
+  });
+
+  it("does NOT adopt a pre-credential session when only its fingerprint-implied first message overlaps", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    const legacyHeader = "legacy-one-message";
+
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": legacyHeader,
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": legacyHeader },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    const before = loreSessionRows(harness);
+    await makeSessionLegacy(harness, before[0].session_id);
+    await harness.restartPipeline();
+
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "unrelated response" },
+        { role: "user", content: "different second user message" },
+      ]),
+      "key-B",
+      { "x-lore-session-id": legacyHeader },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+
+    const after = loreSessionRows(harness);
+    expect(after).toHaveLength(2);
+    expect(new Set(after.map((row) => row.session_id)).size).toBe(2);
+  });
+
+  it("does NOT adopt either of two equally supported legacy candidates", async () => {
+    const users = [U0, U1, U2, "fourth instruction for ambiguity proof"];
+    harness = await createHarness({
+      fixtures: Array.from({ length: 5 }, (_, seq) =>
+        makeFixtureEntry({
+          seq,
+          requestMessages: [],
+          responseText: `A${seq} done.`,
+        }),
+      ),
+    });
+
+    const messages: Array<{ role: string; content: string }> = [];
+    for (let i = 0; i < users.length; i++) {
+      messages.push({ role: "user", content: users[i] });
+      if (i < users.length - 1) {
+        messages.push({ role: "assistant", content: `A${i} done.` });
+      }
+      const r = await harness.chat(body(messages), "key-A", {
+        "x-lore-session-id": "legacy-ambiguous-a",
+      });
+      expect(r.status).toBe(200);
+      await r.text();
+    }
+
+    const [first] = loreSessionRows(harness);
+    expect(first).toBeDefined();
+    await makeSessionLegacy(harness, first.session_id);
+    const secondSession = `legacy-ambiguous-${crypto.randomUUID()}`;
+    const fingerprint = await fingerprintMessages([
+      { role: "user", content: U0 },
+    ]);
+    const db = new DatabaseSync(harness.dbPath);
+    try {
+      const state = db
+        .prepare(
+          `SELECT message_count, project_path, project_path_provisional, is_subagent
+             FROM session_state
+            WHERE session_id = ?`,
+        )
+        .get(first.session_id) as {
+        message_count: number;
+        project_path: string;
+        project_path_provisional: number;
+        is_subagent: number;
+      };
+      db.prepare(
+        `INSERT INTO session_state
+           (session_id, force_min_layer, updated_at, message_count, fingerprint,
+            credential_fingerprint, project_path, project_path_provisional, is_subagent)
+         VALUES (?, 0, ?, ?, ?, '', ?, ?, ?)`,
+      ).run(
+        secondSession,
+        Date.now(),
+        state.message_count,
+        fingerprint,
+        state.project_path,
+        state.project_path_provisional,
+        state.is_subagent,
+      );
+      for (const index of [2, 6]) {
+        const id = deterministicID("user", index, [
+          { type: "text", text: users[index / 2] },
+        ]);
+        db.prepare(
+          "UPDATE temporal_messages SET session_id = ? WHERE id = ?",
+        ).run(secondSession, id);
+      }
+    } finally {
+      db.close();
+    }
+    await harness.restartPipeline();
+
+    const resumed: Array<{ role: string; content: string }> = [];
+    for (let i = 0; i < users.length; i++) {
+      resumed.push({ role: "user", content: users[i] });
+      if (i < users.length - 1) {
+        resumed.push({ role: "assistant", content: `A${i} done.` });
+      }
+    }
+    const r = await harness.chat(body(resumed), "key-B", {
+      "x-lore-session-id": "legacy-ambiguous-new",
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+
+    const rows = harness.queryDB<{
+      session_id: string;
+      header_session_id: string | null;
+    }>(
+      `SELECT session_id, header_session_id
+         FROM session_state
+        WHERE session_id IN (?, ?)
+           OR header_session_id = 'legacy-ambiguous-new'`,
+      [first.session_id, secondSession],
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => row.session_id)).toContain(first.session_id);
+    expect(rows.map((row) => row.session_id)).toContain(secondSession);
+    expect(rows.map((row) => row.header_session_id)).toContain(
+      "legacy-ambiguous-new",
+    );
+  });
+
+  it("does NOT adopt a pre-credential session across projects", async () => {
+    harness = await createHarness({
+      fixtures: fixtures(),
+      projectPath: "/tmp/lore-legacy-project-a",
+    });
+
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": "legacy-project-a",
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "legacy-project-a" },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    const before = loreSessionRows(harness);
+    await makeSessionLegacy(harness, before[0].session_id);
+    await harness.restartPipeline();
+
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-B",
+      {
+        "x-lore-session-id": "legacy-project-a",
+        "x-lore-project": "/tmp/lore-legacy-project-b",
+      },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+
+    const after = loreSessionRows(harness);
+    expect(after).toHaveLength(2);
+    expect(new Set(after.map((row) => row.session_id)).size).toBe(2);
   });
 });

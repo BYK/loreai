@@ -1924,6 +1924,12 @@ const MIGRATIONS: string[] = [
     updated_at  INTEGER NOT NULL DEFAULT 0
   );
   `,
+  // Version 78: local credential scope for header-based session identity.
+  // Credentials may separate sessions but NEVER scope project rows.
+  `ALTER TABLE session_state ADD COLUMN credential_fingerprint TEXT NOT NULL DEFAULT '';`,
+  // Version 79: local-only routing snapshot for restart-safe explicit compaction.
+  // Auth headers are excluded before serialization by gateway forwardClientHeaders().
+  `ALTER TABLE session_state ADD COLUMN last_upstream TEXT;`,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4855,6 +4861,9 @@ export type SessionTrackingState = {
   fingerprint?: string;
   headerSessionId?: string | null;
   headerName?: string | null;
+  credentialFingerprint?: string;
+  /** JSON-serialized non-auth routing snapshot for restart-safe compaction. */
+  lastUpstream?: string | null;
   // v24: cache warming
   resolvedConversationTTL?: string;
   warmupState?: string | null; // JSON blob
@@ -4964,6 +4973,14 @@ export function saveSessionTracking(
     sets.push("header_name = ?");
     vals.push(state.headerName);
   }
+  if (state.credentialFingerprint !== undefined) {
+    sets.push("credential_fingerprint = ?");
+    vals.push(state.credentialFingerprint);
+  }
+  if (state.lastUpstream !== undefined) {
+    sets.push("last_upstream = ?");
+    vals.push(state.lastUpstream);
+  }
   // v24: cache warming
   if (state.resolvedConversationTTL !== undefined) {
     sets.push("resolved_conversation_ttl = ?");
@@ -5057,6 +5074,8 @@ export type LoadedSessionTracking = {
   fingerprint: string;
   headerSessionId: string | null;
   headerName: string | null;
+  credentialFingerprint: string;
+  lastUpstream: string | null;
   // v24: cache warming
   resolvedConversationTTL: string;
   warmupState: string | null;
@@ -5397,7 +5416,8 @@ export function loadSessionTracking(
               ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
               ltm_pin_keys, stable_ltm_text, stable_ltm_tokens, recall_store,
               dedup_decisions,
-              fingerprint, header_session_id, header_name,
+               fingerprint, header_session_id, header_name, credential_fingerprint,
+               last_upstream,
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
               last_layer, last_known_input, last_known_message_count,
@@ -5424,6 +5444,8 @@ export function loadSessionTracking(
     fingerprint: string;
     header_session_id: string | null;
     header_name: string | null;
+    credential_fingerprint: string;
+    last_upstream: string | null;
     resolved_conversation_ttl: string;
     warmup_state: string | null;
     dynamic_context_cap: number;
@@ -5458,6 +5480,8 @@ export function loadSessionTracking(
     fingerprint: row.fingerprint,
     headerSessionId: row.header_session_id,
     headerName: row.header_name,
+    credentialFingerprint: row.credential_fingerprint,
+    lastUpstream: row.last_upstream,
     resolvedConversationTTL: row.resolved_conversation_ttl,
     warmupState: row.warmup_state,
     dynamicContextCap: row.dynamic_context_cap,
@@ -5488,13 +5512,15 @@ export function loadSessionTracking(
  */
 export function findSessionStatesByFingerprint(
   fingerprint: string,
+  options?: { legacyUnownedOnly?: boolean },
 ): Array<{ session_id: string; message_count: number; is_subagent: number }> {
   if (!fingerprint) return [];
   return db()
     .query(
       `SELECT session_id, message_count, is_subagent
          FROM session_state
-        WHERE fingerprint = ? AND fingerprint != ''`,
+        WHERE fingerprint = ? AND fingerprint != ''
+          ${options?.legacyUnownedOnly ? "AND credential_fingerprint = ''" : ""}`,
     )
     .all(fingerprint) as Array<{
     session_id: string;
@@ -5549,10 +5575,11 @@ export function loadHeaderSessionIndex(): Array<{
   sessionId: string;
   headerSessionId: string;
   headerName: string;
+  credentialFingerprint: string;
 }> {
   const rows = db()
     .query(
-      `SELECT session_id, header_session_id, header_name
+      `SELECT session_id, header_session_id, header_name, credential_fingerprint
         FROM session_state
         WHERE header_session_id IS NOT NULL AND header_name IS NOT NULL
         ORDER BY updated_at ASC`,
@@ -5561,11 +5588,13 @@ export function loadHeaderSessionIndex(): Array<{
     session_id: string;
     header_session_id: string;
     header_name: string;
+    credential_fingerprint: string;
   }>;
   return rows.map((row) => ({
     sessionId: row.session_id,
     headerSessionId: row.header_session_id,
     headerName: row.header_name,
+    credentialFingerprint: row.credential_fingerprint,
   }));
 }
 

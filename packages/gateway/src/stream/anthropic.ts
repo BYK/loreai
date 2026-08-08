@@ -50,13 +50,42 @@ export function formatSSEEvent(eventType: string, data: string): string {
  */
 export async function* parseSSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
+  opts: {
+    maxEventBytes?: number;
+    maxFrames?: number;
+    frameCounter?: { count: number };
+    inactivityMs?: number;
+    signal?: AbortSignal;
+  } = {},
 ): AsyncGenerator<{ event: string; data: string }> {
   const decoder = new TextDecoder();
   let buffer = "";
+  let bufferedBytes = 0;
+  const maxEventBytes = opts.maxEventBytes ?? 4 * 1024 * 1024;
+  const maxFrames = opts.maxFrames ?? Number.POSITIVE_INFINITY;
+  const frameCounter = opts.frameCounter ?? { count: 0 };
 
   for (;;) {
-    const { done, value } = await reader.read();
+    opts.signal?.throwIfAborted();
+    const read = reader.read();
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    const inactivity = new Promise<never>((_resolve, reject) => {
+      if (!opts.inactivityMs) return;
+      inactivityTimer = setTimeout(
+        () => reject(new Error("SSE stream inactivity deadline exceeded")),
+        opts.inactivityMs,
+      );
+    });
+    const { done, value } = await (
+      opts.inactivityMs ? Promise.race([read, inactivity]) : read
+    ).finally(() => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+    });
     if (value) {
+      bufferedBytes += value.byteLength;
+      if (bufferedBytes > maxEventBytes) {
+        throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
+      }
       buffer += decoder.decode(value, { stream: true });
     }
 
@@ -65,7 +94,15 @@ export async function* parseSSEStream(
       const boundary = /\r?\n\r?\n/.exec(buffer);
       if (!boundary) break;
       const block = buffer.slice(0, boundary.index);
+      frameCounter.count++;
+      if (frameCounter.count > maxFrames) {
+        throw new Error(`SSE stream exceeded ${maxFrames} frame limit`);
+      }
+      if (Buffer.byteLength(block) > maxEventBytes) {
+        throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
+      }
       buffer = buffer.slice(boundary.index + boundary[0].length);
+      bufferedBytes = Buffer.byteLength(buffer);
 
       // Skip empty blocks
       if (block.trim() === "") continue;

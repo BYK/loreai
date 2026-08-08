@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from "vitest";
+import { describe, test, expect, beforeEach, vi } from "vitest";
 import {
   ftsQuery,
   ftsQueryOr,
@@ -12,8 +12,39 @@ import {
   exactTermMatchRank,
   termIDF,
   runRelaxedSearchAsync,
+  expandQuery,
 } from "../src/search";
 import { db, ensureProject } from "../src/db";
+import type { LLMClient } from "../src/types";
+
+describe("expandQuery", () => {
+  test("aborts the worker when the expansion deadline expires", async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    const llm: LLMClient = {
+      prompt: async (_system, _user, opts) =>
+        new Promise<string | null>((_resolve, reject) => {
+          opts?.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              reject(opts.signal?.reason);
+            },
+            { once: true },
+          );
+        }),
+    };
+
+    try {
+      const pending = expandQuery(llm, "architecture");
+      await vi.advanceTimersByTimeAsync(3_000);
+      await expect(pending).resolves.toEqual(["architecture"]);
+      expect(aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("search", () => {
   describe("ftsQuery (AND semantics)", () => {

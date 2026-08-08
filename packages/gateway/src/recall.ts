@@ -4,9 +4,9 @@
  * Uses a unified "Marker and Expand" strategy:
  *
  *  1. **On response (to client):** The recall `tool_use` block is replaced
- *     with a human-readable marker text block
- *     (`📚 Searching <scope> for "<query>"…`). The recall is executed
- *     internally and the result is stored in session state.
+ *     with a text marker. Responses clients receive an invisible unique anchor;
+ *     other clients receive status text plus the same anchor. The recall result
+ *     is stored in session state under that unique key.
  *
  *  2. **On request (from client):** Marker text blocks in the conversation
  *     are expanded back into the original `tool_use` + `tool_result` pairs
@@ -26,6 +26,7 @@ import {
   type RecallScope,
   type LLMClient,
 } from "@loreai/core";
+import { createHash } from "node:crypto";
 
 import type {
   GatewayTool,
@@ -33,9 +34,11 @@ import type {
   GatewayResponse,
   GatewayToolUseBlock,
   GatewayMessage,
+  GatewayContentBlock,
   RecallStore,
   StoredRecall,
 } from "./translate/types";
+import { looksLikeSSE } from "./translate/types";
 
 // ---------------------------------------------------------------------------
 // Tool definition
@@ -63,6 +66,7 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
       },
     },
     required: ["query"],
+    additionalProperties: false,
   },
 };
 
@@ -70,6 +74,8 @@ export const RECALL_TOOL_NAME = "recall";
 
 /** Safety-net cap on recall follow-ups per client request (like any agentic loop). */
 export const MAX_RECALL_DEPTH = 10;
+export const MAX_RECALL_STORE_ENTRIES = 128;
+export const MAX_RECALL_STORE_BYTES = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Marker utilities — human-readable text ↔ recall tool round-trip
@@ -114,14 +120,236 @@ export function buildRecallMarker(
 }
 
 /** Regex to parse a recall marker back into query + scope. */
-const MARKER_REGEX = /📚 Searching (.+?) for "(.+?)"…/;
+const MARKER_REGEX = /^📚 Searching (.+?) for "(.+)"…$/;
 
 /** Regex to parse an id-based recall marker. */
-const ID_MARKER_REGEX = /📚 Fetching detail for (.+?)…/;
+const ID_MARKER_REGEX = /^📚 Fetching detail for (.+?)…$/;
+
+/** Invisible Responses transcript anchor. Markdown renderers omit comments. */
+const ANCHOR_REGEX =
+  /^<!-- lore-recall:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) -->$/;
+
+export function buildRecallAnchor(toolUseId: string): string {
+  return `<!-- lore-recall:${encodeURIComponent(toolUseId)} -->`;
+}
+
+/** Keep the visible status while assigning every replay a unique key. */
+export function buildAnchoredRecallMarker(
+  query: string,
+  scope: string,
+  id: string | undefined,
+  anchorId: string,
+): string {
+  return `${buildRecallMarker(query, scope, id)}\n${buildRecallAnchor(anchorId)}`;
+}
+
+export function parseRecallAnchor(text: string): string | null {
+  const match = ANCHOR_REGEX.exec(text);
+  return match && buildRecallAnchor(match[1]) === text ? match[1] : null;
+}
+
+function parseRecallAnchorFromText(text: string): string | null {
+  const direct = parseRecallAnchor(text);
+  if (direct) return direct;
+  const newline = text.lastIndexOf("\n");
+  if (newline < 0) return null;
+  return parseRecallAnchor(text.slice(newline + 1));
+}
+
+/** Fingerprint the complete transcript prefix that precedes a replay anchor. */
+export function recallAnchorContext(
+  messages: GatewayMessage[],
+  beforeIndex = messages.length,
+  assistantPrefix: GatewayContentBlock[] = [],
+): string {
+  const normalized: GatewayMessage[] = [];
+  const append = (message: GatewayMessage): void => {
+    const content = message.provenanceContent ?? message.content;
+    if (content.length === 0) return;
+    const previous = normalized[normalized.length - 1];
+    if (previous?.role === message.role) {
+      previous.content.push(...content);
+    } else {
+      normalized.push({ role: message.role, content: [...content] });
+    }
+  };
+  for (const message of messages.slice(0, beforeIndex)) append(message);
+  if (assistantPrefix.length > 0) {
+    append({ role: "assistant", content: assistantPrefix });
+  }
+  const hash = createHash("sha256");
+  const frame = (value: unknown): void => {
+    const payload = JSON.stringify(value);
+    hash.update(`${Buffer.byteLength(payload)}:`);
+    hash.update(payload);
+  };
+  normalized.forEach((message, index) =>
+    frame([index, message.role, message.content]),
+  );
+  return hash.digest("hex");
+}
+
+function recallMessagePrefix(
+  message: GatewayMessage,
+  visibleBlocks: number,
+): GatewayContentBlock[] {
+  if (!message.provenanceContent || !message.provenancePositions) {
+    return message.content.slice(0, visibleBlocks);
+  }
+  const end =
+    visibleBlocks < message.provenancePositions.length
+      ? message.provenancePositions[visibleBlocks]
+      : message.provenanceContent.length;
+  return message.provenanceContent.slice(0, end);
+}
+
+function replaceVisibleContentBlock(
+  message: GatewayMessage,
+  visibleIndex: number,
+  block: GatewayContentBlock,
+): void {
+  message.content[visibleIndex] = block;
+  if (!message.provenanceContent || !message.provenancePositions) return;
+  const provenanceIndex = message.provenancePositions[visibleIndex];
+  if (provenanceIndex === undefined) return;
+  const nextIndex =
+    message.provenancePositions[visibleIndex + 1] ??
+    message.provenanceContent.length;
+  message.provenanceContent.splice(
+    provenanceIndex,
+    nextIndex - provenanceIndex,
+    block,
+  );
+  const delta = 1 - (nextIndex - provenanceIndex);
+  for (let i = visibleIndex + 1; i < message.provenancePositions.length; i++) {
+    message.provenancePositions[i] += delta;
+  }
+}
+
+function truncateVisibleContent(
+  message: GatewayMessage,
+  visibleLength: number,
+): void {
+  message.content.length = visibleLength;
+  if (!message.provenanceContent || !message.provenancePositions) return;
+  const provenanceLength =
+    visibleLength < message.provenancePositions.length
+      ? message.provenancePositions[visibleLength]
+      : message.provenanceContent.length;
+  message.provenanceContent.length = provenanceLength;
+  message.provenancePositions.length = visibleLength;
+}
+
+function removeVisibleContentBlock(
+  message: GatewayMessage,
+  visibleIndex: number,
+): GatewayContentBlock {
+  const provenanceIndex = message.provenancePositions?.[visibleIndex];
+  if (
+    message.provenanceContent &&
+    message.provenancePositions &&
+    (provenanceIndex === undefined ||
+      provenanceIndex < 0 ||
+      provenanceIndex >= message.provenanceContent.length)
+  ) {
+    throw new Error("invalid visible content provenance");
+  }
+  const [block] = message.content.splice(visibleIndex, 1);
+  if (!block) throw new Error("visible content block not found");
+  if (!message.provenanceContent || !message.provenancePositions) return block;
+  if (provenanceIndex === undefined) {
+    throw new Error("invalid visible content provenance");
+  }
+  message.provenanceContent.splice(provenanceIndex, 1);
+  message.provenancePositions.splice(visibleIndex, 1);
+  for (let i = visibleIndex; i < message.provenancePositions.length; i++) {
+    message.provenancePositions[i] -= 1;
+  }
+  return block;
+}
+
+function insertVisibleContentBlocks(
+  message: GatewayMessage,
+  visibleIndex: number,
+  blocks: GatewayContentBlock[],
+): void {
+  if (blocks.length === 0) return;
+  message.content.splice(visibleIndex, 0, ...blocks);
+  if (!message.provenanceContent || !message.provenancePositions) return;
+  const provenanceIndex =
+    message.provenancePositions[visibleIndex] ??
+    message.provenanceContent.length;
+  message.provenanceContent.splice(provenanceIndex, 0, ...blocks);
+  for (let i = visibleIndex; i < message.provenancePositions.length; i++) {
+    message.provenancePositions[i] += blocks.length;
+  }
+  message.provenancePositions.splice(
+    visibleIndex,
+    0,
+    ...blocks.map((_block, index) => provenanceIndex + index),
+  );
+}
+
+type CompanionBundle = {
+  content: GatewayContentBlock[];
+  provenanceContent?: GatewayContentBlock[];
+  provenancePositions?: number[];
+};
+
+function insertCompanionBundle(
+  message: GatewayMessage,
+  visibleIndex: number,
+  bundle: CompanionBundle,
+): void {
+  if (!bundle.provenanceContent || !bundle.provenancePositions) {
+    insertVisibleContentBlocks(message, visibleIndex, bundle.content);
+    return;
+  }
+  if (!message.provenanceContent || !message.provenancePositions) {
+    message.provenanceContent = [...message.content];
+    message.provenancePositions = message.content.map((_block, index) => index);
+  }
+  message.content.splice(visibleIndex, 0, ...bundle.content);
+  const provenanceIndex =
+    message.provenancePositions[visibleIndex] ??
+    message.provenanceContent.length;
+  message.provenanceContent.splice(
+    provenanceIndex,
+    0,
+    ...bundle.provenanceContent,
+  );
+  for (let i = visibleIndex; i < message.provenancePositions.length; i++) {
+    message.provenancePositions[i] += bundle.provenanceContent.length;
+  }
+  message.provenancePositions.splice(
+    visibleIndex,
+    0,
+    ...bundle.provenancePositions.map((position) => provenanceIndex + position),
+  );
+}
 
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
-  return parseRecallMarker(text) !== null;
+  return (
+    parseRecallMarker(text) !== null || parseRecallAnchorFromText(text) !== null
+  );
+}
+
+function storedRecallForText(
+  text: string,
+  store: RecallStore,
+): { key: string; stored: StoredRecall; canonical: boolean } | null {
+  const parsed = parseRecallMarker(text);
+  if (parsed) {
+    const key = recallStoreKey(parsed.query, parsed.scope, parsed.id);
+    const stored = store.get(key);
+    return stored ? { key, stored, canonical: false } : null;
+  }
+  const anchorId = parseRecallAnchorFromText(text);
+  if (!anchorId) return null;
+  const key = `anchor:${anchorId}`;
+  const stored = store.get(key);
+  return stored ? { key, stored, canonical: true } : null;
 }
 
 /**
@@ -157,9 +385,46 @@ export function serializeRecallStore(store: RecallStore): string {
   return JSON.stringify([...store.entries()]);
 }
 
+/** Add one record without evicting a still-live replay anchor. */
+export function addRecallStoreEntry(
+  store: RecallStore,
+  key: string,
+  value: StoredRecall,
+): void {
+  let minimumBytes = 0;
+  const countStrings = (input: unknown): void => {
+    if (minimumBytes > MAX_RECALL_STORE_BYTES) return;
+    if (typeof input === "string") {
+      minimumBytes += Buffer.byteLength(input);
+    } else if (Array.isArray(input)) {
+      for (const item of input) countStrings(item);
+    } else if (input && typeof input === "object") {
+      for (const [name, child] of Object.entries(input)) {
+        minimumBytes += Buffer.byteLength(name);
+        countStrings(child);
+      }
+    }
+  };
+  countStrings(key);
+  countStrings(value);
+  if (minimumBytes > MAX_RECALL_STORE_BYTES) {
+    throw new Error("recall store capacity exceeded");
+  }
+  const candidate = new Map(store);
+  candidate.set(key, value);
+  if (
+    candidate.size > MAX_RECALL_STORE_ENTRIES ||
+    Buffer.byteLength(serializeRecallStore(candidate)) > MAX_RECALL_STORE_BYTES
+  ) {
+    throw new Error("recall store capacity exceeded");
+  }
+  store.set(key, value);
+}
+
 /** Restore a recall store from its JSON form. Tolerant of corrupt/old blobs. */
 export function deserializeRecallStore(json: string): RecallStore {
   const store: RecallStore = new Map();
+  if (Buffer.byteLength(json) > MAX_RECALL_STORE_BYTES) return store;
   try {
     const entries = JSON.parse(json);
     if (!Array.isArray(entries)) return store;
@@ -170,10 +435,14 @@ export function deserializeRecallStore(json: string): RecallStore {
         typeof entry[0] === "string" &&
         entry[1] &&
         typeof entry[1] === "object" &&
-        typeof (entry[1] as StoredRecall).toolUseId === "string" &&
-        typeof (entry[1] as StoredRecall).result === "string"
+        isStoredRecall(entry[1]) &&
+        isValidRecallStoreEntry(entry[0], entry[1])
       ) {
-        store.set(entry[0], entry[1] as StoredRecall);
+        try {
+          addRecallStoreEntry(store, entry[0], entry[1]);
+        } catch {
+          break;
+        }
       }
     }
   } catch {
@@ -181,6 +450,79 @@ export function deserializeRecallStore(json: string): RecallStore {
     // once the recall re-executes).
   }
   return store;
+}
+
+function isValidRecallStoreEntry(key: string, item: StoredRecall): boolean {
+  if (
+    !item.toolUseId ||
+    !Number.isSafeInteger(item.position) ||
+    item.position < 0 ||
+    (item.input.scope !== undefined &&
+      item.input.scope !== "all" &&
+      item.input.scope !== "session" &&
+      item.input.scope !== "project" &&
+      item.input.scope !== "knowledge")
+  ) {
+    return false;
+  }
+  if (!key.startsWith("anchor:")) {
+    return (
+      item.anchorContextId === undefined ||
+      /^[0-9a-f]{64}$/.test(item.anchorContextId)
+    );
+  }
+  if (!item.anchorContextId || !/^[0-9a-f]{64}$/.test(item.anchorContextId)) {
+    return false;
+  }
+  const anchorId = key.slice("anchor:".length);
+  return (
+    item.anchorId === anchorId &&
+    parseRecallAnchor(buildRecallAnchor(anchorId)) === anchorId
+  );
+}
+
+function isStoredRecall(value: unknown): value is StoredRecall {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  const input = item.input as Record<string, unknown> | undefined;
+  if (
+    typeof item.toolUseId !== "string" ||
+    typeof item.result !== "string" ||
+    typeof item.position !== "number" ||
+    !input ||
+    typeof input.query !== "string" ||
+    (input.scope !== undefined && typeof input.scope !== "string") ||
+    ((item.input as Record<string, unknown>).id !== undefined &&
+      typeof (item.input as Record<string, unknown>).id !== "string")
+  ) {
+    return false;
+  }
+  if (
+    (item.anchorId !== undefined && typeof item.anchorId !== "string") ||
+    (item.anchorContextId !== undefined &&
+      typeof item.anchorContextId !== "string") ||
+    (item.companionToolUseIds !== undefined &&
+      (!Array.isArray(item.companionToolUseIds) ||
+        !item.companionToolUseIds.every((id) => typeof id === "string")))
+  ) {
+    return false;
+  }
+  if (item.companionToolUses !== undefined) {
+    if (!Array.isArray(item.companionToolUses)) return false;
+    for (const companion of item.companionToolUses) {
+      if (!companion || typeof companion !== "object") return false;
+      const record = companion as Record<string, unknown>;
+      if (
+        typeof record.id !== "string" ||
+        typeof record.name !== "string" ||
+        !("input" in record) ||
+        (record.side !== "before" && record.side !== "after")
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 /** Derive a store key from query + scope, or from id for detail lookups. */
@@ -211,6 +553,35 @@ export function expandRecallMarkers(
   store: RecallStore,
 ): boolean {
   let expanded = false;
+  const anchorValidity = new Map<string, boolean[]>();
+  const incomingMessages = structuredClone(req.messages);
+  for (let i = 0; i < incomingMessages.length; i++) {
+    const message = incomingMessages[i];
+    if (message.role !== "assistant") continue;
+    for (let j = 0; j < message.content.length; j++) {
+      const block = message.content[j];
+      if (block.type !== "text") continue;
+      const candidate = storedRecallForText(block.text, store);
+      if (!candidate) continue;
+      const valid = candidate.key.startsWith("anchor:")
+        ? candidate.stored.anchorContextId ===
+          recallAnchorContext(
+            incomingMessages,
+            i,
+            recallMessagePrefix(message, j),
+          )
+        : candidate.stored.anchorContextId === undefined ||
+          candidate.stored.anchorContextId ===
+            recallAnchorContext(
+              incomingMessages,
+              i,
+              recallMessagePrefix(message, j),
+            );
+      const occurrences = anchorValidity.get(candidate.key) ?? [];
+      occurrences.push(valid);
+      anchorValidity.set(candidate.key, occurrences);
+    }
+  }
 
   // Iterate forward; when we splice messages the index is adjusted.
   for (let i = 0; i < req.messages.length; i++) {
@@ -221,23 +592,121 @@ export function expandRecallMarkers(
     // We process one marker per assistant message per pass; the outer
     // loop will revisit if there's more than one (rare).
     let markerIdx = -1;
-    let parsed: { query: string; scope: RecallScope; id?: string } | null =
-      null;
+    let match: { key: string; stored: StoredRecall } | null = null;
     for (let j = 0; j < msg.content.length; j++) {
       const block = msg.content[j];
       if (block.type !== "text") continue;
-      parsed = parseRecallMarker(block.text);
-      if (parsed) {
+      match = storedRecallForText(block.text, store);
+      if (match) {
         markerIdx = j;
         break;
       }
     }
 
-    if (markerIdx < 0 || !parsed) continue;
+    if (markerIdx < 0 || !match) continue;
+    const { stored } = match;
+    if (!(anchorValidity.get(match.key)?.shift() ?? false)) continue;
 
-    const key = recallStoreKey(parsed.query, parsed.scope, parsed.id);
-    const stored = store.get(key);
-    if (!stored) continue; // No stored result — leave marker as-is
+    // Responses emits output text and function calls as separate input items,
+    // which parse into adjacent assistant messages. Rejoin only tool calls that
+    // were companions of the original recall. Continuation tool calls are not
+    // companions and must stay after the synthetic recall result turn.
+    const companions = stored.companionToolUses;
+    const beforeCompanions = companions?.filter(
+      (item) => item.side === "before",
+    );
+    const afterCompanions = companions?.filter((item) => item.side === "after");
+    const matchesCompanions = (
+      content: GatewayContentBlock[],
+      expected: typeof beforeCompanions,
+    ): boolean =>
+      content.filter((block) => block.type === "tool_use").length ===
+        expected?.length &&
+      content
+        .filter((block) => block.type === "tool_use")
+        .every((block, index) => {
+          const item = expected[index];
+          return (
+            block.type === "tool_use" &&
+            block.id === item.id &&
+            block.name === item.name &&
+            JSON.stringify(block.input) === JSON.stringify(item.input)
+          );
+        });
+    const takeCompanions = (message: GatewayMessage): CompanionBundle => {
+      if (
+        message.content.every((block) => block.type === "tool_use") &&
+        message.provenanceContent &&
+        message.provenancePositions
+      ) {
+        const provenanceContent = message.provenanceContent;
+        const provenancePositions = message.provenancePositions;
+        if (
+          provenancePositions.length !== message.content.length ||
+          provenancePositions.some(
+            (position, index) =>
+              !Number.isSafeInteger(position) ||
+              position < 0 ||
+              position >= provenanceContent.length ||
+              (index > 0 && position <= provenancePositions[index - 1]),
+          )
+        ) {
+          throw new Error("invalid companion provenance");
+        }
+        const bundle: CompanionBundle = {
+          content: [...message.content],
+          provenanceContent: [...provenanceContent],
+          provenancePositions: [...provenancePositions],
+        };
+        message.content.length = 0;
+        provenanceContent.length = 0;
+        provenancePositions.length = 0;
+        return bundle;
+      }
+      const moved: GatewayContentBlock[] = [];
+      for (let index = message.content.length - 1; index >= 0; index--) {
+        if (message.content[index].type === "tool_use") {
+          moved.unshift(removeVisibleContentBlock(message, index));
+        }
+      }
+      return { content: moved };
+    };
+    while ((beforeCompanions?.length ?? 0) > 0 && i > 0) {
+      const previous = req.messages[i - 1];
+      if (
+        previous.role !== "assistant" ||
+        !matchesCompanions(previous.content, beforeCompanions)
+      ) {
+        break;
+      }
+      const moved = takeCompanions(previous);
+      insertCompanionBundle(msg, 0, moved);
+      markerIdx += moved.content.length;
+      if (
+        previous.content.length === 0 &&
+        (previous.provenanceContent?.length ?? 0) === 0
+      ) {
+        req.messages.splice(i - 1, 1);
+        i -= 1;
+      }
+    }
+    while ((afterCompanions?.length ?? 0) > 0) {
+      const next = req.messages[i + 1];
+      if (
+        !next ||
+        next.role !== "assistant" ||
+        !matchesCompanions(next.content, afterCompanions)
+      ) {
+        break;
+      }
+      insertCompanionBundle(msg, msg.content.length, takeCompanions(next));
+      if (
+        next.content.length === 0 &&
+        (next.provenanceContent?.length ?? 0) === 0
+      ) {
+        req.messages.splice(i + 1, 1);
+      }
+    }
 
     // Check if there's non-tool content AFTER the marker in this message.
     // This happens when recall-only follow-up piped continuation content
@@ -247,16 +716,16 @@ export function expandRecallMarkers(
     const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
 
     // Replace marker with tool_use
-    msg.content[markerIdx] = {
+    replaceVisibleContentBlock(msg, markerIdx, {
       type: "tool_use",
       id: stored.toolUseId,
       name: RECALL_TOOL_NAME,
       input: stored.input,
-    };
+    });
 
     // Truncate assistant message at the tool_use (remove continuation)
     if (hasContinuationAfter) {
-      msg.content.length = markerIdx + 1;
+      truncateVisibleContent(msg, markerIdx + 1);
     }
 
     // Build synthetic tool_result user message
@@ -287,7 +756,10 @@ export function expandRecallMarkers(
       // tool_results — matching the tool_use order in the assistant message.
       const nextMsg = req.messages[i + 1];
       if (nextMsg?.role === "user") {
-        nextMsg.content.unshift({
+        const resultIndex = msg.content
+          .slice(0, markerIdx)
+          .filter((block) => block.type === "tool_use").length;
+        nextMsg.content.splice(resultIndex, 0, {
           type: "tool_result",
           toolUseId: stored.toolUseId,
           content: [{ type: "text", text: stored.result }],
@@ -312,8 +784,8 @@ export function expandRecallMarkers(
 export function cleanupRecallStore(
   req: GatewayRequest,
   store: RecallStore,
-): void {
-  if (store.size === 0) return;
+): boolean {
+  if (store.size === 0) return false;
 
   // Collect all marker keys still present in assistant messages
   const activeKeys = new Set<string>();
@@ -321,19 +793,31 @@ export function cleanupRecallStore(
     if (msg.role !== "assistant") continue;
     for (const block of msg.content) {
       if (block.type !== "text") continue;
-      const parsed = parseRecallMarker(block.text);
-      if (parsed) {
-        activeKeys.add(recallStoreKey(parsed.query, parsed.scope, parsed.id));
+      const match = storedRecallForText(block.text, store);
+      if (
+        match &&
+        (!match.stored.anchorContextId ||
+          match.stored.anchorContextId ===
+            recallAnchorContext(
+              req.messages,
+              req.messages.indexOf(msg),
+              recallMessagePrefix(msg, msg.content.indexOf(block)),
+            ))
+      ) {
+        activeKeys.add(match.key);
       }
     }
   }
 
   // Remove entries not referenced by any current marker
+  let changed = false;
   for (const key of store.keys()) {
     if (!activeKeys.has(key)) {
       store.delete(key);
+      changed = true;
     }
   }
+  return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +886,7 @@ export async function executeRecall(
   sessionID: string,
   llm?: LLMClient,
   alreadyInLtmIds?: ReadonlySet<string>,
+  signal?: AbortSignal,
 ): Promise<{
   result: string;
   input: { query: string; scope?: RecallScope; id?: string };
@@ -410,6 +895,7 @@ export async function executeRecall(
   const cfg = loreConfig();
 
   try {
+    signal?.throwIfAborted();
     const result = await runRecall({
       query,
       scope,
@@ -418,14 +904,17 @@ export async function executeRecall(
       sessionID,
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
       llm,
+      signal,
       searchConfig: cfg.search,
       // Genuine agent recall — record cross-project transfer metrics (#506).
       recordTransfers: true,
       ...(alreadyInLtmIds ? { alreadyInLtmIds } : {}),
     });
+    signal?.throwIfAborted();
 
     return { result, input: { query, scope, id } };
   } catch (e) {
+    if (signal?.aborted) throw signal.reason;
     log.error("gateway recall execution failed:", e);
     return {
       result: "Recall search failed. The memory system encountered an error.",
@@ -458,6 +947,7 @@ export interface RecallFollowUpCtx {
   /** Forward a follow-up request upstream and return the raw response. */
   forward: (
     req: GatewayRequest,
+    signal?: AbortSignal,
   ) => Promise<{ response: Response; effectiveProtocol: RecallProtocol }>;
   /** Parse a non-streaming (JSON) upstream response into a GatewayResponse. */
   parseJSON: (
@@ -518,12 +1008,24 @@ export function buildRecallFollowUpRequest(
   // by default.
   const prefixBlocks = resp.content.filter(
     (b) =>
-      b.type !== "text" && b.type !== "tool_use" && b.type !== "tool_result",
+      b.type !== "text" &&
+      b.type !== "tool_use" &&
+      b.type !== "tool_result" &&
+      !(b.type === "opaque" && b.responsesItem),
   );
+  const rawPrefixBlocks: GatewayContentBlock[] = (resp.rawOutputItems ?? [])
+    .filter(
+      (item) =>
+        item.type !== "function_call" &&
+        item.type !== "function_call_output" &&
+        item.type !== "item_reference",
+    )
+    .map((raw) => ({ type: "opaque", raw, responsesItem: true }));
 
   const assistantMessage: GatewayMessage = {
     role: "assistant",
     content: [
+      ...rawPrefixBlocks,
       ...prefixBlocks,
       {
         type: "tool_use",
@@ -570,13 +1072,105 @@ export function buildRecallFollowUpRequest(
  * loud, greppable error (caught by the recall try/catch → marker fallback +
  * Sentry via log.error).
  */
-function assertSSEResponse(response: Response): void {
+async function ensureSSEResponse(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<Response> {
   const ct = response.headers.get("content-type") ?? "";
-  if (!ct.includes("text/event-stream")) {
-    throw new Error(
-      `recall follow-up expected SSE but got "${ct}" — stream flag/consumer mismatch`,
-    );
+  if (!response.body) {
+    throw new Error("recall follow-up (streaming) response has no body");
   }
+  if (ct.includes("text/event-stream")) return response;
+
+  // ChatGPT/Codex sometimes omits Content-Type on valid SSE responses. Sniff a
+  // tee of the body, preserving the other branch for the real stream parser.
+  const [probe, replay] = response.body.tee();
+  const reader = probe.getReader();
+  const decoder = new TextDecoder();
+  let prefix = "";
+  let probedBytes = 0;
+  const maxProbeBytes = 4096;
+  const maxProbeChunks = 64;
+  const probeSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(10_000)])
+    : AbortSignal.timeout(10_000);
+  const probeAborted = new Promise<never>((_resolve, reject) => {
+    probeSignal.addEventListener("abort", () => reject(probeSignal.reason), {
+      once: true,
+    });
+  });
+  let chunks = 0;
+  try {
+    while (probedBytes < maxProbeBytes && chunks < maxProbeChunks) {
+      const { done, value } = await Promise.race([reader.read(), probeAborted]);
+      if (done) break;
+      chunks++;
+      if (value) {
+        const remaining = maxProbeBytes - probedBytes;
+        const chunk = value.subarray(0, remaining);
+        probedBytes += chunk.byteLength;
+        prefix += decoder.decode(chunk, { stream: true });
+      }
+      let head = prefix.replace(/^\uFEFF/, "").trimStart();
+      while (head.startsWith(":")) {
+        const newline = head.indexOf("\n");
+        if (newline < 0) {
+          head = "";
+          break;
+        }
+        head = head.slice(newline + 1).trimStart();
+      }
+      if (looksLikeSSE(ct, head)) {
+        void reader.cancel();
+        return new Response(replay, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      }
+      if (head && !"data:".startsWith(head) && !"event:".startsWith(head)) {
+        break;
+      }
+    }
+  } finally {
+    void reader.cancel();
+  }
+  void replay.cancel();
+  throw new Error(
+    `recall follow-up expected SSE but got "${ct}" and a non-SSE body`,
+  );
+}
+
+async function readResponseTextLimited(
+  response: Response,
+  maxBytes = 500,
+  signal?: AbortSignal,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  let readBytes = 0;
+  const onAbort = (): void => {
+    void reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    while (readBytes < maxBytes) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      if (!value) continue;
+      const chunk = value.subarray(0, maxBytes - readBytes);
+      readBytes += chunk.byteLength;
+      text += decoder.decode(chunk, { stream: readBytes < maxBytes });
+    }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    void reader.cancel().catch(() => {});
+  }
+  return text;
 }
 
 /**
@@ -638,6 +1232,7 @@ export async function runRecallFollowUpStreaming(
   resp: GatewayResponse,
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
+  signal?: AbortSignal,
 ): Promise<RecallFollowUpStreaming | RecallFollowUpError> {
   const followUp = buildRecallFollowUpRequest(
     originalReq,
@@ -646,16 +1241,23 @@ export async function runRecallFollowUpStreaming(
     recallToolUseBlock,
     /* stream */ true,
   );
-  const { response } = await ctx.forward(followUp);
+  const { response } = await ctx.forward(followUp, signal);
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    return { ok: false, status: response.status, detail: detail.slice(0, 500) };
+    let detail = "";
+    try {
+      detail = await readResponseTextLimited(response, 500, signal);
+    } catch (err) {
+      if (signal?.aborted) throw signal.reason;
+      log.warn("recall follow-up error body could not be read:", err);
+    }
+    return { ok: false, status: response.status, detail };
   }
-  assertSSEResponse(response);
-  if (!response.body) {
+  const sseResponse = await ensureSSEResponse(response, signal);
+  const body = sseResponse.body;
+  if (!body) {
     throw new Error("recall follow-up (streaming) response has no body");
   }
-  return { ok: true, reader: response.body.getReader(), followUp };
+  return { ok: true, reader: body.getReader(), followUp };
 }
 
 /**
@@ -681,8 +1283,8 @@ export async function runRecallFollowUpJSON(
   );
   const { response, effectiveProtocol } = await ctx.forward(followUp);
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    return { ok: false, status: response.status, detail: detail.slice(0, 500) };
+    const detail = await readResponseTextLimited(response).catch(() => "");
+    return { ok: false, status: response.status, detail };
   }
   assertJSONResponse(response);
   const continuation = await ctx.parseJSON(response, effectiveProtocol);
@@ -727,11 +1329,11 @@ export async function runRecallFollowUpStreamAccumulated(
   );
   const { response } = await ctx.forward(followUp);
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    return { ok: false, status: response.status, detail: detail.slice(0, 500) };
+    const detail = await readResponseTextLimited(response).catch(() => "");
+    return { ok: false, status: response.status, detail };
   }
-  assertSSEResponse(response);
-  const continuation = await ctx.parseSSE(response);
+  const sseResponse = await ensureSSEResponse(response);
+  const continuation = await ctx.parseSSE(sseResponse);
   return { ok: true, continuation, followUp };
 }
 
@@ -747,6 +1349,7 @@ export async function runRecallFollowUpStreamAccumulated(
  */
 export function replaceRecallWithMarker(
   resp: GatewayResponse,
+  markers?: ReadonlyMap<string, string>,
 ): GatewayResponse {
   return {
     ...resp,
@@ -759,7 +1362,7 @@ export function replaceRecallWithMarker(
           typeof input.id === "string" && input.id ? input.id : undefined;
         return {
           type: "text" as const,
-          text: buildRecallMarker(query, scope, id),
+          text: markers?.get(b.id) ?? buildRecallMarker(query, scope, id),
         };
       }
       return b;

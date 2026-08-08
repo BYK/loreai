@@ -10,7 +10,7 @@
  * messages into "completed" state.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { isToolPart } from "@loreai/core";
+import { estimateTokens as coreEstimateTokens, isToolPart } from "@loreai/core";
 import type {
   LoreAssistantMessage,
   LoreContentBlock,
@@ -76,10 +76,6 @@ function hashBlocks(
         hashBlocks(h, block.content);
         break;
       case "opaque": {
-        // Hash includes the text projection (type + media_type + length) plus
-        // a prefix of the payload data for collision resistance — two images
-        // with identical type, media_type, and size but different content will
-        // produce distinct hashes.
         const source = block.raw.source as Record<string, unknown> | undefined;
         const data =
           (source?.data as string | undefined) ??
@@ -225,6 +221,13 @@ export function gatewayMessagesToLore(
     const parts: LorePart[] = m.content.map((block, pi) =>
       contentBlockToPart(block, sessionID, id, pi),
     );
+    const hiddenInputTokens = m.provenanceContent
+      ? Math.max(
+          0,
+          coreEstimateTokens(JSON.stringify(m.provenanceContent)) -
+            coreEstimateTokens(JSON.stringify(m.content)),
+        )
+      : 0;
 
     if (m.role === "user") {
       const info: LoreUserMessage = {
@@ -235,7 +238,11 @@ export function gatewayMessagesToLore(
         agent: "gateway",
         model: { providerID: "anthropic", modelID: "unknown" },
       };
-      out.push({ info, parts });
+      out.push({
+        info,
+        parts,
+        ...(hiddenInputTokens ? { hiddenInputTokens } : {}),
+      });
     } else {
       const info: LoreAssistantMessage = {
         id,
@@ -255,7 +262,11 @@ export function gatewayMessagesToLore(
           cache: { read: 0, write: 0 },
         },
       };
-      out.push({ info, parts });
+      out.push({
+        info,
+        parts,
+        ...(hiddenInputTokens ? { hiddenInputTokens } : {}),
+      });
     }
   }
 

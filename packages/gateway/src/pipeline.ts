@@ -12,6 +12,7 @@
  *  3. Normal conversation turns → full pipeline.
  */
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
 import { asString, estimateTokens as coreEstimateTokens } from "@loreai/core";
 import {
@@ -96,6 +97,7 @@ import type {
   GatewayToolUseBlock,
   GatewayToolResultBlock,
   GatewayUsage,
+  StoredRecall,
   SessionState,
   UpstreamSnapshot,
   WarmupState,
@@ -327,14 +329,17 @@ import {
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
   type RecallFollowUpCtx,
-  buildRecallMarker,
-  recallStoreKey,
+  buildRecallAnchor,
+  parseRecallAnchor,
+  buildAnchoredRecallMarker,
   expandRecallMarkers,
   cleanupRecallStore,
   replaceRecallWithMarker,
   isRecallMarker,
   serializeRecallStore,
+  addRecallStoreEntry,
   deserializeRecallStore,
+  recallAnchorContext,
 } from "./recall";
 import { upstreamFetch } from "./fetch";
 import {
@@ -735,12 +740,43 @@ export function rebindActiveSession(
 
 /**
  * Reverse lookup: maps header-based session ID values to internal session IDs.
- * Key: `headerName:headerValue` (e.g. `x-claude-code-session-id:uuid-1234`).
+ * Key: `credentialFingerprint\x1fheaderName\x1fheaderValue`.
  * Value: internal session ID (the key in `sessions`).
  *
  * Populated for both Tier 1 (known headers) and Tier 2 (learned headers).
  */
 const headerSessionIndex = new Map<string, string>();
+const SESSION_INDEX_SEPARATOR = "\x1f";
+
+function requestCredentialFingerprint(headers: Record<string, string>): string {
+  const credential = extractAuth(headers);
+  return credential ? authFingerprint(credential) : "";
+}
+
+function sessionIndexKey(
+  credentialFingerprint: string,
+  headerName: string,
+  headerValue: string,
+): string {
+  return [credentialFingerprint, headerName, headerValue].join(
+    SESSION_INDEX_SEPARATOR,
+  );
+}
+
+function parseSessionIndexKey(key: string): {
+  credentialFingerprint: string;
+  headerName: string;
+  headerValue: string;
+} | null {
+  const first = key.indexOf(SESSION_INDEX_SEPARATOR);
+  const second = key.indexOf(SESSION_INDEX_SEPARATOR, first + 1);
+  if (first < 0 || second < 0) return null;
+  return {
+    credentialFingerprint: key.slice(0, first),
+    headerName: key.slice(first + 1, second),
+    headerValue: key.slice(second + 1),
+  };
+}
 
 /**
  * Per-session LTM cache for byte-stability of **context-bound** entries
@@ -3018,7 +3054,11 @@ async function initIfNeeded(
   try {
     const headerEntries = loadHeaderSessionIndex();
     for (const entry of headerEntries) {
-      const indexKey = `${entry.headerName}:${entry.headerSessionId}`;
+      const indexKey = sessionIndexKey(
+        entry.credentialFingerprint,
+        entry.headerName,
+        entry.headerSessionId,
+      );
       headerSessionIndex.set(indexKey, entry.sessionId);
     }
     if (headerEntries.length > 0) {
@@ -3612,6 +3652,7 @@ function getOrCreateSession(
   sessionID: string,
   projectPath: string,
   pathSource: ProjectPathResult["source"] = "cwd",
+  credentialFingerprint = "",
 ): SessionState {
   let state = sessions.get(sessionID);
   if (!state) {
@@ -3650,6 +3691,8 @@ function getOrCreateSession(
           ? true
           : pathSource === "cwd",
       fingerprint: persisted?.fingerprint || "",
+      credentialFingerprint:
+        persisted?.credentialFingerprint || credentialFingerprint,
       lastRequestTime: Date.now(),
       lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
@@ -3672,7 +3715,11 @@ function getOrCreateSession(
       state.headerSessionId = persisted.headerSessionId;
       state.headerName = persisted.headerName;
       // Rebuild headerSessionIndex for this session
-      const indexKey = `${persisted.headerName}:${persisted.headerSessionId}`;
+      const indexKey = sessionIndexKey(
+        persisted.credentialFingerprint,
+        persisted.headerName,
+        persisted.headerSessionId,
+      );
       headerSessionIndex.set(indexKey, sessionID);
     }
 
@@ -3739,6 +3786,43 @@ function getOrCreateSession(
     // leaking upstream as raw marker text and rewriting that message.
     if (persisted?.recallStore != null) {
       state.recallStore = deserializeRecallStore(persisted.recallStore);
+    }
+    if (persisted?.lastUpstream != null) {
+      try {
+        const parsed = JSON.parse(persisted.lastUpstream) as unknown;
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          typeof (parsed as UpstreamSnapshot).url === "string" &&
+          [
+            "anthropic",
+            "openai",
+            "openai-responses",
+            "vertex",
+            "gemini",
+          ].includes((parsed as UpstreamSnapshot).protocol) &&
+          typeof (parsed as UpstreamSnapshot).model === "string" &&
+          (parsed as UpstreamSnapshot).model.length > 0 &&
+          (parsed as UpstreamSnapshot).headers &&
+          typeof (parsed as UpstreamSnapshot).headers === "object" &&
+          !Array.isArray((parsed as UpstreamSnapshot).headers) &&
+          Object.values((parsed as UpstreamSnapshot).headers).every(
+            (value) => typeof value === "string",
+          )
+        ) {
+          state.lastUpstream = parsed as UpstreamSnapshot;
+          if (state.lastUpstream.providerID) {
+            state.upstreamByProvider.set(
+              state.lastUpstream.providerID,
+              state.lastUpstream,
+            );
+          }
+        }
+      } catch {
+        log.warn(
+          `corrupt last upstream for session ${sessionID.slice(0, 16)}, ignoring`,
+        );
+      }
     }
     if (persisted?.ltmPinText != null && persisted.ltmPinTokens != null) {
       let entryKeys: string[] | undefined;
@@ -3934,16 +4018,32 @@ async function adoptByFingerprint(input: {
   if (!projectPath) return null;
 
   const cred = extractAuth(req.rawHeaders);
-  const fingerprint = await fingerprintMessages(
-    req.messages.map((m) => ({ role: m.role, content: m.content })),
-    { authSuffix: cred ? authFingerprint(cred) : "" },
-  );
+  const credentialFingerprint = cred ? authFingerprint(cred) : "";
+  const fingerprintInput = req.messages.map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+  const fingerprint = await fingerprintMessages(fingerprintInput, {
+    authSuffix: cred ? authFingerprint(cred) : "",
+  });
 
   const reqIsSubagent = !!headers["x-parent-session-id"];
-  const candidates = findSessionStatesByFingerprint(fingerprint).filter(
+  const candidates = findSessionStatesByFingerprint(fingerprint);
+  if (cred) {
+    // v78 added the credential suffix to conversation fingerprints. Legacy
+    // candidates have the old unsuffixed fingerprint and no persisted owner;
+    // they still require the same project-scoped multi-message overlap below.
+    const legacyFingerprint = await fingerprintMessages(fingerprintInput);
+    candidates.push(
+      ...findSessionStatesByFingerprint(legacyFingerprint, {
+        legacyUnownedOnly: true,
+      }),
+    );
+  }
+  const eligibleCandidates = candidates.filter(
     (c) => (c.is_subagent === 1) === reqIsSubagent,
   );
-  if (candidates.length === 0) return null;
+  if (eligibleCandidates.length === 0) return null;
 
   // Hash the leading user messages by their absolute index (the only
   // position-stable IDs in temporal storage). NOTE: identifySession runs before
@@ -3967,7 +4067,11 @@ async function adoptByFingerprint(input: {
   const pid = ensureProject(projectPath);
   const minOverlap = Math.max(ADOPT_MIN_OVERLAP, Math.ceil(probedUsers * 0.5));
   let best: { sid: string; overlap: number; countDiff: number } | null = null;
-  for (const c of candidates) {
+  // temporal_messages.id is globally unique, so valid rows cannot give two
+  // sessions the same positive overlap set. Keep the tie guard as defense in
+  // depth for a corrupt/imported database rather than selecting by row order.
+  let ambiguousBest = false;
+  for (const c of eligibleCandidates) {
     // Fork guard (mirrors the in-memory Tier-3 scan): a count that dropped far
     // below the stored count is a fork, not a resume.
     if (msgCount - c.message_count < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) {
@@ -3982,17 +4086,24 @@ async function adoptByFingerprint(input: {
       (overlap === best.overlap && countDiff < best.countDiff)
     ) {
       best = { sid: c.session_id, overlap, countDiff };
+      ambiguousBest = false;
+    } else if (overlap === best.overlap && countDiff === best.countDiff) {
+      ambiguousBest = true;
     }
   }
-  if (!best) return null;
+  if (!best || ambiguousBest) return null;
 
   // When a known header is present, rebind it → adopted sid so future turns
   // identify via the Tier 1 fast path (and stop re-confirming overlap).
   if (known) {
-    headerSessionIndex.set(`${known.headerName}:${known.sessionId}`, best.sid);
+    headerSessionIndex.set(
+      sessionIndexKey(credentialFingerprint, known.headerName, known.sessionId),
+      best.sid,
+    );
     saveSessionTracking(best.sid, {
       headerSessionId: known.sessionId,
       headerName: known.headerName,
+      credentialFingerprint,
     });
   }
   log.info(
@@ -4008,6 +4119,7 @@ async function identifySession(
   projectPath: string,
 ): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 2.5 | 3 }> {
   const headers = req.rawHeaders;
+  const credentialFingerprint = requestCredentialFingerprint(headers);
 
   // --- Tier 1: Known headers ---
   // Sub-agent requests (carrying x-parent-session-id) are NOT merged into the
@@ -4017,12 +4129,20 @@ async function identifySession(
 
   const known = extractKnownSessionHeader(headers);
   if (known) {
-    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const indexKey = sessionIndexKey(
+      credentialFingerprint,
+      known.headerName,
+      known.sessionId,
+    );
     let existingSid = headerSessionIndex.get(indexKey);
     if (!existingSid) {
       for (const entry of loadHeaderSessionIndex()) {
         headerSessionIndex.set(
-          `${entry.headerName}:${entry.headerSessionId}`,
+          sessionIndexKey(
+            entry.credentialFingerprint,
+            entry.headerName,
+            entry.headerSessionId,
+          ),
           entry.sessionId,
         );
       }
@@ -4043,7 +4163,11 @@ async function identifySession(
       if (fallbackName === known.headerName) continue; // skip the primary
       const fallbackValue = headers[fallbackName];
       if (!fallbackValue) continue;
-      const fallbackKey = `${fallbackName}:${fallbackValue}`;
+      const fallbackKey = sessionIndexKey(
+        credentialFingerprint,
+        fallbackName,
+        fallbackValue,
+      );
       const fallbackSid = headerSessionIndex.get(fallbackKey);
       if (fallbackSid) {
         // Migrate: index under the new (higher-priority) header.
@@ -4051,12 +4175,14 @@ async function identifySession(
         saveSessionTracking(fallbackSid, {
           headerSessionId: known.sessionId,
           headerName: known.headerName,
+          credentialFingerprint,
         });
         // Update in-memory state if present.
         const inMemory = sessions.get(fallbackSid);
         if (inMemory) {
           inMemory.headerSessionId = known.sessionId;
           inMemory.headerName = known.headerName;
+          inMemory.credentialFingerprint = credentialFingerprint;
         }
         log.info(
           `session ${fallbackSid.slice(0, 16)}: migrated from ${fallbackName} to ${known.headerName}`,
@@ -4075,6 +4201,7 @@ async function identifySession(
     const predecessor = !isRotationEligible(known.headerName)
       ? null
       : findRotationPredecessor(
+          credentialFingerprint,
           known.headerName,
           known.sessionId,
           headerSessionIndex,
@@ -4125,6 +4252,7 @@ async function identifySession(
           saveSessionTracking(sessionID, {
             headerSessionId: known.sessionId,
             headerName: known.headerName,
+            credentialFingerprint,
           });
           // The old predecessor's index entry is intentionally preserved — the
           // old session is still valid and may receive requests with its nanoid.
@@ -4138,7 +4266,11 @@ async function identifySession(
 
     if (predecessor) {
       // Resume the old session with the new header value.
-      const oldKey = `${known.headerName}:${predecessor.oldHeaderValue}`;
+      const oldKey = sessionIndexKey(
+        credentialFingerprint,
+        known.headerName,
+        predecessor.oldHeaderValue,
+      );
       headerSessionIndex.delete(oldKey);
       headerSessionIndex.set(indexKey, predecessor.sid);
 
@@ -4147,12 +4279,14 @@ async function identifySession(
       if (inMemory) {
         inMemory.headerSessionId = known.sessionId;
         inMemory.headerName = known.headerName;
+        inMemory.credentialFingerprint = credentialFingerprint;
       }
 
       // Persist the new header mapping immediately.
       saveSessionTracking(predecessor.sid, {
         headerSessionId: known.sessionId,
         headerName: known.headerName,
+        credentialFingerprint,
       });
 
       log.info(
@@ -4181,6 +4315,7 @@ async function identifySession(
     saveSessionTracking(sessionID, {
       headerSessionId: known.sessionId,
       headerName: known.headerName,
+      credentialFingerprint,
     });
     return { sessionID, isNew: true, tier: 1 };
   }
@@ -4190,6 +4325,7 @@ async function identifySession(
   // a header value in the current request.
   for (const [sid, state] of sessions) {
     if (!state.headerSessionId || !state.headerName) continue;
+    if ((state.credentialFingerprint ?? "") !== credentialFingerprint) continue;
     const currentValue = headers[state.headerName];
     if (currentValue && currentValue === state.headerSessionId) {
       return { sessionID: sid, isNew: false, tier: 2 };
@@ -4202,7 +4338,11 @@ async function identifySession(
   // but less authoritative than explicit headers (Tier 1).
   const markerSid = extractSessionMarker(req.messages);
   if (markerSid) {
-    const markerKey = `context-marker:${markerSid}`;
+    const markerKey = sessionIndexKey(
+      credentialFingerprint,
+      "context-marker",
+      markerSid,
+    );
     const existingSid = headerSessionIndex.get(markerKey);
     if (existingSid) {
       return { sessionID: existingSid, isNew: false, tier: 2.5 as const };
@@ -4253,12 +4393,17 @@ async function identifySession(
         state.headerSessionId = result.promoted.value;
         state.headerName = result.promoted.name;
         // Index the promoted header for future Tier 2 lookups.
-        const indexKey = `${result.promoted.name}:${result.promoted.value}`;
+        const indexKey = sessionIndexKey(
+          credentialFingerprint,
+          result.promoted.name,
+          result.promoted.value,
+        );
         headerSessionIndex.set(indexKey, bestMatch.sid);
         // Persist immediately — rare event, critical for post-restart correlation
         saveSessionTracking(bestMatch.sid, {
           headerSessionId: result.promoted.value,
           headerName: result.promoted.name,
+          credentialFingerprint,
         });
         log.info(
           `session ${bestMatch.sid.slice(0, 16)}: promoted header ${result.promoted.name} for Tier 2 identification`,
@@ -4321,6 +4466,7 @@ async function forwardToUpstream(
   config: GatewayConfig,
   interceptor?: UpstreamInterceptor,
   cache?: AnthropicCacheOptions,
+  signal?: AbortSignal,
 ): Promise<UpstreamResult> {
   let url: string;
   let headers: Record<string, string>;
@@ -4726,6 +4872,7 @@ async function forwardToUpstream(
           method: "POST",
           headers,
           body: upstreamBody,
+          signal,
         }),
     );
     return { response, serializedBody, effectiveProtocol };
@@ -4735,6 +4882,7 @@ async function forwardToUpstream(
     method: "POST",
     headers,
     body: upstreamBody,
+    signal,
   });
   return { response, serializedBody, effectiveProtocol };
 }
@@ -4788,6 +4936,8 @@ function buildStreamingResponse(
   upstreamResponse: Response,
   onComplete: (response: GatewayResponse) => void,
   recallContext?: {
+    /** Original client transcript used for replay-anchor provenance. */
+    clientMessages: GatewayMessage[];
     modifiedReq: GatewayRequest;
     config: GatewayConfig;
     sessionState: SessionState;
@@ -4841,6 +4991,7 @@ function buildStreamingResponse(
     recallAccum ??
     createStreamAccumulator({ scaleClientUsage: true, maxReportedUsage });
   const encoder = new TextEncoder();
+  const recallVisibleContent: GatewayContentBlock[] = [];
   // Start of the client-facing stream — used to flag aborts that happen after
   // a long in-flight time (a host-pressure signal; see the abort catch below).
   const streamStartMs = Date.now();
@@ -4900,7 +5051,6 @@ function buildStreamingResponse(
         if (keepaliveTimer) clearTimeout(keepaliveTimer);
         keepaliveTimer = null;
       };
-
       try {
         // Parse and forward upstream SSE events
         if (!upstreamResponse.body) {
@@ -5039,14 +5189,51 @@ function buildStreamingResponse(
             const scope = input.scope ?? "all";
 
             // Store recall result for marker round-trip expansion
-            const storeKey = recallStoreKey(input.query, scope, input.id);
+            const anchorId = crypto.randomUUID();
+            const storeKey = `anchor:${anchorId}`;
             const position = currentResp.content.indexOf(recallBlock);
-            recallContext.sessionState.recallStore.set(storeKey, {
-              toolUseId: recallBlock.id,
-              input,
-              position,
-              result,
-            });
+            const markerPrefix = recallContext.clientSpeaksAnthropic
+              ? currentResp.content.filter(
+                  (block) =>
+                    block.type !== "tool_use" || block.id !== recallBlock.id,
+                )
+              : currentResp.content.slice(0, position);
+            const anchorContextId = recallAnchorContext(
+              recallContext.clientMessages,
+              recallContext.clientMessages.length,
+              [...recallVisibleContent, ...markerPrefix],
+            );
+            const companionToolUses = currentResp.content.flatMap(
+              (block, index) => {
+                if (block.type !== "tool_use" || block.id === recallBlock.id) {
+                  return [];
+                }
+                return [
+                  {
+                    id: block.id,
+                    name: block.name,
+                    input: block.input,
+                    side:
+                      recallContext.clientSpeaksAnthropic || index < position
+                        ? ("before" as const)
+                        : ("after" as const),
+                  },
+                ];
+              },
+            );
+            addRecallStoreEntry(
+              recallContext.sessionState.recallStore,
+              storeKey,
+              {
+                toolUseId: recallBlock.id,
+                anchorId,
+                anchorContextId,
+                input,
+                position,
+                result,
+                ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
+              },
+            );
             // Persist the store (v46) so the marker still expands byte-identically
             // after a gateway restart instead of leaking raw marker text upstream.
             saveSessionTracking(recallContext.sessionState.sessionID, {
@@ -5068,7 +5255,26 @@ function buildStreamingResponse(
             // across turns (the client's persisted transcript has SOMETHING for
             // expandRecallMarkers to find next turn, fixing the silent-recall-loss bug
             // that would result from dropping the marker entirely for these clients).
-            const markerText = buildRecallMarker(input.query, scope, input.id);
+            const markerText = buildAnchoredRecallMarker(
+              input.query,
+              scope,
+              input.id,
+              anchorId,
+            );
+            if (recallContext.clientSpeaksAnthropic) {
+              recallVisibleContent.push(...markerPrefix, {
+                type: "text",
+                text: markerText,
+              });
+            } else {
+              recallVisibleContent.push(
+                ...currentResp.content.map((block) =>
+                  block.type === "tool_use" && block.id === recallBlock.id
+                    ? { type: "text" as const, text: markerText }
+                    : block,
+                ),
+              );
+            }
             let syntheticMarker: string;
             if (recallContext.clientSpeaksAnthropic) {
               const syntheticMessageId = `lore_marker_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -5157,7 +5363,10 @@ function buildStreamingResponse(
                 safeEnqueue(encoder.encode(heldBack));
               }
 
-              const markerResp = replaceRecallWithMarker(currentResp);
+              const markerResp = replaceRecallWithMarker(
+                currentResp,
+                new Map([[recallBlock.id, markerText]]),
+              );
               clearKeepalive();
               onComplete(markerResp);
               safeClose();
@@ -5177,11 +5386,17 @@ function buildStreamingResponse(
             // recall result makes the prefix diverge from the next real turn,
             // so the cache write would be wasted money.
             const streamingRecallCtx: RecallFollowUpCtx = {
-              forward: (r) =>
-                forwardToUpstream(r, recallContext.config, undefined, {
-                  ...recallContext.cacheOptions,
-                  cacheConversation: false,
-                }),
+              forward: (r, signal) =>
+                forwardToUpstream(
+                  r,
+                  recallContext.config,
+                  undefined,
+                  {
+                    ...recallContext.cacheOptions,
+                    cacheConversation: false,
+                  },
+                  signal,
+                ),
               // JSON parsing is unused on the streaming path (assertSSEResponse
               // guarantees an SSE body); provide a guard that throws if reached.
               parseJSON: () => {
@@ -5215,7 +5430,10 @@ function buildStreamingResponse(
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
-              const markerResp = replaceRecallWithMarker(currentResp);
+              const markerResp = replaceRecallWithMarker(
+                currentResp,
+                new Map([[recallBlock.id, markerText]]),
+              );
               clearKeepalive();
               onComplete(markerResp);
               safeClose();
@@ -5247,7 +5465,10 @@ function buildStreamingResponse(
               if (heldBack) {
                 safeEnqueue(encoder.encode(heldBack));
               }
-              const markerResp = replaceRecallWithMarker(currentResp);
+              const markerResp = replaceRecallWithMarker(
+                currentResp,
+                new Map([[recallBlock.id, markerText]]),
+              );
               clearKeepalive();
               onComplete(markerResp);
               safeClose();
@@ -5345,6 +5566,7 @@ function buildStreamingResponse(
 
             const markerResp = replaceRecallWithMarker(
               contAccum.hasRecall() ? contAccum.getResponse() : currentResp,
+              new Map([[recallBlock.id, markerText]]),
             );
             clearKeepalive();
             onComplete(markerResp);
@@ -5437,59 +5659,761 @@ export function streamResponsesRecallAware(
   opts: {
     onComplete: (response: GatewayResponse) => void;
     sessionID?: string;
+    maxRecallDepth?: number;
+    maxDeferredBytes?: number;
+    maxHiddenRecallBytes?: number;
+    maxRetainedStateBytes?: number;
+    maxStreamBytes?: number;
+    maxSSEFrames?: number;
     /**
      * Called when a `recall` function_call is fully parsed. Runs the recall
      * (LTM search + optional LLM result) and returns the pieces needed to
      * deliver the marker + continuation to the client:
-     *  - `markerText`: the `buildRecallMarker(...)` text emission.
      *  - `resultText`: the raw recall result string (for the follow-up).
-     * Return null to abort (emits a marker-only response).
      */
     onRecall: (input: {
       query: string;
       scope?: string;
       id?: string;
+      outputIndex: number;
       toolUseId: string;
+      /** Position in the normalized GatewayResponse content array. */
+      contentPosition: number;
       /** The accumulated response INCLUDING the recall tool_use, so the caller
        *  can build the follow-up request from the same accumulation the
        *  streamer uses. */
       acc: GatewayResponse;
+      signal: AbortSignal;
     }) => Promise<{
-      markerText: string;
+      anchorText: string;
       resultText: string;
-    } | null>;
+      commit?: () => void;
+      rollback?: () => void;
+    }>;
     /** Streaming follow-up stage: build + forward + assert-SSE + reader. */
     runFollowUp: (ctx: {
-      markerText: string;
+      anchorText: string;
       resultText: string;
       acc: GatewayResponse;
+      toolUseId: string;
+      contentPosition: number;
+      signal: AbortSignal;
     }) => Promise<{
       reader: ReadableStreamDefaultReader<Uint8Array>;
     }>;
   },
 ): Response {
   const state = makeResponsesAccState();
+  const syntheticIdentities = new Set<string>();
+  const responseLifecycles = new WeakMap<
+    ResponsesAccState,
+    { created: boolean; terminal: boolean }
+  >();
+  const responseLifecycleFor = (
+    acc: ResponsesAccState,
+  ): { created: boolean; terminal: boolean } => {
+    let lifecycle = responseLifecycles.get(acc);
+    if (!lifecycle) {
+      lifecycle = { created: false, terminal: false };
+      responseLifecycles.set(acc, lifecycle);
+    }
+    return lifecycle;
+  };
+  type OutputLifecycle = {
+    argumentsDone: boolean;
+    outputDone: boolean;
+    content: Map<
+      number,
+      {
+        kind?: string;
+        valueSeen: boolean;
+        valueDone: boolean;
+        finalValue?: string;
+        partFinalValue?: string;
+        partAdded: boolean;
+        partDone: boolean;
+      }
+    >;
+  };
+  const outputLifecycles = new WeakMap<
+    ResponsesAccState,
+    Map<number, OutputLifecycle>
+  >();
+  const lifecyclesFor = (
+    acc: ResponsesAccState,
+  ): Map<number, OutputLifecycle> => {
+    let lifecycles = outputLifecycles.get(acc);
+    if (!lifecycles) {
+      lifecycles = new Map();
+      outputLifecycles.set(acc, lifecycles);
+    }
+    return lifecycles;
+  };
+  let transactionBaseline: ResponsesAccState | undefined;
+  const transactionRollbacks: Array<() => void> = [];
+  const restoreTransactionBaseline = (): void => {
+    if (!transactionBaseline) return;
+    state.id = transactionBaseline.id;
+    state.model = transactionBaseline.model;
+    state.stopReason = transactionBaseline.stopReason;
+    state.terminalEvent = transactionBaseline.terminalEvent;
+    state.usage = { ...transactionBaseline.usage };
+    state.items = new Map(transactionBaseline.items);
+    state.rawItems = new Map(transactionBaseline.rawItems);
+    transactionBaseline = undefined;
+  };
+  const rollbackTransaction = (): void => {
+    restoreTransactionBaseline();
+    for (const rollback of transactionRollbacks.splice(0).reverse()) {
+      try {
+        rollback();
+      } catch (err) {
+        log.error("recall transaction rollback failed:", err);
+      }
+    }
+  };
   const encoder = new TextEncoder();
   const sessionID = opts.sessionID;
+  const maxRecallDepth = opts.maxRecallDepth ?? MAX_RECALL_DEPTH;
+  const maxDeferredBytes = opts.maxDeferredBytes ?? 1024 * 1024;
+  const maxHiddenRecallBytes = opts.maxHiddenRecallBytes ?? maxDeferredBytes;
+  const maxRetainedStateBytes = opts.maxRetainedStateBytes ?? 16 * 1024 * 1024;
+  const maxStreamBytes = opts.maxStreamBytes ?? 64 * 1024 * 1024;
+  let retainedStateBytes = 0;
+  let streamBytes = 0;
+  let hiddenRecallBytes = 0;
+  const maxSSEFrames = opts.maxSSEFrames ?? 100_000;
+  const frameCounter = { count: 0 };
+  const sseInactivityMs = 120_000;
+
+  const parseRecallArguments = (
+    value: unknown,
+  ): { query: string; scope?: string; id?: string } => {
+    if (typeof value !== "string") {
+      throw new Error(
+        "invalid recall function arguments: expected JSON string",
+      );
+    }
+    let input: unknown;
+    try {
+      input = JSON.parse(value);
+    } catch {
+      throw new Error("invalid recall function arguments: malformed JSON");
+    }
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error("invalid recall function arguments: expected object");
+    }
+    const record = input as Record<string, unknown>;
+    const allowed = new Set(["query", "scope", "id"]);
+    const unknown = Object.keys(record).find((key) => !allowed.has(key));
+    if (unknown) {
+      throw new Error(
+        `invalid recall function arguments: unknown property "${unknown}"`,
+      );
+    }
+    if (record.query !== undefined && typeof record.query !== "string") {
+      throw new Error(
+        "invalid recall function arguments: query must be a string",
+      );
+    }
+    if (
+      record.id !== undefined &&
+      record.id !== null &&
+      typeof record.id !== "string"
+    ) {
+      throw new Error("invalid recall function arguments: id must be a string");
+    }
+    if (
+      record.scope !== undefined &&
+      record.scope !== null &&
+      typeof record.scope !== "string"
+    ) {
+      throw new Error(
+        "invalid recall function arguments: scope must be a string",
+      );
+    }
+    const query = record.query ?? "";
+    const id = record.id || undefined;
+    if (!query.trim() && !id) {
+      throw new Error(
+        "invalid recall function arguments: query or id is required",
+      );
+    }
+    const scope = record.scope || undefined;
+    if (
+      scope &&
+      scope !== "all" &&
+      scope !== "session" &&
+      scope !== "project" &&
+      scope !== "knowledge"
+    ) {
+      throw new Error("invalid recall function arguments: unsupported scope");
+    }
+    return { query, ...(scope ? { scope } : {}), ...(id ? { id } : {}) };
+  };
+
+  const mergeUsage = (target: GatewayUsage, source: GatewayUsage): void => {
+    target.inputTokens += source.inputTokens;
+    target.outputTokens += source.outputTokens;
+    if (source.cacheReadInputTokens != null) {
+      target.cacheReadInputTokens =
+        (target.cacheReadInputTokens ?? 0) + source.cacheReadInputTokens;
+    }
+    if (source.cacheCreationInputTokens != null) {
+      target.cacheCreationInputTokens =
+        (target.cacheCreationInputTokens ?? 0) +
+        source.cacheCreationInputTokens;
+    }
+  };
 
   let cancelled = false;
+  let terminalDelivered = false;
+  const abortController = new AbortController();
+  const signal = abortController.signal;
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  const outputIndexForEvent = (
+    event: string,
+    parsed: Record<string, unknown>,
+    state: ResponsesAccState,
+  ): number | undefined => {
+    const requiresOutputIndex =
+      /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_summary|refusal)/.test(
+        event,
+      );
+    const hasOutputIndex = Object.hasOwn(parsed, "output_index");
+    if (!requiresOutputIndex && !hasOutputIndex) return undefined;
+    const index = parsed.output_index;
+    if (!Number.isSafeInteger(index) || (index as number) < 0) {
+      throw new Error(`invalid Responses output_index for ${event}`);
+    }
+    const outputIndex = index as number;
+    const lifecycles = lifecyclesFor(state);
+    const lifecycle = lifecycles.get(outputIndex);
+    if (lifecycle?.outputDone && event !== "response.output_item.added") {
+      throw new Error(
+        `Responses event after output_item.done for index ${outputIndex}`,
+      );
+    }
+    if (event === "response.output_item.added") {
+      if (state.rawItems.has(outputIndex)) {
+        throw new Error(`duplicate Responses output_index ${outputIndex}`);
+      }
+      const item = parsed.item as Record<string, unknown> | undefined;
+      if (
+        !item ||
+        typeof item.type !== "string" ||
+        typeof item.id !== "string" ||
+        item.id.length === 0 ||
+        (item.type === "function_call" &&
+          (typeof item.call_id !== "string" ||
+            item.call_id.length === 0 ||
+            typeof item.name !== "string" ||
+            item.name.length === 0))
+      ) {
+        throw new Error(
+          `incomplete Responses output_item.added identity for index ${outputIndex}`,
+        );
+      }
+      if (item.type === "function_call" && item.id === item.call_id) {
+        throw new Error("duplicate Responses identity within output item");
+      }
+      const identities = [item.id, item.call_id].filter(
+        (value): value is string => typeof value === "string",
+      );
+      if (identities.some((identity) => syntheticIdentities.has(identity))) {
+        throw new Error("duplicate synthetic Responses item identity");
+      }
+      for (const [existingIndex, existing] of state.rawItems) {
+        const newIdentities = [item.id, item.call_id].filter(
+          (value): value is string => typeof value === "string",
+        );
+        const existingIdentities = new Set(
+          [existing.id, existing.call_id].filter(
+            (value): value is string => typeof value === "string",
+          ),
+        );
+        if (
+          existingIndex !== outputIndex &&
+          newIdentities.some((identity) => existingIdentities.has(identity))
+        ) {
+          throw new Error("duplicate Responses item identity");
+        }
+      }
+      lifecycles.set(outputIndex, {
+        argumentsDone: item.type !== "function_call",
+        outputDone: false,
+        content: new Map(),
+      });
+    } else if (!state.rawItems.has(outputIndex)) {
+      throw new Error(
+        `Responses ${event} arrived before output_item.added for index ${outputIndex}`,
+      );
+    } else {
+      const declared = state.rawItems.get(outputIndex);
+      if (!lifecycle) {
+        throw new Error(`missing Responses lifecycle for index ${outputIndex}`);
+      }
+      const item = parsed.item as Record<string, unknown> | undefined;
+      if (
+        event === "response.output_item.done" &&
+        (!item ||
+          item.type !== declared?.type ||
+          item.id !== declared?.id ||
+          item.call_id !== declared?.call_id ||
+          item.name !== declared?.name)
+      ) {
+        throw new Error(
+          `Responses output_item.done changed item identity for index ${outputIndex}`,
+        );
+      }
+      const declaredType = declared?.type;
+      const itemId = parsed.item_id;
+      if (
+        event !== "response.output_item.done" &&
+        (typeof itemId !== "string" || itemId !== declared?.id)
+      ) {
+        throw new Error(
+          `Responses ${event} changed item_id for index ${outputIndex}`,
+        );
+      }
+      if (
+        (event.startsWith("response.output_text") ||
+          event.startsWith("response.content_part") ||
+          event.startsWith("response.refusal")) &&
+        (!Number.isSafeInteger(parsed.content_index) ||
+          (parsed.content_index as number) < 0)
+      ) {
+        throw new Error(`invalid Responses content_index for ${event}`);
+      }
+      if (
+        event.startsWith("response.output_text") ||
+        event.startsWith("response.content_part") ||
+        event.startsWith("response.refusal")
+      ) {
+        const contentIndex = parsed.content_index as number;
+        const contentState = lifecycle.content.get(contentIndex) ?? {
+          valueSeen: false,
+          valueDone: false,
+          partAdded: false,
+          partDone: false,
+        };
+        const expectedKind = event.startsWith("response.output_text")
+          ? "output_text"
+          : event.startsWith("response.refusal")
+            ? "refusal"
+            : undefined;
+        const part = parsed.part as Record<string, unknown> | undefined;
+        const partKind =
+          event.startsWith("response.content_part") &&
+          typeof part?.type === "string"
+            ? part.type
+            : undefined;
+        const kind = expectedKind ?? partKind;
+        if (!kind || (contentState.kind && contentState.kind !== kind)) {
+          throw new Error(
+            `Responses ${event} changed content type for index ${outputIndex}:${contentIndex}`,
+          );
+        }
+        contentState.kind = kind;
+        if (event === "response.content_part.added") {
+          if (contentState.partAdded) {
+            throw new Error(
+              `duplicate Responses content_part.added for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          contentState.partAdded = true;
+        } else if (event === "response.content_part.done") {
+          if (!contentState.partAdded || contentState.partDone) {
+            throw new Error(
+              `invalid Responses content_part.done for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          contentState.partDone = true;
+          const partValue = kind === "output_text" ? part?.text : part?.refusal;
+          if (typeof partValue !== "string") {
+            throw new Error(`invalid Responses ${event} final value`);
+          }
+          contentState.partFinalValue = partValue;
+          if (
+            contentState.finalValue !== undefined &&
+            contentState.finalValue !== partValue
+          ) {
+            throw new Error(
+              `Responses content_part.done changed content for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+        } else {
+          if (contentState.valueDone) {
+            throw new Error(
+              `Responses content changed after completion for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          contentState.valueSeen = true;
+          if (event.endsWith(".done")) {
+            const finalValue =
+              kind === "output_text" ? parsed.text : parsed.refusal;
+            if (typeof finalValue !== "string") {
+              throw new Error(`invalid Responses ${event} final value`);
+            }
+            contentState.valueDone = true;
+            contentState.finalValue = finalValue;
+            if (
+              contentState.partFinalValue !== undefined &&
+              contentState.partFinalValue !== finalValue
+            ) {
+              throw new Error(
+                `Responses ${event} changed content part for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+          }
+        }
+        lifecycle.content.set(contentIndex, contentState);
+      }
+      if (
+        event.startsWith("response.reasoning_summary") &&
+        (!Number.isSafeInteger(parsed.summary_index) ||
+          (parsed.summary_index as number) < 0)
+      ) {
+        throw new Error(`invalid Responses summary_index for ${event}`);
+      }
+      if (
+        ((event.startsWith("response.output_text") ||
+          event.startsWith("response.content_part") ||
+          event.startsWith("response.refusal")) &&
+          declaredType !== "message") ||
+        (event.startsWith("response.reasoning_summary") &&
+          declaredType !== "reasoning") ||
+        (event.startsWith("response.function_call_arguments") &&
+          declaredType !== "function_call")
+      ) {
+        throw new Error(
+          `Responses ${event} does not match item type ${String(declaredType)}`,
+        );
+      }
+      if (event === "response.function_call_arguments.done") {
+        if (lifecycle.argumentsDone) {
+          throw new Error(
+            `duplicate Responses function arguments completion for index ${outputIndex}`,
+          );
+        }
+        lifecycle.argumentsDone = true;
+      } else if (
+        event.startsWith("response.function_call_arguments") &&
+        lifecycle.argumentsDone
+      ) {
+        throw new Error(
+          `Responses function arguments changed after completion for index ${outputIndex}`,
+        );
+      }
+      if (event === "response.output_item.done") {
+        if (declaredType === "function_call" && !lifecycle.argumentsDone) {
+          throw new Error(
+            `Responses function call completed before arguments for index ${outputIndex}`,
+          );
+        }
+        if (declaredType === "function_call") {
+          const normalized = state.items.get(outputIndex);
+          if (
+            normalized?.type !== "tool_use" ||
+            typeof item?.arguments !== "string" ||
+            item.arguments !== normalized.args
+          ) {
+            throw new Error(
+              `Responses output_item.done changed arguments for index ${outputIndex}`,
+            );
+          }
+        }
+        if (declaredType === "message") {
+          const finalContent = item?.content;
+          if (!Array.isArray(finalContent)) {
+            throw new Error(
+              `Responses message completed without content for index ${outputIndex}`,
+            );
+          }
+          for (const [contentIndex, contentState] of lifecycle.content) {
+            const finalPart = finalContent[contentIndex] as
+              | Record<string, unknown>
+              | undefined;
+            if (!finalPart || finalPart.type !== contentState.kind) {
+              throw new Error(
+                `Responses output_item.done changed content type for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            if (contentState.valueSeen && !contentState.valueDone) {
+              throw new Error(
+                `Responses content ended before completion for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            if (contentState.partAdded && !contentState.partDone) {
+              throw new Error(
+                `Responses content part ended before completion for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            const finalValue =
+              contentState.kind === "output_text"
+                ? finalPart.text
+                : finalPart.refusal;
+            if (
+              contentState.finalValue !== undefined &&
+              finalValue !== contentState.finalValue
+            ) {
+              throw new Error(
+                `Responses output_item.done changed content for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+          }
+        }
+        lifecycle.outputDone = true;
+      }
+    }
+    return outputIndex;
+  };
+  const validateResponseLifecycle = (
+    acc: ResponsesAccState,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): void => {
+    const lifecycle = responseLifecycleFor(acc);
+    if (lifecycle.terminal) {
+      throw new Error(`Responses event after terminal: ${event}`);
+    }
+    if (event === "response.created") {
+      if (lifecycle.created) throw new Error("duplicate response.created");
+      const response = parsed.response as Record<string, unknown> | undefined;
+      if (!response || typeof response.id !== "string" || !response.id) {
+        throw new Error("response.created missing response identity");
+      }
+      lifecycle.created = true;
+      return;
+    }
+    if (!lifecycle.created && event.startsWith("response.")) {
+      throw new Error(`Responses event before response.created: ${event}`);
+    }
+    if (event === "response.in_progress") {
+      const response = parsed.response as Record<string, unknown> | undefined;
+      if (acc.id && response?.id !== undefined && response.id !== acc.id) {
+        throw new Error(
+          "Responses in-progress event changed response identity",
+        );
+      }
+    }
+    if (
+      event === "response.completed" ||
+      event === "response.done" ||
+      event === "response.incomplete" ||
+      event === "response.failed"
+    ) {
+      const response = parsed.response as Record<string, unknown> | undefined;
+      if (acc.id && response?.id !== acc.id) {
+        throw new Error("Responses terminal event changed response identity");
+      }
+      lifecycle.terminal = true;
+    }
+  };
+  const assertOutputLifecyclesComplete = (acc: ResponsesAccState): void => {
+    const lifecycles = lifecyclesFor(acc);
+    for (const index of acc.rawItems.keys()) {
+      if (!lifecycles.get(index)?.outputDone) {
+        throw new Error(
+          `Responses stream ended before output_item.done for index ${index}`,
+        );
+      }
+    }
+  };
+  const assertTerminalOutputMatches = (
+    acc: ResponsesAccState,
+    parsed: Record<string, unknown>,
+  ): void => {
+    const response = parsed.response as Record<string, unknown> | undefined;
+    if (!response) throw new Error("Responses terminal event missing response");
+    if (acc.id && response.id !== acc.id) {
+      throw new Error("Responses terminal event changed response identity");
+    }
+    if (response.output === undefined) return;
+    if (!Array.isArray(response.output)) {
+      throw new Error("Responses terminal output must be an array");
+    }
+    const actualOutput = response.output.filter(
+      (item): item is Record<string, unknown> =>
+        !!item &&
+        typeof item === "object" &&
+        (item as Record<string, unknown>).type !== "item_reference",
+    );
+    const expected = [...acc.rawItems.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, item]) => item)
+      .filter((item) => item.type !== "item_reference");
+    if (actualOutput.length !== expected.length) {
+      throw new Error("Responses terminal output changed item count");
+    }
+    for (let i = 0; i < expected.length; i++) {
+      const actual = actualOutput[i];
+      const streamed = expected[i];
+      if (
+        !actual ||
+        actual.type !== streamed.type ||
+        actual.id !== streamed.id ||
+        actual.call_id !== streamed.call_id ||
+        (streamed.type === "message" &&
+          !isDeepStrictEqual(actual.content, streamed.content)) ||
+        (streamed.type === "function_call" &&
+          actual.arguments !== streamed.arguments)
+      ) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+    }
+  };
+  const reserveSyntheticIdentity = (
+    syntheticId: string,
+    states: readonly ResponsesAccState[],
+  ): void => {
+    if (
+      syntheticIdentities.has(syntheticId) ||
+      states.some(
+        (acc) =>
+          [...acc.items.values()].some(
+            (item) =>
+              item.id === syntheticId ||
+              (item.type === "tool_use" && item.callId === syntheticId),
+          ) ||
+          [...acc.rawItems.values()].some(
+            (item) => item.id === syntheticId || item.call_id === syntheticId,
+          ),
+      )
+    ) {
+      throw new Error("duplicate synthetic Responses item identity");
+    }
+    syntheticIdentities.add(syntheticId);
+  };
 
   // --- Keepalive (same as streamResponsesPassthrough) ---
   const KEEPALIVE_INACTIVITY_MS = 30_000;
   const keepaliveComment = encoder.encode(`: keepalive\n\n`);
   let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
   let completed = false;
-  let terminalSeen = false;
+  let completionAttempted = false;
+  let nextSequenceNumber = 0;
 
-  const finish = (resp: GatewayResponse): void => {
-    if (completed) return;
-    completed = true;
+  const sequenceChunk = (chunk: Uint8Array): Uint8Array => {
+    const text = new TextDecoder().decode(chunk);
+    if (!text.startsWith("event: ")) return chunk;
+    let output = "";
+    for (const frame of text.split("\n\n")) {
+      if (!frame) continue;
+      const lines = frame.split("\n");
+      const eventLine = lines.find((line) => line.startsWith("event: "));
+      const dataLines = lines.filter((line) => line.startsWith("data: "));
+      if (!eventLine || dataLines.length === 0) {
+        output += `${frame}\n\n`;
+        continue;
+      }
+      const event = eventLine.slice("event: ".length);
+      const data = dataLines
+        .map((line) => line.slice("data: ".length))
+        .join("\n");
+      try {
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        output += formatResponsesEvent(
+          event,
+          JSON.stringify({ ...parsed, sequence_number: nextSequenceNumber++ }),
+        );
+      } catch {
+        output += `${frame}\n\n`;
+      }
+    }
+    return encoder.encode(output);
+  };
+
+  const finish = (resp: GatewayResponse): boolean => {
+    if (completionAttempted) return completed;
+    completionAttempted = true;
     try {
       opts.onComplete(resp);
+      completed = true;
+      return true;
     } catch (err) {
       log.error("openai-responses recall-aware onComplete error:", err);
+      return false;
     }
+  };
+  const settleRecall = async (
+    input: Parameters<typeof opts.onRecall>[0],
+  ): ReturnType<typeof opts.onRecall> => {
+    const operation = opts.onRecall(input);
+    const onLateResult = async (): Promise<void> => {
+      try {
+        const late = await operation;
+        late.rollback?.();
+      } catch {
+        // The aborted request no longer observes the callback result.
+      }
+    };
+    if (signal.aborted) {
+      void onLateResult();
+      throw signal.reason;
+    }
+    let rejectAbort: ((reason: unknown) => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+      rejectAbort = reject;
+    });
+    const onAbort = (): void => rejectAbort?.(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    let result: Awaited<ReturnType<typeof opts.onRecall>>;
+    try {
+      result = await Promise.race([operation, abort]);
+    } catch (err) {
+      if (signal.aborted) void onLateResult();
+      throw err;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+    if (signal.aborted) {
+      try {
+        result.rollback?.();
+      } catch (err) {
+        log.error("late recall rollback failed:", err);
+      }
+      throw signal.reason;
+    }
+    return result;
+  };
+  const settleFollowUp = async (
+    input: Parameters<typeof opts.runFollowUp>[0],
+  ): ReturnType<typeof opts.runFollowUp> => {
+    const operation = opts.runFollowUp(input);
+    const cancelLateReader = async (): Promise<void> => {
+      try {
+        const late = await operation;
+        await late.reader.cancel();
+      } catch {
+        // The aborted request no longer observes the callback result.
+      }
+    };
+    if (signal.aborted) {
+      void cancelLateReader();
+      throw signal.reason;
+    }
+    let rejectAbort: ((reason: unknown) => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+      rejectAbort = reject;
+    });
+    const onAbort = (): void => rejectAbort?.(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    let result: Awaited<ReturnType<typeof opts.runFollowUp>>;
+    try {
+      result = await Promise.race([operation, abort]);
+    } catch (err) {
+      if (signal.aborted) void cancelLateReader();
+      throw err;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+    if (signal.aborted) {
+      void result.reader.cancel().catch(() => {});
+      throw signal.reason;
+    }
+    return result;
   };
 
   /**
@@ -5578,44 +6502,33 @@ export function streamResponsesRecallAware(
    * Rebuild the terminal `response.completed` event from the given completion
    * state (used instead of the suppressed original when recall was detected).
    */
-  function buildCompleted(res: GatewayResponse): string {
-    const finalOutput: Array<Record<string, unknown>> = [];
-    for (const block of res.content) {
-      if (block.type === "text") {
-        finalOutput.push({
-          type: "message",
-          id: `msg_${state.id || "resp"}_${finalOutput.length}`,
-          role: "assistant",
-          status: "completed",
-          content: [{ type: "output_text", text: block.text, annotations: [] }],
-        });
-      } else if (block.type === "tool_use") {
-        finalOutput.push({
-          type: "function_call",
-          id: `fc_${block.id}`,
-          call_id: block.id,
-          name: block.name,
-          arguments: JSON.stringify(block.input),
-          status: "completed",
-        });
-      }
-    }
+  function buildTerminal(res: GatewayResponse): string {
+    const finalOutput = buildOutputItems();
     const finalStatus = mapStatusFromStopReason(res.stopReason);
     const ru = res.usage ?? ZERO_USAGE;
+    const inclusiveInputTokens =
+      ru.inputTokens +
+      (ru.cacheReadInputTokens ?? 0) +
+      (ru.cacheCreationInputTokens ?? 0);
     const usageData: Record<string, unknown> = {
-      input_tokens: ru.inputTokens,
+      input_tokens: inclusiveInputTokens,
       output_tokens: ru.outputTokens,
-      total_tokens: ru.inputTokens + ru.outputTokens,
+      total_tokens: inclusiveInputTokens + ru.outputTokens,
     };
-    if (ru.cacheReadInputTokens != null) {
-      usageData.prompt_tokens_details = {
-        cached_tokens: ru.cacheReadInputTokens,
+    if (
+      ru.cacheReadInputTokens != null ||
+      ru.cacheCreationInputTokens != null
+    ) {
+      usageData.input_tokens_details = {
+        cached_tokens: ru.cacheReadInputTokens ?? 0,
+        cache_write_tokens: ru.cacheCreationInputTokens ?? 0,
       };
     }
+    const terminalEvent = state.terminalEvent ?? "response.completed";
     return formatResponsesEvent(
-      "response.completed",
+      terminalEvent,
       JSON.stringify({
-        type: "response.completed",
+        type: terminalEvent,
         response: {
           id: state.id,
           object: "response",
@@ -5629,419 +6542,962 @@ export function streamResponsesRecallAware(
     );
   }
 
+  function buildOutputItems(
+    hiddenIndices: ReadonlySet<number> = new Set(),
+  ): Array<Record<string, unknown>> {
+    const finalOutput: Array<Record<string, unknown>> = [];
+    const sortedIndices = [
+      ...new Set([...state.rawItems.keys(), ...state.items.keys()]),
+    ].sort((a, b) => a - b);
+    for (const index of sortedIndices) {
+      if (hiddenIndices.has(index)) continue;
+      const item = state.items.get(index);
+      if (!item) {
+        const rawItem = state.rawItems.get(index);
+        if (rawItem && rawItem.type !== "item_reference") {
+          finalOutput.push(rawItem);
+        }
+        continue;
+      }
+      if (item.type === "text") {
+        if (item.content) {
+          const raw = state.rawItems.get(index);
+          finalOutput.push({
+            ...(raw ?? {
+              type: "message",
+              id: item.id,
+              role: "assistant",
+              status: "completed",
+            }),
+            content: item.content,
+          });
+          continue;
+        }
+        if (item.refusal !== undefined) {
+          finalOutput.push({
+            type: "message",
+            id: item.id,
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "refusal", refusal: item.refusal }],
+          });
+          continue;
+        }
+        finalOutput.push({
+          type: "message",
+          id: item.id,
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: item.text, annotations: [] }],
+        });
+      } else {
+        finalOutput.push({
+          type: "function_call",
+          id: item.id,
+          call_id: item.callId,
+          name: item.name,
+          arguments: item.args,
+          status: "completed",
+        });
+      }
+    }
+    return finalOutput;
+  }
+
+  let resumeDemand: (() => void) | undefined;
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const safeEnqueue = (chunk: Uint8Array): boolean => {
-        if (cancelled) return false;
-        try {
-          controller.enqueue(chunk);
-          return true;
-        } catch {
-          cancelled = true;
-          return false;
-        }
-      };
-      const safeClose = (): void => {
-        if (cancelled) return;
-        try {
-          controller.close();
-        } catch {
-          // Already closed/cancelled
-        }
-      };
-
-      const resetKeepalive = (): void => {
-        if (keepaliveTimer) clearTimeout(keepaliveTimer);
-        keepaliveTimer = setTimeout(function tick() {
-          if (cancelled) return;
-          safeEnqueue(keepaliveComment);
-          keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
-        }, KEEPALIVE_INACTIVITY_MS);
-      };
-      const clearKeepalive = (): void => {
-        if (keepaliveTimer) clearTimeout(keepaliveTimer);
-        keepaliveTimer = null;
-      };
-
-      try {
-        if (!upstreamResponse.body) {
-          throw new Error("Upstream response has no body");
-        }
-        const reader = upstreamResponse.body.getReader();
-        activeReader = reader;
-
-        // --- Recall interception state ---
-        // `output_index` values whose item is a suppressed `recall` function_call.
-        const recallIndices = new Set<number>();
-        // Set of recall indices whose full args have been collected (so we run
-        // the recall exactly once per recall call).
-        const recallExecuted = new Set<number>();
-        const recallToolUseIds = new Map<number, string>();
-        // Ordered list of parsed recall invocations: { outputIndex, block }.
-        const pendingRecalls: Array<{
-          outputIndex: number;
-          toolUseId: string;
-          query: string;
-          scope?: string;
-          id?: string;
-        }> = [];
-        // Whether any NON-recall function_call appeared (mixed-tools case).
-        let otherToolSeen = false;
-
-        resetKeepalive();
-        for await (const { event, data } of parseSSEStream(reader)) {
-          resetKeepalive(); // upstream alive — reset inactivity timer
-
-          if (!data || data === "[DONE]") continue;
-
-          let parsed: Record<string, unknown>;
+    start(controller) {
+      void (async () => {
+        const waitForDemand = async (): Promise<void> => {
+          while (!cancelled && (controller.desiredSize ?? 1) <= 0) {
+            await new Promise<void>((resolve) => {
+              resumeDemand = resolve;
+            });
+          }
+        };
+        const safeEnqueue = async (chunk: Uint8Array): Promise<boolean> => {
+          if (cancelled) return false;
+          await waitForDemand();
+          if (cancelled) return false;
           try {
-            parsed = JSON.parse(data) as Record<string, unknown>;
+            controller.enqueue(sequenceChunk(chunk));
+            return true;
           } catch {
-            // Non-JSON (keepalive etc.) — forward as-is
-            if (event !== "message") {
-              safeEnqueue(encoder.encode(formatResponsesEvent(event, data)));
-            }
-            continue;
+            cancelled = true;
+            return false;
           }
+        };
+        const safeClose = (): void => {
+          if (cancelled) return;
+          try {
+            controller.close();
+          } catch {
+            // Already closed/cancelled
+          }
+        };
 
-          const outputIndex = parsed.output_index as number | undefined;
+        const resetKeepalive = (): void => {
+          if (keepaliveTimer) clearTimeout(keepaliveTimer);
+          keepaliveTimer = setTimeout(function tick() {
+            if (cancelled) return;
+            if ((controller.desiredSize ?? 1) > 0) {
+              void safeEnqueue(keepaliveComment);
+            }
+            keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+          }, KEEPALIVE_INACTIVITY_MS);
+        };
+        const clearKeepalive = (): void => {
+          if (keepaliveTimer) clearTimeout(keepaliveTimer);
+          keepaliveTimer = null;
+        };
+        let principalReader: ReadableStreamDefaultReader<Uint8Array> | null =
+          null;
+        // Recall items are gateway-internal and must stay hidden on every exit,
+        // including failures raised before marker replacement.
+        const recallIndices = new Set<number>();
+        const referenceIndices = new Set<number>();
 
-          // Detect a recall function_call item from its `added` event.
-          if (
-            event === "response.output_item.added" &&
-            outputIndex !== undefined
-          ) {
-            const item = parsed.item as Record<string, unknown> | undefined;
-            const isRecallCall =
-              item?.type === "function_call" && item?.name === "recall";
-            if (isRecallCall) {
-              recallIndices.add(outputIndex);
-              const toolUseId = item?.call_id ?? item?.id;
-              if (typeof toolUseId === "string") {
-                recallToolUseIds.set(outputIndex, toolUseId);
+        try {
+          if (!upstreamResponse.body) {
+            throw new Error("Upstream response has no body");
+          }
+          const reader = upstreamResponse.body.getReader();
+          principalReader = reader;
+          activeReader = reader;
+
+          // --- Recall interception state ---
+          // `output_index` values whose item is a suppressed `recall` function_call.
+          const parsedRecallInputs = new Map<
+            number,
+            { query: string; scope?: string; id?: string }
+          >();
+          // Ordered list of parsed recall invocations: { outputIndex, block }.
+          const pendingRecalls: Array<{
+            outputIndex: number;
+            contentPosition: number;
+            query: string;
+            scope?: string;
+            id?: string;
+            toolUseId: string;
+          }> = [];
+          // Whether any NON-recall function_call appeared (mixed-tools case).
+          let otherToolSeen = false;
+          const deferredEvents: Uint8Array[] = [];
+          let deferredBytes = 0;
+
+          resetKeepalive();
+          for await (const { event, data } of parseSSEStream(reader, {
+            maxFrames: maxSSEFrames,
+            inactivityMs: sseInactivityMs,
+            signal,
+            frameCounter,
+          })) {
+            resetKeepalive(); // upstream alive — reset inactivity timer
+
+            if (!data || data === "[DONE]") continue;
+            streamBytes += encoder.encode(
+              formatResponsesEvent(event, data),
+            ).byteLength;
+            if (streamBytes > maxStreamBytes) {
+              throw new Error("Responses stream exceeded byte limit");
+            }
+
+            let parsed: Record<string, unknown>;
+            try {
+              parsed = JSON.parse(data) as Record<string, unknown>;
+            } catch {
+              if (event.startsWith("response.")) {
+                throw new Error(`malformed JSON in Responses event ${event}`);
               }
-            } else if (item?.type === "function_call") {
-              otherToolSeen = true;
+              // Non-JSON keepalive/comment event — forward as-is.
+              if (recallIndices.size === 0 && event !== "message") {
+                await safeEnqueue(
+                  encoder.encode(formatResponsesEvent(event, data)),
+                );
+              }
+              continue;
             }
-          }
+            if (parsed.type !== event) {
+              throw new Error(`Responses payload type does not match ${event}`);
+            }
+            validateResponseLifecycle(state, event, parsed);
 
-          const isRecallEvent =
-            outputIndex !== undefined && recallIndices.has(outputIndex);
-
-          // Always accumulate into the internal state for postResponse.
-          applyResponsesEvent(state, event, parsed);
-
-          // Suppress all events belonging to a recall item.
-          if (isRecallEvent && outputIndex !== undefined) {
-            // Collect the recall arguments once the function_call_arguments.done
-            // arrives for a recall index.
+            const rawOutputIndex = parsed.output_index;
+            const addedItem = parsed.item as
+              | Record<string, unknown>
+              | undefined;
             if (
-              event === "response.function_call_arguments.done" &&
-              !recallExecuted.has(outputIndex)
+              event === "response.output_item.added" &&
+              addedItem?.type === "item_reference"
             ) {
-              const args = parsed.arguments as string | undefined;
-              let input: Record<string, unknown> = {};
-              if (args) {
-                try {
-                  input = JSON.parse(args) as Record<string, unknown>;
-                } catch {
-                  /* keep empty */
-                }
-              }
-              const query = asString(input.query);
-              pendingRecalls.push({
-                outputIndex,
-                toolUseId:
-                  recallToolUseIds.get(outputIndex) ?? String(outputIndex),
-                query,
-                scope: asString(input.scope) || undefined,
-                id: asString(input.id) || undefined,
-              });
-              recallExecuted.add(outputIndex);
-            }
-            // Don't forward recall-item events to the client.
-            continue;
-          }
-
-          // Terminal events: handle recall interception before forwarding.
-          if (
-            event === "response.completed" ||
-            event === "response.done" ||
-            event === "response.incomplete"
-          ) {
-            if (pendingRecalls.length === 0) {
-              // No recall — forward the terminal event verbatim.
-              terminalSeen = true;
               if (
-                !safeEnqueue(encoder.encode(formatResponsesEvent(event, data)))
-              )
-                break;
+                !Number.isSafeInteger(rawOutputIndex) ||
+                (rawOutputIndex as number) < 0
+              ) {
+                throw new Error(
+                  "invalid Responses output_index for item_reference",
+                );
+              }
+              referenceIndices.add(rawOutputIndex as number);
+              continue;
+            }
+            if (
+              Number.isSafeInteger(rawOutputIndex) &&
+              referenceIndices.has(rawOutputIndex as number)
+            ) {
               continue;
             }
 
-            // Recall was detected. Drive the recall loop.
-            // Marker items already emitted at non-conflicting output indices.
-            let markerTexts: string[] = [];
-            // Continuation items accumulated from a recall-only follow-up, in
-            // their OWN state (never merged into `state` to avoid index
-            // collisions). undefined when no follow-up ran (e.g. mixed tools).
-            let appliedContinuation: ResponsesAccState | undefined;
-            // Offset applied to continuation items when merging into `state`:
-            // the marker slot + 1 (next free position).
-            let contIndexBase = 0;
-
-            for (const recall of pendingRecalls) {
-              const recallAcc = finalizeResponsesAcc(state);
-              const executed = await opts.onRecall({
-                query: recall.query,
-                scope: recall.scope,
-                id: recall.id,
-                toolUseId: recall.toolUseId,
-                acc: recallAcc,
-              });
-              if (!executed) {
-                // Abort path — emit nothing more; rely on the final rebuild.
-                continue;
+            const outputIndex = outputIndexForEvent(event, parsed, state);
+            if (outputIndex !== undefined) {
+              retainedStateBytes += encoder.encode(data).byteLength;
+              if (retainedStateBytes > maxRetainedStateBytes) {
+                throw new Error("Responses retained state exceeded byte limit");
               }
-              markerTexts.push(executed.markerText);
+            }
 
-              // Emit a synthetic marker output_text item at a non-conflicting
-              // output_index (reuse the suppressed recall index slot — the item
-              // is absent from the client, so its position is free).
+            // Detect a recall function_call item from its `added` event.
+            if (
+              event === "response.output_item.added" &&
+              outputIndex !== undefined
+            ) {
+              const item = parsed.item as Record<string, unknown> | undefined;
+              const isRecallCall =
+                item?.type === "function_call" && item?.name === "recall";
+              if (isRecallCall) {
+                recallIndices.add(outputIndex);
+              } else if (item?.type === "function_call") {
+                otherToolSeen = true;
+              }
+            }
+
+            const isRecallEvent =
+              outputIndex !== undefined && recallIndices.has(outputIndex);
+
+            // Always accumulate into the internal state for postResponse.
+            applyResponsesEvent(state, event, parsed);
+
+            // Suppress all events belonging to a recall item, but still count
+            // them so malformed argument streams cannot grow without bound.
+            if (isRecallEvent && outputIndex !== undefined) {
+              const hiddenBytes = encoder.encode(
+                formatResponsesEvent(event, data),
+              ).byteLength;
+              deferredBytes += hiddenBytes;
+              hiddenRecallBytes += hiddenBytes;
               if (
-                !safeEnqueue(
-                  encoder.encode(
-                    emitTextItem(
-                      recall.outputIndex,
-                      executed.markerText,
-                      `msg_${state.id || "lore"}_${recall.outputIndex}`,
-                    ),
-                  ),
+                deferredBytes > maxDeferredBytes ||
+                hiddenRecallBytes > maxHiddenRecallBytes
+              ) {
+                throw new Error("recall stream exceeded deferred event limit");
+              }
+              if (event === "response.function_call_arguments.done") {
+                parsedRecallInputs.set(
+                  outputIndex,
+                  parseRecallArguments(parsed.arguments),
+                );
+              }
+              if (event === "response.output_item.done") {
+                const input = parsedRecallInputs.get(outputIndex);
+                if (!input) {
+                  throw new Error(
+                    `recall output completed before arguments for index ${outputIndex}`,
+                  );
+                }
+                const query = input.query;
+                const recallItem = state.items.get(outputIndex);
+                const recallToolUseId =
+                  recallItem?.type === "tool_use" ? recallItem.callId : "";
+                const contentPosition = finalizeResponsesAcc(
+                  state,
+                ).content.findIndex(
+                  (block) =>
+                    block.type === "tool_use" && block.id === recallToolUseId,
+                );
+                pendingRecalls.push({
+                  outputIndex,
+                  contentPosition,
+                  query,
+                  scope: input.scope,
+                  id: input.id,
+                  toolUseId: recallToolUseId,
+                });
+                parsedRecallInputs.delete(outputIndex);
+              }
+              // Don't forward recall-item events to the client.
+              continue;
+            }
+
+            // Terminal events: handle recall interception before forwarding.
+            if (
+              event === "response.completed" ||
+              event === "response.done" ||
+              event === "response.incomplete" ||
+              event === "response.failed"
+            ) {
+              assertOutputLifecyclesComplete(state);
+              assertTerminalOutputMatches(state, parsed);
+              if (pendingRecalls.length === 0) {
+                if (recallIndices.size > 0) {
+                  throw new Error(
+                    "recall stream ended before function arguments completed",
+                  );
+                }
+                // No recall — forward the terminal event verbatim.
+                if (
+                  !(await safeEnqueue(
+                    encoder.encode(formatResponsesEvent(event, data)),
+                  ))
                 )
-              ) {
-                break;
+                  break;
+                void reader.cancel().catch(() => {});
+                principalReader = null;
+                clearKeepalive();
+                finish(finalizeResponsesAcc(state));
+                safeClose();
+                return;
+              }
+              if (state.terminalEvent === "response.failed") {
+                throw new Error("recall principal returned response.failed");
+              }
+              if (state.terminalEvent === "response.incomplete") {
+                throw new Error(
+                  "incomplete recall principal cannot execute recall",
+                );
               }
 
-              if (
-                !otherToolSeen &&
-                recall === pendingRecalls[pendingRecalls.length - 1]
-              ) {
-                // Recall-only: run the streaming follow-up and pipe the
-                // continuation inline before the final completion.
-                try {
-                  const follow = await opts.runFollowUp({
-                    markerText: executed.markerText,
-                    resultText: executed.resultText,
-                    acc: recallAcc,
+              // Recall was detected. Drive the recall loop.
+              if (pendingRecalls.length > 1) {
+                throw new Error(
+                  "parallel recall calls require a multi-result continuation",
+                );
+              }
+              if (pendingRecalls.length > maxRecallDepth) {
+                throw new Error(
+                  `recall depth exhausted (${maxRecallDepth}) in Responses stream`,
+                );
+              }
+              const anchorTexts: string[] = [];
+              transactionBaseline = {
+                ...state,
+                usage: { ...state.usage },
+                items: new Map(state.items),
+                rawItems: new Map(state.rawItems),
+              };
+              const pendingCommits: Array<() => void> = [];
+              const transactionalEvents: Uint8Array[] = [];
+              let transactionalBytes = 0;
+              const queueTransactional = (chunk: Uint8Array): void => {
+                transactionalBytes += chunk.byteLength;
+                if (transactionalBytes > maxDeferredBytes) {
+                  throw new Error(
+                    "recall continuation exceeded deferred event limit",
+                  );
+                }
+                transactionalEvents.push(chunk);
+              };
+              for (const recall of pendingRecalls) {
+                const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
+                reserveSyntheticIdentity(syntheticId, [state]);
+                const recallAcc = finalizeResponsesAcc(state);
+                const executed = await settleRecall({
+                  query: recall.query,
+                  scope: recall.scope,
+                  id: recall.id,
+                  outputIndex: recall.outputIndex,
+                  toolUseId: recall.toolUseId,
+                  contentPosition: recall.contentPosition,
+                  acc: recallAcc,
+                  signal,
+                });
+                anchorTexts.push(executed.anchorText);
+                if (executed.commit) pendingCommits.push(executed.commit);
+                if (executed.rollback) {
+                  transactionRollbacks.push(executed.rollback);
+                }
+                const anchorChunk = encoder.encode(
+                  emitTextItem(
+                    recall.outputIndex,
+                    executed.anchorText,
+                    syntheticId,
+                  ),
+                );
+                if (otherToolSeen) {
+                  state.items.set(recall.outputIndex, {
+                    type: "text",
+                    id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
+                    text: executed.anchorText,
                   });
-                  activeReader = follow.reader;
-                  // Accumulate the continuation into its OWN state so indices
-                  // never collide with the marker/reply items in `state`.
-                  const contState = makeResponsesAccState();
-                  // Continue the output_index numbering past all suppressed
-                  // markers and the currently-emitted marker.
-                  let contIndex = recall.outputIndex + 1;
-                  contIndexBase = contIndex;
-                  for await (const { event: ce, data: cd } of parseSSEStream(
-                    follow.reader,
-                  )) {
-                    if (cancelled) break;
-                    if (!cd || cd === "[DONE]") continue;
-                    let cparsed: Record<string, unknown>;
-                    try {
-                      cparsed = JSON.parse(cd) as Record<string, unknown>;
-                    } catch {
-                      if (ce !== "message") {
-                        safeEnqueue(
-                          encoder.encode(formatResponsesEvent(ce, cd)),
+                  queueTransactional(anchorChunk);
+                  for (const chunk of deferredEvents) queueTransactional(chunk);
+                } else {
+                  queueTransactional(anchorChunk);
+                  for (const chunk of deferredEvents) queueTransactional(chunk);
+                }
+                deferredEvents.length = 0;
+                deferredBytes = 0;
+
+                if (
+                  !otherToolSeen &&
+                  recall === pendingRecalls[pendingRecalls.length - 1]
+                ) {
+                  // Recall-only: run the streaming follow-up and pipe the
+                  // continuation inline before the final completion.
+                  try {
+                    signal.throwIfAborted();
+                    let follow = await settleFollowUp({
+                      anchorText: executed.anchorText,
+                      resultText: executed.resultText,
+                      acc: recallAcc,
+                      toolUseId: recall.toolUseId,
+                      contentPosition: recall.contentPosition,
+                      signal,
+                    });
+                    let recallDepth = pendingRecalls.length;
+                    for (;;) {
+                      activeReader = follow.reader;
+                      const contState = makeResponsesAccState();
+                      const contRecallIndices = new Set<number>();
+                      const contReferenceIndices = new Set<number>();
+                      const contRecallInputs = new Map<
+                        number,
+                        { query: string; scope?: string; id?: string }
+                      >();
+                      const contPending: typeof pendingRecalls = [];
+                      const heldContinuationEvents: Uint8Array[] = [];
+                      let heldContinuationBytes = 0;
+                      let continuationRecallBytes = 0;
+                      let contOtherTool = false;
+                      let continuationCompleted = false;
+                      let continuationFailed = false;
+                      const contIndex =
+                        Math.max(
+                          -1,
+                          ...state.rawItems.keys(),
+                          ...state.items.keys(),
+                        ) + 1;
+                      try {
+                        for await (const {
+                          event: ce,
+                          data: cd,
+                        } of parseSSEStream(follow.reader, {
+                          maxFrames: maxSSEFrames,
+                          inactivityMs: sseInactivityMs,
+                          signal,
+                          frameCounter,
+                        })) {
+                          if (cancelled) break;
+                          if (!cd || cd === "[DONE]") continue;
+                          streamBytes += encoder.encode(
+                            formatResponsesEvent(ce, cd),
+                          ).byteLength;
+                          if (streamBytes > maxStreamBytes) {
+                            throw new Error(
+                              "Responses stream exceeded byte limit",
+                            );
+                          }
+                          let cparsed: Record<string, unknown>;
+                          try {
+                            cparsed = JSON.parse(cd) as Record<string, unknown>;
+                          } catch {
+                            if (ce.startsWith("response.")) {
+                              throw new Error(
+                                `malformed JSON in Responses event ${ce}`,
+                              );
+                            }
+                            if (
+                              contRecallIndices.size === 0 &&
+                              ce !== "message"
+                            ) {
+                              queueTransactional(
+                                encoder.encode(formatResponsesEvent(ce, cd)),
+                              );
+                            }
+                            continue;
+                          }
+                          if (cparsed.type !== ce) {
+                            throw new Error(
+                              `Responses payload type does not match ${ce}`,
+                            );
+                          }
+                          validateResponseLifecycle(contState, ce, cparsed);
+                          const rawContinuationIndex = cparsed.output_index;
+                          const addedContinuationItem = cparsed.item as
+                            | Record<string, unknown>
+                            | undefined;
+                          if (
+                            ce === "response.output_item.added" &&
+                            addedContinuationItem?.type === "item_reference"
+                          ) {
+                            if (
+                              !Number.isSafeInteger(rawContinuationIndex) ||
+                              (rawContinuationIndex as number) < 0
+                            ) {
+                              throw new Error(
+                                "invalid Responses output_index for item_reference",
+                              );
+                            }
+                            contReferenceIndices.add(
+                              rawContinuationIndex as number,
+                            );
+                            continue;
+                          }
+                          if (
+                            Number.isSafeInteger(rawContinuationIndex) &&
+                            contReferenceIndices.has(
+                              rawContinuationIndex as number,
+                            )
+                          ) {
+                            continue;
+                          }
+                          const ci = outputIndexForEvent(
+                            ce,
+                            cparsed,
+                            contState,
+                          );
+                          if (ci !== undefined) {
+                            retainedStateBytes += encoder.encode(cd).byteLength;
+                            if (retainedStateBytes > maxRetainedStateBytes) {
+                              throw new Error(
+                                "Responses retained state exceeded byte limit",
+                              );
+                            }
+                          }
+                          if (
+                            ce === "response.output_item.added" &&
+                            ci !== undefined
+                          ) {
+                            const item = cparsed.item as
+                              | Record<string, unknown>
+                              | undefined;
+                            if (
+                              item?.type === "function_call" &&
+                              item.name === RECALL_TOOL_NAME
+                            ) {
+                              contRecallIndices.add(ci);
+                            } else if (item?.type === "function_call") {
+                              contOtherTool = true;
+                            }
+                          }
+                          applyResponsesEvent(contState, ce, cparsed);
+                          const isContRecall =
+                            ci !== undefined && contRecallIndices.has(ci);
+                          if (isContRecall) {
+                            const hiddenBytes = encoder.encode(
+                              formatResponsesEvent(ce, cd),
+                            ).byteLength;
+                            continuationRecallBytes += hiddenBytes;
+                            hiddenRecallBytes += hiddenBytes;
+                            if (
+                              continuationRecallBytes > maxDeferredBytes ||
+                              hiddenRecallBytes > maxHiddenRecallBytes
+                            ) {
+                              throw new Error(
+                                "recall continuation exceeded deferred event limit",
+                              );
+                            }
+                            if (
+                              ce === "response.function_call_arguments.done"
+                            ) {
+                              contRecallInputs.set(
+                                ci,
+                                parseRecallArguments(cparsed.arguments),
+                              );
+                            }
+                            if (ce === "response.output_item.done") {
+                              const input = contRecallInputs.get(ci);
+                              if (!input) {
+                                throw new Error(
+                                  `recall continuation completed before arguments for index ${ci}`,
+                                );
+                              }
+                              const item = contState.items.get(ci);
+                              const toolUseId =
+                                item?.type === "tool_use" ? item.callId : "";
+                              const contentPosition = finalizeResponsesAcc(
+                                contState,
+                              ).content.findIndex(
+                                (block) =>
+                                  block.type === "tool_use" &&
+                                  block.id === toolUseId,
+                              );
+                              contPending.push({
+                                outputIndex: ci,
+                                contentPosition,
+                                query: input.query,
+                                scope: input.scope,
+                                id: input.id,
+                                toolUseId,
+                              });
+                              contRecallInputs.delete(ci);
+                            }
+                            continue;
+                          }
+                          if (
+                            ce === "response.completed" ||
+                            ce === "response.done" ||
+                            ce === "response.incomplete" ||
+                            ce === "response.failed"
+                          ) {
+                            assertOutputLifecyclesComplete(contState);
+                            assertTerminalOutputMatches(contState, cparsed);
+                            continuationCompleted =
+                              contState.terminalEvent !== undefined;
+                            continuationFailed =
+                              contState.terminalEvent === "response.failed";
+                            break;
+                          }
+                          if (
+                            ce === "response.created" ||
+                            ce === "response.in_progress"
+                          ) {
+                            continue;
+                          }
+                          if (ci !== undefined) {
+                            const shifted = encoder.encode(
+                              formatResponsesEvent(
+                                ce,
+                                JSON.stringify({
+                                  ...cparsed,
+                                  output_index: ci + contIndex,
+                                }),
+                              ),
+                            );
+                            if (contRecallIndices.size > 0) {
+                              heldContinuationBytes += shifted.byteLength;
+                              if (heldContinuationBytes > maxDeferredBytes) {
+                                throw new Error(
+                                  "recall continuation exceeded deferred event limit",
+                                );
+                              }
+                              heldContinuationEvents.push(shifted);
+                            } else queueTransactional(shifted);
+                          } else if (ce !== "message") {
+                            const chunk = encoder.encode(
+                              formatResponsesEvent(ce, cd),
+                            );
+                            if (contRecallIndices.size > 0) {
+                              heldContinuationBytes += chunk.byteLength;
+                              if (heldContinuationBytes > maxDeferredBytes) {
+                                throw new Error(
+                                  "recall continuation exceeded deferred event limit",
+                                );
+                              }
+                              heldContinuationEvents.push(chunk);
+                            } else queueTransactional(chunk);
+                          }
+                        }
+                      } finally {
+                        void follow.reader.cancel().catch(() => {});
+                      }
+                      const mergeContinuation = (): void => {
+                        for (const item of contState.rawItems.values()) {
+                          const itemIdentities = [item.id, item.call_id].filter(
+                            (value): value is string =>
+                              typeof value === "string",
+                          );
+                          for (const existing of state.items.values()) {
+                            const existingIdentities = new Set(
+                              [
+                                existing.id,
+                                existing.type === "tool_use"
+                                  ? existing.callId
+                                  : undefined,
+                              ].filter(
+                                (value): value is string =>
+                                  typeof value === "string",
+                              ),
+                            );
+                            if (
+                              itemIdentities.some((identity) =>
+                                existingIdentities.has(identity),
+                              )
+                            ) {
+                              throw new Error(
+                                "duplicate Responses item identity across continuation",
+                              );
+                            }
+                          }
+                          for (const existing of state.rawItems.values()) {
+                            const existingIdentities = new Set(
+                              [existing.id, existing.call_id].filter(
+                                (value): value is string =>
+                                  typeof value === "string",
+                              ),
+                            );
+                            if (
+                              itemIdentities.some((identity) =>
+                                existingIdentities.has(identity),
+                              )
+                            ) {
+                              throw new Error(
+                                "duplicate Responses item identity across continuation",
+                              );
+                            }
+                          }
+                        }
+                        for (const [idx, item] of contState.items) {
+                          state.items.set(idx + contIndex, item);
+                        }
+                        for (const [idx, item] of contState.rawItems) {
+                          state.rawItems.set(idx + contIndex, item);
+                        }
+                        mergeUsage(state.usage, contState.usage);
+                      };
+                      if (continuationFailed) {
+                        throw new Error(
+                          "recall follow-up returned response.failed",
                         );
                       }
-                      continue;
-                    }
-                    // Accumulate continuation into contState for the final rebuild.
-                    applyResponsesEvent(contState, ce, cparsed);
-                    const ci = cparsed.output_index as number | undefined;
-                    // Re-index continuation items so they don't collide with the
-                    // marker text item(s) already emitted. The continuation's own
-                    // output numbering starts at 0; shift every index by
-                    // contIndex (the next free slot after the marker).
-                    if (ci !== undefined) {
-                      const shifted = {
-                        ...cparsed,
-                        output_index: ci + contIndex,
-                      };
                       if (
-                        !safeEnqueue(
+                        !continuationCompleted ||
+                        contState.items.size === 0
+                      ) {
+                        throw new Error(
+                          "recall follow-up ended without a completed response containing output",
+                        );
+                      }
+                      if (contRecallIndices.size !== contPending.length) {
+                        throw new Error(
+                          "recall follow-up ended before function arguments completed",
+                        );
+                      }
+                      if (contPending.length > 1) {
+                        throw new Error(
+                          "parallel recall calls require a multi-result continuation",
+                        );
+                      }
+                      if (
+                        contState.terminalEvent === "response.incomplete" &&
+                        contPending.length > 0
+                      ) {
+                        throw new Error(
+                          "incomplete recall continuation cannot execute another recall",
+                        );
+                      }
+                      let nextRecall: (typeof contPending)[number] | undefined;
+                      let nextExecuted:
+                        | {
+                            anchorText: string;
+                            resultText: string;
+                            commit?: () => void;
+                            rollback?: () => void;
+                          }
+                        | undefined;
+                      let nextAcc: GatewayResponse | undefined;
+                      if (contPending.length === 1) {
+                        if (recallDepth >= maxRecallDepth) {
+                          throw new Error(
+                            `recall depth exhausted (${maxRecallDepth}) in Responses continuation`,
+                          );
+                        }
+                        recallDepth++;
+                        nextRecall = contPending[0];
+                        nextAcc = finalizeResponsesAcc(contState);
+                        const nextSyntheticId = `msg_${state.id || "lore"}_${nextRecall.outputIndex + contIndex}`;
+                        reserveSyntheticIdentity(nextSyntheticId, [
+                          state,
+                          contState,
+                        ]);
+                        nextExecuted = await settleRecall({
+                          ...nextRecall,
+                          acc: nextAcc,
+                          signal,
+                        });
+                        if (nextExecuted.commit) {
+                          pendingCommits.push(nextExecuted.commit);
+                        }
+                        if (nextExecuted.rollback) {
+                          transactionRollbacks.push(nextExecuted.rollback);
+                        }
+                        const nextRecallIndex = nextRecall.outputIndex;
+                        contState.items.set(nextRecallIndex, {
+                          type: "text",
+                          id: nextSyntheticId,
+                          text: nextExecuted.anchorText,
+                        });
+                        queueTransactional(
                           encoder.encode(
-                            formatResponsesEvent(ce, JSON.stringify(shifted)),
+                            emitTextItem(
+                              nextRecall.outputIndex + contIndex,
+                              nextExecuted.anchorText,
+                            ),
                           ),
-                        )
-                      ) {
+                        );
+                      }
+                      for (const chunk of heldContinuationEvents) {
+                        queueTransactional(chunk);
+                      }
+                      mergeContinuation();
+                      if (!nextRecall || !nextExecuted || contOtherTool) {
+                        state.stopReason = contState.stopReason;
+                        state.terminalEvent = contState.terminalEvent;
                         break;
                       }
-                    } else if (ce !== "message") {
-                      // Follow-up terminal events stop the continuation loop —
-                      // we rebuild the terminal (response.completed) below.
-                      if (
-                        ce === "response.completed" ||
-                        ce === "response.done" ||
-                        ce === "response.incomplete" ||
-                        ce === "response.failed"
-                      ) {
-                        break;
-                      }
-                      // Follow-up lifecycle events must never reach the client:
-                      // the principal stream already emitted response.created /
-                      // response.in_progress, and we rebuild the terminal below.
-                      // Forwarding them would duplicate init/terminal events and
-                      // violate the Responses SSE protocol.
-                      if (
-                        ce === "response.created" ||
-                        ce === "response.in_progress"
-                      ) {
-                        continue;
-                      }
-                      if (
-                        !safeEnqueue(
-                          encoder.encode(formatResponsesEvent(ce, cd)),
-                        )
-                      )
-                        break;
+                      follow = await settleFollowUp({
+                        anchorText: nextExecuted.anchorText,
+                        resultText: nextExecuted.resultText,
+                        acc: nextAcc ?? finalizeResponsesAcc(contState),
+                        toolUseId: nextRecall.toolUseId,
+                        contentPosition: nextRecall.contentPosition,
+                        signal,
+                      });
                     }
-                    // Terminal for continuation — we rebuild below, so stop here.
-                    if (
-                      ce === "response.completed" ||
-                      ce === "response.done" ||
-                      ce === "response.incomplete" ||
-                      ce === "response.failed"
-                    ) {
-                      break;
-                    }
+                    state.items.set(recall.outputIndex, {
+                      type: "text",
+                      id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
+                      text: executed.anchorText,
+                    });
+                  } catch (err) {
+                    log.error(
+                      `recall follow-up stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
+                      err,
+                    );
+                    throw err;
                   }
-                  appliedContinuation = contState;
-                  // The follow-up has reached its terminal event; cancel its
-                  // reader so the upstream body is released promptly.
-                  void follow.reader.cancel().catch(() => {});
-                } catch (err) {
-                  log.error(
-                    `recall follow-up stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
-                    err,
+                }
+              }
+
+              // Rebuild the terminal response.completed reflecting only the
+              // continuation (recall-only) or the client-owned tools (mixed).
+              const finalResp = finalizeResponsesAcc(state);
+              let anchorIndex = 0;
+              const visibleResp = {
+                ...finalResp,
+                content: finalResp.content.map((block) => {
+                  if (block.type !== "tool_use" || block.name !== "recall") {
+                    return block;
+                  }
+                  return {
+                    type: "text" as const,
+                    text: anchorTexts[anchorIndex++] ?? "",
+                  };
+                }),
+              };
+              clearKeepalive();
+              for (const chunk of transactionalEvents) {
+                if (!(await safeEnqueue(chunk))) {
+                  throw new Error(
+                    "client disconnected while delivering recall continuation",
                   );
                 }
               }
-            }
-
-            // Merge the continuation (if any) into `state` at the correct
-            // offset. The continuation's `contState.items` are keyed by its
-            // OWN 0-based output indices; shift each by contIndex (the marker
-            // slot + 1, the next free position after the emitted marker item)
-            // when a recall-only follow-up ran.
-            if (appliedContinuation) {
-              const offset = contIndexBase;
-              // Shift continuation usage accumulation onto the total for the
-              // internal postResponse response (usage is index-independent).
-              state.usage.inputTokens += appliedContinuation.usage.inputTokens;
-              state.usage.outputTokens +=
-                appliedContinuation.usage.outputTokens;
-              state.usage.cacheReadInputTokens =
-                (state.usage.cacheReadInputTokens ?? 0) +
-                (appliedContinuation.usage.cacheReadInputTokens ?? 0);
-              state.usage.cacheCreationInputTokens =
-                (state.usage.cacheCreationInputTokens ?? 0) +
-                (appliedContinuation.usage.cacheCreationInputTokens ?? 0);
-              for (const [idx, item] of appliedContinuation.items) {
-                state.items.set(idx + offset, item);
+              if (
+                !(await safeEnqueue(encoder.encode(buildTerminal(visibleResp))))
+              ) {
+                throw new Error(
+                  "client disconnected while delivering recall terminal",
+                );
               }
-              // Merge stop reason from the continuation (it is the final leg).
-              if (appliedContinuation.stopReason) {
-                state.stopReason = appliedContinuation.stopReason;
+              terminalDelivered = true;
+              if (cancelled) throw signal.reason;
+              if (!finish(visibleResp)) {
+                throw new Error("recall onComplete failed after delivery");
               }
-            }
-
-            // Rebuild the terminal response.completed reflecting marker +
-            // continuation (recall-only) OR marker + other tools (mixed).
-            const finalResp = finalizeResponsesAcc(state);
-            // Replace ONLY the recall tool_use(s) with their marker text, so
-            // non-recall tool_use (which the client must act on) is preserved.
-            const markedResp = {
-              ...finalResp,
-              content: [
-                ...finalResp.content.filter(
-                  (b) => b.type !== "tool_use" || b.name !== "recall",
-                ),
-                ...markerTexts.map((t) => ({ type: "text" as const, text: t })),
-              ],
-            };
-            clearKeepalive();
-            finish(markedResp);
-            if (!safeEnqueue(encoder.encode(buildCompleted(markedResp)))) {
+              for (const commit of pendingCommits.splice(0)) commit();
+              transactionRollbacks.length = 0;
+              transactionBaseline = undefined;
+              void reader.cancel().catch(() => {});
+              principalReader = null;
               safeClose();
               return;
             }
+
+            // Non-terminal, non-recall event: forward verbatim.
+            const chunk = encoder.encode(formatResponsesEvent(event, data));
+            if (recallIndices.size > 0) {
+              deferredBytes += chunk.byteLength;
+              if (deferredBytes > maxDeferredBytes) {
+                throw new Error("recall stream exceeded deferred event limit");
+              }
+              deferredEvents.push(chunk);
+            } else if (!(await safeEnqueue(chunk))) {
+              break;
+            }
+          }
+
+          throw new Error(
+            "upstream Responses stream ended without a terminal event",
+          );
+        } catch (err) {
+          rollbackTransaction();
+          if (principalReader) {
+            void principalReader.cancel().catch(() => {});
+          }
+          principalReader = null;
+          clearKeepalive();
+          if (terminalDelivered) {
             safeClose();
             return;
           }
-
-          // Non-terminal, non-recall event: forward verbatim.
-          if (!safeEnqueue(encoder.encode(formatResponsesEvent(event, data)))) {
-            break;
+          const isAbort =
+            err instanceof DOMException && err.name === "AbortError";
+          if (isAbort) {
+            log.info(
+              `openai-responses recall-aware stream aborted${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+            );
+            if (cancelled || signal.aborted) {
+              safeClose();
+              return;
+            }
+          } else {
+            log.error(
+              `openai-responses recall-aware stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
+              err,
+            );
           }
-        }
-
-        // Stream ended without a terminal event (e.g. reader closed early).
-        if (!terminalSeen) {
-          clearKeepalive();
-          finish(finalizeResponsesAcc(state));
-        }
-        safeClose();
-      } catch (err) {
-        clearKeepalive();
-        const isAbort =
-          err instanceof DOMException && err.name === "AbortError";
-        if (isAbort) {
-          log.info(
-            `openai-responses recall-aware stream aborted${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
-          );
-        } else {
-          log.error(
-            `openai-responses recall-aware stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
-            err,
-          );
-        }
-        safeEnqueue(
-          encoder.encode(
-            formatResponsesEvent(
-              "response.failed",
-              JSON.stringify({
-                type: "response.failed",
-                response: {
-                  id: state.id || "resp_error",
-                  object: "response",
-                  created_at: Math.floor(Date.now() / 1000),
-                  model: state.model,
-                  status: "failed",
-                  output: [],
-                  usage: null,
-                  error: {
-                    type: "server_error",
-                    message:
-                      err instanceof Error
-                        ? err.message
-                        : "upstream stream error",
+          await safeEnqueue(
+            encoder.encode(
+              formatResponsesEvent(
+                "response.failed",
+                JSON.stringify({
+                  type: "response.failed",
+                  response: {
+                    id: state.id || "resp_error",
+                    object: "response",
+                    created_at: Math.floor(Date.now() / 1000),
+                    model: state.model,
+                    status: "failed",
+                    output: buildOutputItems(recallIndices),
+                    usage: null,
+                    error: {
+                      type: "server_error",
+                      message:
+                        "Lore could not continue the response after recall",
+                    },
                   },
-                },
-              }),
+                }),
+              ),
             ),
-          ),
-        );
-        finish(finalizeResponsesAcc(state));
-        safeClose();
-      }
+          );
+          const failedResponse = finalizeResponsesAcc(state);
+          failedResponse.content = failedResponse.content.filter(
+            (block) =>
+              (block.type !== "tool_use" || block.name !== RECALL_TOOL_NAME) &&
+              (block.type !== "text" || !parseRecallAnchor(block.text)),
+          );
+          failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
+            (item) =>
+              item.type !== "function_call" || item.name !== RECALL_TOOL_NAME,
+          );
+          finish(failedResponse);
+          safeClose();
+        }
+      })();
     },
 
+    pull() {
+      resumeDemand?.();
+      resumeDemand = undefined;
+    },
     cancel() {
+      resumeDemand?.();
+      resumeDemand = undefined;
       cancelled = true;
+      rollbackTransaction();
+      abortController.abort(
+        new DOMException("Responses client disconnected", "AbortError"),
+      );
       if (keepaliveTimer) clearTimeout(keepaliveTimer);
       try {
         if (activeReader) {
@@ -6206,9 +7662,12 @@ export function accumulateResponsesNonStreamJSON(
 ): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const output = json.output as Array<Record<string, unknown>> | undefined;
+  const replayableOutput = output?.filter(
+    (item) => item.type !== "item_reference",
+  );
 
-  if (output) {
-    for (const item of output) {
+  if (replayableOutput) {
+    for (const item of replayableOutput) {
       if (item.type === "message") {
         const msgContent = item.content as
           | Array<Record<string, unknown>>
@@ -6258,6 +7717,7 @@ export function accumulateResponsesNonStreamJSON(
     id: asString(json.id),
     model: asString(json.model),
     content,
+    rawOutputItems: replayableOutput,
     stopReason,
     usage: {
       inputTokens: disjointOpenAIInputTokens(
@@ -6270,6 +7730,117 @@ export function accumulateResponsesNonStreamJSON(
       cacheCreationInputTokens: inputTokensDetails?.cache_write_tokens,
     },
   };
+}
+
+/** @internal Exported for end-to-end replay tests. */
+export function responsesProvenanceContent(
+  response: GatewayResponse,
+  replacements: ReadonlyMap<string, string> = new Map(),
+  stopBeforeToolUseId?: string,
+): GatewayContentBlock[] {
+  if (!response.rawOutputItems?.length) {
+    const content: GatewayContentBlock[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        if (block.id === stopBeforeToolUseId) break;
+        const replacement = replacements.get(block.id);
+        content.push(replacement ? { type: "text", text: replacement } : block);
+      } else {
+        content.push(block);
+      }
+    }
+    return content;
+  }
+
+  const content: GatewayContentBlock[] = [];
+  const textBlocks = response.content.filter(
+    (block): block is Extract<GatewayContentBlock, { type: "text" }> =>
+      block.type === "text",
+  );
+  let textIndex = 0;
+  for (const raw of response.rawOutputItems) {
+    if (raw.type === "item_reference") continue;
+    if (raw.type === "reasoning") {
+      content.push({ type: "opaque", raw, responsesItem: true });
+      continue;
+    }
+    if (raw.type === "message") {
+      const parts = Array.isArray(raw.content)
+        ? (raw.content as Array<Record<string, unknown>>)
+        : [];
+      for (const part of parts) {
+        content.push({
+          type: "opaque",
+          raw: { ...raw, content: [part] },
+          responsesItem: true,
+        });
+        if (part.type === "output_text" && typeof part.text === "string") {
+          textIndex++;
+        }
+      }
+      if (parts.length === 0 && textBlocks[textIndex]) {
+        content.push(textBlocks[textIndex++]);
+      }
+      continue;
+    }
+    if (raw.type === "function_call") {
+      const toolUseId = asString(raw.call_id ?? raw.id);
+      if (toolUseId === stopBeforeToolUseId) break;
+      const replacement = replacements.get(toolUseId);
+      if (replacement) {
+        content.push({ type: "text", text: replacement });
+        continue;
+      }
+      const block = response.content.find(
+        (candidate): candidate is GatewayToolUseBlock =>
+          candidate.type === "tool_use" && candidate.id === toolUseId,
+      );
+      if (block) content.push(block);
+      continue;
+    }
+    content.push({ type: "opaque", raw, responsesItem: true });
+  }
+  return content;
+}
+
+/** @internal Preserve request-only provenance across lossless Lore transforms. */
+export function responsesProvenanceByMessageId(
+  messages: GatewayMessage[],
+  loreMessages: LoreMessageWithParts[],
+): ReadonlyMap<
+  string,
+  Pick<GatewayMessage, "content" | "provenanceContent" | "provenancePositions">
+> {
+  return new Map(
+    loreMessages.flatMap((message, index) => {
+      const original = messages[index];
+      return original?.provenanceContent
+        ? [
+            [
+              message.info.id,
+              {
+                content: original.content,
+                provenanceContent: original.provenanceContent,
+                provenancePositions: original.provenancePositions,
+              },
+            ] as const,
+          ]
+        : [];
+    }),
+  );
+}
+
+/** @internal Build the canonical anchor hash used by every Responses path. */
+export function responsesAnchorContext(
+  clientMessages: GatewayMessage[],
+  visibleContent: GatewayContentBlock[],
+  response: GatewayResponse,
+  stopBeforeToolUseId: string,
+): string {
+  return recallAnchorContext(clientMessages, clientMessages.length, [
+    ...visibleContent,
+    ...responsesProvenanceContent(response, new Map(), stopBeforeToolUseId),
+  ]);
 }
 
 /**
@@ -6926,6 +8497,9 @@ function postResponse(
     }
 
     sessionState.lastUpstream = upstreamSnapshot;
+    saveSessionTracking(sessionID, {
+      lastUpstream: JSON.stringify({ ...upstreamSnapshot, headers: {} }),
+    });
     // Store per-provider snapshot so workers/cache-warmer can look up the
     // correct URL and credentials when the session uses multiple providers.
     if (upstreamSnapshot.providerID) {
@@ -7380,6 +8954,7 @@ async function handleCompaction(
     sessionID,
     pathResult.path,
     pathResult.source,
+    requestCredentialFingerprint(req.rawHeaders),
   );
   const projectPath = resolveSessionProjectPath(
     pathResult,
@@ -7611,8 +9186,16 @@ export async function handleCompactEndpoint(
     rawHeaders[key] = value;
   });
   const gitRemote = extractGitRemoteHeader(rawHeaders);
-
-  await initIfNeeded(projectPath, config, gitRemote);
+  const credential = extractAuth(rawHeaders);
+  if (!credential) {
+    return new Response(
+      JSON.stringify({
+        error: "unauthorized",
+        message: "A provider credential is required",
+      }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
 
   // Build a minimal GatewayRequest for session identification.
   // Only rawHeaders and messages are used by identifySession().
@@ -7646,6 +9229,29 @@ export async function handleCompactEndpoint(
     );
   }
 
+  const state = getOrCreateSession(
+    sessionID,
+    projectPath,
+    "header",
+    authFingerprint(credential),
+  );
+  if (
+    !state ||
+    state.projectPathProvisional === true ||
+    state.projectPath !== projectPath
+  ) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project_path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
+
+  await initIfNeeded(state.projectPath, config, gitRemote);
+
   // Cancel-when-fits policy. The gateway is the authoritative source for
   // "does this session's raw context fit in the layer-0 budget?" — the plugin
   // just relays. We resolve the session's lastUpstream to a real ModelSpec
@@ -7666,7 +9272,6 @@ export async function handleCompactEndpoint(
   // keep raw; anything above it must be summarized (or the next LLM call
   // will overflow). If we later want a tighter per-session cap, it's a
   // single constant in one place to change.
-  const state = sessions.get(sessionID);
   const cancelDecision = shouldCancelCompactionFromBudget(
     body.tokens_before,
     state?.lastUpstream,
@@ -8128,6 +9733,7 @@ async function handleConversationTurn(
     sessionID,
     pathResult.path,
     pathResult.source,
+    cred ? authFingerprint(cred) : "",
   );
   let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
 
@@ -8240,8 +9846,12 @@ async function handleConversationTurn(
       // Search the full headerSessionIndex — covers Tier 1 (known) and Tier 2 (learned) headers.
       let resolvedParent: string | undefined;
       for (const [key, loreId] of headerSessionIndex) {
-        const colonIdx = key.indexOf(":");
-        if (colonIdx >= 0 && key.slice(colonIdx + 1) === parentClientId) {
+        const parsed = parseSessionIndexKey(key);
+        if (
+          parsed?.credentialFingerprint ===
+            (sessionState.credentialFingerprint ?? "") &&
+          parsed.headerValue === parentClientId
+        ) {
           resolvedParent = loreId;
           break;
         }
@@ -8423,16 +10033,38 @@ async function handleConversationTurn(
     projectPath,
   });
 
+  // Anchor provenance must use the normalized client transcript before recall
+  // expansion mutates historical markers into synthetic tool round trips.
+  const recallClientMessages = req.messages.map((message) => ({
+    role: message.role,
+    content: [...message.content],
+    ...(message.provenanceContent
+      ? { provenanceContent: [...message.provenanceContent] }
+      : {}),
+    ...(message.provenancePositions
+      ? { provenancePositions: [...message.provenancePositions] }
+      : {}),
+  }));
+
   // --- Expand recall markers from previous turns ---
   // Scan all assistant messages for marker text blocks and restore them
   // to tool_use + tool_result pairs before forwarding upstream.
   if (sessionState.recallStore.size > 0) {
+    // Cleanup must inspect the client transcript while anchors still exist.
+    // Expanding first would make every live anchor look orphaned.
+    const recallStoreChanged = cleanupRecallStore(
+      req,
+      sessionState.recallStore,
+    );
     const expanded = expandRecallMarkers(req, sessionState.recallStore);
     if (expanded) {
       log.info(`expanded recall markers for session ${sessionID.slice(0, 16)}`);
     }
-    // Clean up orphaned store entries (markers evicted by gradient)
-    cleanupRecallStore(req, sessionState.recallStore);
+    if (recallStoreChanged) {
+      saveSessionTracking(sessionID, {
+        recallStore: serializeRecallStore(sessionState.recallStore),
+      });
+    }
   }
 
   // --- Strip context warning markers from previous turns ---
@@ -8677,6 +10309,10 @@ async function handleConversationTurn(
   // decision below (isLargeColdStart) and the gradient transform in step 7, so
   // both see identical input and agree on whether this cold session compresses.
   const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
+  const provenanceByMessageId = responsesProvenanceByMessageId(
+    req.messages,
+    loreMessages,
+  );
   resolveToolResults(loreMessages);
 
   // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
@@ -9408,7 +11044,14 @@ async function handleConversationTurn(
   // loreMessagesToGateway reconstructs tool_result blocks from assistant's
   // completed/error tool parts; removeOrphanedToolResults is a safety net
   // that catches any remaining orphaned tool_result references.
-  const transformedMessages = loreMessagesToGateway(result.messages);
+  const transformedMessages = loreMessagesToGateway(
+    result.messages,
+    provenanceByMessageId,
+    result.messages.length === loreMessages.length &&
+      result.messages.every(
+        (message, index) => message.info.id === loreMessages[index]?.info.id,
+      ),
+  );
   removeOrphanedToolResults(transformedMessages);
 
   const modifiedReq: GatewayRequest = {
@@ -9434,6 +11077,15 @@ async function handleConversationTurn(
           }
         : RECALL_GATEWAY_TOOL;
     modifiedReq.tools = [...modifiedReq.tools, recallTool];
+  }
+  if (
+    modifiedReq.protocol === "openai-responses" &&
+    clientHasRecallTool(modifiedReq.tools)
+  ) {
+    modifiedReq.extras = {
+      ...modifiedReq.extras,
+      parallel_tool_calls: false,
+    };
   }
 
   // --- 8c. Synthetic project-resolution: inject probe if eligible ---
@@ -9830,6 +11482,7 @@ async function handleConversationTurn(
     let currentResp = resp;
     let recallDepth = 0;
     let currentModifiedReq = modifiedReq;
+    const responsesVisibleContent: GatewayContentBlock[] = [];
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
     // Whether this request opted into the 1M window (context-1m beta); gates the
     // client-usage cap so a 1M-capable model the client meters against 200K is
@@ -9858,17 +11511,29 @@ async function handleConversationTurn(
       );
 
       // Store recall result for marker round-trip expansion
-      const storeKey = recallStoreKey(
-        input.query,
-        input.scope ?? "all",
-        input.id,
-      );
+      const scope = input.scope ?? "all";
+      const anchorId = crypto.randomUUID();
+      const storeKey = `anchor:${anchorId}`;
       const position = currentResp.content.indexOf(recallBlock);
-      sessionState.recallStore.set(storeKey, {
+      const anchorContextId = responsesAnchorContext(
+        recallClientMessages,
+        responsesVisibleContent,
+        currentResp,
+        recallBlock.id,
+      );
+      const companionToolUses = currentResp.content.flatMap((block, index) => {
+        if (block.type !== "tool_use" || block.id === recallBlock.id) return [];
+        const side: "before" | "after" = index < position ? "before" : "after";
+        return [{ id: block.id, name: block.name, input: block.input, side }];
+      });
+      addRecallStoreEntry(sessionState.recallStore, storeKey, {
         toolUseId: recallBlock.id,
+        anchorId,
+        anchorContextId,
         input,
         position,
         result,
+        ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
       });
       // Persist the store (v46) so the marker still expands byte-identically
       // after a gateway restart instead of leaking raw marker text upstream.
@@ -9876,7 +11541,22 @@ async function handleConversationTurn(
         recallStore: serializeRecallStore(sessionState.recallStore),
       });
 
-      const markerResp = replaceRecallWithMarker(currentResp);
+      const markerText = buildAnchoredRecallMarker(
+        input.query,
+        scope,
+        input.id,
+        anchorId,
+      );
+      const markerResp = replaceRecallWithMarker(
+        currentResp,
+        new Map([[recallBlock.id, markerText]]),
+      );
+      responsesVisibleContent.push(
+        ...responsesProvenanceContent(
+          currentResp,
+          new Map([[recallBlock.id, markerText]]),
+        ),
+      );
 
       if (hasOtherToolUse(currentResp)) {
         // Mixed tools — return response with marker, client handles the rest
@@ -10036,7 +11716,17 @@ async function handleConversationTurn(
       log.warn(
         `recall depth exhausted (${MAX_RECALL_DEPTH}) — stripping remaining recall`,
       );
-      currentResp = replaceRecallWithMarker(currentResp);
+      currentResp = {
+        ...currentResp,
+        content: currentResp.content.map((block) =>
+          block.type === "tool_use" && block.name === RECALL_TOOL_NAME
+            ? {
+                type: "text" as const,
+                text: `Recall depth limit reached (${MAX_RECALL_DEPTH}).`,
+              }
+            : block,
+        ),
+      };
     }
     currentResp.usage = cumulativeUsage;
     postResponse(
@@ -10108,6 +11798,8 @@ async function handleConversationTurn(
       // client.
       if (req.protocol === "openai-responses" && !shouldInjectWarning) {
         if (hasRecallTool) {
+          let responsesRecallRequest = modifiedReq;
+          const responsesVisibleContent: GatewayContentBlock[] = [];
           return streamResponsesRecallAware(upstreamResponse, {
             onComplete: (resp) =>
               postResponse(
@@ -10119,7 +11811,16 @@ async function handleConversationTurn(
                 genAiSpan,
               ),
             sessionID: sessionState.sessionID,
-            onRecall: async ({ query, scope, id, toolUseId, acc }) => {
+            maxRecallDepth: MAX_RECALL_DEPTH,
+            onRecall: async ({
+              query,
+              scope,
+              id,
+              toolUseId,
+              contentPosition,
+              acc,
+              signal,
+            }) => {
               const alreadyInLtm = buildAlreadyInLtmIds(
                 stableLtmText,
                 pendingKnowledgeDelta,
@@ -10135,39 +11836,109 @@ async function handleConversationTurn(
                 sessionState.sessionID,
                 getLLMClient(config),
                 alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
+                signal,
               );
-              const scopeVal = input.scope ?? "all";
-              const storeKey = recallStoreKey(query, scopeVal, input.id);
-              const anchorPosition = acc.content.findIndex(
-                (block) => block.type === "tool_use" && block.id === toolUseId,
+              const recallBlock = acc.content[contentPosition];
+              if (
+                recallBlock?.type !== "tool_use" ||
+                recallBlock.id !== toolUseId ||
+                recallBlock.name !== RECALL_TOOL_NAME
+              ) {
+                throw new Error(
+                  "recall execution: recall block not found in accumulated response",
+                );
+              }
+              const anchorId = crypto.randomUUID();
+              const position = contentPosition;
+              const anchorContextId = responsesAnchorContext(
+                recallClientMessages,
+                responsesVisibleContent,
+                acc,
+                recallBlock.id,
               );
-              const markerText = buildRecallMarker(query, scopeVal, input.id);
-              sessionState.recallStore.set(storeKey, {
+              const companionToolUses = acc.content.flatMap((block, index) => {
+                if (block.type !== "tool_use" || block.id === toolUseId) {
+                  return [];
+                }
+                const side: "before" | "after" =
+                  index < position ? "before" : "after";
+                return [
+                  {
+                    id: block.id,
+                    name: block.name,
+                    input: block.input,
+                    side,
+                  },
+                ];
+              });
+              const storeKey = `anchor:${anchorId}`;
+              const storedRecall = {
                 toolUseId,
-                anchorPosition,
+                anchorId,
+                anchorContextId,
                 input,
-                position: -1,
+                position,
                 result,
-              });
-              saveSessionTracking(sessionState.sessionID, {
-                recallStore: serializeRecallStore(sessionState.recallStore),
-              });
-              return { markerText, resultText: result };
+                ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
+              } satisfies StoredRecall;
+              const persistStore = (): void => {
+                saveSessionTracking(sessionState.sessionID, {
+                  recallStore: serializeRecallStore(sessionState.recallStore),
+                });
+              };
+              const anchorText = buildRecallAnchor(anchorId);
+              responsesVisibleContent.push(
+                ...responsesProvenanceContent(
+                  acc,
+                  new Map([[toolUseId, anchorText]]),
+                ),
+              );
+              return {
+                anchorText,
+                resultText: result,
+                commit: () => {
+                  addRecallStoreEntry(
+                    sessionState.recallStore,
+                    storeKey,
+                    storedRecall,
+                  );
+                  persistStore();
+                },
+                rollback: () => {
+                  if (sessionState.recallStore.delete(storeKey)) persistStore();
+                },
+              };
             },
-            runFollowUp: async ({ acc, resultText }) => {
+            runFollowUp: async ({
+              acc,
+              resultText,
+              toolUseId,
+              contentPosition,
+              signal,
+            }) => {
               // Reconstruct the recall tool_use block for the follow-up request.
-              const recallBlock = findRecallToolUse(acc);
-              if (!recallBlock) {
+              const recallBlock = acc.content[contentPosition];
+              if (
+                recallBlock?.type !== "tool_use" ||
+                recallBlock.id !== toolUseId ||
+                recallBlock.name !== RECALL_TOOL_NAME
+              ) {
                 throw new Error(
                   "recall follow-up: recall block not found in accumulated response",
                 );
               }
               const followUpCtx: RecallFollowUpCtx = {
-                forward: (r) =>
-                  forwardToUpstream(r, config, undefined, {
-                    ...cacheOptions,
-                    cacheConversation: false,
-                  }),
+                forward: (r, followUpSignal) =>
+                  forwardToUpstream(
+                    r,
+                    config,
+                    undefined,
+                    {
+                      ...cacheOptions,
+                      cacheConversation: false,
+                    },
+                    followUpSignal,
+                  ),
                 parseJSON: () => {
                   throw new Error(
                     "parseJSON must not be called on the streaming recall path",
@@ -10176,16 +11947,18 @@ async function handleConversationTurn(
               };
               const follow = await runRecallFollowUpStreaming(
                 followUpCtx,
-                modifiedReq,
+                responsesRecallRequest,
                 acc,
                 resultText,
                 recallBlock,
+                signal,
               );
               if (!follow.ok) {
                 throw new Error(
-                  `recall follow-up upstream error: ${follow.status ?? "?"} ${follow.detail}`,
+                  `recall follow-up upstream error: ${follow.status ?? "?"}`,
                 );
               }
+              responsesRecallRequest = follow.followUp;
               return { reader: follow.reader };
             },
           });
@@ -10236,6 +12009,7 @@ async function handleConversationTurn(
         postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
       hasRecallTool
         ? {
+            clientMessages: recallClientMessages,
             modifiedReq,
             config,
             sessionState,
@@ -10321,11 +12095,16 @@ function toolResultContent(state: {
 /** @internal Exported for tests. */
 export function loreMessagesToGateway(
   messages: LoreMessageWithParts[],
-): Array<{ role: "user" | "assistant"; content: GatewayContentBlock[] }> {
-  const out: Array<{
-    role: "user" | "assistant";
-    content: GatewayContentBlock[];
-  }> = [];
+  provenanceByMessageId: ReadonlyMap<
+    string,
+    Pick<
+      GatewayMessage,
+      "content" | "provenanceContent" | "provenancePositions"
+    >
+  > = new Map(),
+  allowProvenance = true,
+): GatewayMessage[] {
+  const out: GatewayMessage[] = [];
 
   // tool_result blocks reconstructed from the preceding assistant message's
   // completed/error tool parts. Injected at the start of the next user message.
@@ -10431,7 +12210,20 @@ export function loreMessagesToGateway(
       }
     }
 
-    out.push({ role: msg.info.role, content });
+    const message: GatewayMessage = { role: msg.info.role, content };
+    const provenance = allowProvenance
+      ? provenanceByMessageId.get(msg.info.id)
+      : undefined;
+    if (
+      provenance?.provenanceContent &&
+      JSON.stringify(content) === JSON.stringify(provenance.content)
+    ) {
+      message.provenanceContent = [...provenance.provenanceContent];
+      if (provenance.provenancePositions) {
+        message.provenancePositions = [...provenance.provenancePositions];
+      }
+    }
+    out.push(message);
   }
 
   return out;
@@ -10612,7 +12404,11 @@ function handleAmnesiaSlashCommand(
   const known = extractKnownSessionHeader(req.rawHeaders);
   let state: SessionState | undefined;
   if (known) {
-    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const indexKey = sessionIndexKey(
+      requestCredentialFingerprint(req.rawHeaders),
+      known.headerName,
+      known.sessionId,
+    );
     const sid = headerSessionIndex.get(indexKey);
     if (sid) state = allSessions.get(sid);
   }
@@ -10698,7 +12494,11 @@ function handleWarmupSlashCommand(
   const known = extractKnownSessionHeader(req.rawHeaders);
   let state: SessionState | undefined;
   if (known) {
-    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const indexKey = sessionIndexKey(
+      requestCredentialFingerprint(req.rawHeaders),
+      known.headerName,
+      known.sessionId,
+    );
     const sid = headerSessionIndex.get(indexKey);
     if (sid) state = allSessions.get(sid);
   }
@@ -10765,7 +12565,11 @@ async function handleCurateSlashCommand(
   let state: SessionState | undefined;
   let sessionID: string | undefined;
   if (known) {
-    const indexKey = `${known.headerName}:${known.sessionId}`;
+    const indexKey = sessionIndexKey(
+      requestCredentialFingerprint(req.rawHeaders),
+      known.headerName,
+      known.sessionId,
+    );
     const sid = headerSessionIndex.get(indexKey);
     if (sid) {
       state = allSessions.get(sid);
@@ -10777,7 +12581,9 @@ async function handleCurateSlashCommand(
   if (!sessionID) {
     // Use the most recently active session
     let latest: SessionState | undefined;
+    const credentialFingerprint = requestCredentialFingerprint(req.rawHeaders);
     for (const s of allSessions.values()) {
+      if ((s.credentialFingerprint ?? "") !== credentialFingerprint) continue;
       if (!latest || s.lastRequestTime > latest.lastRequestTime) {
         latest = s;
       }
@@ -11099,7 +12905,11 @@ export async function handleRequest(
     let priorState: SessionState | undefined;
     const known = extractKnownSessionHeader(req.rawHeaders);
     if (known) {
-      const indexKey = `${known.headerName}:${known.sessionId}`;
+      const indexKey = sessionIndexKey(
+        earlyAuth ? authFingerprint(earlyAuth) : "",
+        known.headerName,
+        known.sessionId,
+      );
       const sid = headerSessionIndex.get(indexKey);
       if (sid) priorState = sessions.get(sid);
     }

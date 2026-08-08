@@ -67,6 +67,8 @@ export type GatewayToolResultBlock = {
 export type GatewayOpaqueBlock = {
   type: "opaque";
   raw: Record<string, unknown>;
+  /** Raw is a complete top-level Responses item, not a message content part. */
+  responsesItem?: boolean;
 };
 
 export type GatewayContentBlock =
@@ -168,6 +170,14 @@ export function opaquePlaceholder(raw: Record<string, unknown>): string {
 export type GatewayMessage = {
   role: "user" | "assistant";
   content: GatewayContentBlock[];
+  /**
+   * Request-only content used to fingerprint recall-anchor provenance. It may
+   * include Responses wire items (notably encrypted reasoning) that must bind a
+   * replay anchor but must never enter normal content or temporal storage.
+   */
+  provenanceContent?: GatewayContentBlock[];
+  /** Index of each visible `content` block inside `provenanceContent`. */
+  provenancePositions?: number[];
 };
 
 // ---------------------------------------------------------------------------
@@ -320,6 +330,8 @@ export type GatewayResponse = {
   id: string;
   model: string;
   content: GatewayContentBlock[];
+  /** Original Responses output items needed for stateless follow-up requests. */
+  rawOutputItems?: Array<Record<string, unknown>>;
   /** Provider stop reason (e.g. `end_turn`, `stop`, `tool_use`, `length`). */
   stopReason: string;
   /**
@@ -342,13 +354,27 @@ export type StoredRecall = {
   input: { query: string; scope?: string };
   /** Position (content block index) in the original assistant message. */
   position: number;
-  /** Original content index of the hidden recall within the assistant turn. */
-  anchorPosition?: number;
   /** Executed recall result (formatted markdown). */
   result: string;
+  /** Unique replay anchor. Unlike query/scope or provider call IDs, this stays
+   * unique when the model repeats an identical recall. */
+  anchorId?: string;
+  /** Fingerprint of the transcript prefix that produced the anchor. */
+  /** Missing only on query-keyed entries persisted by pre-anchor releases. */
+  anchorContextId?: string;
+  /** Non-recall tool calls emitted beside this hidden recall in the original
+   *  response. Used to restore only genuine mixed-tool turns; a tool called by
+   *  the later recall continuation must remain in its own assistant message. */
+  companionToolUseIds?: string[];
+  companionToolUses?: Array<{
+    id: string;
+    name: string;
+    input: unknown;
+    side: "before" | "after";
+  }>;
 };
 
-/** Map from marker key (`${scope}:${query}`) → stored recall data. */
+/** Map from unique anchor or legacy marker keys to stored recall data. */
 export type RecallStore = Map<string, StoredRecall>;
 
 // ---------------------------------------------------------------------------
@@ -534,6 +560,8 @@ export type SessionState = {
   headerSessionId?: string;
   /** Name of the header that provided `headerSessionId`. */
   headerName?: string;
+  /** Privacy-safe credential scope for header/marker session identity. */
+  credentialFingerprint?: string;
   /** Candidate headers being tracked during the Tier 2 learning phase.
    *  Key: header name. Value: last seen value + consecutive stable turn count. */
   candidateHeaders?: Map<string, { value: string; seenCount: number }>;

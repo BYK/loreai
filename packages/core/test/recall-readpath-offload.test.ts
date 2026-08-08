@@ -3,8 +3,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as embedding from "../src/embedding";
 import * as entities from "../src/entities";
+import * as latReader from "../src/lat-reader";
 import * as ltm from "../src/ltm";
-import { searchRecall } from "../src/recall";
+import * as readOffload from "../src/read-offload";
+import * as temporal from "../src/temporal";
+import { runRecall, searchRecall } from "../src/recall";
 
 // PR3 (#966): recall's entity FTS scans and per-vector-hit single-row
 // hydration are routed off the main event loop. Hydration loops are now a
@@ -432,5 +435,569 @@ describe("recall vector-hit hydration is batched + offloaded (#966)", () => {
       .map((r) => r.item.item.id);
     expect(entIds).toContain(visible.id);
     expect(entIds).not.toContain(hidden.id);
+  });
+
+  test("aborts while an embedding worker is still pending", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    embedSpy.mockImplementation(() => {
+      started.resolve();
+      return new Promise(() => {});
+    });
+
+    const pending = searchRecall({
+      query: "totallyunrelatedtoken",
+      projectPath: PROJ,
+      scope: "all",
+      signal: controller.signal,
+    });
+    await started.promise;
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(kSpy).not.toHaveBeenCalled();
+    expect(dSpy).not.toHaveBeenCalled();
+    expect(tSpy).not.toHaveBeenCalled();
+    expect(eSpy).not.toHaveBeenCalled();
+  });
+
+  test("aborts while a primary knowledge search is still pending", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const knowledgeSpy = vi
+      .spyOn(ltm, "searchScored")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(embedSpy).not.toHaveBeenCalled();
+    } finally {
+      knowledgeSpy.mockRestore();
+    }
+  });
+
+  test("aborts while temporal FTS is pending and never starts embedding", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const knowledgeSpy = vi.spyOn(ltm, "searchScored").mockResolvedValue([]);
+    const temporalSpy = vi
+      .spyOn(temporal, "searchScored")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(embedSpy).not.toHaveBeenCalled();
+    } finally {
+      knowledgeSpy.mockRestore();
+      temporalSpy.mockRestore();
+    }
+  });
+
+  test("aborts while distillation FTS is pending and never starts temporal FTS", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const knowledgeSpy = vi.spyOn(ltm, "searchScored").mockResolvedValue([]);
+    const offloadSpy = vi
+      .spyOn(readOffload, "offloadAllOrTimeout")
+      .mockImplementation((sql) => {
+        if (sql.includes("distillation_fts")) {
+          started.resolve();
+          return new Promise(() => {});
+        }
+        return Promise.resolve([]);
+      });
+    const temporalSpy = vi.spyOn(temporal, "searchScored");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(temporalSpy).not.toHaveBeenCalled();
+    } finally {
+      knowledgeSpy.mockRestore();
+      offloadSpy.mockRestore();
+      temporalSpy.mockRestore();
+    }
+  });
+
+  test("aborts while LAT search is pending and never starts cross-project knowledge", async () => {
+    const controller = new AbortController();
+    availableSpy.mockReturnValue(false);
+    const started = Promise.withResolvers<void>();
+    const hasLatSpy = vi.spyOn(latReader, "hasLatDir").mockReturnValue(true);
+    const latSpy = vi
+      .spyOn(latReader, "searchScored")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    const crossProjectSpy = vi.spyOn(ltm, "searchScoredOtherProjects");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(crossProjectSpy).not.toHaveBeenCalled();
+    } finally {
+      hasLatSpy.mockRestore();
+      latSpy.mockRestore();
+      crossProjectSpy.mockRestore();
+    }
+  });
+
+  test("aborts while cross-project knowledge is pending and never starts entity search", async () => {
+    const controller = new AbortController();
+    availableSpy.mockReturnValue(false);
+    const started = Promise.withResolvers<void>();
+    const crossProjectSpy = vi
+      .spyOn(ltm, "searchScoredOtherProjects")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    const entitySpy = vi.spyOn(entities, "searchAsync");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(entitySpy).not.toHaveBeenCalled();
+    } finally {
+      crossProjectSpy.mockRestore();
+      entitySpy.mockRestore();
+    }
+  });
+
+  test("checks cancellation again after synchronous ID detail retrieval", async () => {
+    const controller = new AbortController();
+    const getSpy = vi.spyOn(ltm, "get").mockImplementation(() => {
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+      return null;
+    });
+    try {
+      await expect(
+        runRecall({
+          query: "",
+          id: "k:missing",
+          projectPath: PROJ,
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(getSpy).toHaveBeenCalledWith("missing");
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  test("aborts while knowledge vector search is pending and never starts hydration", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    kSpy.mockImplementation(() => {
+      started.resolve();
+      return new Promise(() => {});
+    });
+    const hydrateSpy = vi.spyOn(ltm, "getManyOffloaded");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(hydrateSpy).not.toHaveBeenCalled();
+      expect(dSpy).not.toHaveBeenCalled();
+    } finally {
+      hydrateSpy.mockRestore();
+    }
+  });
+
+  test("aborts while knowledge vector hydration is pending and never starts distillation vectors", async () => {
+    const controller = new AbortController();
+    kSpy.mockResolvedValue([{ id: "knowledge-hit", similarity: 0.9 }]);
+    const started = Promise.withResolvers<void>();
+    const hydrateSpy = vi
+      .spyOn(ltm, "getManyOffloaded")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(dSpy).not.toHaveBeenCalled();
+    } finally {
+      hydrateSpy.mockRestore();
+    }
+  });
+
+  test("aborts while distillation vector search is pending and never starts temporal vectors", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    dSpy.mockImplementation(() => {
+      started.resolve();
+      return new Promise(() => {});
+    });
+    const pending = searchRecall({
+      query: "totallyunrelatedtoken",
+      projectPath: PROJ,
+      scope: "all",
+      knowledgeEnabled: false,
+      signal: controller.signal,
+    });
+    await started.promise;
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(tSpy).not.toHaveBeenCalled();
+  });
+
+  test("aborts while distillation vector hydration is pending and never starts temporal vectors", async () => {
+    const controller = new AbortController();
+    dSpy.mockResolvedValue([{ id: "distillation-hit", similarity: 0.9 }]);
+    const started = Promise.withResolvers<void>();
+    const originalOffload = readOffload.offloadAll;
+    const offloadSpy = vi
+      .spyOn(readOffload, "offloadAll")
+      .mockImplementation((sql, params) => {
+        if (sql.includes("FROM distillations WHERE id IN")) {
+          started.resolve();
+          return new Promise(() => {});
+        }
+        return originalOffload(sql, params);
+      });
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        knowledgeEnabled: false,
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(tSpy).not.toHaveBeenCalled();
+    } finally {
+      offloadSpy.mockRestore();
+    }
+  });
+
+  test("aborts while temporal vector search is pending and never starts entity vectors", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    tSpy.mockImplementation(() => {
+      started.resolve();
+      return new Promise(() => {});
+    });
+    const pending = searchRecall({
+      query: "totallyunrelatedtoken",
+      projectPath: PROJ,
+      scope: "all",
+      knowledgeEnabled: false,
+      signal: controller.signal,
+    });
+    await started.promise;
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(eSpy).not.toHaveBeenCalled();
+  });
+
+  test("aborts while temporal vector hydration is pending and never starts entity vectors", async () => {
+    const controller = new AbortController();
+    tSpy.mockResolvedValue([{ id: "temporal-hit", similarity: 0.9 }]);
+    const started = Promise.withResolvers<void>();
+    const originalOffload = readOffload.offloadAll;
+    const offloadSpy = vi
+      .spyOn(readOffload, "offloadAll")
+      .mockImplementation((sql, params) => {
+        if (sql.includes("FROM temporal_messages WHERE id IN")) {
+          started.resolve();
+          return new Promise(() => {});
+        }
+        return originalOffload(sql, params);
+      });
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        knowledgeEnabled: false,
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(eSpy).not.toHaveBeenCalled();
+    } finally {
+      offloadSpy.mockRestore();
+    }
+  });
+
+  test("aborts while entity vector search is pending and never starts entity hydration", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    eSpy.mockImplementation(() => {
+      started.resolve();
+      return new Promise(() => {});
+    });
+    const hydrateSpy = vi.spyOn(entities, "getManyWithAliasesOffloaded");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        knowledgeEnabled: false,
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(hydrateSpy).not.toHaveBeenCalled();
+    } finally {
+      hydrateSpy.mockRestore();
+    }
+  });
+
+  test("aborts while entity vector hydration is pending and never starts LAT search", async () => {
+    const controller = new AbortController();
+    eSpy.mockResolvedValue([{ id: "entity-hit", similarity: 0.9 }]);
+    const started = Promise.withResolvers<void>();
+    const hydrateSpy = vi
+      .spyOn(entities, "getManyWithAliasesOffloaded")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    const hasLatSpy = vi.spyOn(latReader, "hasLatDir");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        knowledgeEnabled: false,
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(hasLatSpy).not.toHaveBeenCalled();
+    } finally {
+      hydrateSpy.mockRestore();
+      hasLatSpy.mockRestore();
+    }
+  });
+
+  test("aborts while entity search is pending and never starts cross-repo search", async () => {
+    const controller = new AbortController();
+    availableSpy.mockReturnValue(false);
+    const started = Promise.withResolvers<void>();
+    const entitySpy = vi
+      .spyOn(entities, "searchAsync")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    const crossRepoSpy = vi.spyOn(entities, "searchCrossProjectReposAsync");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(crossRepoSpy).not.toHaveBeenCalled();
+    } finally {
+      entitySpy.mockRestore();
+      crossRepoSpy.mockRestore();
+    }
+  });
+
+  test("aborts while cross-repo search is pending and never starts graph expansion", async () => {
+    const controller = new AbortController();
+    availableSpy.mockReturnValue(false);
+    const started = Promise.withResolvers<void>();
+    const entitySpy = vi.spyOn(entities, "searchAsync").mockResolvedValue([]);
+    const crossRepoSpy = vi
+      .spyOn(entities, "searchCrossProjectReposAsync")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    const graphSpy = vi.spyOn(entities, "graphExpand");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(graphSpy).not.toHaveBeenCalled();
+    } finally {
+      entitySpy.mockRestore();
+      crossRepoSpy.mockRestore();
+      graphSpy.mockRestore();
+    }
+  });
+
+  test("aborts while graph knowledge hydration is pending and never starts neighbor hydration", async () => {
+    const controller = new AbortController();
+    availableSpy.mockReturnValue(false);
+    const seed = entities.create({
+      projectPath: PROJ,
+      entityType: "service",
+      canonicalName: "Graph Cancellation Seed",
+    });
+    const seedEntity = entities.getWithAliases(seed.id);
+    expect(seedEntity).not.toBeNull();
+    if (!seedEntity) throw new Error("graph seed was not created");
+    const entitySpy = vi
+      .spyOn(entities, "searchAsync")
+      .mockResolvedValue([seedEntity]);
+    const crossRepoSpy = vi
+      .spyOn(entities, "searchCrossProjectReposAsync")
+      .mockResolvedValue([]);
+    const graphSpy = vi.spyOn(entities, "graphExpand").mockReturnValue({
+      knowledge: [{ logicalId: "logical-hit", score: 1, depth: 1, reach: 1 }],
+      entities: [{ id: "neighbor-hit", score: 1, depth: 1 }],
+    });
+    const started = Promise.withResolvers<void>();
+    const knowledgeHydrateSpy = vi
+      .spyOn(ltm, "getManyByLogicalOffloaded")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    const entityHydrateSpy = vi.spyOn(entities, "getManyWithAliasesOffloaded");
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(entityHydrateSpy).not.toHaveBeenCalled();
+    } finally {
+      entitySpy.mockRestore();
+      crossRepoSpy.mockRestore();
+      graphSpy.mockRestore();
+      knowledgeHydrateSpy.mockRestore();
+      entityHydrateSpy.mockRestore();
+    }
+  });
+
+  test("aborts while graph neighbor hydration is pending", async () => {
+    const controller = new AbortController();
+    availableSpy.mockReturnValue(false);
+    const seed = entities.create({
+      projectPath: PROJ,
+      entityType: "service",
+      canonicalName: "Graph Neighbor Cancellation Seed",
+    });
+    const seedEntity = entities.getWithAliases(seed.id);
+    expect(seedEntity).not.toBeNull();
+    if (!seedEntity) throw new Error("graph seed was not created");
+    const entitySpy = vi
+      .spyOn(entities, "searchAsync")
+      .mockResolvedValue([seedEntity]);
+    const crossRepoSpy = vi
+      .spyOn(entities, "searchCrossProjectReposAsync")
+      .mockResolvedValue([]);
+    const graphSpy = vi.spyOn(entities, "graphExpand").mockReturnValue({
+      knowledge: [],
+      entities: [{ id: "neighbor-hit", score: 1, depth: 1 }],
+    });
+    const started = Promise.withResolvers<void>();
+    const entityHydrateSpy = vi
+      .spyOn(entities, "getManyWithAliasesOffloaded")
+      .mockImplementation(() => {
+        started.resolve();
+        return new Promise(() => {});
+      });
+    try {
+      const pending = searchRecall({
+        query: "totallyunrelatedtoken",
+        projectPath: PROJ,
+        scope: "all",
+        signal: controller.signal,
+      });
+      await started.promise;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      entitySpy.mockRestore();
+      crossRepoSpy.mockRestore();
+      graphSpy.mockRestore();
+      entityHydrateSpy.mockRestore();
+    }
   });
 });

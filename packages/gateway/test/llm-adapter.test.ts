@@ -20,6 +20,8 @@ vi.mock("../src/worker-health", async (importOriginal) => {
 
 import {
   backoffMs,
+  abortableSleep,
+  readWorkerResponseText,
   createGatewayLLMClient,
   getLastWorkerError,
   maxRetriesFor,
@@ -98,6 +100,45 @@ describe("backoffMs — with Retry-After", () => {
   test("caps Retry-After at 32s regardless of attempt", () => {
     expect(backoffMs(0, 60_000)).toBe(32_000);
     expect(backoffMs(2, 300_000)).toBe(32_000);
+  });
+});
+
+describe("abortableSleep", () => {
+  test("rejects immediately when retry backoff is aborted", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    try {
+      const pending = abortableSleep(32_000, controller.signal);
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("readWorkerResponseText", () => {
+  test("cancels a stalled worker error body on abort", async () => {
+    const controller = new AbortController();
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 500 },
+    );
+    const pending = readWorkerResponseText(response, controller.signal);
+    await Promise.resolve();
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelled).toBe(true);
   });
 });
 

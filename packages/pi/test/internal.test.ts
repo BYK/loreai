@@ -109,6 +109,7 @@ describe("runCompaction", () => {
     previousSummary: "prev",
     firstKeptEntryId: "entry-7",
     tokensBefore: 4242,
+    authHeaders: { authorization: "Bearer pi-auth" },
   };
 
   test("POSTs to /v1/compact with session header + body, returns shaped result", async () => {
@@ -126,6 +127,9 @@ describe("runCompaction", () => {
     expect(url).toBe(`${GW}/v1/compact`);
     expect((init!.headers as Record<string, string>)["x-lore-session-id"]).toBe(
       "sess-c",
+    );
+    expect((init!.headers as Record<string, string>).authorization).toBe(
+      "Bearer pi-auth",
     );
     expect(JSON.parse(init?.body as string)).toEqual({
       project_path: "/proj",

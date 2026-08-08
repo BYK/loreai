@@ -193,6 +193,8 @@ export function isToolPart(p: LorePart): p is LoreToolPart {
 export type LoreMessageWithParts = {
   info: LoreMessage;
   parts: LorePart[];
+  /** Transient provider bytes omitted from parts but counted by gradient. */
+  hiddenInputTokens?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -226,6 +228,8 @@ export interface LLMClient {
     opts?: {
       /** Override model for this call. */
       model?: { providerID: string; modelID: string };
+      /** Abort in-flight work when the owning client disconnects. */
+      signal?: AbortSignal;
       /**
        * Opaque worker identifier used by the host to route the request
        * (e.g. OpenCode uses this as the session agent name).

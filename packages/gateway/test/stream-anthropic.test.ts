@@ -6,7 +6,7 @@
  * (buildKeepaliveCompactionStream and createRecallAwareAccumulator are
  * covered by keepalive-compaction.test.ts / recall-stream.test.ts.)
  */
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi } from "vitest";
 import {
   formatSSEEvent,
   parseSSEStream,
@@ -125,6 +125,65 @@ describe("parseSSEStream", () => {
       readerFromChunks(["event: message_stop\ndata: {}"]),
     );
     expect(events).toEqual([{ event: "message_stop", data: "{}" }]);
+  });
+
+  test("rejects an oversized event before a blank-line delimiter arrives", async () => {
+    const reader = readerFromChunks([
+      "event: response.output_item.added\ndata: ",
+      "x".repeat(64),
+    ]);
+    const collectBounded = async (): Promise<void> => {
+      for await (const _event of parseSSEStream(reader, {
+        maxEventBytes: 32,
+      })) {
+        // No complete event should be yielded.
+      }
+    };
+
+    await expect(collectBounded()).rejects.toThrow(
+      "SSE event exceeded 32 byte limit",
+    );
+  });
+
+  test("rejects an unlimited sequence of small frames", async () => {
+    const reader = readerFromChunks([
+      "data: one\n\ndata: two\n\ndata: three\n\n",
+    ]);
+    const collectBounded = async (): Promise<void> => {
+      for await (const _event of parseSSEStream(reader, { maxFrames: 2 })) {
+        // Consume until the frame cap rejects.
+      }
+    };
+    await expect(collectBounded()).rejects.toThrow(
+      "SSE stream exceeded 2 frame limit",
+    );
+  });
+
+  test("rejects a stalled stream after its inactivity deadline", async () => {
+    vi.useFakeTimers();
+    const reader = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise(() => {});
+      },
+    }).getReader();
+    const collectBounded = async (): Promise<void> => {
+      for await (const _event of parseSSEStream(reader, {
+        inactivityMs: 100,
+      })) {
+        // No frames arrive.
+      }
+    };
+    try {
+      const pending = collectBounded();
+      const assertion = expect(pending).rejects.toThrow(
+        "SSE stream inactivity deadline exceeded",
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+      void reader.cancel();
+    }
   });
 });
 

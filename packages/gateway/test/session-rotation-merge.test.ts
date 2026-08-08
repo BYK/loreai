@@ -59,6 +59,7 @@ interface SessionRow {
   header_name: string | null;
   project_path: string | null;
   project_path_provisional: number;
+  credential_fingerprint: string;
 }
 
 describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
@@ -399,5 +400,46 @@ describe("Tier 1b: x-lore-session-id isolation (Lore plugin stable ID)", () => {
     expect(new Set(sessions.map((s) => s.project_path))).toEqual(
       new Set(["/proj/ls-alpha", "/proj/ls-beta"]),
     );
+  });
+
+  it("does not share one session header across credentials", async () => {
+    harness = await createHarness({
+      fixtures: [
+        ...makeConversationFixtures([
+          { userMessage: "credential alpha", assistantText: "A." },
+        ]),
+        ...makeConversationFixtures([
+          { userMessage: "credential beta", assistantText: "B." },
+        ]),
+      ],
+    });
+    const sessionHeader = "shared-by-two-clients";
+
+    const first = await harness.chat(body("credential alpha"), "key-A", {
+      "x-lore-session-id": sessionHeader,
+      "x-lore-project": "/proj/shared",
+    });
+    expect(first.status).toBe(200);
+    await first.text();
+
+    const second = await harness.chat(body("credential beta"), "key-B", {
+      "x-lore-session-id": sessionHeader,
+      "x-lore-project": "/proj/shared",
+    });
+    expect(second.status).toBe(200);
+    await second.text();
+
+    const rows = harness.queryDB<SessionRow>(
+      `SELECT session_id, credential_fingerprint
+         FROM session_state
+        WHERE header_name = 'x-lore-session-id'
+          AND header_session_id = 'shared-by-two-clients'`,
+    );
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.session_id)).size).toBe(2);
+    expect(new Set(rows.map((row) => row.credential_fingerprint)).size).toBe(2);
+    expect(
+      rows.every((row) => /^[0-9a-f]{16}$/.test(row.credential_fingerprint)),
+    ).toBe(true);
   });
 });

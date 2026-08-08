@@ -55,7 +55,7 @@ function estimateParts(parts: LorePart[]): number {
 }
 
 function estimateMessage(msg: MessageWithParts): number {
-  return estimateParts(msg.parts) + 20; // role/metadata overhead
+  return estimateParts(msg.parts) + (msg.hiddenInputTokens ?? 0) + 20;
 }
 
 // Cached model context limit — set by system transform hook, used by message transform
@@ -4022,6 +4022,7 @@ function transformInner(input: {
   const currentTurn = input.messages.slice(nuclearTurnStart).map((m) => ({
     info: m.info,
     parts: cleanParts(m.parts),
+    hiddenInputTokens: m.hiddenInputTokens,
   }));
   const currentTurnTokens = currentTurn.reduce(
     (sum, m) => sum + estimateMessage(m),
@@ -4039,6 +4040,7 @@ function transformInner(input: {
     olderMessages.unshift({
       info: msg.info,
       parts: cleanParts(msg.parts),
+      hiddenInputTokens: msg.hiddenInputTokens,
     });
     olderTokens += est;
   }
