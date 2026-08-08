@@ -151,8 +151,8 @@ const VERSION_SEEDS: Record<string, bigint> = {
   "2.1.222": SEED_2_1_138,
   "2.1.223": SEED_2_1_138,
   "2.1.224": SEED_2_1_138,
-  "2.1.226": SEED_2_1_138,
   "2.1.225": SEED_2_1_138,
+  "2.1.226": SEED_2_1_138,
   // Future versions: extract and add entries here.
   // Use `node scripts/extract-cch-seed.ts --version X.Y.Z` to extract.
 };
