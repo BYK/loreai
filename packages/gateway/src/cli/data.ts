@@ -2127,10 +2127,9 @@ async function cmdMove(
       const includeChildren = flags["no-children"] !== true;
 
       // Resolve session IDs via prefix matching
-      const sourceProject = data
-        .listProjects()
-        .find((project) => project.path === projectPath);
-      const allSessions = sourceProject
+      const { projectId } = await import("@loreai/core");
+      const sourceProjectId = projectId(projectPath);
+      const allSessions = sourceProjectId
         ? data.listSessions(projectPath, 10000)
         : [];
       const resolved: string[] = [];
@@ -2184,8 +2183,9 @@ async function cmdMove(
         return;
       }
 
-      const { ensureProject } = await import("@loreai/core");
-      const sourceProjectId = ensureProject(projectPath);
+      if (!sourceProjectId) {
+        throw new Error(`Project not found for sessions at ${projectPath}`);
+      }
 
       if (!skipConfirm) {
         const confirmed = await confirm(
@@ -2522,22 +2522,22 @@ async function cmdSplit(
   const minConfidence = (flags["min-confidence"] as string) ?? "high";
   const projectPath = resolve((flags.project as string) ?? process.cwd());
 
-  const sourceProject = data
-    .listProjects()
-    .find((project) => project.path === projectPath);
-  const sessions = sourceProject ? data.listSessions(projectPath, 10000) : [];
+  const { projectId } = await import("@loreai/core");
+  const sourceProjectId = projectId(projectPath);
+  const sessions = sourceProjectId ? data.listSessions(projectPath, 10000) : [];
 
   if (!sessions.length) {
     if (!asJson) console.log("No sessions found in project.");
     return;
   }
-
-  const sourceProjectId = sourceProject?.id;
+  if (!sourceProjectId) {
+    throw new Error(`Project not found for sessions at ${projectPath}`);
+  }
 
   // Suggest targets for all sessions
   const suggestions = suggestProjectsForSessions(
     sessions.map((s) => s.session_id),
-    sourceProjectId ?? "",
+    sourceProjectId,
     projectPath,
   );
 
@@ -3220,16 +3220,14 @@ async function cmdCacheStats(
     process.exit(1);
   }
 
-  const { data, getCacheBustStats, summarizeCacheBustStats } =
+  const { getCacheBustStats, projectId, summarizeCacheBustStats } =
     await import("@loreai/core");
 
   let projectID: string | undefined;
   let scopeLabel = "all projects";
   if (flags.project) {
     const projectPath = resolve(flags.project as string);
-    projectID = data
-      .listProjects()
-      .find((project) => project.path === projectPath)?.id;
+    projectID = projectId(projectPath);
     if (!projectID) {
       console.error(`No tracked project found at ${projectPath}.`);
       process.exitCode = 1;

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { data, ltm } from "@loreai/core";
+import { data, db, ensureProject, ltm, projectId } from "@loreai/core";
 import { commandData } from "../src/cli/data";
 
 let projectDir: string;
@@ -19,6 +19,53 @@ afterEach(() => {
 });
 
 describe("lore data dedup safety policy", () => {
+  test.each([
+    [
+      "move",
+      () => ({
+        project: join(projectDir, "worktree"),
+        to: projectDir,
+        "dry-run": true,
+      }),
+      () => ["move", "session", "missing-session"],
+      true,
+    ],
+    [
+      "split",
+      () => ({ project: join(projectDir, "worktree") }),
+      () => ["split"],
+      false,
+    ],
+    [
+      "cache-stats",
+      () => ({ project: join(projectDir, "worktree") }),
+      () => ["cache-stats"],
+      false,
+    ],
+  ])(
+    "%s resolves an alias without creating a project",
+    async (_name, flagsFor, argsFor, expectsFailure) => {
+      const canonicalId = ensureProject(projectDir);
+      const aliasPath = join(projectDir, "worktree");
+      db()
+        .query(
+          "INSERT INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+        )
+        .run(aliasPath, canonicalId);
+      const projectCount = data.listProjects().length;
+
+      expect(projectId(aliasPath)).toBe(canonicalId);
+      const command = commandData(argsFor(), flagsFor());
+      if (expectsFailure) {
+        await expect(command).rejects.toThrow();
+      } else {
+        await command;
+      }
+
+      expect(data.listProjects()).toHaveLength(projectCount);
+    },
+  );
+
   test.each([
     [
       "move",
