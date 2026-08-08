@@ -1,0 +1,53 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { db, entities } from "@loreai/core";
+import { commandEntity } from "../src/cli/entity";
+
+let projectDir: string;
+let logSpy: ReturnType<typeof vi.spyOn>;
+let errorSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  projectDir = mkdtempSync(join(tmpdir(), "lore-entity-dedup-"));
+  logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  logSpy.mockRestore();
+  errorSpy.mockRestore();
+  rmSync(projectDir, { recursive: true, force: true });
+});
+
+describe("lore entity dedup safety policy", () => {
+  test("--dry-run overrides --yes and preserves a real duplicate cluster", async () => {
+    const canonical = ensureEntity("tool", "Prefer idempotent writes");
+    const duplicate = ensureEntity("tool", "Use atomic skill writes");
+
+    expect(canonical).not.toBe(duplicate);
+    expect(
+      db().query("SELECT COUNT(*) AS n FROM entities").get(),
+    ).toMatchObject({ n: 2 });
+
+    await commandEntity(["dedup"], {
+      project: projectDir,
+      yes: true,
+    });
+
+    expect(
+      db().query("SELECT COUNT(*) AS n FROM entities").get(),
+    ).toMatchObject({ n: 2 });
+  });
+});
+
+function ensureEntity(type: string, name: string): string {
+  const result = entities.create({
+    projectPath: projectDir,
+    entityType: type as Parameters<typeof entities.create>[0]["entityType"],
+    canonicalName: name,
+    crossProject: false,
+  });
+  return result.id;
+}
