@@ -15,6 +15,9 @@ const origNoUpdateCheck = process.env.LORE_NO_UPDATE_CHECK;
 const origArgv = process.argv;
 
 beforeEach(() => {
+  // Clear any `vi.doMock("../src/cli/data", ...)` mock factories left over
+  // from prior tests so each test gets a fresh module instance.
+  vi.resetModules();
   process.env.LORE_NO_UPDATE_CHECK = "1";
   process.argv = origArgv;
 });
@@ -376,6 +379,61 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
     }
     expect(confirm).not.toHaveBeenCalled();
     expect(calls[0]?.values.yes).toBeUndefined();
+    vi.resetModules();
+  });
+
+  test("move from untracked project surfaces Project not found before Session not found", async () => {
+    // Previous tests use `vi.doMock("../src/cli/data", ...)` which leaves
+    // a mock factory in vitest's mock registry. Unmock before importing
+    // so the wrapper sees the real `commandData` and reaches the
+    // untracked-project branch we fixed.
+    vi.resetModules();
+    vi.doUnmock("../src/cli/data");
+    vi.doUnmock("../src/cli/commands/data");
+    const { runCli } = await import("../src/cli/cli");
+    const stdoutChunks: Buffer[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk) => {
+        stdoutChunks.push(
+          Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+        );
+        return true;
+      });
+    process.argv = [
+      "node",
+      "lore",
+      "data",
+      "move",
+      "session",
+      "missing-session",
+      "--to",
+      "/tmp/some-target",
+      "--project",
+      "/tmp/truly-untracked-project",
+      "--yes",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const priorRemote = process.env.LORE_REMOTE_URL;
+    delete process.env.LORE_REMOTE_URL;
+    delete process.env.LORE_REMOTE;
+    delete process.env.LORE_HOSTED_MODE;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      stdoutSpy.mockRestore();
+      process.exitCode = priorExitCode;
+      if (priorRemote !== undefined) {
+        process.env.LORE_REMOTE_URL = priorRemote;
+      }
+    }
+    expect(capturedExitCode).toBe(1);
+    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+    expect(stdout).toContain("Error: Project not found for sessions");
+    expect(stdout).not.toContain("Session not found");
     vi.resetModules();
   });
 
