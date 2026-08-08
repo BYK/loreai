@@ -2129,9 +2129,13 @@ async function cmdMove(
       // Resolve session IDs via prefix matching
       const { projectId } = await import("@loreai/core");
       const sourceProjectId = projectId(projectPath);
-      const allSessions = sourceProjectId
-        ? data.listSessions(projectPath, 10000)
-        : [];
+      if (!sourceProjectId) {
+        console.error(
+          `Error: Project not found for sessions at ${projectPath}`,
+        );
+        process.exit(1);
+      }
+      const allSessions = data.listSessions(projectPath, 10000);
       const resolved: string[] = [];
       for (const rawId of rawIds) {
         const match = allSessions.find((s) => s.session_id.startsWith(rawId));
@@ -2181,10 +2185,6 @@ async function cmdMove(
       if (dryRun) {
         console.log("\nDry run — no changes made.");
         return;
-      }
-
-      if (!sourceProjectId) {
-        throw new Error(`Project not found for sessions at ${projectPath}`);
       }
 
       if (!skipConfirm) {
