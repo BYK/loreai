@@ -11,7 +11,13 @@ import { startServer, bracketHost } from "../server";
 import { resetPipelineState } from "../pipeline";
 import { writePortFile, removePortFile, readPortFile } from "../portfile";
 import { writePidFile, removePidFile } from "../pidfile";
-import { dataDir, embedding, log } from "@loreai/core";
+import {
+  dataDir,
+  embedding,
+  log,
+  close,
+  shutdownVectorPoolAsync,
+} from "@loreai/core";
 import { safeExit } from "./exit";
 import { installSignalShutdown, SHUTDOWN_DEADLINE_MS } from "./shutdown";
 
@@ -470,6 +476,25 @@ export async function startGateway(
         // safeExit — gives the worker time to exit cleanly via its
         // "shutdown" message handler rather than being killed by _exit().
         await embedding.resetProvider();
+        // Shut down the vector-pool workers and wait for each to close its
+        // SQLite reader and exit (#1599). The synchronous `shutdownVectorPool`
+        // posts the shutdown message and immediately force-terminates, so the
+        // worker thread never reads the message and its reader never closes —
+        // leaving the main thread's `close()` (which runs `PRAGMA
+        // wal_checkpoint(TRUNCATE)`) to busy-wait up to 5s on a reader's WAL
+        // lock. The async variant posts the cooperative shutdown message,
+        // waits up to 1s for each worker's exit event, and force-terminates
+        // on timeout. Always resolves, never rejects — the outer
+        // `runShutdownWithDeadline` is the only thing that can force-exit.
+        await shutdownVectorPoolAsync();
+        // Close the main-thread SQLite writer with checkpoint+truncate so
+        // the next boot doesn't inherit a huge WAL to recover (#1221). The
+        // core's `close()` is idempotent — guarded by `if (instance)` so it
+        // never opens an unopened DB and never throws on a closed DB. The
+        // PRAGMA busy_timeout=0 part swallows any residual reader lock (we
+        // already waited for cooperative shutdown above); best-effort, never
+        // blocks the process.
+        close();
       };
 
       if (candidatePort === 0) {

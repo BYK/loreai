@@ -781,7 +781,16 @@ export async function checkReadOffload(
 
 /** Tear down the pool (test teardown + process reset). Idempotent. The
  *  shuttingDown guard keeps the terminate()-induced worker exits below from
- *  being counted as structural failures. */
+ *  being counted as structural failures.
+ *
+ *  Synchronous fire-and-forget: posts the shutdown message and immediately
+ *  force-terminates each worker. The reader close inside the worker thread
+ *  (vector-worker.ts:144-153) is NEVER given a chance to run — fine for the
+ *  test seam (FakeWorker fires `exit` synchronously from `terminate()`) but
+ *  NOT for the real gateway shutdown, which needs the reader to close BEFORE
+ *  the main thread's `close()` runs (`PRAGMA wal_checkpoint(TRUNCATE)` while
+ *  a reader holds the WAL would busy-wait up to 5s). Use
+ *  {@link shutdownVectorPoolAsync} for that. */
 export function shutdownVectorPool(): void {
   shuttingDown = true;
   for (const pw of workers) {
@@ -798,6 +807,120 @@ export function shutdownVectorPool(): void {
     }
   }
   workers = [];
+}
+
+/** Default per-pool shutdown deadline. The gateway's overall shutdown
+ *  deadline is {@link packages/gateway/src/cli/shutdown.ts:SHUTDOWN_DEADLINE_MS}
+ *  (4s default); the vector pool must leave room for the embedding-worker
+ *  reset (~1.5s), the embedding-document drain (~2.4s), and the writer
+ *  `close()` call (~hundreds of ms). 1s lets a wedged worker be terminated
+ *  while still keeping the whole shutdown under the 4s cap with margin for
+ *  the embedding drain's bookkeeping. Override via `opts.timeoutMs`. */
+const VECTOR_POOL_SHUTDOWN_MS_DEFAULT = 1000;
+
+/**
+ * Cooperative, bounded shutdown of the vector-pool workers — waits for each
+ * worker to close its SQLite reader and exit before resolving. This is the
+ * variant the gateway uses: the synchronous {@link shutdownVectorPool}
+ * terminates workers the moment it posts the shutdown message, so the worker
+ * thread never reads the message and its reader never closes — leaving the
+ * main thread's `close()` (`PRAGMA wal_checkpoint(TRUNCATE)`) to busy-wait up
+ * to 5s on a reader's WAL lock.
+ *
+ * For each worker, this:
+ *   1. Posts a cooperative `{type:"shutdown"}` message. The worker closes its
+ *      reader (db/reader.ts) and exits via a deferred `process.exit(0)` on
+ *      the next microtask (vector-worker.ts:147-153).
+ *   2. Waits up to `timeoutMs` for the worker's `exit` event.
+ *   3. On timeout, force-terminates the worker — the OS reclaims the file
+ *      handle, so the main thread's `close()` can run.
+ *
+ * Always resolves (never rejects). The outer `workers` array is cleared
+ * synchronously so concurrent calls are idempotent. The `shuttingDown` flag
+ * is set so the terminate()-induced exits aren't counted as structural
+ * failures.
+ *
+ * Intended to run AFTER `embedding.resetProvider()` (the embedding worker is
+ * already gone) and BEFORE the main-thread `close()` (so the writer's
+ * checkpoint-and-close runs after every reader has detached).
+ */
+export function shutdownVectorPoolAsync(
+  opts: {
+    timeoutMs?: number;
+  } = {},
+): Promise<void> {
+  const rawTimeout = opts.timeoutMs ?? VECTOR_POOL_SHUTDOWN_MS_DEFAULT;
+  // Guard against a typo'd env-like override: a 0 / negative / NaN must still
+  // produce a deadline that fires (mirrors the `computeMaxTokens` /
+  // `parseShutdownDeadline` pattern of refusing to silently disable safety
+  // bounds).
+  const timeoutMs =
+    Number.isFinite(rawTimeout) && rawTimeout > 0
+      ? Math.floor(rawTimeout)
+      : VECTOR_POOL_SHUTDOWN_MS_DEFAULT;
+  // Mark the pool as shutting down BEFORE doing any work so the
+  // terminate()-induced exits below aren't counted as structural failures.
+  shuttingDown = true;
+  // Snapshot + clear synchronously so concurrent calls (e.g. a second
+  // SIGINT) are idempotent — the pool is already gone from the caller's view.
+  const workersToShutdown = workers;
+  workers = [];
+  if (workersToShutdown.length === 0) return Promise.resolve();
+  return Promise.all(
+    workersToShutdown.map((pw) => shutdownOneWorker(pw, timeoutMs)),
+  ).then(() => undefined);
+}
+
+/** Wait for one worker to close its reader and exit. Mirrors the bounded
+ *  pattern in `embedding.awaitWorkerShutdown`: cooperative message first,
+ *  force-terminate on timeout. Always resolves — never rejects. */
+function shutdownOneWorker(pw: PoolWorker, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    // Declared with `let` (not `const`) so the assignment below can run AFTER
+    // `finish()` may have been invoked via the postMessage catch path's
+    // terminate() call — `finish()` references `killTimer` to clear the
+    // deadline. The `undefined` check guards the TDZ window between the
+    // catch-path synchronous terminate() and the setTimeout line below.
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      resolve();
+    };
+    // Already-exited (e.g. the worker died and our `exit` listener chain
+    // already fired) → resolve immediately.
+    if (pw.dead) {
+      finish();
+      return;
+    }
+    pw.worker.once("exit", finish);
+    try {
+      pw.worker.postMessage({ type: "shutdown" });
+    } catch {
+      // Worker already gone — try terminate to ensure the exit event fires.
+      try {
+        void pw.worker.terminate();
+      } catch {
+        // best-effort; the timer below will still fire terminate.
+      }
+    }
+    // Hard cap: if the worker is mid-scan (a synchronous, uninterruptible
+    // `runVectorQuery` or `runReadJob`) and never reads the shutdown
+    // message, force-terminate so the caller (the gateway shutdown) can
+    // proceed. Terminating is safe — the OS reclaims the worker's file
+    // descriptors and the reader connection vanishes.
+    killTimer = setTimeout(() => {
+      try {
+        void pw.worker.terminate();
+      } catch {
+        // best-effort; once terminate() is called, the exit event will fire
+        // asynchronously and finish() will run.
+      }
+    }, timeoutMs);
+    killTimer.unref?.();
+  });
 }
 
 /** For tests: reset all pool state (workers, latches, counters, request ids). */

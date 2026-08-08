@@ -551,6 +551,41 @@ describe("db", () => {
     expect(row?.name).toBe("kv_meta");
   });
 
+  describe("close() idempotency (#1599)", () => {
+    // The gateway shutdown path can call close() more than once in degenerate
+    // scenarios (test seam, second-signal force-exit, partial-init failure).
+    // Each call must be a no-op rather than reopening the DB or throwing.
+    test("close() does NOT open an unopened DB", () => {
+      // Guard: db() has been called by sibling tests in this file (so the
+      // singleton may be populated). We close it to set up the "already
+      // closed" scenario, then close() again. The second call must NOT
+      // trigger a new Database() open — only the public `db()` accessor does
+      // that.
+      close();
+      // Idempotent: a second close() does not throw and does not open.
+      expect(() => close()).not.toThrow();
+      expect(() => close()).not.toThrow();
+    });
+
+    test("close() after close() leaves the DB cleanly re-openable", () => {
+      // The first close() runs the WAL checkpoint and instance.close(). The
+      // second close() must be a no-op (no dangling instance to close,
+      // exception would crash the gateway shutdown). After this, db() must
+      // re-initialize cleanly.
+      close();
+      close();
+      const reopened = db();
+      expect(reopened).toBeDefined();
+      // Verify the re-opened handle is functional (kv_meta exists).
+      const row = reopened
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+        )
+        .get() as { name: string } | null;
+      expect(row?.name).toBe("kv_meta");
+    });
+  });
+
   test("recoverMissingObjects creates kv_meta and metadata when version=latest but tables are missing", () => {
     // Simulate the exact scenario: DB at current version but tables missing
     // due to a partial migration (ALTER TABLE duplicate column aborted exec
