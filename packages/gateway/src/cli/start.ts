@@ -11,7 +11,14 @@ import { startServer, bracketHost } from "../server";
 import { resetPipelineState } from "../pipeline";
 import { writePortFile, removePortFile, readPortFile } from "../portfile";
 import { writePidFile, removePidFile } from "../pidfile";
-import { dataDir, embedding, log } from "@loreai/core";
+import {
+  dataDir,
+  embedding,
+  log,
+  close as closeDb,
+  shutdownVectorPoolAsync,
+  DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
+} from "@loreai/core";
 import { safeExit } from "./exit";
 import { installSignalShutdown, SHUTDOWN_DEADLINE_MS } from "./shutdown";
 
@@ -25,6 +32,24 @@ import { installSignalShutdown, SHUTDOWN_DEADLINE_MS } from "./shutdown";
 const EMBED_DRAIN_DEADLINE_MS = Math.max(
   500,
   Math.floor(SHUTDOWN_DEADLINE_MS * 0.6),
+);
+
+/**
+ * Bound for the bounded vector-pool shutdown on graceful shutdown (#1599).
+ * The pool teardown must wait for every worker's SQLite reader to close before
+ * the writer can TRUNCATE the WAL — leaving readers up would strand the `-wal`
+ * file and force WAL recovery on the next boot. Sized to fit under the global
+ * deadline after the embedding drain (60%) so a stuck worker still leaves room
+ * for the writer's checkpoint+close. Mirrors {@link EMBED_DRAIN_DEADLINE_MS}'s
+ * safety floor of 500ms so an aggressive `LORE_SHUTDOWN_TIMEOUT_MS` (e.g.
+ * 1000ms) doesn't shrink the pool budget into a guaranteed timeout.
+ */
+const VECTOR_POOL_SHUTDOWN_DEADLINE_MS = Math.max(
+  Math.min(
+    DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
+    SHUTDOWN_DEADLINE_MS - 500,
+  ),
+  500,
 );
 
 export interface StartOptions {
@@ -470,6 +495,34 @@ export async function startGateway(
         // safeExit — gives the worker time to exit cleanly via its
         // "shutdown" message handler rather than being killed by _exit().
         await embedding.resetProvider();
+        // Tear down the vector/read worker pool and WAIT for every worker to
+        // close its own SQLite reader (#1599). Done after the embedding worker
+        // is gone (it had its own short-lived budget) and before the writer
+        // close below: SQLite WAL TRUNCATE requires ZERO concurrent
+        // readers on the connection — each worker's `reader.db` holds a WAL
+        // read-mark, so leaving readers alive means the writer's checkpoint
+        // either busy-returns or hangs on `busy_timeout`, both of which leak
+        // the `-wal` to next-boot recovery. The bounded helper force-terminates
+        // any worker that hasn't exited by its deadline, so a stuck reader
+        // can't reintroduce the Ctrl+C hang the embedding budget above
+        // prevents.
+        await shutdownVectorPoolAsync(VECTOR_POOL_SHUTDOWN_DEADLINE_MS);
+        // Close the main SQLite writer. The core `close()` is itself best-
+        // effort (busy_timeout=0 around TRUNCATE so a slow reader can't hang
+        // it; the `-wal` is just recovered on next open) and idempotent (no-op
+        // if the DB was never opened), so calling it unconditionally on the
+        // graceful path is safe. Done AFTER vector-pool shutdown so the writer
+        // can finally grab an exclusive checkpoint lock. Done BEFORE safeExit so
+        // the lazy singleton's atexit isn't the only thing closing it.
+        try {
+          closeDb();
+        } catch (e) {
+          // A checkpoint or close failure must NEVER block process exit —
+          // SQLite WAL recovery handles an unclean shutdown on next boot.
+          notify(
+            `Database close warning: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
       };
 
       if (candidatePort === 0) {

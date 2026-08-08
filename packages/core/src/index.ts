@@ -97,6 +97,9 @@ export {
   type VecWorkerCheck,
   checkReadOffload,
   type ReadOffloadCheck,
+  shutdownVectorPool,
+  shutdownVectorPoolAsync,
+  DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
 } from "./vector-pool";
 export { load, config, type LoreConfig } from "./config";
 export {
