@@ -231,6 +231,44 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
   });
 
+  test("accepts a partial Codex terminal output after streamed items", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_codex_partial_output", "gpt-5.6-terra"),
+        textItem(0, "omitted from terminal", "msg_omitted"),
+        textItem(1, "answer", "msg_answer"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_codex_partial_output",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                id: "msg_answer",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "answer" }],
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not be called");
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("answer");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).not.toContain("response.failed");
+  });
+
   test.each(["failed", "cancelled"])(
     "hides recall when the principal response.done status is %s",
     async (status) => {
@@ -706,6 +744,241 @@ describe("streamResponsesRecallAware", () => {
     expect(await drain(client)).toContain("response.failed");
   });
 
+  test("rejects terminal function calls changing the streamed tool name", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_name", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_terminal_name",
+            call_id: "call_terminal_name",
+            name: "read",
+          },
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_terminal_name",
+          arguments: "{}",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_terminal_name",
+            call_id: "call_terminal_name",
+            name: "read",
+            arguments: "{}",
+            status: "completed",
+          },
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_name",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_terminal_name",
+                call_id: "call_terminal_name",
+                name: "recall",
+                arguments: "{}",
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects malformed terminal output items", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_malformed", "gpt-5.6-terra"),
+        textItem(0, "answer", "msg_terminal_malformed"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_malformed",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [null],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects terminal output reordering streamed items", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_order", "gpt-5.6-terra"),
+        textItem(0, "first", "msg_first"),
+        textItem(1, "second", "msg_second"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_order",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "item_reference",
+                id: "msg_second",
+              },
+              {
+                type: "message",
+                id: "msg_first",
+                role: "assistant",
+                content: [{ type: "output_text", text: "first" }],
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("accepts terminal items that add optional status metadata", async () => {
+    const doneItem = {
+      type: "function_call",
+      id: "fc_terminal_status",
+      call_id: "call_terminal_status",
+      name: "read",
+      arguments: "{}",
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_status", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: doneItem,
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_terminal_status",
+          arguments: "{}",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: doneItem,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_status",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [{ ...doneItem, status: "completed" }],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+  });
+
+  test.each([
+    {
+      name: "message annotations",
+      doneItem: {
+        type: "message",
+        id: "msg_terminal_metadata",
+        role: "assistant",
+        content: [{ type: "output_text", text: "answer" }],
+      },
+      terminalItem: {
+        type: "message",
+        id: "msg_terminal_metadata",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "answer", annotations: [] }],
+      },
+    },
+    {
+      name: "hosted-tool status",
+      doneItem: {
+        type: "web_search_call",
+        id: "ws_terminal_metadata",
+        action: { type: "search", query: "lore" },
+      },
+      terminalItem: {
+        type: "web_search_call",
+        id: "ws_terminal_metadata",
+        status: "completed",
+        action: { type: "search", query: "lore" },
+      },
+    },
+  ])(
+    "accepts terminal enrichment with optional $name",
+    async ({ doneItem, terminalItem }) => {
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_terminal_metadata", "gpt-5.6-terra"),
+          sseEvent("response.output_item.added", {
+            output_index: 0,
+            item: doneItem,
+          }),
+          sseEvent("response.output_item.done", {
+            output_index: 0,
+            item: doneItem,
+          }),
+          sseEvent("response.completed", {
+            response: {
+              id: "resp_terminal_metadata",
+              model: "gpt-5.6-terra",
+              status: "completed",
+              output: [terminalItem],
+            },
+          }),
+        ]),
+        {
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not run");
+          },
+        },
+      );
+
+      expect(await drain(client)).not.toContain("response.failed");
+    },
+  );
+
   test("never forwards response-side item_reference lifecycle events", async () => {
     let completedResponse: GatewayResponse | undefined;
     const client = streamResponsesRecallAware(
@@ -725,7 +998,14 @@ describe("streamResponsesRecallAware", () => {
             id: "msg_server_only",
           },
         }),
-        completed("resp_reference"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_reference",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [{ type: "item_reference", id: "msg_server_only" }],
+          },
+        }),
       ]),
       {
         onComplete: (response) => {
@@ -739,10 +1019,34 @@ describe("streamResponsesRecallAware", () => {
     );
     const out = await drain(client);
     expect(out).not.toContain("item_reference");
+    expect(out).not.toContain("response.failed");
     expect(JSON.stringify(completedResponse)).not.toContain("item_reference");
   });
 
+  test("rejects an item_reference missing output_item.done", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_incomplete", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "item_reference", id: "msg_reference_incomplete" },
+        }),
+        completed("resp_reference_incomplete"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
   test("accepts reasoning summaries with summary_index", async () => {
+    let completedResponse: GatewayResponse | undefined;
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_summary", "gpt-5.6-terra"),
@@ -756,6 +1060,12 @@ describe("streamResponsesRecallAware", () => {
           summary_index: 0,
           delta: "summary",
         }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: "rs_summary",
+          summary_index: 0,
+          text: "summary",
+        }),
         sseEvent("response.output_item.done", {
           output_index: 0,
           item: { type: "reasoning", id: "rs_summary", summary: [] },
@@ -763,7 +1073,9 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_summary"),
       ]),
       {
-        onComplete: () => {},
+        onComplete: (response) => {
+          completedResponse = response;
+        },
         onRecall: async () => ({ anchorText: "", resultText: "" }),
         runFollowUp: async () => {
           throw new Error("should not run");
@@ -773,6 +1085,1652 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out).toContain("response.reasoning_summary_text.delta");
     expect(out).not.toContain("response.failed");
+    expect(completedResponse?.rawOutputItems).toContainEqual(
+      expect.objectContaining({
+        summary: [{ type: "summary_text", text: "summary" }],
+      }),
+    );
+  });
+
+  test("rejects unfinished reasoning omitted from output_item.done", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_summary_unfinished", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_summary_unfinished", summary: [] },
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: "rs_summary_unfinished",
+          summary_index: 0,
+          delta: "partial",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_summary_unfinished", summary: [] },
+        }),
+        completed("resp_summary_unfinished"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects unfinished reasoning when output_item.done omits summary", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_summary_field_omitted", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_summary_field_omitted",
+            summary: [],
+          },
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: "rs_summary_field_omitted",
+          summary_index: 0,
+          delta: "partial",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_summary_field_omitted" },
+        }),
+        completed("resp_summary_field_omitted"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects output text deltas that differ from the final text", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_text_delta_mismatch", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_text_delta_mismatch",
+            role: "assistant",
+          },
+        }),
+        sseEvent("response.output_text.delta", {
+          output_index: 0,
+          item_id: "msg_text_delta_mismatch",
+          content_index: 0,
+          delta: "different",
+        }),
+        sseEvent("response.output_text.done", {
+          output_index: 0,
+          item_id: "msg_text_delta_mismatch",
+          content_index: 0,
+          text: "final",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_text_delta_mismatch",
+            role: "assistant",
+            content: [{ type: "output_text", text: "final" }],
+          },
+        }),
+        completed("resp_text_delta_mismatch"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects function argument deltas that differ from the final arguments", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_argument_delta_mismatch", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_argument_delta_mismatch",
+            call_id: "call_argument_delta_mismatch",
+            name: "read",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_argument_delta_mismatch",
+          delta: '{"path":"different"}',
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_argument_delta_mismatch",
+          arguments: "{}",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_argument_delta_mismatch",
+            call_id: "call_argument_delta_mismatch",
+            name: "read",
+            arguments: "{}",
+          },
+        }),
+        completed("resp_argument_delta_mismatch"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("accepts function argument deltas extending an initial snapshot", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_argument_initial", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_argument_initial",
+            call_id: "call_argument_initial",
+            name: "read",
+            arguments: '{"path":"',
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_argument_initial",
+          delta: 'file"}',
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_argument_initial",
+          arguments: '{"path":"file"}',
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_argument_initial",
+            call_id: "call_argument_initial",
+            name: "read",
+            arguments: '{"path":"file"}',
+          },
+        }),
+        completed("resp_argument_initial"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+  });
+
+  test("rejects output_item.done changing initial function arguments", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_argument_initial_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_argument_initial_changed",
+            call_id: "call_argument_initial_changed",
+            name: "read",
+            arguments: '{"path":"secret"}',
+          },
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_argument_initial_changed",
+          arguments: "{}",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_argument_initial_changed",
+            call_id: "call_argument_initial_changed",
+            name: "read",
+            arguments: "{}",
+          },
+        }),
+        completed("resp_argument_initial_changed"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects output_item.done changing initial message content", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_message_initial_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_initial_changed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "secret" }],
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_initial_changed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "safe" }],
+          },
+        }),
+        completed("resp_message_initial_changed"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects content_part.done changing initial part content", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_part_initial_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_part_initial_changed",
+            role: "assistant",
+          },
+        }),
+        sseEvent("response.content_part.added", {
+          output_index: 0,
+          item_id: "msg_part_initial_changed",
+          content_index: 0,
+          part: { type: "output_text", text: "secret" },
+        }),
+        sseEvent("response.output_text.done", {
+          output_index: 0,
+          item_id: "msg_part_initial_changed",
+          content_index: 0,
+          text: "safe",
+        }),
+        sseEvent("response.content_part.done", {
+          output_index: 0,
+          item_id: "msg_part_initial_changed",
+          content_index: 0,
+          part: { type: "output_text", text: "safe" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_part_initial_changed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "safe" }],
+          },
+        }),
+        completed("resp_part_initial_changed"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects finalized reasoning that contradicts summary deltas", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reasoning_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_changed", summary: [] },
+        }),
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: "rs_changed",
+          summary_index: 0,
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: "rs_changed",
+          summary_index: 0,
+          delta: "secret",
+        }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: "rs_changed",
+          summary_index: 0,
+          text: "secret",
+        }),
+        sseEvent("response.reasoning_summary_part.done", {
+          output_index: 0,
+          item_id: "rs_changed",
+          summary_index: 0,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_changed",
+            summary: [{ type: "summary_text", text: "safe" }],
+          },
+        }),
+        completed("resp_reasoning_changed"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects reuse of an item_reference output index", async () => {
+    let recalled = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_reuse", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "item_reference", id: "msg_server_only" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: { type: "item_reference", id: "msg_server_only" },
+        }),
+        recallCall(0, { query: "hidden" }),
+        completed("resp_reference_reuse"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+    expect(recalled).toBe(0);
+  });
+
+  test("accepts unchanged non-empty initial message content", async () => {
+    const item = {
+      type: "message",
+      id: "msg_initial_unchanged",
+      role: "assistant",
+      content: [{ type: "output_text", text: "already complete" }],
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_message_initial_unchanged", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", { output_index: 0, item }),
+        sseEvent("response.output_item.done", { output_index: 0, item }),
+        completed("resp_message_initial_unchanged"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+  });
+
+  test("rejects output_item.done changing a message role", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_message_role_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_role_changed",
+            role: "assistant",
+            content: [],
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_role_changed",
+            role: "user",
+            content: [],
+          },
+        }),
+        completed("resp_message_role_changed"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("accepts content-part prefixes extended by deltas", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_part_prefix", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "message", id: "msg_part_prefix", role: "assistant" },
+        }),
+        sseEvent("response.content_part.added", {
+          output_index: 0,
+          item_id: "msg_part_prefix",
+          content_index: 0,
+          part: { type: "output_text", text: "pre" },
+        }),
+        sseEvent("response.output_text.delta", {
+          output_index: 0,
+          item_id: "msg_part_prefix",
+          content_index: 0,
+          delta: "fix",
+        }),
+        sseEvent("response.output_text.done", {
+          output_index: 0,
+          item_id: "msg_part_prefix",
+          content_index: 0,
+          text: "prefix",
+        }),
+        sseEvent("response.content_part.done", {
+          output_index: 0,
+          item_id: "msg_part_prefix",
+          content_index: 0,
+          part: { type: "output_text", text: "prefix" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_part_prefix",
+            role: "assistant",
+            content: [{ type: "output_text", text: "prefix" }],
+          },
+        }),
+        completed("resp_part_prefix"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+  });
+
+  test.each([
+    {
+      name: "part completion changing initial content",
+      events:
+        sseEvent("response.content_part.added", {
+          output_index: 0,
+          item_id: "msg_part_order",
+          content_index: 0,
+          part: { type: "output_text", text: "secret" },
+        }) +
+        sseEvent("response.content_part.done", {
+          output_index: 0,
+          item_id: "msg_part_order",
+          content_index: 0,
+          part: { type: "output_text", text: "safe" },
+        }),
+    },
+    {
+      name: "part added after text completion",
+      events:
+        sseEvent("response.output_text.done", {
+          output_index: 0,
+          item_id: "msg_part_order",
+          content_index: 0,
+          text: "safe",
+        }) +
+        sseEvent("response.content_part.added", {
+          output_index: 0,
+          item_id: "msg_part_order",
+          content_index: 0,
+          part: { type: "output_text", text: "evil" },
+        }) +
+        sseEvent("response.content_part.done", {
+          output_index: 0,
+          item_id: "msg_part_order",
+          content_index: 0,
+          part: { type: "output_text", text: "safe" },
+        }),
+    },
+  ])("rejects $name", async ({ events }) => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_part_order", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "message", id: "msg_part_order", role: "assistant" },
+        }),
+        events,
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_part_order",
+            role: "assistant",
+            content: [{ type: "output_text", text: "safe" }],
+          },
+        }),
+        completed("resp_part_order"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("accepts reasoning summary prefixes extended by deltas", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_summary_prefix", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_summary_prefix",
+            summary: [{ type: "summary_text", text: "pre" }],
+          },
+        }),
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: "rs_summary_prefix",
+          summary_index: 0,
+          part: { type: "summary_text", text: "pre" },
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: "rs_summary_prefix",
+          summary_index: 0,
+          delta: "fix",
+        }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: "rs_summary_prefix",
+          summary_index: 0,
+          text: "prefix",
+        }),
+        sseEvent("response.reasoning_summary_part.done", {
+          output_index: 0,
+          item_id: "rs_summary_prefix",
+          summary_index: 0,
+          part: { type: "summary_text", text: "prefix" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_summary_prefix",
+            summary: [{ type: "summary_text", text: "prefix" }],
+          },
+        }),
+        completed("resp_summary_prefix"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+  });
+
+  test("accepts indexed reasoning-text content lifecycles", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reasoning_text", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_text", content: [] },
+        }),
+        sseEvent("response.content_part.added", {
+          output_index: 0,
+          item_id: "rs_text",
+          content_index: 0,
+          part: { type: "reasoning_text", text: "pre" },
+        }),
+        sseEvent("response.reasoning_text.delta", {
+          output_index: 0,
+          item_id: "rs_text",
+          content_index: 0,
+          delta: "fix",
+        }),
+        sseEvent("response.reasoning_text.done", {
+          output_index: 0,
+          item_id: "rs_text",
+          content_index: 0,
+          text: "prefix",
+        }),
+        sseEvent("response.content_part.done", {
+          output_index: 0,
+          item_id: "rs_text",
+          content_index: 0,
+          part: { type: "reasoning_text", text: "prefix" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_text",
+            content: [{ type: "reasoning_text", text: "prefix" }],
+          },
+        }),
+        completed("resp_reasoning_text"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+  });
+
+  test("rejects reasoning deltas after text completion", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reasoning_late_delta", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_late_delta", summary: [] },
+        }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: "rs_late_delta",
+          summary_index: 0,
+          text: "safe",
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: "rs_late_delta",
+          summary_index: 0,
+          delta: "evil",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_late_delta",
+            summary: [{ type: "summary_text", text: "safe" }],
+          },
+        }),
+        completed("resp_reasoning_late_delta"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects output_item.done changing reasoning text", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reasoning_text_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_text_changed", content: [] },
+        }),
+        sseEvent("response.reasoning_text.done", {
+          output_index: 0,
+          item_id: "rs_text_changed",
+          content_index: 0,
+          text: "secret",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_text_changed",
+            content: [{ type: "reasoning_text", text: "safe" }],
+          },
+        }),
+        completed("resp_reasoning_text_changed"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects reuse of an item_reference index in a continuation", async () => {
+    const followUp = streamFrom([
+      created("resp_reference_reuse_followup", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        output_index: 0,
+        item: { type: "item_reference", id: "msg_server_followup" },
+      }),
+      sseEvent("response.output_item.done", {
+        output_index: 0,
+        item: { type: "item_reference", id: "msg_server_followup" },
+      }),
+      recallCall(0, { query: "hidden followup" }),
+      completed("resp_reference_reuse_followup"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_reuse_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "start" }),
+        completed("resp_reference_reuse_principal"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "recalled",
+          resultText: "result",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+  });
+
+  test("rejects content-part declarations after value deltas", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_late_part", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "message", id: "msg_late_part", role: "assistant" },
+        }),
+        sseEvent("response.output_text.delta", {
+          output_index: 0,
+          item_id: "msg_late_part",
+          content_index: 0,
+          delta: "text",
+        }),
+        sseEvent("response.content_part.added", {
+          output_index: 0,
+          item_id: "msg_late_part",
+          content_index: 0,
+          part: { type: "output_text", text: "text" },
+        }),
+        sseEvent("response.output_text.done", {
+          output_index: 0,
+          item_id: "msg_late_part",
+          content_index: 0,
+          text: "text",
+        }),
+        sseEvent("response.content_part.done", {
+          output_index: 0,
+          item_id: "msg_late_part",
+          content_index: 0,
+          part: { type: "output_text", text: "text" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_late_part",
+            role: "assistant",
+            content: [{ type: "output_text", text: "text" }],
+          },
+        }),
+        completed("resp_late_part"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("uses the finalized content position for interleaved recall items", async () => {
+    let observedPosition = -1;
+    const followUp = streamFrom([
+      created("resp_interleaved_followup", "gpt-5.6-terra"),
+      textItem(0, "answer", "msg_interleaved_answer"),
+      completed("resp_interleaved_followup"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_interleaved", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "message", id: "msg_interleaved", role: "assistant" },
+        }),
+        recallCall(1, { query: "position" }),
+        sseEvent("response.output_text.done", {
+          output_index: 0,
+          item_id: "msg_interleaved",
+          content_index: 0,
+          text: "earlier",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "message",
+            id: "msg_interleaved",
+            role: "assistant",
+            content: [{ type: "output_text", text: "earlier" }],
+          },
+        }),
+        completed("resp_interleaved"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async ({ contentPosition }) => {
+          observedPosition = contentPosition;
+          return { anchorText: "recalled", resultText: "result" };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    expect(await drain(client)).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(observedPosition).toBe(1);
+  });
+
+  test("rejects non-completed recall output items without executing them", async () => {
+    let recalled = 0;
+    const args = JSON.stringify({ query: "must not execute" });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_failed_recall_item", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_failed_recall",
+            call_id: "call_failed_recall",
+            name: "recall",
+          },
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_failed_recall",
+          arguments: args,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_failed_recall",
+            call_id: "call_failed_recall",
+            name: "recall",
+            arguments: args,
+            status: "failed",
+          },
+        }),
+        completed("resp_failed_recall_item"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test("rejects terminal-only failed recall status without executing it", async () => {
+    let recalled = 0;
+    const args = JSON.stringify({ query: "terminal failure" });
+    const streamedItem = {
+      type: "function_call",
+      id: "fc_terminal_failed_recall",
+      call_id: "call_terminal_failed_recall",
+      name: "recall",
+      arguments: args,
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_failed_recall", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: streamedItem,
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_terminal_failed_recall",
+          arguments: args,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: streamedItem,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_failed_recall",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [{ ...streamedItem, status: "failed" }],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test("rejects nonterminal response.done status without executing recall", async () => {
+    let recalled = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_nonterminal_done", "gpt-5.6-terra"),
+        recallCall(0, { query: "not terminal" }),
+        doneWithStatus("resp_nonterminal_done", "in_progress"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test.each(["response.created", "response.in_progress"])(
+    "rejects hidden output in %s snapshots",
+    async (event) => {
+      let recalled = 0;
+      const snapshot = sseEvent(event, {
+        response: {
+          id: "resp_snapshot_output",
+          model: "gpt-5.6-terra",
+          status: "in_progress",
+          output: [
+            {
+              type: "function_call",
+              id: "fc_snapshot_recall",
+              call_id: "call_snapshot_recall",
+              name: "recall",
+              arguments: '{"query":"leaked"}',
+            },
+          ],
+        },
+      });
+      const events =
+        event === "response.created"
+          ? [snapshot]
+          : [created("resp_snapshot_output", "gpt-5.6-terra"), snapshot];
+      const client = streamResponsesRecallAware(streamFrom(events), {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      });
+
+      const output = await drain(client);
+      expect(output).toContain("response.failed");
+      expect(output).not.toContain("fc_snapshot_recall");
+      expect(recalled).toBe(0);
+    },
+  );
+
+  test.each(["response.created", "response.in_progress"])(
+    "rejects contradictory status in %s snapshots",
+    async (event) => {
+      const snapshot = sseEvent(event, {
+        response: {
+          id: "resp_snapshot_status",
+          model: "gpt-5.6-terra",
+          status: "failed",
+          output: [],
+        },
+      });
+      const events =
+        event === "response.created"
+          ? [snapshot]
+          : [created("resp_snapshot_status", "gpt-5.6-terra"), snapshot];
+      const client = streamResponsesRecallAware(streamFrom(events), {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      });
+
+      expect(await drain(client)).toContain("response.failed");
+    },
+  );
+
+  test("preserves failed companion-tool status in rebuilt terminals", async () => {
+    const companionArgs = "{}";
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_failed_companion", "gpt-5.6-terra"),
+        recallCall(0, { query: "companion" }),
+        sseEvent("response.output_item.added", {
+          output_index: 1,
+          item: {
+            type: "function_call",
+            id: "fc_failed_companion",
+            call_id: "call_failed_companion",
+            name: "read",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 1,
+          item_id: "fc_failed_companion",
+          arguments: companionArgs,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 1,
+          item: {
+            type: "function_call",
+            id: "fc_failed_companion",
+            call_id: "call_failed_companion",
+            name: "read",
+            arguments: companionArgs,
+          },
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_failed_companion",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_failed_companion",
+                call_id: "call_failed_companion",
+                name: "read",
+                arguments: companionArgs,
+                status: "failed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "recalled",
+          resultText: "result",
+        }),
+        runFollowUp: async () => {
+          throw new Error("mixed tools should not run a follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(output).toContain(
+      '"id":"fc_failed_companion","call_id":"call_failed_companion","name":"read","arguments":"{}","status":"failed"',
+    );
+    expect(output).not.toContain(
+      '"id":"fc_failed_companion","call_id":"call_failed_companion","name":"read","arguments":"{}","status":"completed"',
+    );
+  });
+
+  test("rejects reference identities reused by later output items", async () => {
+    let recalled = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_identity", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "item_reference", id: "call_shared_reference" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: { type: "item_reference", id: "call_shared_reference" },
+        }),
+        recallCall(
+          1,
+          { query: "identity" },
+          "fc_reference_identity",
+          "call_shared_reference",
+        ),
+        completed("resp_reference_identity"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test("rejects reference identities colliding with synthetic markers", async () => {
+    let recalled = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_marker", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "item_reference",
+            id: "msg_resp_reference_marker_1",
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "item_reference",
+            id: "msg_resp_reference_marker_1",
+          },
+        }),
+        recallCall(1, { query: "marker identity" }),
+        completed("resp_reference_marker"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test("rejects reasoning-part declarations after summary deltas", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_late_summary_part", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_late_part", summary: [] },
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: "rs_late_part",
+          summary_index: 0,
+          delta: "summary",
+        }),
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: "rs_late_part",
+          summary_index: 0,
+          part: { type: "summary_text", text: "summary" },
+        }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: "rs_late_part",
+          summary_index: 0,
+          text: "summary",
+        }),
+        sseEvent("response.reasoning_summary_part.done", {
+          output_index: 0,
+          item_id: "rs_late_part",
+          summary_index: 0,
+          part: { type: "summary_text", text: "summary" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_late_part",
+            summary: [{ type: "summary_text", text: "summary" }],
+          },
+        }),
+        completed("resp_late_summary_part"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects continuation index arithmetic beyond safe integers", async () => {
+    const followUp = streamFrom([
+      created("resp_index_overflow_followup", "gpt-5.6-terra"),
+      textItem(0, "first", "msg_index_overflow_first"),
+      textItem(1, "second", "msg_index_overflow_second"),
+      completed("resp_index_overflow_followup"),
+    ]);
+    const maxIndex = Number.MAX_SAFE_INTEGER;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_index_overflow", "gpt-5.6-terra"),
+        recallCall(maxIndex, { query: "overflow" }),
+        completed("resp_index_overflow"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "recalled",
+          resultText: "result",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain('"output_index":9007199254740992');
+  });
+
+  test("rejects usage overflow while merging a continuation", async () => {
+    const followUp = streamFrom([
+      created("resp_usage_overflow_followup", "gpt-5.6-terra"),
+      textItem(0, "answer", "msg_usage_overflow"),
+      completed("resp_usage_overflow_followup", {
+        input_tokens: 1,
+        output_tokens: 0,
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_usage_overflow", "gpt-5.6-terra"),
+        recallCall(0, { query: "usage" }),
+        completed("resp_usage_overflow", {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 0,
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "recalled",
+          resultText: "result",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain('"input_tokens":null');
+  });
+
+  test("rejects per-response usage overflow before recall side effects", async () => {
+    let recalled = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_usage_total_overflow", "gpt-5.6-terra"),
+        recallCall(0, { query: "usage" }),
+        completed("resp_usage_total_overflow", {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 1,
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test("rejects impossible cache usage before recall side effects", async () => {
+    let recalled = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_cache_usage_overflow", "gpt-5.6-terra"),
+        recallCall(0, { query: "usage" }),
+        completed("resp_cache_usage_overflow", {
+          input_tokens: 0,
+          output_tokens: 1,
+          input_tokens_details: {
+            cached_tokens: Number.MAX_SAFE_INTEGER,
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test("rejects cache usage without input_tokens before recall", async () => {
+    let recalled = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_cache_without_input", "gpt-5.6-terra"),
+        recallCall(0, { query: "usage" }),
+        completed("resp_cache_without_input", {
+          output_tokens: 1,
+          input_tokens_details: {
+            cached_tokens: Number.MAX_SAFE_INTEGER,
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(0);
+  });
+
+  test("rejects cross-phase usage overflow before chained recall", async () => {
+    let recalled = 0;
+    const followUp = streamFrom([
+      created("resp_chained_usage_overflow", "gpt-5.6-terra"),
+      recallCall(0, { query: "second" }),
+      completed("resp_chained_usage_overflow", {
+        input_tokens: 0,
+        output_tokens: 1,
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_chained_usage_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "first" }),
+        completed("resp_chained_usage_principal", {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 0,
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled++;
+          return { anchorText: "recalled", resultText: "result" };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalled).toBe(1);
+  });
+
+  test("preserves continuation terminal and item metadata", async () => {
+    const citation = {
+      type: "url_citation",
+      start_index: 0,
+      end_index: 6,
+      url: "https://example.com/lore",
+      title: "Lore",
+    };
+    const followUp = streamFrom([
+      created("resp_terminal_metadata_followup", "gpt-5.6-terra"),
+      textItem(0, "answer", "msg_terminal_metadata_followup"),
+      sseEvent("response.incomplete", {
+        response: {
+          id: "resp_terminal_metadata_followup",
+          model: "gpt-5.6-terra",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [
+            {
+              type: "message",
+              id: "msg_terminal_metadata_followup",
+              role: "assistant",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: "answer",
+                  annotations: [citation],
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_metadata_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "metadata" }),
+        completed("resp_terminal_metadata_principal"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "recalled",
+          resultText: "result",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain('"reason":"max_output_tokens"');
+    expect(output).toContain("https://example.com/lore");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+  });
+
+  test("rejects continuation references colliding with principal identities", async () => {
+    const followUp = streamFrom([
+      created("resp_reference_collision_followup", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        output_index: 0,
+        item: { type: "item_reference", id: "call_principal_recall" },
+      }),
+      sseEvent("response.output_item.done", {
+        output_index: 0,
+        item: { type: "item_reference", id: "call_principal_recall" },
+      }),
+      textItem(1, "answer", "msg_reference_collision_answer"),
+      completed("resp_reference_collision_followup"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_collision_principal", "gpt-5.6-terra"),
+        recallCall(
+          0,
+          { query: "collision" },
+          "fc_principal_recall",
+          "call_principal_recall",
+        ),
+        completed("resp_reference_collision_principal"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "recalled",
+          resultText: "result",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+  });
+
+  test("accepts reasoning-only recall continuations", async () => {
+    const followUp = streamFrom([
+      created("resp_reasoning_only_followup", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        output_index: 0,
+        item: { type: "reasoning", id: "rs_only", summary: [] },
+      }),
+      sseEvent("response.output_item.done", {
+        output_index: 0,
+        item: { type: "reasoning", id: "rs_only", summary: [] },
+      }),
+      completed("resp_reasoning_only_followup"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reasoning_only_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "reason" }),
+        completed("resp_reasoning_only_principal"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "recalled",
+          resultText: "result",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain('"id":"rs_only"');
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
   });
 
   test.each([
