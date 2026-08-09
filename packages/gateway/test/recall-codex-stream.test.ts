@@ -75,9 +75,9 @@ function codexRecallStream(): Response {
         id: "resp_recall",
         model: "gpt-5.5",
         status: "completed",
-        // ChatGPT may omit streamed items from the terminal snapshot. The
+        // ChatGPT may replace streamed items with terminal references. The
         // output_item lifecycle above is the authoritative response content.
-        output: [],
+        output: [{ type: "item_reference", id: "fc_recall" }],
         usage: { input_tokens: 100, output_tokens: 10 },
       },
     }) +
@@ -119,7 +119,7 @@ function codexFinalStream(): Response {
         id: "resp_final",
         model: "gpt-5.5",
         status: "completed",
-        output: [],
+        output: [{ type: "item_reference", id: "msg_final" }],
         usage: { input_tokens: 120, output_tokens: 5 },
       },
     }) +

@@ -5705,6 +5705,8 @@ export function streamResponsesRecallAware(
 ): Response {
   const state = makeResponsesAccState();
   const syntheticIdentities = new Set<string>();
+  const referenceIdentities = new Set<string>();
+  const outputIdentities = new Set<string>();
   const responseLifecycles = new WeakMap<
     ResponsesAccState,
     { created: boolean; terminal: boolean }
@@ -5719,21 +5721,24 @@ export function streamResponsesRecallAware(
     }
     return lifecycle;
   };
+  type TextPartLifecycle = {
+    kind: string;
+    authoritativeValue: string;
+    authoritativeValueSeen: boolean;
+    deltaSeen: boolean;
+    valueDone: boolean;
+    finalValue?: string;
+    partAdded: boolean;
+    partDone: boolean;
+    partFinalValue?: string;
+  };
   type OutputLifecycle = {
+    argumentDeltaSeen: boolean;
+    argumentDeltas: string;
     argumentsDone: boolean;
     outputDone: boolean;
-    content: Map<
-      number,
-      {
-        kind?: string;
-        valueSeen: boolean;
-        valueDone: boolean;
-        finalValue?: string;
-        partFinalValue?: string;
-        partAdded: boolean;
-        partDone: boolean;
-      }
-    >;
+    reasoning: Map<number, TextPartLifecycle>;
+    content: Map<number, TextPartLifecycle>;
   };
   const outputLifecycles = new WeakMap<
     ResponsesAccState,
@@ -5749,6 +5754,54 @@ export function streamResponsesRecallAware(
     }
     return lifecycles;
   };
+  const emptyTextPartLifecycle = (kind: string): TextPartLifecycle => ({
+    kind,
+    authoritativeValue: "",
+    authoritativeValueSeen: false,
+    deltaSeen: false,
+    valueDone: false,
+    partAdded: false,
+    partDone: false,
+  });
+  const partValue = (
+    kind: string,
+    part: Record<string, unknown>,
+    description: string,
+  ): string => {
+    const value = kind === "refusal" ? part.refusal : part.text;
+    if (typeof value !== "string") {
+      throw new Error(`invalid Responses ${description} value`);
+    }
+    return value;
+  };
+  const seedTextParts = (
+    parts: unknown,
+    target: Map<number, TextPartLifecycle>,
+    allowedKinds: ReadonlySet<string>,
+    description: string,
+  ): void => {
+    if (parts === undefined) return;
+    if (!Array.isArray(parts)) {
+      throw new Error(`Responses ${description} must be an array`);
+    }
+    for (const [index, rawPart] of parts.entries()) {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const part = rawPart as Record<string, unknown>;
+      if (typeof part.type !== "string" || !allowedKinds.has(part.type)) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const lifecycle = emptyTextPartLifecycle(part.type);
+      lifecycle.authoritativeValue = partValue(
+        part.type,
+        part,
+        `${description} initial`,
+      );
+      lifecycle.authoritativeValueSeen = true;
+      target.set(index, lifecycle);
+    }
+  };
   let transactionBaseline: ResponsesAccState | undefined;
   const transactionRollbacks: Array<() => void> = [];
   const restoreTransactionBaseline = (): void => {
@@ -5757,6 +5810,7 @@ export function streamResponsesRecallAware(
     state.model = transactionBaseline.model;
     state.stopReason = transactionBaseline.stopReason;
     state.terminalEvent = transactionBaseline.terminalEvent;
+    state.terminalResponse = transactionBaseline.terminalResponse;
     state.usage = { ...transactionBaseline.usage };
     state.items = new Map(transactionBaseline.items);
     state.rawItems = new Map(transactionBaseline.rawItems);
@@ -5852,18 +5906,62 @@ export function streamResponsesRecallAware(
     return { query, ...(scope ? { scope } : {}), ...(id ? { id } : {}) };
   };
 
+  const addUsageTokens = (left: number, right: number): number => {
+    const result = left + right;
+    if (
+      !Number.isSafeInteger(left) ||
+      left < 0 ||
+      !Number.isSafeInteger(right) ||
+      right < 0 ||
+      !Number.isSafeInteger(result)
+    ) {
+      throw new Error("Responses usage token overflow");
+    }
+    return result;
+  };
   const mergeUsage = (target: GatewayUsage, source: GatewayUsage): void => {
-    target.inputTokens += source.inputTokens;
-    target.outputTokens += source.outputTokens;
+    target.inputTokens = addUsageTokens(target.inputTokens, source.inputTokens);
+    target.outputTokens = addUsageTokens(
+      target.outputTokens,
+      source.outputTokens,
+    );
     if (source.cacheReadInputTokens != null) {
-      target.cacheReadInputTokens =
-        (target.cacheReadInputTokens ?? 0) + source.cacheReadInputTokens;
+      target.cacheReadInputTokens = addUsageTokens(
+        target.cacheReadInputTokens ?? 0,
+        source.cacheReadInputTokens,
+      );
     }
     if (source.cacheCreationInputTokens != null) {
-      target.cacheCreationInputTokens =
-        (target.cacheCreationInputTokens ?? 0) +
-        source.cacheCreationInputTokens;
+      target.cacheCreationInputTokens = addUsageTokens(
+        target.cacheCreationInputTokens ?? 0,
+        source.cacheCreationInputTokens,
+      );
     }
+  };
+  const assertUsageMergeable = (
+    target: GatewayUsage,
+    source: GatewayUsage,
+  ): void => {
+    const inputTokens = addUsageTokens(target.inputTokens, source.inputTokens);
+    const outputTokens = addUsageTokens(
+      target.outputTokens,
+      source.outputTokens,
+    );
+    const cacheReadInputTokens = addUsageTokens(
+      target.cacheReadInputTokens ?? 0,
+      source.cacheReadInputTokens ?? 0,
+    );
+    const cacheCreationInputTokens = addUsageTokens(
+      target.cacheCreationInputTokens ?? 0,
+      source.cacheCreationInputTokens ?? 0,
+    );
+    addUsageTokens(
+      addUsageTokens(
+        addUsageTokens(inputTokens, cacheReadInputTokens),
+        cacheCreationInputTokens,
+      ),
+      outputTokens,
+    );
   };
 
   let cancelled = false;
@@ -5878,7 +5976,7 @@ export function streamResponsesRecallAware(
     state: ResponsesAccState,
   ): number | undefined => {
     const requiresOutputIndex =
-      /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_summary|refusal)/.test(
+      /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_(?:summary|text)|refusal)/.test(
         event,
       );
     const hasOutputIndex = Object.hasOwn(parsed, "output_index");
@@ -5918,12 +6016,46 @@ export function streamResponsesRecallAware(
       if (item.type === "function_call" && item.id === item.call_id) {
         throw new Error("duplicate Responses identity within output item");
       }
+      if (
+        item.type === "function_call" &&
+        item.arguments !== undefined &&
+        typeof item.arguments !== "string"
+      ) {
+        throw new Error("invalid initial Responses function arguments");
+      }
+      if (
+        item.type === "function_call" &&
+        item.status !== undefined &&
+        typeof item.status !== "string"
+      ) {
+        throw new Error("invalid initial Responses function status");
+      }
+      if (
+        item.type === "function_call" &&
+        item.name === RECALL_TOOL_NAME &&
+        item.status !== undefined &&
+        item.status !== "in_progress" &&
+        item.status !== "completed"
+      ) {
+        throw new Error("recall function call cannot start failed");
+      }
+      if (item.type === "message" && item.role !== "assistant") {
+        throw new Error("Responses output message must have assistant role");
+      }
       const identities = [item.id, item.call_id].filter(
         (value): value is string => typeof value === "string",
       );
-      if (identities.some((identity) => syntheticIdentities.has(identity))) {
-        throw new Error("duplicate synthetic Responses item identity");
+      if (
+        identities.some(
+          (identity) =>
+            outputIdentities.has(identity) ||
+            referenceIdentities.has(identity) ||
+            syntheticIdentities.has(identity),
+        )
+      ) {
+        throw new Error("duplicate Responses item identity");
       }
+      for (const identity of identities) outputIdentities.add(identity);
       for (const [existingIndex, existing] of state.rawItems) {
         const newIdentities = [item.id, item.call_id].filter(
           (value): value is string => typeof value === "string",
@@ -5940,11 +6072,40 @@ export function streamResponsesRecallAware(
           throw new Error("duplicate Responses item identity");
         }
       }
-      lifecycles.set(outputIndex, {
+      const initialArguments =
+        item.type === "function_call" && typeof item.arguments === "string"
+          ? item.arguments
+          : "";
+      const newLifecycle: OutputLifecycle = {
+        argumentDeltaSeen: initialArguments.length > 0,
+        argumentDeltas: initialArguments,
         argumentsDone: item.type !== "function_call",
         outputDone: false,
+        reasoning: new Map(),
         content: new Map(),
-      });
+      };
+      if (item.type === "message") {
+        seedTextParts(
+          item.content,
+          newLifecycle.content,
+          new Set(["output_text", "refusal"]),
+          "message content",
+        );
+      } else if (item.type === "reasoning") {
+        seedTextParts(
+          item.summary,
+          newLifecycle.reasoning,
+          new Set(["summary_text"]),
+          "reasoning summary",
+        );
+        seedTextParts(
+          item.content,
+          newLifecycle.content,
+          new Set(["reasoning_text"]),
+          "reasoning content",
+        );
+      }
+      lifecycles.set(outputIndex, newLifecycle);
     } else if (!state.rawItems.has(outputIndex)) {
       throw new Error(
         `Responses ${event} arrived before output_item.added for index ${outputIndex}`,
@@ -5961,7 +6122,8 @@ export function streamResponsesRecallAware(
           item.type !== declared?.type ||
           item.id !== declared?.id ||
           item.call_id !== declared?.call_id ||
-          item.name !== declared?.name)
+          item.name !== declared?.name ||
+          (declared?.type === "message" && item.role !== declared.role))
       ) {
         throw new Error(
           `Responses output_item.done changed item identity for index ${outputIndex}`,
@@ -5980,6 +6142,7 @@ export function streamResponsesRecallAware(
       if (
         (event.startsWith("response.output_text") ||
           event.startsWith("response.content_part") ||
+          event.startsWith("response.reasoning_text") ||
           event.startsWith("response.refusal")) &&
         (!Number.isSafeInteger(parsed.content_index) ||
           (parsed.content_index as number) < 0)
@@ -5989,20 +6152,17 @@ export function streamResponsesRecallAware(
       if (
         event.startsWith("response.output_text") ||
         event.startsWith("response.content_part") ||
+        event.startsWith("response.reasoning_text") ||
         event.startsWith("response.refusal")
       ) {
         const contentIndex = parsed.content_index as number;
-        const contentState = lifecycle.content.get(contentIndex) ?? {
-          valueSeen: false,
-          valueDone: false,
-          partAdded: false,
-          partDone: false,
-        };
         const expectedKind = event.startsWith("response.output_text")
           ? "output_text"
           : event.startsWith("response.refusal")
             ? "refusal"
-            : undefined;
+            : event.startsWith("response.reasoning_text")
+              ? "reasoning_text"
+              : undefined;
         const part = parsed.part as Record<string, unknown> | undefined;
         const partKind =
           event.startsWith("response.content_part") &&
@@ -6010,54 +6170,106 @@ export function streamResponsesRecallAware(
             ? part.type
             : undefined;
         const kind = expectedKind ?? partKind;
-        if (!kind || (contentState.kind && contentState.kind !== kind)) {
+        if (
+          !kind ||
+          !["output_text", "refusal", "reasoning_text"].includes(kind)
+        ) {
+          throw new Error(`invalid Responses content type for ${event}`);
+        }
+        const expectedItemType =
+          kind === "reasoning_text" ? "reasoning" : "message";
+        if (declaredType !== expectedItemType) {
+          throw new Error(
+            `Responses ${event} does not match item type ${String(declaredType)}`,
+          );
+        }
+        const contentState =
+          lifecycle.content.get(contentIndex) ?? emptyTextPartLifecycle(kind);
+        if (contentState.kind !== kind) {
           throw new Error(
             `Responses ${event} changed content type for index ${outputIndex}:${contentIndex}`,
           );
         }
-        contentState.kind = kind;
         if (event === "response.content_part.added") {
-          if (contentState.partAdded) {
+          if (
+            contentState.partAdded ||
+            contentState.deltaSeen ||
+            contentState.valueDone
+          ) {
             throw new Error(
-              `duplicate Responses content_part.added for index ${outputIndex}:${contentIndex}`,
+              `invalid Responses content_part.added for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          if (!part) {
+            throw new Error(`invalid Responses ${event} part`);
+          }
+          const initialValue = partValue(kind, part, event);
+          if (
+            contentState.authoritativeValueSeen &&
+            contentState.authoritativeValue !== initialValue
+          ) {
+            throw new Error(
+              `Responses content_part.added changed initial content for index ${outputIndex}:${contentIndex}`,
             );
           }
           contentState.partAdded = true;
+          contentState.authoritativeValue = initialValue;
+          contentState.authoritativeValueSeen = true;
         } else if (event === "response.content_part.done") {
           if (!contentState.partAdded || contentState.partDone) {
             throw new Error(
               `invalid Responses content_part.done for index ${outputIndex}:${contentIndex}`,
             );
           }
-          contentState.partDone = true;
-          const partValue = kind === "output_text" ? part?.text : part?.refusal;
-          if (typeof partValue !== "string") {
-            throw new Error(`invalid Responses ${event} final value`);
+          if (!part) {
+            throw new Error(`invalid Responses ${event} part`);
           }
-          contentState.partFinalValue = partValue;
+          const finalPartValue = partValue(kind, part, event);
           if (
-            contentState.finalValue !== undefined &&
-            contentState.finalValue !== partValue
+            (contentState.authoritativeValueSeen &&
+              contentState.authoritativeValue !== finalPartValue) ||
+            (contentState.finalValue !== undefined &&
+              contentState.finalValue !== finalPartValue)
           ) {
             throw new Error(
               `Responses content_part.done changed content for index ${outputIndex}:${contentIndex}`,
             );
           }
+          contentState.partDone = true;
+          contentState.partFinalValue = finalPartValue;
+          contentState.authoritativeValue = finalPartValue;
+          contentState.authoritativeValueSeen = true;
         } else {
-          if (contentState.valueDone) {
+          if (contentState.valueDone || contentState.partDone) {
             throw new Error(
               `Responses content changed after completion for index ${outputIndex}:${contentIndex}`,
             );
           }
-          contentState.valueSeen = true;
-          if (event.endsWith(".done")) {
+          if (event.endsWith(".delta")) {
+            if (typeof parsed.delta !== "string") {
+              throw new Error(`invalid Responses ${event} delta`);
+            }
+            contentState.deltaSeen = true;
+            contentState.authoritativeValue += parsed.delta;
+            contentState.authoritativeValueSeen = true;
+          } else if (event.endsWith(".done")) {
             const finalValue =
-              kind === "output_text" ? parsed.text : parsed.refusal;
+              kind === "refusal" ? parsed.refusal : parsed.text;
             if (typeof finalValue !== "string") {
               throw new Error(`invalid Responses ${event} final value`);
             }
             contentState.valueDone = true;
             contentState.finalValue = finalValue;
+            if (
+              contentState.authoritativeValueSeen &&
+              contentState.authoritativeValue !== finalValue
+            ) {
+              throw new Error(
+                `Responses ${event} changed streamed content for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            contentState.authoritativeValue = finalValue;
+            contentState.authoritativeValueSeen = true;
             if (
               contentState.partFinalValue !== undefined &&
               contentState.partFinalValue !== finalValue
@@ -6079,7 +6291,6 @@ export function streamResponsesRecallAware(
       }
       if (
         ((event.startsWith("response.output_text") ||
-          event.startsWith("response.content_part") ||
           event.startsWith("response.refusal")) &&
           declaredType !== "message") ||
         (event.startsWith("response.reasoning_summary") &&
@@ -6091,10 +6302,125 @@ export function streamResponsesRecallAware(
           `Responses ${event} does not match item type ${String(declaredType)}`,
         );
       }
+      if (event.startsWith("response.reasoning_summary")) {
+        const summaryIndex = parsed.summary_index as number;
+        const summaryState =
+          lifecycle.reasoning.get(summaryIndex) ??
+          emptyTextPartLifecycle("summary_text");
+        if (event === "response.reasoning_summary_part.added") {
+          if (
+            summaryState.partAdded ||
+            summaryState.deltaSeen ||
+            summaryState.valueDone
+          ) {
+            throw new Error(
+              `invalid Responses reasoning summary part for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          const part = parsed.part as Record<string, unknown> | undefined;
+          if (part !== undefined) {
+            if (part.type !== "summary_text") {
+              throw new Error("invalid Responses reasoning summary part");
+            }
+            const initialValue = partValue(
+              "summary_text",
+              part,
+              "reasoning summary initial",
+            );
+            if (
+              summaryState.authoritativeValueSeen &&
+              summaryState.authoritativeValue !== initialValue
+            ) {
+              throw new Error(
+                `Responses reasoning summary part changed initial content for index ${outputIndex}:${summaryIndex}`,
+              );
+            }
+            summaryState.authoritativeValue = initialValue;
+            summaryState.authoritativeValueSeen = true;
+          }
+          summaryState.partAdded = true;
+        } else if (event === "response.reasoning_summary_part.done") {
+          if (!summaryState.partAdded || summaryState.partDone) {
+            throw new Error(
+              `invalid Responses reasoning summary completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          const part = parsed.part as Record<string, unknown> | undefined;
+          if (part !== undefined) {
+            if (part.type !== "summary_text") {
+              throw new Error("invalid Responses reasoning summary part");
+            }
+            const finalPartValue = partValue(
+              "summary_text",
+              part,
+              "reasoning summary final",
+            );
+            if (
+              (summaryState.authoritativeValueSeen &&
+                summaryState.authoritativeValue !== finalPartValue) ||
+              (summaryState.finalValue !== undefined &&
+                summaryState.finalValue !== finalPartValue)
+            ) {
+              throw new Error(
+                `Responses reasoning summary part changed content for index ${outputIndex}:${summaryIndex}`,
+              );
+            }
+            summaryState.partFinalValue = finalPartValue;
+            summaryState.authoritativeValue = finalPartValue;
+            summaryState.authoritativeValueSeen = true;
+          }
+          summaryState.partDone = true;
+        } else if (event.endsWith(".delta")) {
+          if (summaryState.valueDone || summaryState.partDone) {
+            throw new Error(
+              `Responses reasoning summary changed after completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          if (typeof parsed.delta !== "string") {
+            throw new Error("invalid Responses reasoning summary delta");
+          }
+          summaryState.deltaSeen = true;
+          summaryState.authoritativeValue += parsed.delta;
+          summaryState.authoritativeValueSeen = true;
+        } else if (event.endsWith(".done")) {
+          if (summaryState.valueDone || summaryState.partDone) {
+            throw new Error(
+              `duplicate Responses reasoning summary completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          if (typeof parsed.text !== "string") {
+            throw new Error("invalid Responses reasoning summary final value");
+          }
+          if (
+            summaryState.authoritativeValueSeen &&
+            summaryState.authoritativeValue !== parsed.text
+          ) {
+            throw new Error(
+              `Responses reasoning summary changed streamed content for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          summaryState.valueDone = true;
+          summaryState.finalValue = parsed.text;
+          summaryState.authoritativeValue = parsed.text;
+          summaryState.authoritativeValueSeen = true;
+        }
+        lifecycle.reasoning.set(summaryIndex, summaryState);
+      }
       if (event === "response.function_call_arguments.done") {
         if (lifecycle.argumentsDone) {
           throw new Error(
             `duplicate Responses function arguments completion for index ${outputIndex}`,
+          );
+        }
+        if (typeof parsed.arguments !== "string") {
+          throw new Error("invalid Responses function arguments completion");
+        }
+        if (
+          lifecycle.argumentDeltaSeen &&
+          lifecycle.argumentDeltas !== parsed.arguments
+        ) {
+          throw new Error(
+            `Responses function arguments completion changed streamed arguments for index ${outputIndex}`,
           );
         }
         lifecycle.argumentsDone = true;
@@ -6105,6 +6431,12 @@ export function streamResponsesRecallAware(
         throw new Error(
           `Responses function arguments changed after completion for index ${outputIndex}`,
         );
+      } else if (event === "response.function_call_arguments.delta") {
+        if (typeof parsed.delta !== "string") {
+          throw new Error("invalid Responses function arguments delta");
+        }
+        lifecycle.argumentDeltaSeen = true;
+        lifecycle.argumentDeltas += parsed.delta;
       }
       if (event === "response.output_item.done") {
         if (declaredType === "function_call" && !lifecycle.argumentsDone) {
@@ -6123,6 +6455,16 @@ export function streamResponsesRecallAware(
               `Responses output_item.done changed arguments for index ${outputIndex}`,
             );
           }
+          if (item?.status !== undefined && typeof item.status !== "string") {
+            throw new Error("invalid Responses function call status");
+          }
+          if (
+            declared?.name === RECALL_TOOL_NAME &&
+            item?.status !== undefined &&
+            item.status !== "completed"
+          ) {
+            throw new Error("recall function call did not complete");
+          }
         }
         if (declaredType === "message") {
           const finalContent = item?.content;
@@ -6140,7 +6482,7 @@ export function streamResponsesRecallAware(
                 `Responses output_item.done changed content type for index ${outputIndex}:${contentIndex}`,
               );
             }
-            if (contentState.valueSeen && !contentState.valueDone) {
+            if (contentState.deltaSeen && !contentState.valueDone) {
               throw new Error(
                 `Responses content ended before completion for index ${outputIndex}:${contentIndex}`,
               );
@@ -6150,17 +6492,126 @@ export function streamResponsesRecallAware(
                 `Responses content part ended before completion for index ${outputIndex}:${contentIndex}`,
               );
             }
-            const finalValue =
-              contentState.kind === "output_text"
-                ? finalPart.text
-                : finalPart.refusal;
+            const finalValue = partValue(
+              contentState.kind,
+              finalPart,
+              "output item content",
+            );
             if (
-              contentState.finalValue !== undefined &&
-              finalValue !== contentState.finalValue
+              (contentState.authoritativeValueSeen &&
+                finalValue !== contentState.authoritativeValue) ||
+              (contentState.finalValue !== undefined &&
+                finalValue !== contentState.finalValue) ||
+              (contentState.partFinalValue !== undefined &&
+                finalValue !== contentState.partFinalValue)
             ) {
               throw new Error(
                 `Responses output_item.done changed content for index ${outputIndex}:${contentIndex}`,
               );
+            }
+          }
+        }
+        if (declaredType === "reasoning") {
+          const summary = item?.summary;
+          if (summary !== undefined && !Array.isArray(summary)) {
+            throw new Error("Responses reasoning summary must be an array");
+          }
+          if (summary === undefined) {
+            for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+              if (
+                (summaryState.deltaSeen && !summaryState.valueDone) ||
+                (summaryState.partAdded && !summaryState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+            }
+          }
+          if (Array.isArray(summary)) {
+            for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+              const finalPart = summary[summaryIndex] as
+                | Record<string, unknown>
+                | undefined;
+              if (!finalPart) {
+                if (
+                  (summaryState.deltaSeen && !summaryState.valueDone) ||
+                  (summaryState.partAdded && !summaryState.partDone)
+                ) {
+                  throw new Error(
+                    `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                  );
+                }
+                continue;
+              }
+              if (
+                finalPart.type !== "summary_text" ||
+                typeof finalPart.text !== "string"
+              ) {
+                throw new Error("invalid Responses reasoning summary item");
+              }
+              if (
+                (summaryState.deltaSeen && !summaryState.valueDone) ||
+                (summaryState.partAdded && !summaryState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+              if (
+                summaryState.authoritativeValueSeen &&
+                summaryState.authoritativeValue !== finalPart.text
+              ) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning summary for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+            }
+          }
+          const finalContent = item?.content;
+          if (finalContent !== undefined && !Array.isArray(finalContent)) {
+            throw new Error("Responses reasoning content must be an array");
+          }
+          if (lifecycle.content.size > 0) {
+            if (!Array.isArray(finalContent)) {
+              throw new Error(
+                `Responses reasoning completed without content for index ${outputIndex}`,
+              );
+            }
+            for (const [contentIndex, contentState] of lifecycle.content) {
+              const finalPart = finalContent[contentIndex] as
+                | Record<string, unknown>
+                | undefined;
+              if (!finalPart || finalPart.type !== contentState.kind) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning content type for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+              if (
+                (contentState.deltaSeen && !contentState.valueDone) ||
+                (contentState.partAdded && !contentState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning content ended before completion for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+              const finalValue = partValue(
+                contentState.kind,
+                finalPart,
+                "reasoning output item content",
+              );
+              if (
+                (contentState.authoritativeValueSeen &&
+                  contentState.authoritativeValue !== finalValue) ||
+                (contentState.finalValue !== undefined &&
+                  contentState.finalValue !== finalValue) ||
+                (contentState.partFinalValue !== undefined &&
+                  contentState.partFinalValue !== finalValue)
+              ) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning content for index ${outputIndex}:${contentIndex}`,
+                );
+              }
             }
           }
         }
@@ -6184,6 +6635,15 @@ export function streamResponsesRecallAware(
       if (!response || typeof response.id !== "string" || !response.id) {
         throw new Error("response.created missing response identity");
       }
+      if (response.status !== undefined && response.status !== "in_progress") {
+        throw new Error("response.created has invalid status");
+      }
+      if (
+        response.output !== undefined &&
+        (!Array.isArray(response.output) || response.output.length > 0)
+      ) {
+        throw new Error("response.created must start with empty output");
+      }
       lifecycle.created = true;
       return;
     }
@@ -6197,6 +6657,15 @@ export function streamResponsesRecallAware(
           "Responses in-progress event changed response identity",
         );
       }
+      if (response?.status !== undefined && response.status !== "in_progress") {
+        throw new Error("response.in_progress has invalid status");
+      }
+      if (
+        response?.output !== undefined &&
+        (!Array.isArray(response.output) || response.output.length > 0)
+      ) {
+        throw new Error("response.in_progress must have empty output");
+      }
     }
     if (
       event === "response.completed" ||
@@ -6208,6 +6677,25 @@ export function streamResponsesRecallAware(
       if (acc.id && response?.id !== acc.id) {
         throw new Error("Responses terminal event changed response identity");
       }
+      const status = response?.status;
+      const terminalStatuses = new Set([
+        "completed",
+        "incomplete",
+        "failed",
+        "cancelled",
+      ]);
+      if (typeof status !== "string" || !terminalStatuses.has(status)) {
+        throw new Error("Responses terminal event has nonterminal status");
+      }
+      if (
+        (event === "response.completed" && status !== "completed") ||
+        (event === "response.incomplete" && status !== "incomplete") ||
+        (event === "response.failed" &&
+          status !== "failed" &&
+          status !== "cancelled")
+      ) {
+        throw new Error("Responses terminal event contradicts response status");
+      }
       lifecycle.terminal = true;
     }
   };
@@ -6218,6 +6706,148 @@ export function streamResponsesRecallAware(
         throw new Error(
           `Responses stream ended before output_item.done for index ${index}`,
         );
+      }
+    }
+  };
+  const preserveStreamedReasoning = (
+    acc: ResponsesAccState,
+    outputIndex: number,
+  ): void => {
+    const raw = acc.rawItems.get(outputIndex);
+    const lifecycle = lifecyclesFor(acc).get(outputIndex);
+    if (raw?.type !== "reasoning" || !lifecycle?.reasoning.size) return;
+    const summary = Array.isArray(raw.summary) ? [...raw.summary] : [];
+    let changed = false;
+    for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+      if (
+        summary[summaryIndex] === undefined &&
+        summaryState.authoritativeValueSeen
+      ) {
+        summary[summaryIndex] = {
+          type: "summary_text",
+          text: summaryState.authoritativeValue,
+        };
+        changed = true;
+      }
+    }
+    if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
+  };
+  const terminalTextPartsMatch = (
+    actual: unknown,
+    streamed: unknown,
+  ): boolean => {
+    if (!Array.isArray(actual) || !Array.isArray(streamed)) return false;
+    if (actual.length !== streamed.length) return false;
+    return streamed.every((streamedPart, index) => {
+      const actualPart = actual[index];
+      if (
+        !streamedPart ||
+        typeof streamedPart !== "object" ||
+        Array.isArray(streamedPart) ||
+        !actualPart ||
+        typeof actualPart !== "object" ||
+        Array.isArray(actualPart)
+      ) {
+        return false;
+      }
+      const streamedRecord = streamedPart as Record<string, unknown>;
+      const actualRecord = actualPart as Record<string, unknown>;
+      if (actualRecord.type !== streamedRecord.type) return false;
+      if (
+        typeof streamedRecord.type === "string" &&
+        ["output_text", "reasoning_text", "summary_text", "refusal"].includes(
+          streamedRecord.type,
+        )
+      ) {
+        return (
+          partValue(streamedRecord.type, actualRecord, "terminal content") ===
+          partValue(streamedRecord.type, streamedRecord, "streamed content")
+        );
+      }
+      return isDeepStrictEqual(actualRecord, streamedRecord);
+    });
+  };
+  const terminalItemMatches = (
+    actual: Record<string, unknown>,
+    streamed: Record<string, unknown>,
+  ): boolean => {
+    if (actual.type !== streamed.type || actual.id !== streamed.id)
+      return false;
+    if (actual.status !== undefined && typeof actual.status !== "string") {
+      return false;
+    }
+    if (
+      streamed.status !== undefined &&
+      actual.status !== undefined &&
+      actual.status !== streamed.status
+    ) {
+      return false;
+    }
+    if (actual.type === "function_call") {
+      return (
+        actual.call_id === streamed.call_id &&
+        actual.name === streamed.name &&
+        actual.arguments === streamed.arguments
+      );
+    }
+    if (actual.type === "message") {
+      return (
+        actual.role === streamed.role &&
+        terminalTextPartsMatch(actual.content, streamed.content)
+      );
+    }
+    if (actual.type === "reasoning") {
+      for (const field of ["summary", "content"]) {
+        if (streamed[field] !== undefined) {
+          if (!terminalTextPartsMatch(actual[field], streamed[field])) {
+            return false;
+          }
+        }
+      }
+      if (
+        streamed.encrypted_content !== undefined &&
+        !isDeepStrictEqual(actual.encrypted_content, streamed.encrypted_content)
+      ) {
+        return false;
+      }
+      return true;
+    }
+    const { status: _actualStatus, ...actualSemantic } = actual;
+    const { status: _streamedStatus, ...streamedSemantic } = streamed;
+    return isDeepStrictEqual(actualSemantic, streamedSemantic);
+  };
+  const assertTerminalReasoningMatchesLifecycle = (
+    lifecycle: OutputLifecycle,
+    actual: Record<string, unknown>,
+    outputIndex: number,
+  ): void => {
+    const collections: Array<
+      [unknown, ReadonlyMap<number, TextPartLifecycle>, string]
+    > = [
+      [actual.summary, lifecycle.reasoning, "reasoning summary"],
+      [actual.content, lifecycle.content, "reasoning content"],
+    ];
+    for (const [rawParts, states, description] of collections) {
+      if (rawParts === undefined) continue;
+      if (!Array.isArray(rawParts)) {
+        throw new Error(`Responses terminal ${description} must be an array`);
+      }
+      for (const [partIndex, state] of states) {
+        const part = rawParts[partIndex];
+        if (!part || typeof part !== "object" || Array.isArray(part)) {
+          throw new Error(`Responses terminal changed ${description}`);
+        }
+        const record = part as Record<string, unknown>;
+        if (
+          record.type !== state.kind ||
+          (state.authoritativeValueSeen &&
+            partValue(state.kind, record, `terminal ${description}`) !==
+              state.authoritativeValue)
+        ) {
+          throw new Error(
+            `Responses terminal changed ${description} for index ${outputIndex}:${partIndex}`,
+          );
+        }
       }
     }
   };
@@ -6234,38 +6864,160 @@ export function streamResponsesRecallAware(
     if (!Array.isArray(response.output)) {
       throw new Error("Responses terminal output must be an array");
     }
-    // ChatGPT/Codex can emit `output: []` in the terminal response even though
-    // the preceding output_item events carried the complete response.
-    if (response.output.length === 0) return;
-    const actualOutput = response.output.filter(
-      (item): item is Record<string, unknown> =>
-        !!item &&
-        typeof item === "object" &&
-        (item as Record<string, unknown>).type !== "item_reference",
-    );
-    const expected = [...acc.rawItems.entries()]
-      .sort(([a], [b]) => a - b)
-      .map(([, item]) => item)
-      .filter((item) => item.type !== "item_reference");
-    if (actualOutput.length !== expected.length) {
-      throw new Error("Responses terminal output changed item count");
-    }
-    for (let i = 0; i < expected.length; i++) {
-      const actual = actualOutput[i];
-      const streamed = expected[i];
+    // ChatGPT/Codex can omit some or all streamed items from the terminal
+    // snapshot. Treat the output_item lifecycle as authoritative while still
+    // requiring every repeated terminal item to match in stream order.
+    const actualOutput = response.output.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error("Responses terminal output contains malformed item");
+      }
+      return item as Record<string, unknown>;
+    });
+    const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
+    let expectedIndex = 0;
+    for (const actual of actualOutput) {
+      const isReference = actual.type === "item_reference";
       if (
-        !actual ||
-        actual.type !== streamed.type ||
-        actual.id !== streamed.id ||
-        actual.call_id !== streamed.call_id ||
-        (streamed.type === "message" &&
-          !isDeepStrictEqual(actual.content, streamed.content)) ||
-        (streamed.type === "function_call" &&
-          actual.arguments !== streamed.arguments)
+        isReference &&
+        (typeof actual.id !== "string" ||
+          !actual.id ||
+          Object.keys(actual).some((key) => key !== "type" && key !== "id"))
       ) {
+        throw new Error("Responses terminal output contains invalid reference");
+      }
+      const matchIndex = expected.findIndex(
+        ([, streamed], index) =>
+          index >= expectedIndex &&
+          actual.id === streamed.id &&
+          (isReference ||
+            (actual.type === streamed.type &&
+              actual.call_id === streamed.call_id)),
+      );
+      if (matchIndex < 0) {
         throw new Error("Responses terminal output changed streamed item");
       }
+      const [outputIndex, streamed] = expected[matchIndex];
+      if (!isReference && !terminalItemMatches(actual, streamed)) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      if (!isReference && actual.type === "reasoning") {
+        const lifecycle = lifecyclesFor(acc).get(outputIndex);
+        if (!lifecycle) {
+          throw new Error(
+            `missing Responses lifecycle for index ${outputIndex}`,
+          );
+        }
+        assertTerminalReasoningMatchesLifecycle(lifecycle, actual, outputIndex);
+      }
+      if (!isReference) {
+        acc.rawItems.set(outputIndex, { ...streamed, ...actual });
+      }
+      expectedIndex = matchIndex + 1;
     }
+  };
+  type ReferenceLifecycle = { id: string; done: boolean };
+  const consumeReferenceEvent = (
+    acc: ResponsesAccState,
+    references: Map<number, ReferenceLifecycle>,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): boolean => {
+    const rawIndex = parsed.output_index;
+    const item = parsed.item as Record<string, unknown> | undefined;
+    if (
+      event === "response.output_item.added" &&
+      item?.type === "item_reference"
+    ) {
+      if (!Number.isSafeInteger(rawIndex) || (rawIndex as number) < 0) {
+        throw new Error("invalid Responses output_index for item_reference");
+      }
+      const outputIndex = rawIndex as number;
+      if (
+        typeof item.id !== "string" ||
+        !item.id ||
+        Object.keys(item).some((key) => key !== "type" && key !== "id")
+      ) {
+        throw new Error("invalid Responses output item reference");
+      }
+      if (
+        references.has(outputIndex) ||
+        acc.rawItems.has(outputIndex) ||
+        syntheticIdentities.has(item.id) ||
+        outputIdentities.has(item.id) ||
+        [...acc.rawItems.values()].some(
+          (existing) => existing.id === item.id || existing.call_id === item.id,
+        ) ||
+        referenceIdentities.has(item.id)
+      ) {
+        throw new Error("duplicate Responses item reference");
+      }
+      references.set(outputIndex, { id: item.id, done: false });
+      referenceIdentities.add(item.id);
+      return true;
+    }
+    if (!Number.isSafeInteger(rawIndex)) return false;
+    const outputIndex = rawIndex as number;
+    const reference = references.get(outputIndex);
+    if (!reference) return false;
+    if (
+      event !== "response.output_item.done" ||
+      reference.done ||
+      !item ||
+      item.type !== "item_reference" ||
+      item.id !== reference.id ||
+      Object.keys(item).some((key) => key !== "type" && key !== "id")
+    ) {
+      throw new Error(
+        `invalid Responses item_reference lifecycle for index ${outputIndex}`,
+      );
+    }
+    reference.done = true;
+    return true;
+  };
+  const assertReferenceLifecyclesComplete = (
+    references: ReadonlyMap<number, ReferenceLifecycle>,
+  ): void => {
+    for (const [outputIndex, reference] of references) {
+      if (!reference.done) {
+        throw new Error(
+          `Responses stream ended before item_reference completion for index ${outputIndex}`,
+        );
+      }
+    }
+  };
+  const assertRecallItemsCompleted = (
+    acc: ResponsesAccState,
+    recallIndices: readonly number[],
+  ): void => {
+    for (const outputIndex of recallIndices) {
+      const status = acc.rawItems.get(outputIndex)?.status;
+      if (status !== undefined && status !== "completed") {
+        throw new Error(
+          `recall function call did not complete for index ${outputIndex}`,
+        );
+      }
+    }
+  };
+  const stripHiddenReferenceOutput = (
+    parsed: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    const response = parsed.response as Record<string, unknown> | undefined;
+    if (!Array.isArray(response?.output)) return parsed;
+    const output = response.output.filter(
+      (item) =>
+        !(
+          item &&
+          typeof item === "object" &&
+          !Array.isArray(item) &&
+          (item as Record<string, unknown>).type === "item_reference" &&
+          typeof (item as Record<string, unknown>).id === "string" &&
+          referenceIdentities.has(
+            (item as Record<string, unknown>).id as string,
+          )
+        ),
+    );
+    if (output.length === response.output.length) return parsed;
+    return { ...parsed, response: { ...response, output } };
   };
   const reserveSyntheticIdentity = (
     syntheticId: string,
@@ -6273,6 +7025,8 @@ export function streamResponsesRecallAware(
   ): void => {
     if (
       syntheticIdentities.has(syntheticId) ||
+      referenceIdentities.has(syntheticId) ||
+      outputIdentities.has(syntheticId) ||
       states.some(
         (acc) =>
           [...acc.items.values()].some(
@@ -6418,6 +7172,13 @@ export function streamResponsesRecallAware(
     }
     return result;
   };
+  const shiftedOutputIndex = (index: number, offset: number): number => {
+    const shifted = index + offset;
+    if (!Number.isSafeInteger(shifted) || shifted < 0) {
+      throw new Error("Responses output_index overflow");
+    }
+    return shifted;
+  };
 
   /**
    * Serialize a synthetic Responses output_text item as its SSE flow events
@@ -6509,14 +7270,14 @@ export function streamResponsesRecallAware(
     const finalOutput = buildOutputItems();
     const finalStatus = mapStatusFromStopReason(res.stopReason);
     const ru = res.usage ?? ZERO_USAGE;
-    const inclusiveInputTokens =
-      ru.inputTokens +
-      (ru.cacheReadInputTokens ?? 0) +
-      (ru.cacheCreationInputTokens ?? 0);
+    const inclusiveInputTokens = addUsageTokens(
+      addUsageTokens(ru.inputTokens, ru.cacheReadInputTokens ?? 0),
+      ru.cacheCreationInputTokens ?? 0,
+    );
     const usageData: Record<string, unknown> = {
       input_tokens: inclusiveInputTokens,
       output_tokens: ru.outputTokens,
-      total_tokens: inclusiveInputTokens + ru.outputTokens,
+      total_tokens: addUsageTokens(inclusiveInputTokens, ru.outputTokens),
     };
     if (
       ru.cacheReadInputTokens != null ||
@@ -6528,14 +7289,17 @@ export function streamResponsesRecallAware(
       };
     }
     const terminalEvent = state.terminalEvent ?? "response.completed";
+    const terminalResponse = state.terminalResponse;
     return formatResponsesEvent(
       terminalEvent,
       JSON.stringify({
         type: terminalEvent,
         response: {
+          ...terminalResponse,
           id: state.id,
           object: "response",
-          created_at: Math.floor(Date.now() / 1000),
+          created_at:
+            terminalResponse?.created_at ?? Math.floor(Date.now() / 1000),
           model: res.model || state.model,
           status: finalStatus,
           output: finalOutput,
@@ -6572,7 +7336,7 @@ export function streamResponsesRecallAware(
               role: "assistant",
               status: "completed",
             }),
-            content: item.content,
+            content: Array.isArray(raw?.content) ? raw.content : item.content,
           });
           continue;
         }
@@ -6594,13 +7358,15 @@ export function streamResponsesRecallAware(
           content: [{ type: "output_text", text: item.text, annotations: [] }],
         });
       } else {
+        const raw = state.rawItems.get(index);
         finalOutput.push({
+          ...raw,
           type: "function_call",
           id: item.id,
           call_id: item.callId,
           name: item.name,
           arguments: item.args,
-          status: "completed",
+          status: typeof raw?.status === "string" ? raw.status : "completed",
         });
       }
     }
@@ -6658,7 +7424,7 @@ export function streamResponsesRecallAware(
         // Recall items are gateway-internal and must stay hidden on every exit,
         // including failures raised before marker replacement.
         const recallIndices = new Set<number>();
-        const referenceIndices = new Set<number>();
+        const referenceIndices = new Map<number, ReferenceLifecycle>();
 
         try {
           if (!upstreamResponse.body) {
@@ -6725,29 +7491,7 @@ export function streamResponsesRecallAware(
             }
             validateResponseLifecycle(state, event, parsed);
 
-            const rawOutputIndex = parsed.output_index;
-            const addedItem = parsed.item as
-              | Record<string, unknown>
-              | undefined;
-            if (
-              event === "response.output_item.added" &&
-              addedItem?.type === "item_reference"
-            ) {
-              if (
-                !Number.isSafeInteger(rawOutputIndex) ||
-                (rawOutputIndex as number) < 0
-              ) {
-                throw new Error(
-                  "invalid Responses output_index for item_reference",
-                );
-              }
-              referenceIndices.add(rawOutputIndex as number);
-              continue;
-            }
-            if (
-              Number.isSafeInteger(rawOutputIndex) &&
-              referenceIndices.has(rawOutputIndex as number)
-            ) {
+            if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
               continue;
             }
 
@@ -6779,6 +7523,12 @@ export function streamResponsesRecallAware(
 
             // Always accumulate into the internal state for postResponse.
             applyResponsesEvent(state, event, parsed);
+            if (
+              event === "response.output_item.done" &&
+              outputIndex !== undefined
+            ) {
+              preserveStreamedReasoning(state, outputIndex);
+            }
 
             // Suppress all events belonging to a recall item, but still count
             // them so malformed argument streams cannot grow without bound.
@@ -6838,8 +7588,14 @@ export function streamResponsesRecallAware(
               event === "response.incomplete" ||
               event === "response.failed"
             ) {
+              const terminalParsed = stripHiddenReferenceOutput(parsed);
               assertOutputLifecyclesComplete(state);
-              assertTerminalOutputMatches(state, parsed);
+              assertReferenceLifecyclesComplete(referenceIndices);
+              assertTerminalOutputMatches(state, terminalParsed);
+              assertRecallItemsCompleted(
+                state,
+                pendingRecalls.map((recall) => recall.outputIndex),
+              );
               if (pendingRecalls.length === 0) {
                 if (recallIndices.size > 0) {
                   throw new Error(
@@ -6849,7 +7605,14 @@ export function streamResponsesRecallAware(
                 // No recall — forward the terminal event verbatim.
                 if (
                   !(await safeEnqueue(
-                    encoder.encode(formatResponsesEvent(event, data)),
+                    encoder.encode(
+                      formatResponsesEvent(
+                        event,
+                        terminalParsed === parsed
+                          ? data
+                          : JSON.stringify(terminalParsed),
+                      ),
+                    ),
                   ))
                 )
                   break;
@@ -6903,13 +7666,22 @@ export function streamResponsesRecallAware(
                 const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
                 reserveSyntheticIdentity(syntheticId, [state]);
                 const recallAcc = finalizeResponsesAcc(state);
+                const contentPosition = recallAcc.content.findIndex(
+                  (block) =>
+                    block.type === "tool_use" && block.id === recall.toolUseId,
+                );
+                if (contentPosition < 0) {
+                  throw new Error(
+                    "recall block not found in finalized response",
+                  );
+                }
                 const executed = await settleRecall({
                   query: recall.query,
                   scope: recall.scope,
                   id: recall.id,
                   outputIndex: recall.outputIndex,
                   toolUseId: recall.toolUseId,
-                  contentPosition: recall.contentPosition,
+                  contentPosition,
                   acc: recallAcc,
                   signal,
                 });
@@ -6953,7 +7725,7 @@ export function streamResponsesRecallAware(
                       resultText: executed.resultText,
                       acc: recallAcc,
                       toolUseId: recall.toolUseId,
-                      contentPosition: recall.contentPosition,
+                      contentPosition,
                       signal,
                     });
                     let recallDepth = pendingRecalls.length;
@@ -6961,7 +7733,10 @@ export function streamResponsesRecallAware(
                       activeReader = follow.reader;
                       const contState = makeResponsesAccState();
                       const contRecallIndices = new Set<number>();
-                      const contReferenceIndices = new Set<number>();
+                      const contReferenceIndices = new Map<
+                        number,
+                        ReferenceLifecycle
+                      >();
                       const contRecallInputs = new Map<
                         number,
                         { query: string; scope?: string; id?: string }
@@ -6973,12 +7748,14 @@ export function streamResponsesRecallAware(
                       let contOtherTool = false;
                       let continuationCompleted = false;
                       let continuationFailed = false;
-                      const contIndex =
+                      const contIndex = shiftedOutputIndex(
                         Math.max(
                           -1,
                           ...state.rawItems.keys(),
                           ...state.items.keys(),
-                        ) + 1;
+                        ),
+                        1,
+                      );
                       try {
                         for await (const {
                           event: ce,
@@ -7024,31 +7801,12 @@ export function streamResponsesRecallAware(
                             );
                           }
                           validateResponseLifecycle(contState, ce, cparsed);
-                          const rawContinuationIndex = cparsed.output_index;
-                          const addedContinuationItem = cparsed.item as
-                            | Record<string, unknown>
-                            | undefined;
                           if (
-                            ce === "response.output_item.added" &&
-                            addedContinuationItem?.type === "item_reference"
-                          ) {
-                            if (
-                              !Number.isSafeInteger(rawContinuationIndex) ||
-                              (rawContinuationIndex as number) < 0
-                            ) {
-                              throw new Error(
-                                "invalid Responses output_index for item_reference",
-                              );
-                            }
-                            contReferenceIndices.add(
-                              rawContinuationIndex as number,
-                            );
-                            continue;
-                          }
-                          if (
-                            Number.isSafeInteger(rawContinuationIndex) &&
-                            contReferenceIndices.has(
-                              rawContinuationIndex as number,
+                            consumeReferenceEvent(
+                              contState,
+                              contReferenceIndices,
+                              ce,
+                              cparsed,
                             )
                           ) {
                             continue;
@@ -7083,6 +7841,12 @@ export function streamResponsesRecallAware(
                             }
                           }
                           applyResponsesEvent(contState, ce, cparsed);
+                          if (
+                            ce === "response.output_item.done" &&
+                            ci !== undefined
+                          ) {
+                            preserveStreamedReasoning(contState, ci);
+                          }
                           const isContRecall =
                             ci !== undefined && contRecallIndices.has(ci);
                           if (isContRecall) {
@@ -7142,8 +7906,20 @@ export function streamResponsesRecallAware(
                             ce === "response.incomplete" ||
                             ce === "response.failed"
                           ) {
+                            const terminalParsed =
+                              stripHiddenReferenceOutput(cparsed);
                             assertOutputLifecyclesComplete(contState);
-                            assertTerminalOutputMatches(contState, cparsed);
+                            assertReferenceLifecyclesComplete(
+                              contReferenceIndices,
+                            );
+                            assertTerminalOutputMatches(
+                              contState,
+                              terminalParsed,
+                            );
+                            assertRecallItemsCompleted(
+                              contState,
+                              contPending.map((recall) => recall.outputIndex),
+                            );
                             continuationCompleted =
                               contState.terminalEvent !== undefined;
                             continuationFailed =
@@ -7162,7 +7938,10 @@ export function streamResponsesRecallAware(
                                 ce,
                                 JSON.stringify({
                                   ...cparsed,
-                                  output_index: ci + contIndex,
+                                  output_index: shiftedOutputIndex(
+                                    ci,
+                                    contIndex,
+                                  ),
                                 }),
                               ),
                             );
@@ -7240,10 +8019,16 @@ export function streamResponsesRecallAware(
                           }
                         }
                         for (const [idx, item] of contState.items) {
-                          state.items.set(idx + contIndex, item);
+                          state.items.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
                         }
                         for (const [idx, item] of contState.rawItems) {
-                          state.rawItems.set(idx + contIndex, item);
+                          state.rawItems.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
                         }
                         mergeUsage(state.usage, contState.usage);
                       };
@@ -7254,7 +8039,7 @@ export function streamResponsesRecallAware(
                       }
                       if (
                         !continuationCompleted ||
-                        contState.items.size === 0
+                        contState.rawItems.size === 0
                       ) {
                         throw new Error(
                           "recall follow-up ended without a completed response containing output",
@@ -7278,6 +8063,7 @@ export function streamResponsesRecallAware(
                           "incomplete recall continuation cannot execute another recall",
                         );
                       }
+                      assertUsageMergeable(state.usage, contState.usage);
                       let nextRecall: (typeof contPending)[number] | undefined;
                       let nextExecuted:
                         | {
@@ -7295,9 +8081,27 @@ export function streamResponsesRecallAware(
                           );
                         }
                         recallDepth++;
-                        nextRecall = contPending[0];
                         nextAcc = finalizeResponsesAcc(contState);
-                        const nextSyntheticId = `msg_${state.id || "lore"}_${nextRecall.outputIndex + contIndex}`;
+                        const pendingNextRecall = contPending[0];
+                        const contentPosition = nextAcc.content.findIndex(
+                          (block) =>
+                            block.type === "tool_use" &&
+                            block.id === pendingNextRecall.toolUseId,
+                        );
+                        if (contentPosition < 0) {
+                          throw new Error(
+                            "recall block not found in finalized continuation",
+                          );
+                        }
+                        nextRecall = {
+                          ...pendingNextRecall,
+                          contentPosition,
+                        };
+                        const shiftedRecallIndex = shiftedOutputIndex(
+                          nextRecall.outputIndex,
+                          contIndex,
+                        );
+                        const nextSyntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
                         reserveSyntheticIdentity(nextSyntheticId, [
                           state,
                           contState,
@@ -7322,7 +8126,7 @@ export function streamResponsesRecallAware(
                         queueTransactional(
                           encoder.encode(
                             emitTextItem(
-                              nextRecall.outputIndex + contIndex,
+                              shiftedRecallIndex,
                               nextExecuted.anchorText,
                             ),
                           ),
@@ -7335,6 +8139,7 @@ export function streamResponsesRecallAware(
                       if (!nextRecall || !nextExecuted || contOtherTool) {
                         state.stopReason = contState.stopReason;
                         state.terminalEvent = contState.terminalEvent;
+                        state.terminalResponse = contState.terminalResponse;
                         break;
                       }
                       follow = await settleFollowUp({

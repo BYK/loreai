@@ -42,6 +42,8 @@ export interface ResponsesAccState {
     | "response.completed"
     | "response.incomplete"
     | "response.failed";
+  /** Final upstream response snapshot, used when rebuilding transformed SSE. */
+  terminalResponse?: Record<string, unknown>;
   /** Original upstream output items, retained for terminal rebuilds. */
   rawItems: Map<number, Record<string, unknown>>;
   /** Accumulating output items indexed by output_index. */
@@ -113,7 +115,7 @@ export function applyResponsesEvent(
           id: asString(item.id),
           callId: asString(item.call_id),
           name: asString(item.name),
-          args: "",
+          args: asString(item.arguments),
         });
       }
       break;
@@ -223,6 +225,7 @@ export function applyResponsesEvent(
             ? "response.incomplete"
             : "response.completed";
       if (resp) {
+        state.terminalResponse = { ...resp };
         if (typeof resp.id === "string") state.id = resp.id;
         if (typeof resp.model === "string") state.model = resp.model;
         if (typeof resp.status === "string") {
@@ -231,6 +234,26 @@ export function applyResponsesEvent(
 
         const respUsage = resp.usage as Record<string, unknown> | undefined;
         if (respUsage) {
+          const assertTokenCount = (value: unknown, field: string): void => {
+            if (
+              value !== undefined &&
+              (!Number.isSafeInteger(value) || (value as number) < 0)
+            ) {
+              throw new Error(`invalid Responses usage ${field}`);
+            }
+          };
+          assertTokenCount(respUsage.output_tokens, "output_tokens");
+          assertTokenCount(respUsage.input_tokens, "input_tokens");
+          assertTokenCount(respUsage.total_tokens, "total_tokens");
+          if (
+            typeof respUsage.input_tokens === "number" &&
+            typeof respUsage.output_tokens === "number" &&
+            !Number.isSafeInteger(
+              respUsage.input_tokens + respUsage.output_tokens,
+            )
+          ) {
+            throw new Error("Responses usage total token overflow");
+          }
           if (typeof respUsage.output_tokens === "number") {
             state.usage.outputTokens = respUsage.output_tokens;
           }
@@ -240,6 +263,28 @@ export function applyResponsesEvent(
             respUsage.prompt_tokens_details) as
             | Record<string, number>
             | undefined;
+          assertTokenCount(promptDetails?.cached_tokens, "cached_tokens");
+          assertTokenCount(
+            promptDetails?.cache_write_tokens,
+            "cache_write_tokens",
+          );
+          const cachedTokens = promptDetails?.cached_tokens ?? 0;
+          const cacheWriteTokens = promptDetails?.cache_write_tokens ?? 0;
+          const cacheTokens = cachedTokens + cacheWriteTokens;
+          if (!Number.isSafeInteger(cacheTokens)) {
+            throw new Error("Responses usage cache token overflow");
+          }
+          if (
+            typeof respUsage.input_tokens === "number" &&
+            cacheTokens > respUsage.input_tokens
+          ) {
+            throw new Error("Responses usage cache tokens exceed input tokens");
+          }
+          if (cacheTokens > 0 && typeof respUsage.input_tokens !== "number") {
+            throw new Error(
+              "Responses usage cache tokens require input_tokens",
+            );
+          }
           if (promptDetails?.cached_tokens !== undefined) {
             state.usage.cacheReadInputTokens = promptDetails.cached_tokens;
           }
@@ -252,9 +297,7 @@ export function applyResponsesEvent(
             // to match the gateway's disjoint token convention.
             state.usage.inputTokens = Math.max(
               0,
-              respUsage.input_tokens -
-                (promptDetails?.cached_tokens ?? 0) -
-                (promptDetails?.cache_write_tokens ?? 0),
+              respUsage.input_tokens - cacheTokens,
             );
           }
         }
