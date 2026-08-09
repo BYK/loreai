@@ -6234,6 +6234,9 @@ export function streamResponsesRecallAware(
     if (!Array.isArray(response.output)) {
       throw new Error("Responses terminal output must be an array");
     }
+    // ChatGPT/Codex can emit `output: []` in the terminal response even though
+    // the preceding output_item events carried the complete response.
+    if (response.output.length === 0) return;
     const actualOutput = response.output.filter(
       (item): item is Record<string, unknown> =>
         !!item &&

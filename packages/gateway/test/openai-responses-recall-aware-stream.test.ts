@@ -202,6 +202,35 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("ended without a terminal event");
   });
 
+  test("accepts an empty Codex terminal output after streamed items", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_codex_empty_output", "gpt-5.6-terra"),
+        textItem(0, "answer"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_codex_empty_output",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not be called");
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("answer");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).not.toContain("response.failed");
+  });
+
   test.each(["failed", "cancelled"])(
     "hides recall when the principal response.done status is %s",
     async (status) => {
