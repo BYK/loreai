@@ -96,7 +96,9 @@ describe("startGateway shutdown — strict order (#1599)", () => {
     const order: string[] = [];
     const { core } = await mockCoreShutdown();
     vi.spyOn(embedding, "settleDocumentEmbeds").mockImplementation(
-      async (_deadline?: number) => {
+      async (
+        _deadline?: Parameters<typeof embedding.settleDocumentEmbeds>[0],
+      ) => {
         order.push("drain");
       },
     );

@@ -3,13 +3,11 @@ import { db } from "../src/db";
 import { storeEmbedding } from "../src/db/vec-store";
 import * as embedding from "../src/embedding";
 import * as ltm from "../src/ltm";
-import * as log from "../src/log";
 import {
   changedFiles,
   checkInvariants,
   clusterHunks,
   enforcementLevel,
-  extractFirstJsonObject,
   gateDecision,
   isEnforceableInvariant,
   isEnumerationInvariant,
@@ -21,7 +19,9 @@ import {
   splitDiff,
   type DiffHunk,
   type Finding,
+  type InvariantJudge,
   type InvariantVec,
+  type JudgeOutcome,
   type ResolvedRange,
 } from "../src/invariant-check";
 import type { LLMClient } from "../src/types";
@@ -38,6 +38,20 @@ function stubLLM(responder: (system: string, user: string) => string | null): {
     responder(system, user),
   );
   return { llm: { prompt }, prompt };
+}
+
+function stubJudge(
+  responder: (
+    input: Parameters<InvariantJudge["judge"]>[0],
+    call: number,
+  ) => JudgeOutcome,
+): { judge: InvariantJudge; judgeCall: ReturnType<typeof vi.fn> } {
+  let calls = 0;
+  const judgeCall = vi.fn(
+    async (input: Parameters<InvariantJudge["judge"]>[0]) =>
+      responder(input, ++calls),
+  );
+  return { judge: { judge: judgeCall }, judgeCall };
 }
 
 async function seed(
@@ -57,6 +71,34 @@ async function seed(
   await embedding.settleDocumentEmbeds();
   storeEmbedding(db(), "knowledge", id, vec);
   return id;
+}
+
+async function seedCandidateSet(
+  projectPath: string,
+  count: number,
+): Promise<DiffHunk[]> {
+  const invariantVec = new Float32Array(count + 1);
+  invariantVec[0] = 1;
+  await seed(
+    projectPath,
+    "shared transport boundary",
+    "dispatchRequest() must never bypass the shared transport boundary",
+    invariantVec,
+  );
+
+  const hunkVecs = Array.from({ length: count }, (_, index) => {
+    const vec = new Float32Array(count + 1);
+    // Unit length: cosine with invariant = 0.8 (admitted), while two distinct
+    // hunks have dot=0.64 (not duplicate-clustered).
+    vec[0] = 0.8;
+    vec[index + 1] = 0.6;
+    return vec;
+  });
+  vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue(hunkVecs);
+  return hunkVecs.map((_, index) => ({
+    file: `src/candidate-${index + 1}.ts`,
+    text: `@@\n+dispatchRequest(${index + 1})`,
+  }));
 }
 
 const FAKE_RANGE: ResolvedRange = {
@@ -163,6 +205,26 @@ describe("splitDiff", () => {
     // Only the real source file survives.
     expect(hunks).toHaveLength(1);
     expect(hunks[0].file).toBe("packages/core/src/real.ts");
+  });
+
+  it("does not treat a +++ b/.lore.md line inside a source hunk as metadata", () => {
+    const raw = [
+      "diff --git a/src/parser.ts b/src/parser.ts",
+      "--- a/src/parser.ts",
+      "+++ b/src/parser.ts",
+      "@@ -1 +1,2 @@",
+      " const marker = true;",
+      // An added source line beginning with `++ b/` has this exact raw diff
+      // shape. It must remain hunk content, not spoof the ignored file path.
+      "+++ b/.lore.md",
+    ].join("\n");
+
+    expect(splitDiff(raw)).toEqual([
+      {
+        file: "src/parser.ts",
+        text: "@@ -1 +1,2 @@\n const marker = true;\n+++ b/.lore.md",
+      },
+    ]);
   });
 });
 
@@ -629,10 +691,12 @@ describe("parseInvariantVerdict", () => {
   });
   it("parses each of the four verdict categories", () => {
     for (const v of ["violates", "fixes", "satisfies", "unrelated"] as const) {
-      expect(parseInvariantVerdict(`{"verdict":"${v}"}`)).toEqual({
-        verdict: v,
-        reason: null,
-      });
+      expect(parseInvariantVerdict(`{"verdict":"${v}","reason":"ok"}`)).toEqual(
+        {
+          verdict: v,
+          reason: "ok",
+        },
+      );
     }
   });
   it("returns null for an unknown verdict string (not coerced to satisfies)", () => {
@@ -642,81 +706,57 @@ describe("parseInvariantVerdict", () => {
   });
   it("strips ```json fences", () => {
     expect(
-      parseInvariantVerdict('```json\n{"verdict": "satisfies"}\n```'),
-    ).toEqual({ verdict: "satisfies", reason: null });
+      parseInvariantVerdict(
+        '```json\n{"verdict": "satisfies", "reason": "consistent"}\n```',
+      ),
+    ).toEqual({ verdict: "satisfies", reason: "consistent" });
   });
-  it("returns null for junk / non-JSON / missing field", () => {
+  it("returns null for junk, missing fields, and invalid field types", () => {
     expect(parseInvariantVerdict(null)).toBeNull();
     expect(parseInvariantVerdict("not json")).toBeNull();
     expect(parseInvariantVerdict('{"reason": "no verdict field"}')).toBeNull();
     expect(parseInvariantVerdict("{}")).toBeNull();
-    expect(parseInvariantVerdict('{"verdict": 42}')).toBeNull();
-  });
-  it("extracts a verdict embedded in prose (GLM prose-not-JSON failure mode)", () => {
     expect(
-      parseInvariantVerdict(
-        'Sure! Here is my analysis: {"verdict": "unrelated", "reason": "different scope"}',
-      ),
-    ).toEqual({ verdict: "unrelated", reason: "different scope" });
-  });
-  it("extracts a verdict with trailing prose after the object", () => {
-    expect(
-      parseInvariantVerdict(
-        '{"verdict": "fixes", "reason": "moves payload off assistant"}\n\nHope this helps!',
-      ),
-    ).toEqual({ verdict: "fixes", reason: "moves payload off assistant" });
-  });
-  it("is not fooled by braces inside string values", () => {
-    expect(
-      parseInvariantVerdict(
-        'The verdict: {"verdict": "violates", "reason": "found a { in the code"}',
-      ),
-    ).toEqual({ verdict: "violates", reason: "found a { in the code" });
-  });
-  it("still returns null when prose contains no JSON object at all", () => {
-    expect(
-      parseInvariantVerdict("I think this looks fine, no violation here."),
+      parseInvariantVerdict('{"verdict": 42, "reason": "wrong type"}'),
     ).toBeNull();
   });
-  it("back-compat: legacy {violates:true} shape maps to 'violates'", () => {
-    // Stale logs / older test fixtures may still carry the old binary shape.
-    // Mapping false -> "unrelated" (the conservative non-finding bucket) is
-    // safer than mapping to "satisfies": the binary framing couldn't tell a
-    // fix from a neutral change, and silently dropping a fix-as-violation FP
-    // back into "satisfies" would surface as a real miss.
-    expect(parseInvariantVerdict('{"violates": true, "reason": "y"}')).toEqual({
-      verdict: "violates",
-      reason: "y",
-    });
-    expect(parseInvariantVerdict('{"violates": false}')).toEqual({
-      verdict: "unrelated",
-      reason: null,
-    });
+  it("rejects JSON embedded in prose or followed by trailing prose", () => {
+    expect(
+      parseInvariantVerdict(
+        'Sure: {"verdict":"unrelated","reason":"different scope"}',
+      ),
+    ).toBeNull();
+    expect(
+      parseInvariantVerdict(
+        '{"verdict":"fixes","reason":"moves payload"}\nDone.',
+      ),
+    ).toBeNull();
   });
-});
-
-describe("extractFirstJsonObject", () => {
-  it("returns the first balanced object", () => {
-    expect(extractFirstJsonObject('x {"a":1} y {"b":2}')).toBe('{"a":1}');
+  it("requires exactly verdict+reason and a bounded non-empty reason", () => {
+    expect(
+      parseInvariantVerdict(
+        '{"verdict":"satisfies","reason":"ok","extra":true}',
+      ),
+    ).toBeNull();
+    expect(
+      parseInvariantVerdict('{"verdict":"satisfies","reason":"   "}'),
+    ).toBeNull();
+    expect(
+      parseInvariantVerdict(
+        JSON.stringify({ verdict: "satisfies", reason: "x".repeat(401) }),
+      ),
+    ).toBeNull();
   });
-  it("handles nested objects", () => {
-    expect(extractFirstJsonObject('pre {"a":{"b":2}} post')).toBe(
-      '{"a":{"b":2}}',
-    );
-  });
-  it("ignores braces inside strings", () => {
-    expect(extractFirstJsonObject('{"s":"a } b"}')).toBe('{"s":"a } b"}');
-  });
-  it("ignores an escaped quote inside a string", () => {
-    expect(extractFirstJsonObject('{"s":"a \\" } b"}')).toBe(
-      '{"s":"a \\" } b"}',
-    );
-  });
-  it("returns null when there is no object", () => {
-    expect(extractFirstJsonObject("no braces here")).toBeNull();
-  });
-  it("returns null for an unbalanced/truncated object", () => {
-    expect(extractFirstJsonObject('{"violates": true')).toBeNull();
+  it("rejects legacy booleans and incomplete or non-json fences", () => {
+    expect(
+      parseInvariantVerdict('{"violates":true,"reason":"legacy"}'),
+    ).toBeNull();
+    expect(
+      parseInvariantVerdict('```\n{"verdict":"satisfies","reason":"ok"}\n```'),
+    ).toBeNull();
+    expect(
+      parseInvariantVerdict('```json\n{"verdict":"satisfies","reason":"ok"}'),
+    ).toBeNull();
   });
 });
 
@@ -741,7 +781,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
 
     const { llm, prompt } = stubLLM(() =>
       JSON.stringify({
-        violates: true,
+        verdict: "violates",
         reason: "adds node:sqlite import outside driver.node.ts",
       }),
     );
@@ -771,7 +811,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     );
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
     const { llm, prompt } = stubLLM(() =>
-      JSON.stringify({ violates: false, reason: "docs change, unrelated" }),
+      JSON.stringify({ verdict: "unrelated", reason: "docs change" }),
     );
     const result = await checkInvariants({
       projectPath: project,
@@ -784,7 +824,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.findings).toHaveLength(0);
   });
 
-  it("counts unparseable (prose) judge responses and degrades to no-finding", async () => {
+  it("repairs invalid prose once, then records an unresolved candidate", async () => {
     const project = "/tmp/ic-test-proj-unparseable";
     await seed(
       project,
@@ -793,7 +833,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       v(1, 0, 0),
     );
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
-    // Judge returns prose with no JSON object at all → unparseable.
+    // Both initial and repair calls violate the exact whole-response schema.
     const { llm, prompt } = stubLLM(
       () => "I don't think this violates anything, looks fine to me.",
     );
@@ -804,22 +844,21 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       llm,
       sessionID: "s-unparseable",
     });
-    expect(prompt).toHaveBeenCalledTimes(1);
-    expect(result.judgeCalls).toBe(1);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(result.judgeCalls).toBe(2);
     expect(result.unparseable).toBe(1);
-    expect(result.findings).toHaveLength(0); // safe degrade, no crash
+    expect(result.unresolved).toBe(1);
+    expect(result.status).toBe("failed");
+    expect(result.health.judge.status).toBe("failed");
+    expect(result.candidateOutcomes[0]).toMatchObject({
+      state: "unresolved",
+      failure: { code: "invalid-verdict", scope: "candidate" },
+      stats: { semanticCalls: 2, transportAttempts: 2 },
+    });
+    expect(result.findings).toHaveLength(0);
   });
 
-  it("emits a notice log when the judge returns null text (so 20/20 unparseable in CI is actionable)", async () => {
-    // Regression for PR #1587's CI run (run 31099868171): github-copilot/gpt-5.6-luna
-    // routed to /chat/completions (instead of /responses) returned
-    // `unsupported_api_for_model` as plain JSON, the parser walked
-    // output[].content[].text (empty) → null text, and the CLI silently
-    // counted all 20 calls as unparseable with NO stderr detail to diagnose
-    // the routing miss. The fix: when `responseText === null` after a
-    // successful call (no exception), surface a `log.notice` so the operator
-    // sees the model + provider + likely cause on the next CI run, even
-    // without LORE_DEBUG=1.
+  it("records null text as an explicit empty-response failure", async () => {
     const project = "/tmp/ic-test-proj-null-text";
     await seed(
       project,
@@ -828,11 +867,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       v(1, 0, 0),
     );
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
-    // Judge completes (no throw) but returns null text — the "silent failure"
-    // shape: the worker pipeline swallowed an empty/encrypted/incompatible
-    // response and the parser got nothing back.
     const { llm } = stubLLM(() => null);
-    const noticeSpy = vi.spyOn(log, "notice").mockImplementation(() => {});
 
     const result = await checkInvariants({
       projectPath: project,
@@ -844,17 +879,15 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     });
 
     expect(result.unparseable).toBe(1);
-    expect(result.findings).toHaveLength(0); // safe degrade, no crash
-    // The notice log names the model so an operator staring at "20/20 unparseable"
-    // in CI stderr can immediately identify the routing/compat issue.
-    expect(noticeSpy).toHaveBeenCalledTimes(1);
-    const call = noticeSpy.mock.calls[0][0] as string;
-    expect(call).toContain("github-copilot/gpt-5.6-luna");
-    expect(call).toContain("null text");
-    noticeSpy.mockRestore();
+    expect(result.status).toBe("failed");
+    expect(result.candidateOutcomes[0]).toMatchObject({
+      state: "unresolved",
+      failure: { code: "empty-response", scope: "candidate" },
+    });
+    expect(result.findings).toHaveLength(0);
   });
 
-  it("prose-wrapped JSON verdict still flags (prose-tolerant parse)", async () => {
+  it("does not scan prose for JSON and accepts only the exact repair", async () => {
     const project = "/tmp/ic-test-proj-prosejson";
     await seed(
       project,
@@ -863,10 +896,13 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       v(1, 0, 0),
     );
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]);
-    const { llm } = stubLLM(
-      () =>
-        'Sure, here is the verdict: {"violates": true, "reason": "adds node:sqlite import"}',
-    );
+    let call = 0;
+    const { llm, prompt } = stubLLM(() => {
+      call++;
+      return call === 1
+        ? 'Sure: {"verdict":"violates","reason":"adds node:sqlite import"}'
+        : '{"verdict":"violates","reason":"adds node:sqlite import"}';
+    });
     const result = await checkInvariants({
       projectPath: project,
       hunks: [{ file: "src/other.ts", text: '@@\n+import "node:sqlite"' }],
@@ -874,7 +910,10 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       llm,
       sessionID: "s-prosejson",
     });
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(result.semanticCalls).toBe(2);
     expect(result.unparseable).toBe(0);
+    expect(result.resolved).toBe(1);
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0].reason).toContain("node:sqlite");
   });
@@ -914,7 +953,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     );
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0, 0)]); // orthogonal
     const { llm, prompt } = stubLLM(() =>
-      JSON.stringify({ violates: false, reason: "ok" }),
+      JSON.stringify({ verdict: "satisfies", reason: "consistent" }),
     );
     const result = await checkInvariants({
       projectPath: project,
@@ -945,7 +984,10 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       v(1, 0, 0),
     ]);
     const { llm, prompt } = stubLLM(() =>
-      JSON.stringify({ violates: true, reason: "adds node:sqlite import" }),
+      JSON.stringify({
+        verdict: "violates",
+        reason: "adds node:sqlite import",
+      }),
     );
     const result = await checkInvariants({
       projectPath: project,
@@ -985,7 +1027,10 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       v(1, 0, 0.7),
     ]);
     const { llm } = stubLLM(() =>
-      JSON.stringify({ violates: true, reason: "extends the silenced set" }),
+      JSON.stringify({
+        verdict: "violates",
+        reason: "extends the silenced set",
+      }),
     );
     const result = await checkInvariants({
       projectPath: project,
@@ -1226,7 +1271,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
         opts?: { maxTokens?: number; reasoningEffort?: string },
       ) => {
         captured.push(opts ?? {});
-        return JSON.stringify({ violates: false, reason: "ok" });
+        return JSON.stringify({ verdict: "satisfies", reason: "consistent" });
       },
     );
     const llm: LLMClient = { prompt };
@@ -1260,5 +1305,319 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       // Floor MUST clear 25600 so the verdict is parseable even with no models.dev data.
       expect(captured[0].maxTokens).toBeGreaterThanOrEqual(25_600);
     }
+  });
+});
+
+describe("checkInvariants typed judge outcomes", () => {
+  it.each([
+    {
+      name: "zero hunks",
+      projectPath: "/tmp/ic-test-aborted-zero-hunks",
+      hunks: [] as DiffHunk[],
+    },
+    {
+      name: "zero enforceable invariants",
+      projectPath: "/tmp/ic-test-aborted-zero-invariants",
+      hunks: [{ file: "src/a.ts", text: "@@\n+const value = 1;" }],
+    },
+  ])("does not report healthy for $name after abort", async (input) => {
+    const controller = new AbortController();
+    const reason = new DOMException(
+      "Semantic lint deadline exceeded",
+      "TimeoutError",
+    );
+    controller.abort(reason);
+
+    await expect(
+      checkInvariants({
+        projectPath: input.projectPath,
+        hunks: input.hunks,
+        range: FAKE_RANGE,
+        sessionID: `typed-aborted-${input.name}`,
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(reason);
+  });
+
+  it("keeps diff command failure distinct from a healthy empty diff", async () => {
+    const result = await checkInvariants({
+      projectPath: "/tmp/ic-test-diff-failure",
+      diff: {
+        kind: "failure",
+        failure: {
+          code: "diff-command-failed",
+          message: "unknown revision",
+        },
+      },
+      range: FAKE_RANGE,
+      sessionID: "typed-diff-failure",
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.health).toMatchObject({
+      diff: {
+        status: "failed",
+        failure: { code: "diff-command-failed" },
+      },
+      invariantVectors: { status: "not-run" },
+      hunkVectors: { status: "not-run" },
+      judge: { status: "not-run" },
+    });
+
+    const empty = await checkInvariants({
+      projectPath: "/tmp/ic-test-empty-diff",
+      diff: { kind: "success", hunks: [] },
+      range: FAKE_RANGE,
+      sessionID: "typed-empty-diff",
+    });
+    expect(empty.status).toBe("complete");
+    expect(empty.health.diff.status).toBe("healthy");
+    expect(empty.health.judge.status).toBe("healthy");
+  });
+
+  it("fails explicitly when all non-empty hunk vectors are unavailable", async () => {
+    const project = "/tmp/ic-test-hunk-vector-failure";
+    await seed(
+      project,
+      "shared transport boundary",
+      "dispatchRequest() must never bypass the shared transport boundary",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockRejectedValue(
+      new Error("embed worker unavailable"),
+    );
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict",
+      verdict: "satisfies",
+      reason: "not reached",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [{ file: "src/a.ts", text: "@@\n+dispatchRequest()" }],
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-hunk-vector-failure",
+    });
+
+    expect(judgeCall).not.toHaveBeenCalled();
+    expect(result.status).toBe("failed");
+    expect(result.health.hunkVectors).toMatchObject({
+      status: "failed",
+      expected: 1,
+      available: 0,
+      missing: 1,
+      failure: { code: "hunk-vector-embedding-failed" },
+    });
+    expect(result.health.judge.status).toBe("not-run");
+  });
+
+  it("returns failed health promptly when in-flight hunk embedding exceeds its deadline", async () => {
+    const project = "/tmp/ic-test-hunk-vector-deadline";
+    await seed(
+      project,
+      "shared transport boundary",
+      "dispatchRequest() must never bypass the shared transport boundary",
+      v(1, 0, 0),
+    );
+    vi.spyOn(embedding, "embedInTokenBatches").mockImplementation(
+      () => new Promise<Float32Array[]>(() => {}),
+    );
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks: [{ file: "src/a.ts", text: "@@\n+dispatchRequest()" }],
+      range: FAKE_RANGE,
+      sessionID: "typed-hunk-vector-deadline",
+      deadlineMs: 10,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.health.hunkVectors).toMatchObject({
+      status: "failed",
+      failure: {
+        code: "hunk-vector-embedding-failed",
+        message: "Hunk embedding deadline exceeded",
+      },
+    });
+    expect(result.health.judge.status).toBe("not-run");
+  });
+
+  it("reports a healthy run only when every selected candidate resolves", async () => {
+    const project = "/tmp/ic-test-typed-healthy";
+    const hunks = await seedCandidateSet(project, 3);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict",
+      verdict: "satisfies",
+      reason: "The shared transport remains in use",
+      stats: { semanticCalls: 1, transportAttempts: 2 },
+    }));
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-healthy",
+    });
+
+    expect(judgeCall).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({
+      status: "complete",
+      candidates: 3,
+      attempted: 3,
+      resolved: 3,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 3,
+      transportAttempts: 6,
+    });
+    expect(result.health.judge.status).toBe("healthy");
+    expect(result.candidateOutcomes.every((o) => o.state === "resolved")).toBe(
+      true,
+    );
+    expect(new Set(result.candidateOutcomes.map((o) => o.id)).size).toBe(3);
+  });
+
+  it("fails health when all selected candidates are unresolved", async () => {
+    const project = "/tmp/ic-test-typed-unresolved";
+    const hunks = await seedCandidateSet(project, 3);
+    const { judge } = stubJudge(() => ({
+      kind: "unresolved",
+      failure: {
+        code: "invalid-verdict",
+        message: "Repair still had an extra key",
+        scope: "candidate",
+      },
+      stats: { semanticCalls: 2, transportAttempts: 2 },
+    }));
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-unresolved",
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      attempted: 3,
+      resolved: 0,
+      unresolved: 3,
+      notAttempted: 0,
+      semanticCalls: 6,
+      transportAttempts: 6,
+    });
+    expect(result.health.judge.status).toBe("failed");
+  });
+
+  it("stops after a run-scoped failure and reports a mixed degraded run", async () => {
+    const project = "/tmp/ic-test-typed-mixed";
+    const hunks = await seedCandidateSet(project, 3);
+    const { judge, judgeCall } = stubJudge((_input, call) =>
+      call === 1
+        ? {
+            kind: "verdict",
+            verdict: "unrelated",
+            reason: "Different request path",
+            stats: { semanticCalls: 1, transportAttempts: 1 },
+          }
+        : {
+            kind: "unresolved",
+            failure: {
+              code: "no-auth",
+              message: "No credential is available for the judge",
+              scope: "run",
+            },
+            stats: { semanticCalls: 0, transportAttempts: 0 },
+          },
+    );
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-mixed",
+    });
+
+    expect(judgeCall).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      status: "partial",
+      candidates: 3,
+      attempted: 2,
+      resolved: 1,
+      unresolved: 1,
+      notAttempted: 1,
+      semanticCalls: 1,
+      transportAttempts: 1,
+    });
+    expect(result.health.judge.status).toBe("degraded");
+    expect(result.candidateOutcomes[2]).toMatchObject({
+      state: "not-attempted",
+      failure: { code: "no-auth", scope: "run" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
+
+  it("caps repairs at 20 semantic calls and accounts for displaced candidates", async () => {
+    const project = "/tmp/ic-test-typed-budget";
+    const hunks = await seedCandidateSet(project, 20);
+    const { judge, judgeCall } = stubJudge((input) => {
+      expect(input.semanticCallBudget).toBe(2);
+      return {
+        kind: "unresolved",
+        failure: {
+          code: "invalid-verdict",
+          message: "Initial and repair responses were invalid",
+          scope: "candidate",
+        },
+        stats: { semanticCalls: 2, transportAttempts: 2 },
+      };
+    });
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-budget",
+    });
+
+    expect(judgeCall).toHaveBeenCalledTimes(10);
+    expect(result).toMatchObject({
+      status: "failed",
+      candidates: 20,
+      attempted: 10,
+      resolved: 0,
+      unresolved: 10,
+      notAttempted: 10,
+      semanticCalls: 20,
+      transportAttempts: 20,
+    });
+    expect(
+      result.candidateOutcomes
+        .slice(10)
+        .every(
+          (outcome) =>
+            outcome.state === "not-attempted" &&
+            outcome.failure.code === "semantic-budget-exhausted" &&
+            outcome.stats.semanticCalls === 0,
+        ),
+    ).toBe(true);
+    expect(
+      result.candidateOutcomes.reduce(
+        (sum, outcome) => sum + outcome.stats.semanticCalls,
+        0,
+      ),
+    ).toBe(result.semanticCalls);
+    expect(
+      result.candidateOutcomes.reduce(
+        (sum, outcome) => sum + outcome.stats.transportAttempts,
+        0,
+      ),
+    ).toBe(result.transportAttempts);
   });
 });

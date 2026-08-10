@@ -251,11 +251,9 @@ async function ensurePipeline(): Promise<void> {
               // Recoverable: native-binding parse failure on an intact model
               // triggers an automatic WASM respawn — no user action available.
               // Demote to `console.debug` per the warn-vs-debug escalation rule
-              // (only Sentry-warning-worthy events go through `console.warn`).
-              // `console.warn` is Node-aliased to `console.error`, which the
-              // lint CLI's legacy-bridge shim captures into its stdout stream —
-              // a `[embedding-…]` prefix then breaks `--json` parsing in CI
-              // (lore CI run 31192441316, run 31156866927).
+              // (only actionable events use warning severity). The parent owns
+              // and drains both streams, so this diagnostic is safely routed
+              // through its logger rather than inherited process stdout.
               if (!stderrSilenced) {
                 console.debug(
                   `[embedding-worker] native ONNX could not parse an intact model (${msg}); ` +
@@ -289,8 +287,7 @@ async function ensurePipeline(): Promise<void> {
               // failure) may post init-error. Recoverable: the purge-then-redownload
               // retry typically succeeds — no user action available. Demote to
               // `console.debug` per the warn-vs-debug escalation rule. See the
-              // rationale on the line above for why `console.warn` is hostile in
-              // the lint CLI's stdout-shimmed context.
+              // rationale above for why warning severity is inappropriate.
               if (!stderrSilenced) {
                 console.debug(
                   `[embedding-worker] model corrupt (${msg}); purged cache, retrying download once`,
@@ -779,10 +776,8 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
       if (isOomError(raw)) {
         // Silenced in host-TUI mode (see WorkerInitData.stderrSilenced); the
         // main thread reconstructs OOM telemetry, so nothing diagnostic is lost.
-        // Demote to `console.debug` per the warn-vs-debug escalation rule:
-        // `console.warn` is Node-aliased to `console.error`, which the lint CLI's
-        // legacy-bridge shim captures into its stdout stream — a `[lore]` prefix
-        // then breaks `--json` parsing in CI.
+        // Demote to `console.debug` per the warn-vs-debug escalation rule. The
+        // parent owns/drains this stream and reconstructs OOM telemetry itself.
         if (!stderrSilenced) {
           console.debug(
             `[lore] ONNX OOM at ≤${effectiveMax} tokens (batch=${req.texts.length}, ` +

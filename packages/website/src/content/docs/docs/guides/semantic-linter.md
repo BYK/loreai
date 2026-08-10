@@ -1,13 +1,13 @@
 ---
 title: Semantic linter (CI)
-description: Catch pull requests that contradict a documented invariant in your .lore.md, at CI time, as advisory annotations that never block the build.
+description: Catch pull requests that contradict a documented invariant in your .lore.md, with explicit health reporting and advisory or gate modes.
 sidebar:
   order: 7
 ---
 
 Your team's decisions, patterns, and gotchas live in [`.lore.md`](/docs/team-memory/), a version-controlled record of how this codebase is supposed to work. The **semantic linter** reads that record and, on every pull request, flags changes that appear to contradict it.
 
-It is a judge, not a rule engine. Instead of matching regexes, it asks an LLM whether a specific diff hunk conflicts with a specific documented invariant, and surfaces the ones that do as GitHub annotations. It is **advisory by default: it never fails a build.** A human decides what to do with each finding.
+It is a judge, not a rule engine. Instead of matching regexes, it asks an LLM whether a specific diff hunk conflicts with a specific documented invariant, and surfaces the ones that do as GitHub annotations. It is **advisory by default: findings and health failures do not fail the build.** A human decides what to do with each finding. Gate mode fails closed when the run is inconclusive.
 
 ```
 ✓ no suspected invariant violations (45 hunks × 67 invariants → 20 candidates → 20 judge calls)
@@ -66,7 +66,7 @@ jobs:
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}
 ```
 
-That is the whole setup. Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. It exits `0` regardless of findings.
+That is the whole setup. Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
 
 :::caution
 `fetch-depth: 0` is required. The check diffs the PR against the merge-base with its target branch; a shallow clone forces a noisy tip-to-tip diff instead of the fork-point diff.
@@ -78,7 +78,7 @@ The credential and the model are chosen independently.
 
 **Credential** (the `worker-api-key` input):
 
-- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `copilot-requests: write`, calling GitHub Copilot. The token is sent as a Bearer credential to `api.githubcopilot.com/responses` (the openai-responses worker adapter routes `gpt-5.6-*` via this endpoint — see PR #1582 / `isResponsesOnlyModel` in `llm-adapter.ts`) — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; the judge then no-ops (advisory → still passes) rather than breaking CI.
+- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `copilot-requests: write`, calling GitHub Copilot. The token is sent as a Bearer credential to `api.githubcopilot.com/responses` (the openai-responses worker adapter routes `gpt-5.6-*` via this endpoint — see PR #1582 / `isResponsesOnlyModel` in `llm-adapter.ts`) — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; that produces a visible inconclusive health report. Advisory mode remains non-blocking; gate mode fails closed.
 - **Dedicated key (busy repos).** Set a `LORE_WORKER_API_KEY` secret. It takes precedence over the token.
 
 **Model** (the `model` input, `provider/id`):
@@ -149,9 +149,27 @@ With no arguments it auto-detects the range (the current branch against its base
 - `--model <provider/id>` sweeps a specific judge model.
 - `--effort <level>` sets reasoning effort, as above.
 - `--project <path>` checks a different working tree.
-- `--json` emits machine-readable output (what the CI reporter consumes).
+- `--json` emits the versioned machine-readable report on stdout for local tooling.
+- `--report-file <path>` atomically writes a validated, versioned JSON report. CI uses this owned channel instead of redirecting stdout.
+- `--deadline-ms <ms>` bounds the overall run (default: `1200000`).
+- `--candidate-timeout-ms <ms>` bounds each selected judge candidate (default: `90000`).
 
-In advisory mode the command always exits `0`; a genuine tooling error (for example, no resolvable range) exits `1`.
+The CLI exit contract is:
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Complete, non-blocking report |
+| `1` | Argument/usage failure before report setup |
+| `2` | Complete gate-mode report with blocking findings |
+| `3` | Partial or failed runtime report |
+
+The action always consumes and validates `--report-file`, regardless of the CLI exit. Missing, malformed, wrong-version, or internally inconsistent reports are health failures. Advisory actions show those failures but remain non-blocking; gate actions fail closed.
+
+### Report health
+
+The report distinguishes `complete`, `partial`, and `failed` runs. It records health for range resolution, diff parsing, invariant loading, invariant vectors, hunk vectors, and the judge. Every selected candidate is recorded as resolved, unresolved, or not attempted, and the report validator checks that candidate states and semantic/transport attempt totals match the funnel counters.
+
+“No suspected invariant violations” is shown only for a complete report with zero findings. Partial and failed reports remain visibly inconclusive even when they contain no findings.
 
 ## Enforcement tiers
 

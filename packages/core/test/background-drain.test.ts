@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
   embedKnowledgeEntry,
+  EmbeddingAbortError,
   isAvailable,
   recallEmbedsInFlight,
   settleDocumentEmbeds,
@@ -220,6 +221,34 @@ describe("bounded document-embed drain (issue #1331)", () => {
     const start = Date.now();
     await settleDocumentEmbeds(5000);
     expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  it("settleDocumentEmbeds(options) throws a typed deadline without waiting for a pending embed", async () => {
+    _persistEmbedCap(8192, 0);
+    const fakes = installFakeWorkers();
+
+    embedKnowledgeEntry("k-deadline", "title", "content");
+    await flush();
+    expect(fakes).toHaveLength(1);
+
+    const startedAt = Date.now();
+    const error = await settleDocumentEmbeds({ deadlineMs: 25 }).catch(
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toBeInstanceOf(EmbeddingAbortError);
+    expect(error).toMatchObject({
+      code: "deadline-exceeded",
+      phase: "settle-document-embeds",
+    });
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+
+    fakes[0].emit("message", {
+      type: "result",
+      id: fakes[0].lastPosted().id,
+      vectors: [new Float32Array([0.1, 0.2, 0.3])],
+    });
+    await settleDocumentEmbeds();
   });
 });
 
