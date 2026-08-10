@@ -32,6 +32,7 @@ import {
   isAnthropicClaudeModel,
   isDataPolicyBlocked404,
   isModelUnsupported400,
+  isUnsupportedApi400,
   isThinkingUnsupportedModel,
   markThinkingUnsupported,
   workerThinkingOnByDefault,
@@ -766,6 +767,295 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(mockFetch.mock.calls[0][0]).toContain("/chat/completions");
   });
 
+  test.each([
+    [
+      "OpenAI Chat JSON",
+      "openai" as const,
+      "length",
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: { content: '{"verdict":"holds","reason":"ok"}' },
+                finish_reason: "length",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
+    [
+      "Anthropic JSON",
+      "anthropic" as const,
+      "max_tokens",
+      () =>
+        new Response(
+          JSON.stringify({
+            content: [
+              {
+                type: "text",
+                text: '{"verdict":"holds","reason":"ok"}',
+              },
+            ],
+            stop_reason: "max_tokens",
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
+    [
+      "OpenAI SSE",
+      "openai" as const,
+      "max_tokens",
+      () =>
+        new Response(
+          [
+            'data: {"choices":[{"delta":{"content":"{\\"verdict\\":\\"holds\\",\\"reason\\":\\"ok\\"}"},"finish_reason":null}]}',
+            "",
+            'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+            "",
+            "data: [DONE]",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    ],
+  ])(
+    "%s truncation is incomplete even when text is valid verdict JSON",
+    async (_name, protocol, expectedFinishReason, response) => {
+      mockFetch.mockResolvedValueOnce(response());
+      const providerID = protocol === "anthropic" ? "anthropic" : "openai";
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({
+          scheme: "api-key",
+          value: protocol === "anthropic" ? "sk-ant-test" : "sk-openai-test",
+        }),
+        { providerID, modelID: "test-model" },
+      );
+
+      await expect(
+        client.promptDetailed("system", "user", {
+          workerID: "lore-invariant-check",
+          protocol,
+          upstreamProviderID: providerID,
+        }),
+      ).resolves.toMatchObject({
+        kind: "failure",
+        code: "incomplete-response",
+        finishReason: expectedFinishReason,
+        attempts: 1,
+      });
+    },
+  );
+
+  test("Anthropic SSE without message_stop is invalid even with a complete verdict", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`;
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        event("message_start", {
+          message: { id: "msg_worker", model: "claude-test" },
+        }) +
+          event("content_block_start", {
+            index: 0,
+            content_block: { type: "text", text: "" },
+          }) +
+          event("content_block_delta", {
+            index: 0,
+            delta: {
+              type: "text_delta",
+              text: '{"verdict":"holds","reason":"ok"}',
+            },
+          }) +
+          event("content_block_stop", { index: 0 }) +
+          event("message_delta", {
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 8 },
+          }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    await expect(
+      client.promptDetailed("system", "user", {
+        workerID: "lore-invariant-check",
+        protocol: "anthropic",
+        upstreamProviderID: "anthropic",
+      }),
+    ).resolves.toMatchObject({
+      kind: "failure",
+      code: "invalid-response",
+      attempts: 1,
+    });
+    expect(getLastWorkerError()).toContain("missing terminal message_stop");
+  });
+
+  test.each([
+    [
+      "finish_reason",
+      [
+        'data: {"choices":[{"delta":{"content":"{\\"verdict\\":\\"holds\\",\\"reason\\":\\"ok\\"}"},"finish_reason":null}]}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\r\n"),
+      "missing terminal chat finish_reason",
+    ],
+    [
+      "[DONE]",
+      [
+        'data: {"choices":[{"delta":{"content":"{\\"verdict\\":\\"holds\\",\\"reason\\":\\"ok\\"}"},"finish_reason":null}]}',
+        "",
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "",
+      ].join("\r\n"),
+      "missing terminal [DONE] sentinel",
+    ],
+  ])(
+    "OpenAI chat SSE without %s is invalid even with a complete verdict",
+    async (_terminal, stream, diagnostic) => {
+      mockFetch.mockResolvedValueOnce(
+        new Response(stream, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+      );
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-openai-test" }),
+        { providerID: "openai", modelID: "gpt-test" },
+      );
+
+      await expect(
+        client.promptDetailed("system", "user", {
+          workerID: "lore-invariant-check",
+          protocol: "openai",
+          upstreamProviderID: "openai",
+        }),
+      ).resolves.toMatchObject({
+        kind: "failure",
+        code: "invalid-response",
+        attempts: 1,
+      });
+      expect(getLastWorkerError()).toContain(diagnostic);
+    },
+  );
+
+  test("Gemini SSE without finishReason is invalid even with a complete verdict", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        `data: ${JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: '{"verdict":"holds","reason":"ok"}' }],
+              },
+            },
+          ],
+          modelVersion: "gemini-test",
+        })}\r\n\r\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "goog-key" }),
+      { providerID: "google", modelID: "gemini-test" },
+    );
+
+    await expect(
+      client.promptDetailed("system", "user", {
+        workerID: "lore-invariant-check",
+        protocol: "gemini",
+        upstreamProviderID: "google",
+        upstreamUrl: "https://generativelanguage.googleapis.com",
+      }),
+    ).resolves.toMatchObject({
+      kind: "failure",
+      code: "invalid-response",
+      attempts: 1,
+    });
+    expect(getLastWorkerError()).toContain(
+      "missing terminal Gemini finishReason",
+    );
+  });
+
+  test.each([
+    {
+      name: "Anthropic",
+      protocol: "anthropic" as const,
+      providerID: "anthropic",
+      credential: "sk-ant-test",
+      stream: [
+        'event: message_start\r\ndata: {"message":{"id":"msg_worker","model":"claude-test"}}',
+        'event: content_block_start\r\ndata: {"index":0,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta\r\ndata: {"index":0,"delta":{"type":"text_delta","text":"ok"}}',
+        'event: content_block_stop\r\ndata: {"index":0}',
+        'event: message_delta\r\ndata: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+        'event: message_stop\r\ndata: {"type":"message_stop"}',
+        "",
+      ].join("\r\n\r\n"),
+    },
+    {
+      name: "OpenAI chat",
+      protocol: "openai" as const,
+      providerID: "openai",
+      credential: "sk-openai-test",
+      stream: [
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+        "",
+      ].join("\r\n\r\n"),
+    },
+    {
+      name: "Gemini",
+      protocol: "gemini" as const,
+      providerID: "google",
+      credential: "goog-key",
+      stream: [
+        'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"modelVersion":"gemini-test"}',
+        'data: {"candidates":[{"finishReason":"STOP"}]}',
+        "",
+      ].join("\r\n\r\n"),
+    },
+  ])("accepts complete $name SSE with CRLF framing", async (fixture) => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(fixture.stream, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: fixture.credential }),
+      {
+        providerID: fixture.providerID,
+        modelID:
+          fixture.protocol === "anthropic"
+            ? "claude-test"
+            : fixture.protocol === "openai"
+              ? "gpt-test"
+              : "gemini-test",
+      },
+    );
+
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-invariant-check",
+        protocol: fixture.protocol,
+        upstreamProviderID: fixture.providerID,
+        ...(fixture.protocol === "gemini"
+          ? { upstreamUrl: "https://generativelanguage.googleapis.com" }
+          : {}),
+      }),
+    ).resolves.toBe("ok");
+  });
+
   test("openai-codex worker calls the Responses endpoint with store:false + Codex headers", async () => {
     // Seed the per-session Codex fingerprint as a real conversation turn would.
     captureSessionHeaders("sess-codex", {
@@ -909,7 +1199,7 @@ describe("createGatewayLLMClient.prompt", () => {
   );
 
   test.each(["response.done", "response.incomplete"])(
-    "openai-codex worker accepts %s with CRLF framing",
+    "openai-codex worker honors %s with CRLF framing",
     async (terminalEvent) => {
       const event = (type: string, data: Record<string, unknown>) =>
         `event: ${type}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`;
@@ -921,7 +1211,25 @@ describe("createGatewayLLMClient.prompt", () => {
           }) +
             event("response.output_text.delta", {
               output_index: 0,
+              content_index: 0,
               delta: "codex CRLF reply",
+            }) +
+            event("response.output_text.done", {
+              output_index: 0,
+              content_index: 0,
+              text: "codex CRLF reply",
+            }) +
+            event("response.output_item.done", {
+              output_index: 0,
+              item: {
+                type: "message",
+                id: "msg_worker",
+                role: "assistant",
+                status:
+                  terminalEvent === "response.incomplete"
+                    ? "incomplete"
+                    : "completed",
+              },
             }) +
             event(terminalEvent, {
               response: {
@@ -940,14 +1248,22 @@ describe("createGatewayLLMClient.prompt", () => {
         { providerID: "openai-codex", modelID: "gpt-5.1-codex-mini" },
       );
 
-      const text = await client.prompt("system", "user", {
+      const outcome = await client.promptDetailed("system", "user", {
         sessionID: `sess-codex-${terminalEvent}`,
         workerID: "lore-distill",
         upstreamUrl: "https://chatgpt.com/backend-api",
         protocol: "openai-responses",
       });
 
-      expect(text).toBe("codex CRLF reply");
+      expect(outcome).toMatchObject(
+        terminalEvent === "response.incomplete"
+          ? {
+              kind: "failure",
+              code: "incomplete-response",
+              finishReason: "max_tokens",
+            }
+          : { kind: "success", text: "codex CRLF reply" },
+      );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     },
   );
@@ -3605,7 +3921,7 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
 });
 
 describe("isModelUnsupported400 detector", () => {
-  test("true for Copilot model_not_supported / unsupported_api_for_model", () => {
+  test("separates account model availability from API incompatibility", () => {
     expect(
       isModelUnsupported400(
         400,
@@ -3617,12 +3933,11 @@ describe("isModelUnsupported400 detector", () => {
         }),
       ),
     ).toBe(true);
-    expect(
-      isModelUnsupported400(
-        400,
-        JSON.stringify({ error: { code: "unsupported_api_for_model" } }),
-      ),
-    ).toBe(true);
+    const apiUnsupported = JSON.stringify({
+      error: { code: "unsupported_api_for_model" },
+    });
+    expect(isModelUnsupported400(400, apiUnsupported)).toBe(false);
+    expect(isUnsupportedApi400(400, apiUnsupported)).toBe(true);
   });
 
   test("true for prose 'model X is not available/found/does not exist'", () => {

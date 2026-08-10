@@ -96,6 +96,156 @@ const EMBED_TIMEOUT_MS = 10_000;
  *  before it can exit — without this cap that could block process exit. */
 const WORKER_SHUTDOWN_TIMEOUT_MS = 1_500;
 
+/** Cooperative cancellation controls for bounded embedding phases.
+ * `deadlineMs` is a duration from invocation, matching the existing shutdown
+ * deadline convention in this module. */
+export interface EmbeddingOperationOptions {
+  signal?: AbortSignal;
+  deadlineMs?: number;
+}
+
+/** Stable phase names for orchestration callers (notably semantic lint). */
+export type EmbeddingAbortPhase =
+  | "settle-document-embeds"
+  | "knowledge-backfill";
+
+export type EmbeddingAbortCode = "aborted" | "deadline-exceeded";
+
+/** Typed cooperative-stop signal for embedding work. */
+export class EmbeddingAbortError extends Error {
+  readonly code: EmbeddingAbortCode;
+  readonly phase: EmbeddingAbortPhase;
+
+  constructor(
+    phase: EmbeddingAbortPhase,
+    code: EmbeddingAbortCode,
+    cause?: unknown,
+  ) {
+    super(
+      code === "deadline-exceeded"
+        ? `Embedding phase '${phase}' exceeded its deadline`
+        : `Embedding phase '${phase}' was aborted`,
+    );
+    this.name = "EmbeddingAbortError";
+    this.code = code;
+    this.phase = phase;
+    if (cause !== undefined)
+      (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+interface EmbeddingAbortGuard {
+  phase: EmbeddingAbortPhase;
+  signal?: AbortSignal;
+  deadlineAt?: number;
+}
+
+function abortCodeForReason(reason: unknown): EmbeddingAbortCode {
+  if (reason instanceof EmbeddingAbortError) return reason.code;
+  if (
+    typeof reason === "object" &&
+    reason !== null &&
+    "name" in reason &&
+    reason.name === "TimeoutError"
+  ) {
+    return "deadline-exceeded";
+  }
+  return "aborted";
+}
+
+function createEmbeddingAbortGuard(
+  phase: EmbeddingAbortPhase,
+  options: EmbeddingOperationOptions,
+): EmbeddingAbortGuard {
+  const deadlineMs = options.deadlineMs;
+  if (
+    deadlineMs !== undefined &&
+    (!Number.isFinite(deadlineMs) || deadlineMs < 0)
+  ) {
+    throw new RangeError(
+      "embedding deadlineMs must be a finite non-negative number",
+    );
+  }
+  return {
+    phase,
+    signal: options.signal,
+    deadlineAt: deadlineMs === undefined ? undefined : Date.now() + deadlineMs,
+  };
+}
+
+function currentEmbeddingAbort(
+  guard: EmbeddingAbortGuard,
+): EmbeddingAbortError | null {
+  if (guard.signal?.aborted) {
+    return new EmbeddingAbortError(
+      guard.phase,
+      abortCodeForReason(guard.signal.reason),
+      guard.signal.reason,
+    );
+  }
+  if (guard.deadlineAt !== undefined && Date.now() >= guard.deadlineAt) {
+    return new EmbeddingAbortError(guard.phase, "deadline-exceeded");
+  }
+  return null;
+}
+
+function throwIfEmbeddingAborted(guard: EmbeddingAbortGuard): void {
+  const error = currentEmbeddingAbort(guard);
+  if (error) throw error;
+}
+
+/** Race already-scheduled work against the caller's cancellation boundary.
+ * The underlying inference is not forcibly interrupted, but this caller
+ * returns promptly and its loop never schedules another batch. */
+async function awaitEmbeddingOperation<T>(
+  work: Promise<T>,
+  guard: EmbeddingAbortGuard,
+): Promise<T> {
+  const alreadyAborted = currentEmbeddingAbort(guard);
+  if (alreadyAborted) {
+    // The caller created `work` immediately before this check. Observe any later
+    // rejection even though orchestration is stopping, avoiding an unhandled
+    // worker/API rejection after the lint deadline has already been reported.
+    void work.catch(() => {});
+    throw alreadyAborted;
+  }
+  if (!guard.signal && guard.deadlineAt === undefined) return await work;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    if (guard.signal) {
+      onAbort = () => {
+        reject(
+          new EmbeddingAbortError(
+            guard.phase,
+            abortCodeForReason(guard.signal?.reason),
+            guard.signal?.reason,
+          ),
+        );
+      };
+      guard.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (guard.deadlineAt !== undefined) {
+      timer = setTimeout(
+        () => {
+          reject(new EmbeddingAbortError(guard.phase, "deadline-exceeded"));
+        },
+        Math.max(0, guard.deadlineAt - Date.now()),
+      );
+    }
+  });
+
+  try {
+    return await Promise.race([work, aborted]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort && guard.signal) {
+      guard.signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Adaptive local-embedding token cap — persistence
 // ---------------------------------------------------------------------------
@@ -602,21 +752,151 @@ export function maybeSelfHealEmbeddingProvider(nowMs = Date.now()): boolean {
   return true;
 }
 
+type EmbeddingWorkerSpawnOptions =
+  import("node:worker_threads").WorkerOptions & {
+    /** Virtual filename used by the SEA eval worker's CJS require shim. */
+    filename?: string;
+  };
+
 /** Test seam: when set, `ensureWorker()` uses this factory instead of spawning
- *  a real `node:worker_threads` Worker, so the OOM-recovery lifecycle (exit-75
- *  backoff → respawn → re-submit, floor latch, synchronous respawn failure) can
- *  be driven deterministically. Never set in production. */
+ *  a real `node:worker_threads` Worker, so worker lifecycle and construction
+ *  options can be driven deterministically. Never set in production. */
 let testWorkerFactory:
-  | ((data: WorkerInitData) => import("node:worker_threads").Worker)
+  | ((
+      data: WorkerInitData,
+      entrypoint: string | URL,
+      options: EmbeddingWorkerSpawnOptions,
+    ) => import("node:worker_threads").Worker)
   | null = null;
 
 /** For tests: install the worker factory seam above (null clears it). */
 export function _setTestWorkerFactory(
   factory:
-    | ((data: WorkerInitData) => import("node:worker_threads").Worker)
+    | ((
+        data: WorkerInitData,
+        entrypoint: string | URL,
+        options: EmbeddingWorkerSpawnOptions,
+      ) => import("node:worker_threads").Worker)
     | null,
 ): void {
   testWorkerFactory = factory;
+}
+
+const WORKER_DIAGNOSTIC_MAX_CHARS = 2_000;
+const WORKER_DIAGNOSTIC_WINDOW_MS = 60_000;
+const WORKER_DIAGNOSTIC_LINES_PER_WINDOW = 20;
+
+/** Continuously consume an owned worker stream. Diagnostics are bounded and
+ * routed through the parent logger (which honors TUI stderr silencing and never
+ * writes stdout) rather than piped to either parent stdio stream. The rate cap
+ * keeps a noisy native dependency from turning output draining into synchronous
+ * log-file backpressure; excess bytes are still consumed immediately. */
+function drainEmbeddingWorkerStream(
+  stream: import("node:stream").Readable | null | undefined,
+  source: "stdout" | "stderr",
+): void {
+  if (!stream) return; // Test doubles created before the owned-stdio contract.
+
+  let buffered = "";
+  let emitted = 0;
+  let suppressed = 0;
+  let windowStartedAt = Date.now();
+  let finalized = false;
+
+  const logDiagnostic = (message: string): void => {
+    try {
+      log.info(message);
+    } catch {
+      // A host logger/sink must never interrupt stream consumption and let the
+      // worker block on a full pipe. Structured worker messages still carry all
+      // actionable failures to the normal parent handlers.
+    }
+  };
+
+  const route = (rawLine: string): void => {
+    let line = "";
+    const end = rawLine.endsWith("\r") ? rawLine.length - 1 : rawLine.length;
+    for (let i = 0; i < end && line.length < WORKER_DIAGNOSTIC_MAX_CHARS; i++) {
+      const code = rawLine.charCodeAt(i);
+      if (
+        code <= 0x08 ||
+        code === 0x0b ||
+        code === 0x0c ||
+        (code >= 0x0e && code <= 0x1f) ||
+        code === 0x7f
+      ) {
+        continue;
+      }
+      line += rawLine[i];
+    }
+    if (!line) return;
+
+    const now = Date.now();
+    if (now - windowStartedAt >= WORKER_DIAGNOSTIC_WINDOW_MS) {
+      if (suppressed > 0) {
+        logDiagnostic(
+          `embedding worker ${source}: suppressed ${suppressed} noisy diagnostic line(s)`,
+        );
+      }
+      windowStartedAt = now;
+      emitted = 0;
+      suppressed = 0;
+    }
+
+    if (emitted < WORKER_DIAGNOSTIC_LINES_PER_WINDOW) {
+      emitted++;
+      logDiagnostic(`embedding worker ${source}: ${line}`);
+    } else {
+      suppressed++;
+    }
+  };
+
+  const consume = (chunk: string): void => {
+    buffered += chunk;
+    for (;;) {
+      const newline = buffered.indexOf("\n");
+      if (newline >= 0) {
+        route(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        continue;
+      }
+      if (buffered.length > WORKER_DIAGNOSTIC_MAX_CHARS) {
+        route(`${buffered.slice(0, WORKER_DIAGNOSTIC_MAX_CHARS)}…`);
+        buffered = buffered.slice(WORKER_DIAGNOSTIC_MAX_CHARS);
+        continue;
+      }
+      break;
+    }
+  };
+
+  const finalize = (): void => {
+    if (finalized) return;
+    finalized = true;
+    if (buffered) route(buffered);
+    buffered = "";
+    if (suppressed > 0) {
+      logDiagnostic(
+        `embedding worker ${source}: suppressed ${suppressed} noisy diagnostic line(s)`,
+      );
+    }
+  };
+
+  stream.setEncoding("utf8");
+  stream.on("data", consume);
+  stream.on("end", finalize);
+  stream.on("close", finalize);
+  stream.on("error", (error) => {
+    route(`diagnostic stream error: ${error.message}`);
+    finalize();
+  });
+  stream.resume();
+}
+
+function drainEmbeddingWorkerOutput(
+  worker: import("node:worker_threads").Worker,
+): void {
+  drainEmbeddingWorkerStream(worker.stdout, "stdout");
+  drainEmbeddingWorkerStream(worker.stderr, "stderr");
 }
 
 /** True iff the local provider has been probed and found broken. */
@@ -780,19 +1060,21 @@ class LocalProvider implements EmbeddingProvider {
         forceWasm: this.forceWasm,
       };
 
-      if (testWorkerFactory) {
-        // Test seam (never set in production): a deterministic fake worker so
-        // the OOM-recovery lifecycle can be exercised without a real runtime.
-        this.worker = testWorkerFactory(workerInitData);
-      } else if (workerSource !== undefined) {
-        const { join } = await import("node:path");
-        const { homedir } = await import("node:os");
-        const opts: Record<string, unknown> = {
+      let workerEntrypoint: string | URL;
+      let workerOptions: EmbeddingWorkerSpawnOptions;
+      if (workerSource !== undefined) {
+        const path = await import("node:path");
+        const os = await import("node:os");
+        workerEntrypoint = workerSource;
+        workerOptions = {
           eval: true,
-          filename: join(homedir(), ".cache", "lore", "worker.cjs"),
+          filename: path.join(os.homedir(), ".cache", "lore", "worker.cjs"),
           workerData: workerInitData,
+          // Own both streams. Without these flags Node inherits parent stdio,
+          // so worker console output bypasses parent-only JSON/report capture.
+          stdout: true,
+          stderr: true,
         };
-        this.worker = new Worker(workerSource, opts);
       } else {
         // npm bundle / dev path: point at a sibling worker file.
         // CJS uses __filename (always defined); ESM uses import.meta.url.
@@ -826,10 +1108,30 @@ class LocalProvider implements EmbeddingProvider {
             selfUrl,
           );
         }
-        this.worker = new Worker(workerUrl, {
+        workerEntrypoint = workerUrl;
+        workerOptions = {
           workerData: workerInitData,
-        });
+          stdout: true,
+          stderr: true,
+        };
       }
+
+      if (testWorkerFactory) {
+        // Test seam (never set in production): deterministic fake workers can
+        // inspect the exact options used by both file-backed and SEA branches.
+        this.worker = testWorkerFactory(
+          workerInitData,
+          workerEntrypoint,
+          workerOptions,
+        );
+      } else {
+        this.worker = new Worker(workerEntrypoint, workerOptions);
+      }
+
+      // Attach flowing readers before any request is posted. The streams remain
+      // owned and drained for the worker's whole lifetime, including init/OOM
+      // diagnostics emitted before the first response or during shutdown.
+      drainEmbeddingWorkerOutput(this.worker);
 
       // Don't let the worker prevent process exit.
       this.worker.unref();
@@ -2224,39 +2526,49 @@ function trackDocEmbed(p: Promise<unknown>): void {
  * Await all in-flight fire-and-forget document embeds (knowledge / distillation
  * / entity). Loops so embeds spawned while draining (rare) are also awaited.
  *
- * `timeoutMs` bounds the wait: when the deadline elapses the drain resolves
- * even if embeds are still pending. The production shutdown path (#1331) passes
- * a bound comfortably under `SHUTDOWN_DEADLINE_MS` so a slow/stuck embed can
- * never reintroduce the Ctrl+C hang; anything left unfinished is re-indexed by
- * `runStartupBackfill` on the next boot. Tests call it with no argument for a
- * full (unbounded) drain.
+ * A numeric timeout preserves the shutdown contract: the drain resolves when
+ * that best-effort deadline elapses even if embeds remain pending. The options
+ * form accepts a caller signal and/or deadline and throws
+ * {@link EmbeddingAbortError}, allowing semantic lint to report the interrupted
+ * phase. Tests call it with no argument for a full (unbounded) drain.
  */
-export async function settleDocumentEmbeds(timeoutMs?: number): Promise<void> {
-  if (timeoutMs == null) {
-    while (_docEmbedsInFlight.size > 0) {
-      await Promise.allSettled(_docEmbedsInFlight);
-    }
-    return;
-  }
+export async function settleDocumentEmbeds(
+  timeoutOrOptions?: number | EmbeddingOperationOptions,
+): Promise<void> {
+  const legacyBestEffort = typeof timeoutOrOptions === "number";
+  const options: EmbeddingOperationOptions = legacyBestEffort
+    ? {
+        deadlineMs: Number.isFinite(timeoutOrOptions)
+          ? Math.max(0, timeoutOrOptions)
+          : 0,
+      }
+    : (timeoutOrOptions ?? {});
+  const guard = createEmbeddingAbortGuard("settle-document-embeds", options);
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const EXPIRED = Symbol("expired");
-  const expired = new Promise<typeof EXPIRED>((resolve) => {
-    timer = setTimeout(() => resolve(EXPIRED), timeoutMs);
-  });
   try {
     while (_docEmbedsInFlight.size > 0) {
-      // Race the current in-flight set against the deadline. Loop so embeds
-      // spawned mid-drain are picked up; break the instant the deadline wins so
-      // we never wait — nor busy-spin — past it.
-      const winner = await Promise.race([
+      throwIfEmbeddingAborted(guard);
+      // Loop so embeds spawned mid-drain are picked up. An opted-in signal or
+      // deadline stops waiting promptly; already-running embeds remain tracked
+      // and can be drained by a later shutdown call.
+      await awaitEmbeddingOperation(
         Promise.allSettled(_docEmbedsInFlight).then(() => undefined),
-        expired,
-      ]);
-      if (winner === EXPIRED) break;
+        guard,
+      );
     }
-  } finally {
-    if (timer) clearTimeout(timer);
+    throwIfEmbeddingAborted(guard);
+  } catch (error) {
+    // Preserve the historical shutdown contract: the numeric form is a
+    // best-effort bounded drain that resolves at timeout. The options form is
+    // the typed lint/orchestration API and throws on abort/deadline.
+    if (
+      legacyBestEffort &&
+      error instanceof EmbeddingAbortError &&
+      error.code === "deadline-exceeded"
+    ) {
+      return;
+    }
+    throw error;
   }
 }
 
@@ -2993,14 +3305,25 @@ function nextBatch<T extends { text: string }>(rows: T[], start: number): T[] {
  * Called by `runStartupBackfill()`.
  * Also handles config changes: if provider/model/dimensions changed, clears
  * stale embeddings first, then re-embeds all entries.
+ * When `options.signal` aborts or `options.deadlineMs` elapses, stops before
+ * posting another batch and throws {@link EmbeddingAbortError}.
  * Returns the number of entries embedded.
  */
-export async function backfillEmbeddings(): Promise<number> {
+export async function backfillEmbeddings(
+  options: EmbeddingOperationOptions = {},
+): Promise<number> {
+  const guard = createEmbeddingAbortGuard("knowledge-backfill", options);
+  throwIfEmbeddingAborted(guard);
+
   // Detect config changes and clear stale embeddings
   checkConfigChange();
+  throwIfEmbeddingAborted(guard);
 
   const provider = getProvider();
-  if (!provider) return 0;
+  if (!provider) {
+    throwIfEmbeddingAborted(guard);
+    return 0;
+  }
 
   const mode = readStorageMode(db());
   const rows = db()
@@ -3009,6 +3332,7 @@ export async function backfillEmbeddings(): Promise<number> {
     )
     .all() as Array<{ id: string; title: string; content: string }>;
 
+  throwIfEmbeddingAborted(guard);
   if (!rows.length) return 0;
 
   // Pre-compute text for token-budget batching
@@ -3018,14 +3342,21 @@ export async function backfillEmbeddings(): Promise<number> {
   let i = 0;
 
   while (i < items.length) {
+    // Check before selecting/posting each batch. If cancellation arrived while
+    // the previous batch settled, no new worker/API work is scheduled.
+    throwIfEmbeddingAborted(guard);
     const batch = nextBatch(items, i);
     i += batch.length;
 
     try {
-      const vectors = await embed(
-        batch.map((b) => b.text),
-        "document",
+      const vectors = await awaitEmbeddingOperation(
+        embed(
+          batch.map((b) => b.text),
+          "document",
+        ),
+        guard,
       );
+      throwIfEmbeddingAborted(guard);
 
       for (let j = 0; j < batch.length; j++) {
         storeEmbedding(db(), "knowledge", batch[j].id, vectors[j]);
@@ -3035,6 +3366,7 @@ export async function backfillEmbeddings(): Promise<number> {
       // Provider shutdown / unavailability is expected graceful degradation,
       // not a bug — check before log.error so captureException doesn't fire
       // and create Sentry noise (LOREAI-GATEWAY-Q).
+      if (err instanceof EmbeddingAbortError) throw err;
       if (err instanceof LocalProviderUnavailableError) {
         log.info("embedding backfill stopped: provider unavailable");
         break;

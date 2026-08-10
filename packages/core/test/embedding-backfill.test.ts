@@ -6,6 +6,7 @@ import {
   backfillDistillationEmbeddings,
   backfillEmbeddings,
   backfillEntityEmbeddings,
+  EmbeddingAbortError,
   fromBlob,
 } from "../src/embedding";
 
@@ -75,6 +76,41 @@ describe("backfill writes embeddings through storeEmbedding (blob layout)", () =
     const blob = embeddingOf("knowledge", "bk");
     expect(blob).not.toBeNull();
     expect(Array.from(fromBlob(blob as Buffer))).toEqual(Array.from(VEC));
+  });
+
+  test("backfillEmbeddings stops scheduling batches and throws a typed abort", async () => {
+    const now = Date.now();
+    for (let i = 0; i < 9; i++) {
+      db()
+        .query(
+          "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'test', ?, 'content', ?, ?, ?)",
+        )
+        .run(`abort-${i}`, pid, `title-${i}`, now, now, `abort-${i}`);
+    }
+
+    const controller = new AbortController();
+    const batchSizes: number[] = [];
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          batchSizes.push(texts.length);
+          controller.abort(new Error("lint deadline elapsed"));
+          return texts.map(() => VEC);
+        },
+      },
+    });
+
+    const error = await backfillEmbeddings({
+      signal: controller.signal,
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(EmbeddingAbortError);
+    expect(error).toMatchObject({
+      code: "aborted",
+      phase: "knowledge-backfill",
+    });
+    expect(batchSizes).toEqual([8]);
   });
 
   test("backfillDistillationEmbeddings populates distillations.embedding", async () => {

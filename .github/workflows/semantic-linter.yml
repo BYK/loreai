@@ -4,7 +4,9 @@ name: Semantic linter (advisory)
 # NEVER fails the build — reports findings as annotations + a job summary.
 
 on:
-  pull_request:
+  # Run the base repository's trusted workflow definition. The job checks out
+  # only the event base SHA; the untrusted head is fetched solely as diff data.
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 # Keep only the latest run per PR.
@@ -42,8 +44,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # Full history so merge-base against the PR base resolves.
-          fetch-depth: 0
+          # Execute only code and read invariants from the trusted base commit.
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - name: Fetch exact PR head for diffing
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          sha_re='^[0-9a-fA-F]{40}$'
+          [[ "$PR_BASE_SHA" =~ $sha_re ]] || { echo "invalid PR base SHA" >&2; exit 1; }
+          [[ "$PR_HEAD_SHA" =~ $sha_re ]] || { echo "invalid PR head SHA" >&2; exit 1; }
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo "invalid PR number" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$PR_BASE_SHA"
+          git fetch --no-tags --depth=1 origin \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/lore-pr-head"
+          test "$(git rev-parse refs/remotes/origin/lore-pr-head)" = "$PR_HEAD_SHA"
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -58,6 +76,9 @@ jobs:
       - name: Run Lore semantic linter
         uses: ./.github/actions/lint
         with:
+          # Diff the event's immutable SHAs; the worktree remains at base SHA.
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
           # Run the built CJS binary under Node (see the build step above).
           lore-command: "node packages/gateway/dist/bin.cjs"
           # Judge model + credential. Two supported setups:
@@ -72,8 +93,8 @@ jobs:
           #     — see PR #1582 / `isResponsesOnlyModel` in llm-adapter.ts);
           #     no Copilot-specific token exchange needed in CI.
           #     On fork PRs the token is read-only and may lack inference
-          #     quota; the judge then no-ops (advisory → still passes),
-          #     never breaks CI.
+          #     quota; the judge then produces a visible inconclusive health
+          #     report. Advisory mode remains non-blocking; gate mode fails closed.
           #  2. Dedicated key (busy repos): set the LORE_WORKER_API_KEY secret.
           #     It takes precedence, and the judge model is whatever you set in
           #     the `LORE_INVARIANT_MODEL` repo variable (e.g.
@@ -91,3 +112,7 @@ jobs:
           # a forced github-copilot id, which would 401 and silently no-op.
           model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5.6-luna' || '') }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}
+          # Reserve five minutes of the 25-minute job for report publication and
+          # bounded gateway shutdown.
+          deadline-seconds: "1200"
+          candidate-timeout-seconds: "90"
