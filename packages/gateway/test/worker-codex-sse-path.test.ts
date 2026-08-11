@@ -42,29 +42,35 @@ const CODEX_RESPONSES_SSE = [
   'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5-codex"}}',
   "",
   "event: response.output_item.added",
-  'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant"}}',
+  'data: {"type":"response.output_item.added","item":{"type":"message","id":"msg_1","role":"assistant"}}',
   "",
   "event: response.output_text.delta",
-  'data: {"type":"response.output_text.delta","output_index":0,"delta":"worker "}',
+  'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"worker "}',
   "",
   "event: response.output_text.delta",
-  'data: {"type":"response.output_text.delta","output_index":0,"delta":"text"}',
+  'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"text"}',
   "",
-  "event: response.completed",
-  'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":5,"output_tokens":2},"model":"gpt-5-codex"}}',
+  "event: response.done",
+  'data: {"type":"response.done","response":{"id":"resp_1","incomplete_details":null,"usage":{"input_tokens":5,"output_tokens":2},"model":"gpt-5-codex"}}',
   "",
   "data: [DONE]",
   "",
 ].join("\n");
 
-function sseResponse(contentType: string): Response {
-  return new Response(CODEX_RESPONSES_SSE, {
+function sseResponse(
+  contentType: string,
+  stream = CODEX_RESPONSES_SSE,
+): Response {
+  return new Response(stream, {
     status: 200,
     headers: { "content-type": contentType },
   });
 }
 
-async function runCodexWorker(contentType: string): Promise<string | null> {
+async function runCodexWorker(
+  contentType: string,
+  stream = CODEX_RESPONSES_SSE,
+): Promise<string | null> {
   const client = createGatewayLLMClient(
     UPSTREAMS,
     (_sid, providerID) =>
@@ -73,7 +79,7 @@ async function runCodexWorker(contentType: string): Promise<string | null> {
         : null,
     { providerID: "openai-codex", modelID: "gpt-5-codex" },
   );
-  mockFetch.mockResolvedValue(sseResponse(contentType));
+  mockFetch.mockResolvedValue(sseResponse(contentType, stream));
   return client.prompt("system-prompt", "user-prompt", {
     sessionID: "sess-codex",
     workerID: "lore-distill",
@@ -100,5 +106,20 @@ describe("worker codex responses-SSE path", () => {
     // last-data-line reader would only ever see the terminal event → empty.
     const result = await runCodexWorker("text/event-stream");
     expect(result).toBe("worker text");
+  });
+
+  test("done-only message content produces worker text", async () => {
+    const stream = [
+      "event: response.output_item.done",
+      'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_done","content":[{"type":"output_text","text":"done-only worker text"}]}}',
+      "",
+      "event: response.completed",
+      'data: {"type":"response.completed","response":{"status":"completed"}}',
+      "",
+      "",
+    ].join("\n");
+
+    const result = await runCodexWorker("text/event-stream", stream);
+    expect(result).toBe("done-only worker text");
   });
 });

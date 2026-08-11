@@ -17,6 +17,11 @@ import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 
 const BUNDLE = resolve(process.cwd(), "packages/gateway/dist/bin.cjs");
+// The full suite can saturate CPU with large cache-stability fixtures. Give the
+// real bundled subprocess enough wall time to start instead of reporting a
+// synthetic `code === null` timeout under load.
+const BUNDLE_TIMEOUT_MS = 30_000;
+const TEST_TIMEOUT_MS = 45_000;
 
 async function runBundle(
   args: string[],
@@ -35,7 +40,7 @@ async function runBundle(
         LORE_NO_UPDATE_CHECK: "1",
         ...env,
       },
-      timeout: 10_000,
+      timeout: BUNDLE_TIMEOUT_MS,
     });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -95,37 +100,49 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 
-  test("`lore version` through the bundle returns the build version", async () => {
-    const { stdout, code } = await runBundle(["version"]);
-    expect(code).toBe(0);
-    // The version is a semver string from build-injected VERSION.
-    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
-  }, 15_000);
+  test(
+    "`lore version` through the bundle returns the build version",
+    async () => {
+      const { stdout, code } = await runBundle(["version"]);
+      expect(code).toBe(0);
+      // The version is a semver string from build-injected VERSION.
+      expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+    },
+    TEST_TIMEOUT_MS,
+  );
 
-  test("`lore help --json` through the bundle returns the typed payload", async () => {
-    const { stdout, code } = await runBundle(["help", "--json"]);
-    expect(code).toBe(0);
-    const payload = JSON.parse(stdout.trim());
-    expect(payload.schemaVersion).toBe(1);
-    expect(payload.name).toBe("lore");
-  }, 15_000);
+  test(
+    "`lore help --json` through the bundle returns the typed payload",
+    async () => {
+      const { stdout, code } = await runBundle(["help", "--json"]);
+      expect(code).toBe(0);
+      const payload = JSON.parse(stdout.trim());
+      expect(payload.schemaVersion).toBe(1);
+      expect(payload.name).toBe("lore");
+    },
+    TEST_TIMEOUT_MS,
+  );
 
-  test("`lore whoami` through the bundle returns the typed AuthError envelope when not logged in", async () => {
-    // Force the bundle to see no persisted session. The smoke test only
-    // verifies that the npm binary reaches the typed envelope shape, not
-    // the underlying supabase state.
-    const { stderr, code } = await runBundle(["whoami"], {
-      HOME: "/tmp/lore-bundle-smoke",
-      USERPROFILE: "/tmp/lore-bundle-smoke",
-      LORE_DATA_DIR: "/tmp/lore-bundle-smoke",
-    });
-    // When no session exists, the typed adapter throws AuthError(10)
-    // and the buildOutputCommand wrapper renders the human format with
-    // a `Try: lore login` recovery command.
-    expect(stderr).toContain("Not logged in");
-    expect(stderr).toContain("Try: lore login");
-    expect(code).toBe(10);
-  }, 15_000);
+  test(
+    "`lore whoami` through the bundle returns the typed AuthError envelope when not logged in",
+    async () => {
+      // Force the bundle to see no persisted session. The smoke test only
+      // verifies that the npm binary reaches the typed envelope shape, not
+      // the underlying supabase state.
+      const { stderr, code } = await runBundle(["whoami"], {
+        HOME: "/tmp/lore-bundle-smoke",
+        USERPROFILE: "/tmp/lore-bundle-smoke",
+        LORE_DATA_DIR: "/tmp/lore-bundle-smoke",
+      });
+      // When no session exists, the typed adapter throws AuthError(10)
+      // and the buildOutputCommand wrapper renders the human format with
+      // a `Try: lore login` recovery command.
+      expect(stderr).toContain("Not logged in");
+      expect(stderr).toContain("Try: lore login");
+      expect(code).toBe(10);
+    },
+    TEST_TIMEOUT_MS,
+  );
 
   test.each([
     [[], "Please provide a search query."],
@@ -150,7 +167,7 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
         message,
       });
     },
-    15_000,
+    TEST_TIMEOUT_MS,
   );
 
   test.each([["--json"], ["--json=true"]])(
@@ -173,7 +190,7 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
         await stopRecallServer(server);
       }
     },
-    15_000,
+    TEST_TIMEOUT_MS,
   );
 
   test("`lore recall --json` preserves successful remote JSON output", async () => {

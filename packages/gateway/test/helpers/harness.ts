@@ -5,6 +5,10 @@
  * temporary DB, wires in a replay interceptor from a fixture array, and
  * provides helper methods for sending requests and asserting DB state.
  *
+ * Harnesses are serial-only within a process: they intentionally replace
+ * process-wide DB and pipeline singletons. Concurrent create/teardown is not a
+ * supported architecture; use separate Vitest workers for parallel isolation.
+ *
  * Usage:
  *   const harness = await createHarness({ fixtures });
  *   const resp = await harness.chat(body);
@@ -12,6 +16,8 @@
  */
 import { unlinkSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
 import type { FixtureEntry } from "../../src/recorder";
 import type { SimulatedCacheTurn } from "./simulated-cache";
 
@@ -206,20 +212,55 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     apiKey = "test-key",
     extraHeaders?: Record<string, string>,
   ): Promise<Response> {
-    return fetch(`${baseURL}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        // Provide a confident project binding by default so the synthetic
-        // project-resolution probe is never triggered in harness-based tests.
-        // Tests that intentionally test path-less sessions can override this
-        // via extraHeaders (set to empty string to suppress).
-        "x-lore-project": projectPath,
-        ...extraHeaders,
-      },
-      body: JSON.stringify(requestBody),
+    const body = JSON.stringify(requestBody);
+    const headers = {
+      "content-type": "application/json",
+      "content-length": String(Buffer.byteLength(body)),
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      // Provide a confident project binding by default so the synthetic
+      // project-resolution probe is never triggered in harness-based tests.
+      // Tests that intentionally test path-less sessions can override this
+      // via extraHeaders (set to empty string to suppress).
+      "x-lore-project": projectPath,
+      ...extraHeaders,
+    };
+    // WHATWG fetch rejects a browser-defined list of "bad ports". Port 0 can
+    // legitimately assign one of those ports to the local test server, making
+    // an otherwise valid harness request fail nondeterministically. Use Node's
+    // HTTP transport for this loopback-only helper while retaining a web
+    // Response and streaming body for callers.
+    return new Promise<Response>((resolve, reject) => {
+      const request = httpRequest(
+        {
+          hostname: "127.0.0.1",
+          port: server.port,
+          path: "/v1/messages",
+          method: "POST",
+          headers,
+        },
+        (incoming) => {
+          const responseHeaders = new Headers();
+          for (let i = 0; i < incoming.rawHeaders.length; i += 2) {
+            responseHeaders.append(
+              incoming.rawHeaders[i],
+              incoming.rawHeaders[i + 1],
+            );
+          }
+          resolve(
+            new Response(
+              Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>,
+              {
+                status: incoming.statusCode ?? 500,
+                statusText: incoming.statusMessage,
+                headers: responseHeaders,
+              },
+            ),
+          );
+        },
+      );
+      request.once("error", reject);
+      request.end(body);
     });
   }
 

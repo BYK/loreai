@@ -41,6 +41,29 @@ function geminiUpstreamResponse(): Response {
   );
 }
 
+function geminiUpstreamStreamResponse(): Response {
+  return new Response(
+    `data: ${JSON.stringify({
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "ok" }] },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1,
+        candidatesTokenCount: 1,
+        totalTokenCount: 2,
+      },
+      modelVersion: "gemini-2.5-pro",
+    })}\n\n`,
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  );
+}
+
 async function sendGemini(
   harness: Harness,
   path: string,
@@ -58,7 +81,11 @@ async function sendGemini(
     return makeReal();
   });
   mockFetch.mockReset();
-  mockFetch.mockResolvedValue(geminiUpstreamResponse());
+  mockFetch.mockResolvedValue(
+    path.includes(":streamGenerateContent")
+      ? geminiUpstreamStreamResponse()
+      : geminiUpstreamResponse(),
+  );
 
   const res = await fetch(`${harness.baseURL}${path}`, {
     method: "POST",

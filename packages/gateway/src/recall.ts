@@ -38,6 +38,8 @@ import type {
   RecallStore,
   StoredRecall,
 } from "./translate/types";
+import { promiseAgainstAbort } from "./abort-race";
+import { cancelAndReleaseReader } from "./stream/anthropic";
 import { looksLikeSSE } from "./translate/types";
 
 // ---------------------------------------------------------------------------
@@ -735,6 +737,7 @@ export function expandRecallMarkers(
         {
           type: "tool_result",
           toolUseId: stored.toolUseId,
+          toolName: RECALL_TOOL_NAME,
           content: [{ type: "text", text: stored.result }],
         },
       ],
@@ -762,6 +765,7 @@ export function expandRecallMarkers(
         nextMsg.content.splice(resultIndex, 0, {
           type: "tool_result",
           toolUseId: stored.toolUseId,
+          toolName: RECALL_TOOL_NAME,
           content: [{ type: "text", text: stored.result }],
         });
       } else {
@@ -861,11 +865,48 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   scope: RecallScope;
   id?: string;
 } {
-  const input = block.input as Record<string, unknown>;
+  const input = block.input;
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Recall input must be an object");
+  }
+  const record = input as Record<string, unknown>;
+  if (record.query !== undefined && typeof record.query !== "string") {
+    throw new Error("Recall query must be a string");
+  }
+  if (
+    record.id !== undefined &&
+    (typeof record.id !== "string" || !record.id)
+  ) {
+    throw new Error("Recall id must be a non-empty string");
+  }
+  const query = record.query ?? "";
+  if (!query.trim() && !record.id) {
+    throw new Error("Recall query or id is required");
+  }
+  const validScopes: ReadonlySet<string> = new Set([
+    "all",
+    "session",
+    "project",
+    "knowledge",
+  ]);
+  if (
+    record.scope !== undefined &&
+    (typeof record.scope !== "string" || !validScopes.has(record.scope))
+  ) {
+    throw new Error("Invalid recall scope");
+  }
+  if (
+    record.limit !== undefined &&
+    (!Number.isSafeInteger(record.limit) ||
+      (record.limit as number) < 1 ||
+      (record.limit as number) > 50)
+  ) {
+    throw new Error("Recall limit must be an integer from 1 to 50");
+  }
   return {
-    query: typeof input.query === "string" ? input.query : "",
-    scope: (input.scope as RecallScope) ?? "all",
-    ...(typeof input.id === "string" && input.id ? { id: input.id } : {}),
+    query,
+    scope: (record.scope as RecallScope | undefined) ?? "all",
+    ...(typeof record.id === "string" && record.id ? { id: record.id } : {}),
   };
 }
 
@@ -891,10 +932,13 @@ export async function executeRecall(
   result: string;
   input: { query: string; scope?: RecallScope; id?: string };
 }> {
-  const { query, scope, id } = parseRecallInput(block);
-  const cfg = loreConfig();
+  let query = "";
+  let scope: RecallScope = "all";
+  let id: string | undefined;
 
   try {
+    ({ query, scope, id } = parseRecallInput(block));
+    const cfg = loreConfig();
     signal?.throwIfAborted();
     const result = await runRecall({
       query,
@@ -953,13 +997,17 @@ export interface RecallFollowUpCtx {
   parseJSON: (
     response: Response,
     protocol: RecallProtocol,
+    signal?: AbortSignal,
   ) => Promise<GatewayResponse>;
   /**
    * Accumulate a streaming (SSE) upstream response into a GatewayResponse.
    * Required only by `runRecallFollowUpStreamAccumulated` (the `openai-codex`
    * path, whose ChatGPT backend mandates streaming).
    */
-  parseSSE?: (response: Response) => Promise<GatewayResponse>;
+  parseSSE?: (
+    response: Response,
+    signal?: AbortSignal,
+  ) => Promise<GatewayResponse>;
 }
 
 /**
@@ -1042,6 +1090,7 @@ export function buildRecallFollowUpRequest(
       {
         type: "tool_result",
         toolUseId: recallToolUseBlock.id,
+        toolName: recallToolUseBlock.name,
         content: [
           { type: "text", text: recallResult || "[No results found.]" },
         ],
@@ -1094,15 +1143,14 @@ async function ensureSSEResponse(
   const probeSignal = signal
     ? AbortSignal.any([signal, AbortSignal.timeout(10_000)])
     : AbortSignal.timeout(10_000);
-  const probeAborted = new Promise<never>((_resolve, reject) => {
-    probeSignal.addEventListener("abort", () => reject(probeSignal.reason), {
-      once: true,
-    });
-  });
   let chunks = 0;
+  let preserveReplay = false;
   try {
     while (probedBytes < maxProbeBytes && chunks < maxProbeChunks) {
-      const { done, value } = await Promise.race([reader.read(), probeAborted]);
+      const { done, value } = await promiseAgainstAbort(
+        () => reader.read(),
+        probeSignal,
+      );
       if (done) break;
       chunks++;
       if (value) {
@@ -1121,21 +1169,28 @@ async function ensureSSEResponse(
         head = head.slice(newline + 1).trimStart();
       }
       if (looksLikeSSE(ct, head)) {
-        void reader.cancel();
-        return new Response(replay, {
+        const replayResponse = new Response(replay, {
           status: response.status,
           statusText: response.statusText,
           headers: response.headers,
         });
+        preserveReplay = true;
+        return replayResponse;
       }
       if (head && !"data:".startsWith(head) && !"event:".startsWith(head)) {
         break;
       }
     }
   } finally {
-    void reader.cancel();
+    cancelAndReleaseReader(reader, probeSignal.reason);
+    if (!preserveReplay) {
+      try {
+        void replay.cancel(probeSignal.reason).catch(() => {});
+      } catch {
+        // Both tee branches are best-effort and must never delay the caller.
+      }
+    }
   }
-  void replay.cancel();
   throw new Error(
     `recall follow-up expected SSE but got "${ct}" and a non-SSE body`,
   );
@@ -1151,14 +1206,13 @@ async function readResponseTextLimited(
   const decoder = new TextDecoder();
   let text = "";
   let readBytes = 0;
-  const onAbort = (): void => {
-    void reader.cancel(signal?.reason).catch(() => {});
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     while (readBytes < maxBytes) {
       signal?.throwIfAborted();
-      const { done, value } = await reader.read();
+      const { done, value } = await promiseAgainstAbort(
+        () => reader.read(),
+        signal,
+      );
       signal?.throwIfAborted();
       if (done) break;
       if (!value) continue;
@@ -1167,8 +1221,7 @@ async function readResponseTextLimited(
       text += decoder.decode(chunk, { stream: readBytes < maxBytes });
     }
   } finally {
-    signal?.removeEventListener("abort", onAbort);
-    void reader.cancel().catch(() => {});
+    cancelAndReleaseReader(reader, signal?.reason);
   }
   return text;
 }
@@ -1185,6 +1238,26 @@ function assertJSONResponse(response: Response): void {
     throw new Error(
       `recall follow-up expected JSON but got SSE — stream flag/consumer mismatch`,
     );
+  }
+}
+
+async function parseFollowUpAgainstAbort<T>(
+  response: Response,
+  parse: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const onAbort = (): void => {
+    try {
+      void response.body?.cancel(signal?.reason).catch(() => {});
+    } catch {
+      // A parser may already own the body reader; it receives the same signal.
+    }
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await promiseAgainstAbort(parse, signal);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -1241,7 +1314,17 @@ export async function runRecallFollowUpStreaming(
     recallToolUseBlock,
     /* stream */ true,
   );
-  const { response } = await ctx.forward(followUp, signal);
+  const { response } = await promiseAgainstAbort(
+    () => ctx.forward(followUp, signal),
+    signal,
+    ({ response: lateResponse }) => {
+      try {
+        void lateResponse.body?.cancel(signal?.reason).catch(() => {});
+      } catch {
+        // Late follow-up cleanup is best-effort.
+      }
+    },
+  );
   if (!response.ok) {
     let detail = "";
     try {
@@ -1273,6 +1356,7 @@ export async function runRecallFollowUpJSON(
   resp: GatewayResponse,
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
+  signal?: AbortSignal,
 ): Promise<RecallFollowUpJSON | RecallFollowUpError> {
   const followUp = buildRecallFollowUpRequest(
     originalReq,
@@ -1281,13 +1365,33 @@ export async function runRecallFollowUpJSON(
     recallToolUseBlock,
     /* stream */ false,
   );
-  const { response, effectiveProtocol } = await ctx.forward(followUp);
+  const { response, effectiveProtocol } = await promiseAgainstAbort(
+    () => ctx.forward(followUp, signal),
+    signal,
+    ({ response: lateResponse }) => {
+      try {
+        void lateResponse.body?.cancel(signal?.reason).catch(() => {});
+      } catch {
+        // Late body may already be locked by the abandoned operation.
+      }
+    },
+  );
   if (!response.ok) {
-    const detail = await readResponseTextLimited(response).catch(() => "");
+    let detail = "";
+    try {
+      detail = await readResponseTextLimited(response, 500, signal);
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      log.warn("recall follow-up error body could not be read:", error);
+    }
     return { ok: false, status: response.status, detail };
   }
   assertJSONResponse(response);
-  const continuation = await ctx.parseJSON(response, effectiveProtocol);
+  const continuation = await parseFollowUpAgainstAbort(
+    response,
+    () => ctx.parseJSON(response, effectiveProtocol, signal),
+    signal,
+  );
   return { ok: true, continuation, followUp };
 }
 
@@ -1314,8 +1418,10 @@ export async function runRecallFollowUpStreamAccumulated(
   resp: GatewayResponse,
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
+  signal?: AbortSignal,
 ): Promise<RecallFollowUpJSON | RecallFollowUpError> {
-  if (!ctx.parseSSE) {
+  const parseSSE = ctx.parseSSE;
+  if (!parseSSE) {
     throw new Error(
       "runRecallFollowUpStreamAccumulated requires ctx.parseSSE to accumulate the streamed continuation",
     );
@@ -1327,13 +1433,33 @@ export async function runRecallFollowUpStreamAccumulated(
     recallToolUseBlock,
     /* stream */ true,
   );
-  const { response } = await ctx.forward(followUp);
+  const { response } = await promiseAgainstAbort(
+    () => ctx.forward(followUp, signal),
+    signal,
+    ({ response: lateResponse }) => {
+      try {
+        void lateResponse.body?.cancel(signal?.reason).catch(() => {});
+      } catch {
+        // Late body may already be locked by the abandoned operation.
+      }
+    },
+  );
   if (!response.ok) {
-    const detail = await readResponseTextLimited(response).catch(() => "");
+    let detail = "";
+    try {
+      detail = await readResponseTextLimited(response, 500, signal);
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      log.warn("recall follow-up error body could not be read:", error);
+    }
     return { ok: false, status: response.status, detail };
   }
-  const sseResponse = await ensureSSEResponse(response);
-  const continuation = await ctx.parseSSE(sseResponse);
+  const sseResponse = await ensureSSEResponse(response, signal);
+  const continuation = await parseFollowUpAgainstAbort(
+    sseResponse,
+    () => parseSSE(sseResponse, signal),
+    signal,
+  );
   return { ok: true, continuation, followUp };
 }
 

@@ -49,6 +49,128 @@ function responsesSSE(
 // ---------------------------------------------------------------------------
 
 describe("non-stream Chat Completions cache-write accounting", () => {
+  test("foreground parser rejects duplicate effective tool identities", () => {
+    expect(() =>
+      accumulateOpenAINonStreamJSON({
+        choices: [
+          {
+            message: {
+              tool_calls: [
+                { id: "shared", function: { name: "a", arguments: "{}" } },
+                { id: "shared", function: { name: "b", arguments: "{}" } },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toThrow("malformed OpenAI response tool identity");
+  });
+  test("foreground parser validates tool identities in choice 1", () => {
+    expect(() =>
+      accumulateOpenAINonStreamJSON({
+        choices: [
+          { message: { content: "supported" } },
+          {
+            message: {
+              tool_calls: [
+                { id: "", function: { name: "bad", arguments: "{}" } },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toThrow("malformed OpenAI response tool identity");
+  });
+  test("foreground parser validates all choices while projecting choice zero", () => {
+    const response = accumulateOpenAINonStreamJSON({
+      choices: [
+        {
+          index: 0,
+          message: {
+            content: "projected",
+            tool_calls: [
+              {
+                id: "choice-zero",
+                function: { name: "zero", arguments: "{}" },
+              },
+            ],
+          },
+        },
+        {
+          index: 1,
+          message: {
+            content: "ignored",
+            tool_calls: [
+              { id: "choice-one", function: { name: "one", arguments: "{}" } },
+            ],
+          },
+        },
+      ],
+    });
+    expect(response.content).toEqual([
+      { type: "text", text: "projected" },
+      { type: "tool_use", id: "choice-zero", name: "zero", input: {} },
+    ]);
+  });
+  test("foreground parser permits the same tool identity in independent choices", () => {
+    const response = accumulateOpenAINonStreamJSON({
+      choices: [
+        {
+          index: 0,
+          message: {
+            tool_calls: [
+              { id: "shared", function: { name: "zero", arguments: "{}" } },
+            ],
+          },
+        },
+        {
+          index: 1,
+          message: {
+            tool_calls: [
+              { id: "shared", function: { name: "one", arguments: "{}" } },
+            ],
+          },
+        },
+      ],
+    });
+    expect(response.content).toEqual([
+      { type: "tool_use", id: "shared", name: "zero", input: {} },
+    ]);
+  });
+  test("foreground parser rejects duplicate logical choice indices before tool validation", () => {
+    expect(() =>
+      accumulateOpenAINonStreamJSON({
+        choices: [
+          { index: 4, message: { content: "first" } },
+          { index: 4, message: { tool_calls: "malformed" } },
+        ],
+      }),
+    ).toThrow("malformed OpenAI response choice");
+  });
+  test("foreground parser fallback indices cannot collide with explicit indices", () => {
+    expect(() =>
+      accumulateOpenAINonStreamJSON({
+        choices: [
+          { index: 1, message: { content: "first" } },
+          { message: { content: "second" } },
+        ],
+      }),
+    ).toThrow("malformed OpenAI response choice");
+  });
+  test.each([
+    [{ index: -1, message: { content: "bad" } }],
+    [{ finish_reason: 7, message: { content: "bad" } }],
+    [{ message: { content: 42 } }],
+  ])(
+    "foreground parser rejects malformed non-projected choice %#",
+    (choice) => {
+      expect(() =>
+        accumulateOpenAINonStreamJSON({
+          choices: [{ message: { content: "projected" } }, choice],
+        }),
+      ).toThrow("malformed OpenAI response choice");
+    },
+  );
   test("maps prompt_tokens_details.cache_write_tokens to cacheCreationInputTokens", () => {
     const resp = accumulateOpenAINonStreamJSON({
       id: "c1",
@@ -89,6 +211,43 @@ describe("non-stream Chat Completions cache-write accounting", () => {
 // ---------------------------------------------------------------------------
 
 describe("non-stream Responses API cache-write accounting", () => {
+  test("foreground parser rejects missing and duplicate effective tool identities", () => {
+    expect(() =>
+      accumulateResponsesNonStreamJSON({
+        output: [
+          {
+            type: "function_call",
+            call_id: "",
+            id: "",
+            name: "missing",
+            arguments: "{}",
+          },
+        ],
+      }),
+    ).toThrow("malformed Responses response item identity");
+  });
+  test("foreground parser rejects duplicate item IDs with distinct call IDs", () => {
+    expect(() =>
+      accumulateResponsesNonStreamJSON({
+        output: [
+          {
+            type: "function_call",
+            id: "item-shared",
+            call_id: "call-a",
+            name: "a",
+            arguments: "{}",
+          },
+          {
+            type: "function_call",
+            id: "item-shared",
+            call_id: "call-b",
+            name: "b",
+            arguments: "{}",
+          },
+        ],
+      }),
+    ).toThrow("malformed Responses response item identity");
+  });
   test("reads cache_write_tokens from input_tokens_details", () => {
     const resp = accumulateResponsesNonStreamJSON({
       id: "resp_1",
@@ -97,6 +256,7 @@ describe("non-stream Responses API cache-write accounting", () => {
       output: [
         {
           type: "message",
+          id: "msg-cache-write",
           content: [{ type: "output_text", text: "hi" }],
         },
       ],

@@ -701,8 +701,9 @@ describe("worker-health", () => {
       expect(isCapabilityEmpty("max_tokens")).toBe(false);
     });
 
-    test("NOT capability: content_filter and tool calls", () => {
+    test("NOT capability: filtering/refusal and tool calls", () => {
       expect(isCapabilityEmpty("content_filter")).toBe(false);
+      expect(isCapabilityEmpty("refusal")).toBe(false);
       expect(isCapabilityEmpty("tool_calls")).toBe(false);
       expect(isCapabilityEmpty("tool_use")).toBe(false);
     });
@@ -749,6 +750,15 @@ describe("worker-health", () => {
         ).toBe(false);
       }
       expect(isWorkerIncapable("opencode", "m")).toBe(false);
+    });
+
+    test("raw Anthropic refusal defensively never marks a model incapable", () => {
+      for (let i = 0; i < 10; i++) {
+        expect(recordEmptyWorkerResponse("anthropic", "m", "refusal")).toBe(
+          false,
+        );
+      }
+      expect(isWorkerIncapable("anthropic", "m")).toBe(false);
     });
   });
 

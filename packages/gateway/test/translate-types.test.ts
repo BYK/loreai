@@ -68,12 +68,12 @@ describe("looksLikeSSE", () => {
     expect(looksLikeSSE("", '\uFEFF{"a":1}')).toBe(false);
   });
 
-  it("does NOT false-positive on plaintext beginning with id:/retry:/`:` (only data:/event: count)", () => {
-    // A completion SSE stream always opens with data: or event:. Narrowing the
-    // sniff to those two avoids treating a plaintext error body as SSE.
-    expect(looksLikeSSE("text/plain", "retry: later please")).toBe(false);
-    expect(looksLikeSSE("text/plain", "id: 12345 not found")).toBe(false);
-    expect(looksLikeSSE("text/plain", ": a leading comment line")).toBe(false);
+  it("recognizes legal id/retry/comment prefixes", () => {
+    expect(looksLikeSSE("text/plain", "\uFEFF id: stream-1\n\ndata: x")).toBe(
+      true,
+    );
+    expect(looksLikeSSE("text/plain", "retry: 1000\n\ndata: x")).toBe(true);
+    expect(looksLikeSSE("text/plain", ": a leading comment line")).toBe(true);
     expect(looksLikeSSE("text/plain", "404 page not found")).toBe(false);
   });
 });

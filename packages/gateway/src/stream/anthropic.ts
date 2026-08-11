@@ -22,6 +22,13 @@ import {
   estimateTokens,
   scaleUsageForClient,
 } from "../compaction";
+import {
+  ANTHROPIC_CONTENT_BLOCK_TYPES,
+  ANTHROPIC_STOP_REASONS,
+  normalizeAnthropicStopReason,
+  toAnthropicStopReason,
+} from "../anthropic-protocol";
+import { isRecord, validateAnthropicUsage } from "../usage-validation";
 // NOTE: `estimateTokens` re-exported from `compaction.ts` is now the BPE-backed
 // helper from @loreai/core (see packages/core/src/tokenize.ts), no longer the
 // legacy length/4 heuristic.
@@ -38,6 +45,98 @@ export function formatSSEEvent(eventType: string, data: string): string {
 // ---------------------------------------------------------------------------
 // SSE parsing
 // ---------------------------------------------------------------------------
+
+type StreamChunkRead = Awaited<
+  ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
+>;
+
+/**
+ * Foreground and worker SSE streams share this finite frame ceiling. The byte
+ * ceilings bound retained data, while this independently bounds parser work for
+ * tiny frames (including blank and comment-only frames).
+ */
+export const DEFAULT_MAX_SSE_FRAMES = 100_000;
+
+/** A post-header transport failure while reading an SSE response body. */
+export class SSEStreamTransportError extends Error {
+  readonly kind: "inactivity" | "read";
+
+  constructor(
+    kind: "inactivity" | "read",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "SSEStreamTransportError";
+    this.kind = kind;
+  }
+}
+
+/** Deterministic local stream limits must never be reclassified as transport. */
+export class SSEStreamLimitError extends Error {}
+
+/** Read one stream chunk while making abort and inactivity independently fatal. */
+export async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  opts: { signal?: AbortSignal; inactivityMs?: number } = {},
+): Promise<StreamChunkRead> {
+  opts.signal?.throwIfAborted();
+  const reads: Array<Promise<StreamChunkRead>> = [
+    reader.read().catch((error: unknown) => {
+      opts.signal?.throwIfAborted();
+      if (error instanceof SSEStreamLimitError) throw error;
+      throw new SSEStreamTransportError("read", "SSE stream read failed", {
+        cause: error,
+      });
+    }),
+  ];
+  let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+  let inactivityError: Error | undefined;
+  let onAbort: (() => void) | undefined;
+
+  if (opts.signal) {
+    const signal = opts.signal;
+    reads.push(
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => {
+          void reader.cancel(signal.reason).catch(() => {});
+          try {
+            signal.throwIfAborted();
+          } catch (error) {
+            reject(error);
+          }
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }),
+    );
+  }
+
+  if (opts.inactivityMs) {
+    reads.push(
+      new Promise<never>((_resolve, reject) => {
+        inactivityTimer = setTimeout(() => {
+          inactivityError = new SSEStreamTransportError(
+            "inactivity",
+            "SSE stream inactivity deadline exceeded",
+          );
+          void reader.cancel(inactivityError).catch(() => {});
+          reject(inactivityError);
+        }, opts.inactivityMs);
+      }),
+    );
+  }
+
+  try {
+    const result = await Promise.race(reads);
+    if (inactivityError) throw inactivityError;
+    opts.signal?.throwIfAborted();
+    return result;
+  } finally {
+    if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
+    if (inactivityTimer) clearTimeout(inactivityTimer);
+  }
+}
 
 /**
  * Parse an SSE byte stream into typed events.
@@ -56,81 +155,185 @@ export async function* parseSSEStream(
     frameCounter?: { count: number };
     inactivityMs?: number;
     signal?: AbortSignal;
+    requireEventTerminator?: boolean;
+    maxTotalBytes?: number;
+    fatalUtf8?: boolean;
   } = {},
 ): AsyncGenerator<{ event: string; data: string }> {
-  const decoder = new TextDecoder();
-  let buffer = "";
+  // Expose BOM code points to the parser; `stripInitialBom` below owns removal
+  // and byte accounting exactly once, including split transport chunks.
+  const decoder = new TextDecoder("utf-8", {
+    fatal: opts.fatalUtf8,
+    ignoreBOM: true,
+  });
+  let bufferParts: string[] = [];
+  let delimiterScanTail = "";
+  let initialBytes: number[] = [];
+  let initialBytesResolved = false;
   let bufferedBytes = 0;
   const maxEventBytes = opts.maxEventBytes ?? 4 * 1024 * 1024;
-  const maxFrames = opts.maxFrames ?? Number.POSITIVE_INFINITY;
+  const maxFrames = opts.maxFrames ?? DEFAULT_MAX_SSE_FRAMES;
   const frameCounter = opts.frameCounter ?? { count: 0 };
+  let totalBytes = 0;
+  const delimiterPattern =
+    "(?:\\r\\n|(?<!\\r)\\n|\\r(?!\\n))(?:\\r\\n|(?<!\\r)\\n|\\r(?!\\n))";
+
+  const appendDecoded = (text: string): boolean => {
+    if (!text) return false;
+    bufferParts.push(text);
+    const scan = delimiterScanTail + text;
+    const found = new RegExp(delimiterPattern).test(scan);
+    // The longest delimiter is four characters, so retaining three detects
+    // every delimiter completed by the next transport chunk without rescanning
+    // the accumulated event.
+    delimiterScanTail = scan.slice(-3);
+    return found;
+  };
+
+  if (!Number.isSafeInteger(maxFrames) || maxFrames < 0) {
+    throw new Error("SSE frame limit must be a non-negative safe integer");
+  }
+
+  const countFrame = (): void => {
+    frameCounter.count++;
+    if (frameCounter.count > maxFrames) {
+      throw new Error(`SSE stream exceeded ${maxFrames} frame limit`);
+    }
+  };
+
+  const stripInitialBom = (
+    value: Uint8Array | undefined,
+    done: boolean,
+  ): Uint8Array | undefined => {
+    if (initialBytesResolved) return value;
+    let offset = 0;
+    while (value && offset < value.byteLength && initialBytes.length < 3) {
+      initialBytes.push(value[offset++]);
+      if (
+        initialBytes[0] !== 0xef ||
+        (initialBytes.length >= 2 && initialBytes[1] !== 0xbb)
+      ) {
+        break;
+      }
+    }
+    if (initialBytes.length === 0 && !done) return undefined;
+    const isBom =
+      initialBytes.length === 3 &&
+      initialBytes[0] === 0xef &&
+      initialBytes[1] === 0xbb &&
+      initialBytes[2] === 0xbf;
+    const prefixMismatch =
+      initialBytes[0] !== 0xef ||
+      (initialBytes.length >= 2 && initialBytes[1] !== 0xbb) ||
+      (initialBytes.length >= 3 && !isBom);
+    if (!isBom && !prefixMismatch && !done) return undefined;
+
+    initialBytesResolved = true;
+    const prefix = isBom ? new Uint8Array() : Uint8Array.from(initialBytes);
+    initialBytes = [];
+    const suffix = value?.subarray(offset) ?? new Uint8Array();
+    if (prefix.byteLength === 0) return suffix;
+    if (suffix.byteLength === 0) return prefix;
+    const combined = new Uint8Array(prefix.byteLength + suffix.byteLength);
+    combined.set(prefix);
+    combined.set(suffix, prefix.byteLength);
+    return combined;
+  };
 
   for (;;) {
-    opts.signal?.throwIfAborted();
-    const read = reader.read();
-    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
-    const inactivity = new Promise<never>((_resolve, reject) => {
-      if (!opts.inactivityMs) return;
-      inactivityTimer = setTimeout(
-        () => reject(new Error("SSE stream inactivity deadline exceeded")),
-        opts.inactivityMs,
-      );
+    const { done, value } = await readStreamChunk(reader, {
+      signal: opts.signal,
+      inactivityMs: opts.inactivityMs,
     });
-    const { done, value } = await (
-      opts.inactivityMs ? Promise.race([read, inactivity]) : read
-    ).finally(() => {
-      if (inactivityTimer) clearTimeout(inactivityTimer);
-    });
-    if (value) {
-      bufferedBytes += value.byteLength;
-      if (bufferedBytes > maxEventBytes) {
-        throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
+    const payload = stripInitialBom(value, done);
+    let shouldProcess = false;
+    if (payload && payload.byteLength > 0) {
+      totalBytes += payload.byteLength;
+      if (totalBytes > (opts.maxTotalBytes ?? Number.POSITIVE_INFINITY)) {
+        throw new Error("SSE stream exceeded aggregate byte limit");
       }
-      buffer += decoder.decode(value, { stream: true });
+      bufferedBytes += payload.byteLength;
+      try {
+        shouldProcess = appendDecoded(
+          decoder.decode(payload, { stream: true }),
+        );
+      } catch {
+        throw new Error("malformed SSE UTF-8");
+      }
+    }
+    if (done) {
+      try {
+        shouldProcess = appendDecoded(decoder.decode()) || shouldProcess;
+      } catch {
+        throw new Error("malformed SSE UTF-8");
+      }
+    }
+    if (shouldProcess) {
+      // Join only when a complete event exists. An attacker fragmenting one
+      // unterminated event into tiny chunks therefore cannot force repeated
+      // copies and full-prefix delimiter scans.
+      const buffer = bufferParts.join("");
+      const delimiter = new RegExp(delimiterPattern, "g");
+      let consumedChars = 0;
+      let consumedBytes = 0;
+      for (;;) {
+        delimiter.lastIndex = consumedChars;
+        const boundary = delimiter.exec(buffer);
+        if (!boundary) break;
+        const block = buffer.slice(consumedChars, boundary.index);
+        // Every delimiter consumes parser work, even when its block is blank or
+        // comment-only and therefore yields no event to the caller.
+        countFrame();
+        const blockBytes = Buffer.byteLength(block);
+        if (blockBytes > maxEventBytes) {
+          throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
+        }
+        consumedChars = boundary.index + boundary[0].length;
+        consumedBytes += blockBytes + boundary[0].length;
+
+        // Skip empty blocks
+        if (block.trim() === "") continue;
+
+        let eventType = "message";
+        const dataLines: string[] = [];
+
+        for (const line of block.split(/\r\n|\r|\n/)) {
+          if (line.startsWith("event:")) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+          // Lines starting with ':' are comments — ignore
+          // Other lines without known prefix — ignore per SSE spec
+        }
+
+        if (dataLines.length > 0) {
+          yield { event: eventType, data: dataLines.join("\n") };
+        }
+      }
+      if (consumedChars > 0) {
+        const remaining = buffer.slice(consumedChars);
+        bufferParts = remaining ? [remaining] : [];
+        delimiterScanTail = remaining.slice(-3);
+        bufferedBytes -= consumedBytes;
+      }
     }
 
-    // Process complete events (blank-line delimiter; accept LF and CRLF).
-    for (;;) {
-      const boundary = /\r?\n\r?\n/.exec(buffer);
-      if (!boundary) break;
-      const block = buffer.slice(0, boundary.index);
-      frameCounter.count++;
-      if (frameCounter.count > maxFrames) {
-        throw new Error(`SSE stream exceeded ${maxFrames} frame limit`);
-      }
-      if (Buffer.byteLength(block) > maxEventBytes) {
-        throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
-      }
-      buffer = buffer.slice(boundary.index + boundary[0].length);
-      bufferedBytes = Buffer.byteLength(buffer);
-
-      // Skip empty blocks
-      if (block.trim() === "") continue;
-
-      let eventType = "message";
-      const dataLines: string[] = [];
-
-      for (const line of block.split(/\r?\n/)) {
-        if (line.startsWith("event:")) {
-          eventType = line.slice(6).trim();
-        } else if (line.startsWith("data:")) {
-          dataLines.push(line.slice(5).trimStart());
-        }
-        // Lines starting with ':' are comments — ignore
-        // Other lines without known prefix — ignore per SSE spec
-      }
-
-      if (dataLines.length > 0) {
-        yield { event: eventType, data: dataLines.join("\n") };
-      }
+    if (bufferedBytes > maxEventBytes) {
+      throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
     }
 
     if (done) {
+      const buffer = bufferParts.join("");
       // Flush any remaining partial block (shouldn't happen with well-formed SSE)
       if (buffer.trim()) {
+        countFrame();
+        if (opts.requireEventTerminator) {
+          throw new Error("unterminated SSE event at EOF");
+        }
         let eventType = "message";
         const dataLines: string[] = [];
-        for (const line of buffer.split(/\r?\n/)) {
+        for (const line of buffer.split(/\r\n|\r|\n/)) {
           if (line.startsWith("event:")) {
             eventType = line.slice(6).trim();
           } else if (line.startsWith("data:")) {
@@ -144,6 +347,28 @@ export async function* parseSSEStream(
       break;
     }
   }
+}
+
+/** Cancel without awaiting hostile sources, and release the reader lock safely. */
+export function cancelAndReleaseReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reason?: unknown,
+): void {
+  let cancellation: Promise<void>;
+  try {
+    cancellation = reader.cancel(reason).catch(() => {});
+  } catch {
+    cancellation = Promise.resolve();
+  }
+  const release = (): void => {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A runtime may keep a raced read pending until cancellation settles.
+    }
+  };
+  release();
+  void cancellation.finally(release).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +718,7 @@ export function createStreamAccumulator(options?: {
   function handleMessageDelta(parsed: Record<string, unknown>): void {
     const delta = parsed.delta as Record<string, unknown> | undefined;
     if (delta && typeof delta.stop_reason === "string") {
-      stopReason = delta.stop_reason;
+      stopReason = normalizeAnthropicStopReason(delta.stop_reason);
     }
 
     // message_delta usage is cumulative output tokens
@@ -902,7 +1127,7 @@ export function buildSSEResponse(resp: GatewayResponse): string {
       JSON.stringify({
         type: "message_delta",
         delta: {
-          stop_reason: resp.stopReason ?? "end_turn",
+          stop_reason: toAnthropicStopReason(resp.stopReason ?? "end_turn"),
           stop_sequence: null,
         },
         usage: { output_tokens: u.outputTokens },
@@ -1418,6 +1643,309 @@ export function createRecallAwareAccumulator(
   };
 }
 
+function malformedAnthropicStream(): never {
+  throw new Error("malformed Anthropic stream event");
+}
+
+function validateAnthropicStreamBlock(block: unknown): string {
+  if (
+    !isRecord(block) ||
+    typeof block.type !== "string" ||
+    !ANTHROPIC_CONTENT_BLOCK_TYPES.has(block.type)
+  ) {
+    malformedAnthropicStream();
+  }
+
+  switch (block.type) {
+    case "text":
+      if (typeof block.text !== "string") malformedAnthropicStream();
+      if (
+        block.citations !== undefined &&
+        block.citations !== null &&
+        (!Array.isArray(block.citations) ||
+          block.citations.some((citation) => !isRecord(citation)))
+      ) {
+        malformedAnthropicStream();
+      }
+      break;
+    case "thinking":
+      if (
+        typeof block.thinking !== "string" ||
+        (block.signature !== undefined && typeof block.signature !== "string")
+      ) {
+        malformedAnthropicStream();
+      }
+      break;
+    case "redacted_thinking":
+      if (typeof block.data !== "string") malformedAnthropicStream();
+      break;
+    case "tool_use":
+      if (
+        typeof block.id !== "string" ||
+        typeof block.name !== "string" ||
+        !isRecord(block.input)
+      ) {
+        malformedAnthropicStream();
+      }
+      break;
+    case "server_tool_use":
+      if (
+        typeof block.id !== "string" ||
+        typeof block.name !== "string" ||
+        block.input === undefined
+      ) {
+        malformedAnthropicStream();
+      }
+      break;
+    case "container_upload":
+      if (typeof block.file_id !== "string") malformedAnthropicStream();
+      break;
+    case "web_search_tool_result":
+    case "web_fetch_tool_result":
+    case "code_execution_tool_result":
+    case "bash_code_execution_tool_result":
+    case "text_editor_code_execution_tool_result":
+    case "tool_search_tool_result":
+      if (typeof block.tool_use_id !== "string" || block.content == null) {
+        malformedAnthropicStream();
+      }
+      break;
+    case "fallback":
+      // Server-side fallback emits only a start/stop boundary block.
+      break;
+  }
+  return block.type;
+}
+
+function validateAnthropicMessageStart(parsed: Record<string, unknown>): void {
+  if (!isRecord(parsed.message)) malformedAnthropicStream();
+  const message = parsed.message;
+  if (
+    typeof message.id !== "string" ||
+    message.type !== "message" ||
+    message.role !== "assistant" ||
+    typeof message.model !== "string" ||
+    !Array.isArray(message.content) ||
+    message.content.length !== 0 ||
+    message.stop_reason !== null ||
+    message.stop_sequence !== null
+  ) {
+    malformedAnthropicStream();
+  }
+  if (
+    message.container !== undefined &&
+    message.container !== null &&
+    !isRecord(message.container)
+  ) {
+    malformedAnthropicStream();
+  }
+  if (
+    message.stop_details !== undefined &&
+    message.stop_details !== null &&
+    !isRecord(message.stop_details)
+  ) {
+    malformedAnthropicStream();
+  }
+  validateAnthropicUsage(message.usage, {
+    message: "malformed Anthropic stream event",
+    required: true,
+    requireInput: true,
+    requireOutput: true,
+  });
+}
+
+function validateAnthropicMessageDelta(
+  parsed: Record<string, unknown>,
+): string | null {
+  if (!isRecord(parsed.delta)) malformedAnthropicStream();
+  const delta = parsed.delta;
+  if (!("stop_reason" in delta)) malformedAnthropicStream();
+  const stopReason = delta.stop_reason;
+  if (
+    stopReason !== null &&
+    (typeof stopReason !== "string" || !ANTHROPIC_STOP_REASONS.has(stopReason))
+  ) {
+    malformedAnthropicStream();
+  }
+  if (
+    delta.stop_sequence !== undefined &&
+    delta.stop_sequence !== null &&
+    typeof delta.stop_sequence !== "string"
+  ) {
+    malformedAnthropicStream();
+  }
+  if (
+    delta.container !== undefined &&
+    delta.container !== null &&
+    !isRecord(delta.container)
+  ) {
+    malformedAnthropicStream();
+  }
+  if (
+    delta.stop_details !== undefined &&
+    delta.stop_details !== null &&
+    !isRecord(delta.stop_details)
+  ) {
+    malformedAnthropicStream();
+  }
+  validateAnthropicUsage(parsed.usage, {
+    message: "malformed Anthropic stream event",
+    required: true,
+    requireOutput: true,
+    allowNullCounts: true,
+  });
+  return typeof stopReason === "string" ? stopReason : null;
+}
+
+/** Incremental strict validator shared by buffered and true-streaming paths. */
+export class AnthropicSSEValidator {
+  private messageStarted = false;
+  private messageDeltaPhase = false;
+  private terminalStopReason: string | null = null;
+  private terminalSeen = false;
+  private readonly activeBlocks = new Set<number>();
+  private readonly seenBlocks = new Set<number>();
+  private readonly blockTypes = new Map<number, string>();
+  private readonly toolUseIds = new Set<string>();
+
+  process(event: string, data: string): void {
+    let parsed: Record<string, unknown>;
+    try {
+      const decoded: unknown = JSON.parse(data);
+      if (!isRecord(decoded)) malformedAnthropicStream();
+      parsed = decoded;
+    } catch {
+      malformedAnthropicStream();
+    }
+    if (this.terminalSeen || parsed.type !== event) malformedAnthropicStream();
+    const index = parsed.index;
+    const validIndex = Number.isSafeInteger(index) && (index as number) >= 0;
+    switch (event) {
+      case "error":
+        throw new Error("Anthropic stream error event");
+      case "ping":
+        break;
+      case "message_start":
+        if (this.messageStarted) malformedAnthropicStream();
+        validateAnthropicMessageStart(parsed);
+        this.messageStarted = true;
+        break;
+      case "content_block_start": {
+        if (
+          !this.messageStarted ||
+          this.messageDeltaPhase ||
+          !validIndex ||
+          this.activeBlocks.has(index as number) ||
+          this.seenBlocks.has(index as number)
+        ) {
+          malformedAnthropicStream();
+        }
+        const blockType = validateAnthropicStreamBlock(parsed.content_block);
+        const block = parsed.content_block as Record<string, unknown>;
+        const hasToolIdentity =
+          blockType === "tool_use" || blockType === "server_tool_use";
+        if (
+          hasToolIdentity &&
+          (!block.id || this.toolUseIds.has(block.id as string))
+        ) {
+          malformedAnthropicStream();
+        }
+        if (hasToolIdentity) this.toolUseIds.add(block.id as string);
+        this.blockTypes.set(index as number, blockType);
+        this.activeBlocks.add(index as number);
+        this.seenBlocks.add(index as number);
+        break;
+      }
+      case "content_block_delta": {
+        if (
+          !validIndex ||
+          !this.activeBlocks.has(index as number) ||
+          !isRecord(parsed.delta)
+        ) {
+          malformedAnthropicStream();
+        }
+        const delta = parsed.delta;
+        switch (delta.type) {
+          case "text_delta":
+            if (typeof delta.text !== "string") malformedAnthropicStream();
+            break;
+          case "thinking_delta":
+            if (typeof delta.thinking !== "string") malformedAnthropicStream();
+            break;
+          case "signature_delta":
+            if (typeof delta.signature !== "string") malformedAnthropicStream();
+            break;
+          case "input_json_delta":
+            if (typeof delta.partial_json !== "string") {
+              malformedAnthropicStream();
+            }
+            break;
+          case "citations_delta":
+            if (!isRecord(delta.citation)) malformedAnthropicStream();
+            break;
+          default:
+            malformedAnthropicStream();
+        }
+        const blockType = this.blockTypes.get(index as number);
+        const validDeltaForBlock =
+          blockType === "text"
+            ? delta.type === "text_delta" || delta.type === "citations_delta"
+            : blockType === "thinking"
+              ? delta.type === "thinking_delta" ||
+                delta.type === "signature_delta"
+              : blockType === "tool_use" || blockType === "server_tool_use"
+                ? delta.type === "input_json_delta"
+                : false;
+        if (!validDeltaForBlock) malformedAnthropicStream();
+        break;
+      }
+      case "content_block_stop":
+        if (!validIndex || !this.activeBlocks.delete(index as number)) {
+          malformedAnthropicStream();
+        }
+        break;
+      case "message_delta": {
+        if (!this.messageStarted || this.activeBlocks.size > 0) {
+          malformedAnthropicStream();
+        }
+        this.messageDeltaPhase = true;
+        const stopReason = validateAnthropicMessageDelta(parsed);
+        if (
+          stopReason !== null &&
+          this.terminalStopReason !== null &&
+          this.terminalStopReason !== stopReason
+        ) {
+          malformedAnthropicStream();
+        }
+        this.terminalStopReason = stopReason ?? this.terminalStopReason;
+        break;
+      }
+      case "message_stop":
+        if (
+          !this.messageStarted ||
+          this.terminalStopReason === null ||
+          this.activeBlocks.size > 0
+        ) {
+          malformedAnthropicStream();
+        }
+        this.terminalSeen = true;
+        break;
+      default:
+        malformedAnthropicStream();
+    }
+  }
+
+  isDone(): boolean {
+    return this.terminalSeen;
+  }
+
+  assertDone(): void {
+    if (!this.terminalSeen) {
+      throw new Error("missing Anthropic message_stop terminal");
+    }
+  }
+}
+
 /**
  * Consume an Anthropic SSE streaming Response and return the accumulated
  * GatewayResponse. Useful when the response needs to be translated to another
@@ -1425,25 +1953,225 @@ export function createRecallAwareAccumulator(
  */
 export async function accumulateSSEResponse(
   response: Response,
+  opts: {
+    signal?: AbortSignal;
+    stopAtTerminal?: boolean;
+    strict?: boolean;
+    inactivityMs?: number;
+    maxFrames?: number;
+    onSemanticContent?: () => void;
+  } = {},
 ): Promise<GatewayResponse> {
   const accumulator = createStreamAccumulator();
-  const text = await response.text();
+  let messageStarted = false;
+  let messageDeltaPhase = false;
+  let terminalStopReason: string | null = null;
+  const activeBlocks = new Set<number>();
+  const seenBlocks = new Set<number>();
+  const blockTypes = new Map<number, string>();
+  const toolUseIds = new Set<string>();
+  const strictValidator = opts.strict ? new AnthropicSSEValidator() : undefined;
+  if (!response.body) throw new Error("Response has no body");
+  const reader = response.body.getReader();
 
-  for (const block of text.split("\n\n")) {
-    if (!block.trim()) continue;
-    let eventType = "message";
-    const dataLines: string[] = [];
-    for (const line of block.split("\n")) {
-      if (line.startsWith("event:")) {
-        eventType = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trimStart());
+  try {
+    for await (const { event, data } of parseSSEStream(reader, {
+      signal: opts.signal,
+      inactivityMs: opts.inactivityMs,
+      requireEventTerminator: opts.strict,
+      fatalUtf8: opts.strict,
+      maxEventBytes: opts.strict ? undefined : Number.POSITIVE_INFINITY,
+      maxFrames: opts.strict
+        ? (opts.maxFrames ?? DEFAULT_MAX_SSE_FRAMES)
+        : opts.maxFrames,
+      maxTotalBytes: opts.strict ? 4 * 1024 * 1024 : undefined,
+    })) {
+      strictValidator?.process(event, data);
+      if (opts.strict) {
+        let parsed: Record<string, unknown>;
+        try {
+          const decoded: unknown = JSON.parse(data);
+          if (!isRecord(decoded)) malformedAnthropicStream();
+          parsed = decoded;
+        } catch {
+          malformedAnthropicStream();
+        }
+        if (parsed.type !== event) malformedAnthropicStream();
+        const index = parsed.index;
+        const validIndex =
+          Number.isSafeInteger(index) && (index as number) >= 0;
+        switch (event) {
+          case "error":
+            throw new Error("Anthropic stream error event");
+          case "ping":
+            break;
+          case "message_start":
+            if (messageStarted) malformedAnthropicStream();
+            validateAnthropicMessageStart(parsed);
+            messageStarted = true;
+            break;
+          case "content_block_start":
+            if (
+              !messageStarted ||
+              messageDeltaPhase ||
+              !validIndex ||
+              activeBlocks.has(index as number) ||
+              seenBlocks.has(index as number)
+            ) {
+              malformedAnthropicStream();
+            }
+            {
+              const blockType = validateAnthropicStreamBlock(
+                parsed.content_block,
+              );
+              const block = parsed.content_block as Record<string, unknown>;
+              const hasToolIdentity =
+                blockType === "tool_use" || blockType === "server_tool_use";
+              if (
+                hasToolIdentity &&
+                (!block.id || toolUseIds.has(block.id as string))
+              ) {
+                malformedAnthropicStream();
+              }
+              if (hasToolIdentity) {
+                toolUseIds.add(block.id as string);
+              }
+              blockTypes.set(index as number, blockType);
+            }
+            activeBlocks.add(index as number);
+            seenBlocks.add(index as number);
+            break;
+          case "content_block_delta":
+            if (
+              !validIndex ||
+              !activeBlocks.has(index as number) ||
+              !isRecord(parsed.delta)
+            ) {
+              malformedAnthropicStream();
+            }
+            {
+              const delta = parsed.delta;
+              switch (delta.type) {
+                case "text_delta":
+                  if (typeof delta.text !== "string") {
+                    malformedAnthropicStream();
+                  }
+                  break;
+                case "thinking_delta":
+                  if (typeof delta.thinking !== "string") {
+                    malformedAnthropicStream();
+                  }
+                  break;
+                case "signature_delta":
+                  if (typeof delta.signature !== "string") {
+                    malformedAnthropicStream();
+                  }
+                  break;
+                case "input_json_delta":
+                  if (typeof delta.partial_json !== "string") {
+                    malformedAnthropicStream();
+                  }
+                  break;
+                case "citations_delta":
+                  if (!isRecord(delta.citation)) malformedAnthropicStream();
+                  break;
+                default:
+                  malformedAnthropicStream();
+              }
+              const blockType = blockTypes.get(index as number);
+              const validDeltaForBlock =
+                blockType === "text"
+                  ? delta.type === "text_delta" ||
+                    delta.type === "citations_delta"
+                  : blockType === "thinking"
+                    ? delta.type === "thinking_delta" ||
+                      delta.type === "signature_delta"
+                    : blockType === "tool_use" ||
+                        blockType === "server_tool_use"
+                      ? delta.type === "input_json_delta"
+                      : false;
+              if (!validDeltaForBlock) malformedAnthropicStream();
+            }
+            break;
+          case "content_block_stop":
+            if (!validIndex || !activeBlocks.delete(index as number)) {
+              malformedAnthropicStream();
+            }
+            break;
+          case "message_delta":
+            if (!messageStarted || activeBlocks.size > 0) {
+              malformedAnthropicStream();
+            }
+            messageDeltaPhase = true;
+            {
+              const stopReason = validateAnthropicMessageDelta(parsed);
+              if (
+                stopReason !== null &&
+                terminalStopReason !== null &&
+                terminalStopReason !== stopReason
+              ) {
+                malformedAnthropicStream();
+              }
+              terminalStopReason = stopReason ?? terminalStopReason;
+            }
+            break;
+          case "message_stop":
+            if (
+              !messageStarted ||
+              terminalStopReason === null ||
+              activeBlocks.size > 0
+            ) {
+              malformedAnthropicStream();
+            }
+            break;
+          default:
+            malformedAnthropicStream();
+        }
       }
+      if (opts.onSemanticContent) {
+        let semantic = false;
+        try {
+          const parsed = JSON.parse(data) as Record<string, unknown>;
+          if (
+            event === "content_block_start" &&
+            isRecord(parsed.content_block)
+          ) {
+            const block = parsed.content_block;
+            semantic =
+              block.type === "tool_use" ||
+              block.type === "server_tool_use" ||
+              (block.type === "text" &&
+                typeof block.text === "string" &&
+                block.text.length > 0) ||
+              (block.type === "thinking" &&
+                typeof block.thinking === "string" &&
+                block.thinking.length > 0);
+          } else if (
+            event === "content_block_delta" &&
+            isRecord(parsed.delta)
+          ) {
+            semantic = [
+              parsed.delta.text,
+              parsed.delta.thinking,
+              parsed.delta.partial_json,
+            ].some((value) => typeof value === "string" && value.length > 0);
+          }
+        } catch {
+          // Strict parsing above owns malformed JSON diagnostics.
+        }
+        if (semantic) opts.onSemanticContent();
+      }
+      accumulator.processEvent(event, data);
+      if (opts.stopAtTerminal && accumulator.isDone()) break;
     }
-    if (dataLines.length > 0) {
-      accumulator.processEvent(eventType, dataLines.join("\n"));
-    }
+  } finally {
+    cancelAndReleaseReader(reader);
   }
+
+  if (opts.stopAtTerminal && !accumulator.isDone()) {
+    throw new Error("missing Anthropic message_stop terminal");
+  }
+  if (opts.stopAtTerminal) strictValidator?.assertDone();
 
   return accumulator.getResponse();
 }

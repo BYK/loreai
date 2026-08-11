@@ -9,7 +9,7 @@
  * profile, and the ADC token seam. End-to-end routing is covered in
  * `vertex-routing.test.ts`.
  */
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   buildVertexUpstream,
   isVertexHost,
@@ -28,6 +28,7 @@ import {
   getVertexAccessToken,
   resolveVertexProject,
 } from "../src/vertex-auth";
+import { createForegroundAbortScope } from "../src/pipeline";
 
 describe("toVertexModelId", () => {
   test("passes through short ids that Vertex uses verbatim", () => {
@@ -235,6 +236,39 @@ describe("resolveWorkerProtocol — ChatGPT backend (openai → openai-codex-res
     ).toBe("openai-codex-responses");
   });
 
+  test("recognizes a ChatGPT-compatible /backend-api proxy", () => {
+    expect(
+      resolveWorkerProtocol(
+        "openai",
+        undefined,
+        "gpt-5.6-terra",
+        "https://proxy.internal/backend-api",
+      ),
+    ).toBe("openai-codex-responses");
+  });
+
+  test.each([
+    "https://proxy.internal/backend-apiary",
+    "https://proxy.internal/backend-api-v2",
+    "https://chatgpt.com/v1",
+    "https://proxy.internal/v1?next=/backend-api",
+  ])("rejects non-backend paths: %s", (url) => {
+    expect(
+      resolveWorkerProtocol("openai", undefined, "gpt-5.6-terra", url),
+    ).toBe("openai");
+  });
+
+  test("recognizes backend-api as a complete nested path segment", () => {
+    expect(
+      resolveWorkerProtocol(
+        "openai",
+        undefined,
+        "gpt-5.6-terra",
+        "https://proxy.internal/prefix/backend-api/",
+      ),
+    ).toBe("openai-codex-responses");
+  });
+
   test("openai providerID + api.openai.com URL → openai (no collapse)", () => {
     // The real OpenAI endpoint serves BOTH Chat Completions and Responses —
     // the legacy Chat Completions path is correct here. The guard must NOT
@@ -393,6 +427,100 @@ describe("vertex-auth — ADC token seam", () => {
   test("getVertexAccessToken returns the injected test token", async () => {
     _setTestVertexTokenProvider(() => Promise.resolve("test-token-123"));
     expect(await getVertexAccessToken()).toBe("test-token-123");
+  });
+
+  test.each(["AbortError", "TimeoutError"])(
+    "getVertexAccessToken propagates %s while its provider is stalled",
+    async (name) => {
+      _setTestVertexTokenProvider(() => new Promise<string>(() => {}));
+      const controller = new AbortController();
+      const pending = getVertexAccessToken(controller.signal);
+      controller.abort(new DOMException("cancelled", name));
+
+      await expect(pending).rejects.toMatchObject({ name });
+    },
+  );
+
+  test("abort immediately removes its listener and observes a late provider rejection", async () => {
+    let rejectProvider!: (error: unknown) => void;
+    _setTestVertexTokenProvider(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectProvider = reject;
+        }),
+    );
+    const controller = new AbortController();
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const pending = getVertexAccessToken(controller.signal);
+    const rejected = expect(pending).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+    await rejected;
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+
+    rejectProvider(new Error("late provider failure"));
+    await Promise.resolve();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  test("an already-aborted signal does not invoke the token provider", async () => {
+    let calls = 0;
+    _setTestVertexTokenProvider(async () => {
+      calls++;
+      return "must not run";
+    });
+    const controller = new AbortController();
+    controller.abort(new DOMException("already aborted", "AbortError"));
+    await expect(getVertexAccessToken(controller.signal)).rejects.toMatchObject(
+      {
+        name: "AbortError",
+      },
+    );
+    expect(calls).toBe(0);
+  });
+
+  test("observes provider rejection when abort wins during factory invocation", async () => {
+    const controller = new AbortController();
+    _setTestVertexTokenProvider(() => {
+      controller.abort(new DOMException("raced abort", "AbortError"));
+      return Promise.reject(new Error("provider rejected after abort"));
+    });
+    await expect(getVertexAccessToken(controller.signal)).rejects.toMatchObject(
+      {
+        name: "AbortError",
+      },
+    );
+    await Promise.resolve();
+  });
+
+  test("foreground caller cancellation aborts a stalled Vertex token provider", async () => {
+    _setTestVertexTokenProvider(() => new Promise<string>(() => {}));
+    const caller = new AbortController();
+    const scope = createForegroundAbortScope(caller.signal);
+    const pending = getVertexAccessToken(scope.signal);
+    caller.abort(new DOMException("client disconnected", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    scope.dispose();
+  });
+
+  test("foreground deadline aborts a stalled Vertex token provider and clears its timer", async () => {
+    vi.useFakeTimers();
+    try {
+      _setTestVertexTokenProvider(() => new Promise<string>(() => {}));
+      const scope = createForegroundAbortScope();
+      const pending = getVertexAccessToken(scope.signal);
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
+      await vi.advanceTimersByTimeAsync(300_000);
+      await rejected;
+      scope.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("resolveVertexProject prefers the configured project (no ADC call)", async () => {

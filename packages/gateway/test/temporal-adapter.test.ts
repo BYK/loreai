@@ -7,6 +7,11 @@ import type { GatewayMessage } from "../src/translate/types";
 import type { LorePart } from "@loreai/core";
 import { isToolPart } from "@loreai/core";
 import { estimateMessages } from "../../core/src/gradient";
+import { loreMessagesToGateway } from "../src/pipeline";
+import {
+  buildGeminiUpstreamRequest,
+  parseGeminiRequest,
+} from "../src/translate/gemini";
 
 // Test-local view of a tool part's state covering all status variants.
 type TestToolState = {
@@ -342,5 +347,75 @@ describe("resolveToolResults", () => {
     expect(messages[0].parts).toHaveLength(1);
     expect(messages[0].hiddenInputTokens).toBeGreaterThan(1_000);
     expect(estimateMessages(messages)).toBeGreaterThan(1_000);
+  });
+
+  test("preserves distinct Gemini call id and name through Lore and egress", () => {
+    const parsed = parseGeminiRequest(
+      {
+        contents: [
+          {
+            role: "model",
+            parts: [
+              {
+                functionCall: {
+                  id: "call-1",
+                  name: "lookup",
+                  args: { query: "x" },
+                },
+              },
+            ],
+          },
+          {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  id: "call-1",
+                  name: "lookup",
+                  response: { value: 1 },
+                },
+              },
+            ],
+          },
+        ],
+      },
+      {},
+      "gemini-test",
+      false,
+    );
+    const lore = gatewayMessagesToLore(parsed.messages, "sess-gemini-id");
+    resolveToolResults(lore);
+    const reconstructed = loreMessagesToGateway(lore);
+    expect(reconstructed[0].content[0]).toMatchObject({
+      type: "tool_use",
+      id: "call-1",
+      name: "lookup",
+    });
+    expect(reconstructed[1].content[0]).toMatchObject({
+      type: "tool_result",
+      toolUseId: "call-1",
+      toolName: "lookup",
+    });
+    const body = buildGeminiUpstreamRequest(
+      { ...parsed, messages: reconstructed },
+      "https://gemini.example",
+    ).body as Record<string, unknown>;
+    const contents = body.contents as Array<{
+      parts: Array<Record<string, unknown>>;
+    }>;
+    expect(contents[0].parts[0]).toEqual({
+      functionCall: {
+        id: "call-1",
+        name: "lookup",
+        args: { query: "x" },
+      },
+    });
+    expect(contents[1].parts[0]).toEqual({
+      functionResponse: {
+        id: "call-1",
+        name: "lookup",
+        response: { value: 1 },
+      },
+    });
   });
 });

@@ -21,6 +21,11 @@
 import {
   brotliCompressSync,
   brotliDecompressSync,
+  createBrotliDecompress,
+  createGunzip,
+  createInflate,
+  createInflateRaw,
+  createZstdDecompress,
   deflateSync,
   gunzipSync,
   gzipSync,
@@ -29,6 +34,73 @@ import {
   zstdCompressSync,
   zstdDecompressSync,
 } from "node:zlib";
+import { promiseAgainstAbort } from "./abort-race";
+import { cancelAndReleaseReader } from "./stream/anthropic";
+
+/** Maximum wire bytes accepted from any standard JSON request body. */
+export const MAX_HTTP_REQUEST_COMPRESSED_BYTES = 32 * 1024 * 1024;
+/** Maximum UTF-8/JSON bytes produced after Content-Encoding decoding. */
+export const MAX_HTTP_REQUEST_DECOMPRESSED_BYTES = 32 * 1024 * 1024;
+
+export class HttpRequestBodyTooLargeError extends Error {
+  constructor(phase: "compressed" | "decompressed") {
+    const limit =
+      phase === "compressed"
+        ? MAX_HTTP_REQUEST_COMPRESSED_BYTES
+        : MAX_HTTP_REQUEST_DECOMPRESSED_BYTES;
+    super(`HTTP request ${phase} body exceeded ${limit} byte limit`);
+    this.name = "HttpRequestBodyTooLargeError";
+  }
+}
+
+function outputLimitError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (("code" in error &&
+      (error as Error & { code?: string }).code === "ERR_BUFFER_TOO_LARGE") ||
+      /maxOutputLength|larger than/i.test(error.message))
+  );
+}
+
+async function readRequestBodyBytes(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let completed = false;
+  try {
+    while (true) {
+      const { done, value } = await promiseAgainstAbort(
+        () => reader.read(),
+        signal,
+      );
+      signal.throwIfAborted();
+      if (done) {
+        completed = true;
+        break;
+      }
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_HTTP_REQUEST_COMPRESSED_BYTES) {
+        throw new HttpRequestBodyTooLargeError("compressed");
+      }
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    if (completed) {
+      try {
+        reader.releaseLock();
+      } catch {
+        // Normal EOF has no pending read in conforming runtimes.
+      }
+    } else {
+      cancelAndReleaseReader(reader, signal.reason);
+    }
+  }
+}
 
 /**
  * Content-encodings the gateway can decode AND re-encode. `x-gzip` is the
@@ -69,23 +141,98 @@ export function isSupportedEncoding(enc: string | null | undefined): boolean {
  * encoding or on malformed compressed input.
  */
 export function decompressBody(bytes: Uint8Array, encoding: string): Buffer {
-  switch (encoding) {
-    case "zstd":
-      return zstdDecompressSync(bytes);
-    case "gzip":
-    case "x-gzip":
-      return gunzipSync(bytes);
-    case "br":
-      return brotliDecompressSync(bytes);
-    case "deflate":
-      // Some clients send raw DEFLATE (no zlib header); fall back to it.
-      try {
-        return inflateSync(bytes);
-      } catch {
-        return inflateRawSync(bytes);
+  const opts = { maxOutputLength: MAX_HTTP_REQUEST_DECOMPRESSED_BYTES };
+  try {
+    switch (encoding) {
+      case "zstd":
+        return zstdDecompressSync(bytes, opts);
+      case "gzip":
+      case "x-gzip":
+        return gunzipSync(bytes, opts);
+      case "br":
+        return brotliDecompressSync(bytes, opts);
+      case "deflate":
+        // Some clients send raw DEFLATE (no zlib header); fall back to it.
+        try {
+          return inflateSync(bytes, opts);
+        } catch (error) {
+          if (outputLimitError(error)) throw error;
+          return inflateRawSync(bytes, opts);
+        }
+      default:
+        throw new Error(`Unsupported Content-Encoding: ${encoding}`);
+    }
+  } catch (error) {
+    if (outputLimitError(error)) {
+      throw new HttpRequestBodyTooLargeError("decompressed");
+    }
+    throw error;
+  }
+}
+
+function hasZlibWrapper(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < 2) return false;
+  const cmf = bytes[0];
+  const flg = bytes[1];
+  return (cmf & 0x0f) === 8 && ((cmf << 8) + flg) % 31 === 0;
+}
+
+async function decompressRequestBody(
+  bytes: Uint8Array,
+  encoding: string,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  signal.throwIfAborted();
+  const decoder = (() => {
+    switch (encoding) {
+      case "zstd":
+        return createZstdDecompress();
+      case "gzip":
+      case "x-gzip":
+        return createGunzip();
+      case "br":
+        return createBrotliDecompress();
+      case "deflate":
+        // RFC 1950's two-byte wrapper is self-identifying. Selecting once
+        // avoids decoding hostile input twice through inflate + raw fallback.
+        return hasZlibWrapper(bytes) ? createInflate() : createInflateRaw();
+      default:
+        throw new Error(`Unsupported Content-Encoding: ${encoding}`);
+    }
+  })();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const onAbort = (): void => {
+    const reason =
+      signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException("request aborted", "AbortError");
+    decoder.destroy(reason);
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    decoder.end(bytes);
+    for await (const value of decoder) {
+      signal.throwIfAborted();
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      total += chunk.byteLength;
+      if (total > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
+        throw new HttpRequestBodyTooLargeError("decompressed");
       }
-    default:
-      throw new Error(`Unsupported Content-Encoding: ${encoding}`);
+      chunks.push(chunk);
+    }
+    signal.throwIfAborted();
+    return Buffer.concat(chunks, total);
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error instanceof HttpRequestBodyTooLargeError) throw error;
+    if (outputLimitError(error)) {
+      throw new HttpRequestBodyTooLargeError("decompressed");
+    }
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    decoder.destroy();
   }
 }
 
@@ -121,14 +268,27 @@ export function compressBody(
  * - Unsupported encoding → throws (callers map this to a 400, same as a
  *   JSON parse failure).
  */
-export async function decodeRequestBody(req: Request): Promise<string> {
+export async function decodeRequestBody(
+  req: Request,
+  signal: AbortSignal = req.signal,
+): Promise<string> {
   const enc = normalizeRequestEncoding(req.headers.get("content-encoding"));
-  if (!enc) return req.text();
+  if (!enc) {
+    if (!req.body) return "";
+    const bytes = await readRequestBodyBytes(req.body, signal);
+    if (bytes.byteLength > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
+      throw new HttpRequestBodyTooLargeError("decompressed");
+    }
+    return bytes.toString("utf8");
+  }
   if (!isSupportedEncoding(enc)) {
     throw new Error(`Unsupported Content-Encoding: ${enc}`);
   }
-  const bytes = new Uint8Array(await req.arrayBuffer());
-  return decompressBody(bytes, enc).toString("utf8");
+  if (!req.body) return "";
+  const bytes = await readRequestBodyBytes(req.body, signal);
+  const decompressed = await decompressRequestBody(bytes, enc, signal);
+  signal.throwIfAborted();
+  return decompressed.toString("utf8");
 }
 
 /**

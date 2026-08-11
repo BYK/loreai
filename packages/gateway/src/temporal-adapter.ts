@@ -72,7 +72,7 @@ function hashBlocks(
         );
         break;
       case "tool_result":
-        h.update(`tool_result:${block.toolUseId}:`);
+        h.update(`tool_result:${block.toolUseId}:${block.toolName ?? ""}:`);
         hashBlocks(h, block.content);
         break;
       case "opaque": {
@@ -161,6 +161,7 @@ function contentBlockToPart(
         messageID,
         type: "tool",
         tool: "result",
+        ...(block.toolName ? { toolName: block.toolName } : undefined),
         callID: block.toolUseId,
         // Propagate the error flag so downstream consumers (structured
         // tool-call trace, gradient) can distinguish failed tool results.
@@ -320,7 +321,12 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
   // --- Pass 1: Index all tool_result parts by callID ---
   const resultsByCallID = new Map<
     string,
-    { output: string; blocks?: LoreContentBlock[]; isError: boolean }
+    {
+      output: string;
+      blocks?: LoreContentBlock[];
+      toolName?: string;
+      isError: boolean;
+    }
   >();
 
   for (const msg of messages) {
@@ -330,12 +336,14 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
           resultsByCallID.set(part.callID, {
             output: part.state.output,
             blocks: part.state.blocks,
+            toolName: part.toolName,
             isError: false,
           });
         } else if (part.state.status === "error") {
           resultsByCallID.set(part.callID, {
             output: part.state.error,
             blocks: part.state.blocks,
+            toolName: part.toolName,
             isError: true,
           });
         }
@@ -354,6 +362,7 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
       ) {
         const result = resultsByCallID.get(part.callID);
         if (result) {
+          if (result.toolName) part.toolName = result.toolName;
           part.state = result.isError
             ? {
                 status: "error",

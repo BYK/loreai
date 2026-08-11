@@ -6,6 +6,13 @@ import { fetchArgUrl } from "./helpers/fetch-url";
 // globalThis.fetch (upstreamFetch is the gateway's own upstream path and does
 // not go through globalThis.fetch, so mocking it is the reliable seam).
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
+vi.mock("@sentry/bun", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@sentry/bun")>();
+  return {
+    ...actual,
+    captureException: vi.fn(actual.captureException),
+  };
+});
 vi.mock("../src/worker-health", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/worker-health")>();
   return {
@@ -20,13 +27,16 @@ vi.mock("../src/worker-health", async (importOriginal) => {
 
 import {
   backoffMs,
+  parseRetryAfter,
   abortableSleep,
   readWorkerResponseText,
+  describeEmptyWorkerResponse,
   createGatewayLLMClient,
   getLastWorkerError,
   maxRetriesFor,
   normalizeOpenAIUsage,
   resolveWorkerProtocol,
+  resolveTarget,
   AUTH_ERROR_CODES,
   isTemperatureUnsupportedModel,
   isAnthropicClaudeModel,
@@ -56,10 +66,14 @@ import {
 import {
   markWorkerIncapable,
   markFreeModelsDataBlocked,
+  getWorkerHealth,
+  isWorkerIncapable,
   _resetForTest as _resetWorkerHealthForTest,
 } from "../src/worker-health";
 import { captureSessionHeaders, captureBillingPrefix } from "../src/cch";
 import { _setTestVertexTokenProvider } from "../src/vertex-auth";
+import * as Sentry from "@sentry/bun";
+import { log } from "@loreai/core";
 
 // Claude Code billing-header system prompt — marks a session as an OAuth
 // billing session so worker calls replay its sniffed anthropic-beta header.
@@ -101,6 +115,33 @@ describe("backoffMs — with Retry-After", () => {
     expect(backoffMs(0, 60_000)).toBe(32_000);
     expect(backoffMs(2, 300_000)).toBe(32_000);
   });
+
+  test("rejects negative and non-finite Retry-After values", () => {
+    for (const value of ["-1", "Infinity", "-Infinity"]) {
+      expect(
+        parseRetryAfter(
+          new Response(null, { headers: { "retry-after": value } }),
+        ),
+      ).toBeNull();
+    }
+    expect(backoffMs(0, -1)).toBe(0);
+    expect(backoffMs(0, Number.POSITIVE_INFINITY)).toBeGreaterThanOrEqual(500);
+  });
+
+  test("rejects unsafe multiplied values and caps finite server hints", () => {
+    expect(
+      parseRetryAfter(
+        new Response(null, {
+          headers: { "retry-after": String(Number.MAX_SAFE_INTEGER) },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseRetryAfter(
+        new Response(null, { headers: { "retry-after": "1000000" } }),
+      ),
+    ).toBe(32_000);
+  });
 });
 
 describe("abortableSleep", () => {
@@ -119,6 +160,14 @@ describe("abortableSleep", () => {
 });
 
 describe("readWorkerResponseText", () => {
+  test("keeps diagnostic error bodies capped at 64 KiB", async () => {
+    const text = await readWorkerResponseText(
+      new Response("x".repeat(70 * 1024), { status: 500 }),
+    );
+
+    expect(Buffer.byteLength(text)).toBe(64 * 1024);
+  });
+
   test("cancels a stalled worker error body on abort", async () => {
     const controller = new AbortController();
     let cancelled = false;
@@ -140,6 +189,51 @@ describe("readWorkerResponseText", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(cancelled).toBe(true);
   });
+
+  test("replacement-decodes malformed diagnostic UTF-8", async () => {
+    for (const chunks of [
+      [new Uint8Array([0xff])],
+      [new Uint8Array([0xe2]), new Uint8Array([0x28, 0xa1])],
+    ]) {
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(chunk);
+            controller.close();
+          },
+        }),
+      );
+      expect(await readWorkerResponseText(response)).toContain("�");
+    }
+  });
+
+  test("replacement-decodes a multibyte code point split by the 64 KiB cap", async () => {
+    const prefix = new TextEncoder().encode("x".repeat(64 * 1024 - 1));
+    const euro = new TextEncoder().encode("€");
+    const text = await readWorkerResponseText(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(prefix);
+            controller.enqueue(euro);
+            controller.close();
+          },
+        }),
+      ),
+    );
+    expect(text.endsWith("�")).toBe(true);
+  });
+});
+
+test("empty worker diagnostics never include response values", () => {
+  const sentinel = "must-not-leak-empty-secret";
+  const diagnostic = describeEmptyWorkerResponse({
+    metadata: { token: sentinel },
+    choices: [{ message: { content: "" }, finish_reason: sentinel }],
+  });
+
+  expect(diagnostic).not.toContain(sentinel);
+  expect(diagnostic).toContain("finish_reason=unknown");
 });
 
 // ---------------------------------------------------------------------------
@@ -316,6 +410,52 @@ describe("AUTH_ERROR_CODES", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveWorkerProtocol", () => {
+  test("target resolution never maps OpenAI-family protocols to Anthropic", () => {
+    const upstreams = {
+      anthropic: "https://api.anthropic.com",
+      openai: "https://api.openai.com",
+    };
+    for (const protocol of ["openai", "openai-responses"] as const) {
+      expect(
+        resolveTarget(upstreams, protocol, undefined, "openai"),
+      ).toMatchObject({
+        url: "https://api.openai.com",
+        protocol,
+      });
+      expect(
+        resolveTarget(
+          { ...upstreams, openai: "" },
+          protocol,
+          undefined,
+          "openai",
+        ),
+      ).toMatchObject({ routeUnavailable: true, url: "" });
+      expect(
+        resolveTarget(
+          upstreams,
+          protocol,
+          "https://api.anthropic.com",
+          "openai",
+          "openai",
+        ),
+      ).toMatchObject({ routeUnavailable: true, url: "" });
+    }
+    expect(
+      resolveTarget(
+        upstreams,
+        "anthropic",
+        "https://api.openai.com",
+        "anthropic",
+        "anthropic",
+      ),
+    ).toMatchObject({ routeUnavailable: true, url: "" });
+    expect(
+      resolveTarget(upstreams, "anthropic", undefined, "openai"),
+    ).toMatchObject({ routeUnavailable: true, url: "" });
+    expect(
+      resolveTarget(upstreams, "openai", undefined, "anthropic"),
+    ).toMatchObject({ routeUnavailable: true, url: "" });
+  });
   // Priority 1: explicit protocol from UpstreamSnapshot wins
   test("explicit 'anthropic' wins over route table", () => {
     expect(resolveWorkerProtocol("openai", "anthropic")).toBe("anthropic");
@@ -793,6 +933,10 @@ describe("createGatewayLLMClient.prompt", () => {
             output_index: 0,
             delta: "reply",
           }) +
+          event("response.output_item.done", {
+            output_index: 0,
+            item: { type: "message", id: "msg_worker", role: "assistant" },
+          }) +
           event("response.completed", {
             response: {
               id: "resp_worker",
@@ -816,6 +960,7 @@ describe("createGatewayLLMClient.prompt", () => {
       workerID: "lore-distill",
       // Session upstream override (chatgpt backend) + responses protocol hint.
       upstreamUrl: "https://chatgpt.com/backend-api",
+      upstreamProviderID: "openai-codex",
       protocol: "openai-responses",
     });
 
@@ -839,6 +984,641 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(distillationCost?.cost).toBeGreaterThan(0);
   });
 
+  test("OpenAI worker ignores an unproven ChatGPT backend URL", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "direct OpenAI reply" } }],
+          model: "gpt-4o-mini",
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sessionID, providerID) =>
+        providerID === "openai"
+          ? { scheme: "api-key", value: "openai-key" }
+          : null,
+      { providerID: "openai", modelID: "gpt-4o-mini" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-cross-provider-chatgpt",
+      workerID: "lore-distill",
+      model: { providerID: "openai", modelID: "gpt-4o-mini" },
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      protocol: "openai-responses",
+    });
+
+    expect(text).toBe("direct OpenAI reply");
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      "https://api.openai.com/v1/chat/completions",
+    );
+  });
+
+  test("ChatGPT worker preserves a valid Responses stream larger than 64 KiB", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    const deltas = Array.from({ length: 900 }, () => "x".repeat(80));
+    const output = deltas.join("");
+    const wire =
+      event("response.created", {
+        response: { id: "resp_large", model: "gpt-5.6-sol" },
+      }) +
+      event("response.output_item.added", {
+        output_index: 0,
+        item: { type: "message", id: "msg_large", role: "assistant" },
+      }) +
+      deltas
+        .map((delta) =>
+          event("response.output_text.delta", { output_index: 0, delta }),
+        )
+        .join("") +
+      event("response.output_item.done", {
+        output_index: 0,
+        item: { type: "message", id: "msg_large", role: "assistant" },
+      }) +
+      event("response.completed", {
+        response: {
+          id: "resp_large",
+          model: "gpt-5.6-sol",
+          status: "completed",
+          usage: { input_tokens: 12, output_tokens: 16_000 },
+        },
+      });
+    const bytes = new TextEncoder().encode(wire);
+    let offset = 0;
+    captureSessionHeaders("sess-chatgpt-large-worker", {
+      "chatgpt-account-id": "acct-large-worker",
+      originator: "opencode",
+    });
+    mockFetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (offset >= bytes.byteLength) {
+              controller.close();
+              return;
+            }
+            controller.enqueue(bytes.subarray(offset, offset + 257));
+            offset += 257;
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sessionID, providerID) =>
+        providerID === "openai"
+          ? { scheme: "bearer", value: "jwt-token" }
+          : null,
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-chatgpt-large-worker",
+      workerID: "lore-distill",
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      upstreamProviderID: "openai",
+      protocol: "openai-responses",
+    });
+
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    const headers = mockFetch.mock.calls[0][1]?.headers as Record<
+      string,
+      string
+    >;
+    expect(headers["chatgpt-account-id"]).toBe("acct-large-worker");
+    expect(text).toBe(output);
+  });
+
+  test("sniffs a mislabeled SSE stream with a leading comment one byte at a time", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    const bytes = new TextEncoder().encode(
+      ": upstream heartbeat\n\n" +
+        event("response.output_item.added", {
+          output_index: 0,
+          item: { type: "message", id: "msg_comment", role: "assistant" },
+        }) +
+        event("response.output_text.delta", {
+          output_index: 0,
+          delta: "comment-safe",
+        }) +
+        event("response.output_item.done", {
+          output_index: 0,
+          item: { type: "message", id: "msg_comment", role: "assistant" },
+        }) +
+        event("response.completed", {
+          response: { status: "completed" },
+        }),
+    );
+    let offset = 0;
+    mockFetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (offset === bytes.byteLength) {
+              controller.close();
+              return;
+            }
+            controller.enqueue(bytes.subarray(offset, ++offset));
+          },
+        }),
+        { headers: { "content-type": "application/octet-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-chatgpt-comment-sniff",
+      workerID: "lore-distill",
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      upstreamProviderID: "openai",
+      protocol: "openai-responses",
+    });
+
+    expect(text).toBe("comment-safe");
+  });
+
+  test("ChatGPT worker stops and cancels after a valid terminal event", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    const wire =
+      event("response.output_item.added", {
+        output_index: 0,
+        item: { type: "message", id: "msg_terminal", role: "assistant" },
+      }) +
+      event("response.output_text.delta", {
+        output_index: 0,
+        delta: "finished",
+      }) +
+      event("response.output_item.done", {
+        output_index: 0,
+        item: { type: "message", id: "msg_terminal", role: "assistant" },
+      }) +
+      event("response.completed", {
+        response: { status: "completed" },
+      });
+    let cancelled = false;
+    mockFetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(wire + "x".repeat(4 * 1024 * 1024)),
+            );
+          },
+          cancel() {
+            cancelled = true;
+            return new Promise(() => {});
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+
+    let timeoutID: ReturnType<typeof setTimeout> | undefined = undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      timeoutID = setTimeout(() => resolve("timeout"), 1000);
+    });
+    const result = await Promise.race([
+      client.prompt("system", "user", {
+        sessionID: "sess-chatgpt-terminal",
+        workerID: "lore-distill",
+        upstreamUrl: "https://chatgpt.com/backend-api",
+        upstreamProviderID: "openai",
+        protocol: "openai-responses",
+      }),
+      timeout,
+    ]);
+    if (timeoutID) clearTimeout(timeoutID);
+
+    expect(result).toBe("finished");
+    expect(cancelled).toBe(true);
+  });
+
+  test("aborting a stalled ChatGPT worker read cancels the source", async () => {
+    const controller = new AbortController();
+    let cancelled = false;
+    mockFetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            return new Promise(() => {});
+          },
+          cancel() {
+            cancelled = true;
+            return new Promise(() => {});
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+    const pending = client.prompt("system", "user", {
+      sessionID: "sess-chatgpt-abort",
+      workerID: "lore-distill",
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      upstreamProviderID: "openai",
+      protocol: "openai-responses",
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelled).toBe(true);
+  });
+
+  test("oversized ChatGPT worker stream fails explicitly without partial output", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    mockFetch.mockResolvedValue(
+      new Response(
+        event("response.output_item.added", {
+          output_index: 0,
+          item: { type: "message", id: "msg_oversized", role: "assistant" },
+        }) +
+          event("response.output_text.delta", {
+            output_index: 0,
+            delta: "x".repeat(4 * 1024 * 1024),
+          }) +
+          event("response.completed", {
+            response: { status: "completed" },
+          }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-chatgpt-oversized",
+      workerID: "lore-distill",
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      upstreamProviderID: "openai",
+      protocol: "openai-responses",
+    });
+
+    expect(result).toBeNull();
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      "sess-chatgpt-oversized",
+      "lore-distill",
+      "upstream-error",
+    );
+    expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toContain(
+      "worker response exceeded 4194304 byte limit",
+    );
+  });
+
+  test("strict worker SSE rejects the finite frame ceiling before protocol parsing", async () => {
+    // One comment frame makes body sniffing select SSE; 100,000 following blank
+    // frames cross the shared foreground/worker ceiling using only ~200 KiB.
+    // This reproduces the millions-of-delimiters shape without allocating
+    // millions of frames in the regression itself.
+    const wire = ": heartbeat\n\n" + "\n\n".repeat(100_000);
+    mockFetch.mockResolvedValue(
+      new Response(wire, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-worker-frame-limit",
+      workerID: "lore-distill",
+      upstreamProviderID: "openai",
+      protocol: "openai-responses",
+    });
+
+    expect(result).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(getLastWorkerError()).toContain(
+      "SSE stream exceeded 100000 frame limit",
+    );
+  });
+
+  test("oversized first JSON chunk fails before body decoding", async () => {
+    const oversized = new TextEncoder().encode(
+      `{"value":"${"x".repeat(4 * 1024 * 1024)}"}`,
+    );
+    mockFetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(oversized);
+            controller.close();
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-chatgpt-oversized-json",
+      workerID: "lore-distill",
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      upstreamProviderID: "openai",
+      protocol: "openai-responses",
+    });
+
+    expect(result).toBeNull();
+    expect(getLastWorkerError()).toContain(
+      "worker response exceeded 4194304 byte limit",
+    );
+  });
+
+  test("malformed JSON diagnostics do not expose response content", async () => {
+    const sentinel = "must-not-leak-worker-secret";
+    mockFetch.mockResolvedValue(
+      new Response(`{"token":"${sentinel}"`, {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-4o-mini" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-malformed-json",
+      workerID: "lore-distill",
+      upstreamProviderID: "openai",
+      protocol: "openai",
+    });
+
+    expect(result).toBeNull();
+    expect(getLastWorkerError()).toContain("malformed JSON body");
+    expect(getLastWorkerError()).not.toContain(sentinel);
+  });
+
+  test("non-object JSON response roots are upstream errors", async () => {
+    mockFetch.mockResolvedValue(
+      new Response("[]", {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-4o-mini" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-array-json-root",
+      workerID: "lore-distill",
+      upstreamProviderID: "openai",
+      protocol: "openai",
+    });
+
+    expect(result).toBeNull();
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      "sess-array-json-root",
+      "lore-distill",
+      "upstream-error",
+    );
+    expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toContain(
+      "worker JSON response root must be an object",
+    );
+  });
+
+  test.each(["failed", "cancelled", "in_progress"])(
+    "non-streaming Responses status %s is an upstream error",
+    async (status) => {
+      mockFetch.mockResolvedValue(
+        new Response(JSON.stringify({ status, output_text: "partial" }), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "test-key" }),
+        { providerID: "openai", modelID: "gpt-5.6-sol" },
+      );
+
+      const result = await client.prompt("system", "user", {
+        sessionID: `sess-json-status-${status}`,
+        workerID: "lore-distill",
+        upstreamProviderID: "openai",
+        protocol: "openai-responses",
+      });
+
+      expect(result).toBeNull();
+      expect(recordWorkerFailure).toHaveBeenCalledWith(
+        `sess-json-status-${status}`,
+        "lore-distill",
+        "upstream-error",
+      );
+      expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+      expect(getLastWorkerError()).toContain(
+        "non-success Responses response status",
+      );
+    },
+  );
+
+  test("openai-responses applies reasoning headroom above a 256-token request", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({ status: "completed", output_text: "reasoned" }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+    await expect(
+      client.prompt("system", "user", {
+        sessionID: "sess-responses-headroom",
+        workerID: "lore-distill",
+        upstreamProviderID: "openai",
+        protocol: "openai-responses",
+        maxTokens: 256,
+        reasoningEffort: "high",
+      }),
+    ).resolves.toBe("reasoned");
+    const body = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string) as {
+      max_output_tokens: number;
+      reasoning?: { effort?: string };
+    };
+    expect(body.max_output_tokens).toBeGreaterThan(256);
+    expect(body.reasoning).toEqual({ effort: "high" });
+  });
+
+  test("retries an empty incomplete Responses body truncated at max_output_tokens", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+            output: [],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ status: "completed", output_text: "retried" }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+    await expect(
+      client.prompt("system", "user", {
+        sessionID: "sess-responses-incomplete",
+        workerID: "lore-distill",
+        upstreamProviderID: "openai",
+        protocol: "openai-responses",
+        maxTokens: 256,
+      }),
+    ).resolves.toBe("retried");
+    const budgets = mockFetch.mock.calls.map((call) => {
+      const body = JSON.parse(call[1]?.body as string) as {
+        max_output_tokens: number;
+      };
+      return body.max_output_tokens;
+    });
+    expect(budgets).toHaveLength(2);
+    expect(budgets[1]).toBeGreaterThan(budgets[0]);
+  });
+
+  test("does not length-retry a non-budget incomplete Responses reason", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "incomplete",
+          incomplete_details: { reason: "content_filter" },
+          output: [],
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+    await expect(
+      client.prompt("system", "user", {
+        sessionID: "sess-responses-incomplete-filter",
+        workerID: "lore-distill",
+        upstreamProviderID: "openai",
+        protocol: "openai-responses",
+        maxTokens: 256,
+      }),
+    ).resolves.toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("caller abort settles when the injected worker fetch never resolves", async () => {
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    mockFetch.mockImplementation(() => {
+      markStarted?.();
+      return new Promise(() => {});
+    });
+    const controller = new AbortController();
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-4o-mini" },
+    );
+    const pending = client.prompt("system", "user", {
+      sessionID: "sess-hostile-fetch",
+      workerID: "lore-distill",
+      upstreamProviderID: "openai",
+      protocol: "openai",
+      signal: controller.signal,
+    });
+    await started;
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("public openai-responses workers retain strict output lifecycle validation", async () => {
+    const stream =
+      `event: response.output_item.done\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: {
+          type: "message",
+          id: "msg_public_done_only",
+          content: [{ type: "output_text", text: "must not escape" }],
+        },
+      })}\n\n` +
+      `event: response.completed\ndata: ${JSON.stringify({
+        response: { status: "completed" },
+      })}\n\n`;
+    mockFetch.mockResolvedValue(
+      new Response(stream, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "test-key" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-public-responses-strict",
+      workerID: "lore-distill",
+      upstreamProviderID: "openai",
+      protocol: "openai-responses",
+    });
+
+    expect(result).toBeNull();
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      "sess-public-responses-strict",
+      "lore-distill",
+      "upstream-error",
+    );
+    expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toContain("malformed Responses stream event");
+  });
+
   test.each([
     [
       "failed terminal",
@@ -850,14 +1630,45 @@ describe("createGatewayLLMClient.prompt", () => {
     [
       "malformed event",
       "event: response.output_text.delta\ndata: {not-json}\n\n",
-      "malformed response.output_text.delta event",
+      "malformed Responses stream event",
+    ],
+    [
+      "malformed provided output index",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: "0",
+        item: { type: "message", id: "msg_bad_output_index" },
+      })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "malformed provided content index",
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        item_id: "msg_bad_content_index",
+        content_index: "0",
+        delta: "partial",
+      })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "malformed provided incomplete reason",
+      `event: response.incomplete\ndata: ${JSON.stringify({
+        response: {
+          status: "incomplete",
+          incomplete_details: { reason: 1 },
+        },
+      })}\n\n`,
+      "malformed Responses terminal event",
     ],
     [
       "missing terminal",
-      `event: response.output_text.delta\ndata: ${JSON.stringify({
+      `event: response.output_item.added\ndata: ${JSON.stringify({
         output_index: 0,
-        delta: "partial",
-      })}\n\n`,
+        item: { type: "message", id: "msg_partial", role: "assistant" },
+      })}\n\n` +
+        `event: response.output_text.delta\ndata: ${JSON.stringify({
+          output_index: 0,
+          delta: "partial",
+        })}\n\n`,
       "missing terminal response status",
     ],
     [
@@ -865,14 +1676,231 @@ describe("createGatewayLLMClient.prompt", () => {
       `event: response.completed\ndata: ${JSON.stringify({
         response: { status: "failed" },
       })}\n\n`,
-      "terminal response status=failed",
+      "Responses terminal reported failure",
     ],
     [
       "cancelled status",
       `event: response.completed\ndata: ${JSON.stringify({
         response: { status: "cancelled" },
       })}\n\n`,
-      "terminal response status=cancelled",
+      "Responses terminal reported failure",
+    ],
+    [
+      "nonterminal completed status",
+      `event: response.completed\ndata: ${JSON.stringify({
+        response: { status: "in_progress" },
+      })}\n\n`,
+      "Responses terminal event/status mismatch",
+    ],
+    [
+      "nonterminal response.done status",
+      `event: response.done\ndata: ${JSON.stringify({
+        response: { status: "in_progress" },
+      })}\n\n`,
+      "Responses terminal event/status mismatch",
+    ],
+    [
+      "contradictory incomplete status",
+      `event: response.incomplete\ndata: ${JSON.stringify({
+        response: { status: "completed" },
+      })}\n\n`,
+      "Responses terminal event/status mismatch",
+    ],
+    [
+      "out-of-order delta",
+      `event: response.output_text.delta\ndata: ${JSON.stringify({
+        output_index: 0,
+        delta: "partial",
+      })}\n\n` +
+        `event: response.completed\ndata: ${JSON.stringify({
+          response: { status: "completed" },
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "duplicate added item",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_first" },
+      })}\n\n` +
+        `event: response.output_item.added\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_duplicate" },
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "added item without type",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { id: "msg_missing_type" },
+      })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "done item type mismatch",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_mismatch" },
+      })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "function_call", id: "fc_mismatch" },
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "terminal without response object",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_no_response" },
+      })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_no_response" },
+        })}\n\n` +
+        "event: response.completed\ndata: {}\n\n",
+      "malformed Responses terminal event",
+    ],
+    [
+      "done item ID mismatch",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_added" },
+      })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_different" },
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "payload type mismatch",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: { type: "message", id: "msg_type_mismatch" },
+      })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "delta item ID mismatch",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_expected" },
+      })}\n\n` +
+        `event: response.output_text.delta\ndata: ${JSON.stringify({
+          output_index: 0,
+          item_id: "msg_other",
+          delta: "cross-wired",
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "response ID mismatch",
+      `event: response.created\ndata: ${JSON.stringify({
+        response: { id: "resp_created" },
+      })}\n\n` +
+        `event: response.output_item.added\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_response_mismatch" },
+        })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_response_mismatch" },
+        })}\n\n` +
+        `event: response.completed\ndata: ${JSON.stringify({
+          response: { id: "resp_terminal", status: "completed" },
+        })}\n\n`,
+      "malformed Responses terminal event",
+    ],
+    [
+      "delta after item done",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_already_done" },
+      })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_already_done" },
+        })}\n\n` +
+        `event: response.output_text.delta\ndata: ${JSON.stringify({
+          output_index: 0,
+          delta: "late",
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "regressing sequence number",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        sequence_number: 2,
+        output_index: 0,
+        item: { type: "message", id: "msg_sequence" },
+      })}\n\n` +
+        `event: response.output_text.delta\ndata: ${JSON.stringify({
+          sequence_number: 1,
+          output_index: 0,
+          delta: "late sequence",
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "content part after item done",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_content_done" },
+      })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_content_done" },
+        })}\n\n` +
+        `event: response.content_part.added\ndata: ${JSON.stringify({
+          output_index: 0,
+          item_id: "msg_content_done",
+          content_index: 0,
+          part: { type: "output_text", text: "late" },
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "completed response.created status",
+      `event: response.created\ndata: ${JSON.stringify({
+        response: { id: "resp_bad_created", status: "completed" },
+      })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "changing content index",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_content_index" },
+      })}\n\n` +
+        `event: response.output_text.delta\ndata: ${JSON.stringify({
+          output_index: 0,
+          content_index: 0,
+          delta: "text",
+        })}\n\n` +
+        `event: response.output_text.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          content_index: 1,
+          text: "text",
+        })}\n\n`,
+      "malformed Responses stream event",
+    ],
+    [
+      "unterminated terminal frame",
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        output_index: 0,
+        item: { type: "message", id: "msg_unterminated" },
+      })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          output_index: 0,
+          item: { type: "message", id: "msg_unterminated" },
+        })}\n\n` +
+        `event: response.completed\ndata: ${JSON.stringify({
+          response: { status: "completed" },
+        })}`,
+      "unterminated SSE event at EOF",
     ],
   ])(
     "openai-codex worker classifies %s SSE as upstream-error, never model incapability",
@@ -908,9 +1936,51 @@ describe("createGatewayLLMClient.prompt", () => {
     },
   );
 
-  test.each(["response.done", "response.incomplete"])(
-    "openai-codex worker accepts %s with CRLF framing",
-    async (terminalEvent) => {
+  test.each([
+    [
+      "terminal status",
+      (sentinel: string) =>
+        `event: response.completed\ndata: ${JSON.stringify({
+          response: { status: sentinel },
+        })}\n\n`,
+    ],
+    [
+      "event name",
+      (sentinel: string) => `event: ${sentinel}\ndata: {not-json}\n\n`,
+    ],
+  ])("does not expose an untrusted Responses %s", async (_case, streamFor) => {
+    const sentinel = "must-not-leak-provider-secret";
+    mockFetch.mockResolvedValue(
+      new Response(streamFor(sentinel), {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "jwt-token" }),
+      { providerID: "openai-codex", modelID: "gpt-5.1-codex-mini" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      sessionID: "sess-codex-secret-safe",
+      workerID: "lore-distill",
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      protocol: "openai-responses",
+    });
+
+    expect(text).toBeNull();
+    expect(getLastWorkerError()).not.toContain(sentinel);
+  });
+
+  test.each([
+    ["response.done", "completed"],
+    ["response.done", undefined],
+    ["response.incomplete", "incomplete"],
+    ["response.completed", "incomplete"],
+    ["response.completed", undefined],
+  ])(
+    "openai-codex worker accepts %s with status %s and CRLF framing",
+    async (terminalEvent, terminalStatus) => {
       const event = (type: string, data: Record<string, unknown>) =>
         `event: ${type}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`;
       mockFetch.mockResolvedValue(
@@ -923,13 +1993,16 @@ describe("createGatewayLLMClient.prompt", () => {
               output_index: 0,
               delta: "codex CRLF reply",
             }) +
-            event(terminalEvent, {
-              response: {
-                status:
-                  terminalEvent === "response.incomplete"
-                    ? "incomplete"
-                    : "completed",
+            event("response.output_item.done", {
+              output_index: 0,
+              item: {
+                type: "message",
+                id: "msg_worker",
+                role: "assistant",
               },
+            }) +
+            event(terminalEvent, {
+              response: { status: terminalStatus },
             }),
           { headers: { "content-type": "text/event-stream" } },
         ),
@@ -1079,11 +2152,136 @@ describe("createGatewayLLMClient.prompt", () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       const [url, init] = mockFetch.mock.calls[0];
       expect(url).toContain(":rawPredict");
-      expect((init!.headers as Record<string, string>).Authorization).toBe(
-        "Bearer test-vertex-token",
-      );
+      const headers = init?.headers as Record<string, string> | undefined;
+      expect(headers?.Authorization).toBe("Bearer test-vertex-token");
     } finally {
       _setTestVertexTokenProvider(null);
+    }
+  });
+
+  test("caller abort covers stalled initial Vertex token minting", async () => {
+    _setTestVertexTokenProvider(() => new Promise(() => {}));
+    const controller = new AbortController();
+    try {
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => null,
+        { providerID: "vertex", modelID: "claude-opus-4-8" },
+        { vertexProject: "test-vertex-project" },
+      );
+      const pending = client.prompt("system", "user", {
+        protocol: "vertex",
+        upstreamProviderID: "vertex",
+        upstreamUrl: "https://aiplatform.googleapis.com",
+        signal: controller.signal,
+      });
+      controller.abort(new DOMException("cancelled", "AbortError"));
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      _setTestVertexTokenProvider(null);
+    }
+  });
+
+  test("overall deadline covers stalled initial Vertex token minting", async () => {
+    vi.useFakeTimers();
+    _setTestVertexTokenProvider(() => new Promise(() => {}));
+    try {
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => null,
+        { providerID: "vertex", modelID: "claude-opus-4-8" },
+        { vertexProject: "test-vertex-project" },
+      );
+      const pending = client.prompt("system", "user", {
+        protocol: "vertex",
+        upstreamProviderID: "vertex",
+        upstreamUrl: "https://aiplatform.googleapis.com",
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
+      await vi.advanceTimersByTimeAsync(300_000);
+      await rejected;
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      _setTestVertexTokenProvider(null);
+      vi.useRealTimers();
+    }
+  });
+
+  test("caller abort covers a stalled Vertex retry rebuild", async () => {
+    let tokenCalls = 0;
+    _setTestVertexTokenProvider(() => {
+      tokenCalls++;
+      return tokenCalls === 1
+        ? Promise.resolve("first-token")
+        : new Promise(() => {});
+    });
+    mockFetch.mockResolvedValue(
+      new Response('{"error":{"message":"temperature is unsupported"}}', {
+        status: 400,
+      }),
+    );
+    const controller = new AbortController();
+    try {
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => null,
+        { providerID: "vertex", modelID: "claude-opus-4-8" },
+        { vertexProject: "test-vertex-project" },
+      );
+      const pending = client.prompt("system", "user", {
+        protocol: "vertex",
+        upstreamProviderID: "vertex",
+        upstreamUrl: "https://aiplatform.googleapis.com",
+        temperature: 0.5,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(tokenCalls).toBe(2));
+      controller.abort(new DOMException("cancelled", "AbortError"));
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      _setTestVertexTokenProvider(null);
+    }
+  });
+
+  test("overall deadline surfaces during a stalled Vertex retry rebuild", async () => {
+    vi.useFakeTimers();
+    let tokenCalls = 0;
+    _setTestVertexTokenProvider(() => {
+      tokenCalls++;
+      return tokenCalls === 1
+        ? Promise.resolve("first-token")
+        : new Promise(() => {});
+    });
+    mockFetch.mockResolvedValue(
+      new Response('{"error":{"message":"temperature is unsupported"}}', {
+        status: 400,
+      }),
+    );
+    try {
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => null,
+        { providerID: "vertex", modelID: "claude-opus-4-8" },
+        { vertexProject: "test-vertex-project" },
+      );
+      const pending = client.prompt("system", "user", {
+        protocol: "vertex",
+        upstreamProviderID: "vertex",
+        upstreamUrl: "https://aiplatform.googleapis.com",
+        temperature: 0.5,
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
+      await vi.advanceTimersByTimeAsync(300_000);
+      await rejected;
+      expect(tokenCalls).toBe(2);
+    } finally {
+      _setTestVertexTokenProvider(null);
+      vi.useRealTimers();
     }
   });
 
@@ -1118,6 +2316,22 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  test("rejects an Anthropic API key on the OpenAI Responses protocol", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-secret" }),
+      { providerID: "openai", modelID: "gpt-5.6-sol" },
+    );
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-distill",
+        upstreamProviderID: "openai",
+        protocol: "openai-responses",
+      }),
+    ).resolves.toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   test("returns null on a 401 auth error (no credential change)", async () => {
     mockFetch.mockResolvedValue(
       new Response(JSON.stringify({ error: { message: "unauthorized" } }), {
@@ -1137,6 +2351,416 @@ describe("createGatewayLLMClient.prompt", () => {
 
     expect(text).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("worker provider body validation", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const upstreams = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    _resetWorkerHealthForTest();
+    vi.mocked(recordWorkerFailure).mockClear();
+    vi.mocked(recordEmptyWorkerResponse).mockClear();
+    vi.mocked(markWorkerIncapable).mockClear();
+  });
+
+  afterEach(() => {
+    mockFetch.mockReset();
+    clearAllCosts();
+    _resetWorkerHealthForTest();
+  });
+
+  const cases: Array<{
+    name: string;
+    providerID: string;
+    modelID: string;
+    protocol: "anthropic" | "openai" | "openai-responses" | "gemini";
+    upstreamUrl: string;
+    contentType?: string;
+    body: string;
+  }> = [
+    {
+      name: "Anthropic SSE negative usage",
+      providerID: "anthropic",
+      modelID: "claude-test",
+      protocol: "anthropic" as const,
+      upstreamUrl: "https://api.anthropic.com",
+      contentType: "text/event-stream",
+      body:
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"claude-test","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":-1,"output_tokens":0}}}\n\n' +
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\n' +
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    },
+    {
+      name: "Anthropic negative usage",
+      providerID: "anthropic",
+      modelID: "claude-test",
+      protocol: "anthropic" as const,
+      upstreamUrl: "https://api.anthropic.com",
+      body: JSON.stringify({
+        content: [{ type: "text", text: "must not escape" }],
+        model: "claude-test",
+        stop_reason: "end_turn",
+        usage: { input_tokens: -1, output_tokens: 1 },
+      }),
+    },
+    {
+      name: "Anthropic Infinity-equivalent usage",
+      providerID: "anthropic",
+      modelID: "claude-test",
+      protocol: "anthropic" as const,
+      upstreamUrl: "https://api.anthropic.com",
+      body: '{"content":[{"type":"text","text":"must not escape"}],"stop_reason":"end_turn","usage":{"input_tokens":1e309,"output_tokens":1}}',
+    },
+    {
+      name: "Anthropic malformed later block",
+      providerID: "anthropic",
+      modelID: "claude-test",
+      protocol: "anthropic" as const,
+      upstreamUrl: "https://api.anthropic.com",
+      body: JSON.stringify({
+        content: [{ type: "text", text: "must not escape" }, null],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    },
+    {
+      name: "OpenAI SSE cache sum overflow without prompt_tokens",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai" as const,
+      upstreamUrl: "https://api.openai.com",
+      contentType: "text/event-stream",
+      body: `data: ${JSON.stringify({
+        choices: [
+          {
+            delta: { content: "must not escape" },
+            finish_reason: "stop",
+          },
+        ],
+        usage: {
+          completion_tokens: 1,
+          prompt_tokens_details: {
+            cached_tokens: Number.MAX_SAFE_INTEGER,
+            cache_write_tokens: 1,
+          },
+        },
+      })}\n\n`,
+    },
+    {
+      name: "OpenAI cache sum overflow without prompt_tokens",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai" as const,
+      upstreamUrl: "https://api.openai.com",
+      body: JSON.stringify({
+        choices: [
+          { message: { content: "must not escape" }, finish_reason: "stop" },
+        ],
+        usage: {
+          completion_tokens: 1,
+          prompt_tokens_details: {
+            cached_tokens: Number.MAX_SAFE_INTEGER,
+            cache_write_tokens: 1,
+          },
+        },
+      }),
+    },
+    {
+      name: "OpenAI unsafe usage",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai" as const,
+      upstreamUrl: "https://api.openai.com",
+      body: JSON.stringify({
+        choices: [{ message: { content: "must not escape" } }],
+        usage: { prompt_tokens: Number.MAX_SAFE_INTEGER + 1 },
+      }),
+    },
+    {
+      name: "OpenAI malformed later choice",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai" as const,
+      upstreamUrl: "https://api.openai.com",
+      body: JSON.stringify({
+        choices: [{ message: { content: "must not escape" } }, null],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+    },
+    {
+      name: "Responses SSE unsafe usage sum",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai-responses" as const,
+      upstreamUrl: "https://api.openai.com",
+      contentType: "text/event-stream",
+      body:
+        `event: response.output_item.added\ndata: ${JSON.stringify({
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "message", id: "msg_usage", role: "assistant" },
+        })}\n\n` +
+        `event: response.output_text.delta\ndata: ${JSON.stringify({
+          type: "response.output_text.delta",
+          output_index: 0,
+          delta: "must not escape",
+        })}\n\n` +
+        `event: response.output_item.done\ndata: ${JSON.stringify({
+          type: "response.output_item.done",
+          output_index: 0,
+          item: { type: "message", id: "msg_usage", role: "assistant" },
+        })}\n\n` +
+        `event: response.completed\ndata: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            status: "completed",
+            usage: { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1 },
+          },
+        })}\n\n`,
+    },
+    {
+      name: "Responses unsafe usage",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai-responses" as const,
+      upstreamUrl: "https://api.openai.com",
+      body: JSON.stringify({
+        status: "completed",
+        output_text: "must not escape",
+        usage: { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1 },
+      }),
+    },
+    {
+      name: "Responses malformed details",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai-responses" as const,
+      upstreamUrl: "https://api.openai.com",
+      body: JSON.stringify({
+        status: "completed",
+        output_text: "must not escape",
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          input_tokens_details: [],
+        },
+      }),
+    },
+    {
+      name: "Responses malformed later output item",
+      providerID: "openai",
+      modelID: "gpt-test",
+      protocol: "openai-responses" as const,
+      upstreamUrl: "https://api.openai.com",
+      body: JSON.stringify({
+        status: "completed",
+        output_text: "must not escape",
+        output: [
+          { type: "message", content: [{ type: "output_text", text: "ok" }] },
+          null,
+        ],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    },
+    {
+      name: "Gemini SSE candidates plus thoughts overflow",
+      providerID: "google",
+      modelID: "gemini-test",
+      protocol: "gemini" as const,
+      upstreamUrl: "https://generativelanguage.googleapis.com",
+      contentType: "text/event-stream",
+      body: `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: { parts: [{ text: "must not escape" }] },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1,
+          candidatesTokenCount: Number.MAX_SAFE_INTEGER,
+          thoughtsTokenCount: 1,
+        },
+      })}\n\n`,
+    },
+    {
+      name: "Gemini candidates plus thoughts overflow",
+      providerID: "google",
+      modelID: "gemini-test",
+      protocol: "gemini" as const,
+      upstreamUrl: "https://generativelanguage.googleapis.com",
+      body: JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "must not escape" }] } }],
+        usageMetadata: {
+          promptTokenCount: 1,
+          candidatesTokenCount: Number.MAX_SAFE_INTEGER,
+          thoughtsTokenCount: 1,
+        },
+      }),
+    },
+    {
+      name: "Gemini malformed usage container",
+      providerID: "google",
+      modelID: "gemini-test",
+      protocol: "gemini" as const,
+      upstreamUrl: "https://generativelanguage.googleapis.com",
+      body: JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "must not escape" }] } }],
+        usageMetadata: [],
+      }),
+    },
+    {
+      name: "Gemini malformed candidates container",
+      providerID: "google",
+      modelID: "gemini-test",
+      protocol: "gemini" as const,
+      upstreamUrl: "https://generativelanguage.googleapis.com",
+      body: JSON.stringify({
+        candidates: { content: { parts: [{ text: "must not escape" }] } },
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      }),
+    },
+    {
+      name: "Gemini malformed later candidate",
+      providerID: "google",
+      modelID: "gemini-test",
+      protocol: "gemini" as const,
+      upstreamUrl: "https://generativelanguage.googleapis.com",
+      body: JSON.stringify({
+        candidates: [
+          { content: { parts: [{ text: "must not escape" }] } },
+          null,
+        ],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      }),
+    },
+  ];
+
+  test.each(cases)(
+    "$name is upstream-error with no cost or incapability mutation",
+    async ({
+      name,
+      providerID,
+      modelID,
+      protocol,
+      upstreamUrl,
+      contentType,
+      body,
+    }) => {
+      const sessionID = `sess-malformed-${name.replaceAll(/\W+/g, "-")}`;
+      mockFetch.mockResolvedValue(
+        new Response(body, {
+          headers: { "content-type": contentType ?? "application/json" },
+        }),
+      );
+      const client = createGatewayLLMClient(
+        upstreams,
+        () => ({
+          scheme: "api-key",
+          value: providerID === "anthropic" ? "sk-ant-test" : "test-key",
+        }),
+        { providerID, modelID },
+      );
+
+      const result = await client.prompt("system", "user", {
+        sessionID,
+        workerID: "lore-distill",
+        upstreamProviderID: providerID,
+        upstreamUrl,
+        protocol,
+      });
+
+      expect(result).toBeNull();
+      expect(recordWorkerFailure).toHaveBeenCalledWith(
+        sessionID,
+        "lore-distill",
+        "upstream-error",
+      );
+      expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+      expect(markWorkerIncapable).not.toHaveBeenCalled();
+      expect(isWorkerIncapable(providerID, modelID, "lore-distill")).toBe(
+        false,
+      );
+      expect(getSessionCosts(sessionID)).toBeNull();
+      expect(getWorkerHealth()).toContainEqual(
+        expect.objectContaining({
+          sessionID,
+          failureCount: 1,
+          reasons: ["upstream-error"],
+        }),
+      );
+    },
+  );
+
+  test("three valid empty Anthropic refusals never mark the real worker path incapable", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const wire =
+      event("message_start", {
+        message: {
+          id: "msg_refusal",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "claude-test",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }) +
+      event("message_delta", {
+        delta: { stop_reason: "refusal", stop_sequence: null },
+        usage: { output_tokens: 0 },
+      }) +
+      event("message_stop", {});
+    mockFetch.mockImplementation(
+      async () =>
+        new Response(wire, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const client = createGatewayLLMClient(
+      upstreams,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+    const opts = {
+      sessionID: "sess-three-refusals",
+      workerID: "lore-distill" as const,
+      protocol: "anthropic" as const,
+      upstreamProviderID: "anthropic",
+      upstreamUrl: "https://api.anthropic.com",
+    };
+
+    for (let i = 0; i < 3; i++) {
+      await expect(client.prompt("system", "user", opts)).resolves.toBeNull();
+    }
+
+    expect(recordEmptyWorkerResponse).toHaveBeenCalledTimes(3);
+    expect(recordEmptyWorkerResponse).toHaveBeenCalledWith(
+      "anthropic",
+      "claude-test",
+      "content_filter",
+      "lore-distill",
+    );
+    expect(markWorkerIncapable).not.toHaveBeenCalled();
+    expect(isWorkerIncapable("anthropic", "claude-test", "lore-distill")).toBe(
+      false,
+    );
+    expect(getWorkerHealth()).toContainEqual(
+      expect.objectContaining({
+        sessionID: "sess-three-refusals",
+        failureCount: 3,
+        reasons: ["no-response"],
+      }),
+    );
   });
 });
 
@@ -1636,6 +3260,33 @@ describe("cross-provider collusion guard", () => {
       "sess-xprov-2",
       "lore-distill",
       expect.stringMatching(/cross-provider|no-auth/),
+    );
+  });
+
+  test("never sends a route-less provider credential to an unproven override", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "route-less-provider"
+          ? { scheme: "api-key", value: "EXFILTRATED_PROVIDER_SECRET" }
+          : null,
+      { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+    );
+
+    const result = await client.prompt("system", "user", {
+      sessionID: "sess-unproven-route-less",
+      workerID: "lore-distill",
+      model: { providerID: "route-less-provider", modelID: "custom-model" },
+      upstreamUrl: "https://attacker.invalid/provider",
+      protocol: "anthropic",
+    });
+
+    expect(result).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockRecordFailure).toHaveBeenCalledWith(
+      "sess-unproven-route-less",
+      "lore-distill",
+      "cross-provider",
     );
   });
 
@@ -3160,6 +4811,7 @@ describe("worker empty-response retry on budget truncation (finish_reason: lengt
       "",
       "data: [DONE]",
       "",
+      "",
     ].join("\n");
     return new Response(body, {
       status: 200,
@@ -3773,6 +5425,62 @@ describe("worker 400 model-not-supported: fall back to a same-provider backup", 
     expect(mockMarkPaused).not.toHaveBeenCalled();
   });
 
+  test("gpt-5.6 Responses fallback rebuilds the route for Chat Completions", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(UNSUPPORTED_400, {
+          status: 400,
+          statusText: "Bad Request",
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(OK_200, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "gho_test" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    );
+
+    const text = await client.prompt("system", "user", {
+      workerID: "lore-import",
+      sessionID: "sess-route-fallback",
+      protocol: "openai",
+      upstreamProviderID: "github-copilot",
+      upstreamUrl: "https://api.githubcopilot.com",
+      maxTokens: 256,
+      reasoningEffort: "high",
+    });
+
+    expect(text).toBe("worked on the backup");
+    expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toContain("/responses");
+    expect(fetchArgUrl(mockFetch.mock.calls[1]?.[0])).toContain(
+      "/chat/completions",
+    );
+    const firstBody = JSON.parse(
+      mockFetch.mock.calls[0]?.[1]?.body as string,
+    ) as Record<string, unknown>;
+    const secondBody = JSON.parse(
+      mockFetch.mock.calls[1]?.[1]?.body as string,
+    ) as Record<string, unknown>;
+    expect(firstBody.model).toBe("gpt-5.6-luna");
+    expect(firstBody.input).toBeDefined();
+    expect(firstBody.messages).toBeUndefined();
+    expect(firstBody.max_output_tokens).toEqual(expect.any(Number));
+    expect(firstBody.max_output_tokens as number).toBeGreaterThan(256);
+    expect(secondBody.model).toBe("gpt-5-mini");
+    expect(secondBody.messages).toBeDefined();
+    expect(secondBody.input).toBeUndefined();
+    expect(secondBody.max_completion_tokens).toEqual(expect.any(Number));
+    expect(secondBody.max_completion_tokens as number).toBeGreaterThan(256);
+  });
+
   test("a provider with NO backup list surfaces the 400 (no swap, one call)", async () => {
     mockFetch.mockResolvedValue(
       new Response(
@@ -3917,4 +5625,601 @@ describe("worker 400 model-not-supported: fall back to a same-provider backup", 
       else process.env.LORE_MAX_RETRIES = prev;
     }
   });
+});
+
+describe("worker transport lifecycle remediation", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const originalRetries = process.env.LORE_MAX_RETRIES;
+  const UPSTREAMS = {
+    anthropic: "https://api.anthropic.com",
+    openai: "https://api.openai.com",
+  };
+  const success = () =>
+    new Response(
+      JSON.stringify({
+        content: [{ type: "text", text: "recovered" }],
+        model: "claude-test",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+  const client = () =>
+    createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+  beforeEach(() => {
+    process.env.LORE_MAX_RETRIES = "1";
+    mockFetch.mockReset();
+    vi.mocked(recordWorkerFailure).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    mockFetch.mockReset();
+    if (originalRetries === undefined) delete process.env.LORE_MAX_RETRIES;
+    else process.env.LORE_MAX_RETRIES = originalRetries;
+  });
+
+  test("retries a post-header reader failure and succeeds without intermediate health failure", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull() {
+              return Promise.reject(new Error("provider reset secret"));
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(success());
+
+    const pending = client().prompt("system", "user", {
+      sessionID: "sess-reader-retry",
+      workerID: "lore-distill",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(pending).resolves.toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(recordWorkerFailure).not.toHaveBeenCalled();
+  });
+
+  test("does not retry a non-SSE JSON reset after partial body bytes", async () => {
+    let delivered = false;
+    mockFetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!delivered) {
+              delivered = true;
+              controller.enqueue(
+                new TextEncoder().encode(
+                  '{"content":[{"type":"text","text":"partial',
+                ),
+              );
+              return;
+            }
+            return Promise.reject(new Error("JSON body reset secret"));
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await expect(
+      client().prompt("system", "user", {
+        sessionID: "sess-json-partial-reset",
+        workerID: "lore-distill",
+      }),
+    ).resolves.toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(recordWorkerFailure).toHaveBeenCalledTimes(1);
+  });
+
+  test("retries body inactivity, never awaits cancel, and succeeds on the second response", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    let cancelled = false;
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull() {
+              return new Promise(() => {});
+            },
+            cancel() {
+              cancelled = true;
+              return new Promise(() => {});
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      )
+      .mockResolvedValueOnce(success());
+
+    const pending = client().prompt("system", "user", {
+      sessionID: "sess-inactivity-retry",
+      workerID: "lore-distill",
+    });
+    await vi.advanceTimersByTimeAsync(120_500);
+
+    await expect(pending).resolves.toBe("recovered");
+    expect(cancelled).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(recordWorkerFailure).not.toHaveBeenCalled();
+  });
+
+  test("retries a reset after bookkeeping metadata but before semantic content", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const metadata =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n';
+    let delivered = false;
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!delivered) {
+                delivered = true;
+                controller.enqueue(new TextEncoder().encode(metadata));
+                return;
+              }
+              return Promise.reject(new Error("reset after metadata"));
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      )
+      .mockResolvedValueOnce(success());
+
+    const pending = client().prompt("system", "user", {
+      sessionID: "sess-metadata-reset",
+      workerID: "lore-distill",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(pending).resolves.toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("does not retry a reset after partial semantic content", async () => {
+    const partial =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n';
+    let delivered = false;
+    mockFetch.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!delivered) {
+              delivered = true;
+              controller.enqueue(new TextEncoder().encode(partial));
+              return;
+            }
+            return Promise.reject(new Error("reset after partial text"));
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+
+    await expect(
+      client().prompt("system", "user", {
+        sessionID: "sess-semantic-reset",
+        workerID: "lore-distill",
+      }),
+    ).resolves.toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(recordWorkerFailure).toHaveBeenCalledTimes(1);
+  });
+
+  const streamModes = [
+    {
+      name: "Anthropic",
+      providerID: "anthropic",
+      protocol: "anthropic",
+      upstreamUrl: "https://api.anthropic.com",
+      metadata:
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+      semantic:
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n' +
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n',
+      success: {
+        content: [{ type: "text", text: "recovered" }],
+        model: "claude-test",
+      },
+    },
+    {
+      name: "OpenAI Chat",
+      providerID: "openai",
+      protocol: "openai",
+      upstreamUrl: "https://api.openai.com",
+      metadata: 'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
+      semantic:
+        'data: {"choices":[{"delta":{"role":"assistant","content":"partial"}}]}\n\n',
+      success: {
+        choices: [{ message: { content: "recovered" }, finish_reason: "stop" }],
+      },
+    },
+    {
+      name: "public Responses",
+      providerID: "openai",
+      protocol: "openai-responses",
+      upstreamUrl: "https://api.openai.com",
+      metadata:
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"r","model":"gpt-test","status":"in_progress"}}\n\n',
+      semantic:
+        'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg"}}\n\n' +
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"partial"}\n\n',
+      success: {
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg-recovered-public",
+            content: [{ type: "output_text", text: "recovered" }],
+          },
+        ],
+      },
+    },
+    {
+      name: "Codex Responses",
+      providerID: "openai-codex",
+      protocol: "openai-responses",
+      upstreamUrl: "https://chatgpt.com/backend-api",
+      metadata:
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"r","model":"gpt-test","status":"in_progress"}}\n\n',
+      semantic:
+        'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"type":"message","id":"msg"}}\n\n' +
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg","delta":"partial"}\n\n',
+      success: {
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg-recovered-codex",
+            content: [{ type: "output_text", text: "recovered" }],
+          },
+        ],
+      },
+    },
+    {
+      name: "Gemini",
+      providerID: "google",
+      protocol: "gemini",
+      upstreamUrl: "https://generativelanguage.googleapis.com",
+      metadata: 'data: {"responseId":"r","modelVersion":"gemini-test"}\n\n',
+      semantic:
+        'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}\n\n',
+      success: {
+        candidates: [
+          {
+            content: { role: "model", parts: [{ text: "recovered" }] },
+            finishReason: "STOP",
+          },
+        ],
+      },
+    },
+  ] as const;
+
+  const resettingStream = (wire: string): Response => {
+    let delivered = false;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!delivered) {
+            delivered = true;
+            controller.enqueue(new TextEncoder().encode(wire));
+            return;
+          }
+          return Promise.reject(new Error("provider reset"));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  test.each(streamModes)("$name retries metadata-only resets", async (mode) => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    mockFetch
+      .mockResolvedValueOnce(resettingStream(mode.metadata))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(mode.success), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const modeClient = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({
+        scheme: "api-key",
+        value: mode.providerID === "anthropic" ? "sk-ant-test" : "sk-test",
+      }),
+      { providerID: mode.providerID, modelID: `${mode.providerID}-test` },
+    );
+    const pending = modeClient.prompt("system", "user", {
+      protocol: mode.protocol,
+      upstreamProviderID: mode.providerID,
+      upstreamUrl: mode.upstreamUrl,
+      sessionID: `metadata-${mode.providerID}`,
+      workerID: "lore-distill",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(pending).resolves.toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(streamModes)(
+    "$name does not retry after semantic stream content",
+    async (mode) => {
+      mockFetch.mockResolvedValue(resettingStream(mode.semantic));
+      const modeClient = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({
+          scheme: "api-key",
+          value: mode.providerID === "anthropic" ? "sk-ant-test" : "sk-test",
+        }),
+        { providerID: mode.providerID, modelID: `${mode.providerID}-test` },
+      );
+      await expect(
+        modeClient.prompt("system", "user", {
+          protocol: mode.protocol,
+          upstreamProviderID: mode.providerID,
+          upstreamUrl: mode.upstreamUrl,
+          sessionID: `semantic-${mode.providerID}`,
+          workerID: "lore-distill",
+        }),
+      ).resolves.toBeNull();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test.each(["id: stream-1\n\n", "retry: 1000\n\n"])(
+    "sniffs SSE with a leading %s field on a mislabeled response",
+    async (prefix) => {
+      const wire =
+        prefix +
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n' +
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"sniffed"}}\n\n' +
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n' +
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+      mockFetch.mockResolvedValue(new Response(wire));
+      await expect(
+        client().prompt("system", "user", {
+          sessionID: "sess-sse-field-prefix",
+          workerID: "lore-distill",
+        }),
+      ).resolves.toBe("sniffed");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("cancels a transient HTTP body before retry without awaiting cancel", async () => {
+    vi.useFakeTimers();
+    let cancelled = false;
+    let call = 0;
+    mockFetch.mockImplementation(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelled = true;
+              return new Promise(() => {});
+            },
+          }),
+          { status: 500, headers: { "retry-after": "0" } },
+        );
+      }
+      expect(cancelled).toBe(true);
+      return success();
+    });
+
+    const pending = client().prompt("system", "user", {
+      sessionID: "sess-transient-cancel",
+      workerID: "lore-distill",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(pending).resolves.toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  test("one 300-second deadline covers fetch, retry delay, and every attempt", async () => {
+    vi.useFakeTimers();
+    let cancelled = false;
+    mockFetch.mockImplementation(
+      async () =>
+        new Promise<Response>((resolve) => {
+          setTimeout(
+            () =>
+              resolve(
+                new Response(
+                  new ReadableStream<Uint8Array>({
+                    cancel() {
+                      cancelled = true;
+                    },
+                  }),
+                  { status: 500, headers: { "retry-after": "32" } },
+                ),
+              ),
+            299_000,
+          );
+        }),
+    );
+
+    const pending = client().prompt("system", "user", {
+      sessionID: "sess-overall-deadline",
+      workerID: "lore-distill",
+    });
+    const rejected = expect(pending).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    await vi.advanceTimersByTimeAsync(299_000);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(cancelled).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("the deadline settles a fetch implementation that ignores AbortSignal", async () => {
+    vi.useFakeTimers();
+    mockFetch.mockImplementation(() => new Promise(() => {}));
+    const pending = client().prompt("system", "user", {
+      sessionID: "sess-hostile-deadline",
+      workerID: "lore-distill",
+    });
+    const rejected = expect(pending).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    await vi.advanceTimersByTimeAsync(300_000);
+    await rejected;
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects an oversized serialized worker request before fetch", async () => {
+    // Raw source stays within the derived worst-case preflight cap, but JSON
+    // expands every NUL to `\u0000`, crossing the 4 MiB serialized wire cap.
+    const worstCaseSourceBytes = Math.floor((4 * 1024 * 1024) / 6);
+    const result = await client().prompt(
+      "",
+      "\u0000".repeat(worstCaseSourceBytes),
+      {
+        sessionID: "sess-request-cap",
+        workerID: "lore-distill",
+      },
+    );
+
+    expect(result).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toBe(
+      "worker request exceeded 4194304 byte limit",
+    );
+  });
+
+  test("rejects source prompts above the derived JSON expansion cap before serialization", async () => {
+    const sourceLimit = Math.floor((4 * 1024 * 1024) / 6);
+    const result = await client().prompt("", "x".repeat(sourceLimit + 1), {
+      sessionID: "sess-prompt-source-cap",
+      workerID: "lore-distill",
+    });
+
+    expect(result).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toBe(
+      `worker prompt exceeded ${sourceLimit} byte limit`,
+    );
+  });
+});
+
+describe("worker diagnostic redaction", () => {
+  const mockFetch = vi.mocked(upstreamFetch);
+  const originalRetries = process.env.LORE_MAX_RETRIES;
+  const capturedLogs: string[] = [];
+  const silentSink = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    captureException: () => {},
+  };
+
+  beforeEach(() => {
+    process.env.LORE_MAX_RETRIES = "1";
+    capturedLogs.length = 0;
+    mockFetch.mockReset();
+    vi.mocked(Sentry.captureException).mockClear();
+    log.registerSink({
+      info: (message) => capturedLogs.push(message),
+      warn: (message) => capturedLogs.push(message),
+      error: (message) => capturedLogs.push(message),
+      captureException: (error) =>
+        capturedLogs.push(
+          error instanceof Error ? error.message : String(error),
+        ),
+    });
+  });
+
+  afterEach(() => {
+    log.registerSink(silentSink);
+    mockFetch.mockReset();
+    if (originalRetries === undefined) delete process.env.LORE_MAX_RETRIES;
+    else process.env.LORE_MAX_RETRIES = originalRetries;
+  });
+
+  test.each([400, 401, 429, 500])(
+    "HTTP %i exposes neither provider body nor URL credentials/path/query in diagnostics",
+    async (status) => {
+      const bodySentinel = `BODY_SECRET_${status}\nFORGED_LOG_LINE_${status}`;
+      const urlSentinels = [
+        "URL_USER_SECRET",
+        "URL_PASSWORD_SECRET",
+        "private-worker-path",
+        "QUERY_SECRET",
+      ];
+      const upstreamUrl =
+        "https://URL_USER_SECRET:URL_PASSWORD_SECRET@example.com/" +
+        "private-worker-path?token=QUERY_SECRET";
+      mockFetch.mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({ error: { code: status, message: bodySentinel } }),
+            { status, headers: { "retry-after": "0" } },
+          ),
+      );
+      const client = createGatewayLLMClient(
+        {
+          anthropic: "https://api.anthropic.com",
+          openai: "https://api.openai.com",
+        },
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-test" },
+      );
+
+      await expect(
+        client.prompt("system", "user", {
+          sessionID: `sess-redaction-${status}`,
+          workerID: "lore-distill",
+          upstreamUrl,
+          upstreamProviderID: "anthropic",
+          protocol: "anthropic",
+        }),
+      ).resolves.toBeNull();
+
+      const logDump = capturedLogs.join("\n");
+      const sentryDump = vi
+        .mocked(Sentry.captureException)
+        .mock.calls.map(([error, context]) =>
+          [error instanceof Error ? error.message : String(error), context]
+            .map((value) =>
+              typeof value === "string" ? value : JSON.stringify(value),
+            )
+            .join(" "),
+        )
+        .join("\n");
+      const lastError = getLastWorkerError() ?? "";
+
+      for (const dump of [logDump, sentryDump, lastError]) {
+        expect(dump).not.toContain(bodySentinel);
+        expect(dump).not.toContain("FORGED_LOG_LINE");
+        for (const sentinel of urlSentinels) {
+          expect(dump).not.toContain(sentinel);
+        }
+      }
+      expect(logDump).toContain("https://example.com");
+    },
+  );
 });

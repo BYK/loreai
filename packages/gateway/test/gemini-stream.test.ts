@@ -27,6 +27,373 @@ async function readGeminiSSEFrame(
 // ---------------------------------------------------------------------------
 
 describe("accumulateGeminiSSEStream", () => {
+  test("strict mode rejects ambiguous repeated same-name calls without IDs", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { functionCall: { name: "lookup", args: { a: 1 } } },
+                    { functionCall: { name: "lookup", args: { a: 2 } } },
+                  ],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        ]),
+        { strict: true, stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
+  });
+
+  test("strict mode preserves independent same-name calls with distinct IDs", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: "call-a",
+                      name: "lookup",
+                      args: { a: 1 },
+                    },
+                  },
+                  {
+                    functionCall: {
+                      id: "call-b",
+                      name: "lookup",
+                      args: { a: 2 },
+                    },
+                  },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true, stopAtTerminal: true },
+    );
+
+    expect(response.content).toEqual([
+      { type: "tool_use", id: "call-a", name: "lookup", input: { a: 1 } },
+      { type: "tool_use", id: "call-b", name: "lookup", input: { a: 2 } },
+    ]);
+  });
+  test("strict mode permits the same tool identity in independent candidates", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              index: 0,
+              content: {
+                parts: [
+                  { functionCall: { id: "shared", name: "lookup", args: {} } },
+                ],
+              },
+              finishReason: "STOP",
+            },
+            {
+              index: 1,
+              content: {
+                parts: [
+                  { functionCall: { id: "shared", name: "lookup", args: {} } },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true, stopAtTerminal: true },
+    );
+    expect(response.content).toEqual([
+      { type: "tool_use", id: "shared", name: "lookup", input: {} },
+    ]);
+  });
+  test("stops at finishReason without waiting for transport EOF", async () => {
+    let cancelled = false;
+    const terminal = {
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "done" }] },
+          finishReason: "STOP",
+        },
+      ],
+    };
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(`data: ${JSON.stringify(terminal)}\n\n`),
+          );
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise(() => {});
+        },
+      }),
+    );
+
+    const resp = await accumulateGeminiSSEStream(response, {
+      stopAtTerminal: true,
+      strict: true,
+    });
+
+    expect(resp.content).toEqual([{ type: "text", text: "done" }]);
+    expect(cancelled).toBe(true);
+    expect(response.body?.locked).toBe(false);
+  });
+
+  test("takes cumulative usage from the finishReason frame and cancels transport tail", async () => {
+    let cancelled = false;
+    const terminal = {
+      candidates: [
+        {
+          content: { parts: [{ text: "done" }] },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 2 },
+    };
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(`data: ${JSON.stringify(terminal)}\n\n`),
+          );
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+    const result = await accumulateGeminiSSEStream(response, {
+      strict: true,
+      stopAtTerminal: true,
+    });
+    expect(result.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
+    expect(cancelled).toBe(true);
+  });
+
+  test("does not stop on FINISH_REASON_UNSPECIFIED", async () => {
+    const res = sse([
+      {
+        candidates: [
+          {
+            content: { role: "model", parts: [{ text: "Hel" }] },
+            finishReason: "FINISH_REASON_UNSPECIFIED",
+          },
+        ],
+      },
+      {
+        candidates: [
+          {
+            content: { role: "model", parts: [{ text: "lo" }] },
+            finishReason: "STOP",
+          },
+        ],
+      },
+    ]);
+
+    const resp = await accumulateGeminiSSEStream(res, {
+      stopAtTerminal: true,
+      strict: true,
+    });
+
+    expect(resp.content).toEqual([{ type: "text", text: "Hello" }]);
+  });
+
+  test("rejects EOF before finishReason in strict worker mode", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([{ candidates: [{ content: { parts: [{ text: "partial" }] } }] }]),
+        { stopAtTerminal: true, strict: true },
+      ),
+    ).rejects.toThrow("missing Gemini finishReason terminal");
+  });
+
+  test("rejects an unterminated terminal frame in strict worker mode", async () => {
+    const terminal = {
+      candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+    };
+    await expect(
+      accumulateGeminiSSEStream(
+        new Response(`data: ${JSON.stringify(terminal)}`),
+        { stopAtTerminal: true, strict: true },
+      ),
+    ).rejects.toThrow("unterminated SSE event at EOF");
+  });
+
+  test("rejects malformed JSON before a valid terminal", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        new Response(
+          `data: {not-json}\n\ndata: ${JSON.stringify({
+            candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+          })}\n\n`,
+        ),
+        { stopAtTerminal: true, strict: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
+  });
+
+  test("rejects malformed consumed part fields in strict worker mode", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              { content: { parts: [{ text: 42 }] }, finishReason: "STOP" },
+            ],
+          },
+        ]),
+        { stopAtTerminal: true, strict: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
+  });
+
+  test("rejects contradictory parts and malformed usage", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: "visible",
+                      functionCall: { name: "tool", args: 7 },
+                    },
+                  ],
+                },
+                finishReason: "STOP",
+              },
+            ],
+            usageMetadata: { promptTokenCount: -1 },
+          },
+        ]),
+        { stopAtTerminal: true, strict: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
+  });
+
+  test.each([
+    [
+      "candidates plus thoughts overflow",
+      {
+        promptTokenCount: 1,
+        candidatesTokenCount: Number.MAX_SAFE_INTEGER,
+        thoughtsTokenCount: 1,
+      },
+    ],
+    [
+      "cache exceeds prompt subset",
+      { promptTokenCount: 1, cachedContentTokenCount: 2 },
+    ],
+    [
+      "malformed modality details",
+      { promptTokenCount: 1, promptTokensDetails: [null] },
+    ],
+  ])("rejects %s", async (_case, usageMetadata) => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              { content: { parts: [{ text: "x" }] }, finishReason: "STOP" },
+            ],
+            usageMetadata,
+          },
+        ]),
+        { stopAtTerminal: true, strict: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
+  });
+
+  test("validates every candidate while preserving first-candidate extraction", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              { content: { parts: [{ text: "first" }] }, finishReason: "STOP" },
+              { content: { parts: [null] }, index: 1 },
+            ],
+          },
+        ]),
+        { stopAtTerminal: true, strict: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
+
+    const result = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            { content: { parts: [{ text: "first" }] }, finishReason: "STOP" },
+            { content: { parts: [{ text: "ignored" }] }, index: 1 },
+          ],
+        },
+      ]),
+      { stopAtTerminal: true, strict: true },
+    );
+    expect(result.content).toEqual([{ type: "text", text: "first" }]);
+  });
+
+  test("accepts nullable optional usage detail arrays", async () => {
+    const result = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            { content: { parts: [{ text: "ok" }] }, finishReason: "STOP" },
+          ],
+          usageMetadata: {
+            promptTokenCount: 1,
+            candidatesTokenCount: 1,
+            promptTokensDetails: null,
+            candidatesTokensDetails: null,
+          },
+        },
+      ]),
+      { stopAtTerminal: true, strict: true },
+    );
+    expect(result.content).toEqual([{ type: "text", text: "ok" }]);
+  });
+
+  test("preserves a prompt-level native block reason", async () => {
+    const result = await accumulateGeminiSSEStream(
+      sse([{ promptFeedback: { blockReason: "SAFETY" } }]),
+      { stopAtTerminal: true, strict: true },
+    );
+
+    expect(result.content).toEqual([]);
+    expect(result.stopReason).toBe("SAFETY");
+  });
+
+  test("preserves a candidate-level native safety reason", async () => {
+    const result = await accumulateGeminiSSEStream(
+      sse([
+        { candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }] },
+      ]),
+      { stopAtTerminal: true, strict: true },
+    );
+
+    expect(result.content).toEqual([]);
+    expect(result.stopReason).toBe("SAFETY");
+  });
+
   test("concatenates text deltas across frames + final usage/finishReason", async () => {
     const res = sse([
       {
@@ -132,6 +499,99 @@ describe("accumulateGeminiSSEStream", () => {
     ]);
     const resp = await accumulateGeminiSSEStream(res);
     expect(resp.usage).toEqual({ inputTokens: 10, outputTokens: 42 });
+  });
+
+  test("rejects totalTokenCount contradictory to prompt, candidates, thoughts, and tool tokens", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              {
+                content: { role: "model", parts: [{ text: "done" }] },
+                finishReason: "STOP",
+              },
+            ],
+            usageMetadata: {
+              promptTokenCount: 2,
+              candidatesTokenCount: 3,
+              thoughtsTokenCount: 4,
+              toolUsePromptTokenCount: 5,
+              cachedContentTokenCount: 1,
+              totalTokenCount: 15,
+            },
+          },
+        ]),
+        { strict: true, stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
+  });
+
+  test("accepts exact Gemini totals without double-counting cached prompt tokens", async () => {
+    const result = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: "done" }] },
+              finishReason: "STOP",
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: 100,
+            cachedContentTokenCount: 80,
+            candidatesTokenCount: 20,
+            thoughtsTokenCount: 10,
+            toolUsePromptTokenCount: 5,
+            totalTokenCount: 135,
+          },
+        },
+      ]),
+      { strict: true, stopAtTerminal: true },
+    );
+    expect(result.usage).toMatchObject({
+      inputTokens: 25,
+      cacheReadInputTokens: 80,
+      outputTokens: 30,
+    });
+  });
+
+  test("counts no-cache Gemini tool-use prompt tokens exactly once", async () => {
+    const result = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            { content: { parts: [{ text: "done" }] }, finishReason: "STOP" },
+          ],
+          usageMetadata: {
+            promptTokenCount: 100,
+            candidatesTokenCount: 20,
+            toolUsePromptTokenCount: 5,
+            totalTokenCount: 125,
+          },
+        },
+      ]),
+      { strict: true, stopAtTerminal: true },
+    );
+    expect(result.usage).toMatchObject({
+      inputTokens: 105,
+      outputTokens: 20,
+    });
+    expect(result.usage?.cacheReadInputTokens).toBeUndefined();
+  });
+
+  test("rejects totalTokenCount when a required parent count is absent", async () => {
+    await expect(
+      accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 2, totalTokenCount: 2 },
+          },
+        ]),
+        { strict: true, stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Gemini stream event");
   });
 
   test("SAFETY finishReason preserved verbatim", async () => {

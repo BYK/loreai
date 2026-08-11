@@ -28,6 +28,32 @@ let cachedProject: string | null = null;
 // credentials (CI has none). `null` restores real ADC behavior.
 let testTokenProvider: (() => Promise<string>) | null = null;
 
+async function withAbort<T>(
+  start: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return start();
+  signal.throwIfAborted();
+  const promise = start();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+    const settle = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      operation();
+    };
+    const onAbort = (): void => settle(() => reject(signal.reason));
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      (value) => settle(() => resolve(value)),
+      (error) => settle(() => reject(error)),
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
 /** @internal test-only: inject (or clear with null) a fake access-token source. */
 export function _setTestVertexTokenProvider(
   fn: (() => Promise<string>) | null,
@@ -47,12 +73,15 @@ function getAuth(): GoogleAuth {
  * unavailable (the request path surfaces it rather than sending an unauthorized
  * call upstream).
  */
-export async function getVertexAccessToken(): Promise<string> {
-  if (testTokenProvider) return testTokenProvider();
+export async function getVertexAccessToken(
+  signal?: AbortSignal,
+): Promise<string> {
+  if (testTokenProvider) return withAbort(testTokenProvider, signal);
   let token: string | null | undefined;
   try {
-    token = await getAuth().getAccessToken();
+    token = await withAbort(() => getAuth().getAccessToken(), signal);
   } catch (err) {
+    if (signal?.aborted) throw signal.reason;
     // Log the raw ADC failure to stderr so the operator can debug it, but do
     // NOT embed it in the thrown message: this Error can propagate to the
     // client (the conversation path surfaces it), and the raw ADC error may
@@ -84,6 +113,7 @@ export async function getVertexAccessToken(): Promise<string> {
  */
 export async function resolveVertexProject(
   configured: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   // Cache the configured project too: the conversation path resolves it with
   // config.vertexProject on the first turn, so a later warmer call (which has
@@ -101,10 +131,12 @@ export async function resolveVertexProject(
   // and recovers automatically once ADC provides a project).
   if (cachedProject) return cachedProject;
   try {
-    const derived = (await getAuth().getProjectId()) ?? "";
+    const derived =
+      (await withAbort(() => getAuth().getProjectId(), signal)) ?? "";
     if (derived) cachedProject = derived;
     return derived;
   } catch {
+    if (signal?.aborted) throw signal.reason;
     return "";
   }
 }
