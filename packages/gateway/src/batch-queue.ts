@@ -127,6 +127,10 @@ interface PendingRequest {
   sessionID?: string;
   /** Worker ID for cost attribution (e.g. "lore-distill", "lore-curator"). */
   workerID?: string;
+  /** Dispatch-time route snapshot for synchronous fallback. */
+  upstreamUrl?: string;
+  upstreamProviderID?: string;
+  protocol?: NonNullable<Parameters<LLMClient["prompt"]>[2]>["protocol"];
 }
 
 /** A batch that has been submitted and is being polled for results. */
@@ -1134,6 +1138,13 @@ export function createBatchLLMClient(
             const result = await inner.prompt(system, user, {
               sessionID: item.sessionID,
               workerID: item.workerID,
+              model: {
+                providerID: item.providerID,
+                modelID: item.params.model,
+              },
+              upstreamUrl: item.upstreamUrl,
+              upstreamProviderID: item.upstreamProviderID,
+              protocol: item.protocol,
               maxTokens: item.params.max_tokens,
               ...(item.params.temperature != null && {
                 temperature: item.params.temperature,
@@ -1236,6 +1247,9 @@ export function createBatchLLMClient(
           providerID: model.providerID,
           sessionID: opts?.sessionID,
           workerID: opts?.workerID,
+          upstreamUrl: opts?.upstreamUrl,
+          upstreamProviderID: opts?.upstreamProviderID,
+          protocol: opts?.protocol,
         });
       });
 

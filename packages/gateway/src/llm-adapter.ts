@@ -1286,7 +1286,7 @@ export function canonicalWorkerProviderID(providerID: string): string {
   return providerID;
 }
 
-function workerProviderAliasIDs(providerID: string): readonly string[] {
+export function workerProviderAliasIDs(providerID: string): readonly string[] {
   for (const family of WORKER_PROVIDER_ALIAS_FAMILIES) {
     if (family.has(providerID)) {
       return [providerID, ...[...family].filter((id) => id !== providerID)];
@@ -1299,7 +1299,7 @@ function workerProvidersEquivalent(left: string, right: string): boolean {
   return canonicalWorkerProviderID(left) === canonicalWorkerProviderID(right);
 }
 
-function workerProviderSupportsProtocol(
+export function workerProviderSupportsProtocol(
   providerID: string,
   protocol: WorkerProtocol,
 ): boolean {
@@ -1931,26 +1931,24 @@ function buildOpenAIWorkerRequest(
   maxTokens: number,
   temperature?: number,
   reasoningEffort?: ReasoningEffort,
+  providerOptions?: Readonly<Record<string, unknown>>,
 ): { url: string; headers: Record<string, string>; body: string } {
   const messages: Array<{ role: string; content: string }> = [];
   if (system) messages.push({ role: "system", content: system });
   messages.push({ role: "user", content: user });
 
-  // OpenRouter-only cost lever: route background worker calls to the cheapest
-  // provider for the chosen model (equivalent to the `:floor` slug suffix, i.e.
-  // `provider.sort: "price"`). This is safe here because `buildOpenAIWorkerRequest`
-  // only ever builds BACKGROUND worker calls (distillation, curation, query
-  // expansion) — never the live conversation, which goes through the proxy path
-  // and needs OpenRouter's default load-balancing for reliability. Worker calls
-  // are latency-tolerant with no user waiting, so trading load-balancing for the
-  // lowest price is pure upside. The field is OpenRouter-specific; other OpenAI-
-  // protocol providers ignore an unknown `provider` key. NOTE: `:floor` can land
-  // on a quantized endpoint — if distillation/curation quality degrades, a user
-  // can pin precision via their own worker model config (see docs). Other OpenAI-
-  // protocol upstreams never see this block (gated on providerName).
+  // OpenRouter workers inherit the owning session's explicit routing policy.
+  // Without one, retain Lore's existing cheapest-provider default for
+  // latency-tolerant background work. Other providers never see this field.
+  const validProviderOptions =
+    providerOptions !== null &&
+    typeof providerOptions === "object" &&
+    !Array.isArray(providerOptions)
+      ? providerOptions
+      : undefined;
   const providerPrefs =
     target.providerName === "openrouter"
-      ? { provider: { sort: "price" } }
+      ? { provider: validProviderOptions ?? { sort: "price" } }
       : undefined;
 
   // Reasoning models honor `reasoning_effort`; non-reasoning models (gpt-4o-mini,
@@ -2824,6 +2822,7 @@ async function buildWorkerRequest(
   vertexProject?: string,
   disableThinking = false,
   reasoningEffort?: ReasoningEffort,
+  providerOptions?: Readonly<Record<string, unknown>>,
   signal?: AbortSignal,
 ): Promise<{ url: string; headers: Record<string, string>; body: string }> {
   switch (target.protocol) {
@@ -2859,6 +2858,7 @@ async function buildWorkerRequest(
         maxTokens,
         temperature,
         reasoningEffort,
+        providerOptions,
       );
     case "vertex":
       return buildVertexWorkerRequest(
@@ -3256,13 +3256,24 @@ export type PromptOutcome =
       attempts: number;
     };
 
-type PromptOptions = NonNullable<Parameters<LLMClient["prompt"]>[2]>;
+type CorePromptOptions = NonNullable<Parameters<LLMClient["prompt"]>[2]>;
+
+/** Gateway-private prompt extensions that must not leak into @loreai/core. */
+export interface GatewayPromptOptions extends CorePromptOptions {
+  /** Validated OpenRouter provider routing policy from the matching snapshot. */
+  providerOptions?: Readonly<Record<string, unknown>>;
+}
 
 export interface GatewayLLMClient extends LLMClient {
+  prompt(
+    system: string,
+    user: string,
+    opts?: GatewayPromptOptions,
+  ): Promise<string | null>;
   promptDetailed(
     system: string,
     user: string,
-    opts?: PromptOptions,
+    opts?: GatewayPromptOptions,
   ): Promise<PromptOutcome>;
 }
 
@@ -3682,6 +3693,7 @@ export function createGatewayLLMClient(
             factoryVertexProject,
             effectiveDisableThinking,
             reasoningEffort,
+            opts?.providerOptions,
             requestSignal,
           ),
         );

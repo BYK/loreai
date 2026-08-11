@@ -65,6 +65,7 @@ import type { GatewayConfig } from "./config";
 import type { SessionState } from "./translate/types";
 import { getWorkerModel, getModelEntrySync } from "./worker-model";
 import { buildSessionMetadata } from "./session-metadata";
+import { hasWorkerSessionAuth } from "./worker-auth";
 import {
   isCircuitBreakerTripped,
   pruneExpiredCircuitBreakers,
@@ -668,7 +669,11 @@ export function startIdleScheduler(
       if (
         !config.workerApiKey &&
         idleWorkerModel &&
-        !resolveAuth(sessionID, idleWorkerModel.providerID)
+        !hasWorkerSessionAuth(
+          sessionID,
+          idleWorkerModel.providerID,
+          state.upstreamByProvider.get(idleWorkerModel.providerID)?.protocol,
+        )
       ) {
         continue;
       }

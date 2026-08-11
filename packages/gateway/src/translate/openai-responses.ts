@@ -19,7 +19,13 @@ import type {
   GatewayTool,
   GatewayUsage,
 } from "./types";
-import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
+import {
+  blocksToText,
+  forwardClientHeaders,
+  providerRoutingValue,
+  requestTargetsOpenRouter,
+  ZERO_USAGE,
+} from "./types";
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
 
@@ -101,6 +107,9 @@ export function parseOpenAIResponsesRequest(
   }
   if (typeof raw.user === "string") {
     extras.user = raw.user;
+  }
+  if (Object.hasOwn(raw, "provider")) {
+    extras.provider = raw.provider;
   }
   // Responses API-specific extras
   if (raw.previous_response_id !== undefined) {
@@ -561,6 +570,15 @@ export function buildOpenAIResponsesUpstreamRequest(
     if (req.extras.parallel_tool_calls !== undefined) {
       body.parallel_tool_calls = req.extras.parallel_tool_calls;
     }
+  }
+
+  const providerRouting = providerRoutingValue(req);
+  if (
+    !req.codex &&
+    providerRouting.present &&
+    requestTargetsOpenRouter(req, upstreamBase)
+  ) {
+    body.provider = providerRouting.value;
   }
 
   // Codex (ChatGPT) is the OpenAI Responses wire format plus a small, cohesive
