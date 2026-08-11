@@ -1101,7 +1101,7 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(text).toContain('"name":"search"');
   });
 
-  test("non-streaming: emits prompt_tokens_details.cached_tokens when present", async () => {
+  test("non-streaming: emits input_tokens_details.cached_tokens when present", async () => {
     const resp: GatewayResponse = {
       ...baseResponse,
       usage: {
@@ -1114,17 +1114,17 @@ describe("buildOpenAIResponsesResponse", () => {
     const response = buildOpenAIResponsesResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.input_tokens).toBe(100);
+    expect(usage.input_tokens).toBe(180);
     expect(usage.output_tokens).toBe(20);
-    const details = usage.prompt_tokens_details as Record<string, number>;
+    const details = usage.input_tokens_details as Record<string, number>;
     expect(details.cached_tokens).toBe(80);
   });
 
-  test("non-streaming: omits prompt_tokens_details when no cached tokens", async () => {
+  test("non-streaming: omits input_tokens_details when no cached tokens", async () => {
     const response = buildOpenAIResponsesResponse(baseResponse, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.prompt_tokens_details).toBeUndefined();
+    expect(usage.input_tokens_details).toBeUndefined();
   });
 
   test("streaming: emits cached_tokens in response.completed usage", async () => {
@@ -1164,7 +1164,7 @@ describe("buildOpenAIResponse (Chat Completions) — cached_tokens", () => {
     const response = buildOpenAIResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.prompt_tokens).toBe(100);
+    expect(usage.prompt_tokens).toBe(180);
     expect(usage.completion_tokens).toBe(20);
     const details = usage.prompt_tokens_details as Record<string, number>;
     expect(details.cached_tokens).toBe(80);

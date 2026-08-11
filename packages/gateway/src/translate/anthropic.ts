@@ -15,6 +15,11 @@ import type {
 import { forwardClientHeaders, ZERO_USAGE } from "./types";
 import { asString } from "@loreai/core";
 import { extractAuth, authHeaders } from "../auth";
+import {
+  normalizeAnthropicStopReason,
+  toAnthropicStopReason,
+} from "../anthropic-protocol";
+import { validateAnthropicUsage } from "../usage-validation";
 
 // ---------------------------------------------------------------------------
 // Anthropic API version — used in all outgoing requests
@@ -540,6 +545,7 @@ export function parseAnthropicResponseJSON(
   json: Record<string, unknown>,
 ): GatewayResponse {
   const content: GatewayContentBlock[] = [];
+  const toolIdentities = new Set<string>();
   const rawContent = json.content as Array<Record<string, unknown>> | undefined;
   if (rawContent) {
     for (const block of rawContent) {
@@ -556,14 +562,29 @@ export function parseAnthropicResponseJSON(
               : undefined),
           });
           break;
-        case "tool_use":
+        case "tool_use": {
+          const id = asString(block.id);
+          if (!id || toolIdentities.has(id)) {
+            throw new Error("malformed Anthropic response tool identity");
+          }
+          toolIdentities.add(id);
           content.push({
             type: "tool_use",
-            id: asString(block.id),
+            id,
             name: asString(block.name),
             input: block.input,
           });
           break;
+        }
+        case "server_tool_use": {
+          const id = asString(block.id);
+          if (!id || toolIdentities.has(id)) {
+            throw new Error("malformed Anthropic response tool identity");
+          }
+          toolIdentities.add(id);
+          content.push({ type: "opaque", raw: block });
+          break;
+        }
         default:
           // Preserve unknown response block types as opaque so no data is
           // silently lost (lossless-by-default for future modalities).
@@ -573,18 +594,28 @@ export function parseAnthropicResponseJSON(
     }
   }
 
-  const usage = json.usage as Record<string, number> | undefined;
+  const usage = validateAnthropicUsage(json.usage, {
+    message: "malformed Anthropic response usage",
+    requireInput: true,
+    requireOutput: true,
+  });
 
   return {
     id: asString(json.id),
     model: asString(json.model),
     content,
-    stopReason: String((json.stop_reason as string) ?? "end_turn"),
+    stopReason: normalizeAnthropicStopReason(
+      String((json.stop_reason as string) ?? "end_turn"),
+    ),
     usage: {
-      inputTokens: usage?.input_tokens ?? 0,
-      outputTokens: usage?.output_tokens ?? 0,
-      cacheReadInputTokens: usage?.cache_read_input_tokens,
-      cacheCreationInputTokens: usage?.cache_creation_input_tokens,
+      inputTokens: (usage?.input_tokens as number | undefined) ?? 0,
+      outputTokens: (usage?.output_tokens as number | undefined) ?? 0,
+      cacheReadInputTokens: usage?.cache_read_input_tokens as
+        | number
+        | undefined,
+      cacheCreationInputTokens: usage?.cache_creation_input_tokens as
+        | number
+        | undefined,
     },
   };
 }
@@ -617,7 +648,7 @@ export function buildAnthropicNonStreamResponse(
     role: "assistant",
     model: resp.model,
     content: resp.content.map(toAnthropicBlock),
-    stop_reason: resp.stopReason,
+    stop_reason: toAnthropicStopReason(resp.stopReason),
     stop_sequence: null,
     usage,
   };

@@ -145,6 +145,8 @@ export type LoreToolPart = {
   messageID: string;
   type: "tool";
   tool: string;
+  /** Provider function name for result parts whose call ID is distinct. */
+  toolName?: string;
   callID: string;
   state: LoreToolState;
 };

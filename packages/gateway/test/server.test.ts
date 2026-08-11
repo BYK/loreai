@@ -13,10 +13,12 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import { connect } from "node:net";
-import { zstdCompressSync } from "node:zlib";
+import { createServer as createHttpServer } from "node:http";
+import { brotliCompressSync, gzipSync, zstdCompressSync } from "node:zlib";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import type { GatewayConfig } from "../src/config";
+import { MAX_HTTP_REQUEST_DECOMPRESSED_BYTES } from "../src/http-body";
 
 type ServerHandle = Awaited<ReturnType<typeof startServer>>;
 
@@ -45,6 +47,92 @@ afterAll(() => {
 });
 
 describe("server routing", () => {
+  test("destroying a client socket aborts a pending upstream fetch", async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => (markStarted = resolve));
+    let markClosed!: () => void;
+    const closed = new Promise<void>((resolve) => (markClosed = resolve));
+    const upstream = createHttpServer((req) => {
+      markStarted();
+      req.once("close", markClosed);
+    });
+    await new Promise<void>((resolve) =>
+      upstream.listen(0, "127.0.0.1", resolve),
+    );
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+    const gateway = await startServer(
+      makeConfig({ upstreamAnthropic: `http://127.0.0.1:${address.port}` }),
+    );
+    const socket = connect(gateway.port, "127.0.0.1", () => {
+      socket.write(
+        `GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:${gateway.port}\r\n\r\n`,
+      );
+    });
+    try {
+      await started;
+      socket.destroy();
+      await Promise.race([
+        closed,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("upstream fetch stayed open")),
+            2000,
+          ),
+        ),
+      ]);
+    } finally {
+      socket.destroy();
+      gateway.stop();
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
+  test("destroying a client socket cancels an open upstream response body", async () => {
+    let markClosed!: () => void;
+    const closed = new Promise<void>((resolve) => (markClosed = resolve));
+    const upstream = createHttpServer((_req, res) => {
+      res.once("close", markClosed);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"partial":');
+    });
+    await new Promise<void>((resolve) =>
+      upstream.listen(0, "127.0.0.1", resolve),
+    );
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+    const gateway = await startServer(
+      makeConfig({ upstreamAnthropic: `http://127.0.0.1:${address.port}` }),
+    );
+    const socket = connect(gateway.port, "127.0.0.1", () => {
+      socket.write(
+        `GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:${gateway.port}\r\n\r\n`,
+      );
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("data", () => resolve());
+        socket.once("error", reject);
+      });
+      socket.destroy();
+      await Promise.race([
+        closed,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("upstream body stayed open")),
+            2000,
+          ),
+        ),
+      ]);
+    } finally {
+      socket.destroy();
+      gateway.stop();
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
   test("OPTIONS preflight returns 204 with permissive CORS headers", async () => {
     const res = await fetch(`${baseURL}/v1/messages`, { method: "OPTIONS" });
     expect(res.status).toBe(204);
@@ -123,6 +211,52 @@ describe("server routing", () => {
     const body = (await res.json()) as { error: { type: string } };
     expect(body.error.type).toBe("api_error");
   });
+
+  test("POST /v1/responses/compact rejects invalid JSON on the exact route", async () => {
+    const res = await fetch(`${baseURL}/v1/responses/compact`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ not json",
+    });
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "invalid_request",
+      message: "Invalid JSON body",
+    });
+  });
+
+  test.each([
+    ["/v1/messages", "gzip"],
+    ["/v1/chat/completions", "br"],
+    ["/v1/responses", "zstd"],
+    ["/v1beta/models/gemini-test:generateContent", "gzip"],
+    ["/v1/compact", "br"],
+    ["/v1/responses/compact", "zstd"],
+  ] as const)(
+    "POST %s rejects a %s decompression bomb",
+    async (path, encoding) => {
+      const expanded = Buffer.alloc(
+        MAX_HTTP_REQUEST_DECOMPRESSED_BYTES + 1,
+        0x61,
+      );
+      const compressed =
+        encoding === "gzip"
+          ? gzipSync(expanded)
+          : encoding === "br"
+            ? brotliCompressSync(expanded)
+            : zstdCompressSync(expanded);
+      const res = await fetch(`${baseURL}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-encoding": encoding,
+          "x-api-key": "test-key",
+        },
+        body: compressed,
+      });
+      expect(res.status).toBe(400);
+    },
+  );
 
   test("rejects a raw WebSocket upgrade with 426 at the socket level", async () => {
     // node:http dispatches Upgrade requests via a separate 'upgrade' event,

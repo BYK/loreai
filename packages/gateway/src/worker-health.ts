@@ -381,6 +381,7 @@ function modelKey(
  *  - "length"           — OpenAI output-budget truncation
  *  - "max_tokens"       — Anthropic output-budget truncation (same as length)
  *  - "content_filter"   — prompt-specific moderation, not a model trait
+ *  - "refusal"          — Anthropic filtering (defense if not normalized)
  *  - "tool_calls" /
  *    "tool_use"         — the model emitted tool calls, not text (expected)
  *
@@ -394,6 +395,7 @@ export function isCapabilityEmpty(finishReason: string | undefined): boolean {
     "length",
     "max_tokens",
     "content_filter",
+    "refusal",
     "tool_calls",
     "tool_use",
   ].includes(finishReason);

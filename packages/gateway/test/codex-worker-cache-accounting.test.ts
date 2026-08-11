@@ -75,6 +75,7 @@ describe("parseResponsesWorkerResponse cache accounting", () => {
       output_text: null as unknown as string,
       output: [
         {
+          id: "msg-fallback",
           type: "message",
           content: [{ type: "output_text", text: "fallback via item walk" }],
         },

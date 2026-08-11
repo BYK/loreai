@@ -4042,6 +4042,84 @@ describe("streamResponsesRecallAware", () => {
     ).resolves.toBe("cancelled");
   });
 
+  test("foreground timeout settles a non-settling follow-up setup", async () => {
+    const followUpStarted = Promise.withResolvers<void>();
+    const foreground = new AbortController();
+    let callbackSignal: AbortSignal | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_timeout_followup", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_timeout_followup"),
+      ]),
+      {
+        signal: foreground.signal,
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: buildAnchor("architecture"),
+          resultText: "results",
+        }),
+        runFollowUp: async ({ signal }) => {
+          callbackSignal = signal;
+          followUpStarted.resolve();
+          return new Promise<never>(() => {});
+        },
+      },
+    );
+    const pending = drain(client);
+    await followUpStarted.promise;
+    foreground.abort(new DOMException("foreground timed out", "TimeoutError"));
+    await expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(callbackSignal?.aborted).toBe(true);
+  });
+
+  test("foreground abort cancels and unlocks a hostile continuation reader", async () => {
+    const foreground = new AbortController();
+    const continuationStarted = Promise.withResolvers<void>();
+    let cancelled = false;
+    const continuation = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_hostile_continuation", "gpt-5.6-terra"),
+            ),
+          );
+        },
+        pull() {
+          continuationStarted.resolve();
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      }),
+    );
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_hostile_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_hostile_principal"),
+      ]),
+      {
+        signal: foreground.signal,
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: buildAnchor("architecture"),
+          resultText: "results",
+        }),
+        runFollowUp: async () => ({ reader: continuation.body!.getReader() }),
+      },
+    );
+    const pending = drain(client);
+    await continuationStarted.promise;
+    foreground.abort(new DOMException("caller aborted", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelled).toBe(true);
+    expect(continuation.body?.locked).toBe(false);
+  });
+
   test("rejects a chained recall whose arguments never complete", async () => {
     const malformed = streamFrom([
       created("resp_malformed", "gpt-5.6-terra"),

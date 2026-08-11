@@ -8,6 +8,7 @@ import {
   buildGeminiResponse,
 } from "../src/translate/gemini";
 import type { GatewayRequest, GatewayResponse } from "../src/translate/types";
+import { validateGeminiUsageMetadata } from "../src/usage-validation";
 
 // ---------------------------------------------------------------------------
 // parseGeminiRequest (Gemini generateContent body → GatewayRequest)
@@ -230,11 +231,15 @@ describe("buildGeminiUpstreamRequest", () => {
       { role: "user", parts: [{ text: "hi" }] },
       {
         role: "model",
-        parts: [{ functionCall: { name: "f", args: { a: 1 } } }],
+        parts: [{ functionCall: { id: "f", name: "f", args: { a: 1 } } }],
       },
       {
         role: "user",
-        parts: [{ functionResponse: { name: "f", response: { ok: true } } }],
+        parts: [
+          {
+            functionResponse: { id: "f", name: "f", response: { ok: true } },
+          },
+        ],
       },
     ]);
     expect(b.tools).toEqual([
@@ -269,6 +274,89 @@ describe("buildGeminiUpstreamRequest", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseGeminiResponseJSON", () => {
+  test("rejects ambiguous repeated same-name function calls without IDs", () => {
+    expect(() =>
+      parseGeminiResponseJSON({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { functionCall: { name: "lookup", args: { a: 1 } } },
+                { functionCall: { name: "lookup", args: { a: 2 } } },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toThrow("malformed Gemini response tool identity");
+  });
+  test("preserves same-name function calls with distinct provider IDs", () => {
+    const response = parseGeminiResponseJSON({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { functionCall: { id: "one", name: "lookup", args: { a: 1 } } },
+              { functionCall: { id: "two", name: "lookup", args: { a: 2 } } },
+            ],
+          },
+        },
+      ],
+    });
+    expect(response.content).toEqual([
+      { type: "tool_use", id: "one", name: "lookup", input: { a: 1 } },
+      { type: "tool_use", id: "two", name: "lookup", input: { a: 2 } },
+    ]);
+  });
+
+  test("permits the same tool identity in independent candidates", () => {
+    const response = parseGeminiResponseJSON({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { functionCall: { id: "shared", name: "lookup", args: {} } },
+            ],
+          },
+        },
+        {
+          content: {
+            parts: [
+              { functionCall: { id: "shared", name: "lookup", args: {} } },
+            ],
+          },
+        },
+      ],
+    });
+    expect(response.content).toEqual([
+      { type: "tool_use", id: "shared", name: "lookup", input: {} },
+    ]);
+  });
+
+  test("validates tool identity in candidate one even though candidate zero is projected", () => {
+    expect(() =>
+      parseGeminiResponseJSON({
+        candidates: [
+          { content: { parts: [{ text: "projected" }] } },
+          { content: { parts: [{ functionCall: { id: "", name: "bad" } }] } },
+        ],
+      }),
+    ).toThrow("malformed Gemini response tool identity");
+  });
+  test.each([
+    { index: -1, content: { parts: [{ text: "bad" }] } },
+    { finishReason: 7, content: { parts: [{ text: "bad" }] } },
+    { content: { parts: [{ text: 42 }] } },
+  ])("rejects malformed non-projected Gemini candidate %#", (candidate) => {
+    expect(() =>
+      parseGeminiResponseJSON({
+        candidates: [
+          { content: { parts: [{ text: "projected" }] } },
+          candidate,
+        ],
+      }),
+    ).toThrow("malformed Gemini response tool identity");
+  });
   test("maps candidate text parts + usageMetadata", () => {
     const resp = parseGeminiResponseJSON({
       candidates: [
@@ -289,7 +377,7 @@ describe("parseGeminiResponseJSON", () => {
     expect(resp.stopReason).toBe("end_turn");
     expect(resp.model).toBe("gemini-2.5-pro");
     expect(resp.usage).toEqual({
-      inputTokens: 10,
+      inputTokens: 6,
       outputTokens: 3,
       cacheReadInputTokens: 4,
     });
@@ -389,6 +477,58 @@ describe("parseGeminiResponseJSON", () => {
   });
 });
 
+test("Gemini request round-trip preserves distinct function ID and name", () => {
+  const parsed = parseGeminiRequest(
+    {
+      contents: [
+        {
+          role: "model",
+          parts: [
+            { functionCall: { id: "call-1", name: "lookup", args: { q: 1 } } },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                id: "call-1",
+                name: "lookup",
+                response: { ok: true },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {},
+    "gemini-test",
+    false,
+  );
+  const rebuilt = buildGeminiUpstreamRequest(parsed, "https://example.test")
+    .body as { contents: Array<{ parts: unknown[] }> };
+  expect(rebuilt.contents).toEqual([
+    {
+      role: "model",
+      parts: [
+        { functionCall: { id: "call-1", name: "lookup", args: { q: 1 } } },
+      ],
+    },
+    {
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            id: "call-1",
+            name: "lookup",
+            response: { ok: true },
+          },
+        },
+      ],
+    },
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // Egress: thinking + preserved finishReason round-trip
 // ---------------------------------------------------------------------------
@@ -450,7 +590,7 @@ describe("buildGeminiResponse", () => {
           role: "model",
           parts: [
             { text: "hello" },
-            { functionCall: { name: "f", args: { a: 1 } } },
+            { functionCall: { id: "f", name: "f", args: { a: 1 } } },
           ],
         },
         finishReason: "STOP",
@@ -458,9 +598,9 @@ describe("buildGeminiResponse", () => {
       },
     ]);
     expect(b.usageMetadata).toEqual({
-      promptTokenCount: 5,
+      promptTokenCount: 6,
       candidatesTokenCount: 2,
-      totalTokenCount: 7,
+      totalTokenCount: 8,
       cachedContentTokenCount: 1,
     });
     expect(b.modelVersion).toBe("gemini-2.5-pro");
@@ -474,6 +614,30 @@ describe("buildGeminiResponse", () => {
     const text = await sseRes.text();
     expect(text.startsWith("data: ")).toBe(true);
     expect(text.endsWith("\n\n")).toBe(true);
+  });
+
+  test("includes disjoint cache creation in Gemini's inclusive parent count", () => {
+    const body = buildGeminiResponseBody({
+      ...resp,
+      usage: {
+        inputTokens: 10,
+        cacheReadInputTokens: 90,
+        cacheCreationInputTokens: 20,
+        outputTokens: 1,
+      },
+    });
+    expect(body.usageMetadata).toEqual({
+      promptTokenCount: 120,
+      candidatesTokenCount: 1,
+      totalTokenCount: 121,
+      cachedContentTokenCount: 90,
+    });
+    expect(() =>
+      validateGeminiUsageMetadata(
+        body.usageMetadata,
+        "invalid translated usage",
+      ),
+    ).not.toThrow();
   });
 });
 

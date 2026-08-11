@@ -1,5 +1,29 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server } from "node:http";
+import { EventEmitter } from "node:events";
+
+class FakeIncomingMessage extends EventEmitter {
+  paused = 0;
+  resumed = 0;
+  destroyed = false;
+  complete = false;
+  readableEnded = false;
+
+  pause(): this {
+    this.paused++;
+    return this;
+  }
+
+  resume(): this {
+    this.resumed++;
+    return this;
+  }
+
+  destroy(): this {
+    this.destroyed = true;
+    return this;
+  }
+}
 
 /**
  * upstreamFetch chooses its transport by runtime:
@@ -97,7 +121,8 @@ describe("upstreamFetch runtime split", () => {
       expect(res.status).toBe(200);
 
       // Read the body incrementally via the standard ReadableStream API
-      const reader = res.body!.getReader();
+      if (!res.body) throw new Error("streaming response has no body");
+      const reader = res.body.getReader();
       const chunks: string[] = [];
       const decoder = new TextDecoder();
       for (;;) {
@@ -112,6 +137,79 @@ describe("upstreamFetch runtime split", () => {
       server.close();
     }
   });
+
+  test("Bun bridge pauses at its byte high-water mark and resumes only on pull", async () => {
+    (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
+    vi.resetModules();
+    vi.doMock("undici", () => ({ fetch: vi.fn(), Agent: class {} }));
+    const { nodeReadableToWebStream } = await import("../src/fetch");
+    const source = new FakeIncomingMessage();
+    const body = nodeReadableToWebStream(source as unknown as IncomingMessage);
+
+    // Two 40 KiB chunks exceed the bridge's 64 KiB byte queue. The source is
+    // paused exactly once rather than continuing to buffer arbitrarily.
+    source.emit("data", Buffer.alloc(40 * 1024, 1));
+    source.emit("data", Buffer.alloc(40 * 1024, 2));
+    expect(source.paused).toBe(1);
+    expect(source.resumed).toBe(0);
+
+    const reader = body.getReader();
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    await vi.waitFor(() => expect(source.resumed).toBe(1));
+
+    source.readableEnded = true;
+    source.complete = true;
+    source.emit("end");
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+    expect(source.eventNames()).toEqual([]);
+  });
+
+  test("Bun bridge cancellation destroys the source and removes listeners", async () => {
+    (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
+    vi.resetModules();
+    vi.doMock("undici", () => ({ fetch: vi.fn(), Agent: class {} }));
+    const { nodeReadableToWebStream } = await import("../src/fetch");
+    const source = new FakeIncomingMessage();
+    const reader = nodeReadableToWebStream(
+      source as unknown as IncomingMessage,
+    ).getReader();
+
+    await reader.cancel(new Error("consumer stopped"));
+
+    expect(source.destroyed).toBe(true);
+    expect(source.eventNames()).toEqual([]);
+  });
+
+  test.each(["error", "close"] as const)(
+    "Bun bridge %s cleanup removes every source listener",
+    async (event) => {
+      (globalThis as { Bun?: unknown }).Bun = { version: "1.3.14" };
+      vi.resetModules();
+      vi.doMock("undici", () => ({ fetch: vi.fn(), Agent: class {} }));
+      const { nodeReadableToWebStream } = await import("../src/fetch");
+      const source = new FakeIncomingMessage();
+      const reader = nodeReadableToWebStream(
+        source as unknown as IncomingMessage,
+      ).getReader();
+      const pending = reader.read();
+
+      if (event === "error") {
+        source.emit("error", new Error("socket reset"));
+      } else {
+        source.emit("close");
+      }
+
+      await expect(pending).rejects.toThrow(
+        event === "error" ? "socket reset" : "closed before end",
+      );
+      expect(source.eventNames()).toEqual([]);
+      if (event === "error") expect(source.destroyed).toBe(true);
+    },
+  );
 
   test("Bun: abort destroys a request waiting for response headers", async () => {
     let requestStartedResolve: (() => void) | undefined;

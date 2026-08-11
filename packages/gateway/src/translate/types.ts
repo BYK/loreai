@@ -41,6 +41,8 @@ export type GatewayToolResultBlock = {
   type: "tool_result";
   /** ID of the tool_use block this result corresponds to. */
   toolUseId: string;
+  /** Provider function name when identity and name are distinct (Gemini). */
+  toolName?: string;
   /**
    * Structured tool-result content. Anthropic `tool_result` content can be a
    * string or an array of blocks (text, image, etc.). We always normalize to
@@ -204,6 +206,8 @@ export type GatewayProtocol =
 
 /** Normalized request after ingress translation from either protocol. */
 export type GatewayRequest = {
+  /** Caller disconnect/cancellation propagated from the ingress Request. */
+  signal?: AbortSignal;
   /** Which protocol the request arrived as — determines egress translation. */
   protocol: GatewayProtocol;
   /** Model identifier (e.g. `claude-sonnet-4-20250514`, `gpt-4o`). */
@@ -313,16 +317,12 @@ export const ZERO_USAGE: GatewayUsage = Object.freeze({
  * check misses them and `JSON.parse`-ing the SSE body throws
  * (`Unexpected token 'e', "event: res"...` — LOREAI-GATEWAY-38 / -1P).
  *
- * Only `data:`/`event:` are sniffed (not `id:`/`retry:`/`:` comments): those two
- * are the only prefixes a completion stream opens with, and the narrower set
- * avoids false-positives on plaintext error bodies (e.g. a body starting with
- * `retry: later`). The caller feeds a detected SSE body to a stream accumulator,
- * which tolerates any subsequent field.
+ * Recognizes every legal field/comment that may precede the first data event.
  */
 export function looksLikeSSE(contentType: string, body: string): boolean {
   if (contentType.includes("text/event-stream")) return true;
   const head = body.replace(/^\uFEFF/, "").trimStart();
-  return /^(?:data|event):/.test(head);
+  return /^(?:(?:data|event|id|retry):|:)/.test(head);
 }
 
 /** Accumulated response from the upstream provider. */
