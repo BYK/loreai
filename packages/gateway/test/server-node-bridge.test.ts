@@ -3,6 +3,14 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, test, vi } from "vitest";
 import { handleForegroundBodyRoute, handleNodeRequest } from "../src/server";
 import { decodeRequestBody } from "../src/http-body";
+import type { GatewayRequest } from "../src/translate/types";
+import {
+  handleRequest,
+  resetPipelineState,
+  setPostResponseStartObserverForTest,
+  setUpstreamInterceptor,
+} from "../src/pipeline";
+import { loadConfig } from "../src/config";
 
 class FakeRequest extends EventEmitter {
   method = "GET";
@@ -20,6 +28,8 @@ class FakeResponse extends EventEmitter {
   status = 0;
   chunks: Uint8Array[] = [];
   writeResults: boolean[] = [];
+  backpressureOnText?: string;
+  backpressureTriggered = false;
   autoCloseOnEnd = true;
 
   writeHead(status: number): this {
@@ -30,6 +40,14 @@ class FakeResponse extends EventEmitter {
 
   write(chunk: Uint8Array): boolean {
     this.chunks.push(chunk);
+    if (
+      !this.backpressureTriggered &&
+      this.backpressureOnText &&
+      Buffer.from(chunk).toString("utf8").includes(this.backpressureOnText)
+    ) {
+      this.backpressureTriggered = true;
+      return false;
+    }
     return this.writeResults.shift() ?? true;
   }
 
@@ -69,6 +87,27 @@ function expectListenersCleaned(req: FakeRequest, res: FakeResponse): void {
   expect(res.listenerCount("finish")).toBe(0);
   expect(req.socket.listenerCount("close")).toBe(0);
   expect(req.socket.listenerCount("error")).toBe(0);
+}
+
+function responsesEvent(type: string, data: Record<string, unknown>): string {
+  return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+}
+
+function terminalResponsesSSE(id: string): string {
+  return (
+    responsesEvent("response.created", {
+      response: { id, model: "gpt-5.6-sol", status: "in_progress" },
+    }) +
+    responsesEvent("response.completed", {
+      response: {
+        id,
+        model: "gpt-5.6-sol",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    })
+  );
 }
 
 describe("node:http ingress lifecycle branches", () => {
@@ -276,6 +315,81 @@ describe("node:http ingress lifecycle branches", () => {
     expect(res.chunks).toHaveLength(2);
     expect(res.writableEnded).toBe(true);
     expectListenersCleaned(req, res);
+  });
+
+  test("deferred streaming work starts after end despite terminal backpressure", async () => {
+    const req = new FakeRequest();
+    req.complete = true;
+    const res = new FakeResponse();
+    res.backpressureOnText = "event: response.completed";
+    let postResponseSawEnd: boolean | undefined;
+    setPostResponseStartObserverForTest(() => {
+      postResponseSawEnd = res.writableEnded;
+    });
+    setUpstreamInterceptor(
+      async () =>
+        new Response(terminalResponsesSSE("resp_node_backpressure"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const gatewayRequest: GatewayRequest = {
+      protocol: "openai-responses",
+      model: "gpt-5.6-sol",
+      system: "You are a coding agent.",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "continue" }] },
+      ],
+      tools: [{ name: "read", description: "Read a file", inputSchema: {} }],
+      stream: true,
+      maxTokens: 1024,
+      metadata: {},
+      rawHeaders: {
+        authorization: "Bearer test-key",
+        "x-lore-agent": "coder",
+        "x-lore-project": process.cwd(),
+        "x-lore-provider": "openai",
+        "x-lore-upstream-url": "https://api.openai.com/v1",
+        "x-lore-session-id": "node-backpressure-session",
+      },
+    };
+
+    try {
+      const handling = handleNodeRequest(
+        asRequest(req),
+        asResponse(res),
+        () => handleRequest(gatewayRequest, loadConfig()),
+        "127.0.0.1",
+        3207,
+      );
+      await vi.waitFor(
+        () => {
+          expect(res.backpressureTriggered).toBe(true);
+          expect(res.listenerCount("drain")).toBeGreaterThan(0);
+        },
+        { timeout: 10_000 },
+      );
+
+      expect(Buffer.concat(res.chunks).toString("utf8")).toContain(
+        "event: response.completed",
+      );
+      expect(res.writableEnded).toBe(false);
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(postResponseSawEnd).toBeUndefined();
+
+      res.emit("drain");
+      await handling;
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(res.writableEnded).toBe(true);
+      expect(postResponseSawEnd).toBe(true);
+      expectListenersCleaned(req, res);
+    } finally {
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
   });
 
   test("disconnect while waiting for drain cancels without reading more", async () => {

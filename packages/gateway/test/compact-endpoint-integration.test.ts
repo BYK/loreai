@@ -24,16 +24,47 @@ async function postCompact(
   body: string,
   sessionID: string,
   apiKey: string | null = "test-key",
+  extraHeaders: Record<string, string> = {},
 ): Promise<Response> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "x-lore-session-id": sessionID,
+    ...extraHeaders,
   };
   if (apiKey) headers["x-api-key"] = apiKey;
   return fetch(`${baseURL}/v1/compact`, {
     method: "POST",
     headers,
     body,
+  });
+}
+
+async function postResponsesCompact(
+  baseURL: string,
+  sessionID: string,
+  apiKey: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<Response> {
+  return fetch(`${baseURL}/v1/responses/compact`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "x-lore-session-id": sessionID,
+      "x-lore-project": process.cwd(),
+      ...extraHeaders,
+    },
+    body: JSON.stringify({
+      model: "gpt-5.6-sol",
+      instructions: "You are a coding agent.",
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: "compact" }],
+        },
+      ],
+      tools: [],
+    }),
   });
 }
 
@@ -196,6 +227,92 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       ).toEqual([]);
     },
   );
+
+  it("does not bootstrap a session mapping from unauthenticated compaction", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({ seq: 0, requestMessages: [], responseText: "hi" }),
+      ],
+      projectPath: PROJECT_PATH,
+    });
+    expect(
+      (
+        await chatWithSession(
+          harness,
+          realConversationBody("claude-sonnet-4-6"),
+          "victim-session",
+        )
+      ).status,
+    ).toBe(200);
+
+    const attackerSession = "attacker-bootstrap-session";
+    const bootstrap = await postCompact(
+      harness.baseURL,
+      JSON.stringify({ project_path: PROJECT_PATH }),
+      attackerSession,
+      "garbage-credential",
+    );
+    expect(bootstrap.status).toBe(404);
+
+    const exfiltration = await postResponsesCompact(
+      harness.baseURL,
+      attackerSession,
+      "garbage-credential",
+    );
+    expect(exfiltration.status).toBe(404);
+    expect(await exfiltration.text()).not.toContain("output_text");
+    expect(
+      harness.queryDB<{ session_id: string }>(
+        `SELECT session_id FROM session_state
+         WHERE header_name = 'x-lore-session-id' AND header_session_id = ?`,
+        [attackerSession],
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not migrate an unknown canonical compaction header through an alias", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({ seq: 0, requestMessages: [], responseText: "hi" }),
+      ],
+      projectPath: PROJECT_PATH,
+    });
+    const alias = "established-compaction-alias";
+    const established = await harness.chat(
+      realConversationBody("claude-sonnet-4-6"),
+      "test-key",
+      {
+        "x-session-affinity": alias,
+        "x-lore-provider": "anthropic",
+      },
+    );
+    expect(established.status).toBe(200);
+
+    const unknownCanonical = "unknown-canonical-compaction";
+    const compact = await postCompact(
+      harness.baseURL,
+      JSON.stringify({ project_path: PROJECT_PATH }),
+      unknownCanonical,
+      "test-key",
+      { "x-session-affinity": alias },
+    );
+    expect(compact.status).toBe(404);
+
+    const responsesCompact = await postResponsesCompact(
+      harness.baseURL,
+      unknownCanonical,
+      "test-key",
+      { "x-session-affinity": alias },
+    );
+    expect(responsesCompact.status).toBe(404);
+    expect(
+      harness.queryDB<{ session_id: string }>(
+        `SELECT session_id FROM session_state
+         WHERE header_name = 'x-lore-session-id' AND header_session_id = ?`,
+        [unknownCanonical],
+      ),
+    ).toEqual([]);
+  });
 
   it("rejects a compact request without a provider credential", async () => {
     harness = await createHarness({
@@ -409,12 +526,30 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     // NOT hardcoded to 200K (the bug the prior client-side design had).
     harness = await createHarness({
       fixtures: [
-        makeFixtureEntry({
-          seq: 0,
-          requestMessages: [{ role: "user", content: "hello" }],
-          responseText: "hi",
-          model: "gpt-4o-mini",
-        }),
+        {
+          ...makeFixtureEntry({
+            seq: 0,
+            requestMessages: [{ role: "user", content: "hello" }],
+            responseText: "hi",
+            model: "gpt-4o-mini",
+          }),
+          response: {
+            id: "resp_gpt_mini",
+            object: "response",
+            model: "gpt-4o-mini",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                id: "msg_gpt_mini",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "hi", annotations: [] }],
+              },
+            ],
+            usage: { input_tokens: 100, output_tokens: 10 },
+          },
+        },
       ],
       projectPath: PROJECT_PATH,
     });

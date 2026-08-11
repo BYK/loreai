@@ -2520,14 +2520,16 @@ describe("streamResponsesPassthrough", () => {
   });
 
   test("does not forward malformed JSON", async () => {
+    const outcomes: boolean[] = [];
     const output = await streamResponsesPassthrough(
       new Response("event: response.created\ndata: {bad}\n\n"),
-      () => {},
+      (_response, successful) => outcomes.push(successful),
       undefined,
       "public",
     ).text();
     expect(output).not.toContain("{bad}");
     expect(output).toContain("event: response.failed");
+    expect(outcomes).toEqual([false]);
   });
 
   test("rejects duplicate call_id before forwarding the conflicting event", async () => {
@@ -2595,6 +2597,7 @@ describe("streamResponsesPassthrough", () => {
   });
 
   test("validates and forwards a provider failure terminal", async () => {
+    const outcomes: boolean[] = [];
     const output = await streamResponsesPassthrough(
       buildSSEResponse([
         {
@@ -2608,12 +2611,33 @@ describe("streamResponsesPassthrough", () => {
           },
         },
       ]),
-      () => {},
+      (_response, successful) => outcomes.push(successful),
       undefined,
       "public",
     ).text();
     expect(output.match(/event: response\.failed/g)).toHaveLength(1);
     expect(output).toContain("provider failed");
+    expect(outcomes).toEqual([false]);
+  });
+
+  test("reports a missing terminal as unsuccessful", async () => {
+    const outcomes: boolean[] = [];
+    const output = await streamResponsesPassthrough(
+      buildSSEResponse([
+        {
+          event: "response.created",
+          data: {
+            type: "response.created",
+            response: { id: "missing-terminal", status: "in_progress" },
+          },
+        },
+      ]),
+      (_response, successful) => outcomes.push(successful),
+      undefined,
+      "public",
+    ).text();
+    expect(output).toContain("event: response.failed");
+    expect(outcomes).toEqual([false]);
   });
 
   test("counts comment-only wire bytes toward the aggregate cap", async () => {
@@ -2623,7 +2647,7 @@ describe("streamResponsesPassthrough", () => {
       undefined,
       "public",
     ).text();
-    expect(output).toContain("exceeded aggregate byte limit");
+    expect(output).toContain("Upstream response stream failed");
   });
 
   test("fails the stream when aggregate retained event data exceeds its cap", async () => {
@@ -2636,7 +2660,7 @@ describe("streamResponsesPassthrough", () => {
     const output = await streamResponsesPassthrough(upstream, () => {}).text();
 
     expect(output).toContain("event: response.failed");
-    expect(output).toContain("exceeded aggregate byte limit");
+    expect(output).toContain("Upstream response stream failed");
   });
 
   test("stops pulling upstream while a downstream consumer is not reading", async () => {
@@ -2745,6 +2769,46 @@ describe("streamResponsesPassthrough", () => {
     expect(done.stopReason).toBe("end_turn");
   });
 
+  test("finalizes when the client cancels immediately after the terminal event", async () => {
+    const upstream = controllableSSE();
+    let completeCalls = 0;
+    const client = streamResponsesPassthrough(upstream.response, () => {
+      completeCalls++;
+    });
+    if (!client.body) throw new Error("test response has no body");
+    const reader = client.body.getReader();
+    const decoder = new TextDecoder();
+
+    upstream.push("response.created", {
+      type: "response.created",
+      response: {
+        id: "resp_cancel_after_terminal",
+        model: "gpt-5.6-sol",
+        status: "in_progress",
+      },
+    });
+    upstream.push("response.completed", {
+      type: "response.completed",
+      response: {
+        id: "resp_cancel_after_terminal",
+        model: "gpt-5.6-sol",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    });
+
+    let seen = "";
+    while (!seen.includes("event: response.completed")) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error("stream closed before terminal event");
+      if (value) seen += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+
+    expect(completeCalls).toBe(1);
+  });
+
   test("forwards every upstream event verbatim, preserving non-accumulated fields", async () => {
     const upstream = controllableSSE();
     const clientResp = streamResponsesPassthrough(upstream.response, () => {});
@@ -2848,6 +2912,7 @@ describe("streamResponsesPassthrough", () => {
     const out = await drainToString(clientResp);
     // Client is told the turn failed rather than hanging on a missing terminal.
     expect(out).toContain("response.failed");
+    expect(out).not.toContain("upstream exploded");
     // onComplete still ran (so postResponse/cost tracking is not skipped)…
     expect(completed).not.toBeNull();
     // …and exactly once (the `completed` guard must not double-fire).

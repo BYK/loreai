@@ -1585,7 +1585,9 @@ export async function validateProjectReferences(
   projectPath: string,
   resolver: ReferenceResolver,
   now: number = Date.now(),
+  signal?: AbortSignal,
 ): Promise<RefCheckResult> {
+  signal?.throwIfAborted();
   const pid = ensureProject(projectPath);
   const proj = db()
     .query("SELECT last_refcheck_at FROM projects WHERE id = ?")
@@ -1632,6 +1634,7 @@ export async function validateProjectReferences(
   }
 
   const statusMap = await resolver.resolve(unionList);
+  signal?.throwIfAborted();
   if (statusMap == null) {
     // Whole batch unverifiable (probe error/timeout / no FS) → strict no-op.
     // Consume the gate so a failing probe isn't re-hammered every idle tick.
@@ -2430,6 +2433,8 @@ export const CONTEXT_SOURCE_LIMIT = 12;
 export const RECALLED_CONTEXT_CATEGORY = "recalled";
 
 export type ForSessionOptions = {
+  /** Abort stale request work before reinforcement/transfer side effects. */
+  signal?: AbortSignal;
   /** Caller-provided context (e.g., user's current message) for relevance
    *  scoring when no session context exists in the DB yet. */
   contextHint?: string;
@@ -2519,6 +2524,7 @@ export async function forSession(
   maxTokens: number,
   options?: ForSessionOptions,
 ): Promise<KnowledgeEntry[]> {
+  options?.signal?.throwIfAborted();
   // Measure this hot per-turn path's main-thread blocking cost (#966 B). The
   // awaits below (embed + the pool-backed vector search) are wrapped so the
   // wall-time remainder is the synchronous entry-load / FTS / scoring / packing
@@ -2667,10 +2673,12 @@ export async function forSession(
     // preference injected into system[1] every turn would still age out and be
     // pruned by decayProject/pruneDeadEntries after the grace window — silently
     // deleting an actively-used directive. Resets the decay clock only.
+    options?.signal?.throwIfAborted();
     try {
       markInjected(result.map((e) => e.id));
       recordSessionInjections(sessionID, projectPath, result);
     } catch (err) {
+      options?.signal?.throwIfAborted();
       log.warn(
         "forSession(preference): reinforcement failed (non-fatal):",
         err,
@@ -2734,6 +2742,7 @@ export async function forSession(
       );
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
     } catch (err) {
+      options?.signal?.throwIfAborted();
       log.warn("Vector scoring failed, falling back to FTS5:", err);
       vectorScores = new Map();
     }
@@ -2966,6 +2975,7 @@ export async function forSession(
   // (project_id === pid) are not transfers; lat.md synthetics are skipped (they
   // are not knowledge rows). The in-memory throttle bounds writes so this
   // every-message path does not hammer SQLite.
+  options?.signal?.throwIfAborted();
   try {
     for (const entry of result) {
       if (entry.category === "lat.md") continue;
@@ -2979,6 +2989,7 @@ export async function forSession(
       });
     }
   } catch (err) {
+    options?.signal?.throwIfAborted();
     log.warn("forSession: transfer recording failed (non-fatal):", err);
   }
 
@@ -2986,6 +2997,7 @@ export async function forSession(
   // Being selected for the prompt resets each entry's decay clock — it is "still
   // relevant" — WITHOUT bumping confidence (that would re-flatten everything to
   // 1.0 and destroy the decay signal). lat.md synthetics are not knowledge rows.
+  options?.signal?.throwIfAborted();
   try {
     // Only real knowledge rows get reinforced / recorded — lat.md and
     // recalled-context synthetics are not knowledge and have no confidence
@@ -2997,6 +3009,7 @@ export async function forSession(
     markInjected(knowledgeResult.map((e) => e.id));
     recordSessionInjections(sessionID, projectPath, knowledgeResult);
   } catch (err) {
+    options?.signal?.throwIfAborted();
     log.warn("forSession: reinforcement failed (non-fatal):", err);
   }
 
@@ -3008,6 +3021,7 @@ export async function forSession(
   // (lat.md synthetics are packed separately in step 6), so this never leaks a
   // lat.md row, which has no recall id.
   if (options?.overflowSink) {
+    options.signal?.throwIfAborted();
     const selectedIds = new Set(result.map((e) => e.id));
     for (const { entry } of allScored) {
       // Recalled-context synthetics are not knowledge rows — keep the ToC

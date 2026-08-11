@@ -328,28 +328,14 @@ describe("Compaction interception", () => {
 
   afterEach(() => harness?.teardown());
 
-  it("compaction request falls back to upstream when worker model is unavailable", async () => {
-    // In test, the worker model has no auth credentials, so llm.prompt()
-    // returns null. The gateway should fall back to forwarding the original
-    // compaction request to the upstream API (like handlePassthrough).
-    // Provide one fixture for the upstream fallback response.
+  it("rejects compaction without an authenticated prior session", async () => {
     const compactionSystem =
       "You are an anchored context summarization assistant for coding sessions. " +
       "Your job is to produce a structured summary of the conversation history.";
     const compactionUserMessage =
       "Please create an anchored summary from the conversation history above.";
 
-    harness = await createHarness({
-      fixtures: [
-        makeFixtureEntry({
-          seq: 0,
-          system: compactionSystem,
-          requestMessages: [{ role: "user", content: compactionUserMessage }],
-          responseText:
-            "## Summary\n\nThis is a compaction summary from upstream.",
-        }),
-      ],
-    });
+    harness = await createHarness({ fixtures: [] });
 
     // Build a request that matches isCompactionRequest() via the system prompt pattern
     const resp = await harness.chat({
@@ -366,24 +352,14 @@ describe("Compaction interception", () => {
       // No tools — compaction agents typically have no tools
     });
 
-    // The gateway must return a 200 — either from Lore's own summary or
-    // from the upstream fallback when the worker model is unavailable.
-    expect(resp.status).toBe(200);
+    expect(resp.status).toBe(404);
 
-    const body = (await resp.json()) as Record<string, unknown>;
-
-    // Response must have content (the synthesized summary text)
-    const content = body.content as Array<Record<string, unknown>>;
-    expect(Array.isArray(content)).toBe(true);
-    expect(content.length).toBeGreaterThanOrEqual(1);
-
-    // There must be at least one text block
-    const textBlock = content.find((b) => b.type === "text");
-    expect(textBlock).toBeDefined();
-    expect(typeof (textBlock as Record<string, unknown>).text).toBe("string");
-
-    // The response should have the standard Anthropic shape
-    expect(typeof body.id).toBe("string");
-    expect(typeof body.stop_reason).toBe("string");
+    const body = (await resp.json()) as {
+      type: string;
+      error: { message: string };
+    };
+    expect(body.type).toBe("error");
+    expect(body.error.message).toContain("No authenticated session found");
+    expect(harness.upstreamBodies()).toHaveLength(0);
   });
 });

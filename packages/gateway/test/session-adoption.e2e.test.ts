@@ -29,6 +29,9 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
+import { setUpstreamInterceptor } from "../src/pipeline";
+import { getLastSeenAuth, resolveAuth } from "../src/auth";
+import { enableHostedMode, _resetHostedModeForTest } from "@loreai/core";
 
 const U0 = "alpha first task: please implement the parser module";
 const U1 = "second follow-up: now add tests for the parser";
@@ -55,11 +58,16 @@ function fixtures() {
   ];
 }
 
-type Row = { session_id: string; header_session_id: string | null };
+type Row = {
+  session_id: string;
+  header_session_id: string | null;
+  message_count: number;
+  project_path: string | null;
+};
 
 function loreSessionRows(h: Harness): Row[] {
   return h.queryDB<Row>(
-    "SELECT session_id, header_session_id FROM session_state WHERE header_name = 'x-lore-session-id'",
+    "SELECT session_id, header_session_id, message_count, project_path FROM session_state WHERE header_name = 'x-lore-session-id'",
   );
 }
 
@@ -88,6 +96,7 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
 
   afterEach(async () => {
     if (harness) await harness.teardown();
+    _resetHostedModeForTest();
   });
 
   it("adopts the prior session when a resumed conversation arrives under a new x-lore-session-id after restart", async () => {
@@ -99,6 +108,8 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     });
     expect(r.status).toBe(200);
     await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     // Turn 2 (same session V1 continues) — stores u1, updates message_count.
     r = await harness.chat(
@@ -112,6 +123,8 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     );
     expect(r.status).toBe(200);
     await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     // Exactly one conversation session so far, bound to V1.
     let rows = loreSessionRows(harness);
@@ -136,6 +149,8 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     );
     expect(r.status).toBe(200);
     await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     // Adopted: still ONE conversation session (no new row), same internal id,
     // now rebound to the new header value for the Tier-1 fast path.
@@ -143,6 +158,240 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].session_id).toBe(s1);
     expect(rows[0].header_session_id).toBe("V2");
+  });
+
+  it("does not persist fingerprint adoption after a failed resumed turn", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": "V1",
+    });
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "V1" },
+    );
+    await r.text();
+    const original = loreSessionRows(harness)[0];
+    await harness.restartPipeline();
+    const globalAuthBefore = getLastSeenAuth("anthropic")?.value;
+
+    setUpstreamInterceptor(async () =>
+      Promise.resolve(
+        new Response("provider failed", {
+          status: 500,
+          headers: { "content-type": "text/plain" },
+        }),
+      ),
+    );
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "V2" },
+    );
+    expect(r.status).toBe(500);
+    await r.text();
+
+    const rows = loreSessionRows(harness);
+    expect(rows).toEqual([original]);
+    expect(resolveAuth(original.session_id)?.value).toBe("key-A");
+    expect(getLastSeenAuth("anthropic")?.value).toBe(globalAuthBefore);
+  });
+
+  it("persists the resumed turn when fingerprint adoption has no session header", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": "V1",
+    });
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "V1" },
+    );
+    await r.text();
+    const original = loreSessionRows(harness)[0];
+    await harness.restartPipeline();
+
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-A",
+      {},
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = loreSessionRows(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session_id: original.session_id,
+      header_session_id: "V1",
+      message_count: 5,
+    });
+    expect(
+      harness.queryDB<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ? AND content LIKE ?",
+        [original.session_id, `%${U2}%`],
+      )[0]?.count,
+    ).toBeGreaterThan(0);
+  });
+
+  it("adopts a resumed conversation from a new clone path matched by git remote", async () => {
+    enableHostedMode();
+    const originalPath = "/client/checkouts/adoption-original";
+    const clonePath = "/client/checkouts/adoption-clone";
+    const remote = `github.com/test/adoption-${crypto.randomUUID()}`;
+    harness = await createHarness({ fixtures: fixtures() });
+
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": "clone-V1",
+      "x-lore-project": originalPath,
+      "x-lore-git-remote": remote,
+    });
+    expect(r.status).toBe(200);
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      {
+        "x-lore-session-id": "clone-V1",
+        "x-lore-project": originalPath,
+        "x-lore-git-remote": remote,
+      },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    const original = loreSessionRows(harness)[0];
+    await harness.restartPipeline();
+
+    // This path has never been registered as an alias. The persisted project's
+    // normalized remote is the only signal that scopes overlap to the original
+    // project rather than minting a second session for the clone.
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-A",
+      {
+        "x-lore-session-id": "clone-V2",
+        "x-lore-project": clonePath,
+        "x-lore-git-remote": remote,
+      },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = loreSessionRows(harness);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session_id: original.session_id,
+      header_session_id: "clone-V2",
+      project_path: clonePath,
+    });
+  });
+
+  it("does not trust a spoofed clone remote on a local gateway", async () => {
+    const originalPath = "/tmp/adoption-local-original";
+    const unrelatedPath = "/tmp/adoption-local-unrelated";
+    const spoofedRemote = `github.com/test/adoption-spoof-${crypto.randomUUID()}`;
+    harness = await createHarness({ fixtures: fixtures() });
+
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": "spoof-V1",
+      "x-lore-project": originalPath,
+    });
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      {
+        "x-lore-session-id": "spoof-V1",
+        "x-lore-project": originalPath,
+      },
+    );
+    await r.text();
+    const original = loreSessionRows(harness)[0];
+    const database = new DatabaseSync(harness.dbPath);
+    try {
+      database
+        .prepare("UPDATE projects SET git_remote = ? WHERE path = ?")
+        .run(spoofedRemote, originalPath);
+    } finally {
+      database.close();
+    }
+    await harness.restartPipeline();
+
+    // unrelatedPath is not a git repository on this local gateway. A forged
+    // header must not select originalPath's project and authorize adoption.
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-A",
+      {
+        "x-lore-session-id": "spoof-V2",
+        "x-lore-project": unrelatedPath,
+        "x-lore-git-remote": spoofedRemote,
+      },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = loreSessionRows(harness);
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.find((row) => row.session_id === original.session_id),
+    ).toMatchObject({
+      header_session_id: "spoof-V1",
+      project_path: originalPath,
+    });
+    expect(
+      rows.find((row) => row.header_session_id === "spoof-V2"),
+    ).toMatchObject({
+      project_path: unrelatedPath,
+    });
   });
 
   it("does NOT adopt when the resumed conversation has a different fingerprint (different first message)", async () => {
@@ -267,6 +516,8 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     );
     expect(r.status).toBe(200);
     await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     const after = harness.queryDB<Row & { credential_fingerprint: string }>(
       `SELECT session_id, header_session_id, credential_fingerprint

@@ -89,6 +89,17 @@ export interface ResponsesAccState {
   >;
 }
 
+/** Validated unsuccessful terminal, carrying usage for accounting-only paths. */
+export class ResponsesTerminalError extends Error {
+  constructor(
+    readonly response: GatewayResponse,
+    readonly status: string,
+  ) {
+    super(`upstream Responses request ended with status ${status}`);
+    this.name = "ResponsesTerminalError";
+  }
+}
+
 export function makeResponsesAccState(): ResponsesAccState {
   return {
     id: "",
@@ -1297,6 +1308,9 @@ export async function accumulateResponsesSSEStream(
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
     /** Passthrough clients must receive a provider's valid failure terminal. */
     allowFailureTerminal?: boolean;
+    /** Buffered callers that run successful-turn side effects must reject
+     * incomplete terminals rather than treating a parsed body as completion. */
+    requireCompletedTerminal?: boolean;
     /** Internal state injection used by validated true passthrough. */
     state?: ResponsesAccState;
     onReader?: (reader: ReadableStreamDefaultReader<Uint8Array>) => void;
@@ -1364,7 +1378,8 @@ export async function accumulateResponsesSSEStream(
       if (
         opts.validation &&
         event === "response.failed" &&
-        !opts.allowFailureTerminal
+        !opts.allowFailureTerminal &&
+        !opts.requireCompletedTerminal
       ) {
         throw new Error("response.failed terminal");
       }
@@ -1597,7 +1612,8 @@ export async function accumulateResponsesSSEStream(
         event === "response.completed" ||
         event === "response.done" ||
         event === "response.incomplete" ||
-        (opts.allowFailureTerminal && event === "response.failed")
+        ((opts.allowFailureTerminal || opts.requireCompletedTerminal) &&
+          event === "response.failed")
       ) {
         const terminal = parsed.response as Record<string, unknown> | undefined;
         if (opts.validation && terminal?.output !== undefined) {
@@ -1699,6 +1715,16 @@ export async function accumulateResponsesSSEStream(
   if (opts.validation && !terminalStatus) {
     throw new Error("missing terminal response status");
   }
+  if (
+    opts.validation &&
+    opts.requireCompletedTerminal &&
+    terminalStatus !== "completed"
+  ) {
+    throw new ResponsesTerminalError(
+      finalizeResponsesAcc(state),
+      terminalStatus ?? "unknown",
+    );
+  }
 
   return finalizeResponsesAcc(state);
 }
@@ -1736,13 +1762,13 @@ export function formatResponsesEvent(event: string, data: string): string {
  * injected tool_use never leaks to the client. When the recall tool is present
  * the caller keeps the buffered `accumulateResponsesSSEStream` path.
  *
- * `onComplete` is invoked exactly once with the accumulated response when the
- * upstream stream ends, mirroring the Anthropic `buildStreamingResponse`
- * contract so `postResponse` (cost/calibration/temporal) runs identically.
+ * `onComplete` is invoked exactly once with the accumulated response and a
+ * success flag. Failed/incomplete/malformed streams must not enter successful
+ * turn persistence or session-identity confirmation.
  */
 export function streamResponsesPassthrough(
   upstreamResponse: Response,
-  onComplete: (response: GatewayResponse) => void,
+  onComplete: (response: GatewayResponse, successful: boolean) => void,
   sessionID?: string,
   validation: ResponsesValidationMode = "public",
   signal?: AbortSignal,
@@ -1855,11 +1881,11 @@ export function streamResponsesPassthrough(
         keepaliveTimer = null;
       };
 
-      const finish = (): void => {
+      const finish = (successful: boolean): void => {
         if (completed) return;
         completed = true;
         try {
-          onComplete(finalizeResponsesAcc(state));
+          onComplete(finalizeResponsesAcc(state), successful);
         } catch (err) {
           log.error("openai-responses passthrough onComplete error:", err);
         }
@@ -1905,6 +1931,7 @@ export function streamResponsesPassthrough(
                   event === "response.failed"
                 ) {
                   terminalForwarded = true;
+                  finish(state.terminalEvent === "response.completed");
                 }
               },
             },
@@ -1912,7 +1939,10 @@ export function streamResponsesPassthrough(
           clearKeepalive();
           if (!completed) {
             completed = true;
-            onComplete(accumulated);
+            onComplete(
+              accumulated,
+              state.terminalEvent === "response.completed",
+            );
           }
           safeClose();
         } catch (err) {
@@ -1961,17 +1991,14 @@ export function streamResponsesPassthrough(
                     usage: null,
                     error: {
                       type: "server_error",
-                      message:
-                        err instanceof Error
-                          ? err.message
-                          : "upstream stream error",
+                      message: "Upstream response stream failed",
                     },
                   },
                 }),
               ),
             ),
           );
-          finish();
+          finish(false);
           safeClose();
         }
       };
@@ -2570,10 +2597,7 @@ export function translateAnthropicStreamToResponses(
                     usage: null,
                     error: {
                       type: "server_error",
-                      message:
-                        err instanceof Error
-                          ? err.message
-                          : "upstream stream error",
+                      message: "Upstream response stream failed",
                     },
                   },
                 }),

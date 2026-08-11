@@ -30,13 +30,12 @@ describe("POST /v1/compact", () => {
 
   afterEach(() => harness?.teardown());
 
-  it("returns 400 on invalid JSON", async () => {
+  it("rejects an unknown session before parsing invalid JSON", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(harness.baseURL, "{ not json");
-    expect(resp.status).toBe(400);
+    expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
-    expect(body.error).toBe("invalid_request");
-    expect(body.message).toBe("Invalid JSON body");
+    expect(body.error).toBe("session_not_found");
   });
 
   it("rejects missing authentication without reading an indefinite body", async () => {
@@ -57,13 +56,34 @@ describe("POST /v1/compact", () => {
     await response.body?.cancel();
   });
 
-  it("returns 400 when project_path is missing", async () => {
+  it("rejects an unknown session without reading an indefinite body", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      type: "bytes",
+      pull() {
+        return new Promise(() => {});
+      },
+    });
+    const req = new Request("http://gateway.test/v1/compact", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-key",
+        "x-lore-session-id": "unknown-stalled-session",
+      },
+      body: source,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const response = await handleCompactEndpoint(req, loadConfig());
+    expect(response.status).toBe(404);
+    expect(req.bodyUsed).toBe(false);
+    await response.body?.cancel();
+  });
+
+  it("rejects an unknown session before validating project_path", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(harness.baseURL, JSON.stringify({}));
-    expect(resp.status).toBe(400);
+    expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
-    expect(body.error).toBe("invalid_request");
-    expect(body.message).toContain("project_path is required");
+    expect(body.error).toBe("session_not_found");
   });
 
   it("returns 404 when no active session exists for the project", async () => {
@@ -75,7 +95,7 @@ describe("POST /v1/compact", () => {
     expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
     expect(body.error).toBe("session_not_found");
-    expect(body.message).toContain("No active session found");
+    expect(body.message).toContain("No authenticated session found");
   });
 });
 

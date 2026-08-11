@@ -212,29 +212,32 @@ describe("server routing", () => {
     expect(body.error.type).toBe("api_error");
   });
 
-  test("POST /v1/responses/compact rejects invalid JSON on the exact route", async () => {
+  test("POST /v1/responses/compact authenticates the session before parsing", async () => {
     const res = await fetch(`${baseURL}/v1/responses/compact`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
       body: "{ not json",
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
     await expect(res.json()).resolves.toEqual({
-      error: "invalid_request",
-      message: "Invalid JSON body",
+      error: "session_not_found",
+      message: "No authenticated session found for the given headers",
     });
   });
 
   test.each([
-    ["/v1/messages", "gzip"],
-    ["/v1/chat/completions", "br"],
-    ["/v1/responses", "zstd"],
-    ["/v1beta/models/gemini-test:generateContent", "gzip"],
-    ["/v1/compact", "br"],
-    ["/v1/responses/compact", "zstd"],
+    ["/v1/messages", "gzip", 400],
+    ["/v1/chat/completions", "br", 400],
+    ["/v1/responses", "zstd", 400],
+    ["/v1beta/models/gemini-test:generateContent", "gzip", 400],
+    ["/v1/compact", "br", 404],
+    ["/v1/responses/compact", "zstd", 404],
   ] as const)(
     "POST %s rejects a %s decompression bomb",
-    async (path, encoding) => {
+    async (path, encoding, expectedStatus) => {
       const expanded = Buffer.alloc(
         MAX_HTTP_REQUEST_DECOMPRESSED_BYTES + 1,
         0x61,
@@ -254,7 +257,7 @@ describe("server routing", () => {
         },
         body: compressed,
       });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(expectedStatus);
     },
   );
 

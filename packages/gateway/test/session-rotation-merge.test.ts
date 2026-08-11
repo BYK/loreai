@@ -20,6 +20,7 @@
  * tests in session.test.ts.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { DatabaseSync } from "node:sqlite";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import {
@@ -28,6 +29,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
+import { enableHostedMode, _resetHostedModeForTest } from "@loreai/core";
 
 // A faithful Claude Code coding turn carries the anchored OAuth billing header
 // at system[0] (Claude Code emits it whenever `_CLAUDE_CODE_ASSUME_FIRST_PARTY_
@@ -67,6 +69,7 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
 
   afterEach(async () => {
     if (harness) await harness.teardown();
+    _resetHostedModeForTest();
   });
 
   it("does NOT merge two distinct Claude Code conversations into one session", async () => {
@@ -352,6 +355,94 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     );
     // ONE session — rotation proceeded (Fix 2 was a no-op, no incoming project).
     expect(sessions.length).toBe(1);
+  });
+
+  it("commits a provisional rotation when remote backfill must merge projects", async () => {
+    enableHostedMode();
+    const projectPath = "/client/projects/rotation-backfill";
+    const conflictingPath = "/client/projects/rotation-backfill-clone";
+    const remote = `github.com/test/rotation-${crypto.randomUUID()}`;
+    harness = await createHarness({
+      fixtures: makeConversationFixtures([
+        { userMessage: "rotation merge first", assistantText: "First." },
+        { userMessage: "rotation merge second", assistantText: "Second." },
+      ]),
+    });
+
+    let response = await harness.chat(body("rotation merge first"), "key-A", {
+      "x-session-affinity": "rotation-merge-before",
+      "x-lore-project": projectPath,
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+
+    // Adversarial order: the path-only project already exists, then a clone
+    // carrying its remote arrives before the provisional rotation commits.
+    // Backfilling projectPath now has to merge this conflicting remote row.
+    const conflictingId = crypto.randomUUID();
+    const database = new DatabaseSync(harness.dbPath);
+    try {
+      database
+        .prepare(
+          "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          conflictingId,
+          conflictingPath,
+          "rotation-backfill-clone",
+          remote,
+          Date.now(),
+        );
+    } finally {
+      database.close();
+    }
+
+    response = await harness.chat(
+      {
+        ...body("rotation merge second"),
+        messages: [
+          { role: "user", content: "rotation merge first" },
+          { role: "assistant", content: "First." },
+          { role: "user", content: "rotation merge second" },
+        ],
+      },
+      "key-A",
+      {
+        "x-session-affinity": "rotation-merge-after",
+        "x-lore-project": projectPath,
+        "x-lore-git-remote": remote,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const sessions = harness.queryDB<SessionRow & { message_count: number }>(
+      `SELECT session_id, header_session_id, header_name, project_path,
+              project_path_provisional, credential_fingerprint, message_count
+         FROM session_state
+        WHERE header_name = 'x-session-affinity'`,
+    );
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      header_session_id: "rotation-merge-after",
+      project_path: projectPath,
+      project_path_provisional: 0,
+      message_count: 3,
+    });
+    expect(
+      harness.queryDB<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ? AND content LIKE ?",
+        [sessions[0].session_id, "%rotation merge second%"],
+      )[0]?.count,
+    ).toBeGreaterThan(0);
+    expect(
+      harness.queryDB<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM projects WHERE id = ?",
+        [conflictingId],
+      )[0]?.count,
+    ).toBe(0);
   });
 });
 

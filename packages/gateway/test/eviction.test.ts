@@ -389,6 +389,30 @@ describe("evictIdleSessions", () => {
     expect(sessions.has("warming-sess")).toBe(true);
   });
 
+  test("does not evict sessions with an externally-owned response finalizer", () => {
+    const sessions = new Map<string, SessionState>();
+    sessions.set(
+      "response-active",
+      makeSessionState({
+        sessionID: "response-active",
+        lastRequestTime: Date.now() - 2_000_000,
+      }),
+    );
+
+    const evicted = evictIdleSessions(
+      makeConfig({ sessionEvictionTimeoutSeconds: 1800 }),
+      sessions,
+      EMPTY_SET,
+      EMPTY_SET,
+      Date.now(),
+      undefined,
+      (sessionID) => sessionID === "response-active",
+    );
+
+    expect(evicted).toBe(0);
+    expect(sessions.has("response-active")).toBe(true);
+  });
+
   test("does not evict sessions still executing tools", () => {
     const sessions = new Map<string, SessionState>();
     sessions.set(
@@ -562,6 +586,32 @@ describe("startIdleScheduler", () => {
       release();
       vi.useRealTimers();
       distillLimiter.clear();
+    }
+  });
+
+  test("amnesia sessions never enter idle background work", async () => {
+    vi.useFakeTimers();
+    try {
+      const sessions = new Map<string, SessionState>();
+      sessions.set(
+        "amnesia-idle-session",
+        makeSessionState({
+          sessionID: "amnesia-idle-session",
+          amnesia: true,
+          lastRequestTime: Date.now() - 10 * 60 * 1000,
+          lastStopReason: "end_turn",
+        }),
+      );
+      let idleRuns = 0;
+      const stop = startIdleScheduler(makeConfig(), sessions, async () => {
+        idleRuns++;
+      });
+
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(idleRuns).toBe(0);
+      stop();
+    } finally {
+      vi.useRealTimers();
     }
   });
 

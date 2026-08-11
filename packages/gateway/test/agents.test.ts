@@ -1,4 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AGENTS, captureUserUpstream } from "../src/cli/agents";
 
 // ---------------------------------------------------------------------------
@@ -35,15 +39,25 @@ describe("Claude Code agent envVars", () => {
   });
 
   test("both X-Lore-Project and X-Lore-Git-Remote coexist when git remote is available", () => {
-    // Use the actual repo cwd so safeRemote() finds a real git remote.
-    const env = claude.envVars("http://127.0.0.1:3207", process.cwd());
-    const headers = env.ANTHROPIC_CUSTOM_HEADERS ?? "";
-    expect(headers).toContain("X-Lore-Project:");
-    expect(headers).toContain("X-Lore-Git-Remote:");
-    // Project header should appear first (injected before git remote).
-    const projectIdx = headers.indexOf("X-Lore-Project:");
-    const remoteIdx = headers.indexOf("X-Lore-Git-Remote:");
-    expect(projectIdx).toBeLessThan(remoteIdx);
+    const cwd = mkdtempSync(join(tmpdir(), "lore-agent-remote-"));
+    try {
+      execFileSync("git", ["init"], { cwd, stdio: "ignore" });
+      execFileSync(
+        "git",
+        ["remote", "add", "origin", "git@github.com:test/repo.git"],
+        { cwd, stdio: "ignore" },
+      );
+      const env = claude.envVars("http://127.0.0.1:3207", cwd);
+      const headers = env.ANTHROPIC_CUSTOM_HEADERS ?? "";
+      expect(headers).toContain(`X-Lore-Project: ${cwd}`);
+      expect(headers).toContain("X-Lore-Git-Remote: github.com/test/repo");
+      // Project header should appear first (injected before git remote).
+      const projectIdx = headers.indexOf("X-Lore-Project:");
+      const remoteIdx = headers.indexOf("X-Lore-Git-Remote:");
+      expect(projectIdx).toBeLessThan(remoteIdx);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   test("preserves user-set ANTHROPIC_CUSTOM_HEADERS", () => {

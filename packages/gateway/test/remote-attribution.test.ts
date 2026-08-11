@@ -33,6 +33,33 @@ function pathlessBody(userMessage: string): Record<string, unknown> {
   };
 }
 
+function pathlessBodyWithoutTools(
+  userMessage: string,
+): Record<string, unknown> {
+  return {
+    ...pathlessBody(userMessage),
+    // Keep enough tool definitions for normal-turn classification, but none of
+    // the read/shell tools that trigger the synthetic project-resolution probe.
+    tools: [
+      {
+        name: "write_a",
+        description: "Write A",
+        input_schema: { type: "object" },
+      },
+      {
+        name: "write_b",
+        description: "Write B",
+        input_schema: { type: "object" },
+      },
+      {
+        name: "write_c",
+        description: "Write C",
+        input_schema: { type: "object" },
+      },
+    ],
+  };
+}
+
 describe("remote gateway: path-less session attribution", () => {
   let harness: Harness;
   let prevRemote: string | undefined;
@@ -99,6 +126,317 @@ describe("remote gateway: path-less session attribution", () => {
     }
     // The gateway's own cwd must NOT have become a project.
     expect(projects.some((p) => p.path === process.cwd())).toBe(false);
+  });
+
+  it("re-attributes a provisional bucket before publishing a rotated session header", async () => {
+    const first = "bucket turn that must follow the session";
+    const second = "confident turn after client restart";
+    const realPath = "/client/projects/remote-self-heal";
+    harness = await createHarness({
+      fixtures: makeConversationFixtures([
+        { userMessage: first, assistantText: "First response." },
+        { userMessage: second, assistantText: "Second response." },
+      ]),
+    });
+
+    let response = await harness.chat(
+      pathlessBodyWithoutTools(first),
+      "test-key",
+      {
+        "x-lore-project": "",
+        "x-session-affinity": "remote-affinity-before-restart",
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    // A real client restart may coincide with a gateway restart. This also
+    // deterministically drains the first turn's deferred finalizer before the
+    // persisted binding is inspected and the affinity value rotates.
+    await harness.restartPipeline();
+
+    const before = harness.queryDB<{
+      session_id: string;
+      project_path: string;
+      project_path_provisional: number;
+    }>(
+      `SELECT session_id, project_path, project_path_provisional
+         FROM session_state
+        WHERE header_session_id = 'remote-affinity-before-restart'`,
+    );
+    expect(before).toHaveLength(1);
+    expect(before[0].project_path).toMatch(/^\/__lore_unattributed__\//);
+    expect(before[0].project_path_provisional).toBe(1);
+
+    // OpenCode restarted and rotated its affinity value. Tier 1b provisionally
+    // adopts the old Lore session; the successful turn must self-heal the old
+    // bucket before publishing the new header and confident path.
+    response = await harness.chat(
+      pathlessBodyWithoutTools(second),
+      "test-key",
+      {
+        "x-lore-project": realPath,
+        "x-session-affinity": "remote-affinity-after-restart",
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const after = harness.queryDB<{
+      session_id: string;
+      header_session_id: string;
+      project_path: string;
+      project_path_provisional: number;
+    }>(
+      `SELECT session_id, header_session_id, project_path,
+              project_path_provisional
+         FROM session_state
+        WHERE session_id = ?`,
+      [before[0].session_id],
+    );
+    expect(after).toEqual([
+      {
+        session_id: before[0].session_id,
+        header_session_id: "remote-affinity-after-restart",
+        project_path: realPath,
+        project_path_provisional: 0,
+      },
+    ]);
+
+    const attribution = harness.queryDB<{
+      content: string;
+      project_path: string;
+    }>(
+      `SELECT tm.content, p.path AS project_path
+         FROM temporal_messages tm
+         JOIN projects p ON p.id = tm.project_id
+        WHERE tm.session_id = ?
+          AND (tm.content LIKE ? OR tm.content LIKE ?)`,
+      [before[0].session_id, `%${first}%`, `%${second}%`],
+    );
+    expect(attribution.some((row) => row.content.includes(first))).toBe(true);
+    expect(attribution.some((row) => row.content.includes(second))).toBe(true);
+    expect(new Set(attribution.map((row) => row.project_path))).toEqual(
+      new Set([realPath]),
+    );
+  });
+
+  it("rolls back project re-attribution when the provisional turn commit fails", async () => {
+    const first = "atomic bucket turn";
+    const second = "atomic confident retry";
+    const realPath = "/client/projects/atomic-self-heal";
+    const oldRoute = "https://old-anthropic-route.invalid";
+    const newRoute = "https://new-anthropic-route.invalid";
+    const oldAffinity = "atomic-affinity-before-restart";
+    const newAffinity = "atomic-affinity-after-restart";
+    harness = await createHarness({
+      fixtures: makeConversationFixtures([
+        { userMessage: first, assistantText: "First response." },
+        { userMessage: second, assistantText: "Failed local commit." },
+        { userMessage: second, assistantText: "Failed project merge." },
+        { userMessage: second, assistantText: "Successful retry." },
+      ]),
+    });
+
+    let response = await harness.chat(
+      pathlessBodyWithoutTools(first),
+      "test-key",
+      {
+        "x-lore-project": "",
+        "x-session-affinity": oldAffinity,
+        "x-lore-provider": "anthropic",
+        "x-lore-upstream-url": oldRoute,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await harness.restartPipeline();
+
+    const before = harness.queryDB<{
+      session_id: string;
+      project_path: string;
+      last_upstream: string;
+    }>(
+      `SELECT session_id, project_path, last_upstream
+         FROM session_state
+        WHERE header_session_id = ?`,
+      [oldAffinity],
+    );
+    expect(before).toHaveLength(1);
+    const bucketPath = before[0].project_path;
+    expect(bucketPath).toMatch(/^\/__lore_unattributed__\//);
+    expect(before[0].last_upstream).toContain(oldRoute);
+
+    const { db } = await import("@loreai/core");
+    db().exec(`
+      CREATE TEMP TRIGGER fail_atomic_provisional_turn
+      BEFORE INSERT ON temporal_messages
+      WHEN NEW.content LIKE '%${second}%'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced provisional temporal failure');
+      END;
+    `);
+
+    const migratedBody = {
+      ...pathlessBodyWithoutTools(second),
+      model: "claude-opus-4-1",
+    };
+    response = await harness.chat(migratedBody, "test-key", {
+      "x-lore-project": realPath,
+      "x-session-affinity": newAffinity,
+      "x-lore-provider": "anthropic",
+      "x-lore-upstream-url": newRoute,
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const afterFailure = harness.queryDB<{
+      header_session_id: string;
+      project_path: string;
+      project_path_provisional: number;
+      last_upstream: string;
+    }>(
+      `SELECT header_session_id, project_path, project_path_provisional,
+              last_upstream
+         FROM session_state
+        WHERE session_id = ?`,
+      [before[0].session_id],
+    );
+    expect(afterFailure).toEqual([
+      {
+        header_session_id: oldAffinity,
+        project_path: bucketPath,
+        project_path_provisional: 1,
+        last_upstream: before[0].last_upstream,
+      },
+    ]);
+    expect(
+      harness.queryDB("SELECT id FROM projects WHERE path = ?", [realPath]),
+    ).toHaveLength(0);
+    expect(
+      harness.queryDB("SELECT id FROM projects WHERE path = ?", [bucketPath]),
+    ).toHaveLength(1);
+    expect(
+      harness.queryDB(
+        "SELECT project_id FROM project_path_aliases WHERE path = ?",
+        [bucketPath],
+      ),
+    ).toHaveLength(0);
+    const failedAttribution = harness.queryDB<{
+      content: string;
+      project_path: string;
+    }>(
+      `SELECT tm.content, p.path AS project_path
+         FROM temporal_messages tm
+         JOIN projects p ON p.id = tm.project_id
+        WHERE tm.session_id = ?`,
+      [before[0].session_id],
+    );
+    expect(failedAttribution.some((row) => row.content.includes(first))).toBe(
+      true,
+    );
+    expect(failedAttribution.some((row) => row.content.includes(second))).toBe(
+      false,
+    );
+    expect(new Set(failedAttribution.map((row) => row.project_path))).toEqual(
+      new Set([bucketPath]),
+    );
+
+    db().exec("DROP TRIGGER fail_atomic_provisional_turn");
+    db().exec(`
+      CREATE TEMP TRIGGER fail_atomic_project_merge
+      BEFORE DELETE ON projects
+      WHEN OLD.path LIKE '/__lore_unattributed__/%'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced provisional project merge failure');
+      END;
+    `);
+    response = await harness.chat(migratedBody, "test-key", {
+      "x-lore-project": realPath,
+      "x-session-affinity": newAffinity,
+      "x-lore-provider": "anthropic",
+      "x-lore-upstream-url": newRoute,
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(
+      harness.queryDB(
+        `SELECT header_session_id, project_path, project_path_provisional,
+                last_upstream
+           FROM session_state
+          WHERE session_id = ?`,
+        [before[0].session_id],
+      ),
+    ).toEqual(afterFailure);
+    expect(
+      harness.queryDB("SELECT id FROM projects WHERE path = ?", [realPath]),
+    ).toHaveLength(0);
+    expect(
+      harness.queryDB("SELECT id FROM projects WHERE path = ?", [bucketPath]),
+    ).toHaveLength(1);
+
+    db().exec("DROP TRIGGER fail_atomic_project_merge");
+    response = await harness.chat(migratedBody, "test-key", {
+      "x-lore-project": realPath,
+      "x-session-affinity": newAffinity,
+      "x-lore-provider": "anthropic",
+      "x-lore-upstream-url": newRoute,
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const afterRetry = harness.queryDB<{
+      header_session_id: string;
+      project_path: string;
+      project_path_provisional: number;
+      last_upstream: string;
+    }>(
+      `SELECT header_session_id, project_path, project_path_provisional,
+              last_upstream
+         FROM session_state
+        WHERE session_id = ?`,
+      [before[0].session_id],
+    );
+    expect(afterRetry).toHaveLength(1);
+    expect(afterRetry[0]).toMatchObject({
+      header_session_id: newAffinity,
+      project_path: realPath,
+      project_path_provisional: 0,
+    });
+    expect(afterRetry[0].last_upstream).toContain(newRoute);
+    expect(afterRetry[0].last_upstream).toContain("claude-opus-4-1");
+    expect(
+      harness.queryDB("SELECT id FROM projects WHERE path = ?", [bucketPath]),
+    ).toHaveLength(0);
+    expect(
+      harness.queryDB(
+        "SELECT project_id FROM project_path_aliases WHERE path = ?",
+        [bucketPath],
+      ),
+    ).toHaveLength(1);
+    const attribution = harness.queryDB<{
+      content: string;
+      project_path: string;
+    }>(
+      `SELECT tm.content, p.path AS project_path
+         FROM temporal_messages tm
+         JOIN projects p ON p.id = tm.project_id
+        WHERE tm.session_id = ?`,
+      [before[0].session_id],
+    );
+    expect(attribution.some((row) => row.content.includes(first))).toBe(true);
+    expect(attribution.some((row) => row.content.includes(second))).toBe(true);
+    expect(new Set(attribution.map((row) => row.project_path))).toEqual(
+      new Set([realPath]),
+    );
   });
 });
 

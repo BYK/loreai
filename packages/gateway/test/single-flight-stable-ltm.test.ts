@@ -117,4 +117,73 @@ describe("singleFlightStableLtm", () => {
       expect(r).toEqual({ formatted: "final", tokenCount: 99 });
     }
   });
+
+  test("session eviction aborts the owner before a late compute can publish", async () => {
+    vi.resetModules();
+    const { evictStableLtmSessionForTest, singleFlightStableLtm } =
+      await import("../src/pipeline");
+
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let ownerSignal: AbortSignal | undefined;
+    const compute = vi.fn(async (signal: AbortSignal) => {
+      ownerSignal = signal;
+      await blocked;
+      return { formatted: "stale", tokenCount: 5 };
+    });
+
+    const pending = singleFlightStableLtm("session-evicted", compute);
+    await vi.waitFor(() => expect(ownerSignal).toBeDefined());
+    evictStableLtmSessionForTest("session-evicted");
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(ownerSignal?.aborted).toBe(true);
+    release();
+
+    const fresh = await singleFlightStableLtm("session-evicted", async () => ({
+      formatted: "fresh",
+      tokenCount: 6,
+    }));
+    expect(fresh).toEqual({ formatted: "fresh", tokenCount: 6 });
+    expect(compute).toHaveBeenCalledTimes(1);
+  });
+
+  test("one caller cancelling does not abort a shared session-owned compute", async () => {
+    vi.resetModules();
+    const { singleFlightStableLtm } = await import("../src/pipeline");
+    const owner = new AbortController();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let computeSignal: AbortSignal | undefined;
+    const compute = vi.fn(async (signal: AbortSignal) => {
+      computeSignal = signal;
+      await blocked;
+      return { formatted: "shared", tokenCount: 7 };
+    });
+
+    const cancelledCaller = singleFlightStableLtm(
+      "session-shared-owner",
+      compute,
+      owner.signal,
+    );
+    await vi.waitFor(() => expect(computeSignal).toBeDefined());
+    const healthyCaller = singleFlightStableLtm(
+      "session-shared-owner",
+      compute,
+    );
+    owner.abort(new DOMException("caller disconnected", "AbortError"));
+
+    await expect(cancelledCaller).rejects.toMatchObject({ name: "AbortError" });
+    expect(computeSignal?.aborted).toBe(false);
+    release();
+    await expect(healthyCaller).resolves.toEqual({
+      formatted: "shared",
+      tokenCount: 7,
+    });
+    expect(compute).toHaveBeenCalledTimes(1);
+  });
 });

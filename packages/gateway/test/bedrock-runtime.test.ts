@@ -8,6 +8,8 @@
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
 import { MockAgent } from "undici";
 import {
   BEDROCK_RUNTIME_PATH_RE,
@@ -22,6 +24,52 @@ import { resetPipelineState } from "../src/pipeline";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import { close as closeDB } from "@loreai/core";
+
+function localRequest(
+  baseURL: string,
+  path: string,
+  options: {
+    method: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+): Promise<Response> {
+  const port = Number(new URL(baseURL).port);
+  return new Promise<Response>((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path,
+        method: options.method,
+        headers: {
+          ...options.headers,
+          ...(options.body === undefined
+            ? {}
+            : { "content-length": String(Buffer.byteLength(options.body)) }),
+        },
+      },
+      (incoming) => {
+        const headers = new Headers();
+        for (let i = 0; i < incoming.rawHeaders.length; i += 2) {
+          headers.append(incoming.rawHeaders[i], incoming.rawHeaders[i + 1]);
+        }
+        resolve(
+          new Response(
+            Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>,
+            {
+              status: incoming.statusCode ?? 500,
+              statusText: incoming.statusMessage,
+              headers,
+            },
+          ),
+        );
+      },
+    );
+    request.once("error", reject);
+    request.end(options.body);
+  });
+}
 
 describe("bedrockRuntimeUrl", () => {
   test("builds the regional bedrock-runtime origin (no trailing slash)", () => {
@@ -554,7 +602,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
       inferenceConfig: { maxTokens: 64 },
     });
 
-    const resp = await fetch(`${baseURL}/v1/model/${modelId}/${verb}`, {
+    const resp = await localRequest(baseURL, `/v1/model/${modelId}/${verb}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -669,7 +717,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/model/${modelId}/${verb}`, {
+    const resp = await localRequest(baseURL, `/v1/model/${modelId}/${verb}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -741,7 +789,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/model/${modelId}/${verb}`, {
+    const resp = await localRequest(baseURL, `/v1/model/${modelId}/${verb}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -795,7 +843,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
 
     // /v1/models is the Anthropic-protocol models list passthrough — must
     // NOT be misclassified as a Bedrock Runtime call.
-    const resp = await fetch(`${baseURL}/v1/models`, { method: "GET" });
+    const resp = await localRequest(baseURL, "/v1/models", { method: "GET" });
     // 404 because no real upstream is configured; the load-bearing assertion
     // is that we reached the Anthropic passthrough route, not the Bedrock one.
     expect(resp.status).not.toBe(200);

@@ -14,24 +14,33 @@ import { isHostedMode } from "./hosted";
 import { dataDir } from "./data-dir";
 import { tracedDatabase } from "./db/traced";
 
-/**
- * Callback fired when project rows are created or mutated (merge, rename, etc.).
- * Used by data.ts to invalidate its listing caches without a circular import.
- */
-let onProjectMutationCb: (() => void) | null = null;
+export type ProjectMutation =
+  | { type: "create"; projectId: string }
+  | {
+      type: "merge";
+      sourceId: string;
+      targetId: string;
+      sourcePath?: string;
+    };
 
-/** Register a callback for project mutations. Only one callback is supported. */
-export function onProjectMutation(cb: () => void): void {
-  onProjectMutationCb = cb;
+/** Project mutation listeners, kept here to avoid higher-layer import cycles. */
+const projectMutationListeners = new Set<(mutation: ProjectMutation) => void>();
+
+/** Register a callback for project mutations. */
+export function onProjectMutation(
+  cb: (mutation: ProjectMutation) => void,
+): () => void {
+  projectMutationListeners.add(cb);
+  return () => projectMutationListeners.delete(cb);
 }
 
 /** Fire the project mutation callback (if registered). */
-function fireProjectMutation(): void {
+function fireProjectMutation(mutation: ProjectMutation): void {
   // Project creation and merge (mergeProjectInternal) both route through here,
   // and a merge re-points a path to a different project id. Drop the memo so a
   // stale path→id can never survive a mutation.
   invalidateProjectIdCache();
-  onProjectMutationCb?.();
+  for (const listener of projectMutationListeners) listener(mutation);
 }
 
 /**
@@ -87,6 +96,7 @@ export function fireProjectRemoteBackfilled(projectId: string): void {
  * branch is intentionally left uncached so lazy backfill keeps retrying.
  */
 const projectIdByPathCache = new WeakMap<Database, Map<string, string>>();
+const projectIdCacheDataVersion = new WeakMap<Database, number>();
 
 function projectIdCacheFor(conn: Database): Map<string, string> {
   let m = projectIdByPathCache.get(conn);
@@ -95,6 +105,75 @@ function projectIdCacheFor(conn: Database): Map<string, string> {
     projectIdByPathCache.set(conn, m);
   }
   return m;
+}
+
+function projectDataVersion(conn: Database): number {
+  const row = conn.query("PRAGMA data_version").get() as {
+    data_version: number;
+  } | null;
+  if (!row || !Number.isSafeInteger(row.data_version)) {
+    throw new Error("invalid SQLite data_version");
+  }
+  return row.data_version;
+}
+
+function cachedProjectId(
+  conn: Database,
+  path: string,
+  dataVersion: number,
+): string | undefined {
+  const cache = projectIdCacheFor(conn);
+  const cachedVersion = projectIdCacheDataVersion.get(conn);
+  if (cachedVersion !== undefined && cachedVersion !== dataVersion) {
+    cache.clear();
+  }
+  projectIdCacheDataVersion.set(conn, dataVersion);
+  return cache.get(path);
+}
+
+/** True while either supported SQLite driver has an open transaction. */
+export function databaseInTransaction(conn: Database): boolean {
+  const transactionState = conn as Database & {
+    /** node:sqlite transaction-state getter. */
+    isTransaction?: boolean;
+    /** bun:sqlite transaction-state getter. */
+    inTransaction?: boolean;
+  };
+  if (typeof transactionState.isTransaction === "boolean") {
+    return transactionState.isTransaction;
+  }
+  if (typeof transactionState.inTransaction === "boolean") {
+    return transactionState.inTransaction;
+  }
+
+  // node:sqlite shipped before isTransaction (Node 22.5-22.15). Ask SQLite
+  // directly instead of maintaining a depth counter that can drift after raw
+  // SQL, failed commits, or SQLite's automatic rollback conditions.
+  try {
+    conn.exec("BEGIN DEFERRED; ROLLBACK");
+    return false;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      /cannot start a transaction within a transaction/i.test(error.message)
+    ) {
+      return true;
+    }
+    throw error;
+  }
+}
+
+/** Publish a stable path mapping only after it is outside rollback scope. */
+function memoizeProjectId(
+  conn: Database,
+  path: string,
+  projectID: string,
+  dataVersion: number,
+): void {
+  if (!databaseInTransaction(conn)) {
+    projectIdCacheFor(conn).set(path, projectID);
+    projectIdCacheDataVersion.set(conn, dataVersion);
+  }
 }
 
 /**
@@ -1930,6 +2009,20 @@ const MIGRATIONS: string[] = [
   // Version 79: local-only routing snapshot for restart-safe explicit compaction.
   // Auth headers are excluded before serialization by gateway forwardClientHeaders().
   `ALTER TABLE session_state ADD COLUMN last_upstream TEXT;`,
+  // Version 80: persist session-scoped amnesia across eviction and restart.
+  // Local-only privacy state; never synchronized between devices.
+  `ALTER TABLE session_state ADD COLUMN amnesia INTEGER NOT NULL DEFAULT 0;`,
+  `
+  -- Version 81: durable local redirects for retired project UUIDs.
+  -- Paths can be reused or repointed, so cross-process consumers need the
+  -- immutable source UUID to recover the live merge target safely.
+  CREATE TABLE IF NOT EXISTS project_id_aliases (
+    retired_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_project_id_aliases_project
+    ON project_id_aliases(project_id);
+  `,
 ];
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -3547,6 +3640,17 @@ function recoverMissingObjects(database: Database) {
       `);
     }
   }
+  // Version 81: local retired-project UUID redirects. These are deliberately
+  // not synchronized; they repair process-local state after another local
+  // connection merges a project.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS project_id_aliases (
+      retired_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_id_aliases_project
+      ON project_id_aliases(project_id);
+  `);
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
   // The verdict-keyed index MUST be created here, AFTER the column is ensured —
   // never in the big exec above, which runs before this ALTER and would throw
@@ -3621,7 +3725,8 @@ function recoverMissingObjects(database: Database) {
  * ping-pong (a non-deterministic "local wins" would make the two devices merge in
  * opposite directions forever). mergeProjectInternal re-keys the content + re-enqueues it
  * under the winner. MUST run AFTER a pull (post-content, so the re-key finds the applied
- * rows) and OUTSIDE any transaction (mergeProjectInternal opens its own BEGIN IMMEDIATE).
+ * rows). mergeProjectInternal is savepoint-backed, so callers may include the
+ * merge in a larger atomic write unit.
  */
 export function convergeProjectsByRemote(): void {
   const dupes = db()
@@ -3640,10 +3745,160 @@ export function convergeProjectsByRemote(): void {
   }
 }
 
-export function mergeProjectInternal(sourceId: string, targetId: string): void {
-  const d = db();
-  d.exec("BEGIN IMMEDIATE");
+/** Every durable table whose rows must follow a project merge. */
+export const PROJECT_MERGE_TABLES = Object.freeze([
+  "cache_bust_stats",
+  "dedup_feedback",
+  "distillation_vec",
+  "distillations",
+  "entities",
+  "import_history",
+  "knowledge",
+  "knowledge_contradictions",
+  "knowledge_session_injections",
+  "knowledge_tombstones",
+  "knowledge_transfers",
+  "lat_sections",
+  "project_id_aliases",
+  "project_path_aliases",
+  "session_prompt_deltas",
+  "session_rollup",
+  "temporal_messages",
+  "temporal_vec",
+  "tool_calls",
+  "warmup_histograms",
+] as const);
+
+const WARMUP_HISTOGRAM_BIN_COUNT = 21;
+const SQLITE_MAX_INTEGER = "9223372036854775807";
+
+function assertProjectMergeCountersSafe(
+  database: Database,
+  sourceId: string,
+  targetId: string,
+): void {
+  const invalidCacheSource = database
+    .query(
+      `SELECT 1 FROM cache_bust_stats
+        WHERE project_id = ?
+          AND (typeof(turns) != 'integer'
+            OR typeof(write_tokens) != 'integer'
+            OR turns < 0 OR write_tokens < 0)
+        LIMIT 1`,
+    )
+    .get(sourceId);
+  const invalidTransferSource = database
+    .query(
+      `SELECT 1 FROM knowledge_transfers
+        WHERE recalled_in_project_id = ?
+          AND (typeof(hit_count) != 'integer' OR hit_count < 0)
+        LIMIT 1`,
+    )
+    .get(sourceId);
+  const cacheOverflow = database
+    .query(
+      `SELECT 1
+         FROM cache_bust_stats AS source
+         JOIN cache_bust_stats AS target
+           ON target.project_id = ?
+          AND target.cause = source.cause
+          AND target.relocatable = source.relocatable
+        WHERE source.project_id = ?
+          AND (typeof(source.turns) != 'integer'
+            OR typeof(target.turns) != 'integer'
+            OR typeof(source.write_tokens) != 'integer'
+            OR typeof(target.write_tokens) != 'integer'
+            OR source.turns < 0 OR target.turns < 0
+            OR source.write_tokens < 0 OR target.write_tokens < 0
+            OR target.turns > ${SQLITE_MAX_INTEGER} - source.turns
+            OR target.write_tokens > ${SQLITE_MAX_INTEGER} - source.write_tokens)
+        LIMIT 1`,
+    )
+    .get(targetId, sourceId);
+  const transferOverflow = database
+    .query(
+      `SELECT 1
+         FROM knowledge_transfers AS source
+         JOIN knowledge_transfers AS target
+           ON target.recalled_in_project_id = ?
+          AND target.knowledge_id = source.knowledge_id
+        WHERE source.recalled_in_project_id = ?
+          AND (typeof(source.hit_count) != 'integer'
+            OR typeof(target.hit_count) != 'integer'
+            OR source.hit_count < 0 OR target.hit_count < 0
+            OR target.hit_count > ${SQLITE_MAX_INTEGER} - source.hit_count)
+        LIMIT 1`,
+    )
+    .get(targetId, sourceId);
+  if (
+    invalidCacheSource ||
+    invalidTransferSource ||
+    cacheOverflow ||
+    transferOverflow
+  ) {
+    throw new Error("project merge counter overflow");
+  }
+}
+
+function assertRollupSourcesSafe(
+  database: Database,
+  projectId: string,
+  sessionId: string,
+): void {
+  const invalidTemporal = database
+    .query(
+      `SELECT 1 FROM temporal_messages
+        WHERE project_id = ? AND session_id = ? AND tokens IS NOT NULL
+          AND (typeof(tokens) != 'integer' OR tokens < 0
+            OR tokens > ${Number.MAX_SAFE_INTEGER})
+        LIMIT 1`,
+    )
+    .get(projectId, sessionId);
+  const invalidDistillation = database
+    .query(
+      `SELECT 1 FROM distillations
+        WHERE project_id = ? AND session_id = ? AND token_count IS NOT NULL
+          AND (typeof(token_count) != 'integer' OR token_count < 0
+            OR token_count > ${Number.MAX_SAFE_INTEGER})
+        LIMIT 1`,
+    )
+    .get(projectId, sessionId);
+  const unsafeAggregate = database
+    .query(
+      `SELECT 1
+         WHERE (SELECT TOTAL(tokens) FROM temporal_messages
+                 WHERE project_id = ? AND session_id = ?) > ${Number.MAX_SAFE_INTEGER}
+            OR (SELECT TOTAL(token_count) FROM distillations
+                 WHERE project_id = ? AND session_id = ?) > ${Number.MAX_SAFE_INTEGER}
+        LIMIT 1`,
+    )
+    .get(projectId, sessionId, projectId, sessionId);
+  if (invalidTemporal || invalidDistillation || unsafeAggregate) {
+    throw new Error("project merge rollup counter invalid");
+  }
+}
+
+function parseSqliteInteger(value: string): bigint | null {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) return null;
   try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+export function mergeProjectInternal(sourceId: string, targetId: string): void {
+  if (sourceId === targetId) return;
+  const d = db();
+  let sourcePath: string | undefined;
+  let merged = false;
+  withSavepoint("merge_project", () => {
+    const sourceRow = d
+      .query("SELECT path FROM projects WHERE id = ?")
+      .get(sourceId) as { path: string } | null;
+    if (!sourceRow) return;
+    sourcePath = sourceRow.path;
+    assertProjectMergeCountersSafe(d, sourceId, targetId);
     d.query("UPDATE knowledge SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
@@ -3660,13 +3915,34 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     // ⇒ no session filter. Inside the transaction so a failure rolls the merge
     // back; no-op in blob mode. (knowledge_vec/entity_vec have no partition key.)
     repartitionVec0Project(d, sourceId, targetId);
-    // Re-point the session rollup set-based: the temporal/distillation project_id
-    // UPDATEs above do NOT fire the rollup triggers (scoped to content/tokens/
-    // metadata + insert/delete), so move the rows here. session_id is globally
-    // unique ⇒ no (target, session_id) PK collision.
+    // Re-point rollups set-based, but rebuild collisions from the authoritative
+    // temporal/distillation rows after those rows have moved above.
+    const rollupCollisions = d
+      .query(
+        `SELECT target.session_id
+           FROM session_rollup AS target
+           JOIN session_rollup AS source
+             ON source.project_id = ?
+            AND source.session_id = target.session_id
+          WHERE target.project_id = ?`,
+      )
+      .all(sourceId, targetId) as Array<{ session_id: string }>;
+    d.query(
+      `DELETE FROM session_rollup AS source
+        WHERE source.project_id = ?
+          AND EXISTS (
+            SELECT 1 FROM session_rollup AS target
+             WHERE target.project_id = ?
+               AND target.session_id = source.session_id
+          )`,
+    ).run(sourceId, targetId);
     d.query(
       "UPDATE session_rollup SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
+    for (const collision of rollupCollisions) {
+      assertRollupSourcesSafe(d, targetId, collision.session_id);
+      recomputeSessionRollupRow(d, targetId, collision.session_id);
+    }
     d.query("UPDATE lat_sections SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
@@ -3679,6 +3955,192 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
       targetId,
       sourceId,
     );
+    // Prompt deltas are globally keyed by (session_id, seq), so project_id is
+    // not part of their identity and can be re-keyed directly.
+    d.query(
+      "UPDATE session_prompt_deltas SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    // Import identity is (project, agent, source). Preserve the newest record
+    // when both projects imported the same source, then re-key the remainder.
+    d.query(
+      `DELETE FROM import_history
+        WHERE project_id = ?
+          AND EXISTS (
+            SELECT 1 FROM import_history AS target
+             WHERE target.project_id = ?
+               AND target.agent_name = import_history.agent_name
+               AND target.source_id = import_history.source_id
+               AND target.imported_at >= import_history.imported_at
+          )`,
+    ).run(sourceId, targetId);
+    d.query(
+      `DELETE FROM import_history
+        WHERE project_id = ?
+          AND EXISTS (
+            SELECT 1 FROM import_history AS source
+             WHERE source.project_id = ?
+               AND source.agent_name = import_history.agent_name
+               AND source.source_id = import_history.source_id
+               AND source.imported_at > import_history.imported_at
+          )`,
+    ).run(targetId, sourceId);
+    d.query(
+      "UPDATE import_history SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    // Histogram rows collide by time slot. Sum valid count vectors and totals;
+    // if either persisted row is malformed, retain the newer whole row.
+    const sourceHistograms = d
+      .query(
+        `SELECT time_slot, counts, CAST(total AS TEXT) AS total,
+                CAST(updated_at AS TEXT) AS updated_at
+           FROM warmup_histograms WHERE project_id = ?`,
+      )
+      .all(sourceId) as Array<{
+      time_slot: string;
+      counts: string;
+      total: string;
+      updated_at: string;
+    }>;
+    for (const source of sourceHistograms) {
+      const target = d
+        .query(
+          `SELECT counts, CAST(total AS TEXT) AS total,
+                  CAST(updated_at AS TEXT) AS updated_at
+             FROM warmup_histograms WHERE project_id = ? AND time_slot = ?`,
+        )
+        .get(targetId, source.time_slot) as {
+        counts: string;
+        total: string;
+        updated_at: string;
+      } | null;
+      if (!target) continue;
+      let counts = target.counts;
+      let total: number | undefined;
+      const sourceUpdatedAt = parseSqliteInteger(source.updated_at);
+      const targetUpdatedAt = parseSqliteInteger(target.updated_at);
+      const sourceIsNewer =
+        sourceUpdatedAt !== null &&
+        (targetUpdatedAt === null || sourceUpdatedAt > targetUpdatedAt);
+      try {
+        const sourceValues = JSON.parse(source.counts) as unknown;
+        const targetValues = JSON.parse(target.counts) as unknown;
+        const sourceTotal = parseSqliteInteger(source.total);
+        const targetTotal = parseSqliteInteger(target.total);
+        if (
+          !Array.isArray(sourceValues) ||
+          !Array.isArray(targetValues) ||
+          sourceValues.length !== WARMUP_HISTOGRAM_BIN_COUNT ||
+          targetValues.length !== WARMUP_HISTOGRAM_BIN_COUNT ||
+          !sourceValues.every(
+            (value) => Number.isSafeInteger(value) && value >= 0,
+          ) ||
+          !targetValues.every(
+            (value) => Number.isSafeInteger(value) && value >= 0,
+          ) ||
+          sourceTotal === null ||
+          sourceTotal > BigInt(Number.MAX_SAFE_INTEGER) ||
+          targetTotal === null ||
+          targetTotal > BigInt(Number.MAX_SAFE_INTEGER)
+        ) {
+          throw new Error("invalid histogram counts");
+        }
+        const sourceCountTotal = sourceValues.reduce(
+          (sum, value) => sum + BigInt(value),
+          0n,
+        );
+        const targetCountTotal = targetValues.reduce(
+          (sum, value) => sum + BigInt(value),
+          0n,
+        );
+        if (
+          sourceCountTotal !== sourceTotal ||
+          targetCountTotal !== targetTotal
+        ) {
+          throw new Error("histogram total does not match counts");
+        }
+        const merged = targetValues.map(
+          (value, index) => value + sourceValues[index],
+        );
+        const mergedTotal = Number(targetTotal + sourceTotal);
+        if (
+          !merged.every(Number.isSafeInteger) ||
+          !Number.isSafeInteger(mergedTotal)
+        ) {
+          throw new Error("histogram counter overflow");
+        }
+        counts = JSON.stringify(merged);
+        total = mergedTotal;
+      } catch {
+        if (sourceIsNewer) {
+          d.query(
+            `UPDATE warmup_histograms
+                SET counts = (SELECT counts FROM warmup_histograms
+                                WHERE project_id = ? AND time_slot = ?),
+                    total = (SELECT total FROM warmup_histograms
+                              WHERE project_id = ? AND time_slot = ?),
+                    updated_at = (SELECT updated_at FROM warmup_histograms
+                                   WHERE project_id = ? AND time_slot = ?)
+              WHERE project_id = ? AND time_slot = ?`,
+          ).run(
+            sourceId,
+            source.time_slot,
+            sourceId,
+            source.time_slot,
+            sourceId,
+            source.time_slot,
+            targetId,
+            source.time_slot,
+          );
+        }
+        d.query(
+          "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot = ?",
+        ).run(sourceId, source.time_slot);
+        continue;
+      }
+      d.query(
+        `UPDATE warmup_histograms
+            SET counts = ?, total = ?,
+                updated_at = MAX(
+                  updated_at,
+                  (SELECT updated_at FROM warmup_histograms
+                    WHERE project_id = ? AND time_slot = ?)
+                )
+          WHERE project_id = ? AND time_slot = ?`,
+      ).run(
+        counts,
+        total,
+        sourceId,
+        source.time_slot,
+        targetId,
+        source.time_slot,
+      );
+      d.query(
+        "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot = ?",
+      ).run(sourceId, source.time_slot);
+    }
+    d.query(
+      "UPDATE warmup_histograms SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query(
+      "UPDATE dedup_feedback SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query(
+      "UPDATE knowledge_tombstones SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query(
+      `INSERT INTO cache_bust_stats
+         (project_id, cause, relocatable, turns, write_tokens, updated_at)
+       SELECT ?, cause, relocatable, turns, write_tokens, updated_at
+         FROM cache_bust_stats WHERE project_id = ?
+       ON CONFLICT(project_id, cause, relocatable) DO UPDATE SET
+         turns = cache_bust_stats.turns + excluded.turns,
+         write_tokens = cache_bust_stats.write_tokens + excluded.write_tokens,
+         updated_at = MAX(cache_bust_stats.updated_at, excluded.updated_at)`,
+    ).run(targetId, sourceId);
+    d.query("DELETE FROM cache_bust_stats WHERE project_id = ?").run(sourceId);
+    d.query(
+      "UPDATE knowledge_contradictions SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
     // Outcome-reward injection log (#497): carries a project_id that must follow
     // the entries to the target, or its rows orphan once the source project row
     // is deleted below AND crediting breaks (creditSessionOutcome queries by the
@@ -3714,25 +4176,33 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     ).run(targetId, targetId);
     // entity_relations references entities by FK — no project_id column to update.
     // Relations move implicitly when their parent entities move.
+    // Flatten every prior redirect to the new live winner before retiring this
+    // source UUID. This makes transitive merge resolution a single indexed read.
+    d.query("DELETE FROM project_id_aliases WHERE retired_id = ?").run(
+      targetId,
+    );
     d.query(
-      "UPDATE OR IGNORE project_path_aliases SET project_id = ? WHERE project_id = ?",
+      "UPDATE project_id_aliases SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query(
+      `INSERT INTO project_id_aliases (retired_id, project_id) VALUES (?, ?)
+       ON CONFLICT(retired_id) DO UPDATE SET project_id = excluded.project_id`,
+    ).run(sourceId, targetId);
+    d.query(
+      "UPDATE project_path_aliases SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
     // Register source's path as alias of target
-    const sourceRow = d
-      .query("SELECT path FROM projects WHERE id = ?")
-      .get(sourceId) as { path: string } | null;
-    if (sourceRow) {
-      d.query(
-        "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
-      ).run(sourceRow.path, targetId);
-    }
+    d.query(
+      `INSERT INTO project_path_aliases (path, project_id) VALUES (?, ?)
+       ON CONFLICT(path) DO UPDATE SET project_id = excluded.project_id`,
+    ).run(sourceRow.path, targetId);
     d.query("DELETE FROM projects WHERE id = ?").run(sourceId);
-    d.exec("COMMIT");
-    fireProjectMutation();
-  } catch (e) {
-    d.exec("ROLLBACK");
-    throw e;
-  }
+    merged = true;
+  });
+  if (!merged) return;
+  // Invalidate after all merge statements have succeeded. If an outer
+  // transaction later rolls back, conservative cache invalidation is harmless.
+  fireProjectMutation({ type: "merge", sourceId, targetId, sourcePath });
 }
 
 export function close() {
@@ -4146,8 +4616,9 @@ export function ensureProject(
 
   // 0. Memoized fast path — the same session path is resolved many times per
   // request (see projectIdByPathCache docs / LOREAI-GATEWAY-3K).
-  const cache = projectIdCacheFor(db());
-  const cached = cache.get(path);
+  const connection = db();
+  const dataVersion = projectDataVersion(connection);
+  const cached = cachedProjectId(connection, path, dataVersion);
   if (cached !== undefined) return cached;
 
   // 1. Exact path match (fast path)
@@ -4182,7 +4653,7 @@ export function ensureProject(
         // above (it is the merge TARGET) — memoize so the next call for this
         // path skips the exact-path lookup. fireProjectRemoteBackfilled cleared
         // the map, so this set must come AFTER it.
-        cache.set(path, existing.id);
+        memoizeProjectId(connection, path, existing.id, dataVersion);
         return existing.id;
       }
       // Still remote-less (no remote resolved) — leave uncached so a later call
@@ -4190,7 +4661,7 @@ export function ensureProject(
       return existing.id;
     }
     // Settled remote-backed row — stable mapping, safe to memoize.
-    cache.set(path, existing.id);
+    memoizeProjectId(connection, path, existing.id, dataVersion);
     return existing.id;
   }
 
@@ -4199,7 +4670,7 @@ export function ensureProject(
     .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
     .get(path) as { project_id: string } | null;
   if (alias) {
-    cache.set(path, alias.project_id);
+    memoizeProjectId(connection, path, alias.project_id, dataVersion);
     return alias.project_id;
   }
 
@@ -4216,7 +4687,7 @@ export function ensureProject(
           "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
         )
         .run(path, byRemote.id);
-      cache.set(path, byRemote.id);
+      memoizeProjectId(connection, path, byRemote.id, dataVersion);
       return byRemote.id;
     }
   }
@@ -4241,15 +4712,52 @@ export function ensureProject(
   // already settled (has a remote): a remote-less project can still be
   // git_remote-backfilled by a later ensureProject(path, suppliedGitRemote)
   // call, so leave it uncached (mirrors the NULL-git_remote existing branch).
-  fireProjectMutation();
-  if (gitRemote) cache.set(path, id);
+  fireProjectMutation({ type: "create", projectId: id });
+  if (gitRemote) memoizeProjectId(connection, path, id, dataVersion);
   return id;
+}
+
+function canonicalProjectIdFrom(
+  connection: Database,
+  id: string,
+): string | undefined {
+  const row = connection
+    .query(
+      `SELECT project_id AS id FROM project_id_aliases WHERE retired_id = ?
+       UNION ALL
+       SELECT id FROM projects WHERE id = ?
+       LIMIT 1`,
+    )
+    .get(id, id) as { id: string } | null;
+  return row?.id;
+}
+
+/** Resolve a live project UUID or a durable redirect left by a local merge. */
+export function canonicalProjectId(
+  id: string,
+  options?: { committed?: boolean },
+): string | undefined {
+  const connection = db();
+  if (!options?.committed || !databaseInTransaction(connection)) {
+    return canonicalProjectIdFrom(connection, id);
+  }
+
+  // The writer sees its own uncommitted redirects. A short-lived WAL reader
+  // observes only committed state, so read-only caches cannot publish a merge
+  // that an outer savepoint may still roll back.
+  const reader = new Database(dbPath());
+  try {
+    return canonicalProjectIdFrom(reader, id);
+  } finally {
+    reader.close();
+  }
 }
 
 export function projectId(path: string): string | undefined {
   // Shares ensureProject's per-connection memo (LOREAI-GATEWAY-3K).
-  const cache = projectIdCacheFor(db());
-  const cached = cache.get(path);
+  const connection = db();
+  const dataVersion = projectDataVersion(connection);
+  const cached = cachedProjectId(connection, path, dataVersion);
   if (cached !== undefined) return cached;
 
   const row = db()
@@ -4259,7 +4767,9 @@ export function projectId(path: string): string | undefined {
     // Mirror ensureProject: only memoize a settled (remote-backed) exact-path
     // row so a NULL-git_remote project still gets its lazy backfill retried
     // there. An unsettled row is returned but left uncached.
-    if (row.git_remote) cache.set(path, row.id);
+    if (row.git_remote) {
+      memoizeProjectId(connection, path, row.id, dataVersion);
+    }
     return row.id;
   }
 
@@ -4269,7 +4779,7 @@ export function projectId(path: string): string | undefined {
     .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
     .get(path) as { project_id: string } | null;
   if (alias) {
-    cache.set(path, alias.project_id);
+    memoizeProjectId(connection, path, alias.project_id, dataVersion);
     return alias.project_id;
   }
   return undefined;
@@ -4885,6 +5395,8 @@ export type SessionTrackingState = {
   projectPathProvisional?: boolean;
   // v37: compaction anomaly pending flag
   compactionAnomalyPending?: boolean;
+  // v80: session-scoped privacy mode
+  amnesia?: boolean;
 };
 
 /**
@@ -5046,6 +5558,10 @@ export function saveSessionTracking(
     sets.push("compaction_anomaly_pending = ?");
     vals.push(state.compactionAnomalyPending ? 1 : 0);
   }
+  if (state.amnesia !== undefined) {
+    sets.push("amnesia = ?");
+    vals.push(state.amnesia ? 1 : 0);
+  }
   // Update only the specified columns
   db()
     .query(`UPDATE session_state SET ${sets.join(", ")} WHERE session_id = ?`)
@@ -5097,6 +5613,8 @@ export type LoadedSessionTracking = {
   projectPathProvisional: boolean;
   // v37: compaction anomaly pending flag
   compactionAnomalyPending: boolean;
+  // v80: session-scoped privacy mode
+  amnesia: boolean;
 };
 
 export type SessionPromptDelta = {
@@ -5424,7 +5942,7 @@ export function loadSessionTracking(
               last_turn_at, last_bust_at,
               parent_session_id, is_subagent,
               project_path, project_path_provisional,
-              compaction_anomaly_pending
+               compaction_anomaly_pending, amnesia
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -5461,6 +5979,7 @@ export function loadSessionTracking(
     project_path: string | null;
     project_path_provisional: number;
     compaction_anomaly_pending: number;
+    amnesia: number;
   } | null;
   if (!row) return null;
   return {
@@ -5497,6 +6016,7 @@ export function loadSessionTracking(
     projectPath: row.project_path,
     projectPathProvisional: row.project_path_provisional === 1,
     compactionAnomalyPending: row.compaction_anomaly_pending === 1,
+    amnesia: row.amnesia === 1,
   };
 }
 

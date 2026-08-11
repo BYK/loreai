@@ -155,4 +155,87 @@ describe("pattern-echo cooldown", () => {
     await detectPatternEchoes({ ...base, distillId: "f2" });
     expect(searchSpy).toHaveBeenCalledTimes(1);
   });
+
+  it("rolls back its cooldown when cancellation interrupts an armed attempt", async () => {
+    const pid = ensureProject(PROJECT);
+    insertDistill("c1", pid, "s-cancel");
+    insertDistill("c2", pid, "s-cancel");
+    const controller = new AbortController();
+    let searchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      searchStarted = resolve;
+    });
+    searchSpy.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          searchStarted();
+          controller.signal.addEventListener(
+            "abort",
+            () => reject(controller.signal.reason),
+            { once: true },
+          );
+        }),
+    );
+    const base = {
+      observations: "obs",
+      projectPath: PROJECT,
+      sessionID: "s-cancel",
+      llm: stubLLM(),
+    };
+
+    const cancelled = detectPatternEchoes({
+      ...base,
+      distillId: "c1",
+      signal: controller.signal,
+    });
+    await started;
+    controller.abort(new DOMException("session reset", "AbortError"));
+    await cancelled;
+
+    await detectPatternEchoes({ ...base, distillId: "c2" });
+    expect(searchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not clear a newer cooldown owner when an older attempt cancels", async () => {
+    vi.useFakeTimers();
+    try {
+      const pid = ensureProject(PROJECT);
+      insertDistill("o1", pid, "s-owner");
+      insertDistill("o2", pid, "s-owner");
+      insertDistill("o3", pid, "s-owner");
+      const older = new AbortController();
+      let rejectOlder!: (reason: unknown) => void;
+      searchSpy.mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectOlder = reject;
+          }),
+      );
+      const base = {
+        observations: "obs",
+        projectPath: PROJECT,
+        sessionID: "s-owner",
+        llm: stubLLM(),
+      };
+
+      const olderAttempt = detectPatternEchoes({
+        ...base,
+        distillId: "o1",
+        signal: older.signal,
+      });
+      await vi.waitFor(() => expect(searchSpy).toHaveBeenCalledTimes(1));
+      vi.advanceTimersByTime(PATTERN_COOLDOWN_MS + 1);
+      await detectPatternEchoes({ ...base, distillId: "o2" });
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+
+      older.abort(new DOMException("older generation reset", "AbortError"));
+      rejectOlder(older.signal.reason);
+      await olderAttempt;
+
+      await detectPatternEchoes({ ...base, distillId: "o3" });
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
