@@ -9,6 +9,50 @@ afterEach(() => {
 });
 
 describe("runSemanticLint cancellation", () => {
+  it("preserves typed diff limit failures in the published report", async () => {
+    const range = { base: "base", head: "head", source: "test" };
+    const startGateway = vi.fn();
+    vi.doMock("@loreai/core", () => ({
+      config: () => ({
+        model: undefined,
+        invariantCheck: { effort: "off" },
+      }),
+      embedding: {},
+      importLoreFile: vi.fn(),
+      invariantCheck: {
+        resolveRange: () => range,
+        parseDiffResult: () => ({
+          kind: "failure",
+          failure: {
+            code: "diff-too-large",
+            message: "too many hunks",
+          },
+        }),
+      },
+      parseReasoningEffort: vi.fn(),
+    }));
+    vi.doMock("../src/llm-adapter", () => ({
+      createGatewayLLMClient: () => ({}),
+      createGatewayInvariantJudge: () => ({}),
+    }));
+    vi.doMock("../src/cli/start", () => ({ startGateway }));
+
+    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const report = await runSemanticLint({
+      project: ".",
+      gate: false,
+      importLoreMd: false,
+      deadlineMs: 1_000,
+      candidateTimeoutMs: 100,
+    });
+
+    expect(report.health.diff).toMatchObject({
+      status: "failed",
+      failure: { code: "diff-too-large", message: "too many hunks" },
+    });
+    expect(startGateway).not.toHaveBeenCalled();
+  });
+
   it("attributes expiry after range resolution to the diff phase", async () => {
     let now = 0;
     const range = { base: "base", head: "head", source: "test" };

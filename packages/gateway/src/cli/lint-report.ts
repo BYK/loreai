@@ -161,6 +161,7 @@ const CANDIDATE_FAILURE_CODES = new Set([
 const PHASE_FAILURE_CODES = new Set([
   "range-resolution-failed",
   "diff-command-failed",
+  "diff-too-large",
   "invariant-source-read-failed",
   "invariant-source-import-failed",
   "invariant-vector-load-failed",
