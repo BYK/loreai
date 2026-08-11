@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../src/db";
 import { storeEmbedding } from "../src/db/vec-store";
@@ -12,7 +16,12 @@ import {
   isEnforceableInvariant,
   isEnumerationInvariant,
   isIgnoredFile,
+  MAX_DIFF_HUNKS,
+  MAX_DIFF_TEXT_BYTES,
+  MAX_GIT_OUTPUT_BYTES,
+  MAX_HUNK_TEXT_BYTES,
   overrideMatchesFinding,
+  parseDiffResult,
   parseInvariantVerdict,
   parseOverrides,
   selectCandidates,
@@ -106,6 +115,37 @@ const FAKE_RANGE: ResolvedRange = {
   head: "bbbb",
   source: "test",
 };
+
+function initGitRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), "lore-large-diff-"));
+  execFileSync("git", ["init", "--quiet"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], {
+    cwd: repo,
+  });
+  execFileSync("git", ["config", "user.name", "Lore Test"], { cwd: repo });
+  return repo;
+}
+
+function commitAll(repo: string, message: string): string {
+  execFileSync("git", ["add", "-A"], { cwd: repo });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "--quiet",
+      "--no-verify",
+      "-m",
+      message,
+    ],
+    { cwd: repo },
+  );
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: repo,
+    encoding: "utf8",
+  }).trim();
+}
 
 beforeEach(() => {
   vi.spyOn(embedding, "embed").mockResolvedValue([v(0, 0, 1)]);
@@ -225,6 +265,118 @@ describe("splitDiff", () => {
         text: "@@ -1 +1,2 @@\n const marker = true;\n+++ b/.lore.md",
       },
     ]);
+  });
+});
+
+describe("parseDiffResult", () => {
+  it("bounds hunks from diffs larger than Node's default buffer before judging", async () => {
+    const repo = initGitRepo();
+    try {
+      writeFileSync(join(repo, "large.txt"), "");
+      const base = commitAll(repo, "base");
+
+      writeFileSync(join(repo, "large.txt"), `${"x".repeat(1_100_000)}\n`);
+      const head = commitAll(repo, "large diff");
+
+      const result = parseDiffResult(repo, base, head);
+      expect(result.kind).toBe("success");
+      if (result.kind === "success") {
+        expect(result.hunks).toHaveLength(1);
+        expect(result.hunks[0].file).toBe("large.txt");
+        expect(Buffer.byteLength(result.hunks[0].text)).toBeLessThanOrEqual(
+          MAX_HUNK_TEXT_BYTES,
+        );
+        expect(result.hunks[0].text).toContain("hunk truncated by Lore");
+
+        await seed(
+          repo,
+          "large file boundary",
+          "large.txt must never bypass the shared boundary",
+          v(1, 0, 0),
+        );
+        vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([
+          v(1, 0, 0),
+        ]);
+        const { judge, judgeCall } = stubJudge(() => ({
+          kind: "verdict",
+          verdict: "satisfies",
+          reason: "bounded",
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        }));
+        await checkInvariants({
+          projectPath: repo,
+          diff: result,
+          range: { base, head, source: "test" },
+          judge,
+          sessionID: "large-real-git-hunk",
+        });
+        expect(judgeCall).toHaveBeenCalledWith(
+          expect.objectContaining({ hunk: result.hunks[0].text }),
+        );
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("returns diff-too-large before embedding excessive hunk counts", () => {
+    const repo = initGitRepo();
+    try {
+      const blocks = Array.from({ length: MAX_DIFF_HUNKS + 1 }, (_, index) =>
+        [
+          `old-${index}`,
+          ...Array.from(
+            { length: 7 },
+            (__, offset) => `context-${index}-${offset}`,
+          ),
+        ].join("\n"),
+      );
+      writeFileSync(join(repo, "many.txt"), `${blocks.join("\n")}\n`);
+      const base = commitAll(repo, "base");
+      writeFileSync(
+        join(repo, "many.txt"),
+        `${blocks.map((block, index) => block.replace(`old-${index}`, `new-${index}`)).join("\n")}\n`,
+      );
+      const head = commitAll(repo, "many hunks");
+
+      expect(parseDiffResult(repo, base, head)).toMatchObject({
+        kind: "failure",
+        failure: { code: "diff-too-large" },
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps aggregate parsed hunk text bounded", () => {
+    const hunkCount = Math.floor(MAX_DIFF_TEXT_BYTES / MAX_HUNK_TEXT_BYTES) + 1;
+    const raw = Array.from(
+      { length: hunkCount },
+      (_, index) =>
+        `diff --git a/file-${index}.txt b/file-${index}.txt\n--- a/file-${index}.txt\n+++ b/file-${index}.txt\n@@ -0,0 +1 @@\n+${"x".repeat(MAX_HUNK_TEXT_BYTES)}`,
+    ).join("\n");
+
+    expect(() => splitDiff(raw)).toThrow(/parsed text bytes/);
+  });
+
+  it("rejects Git output above the 16 MiB security ceiling", () => {
+    const repo = initGitRepo();
+    try {
+      writeFileSync(join(repo, "oversized.txt"), "");
+      const base = commitAll(repo, "base");
+      writeFileSync(
+        join(repo, "oversized.txt"),
+        `${"x".repeat(MAX_GIT_OUTPUT_BYTES + 1024)}\n`,
+      );
+      const head = commitAll(repo, "oversized diff");
+
+      expect(parseDiffResult(repo, base, head)).toMatchObject({
+        kind: "failure",
+        failure: { code: "diff-command-failed" },
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });
 

@@ -162,7 +162,7 @@ export async function runSemanticLint(
         effort,
         range,
         phase,
-        code: "diff-command-failed",
+        code: diff.failure.code,
         error: diff.failure.message,
       });
       await options.publishReport?.(report);

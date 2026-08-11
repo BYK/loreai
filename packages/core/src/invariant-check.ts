@@ -265,11 +265,16 @@ export function enforcementLevel(entry: {
 // Git range auto-detection (Craft-style: resolve base/head automatically)
 // ---------------------------------------------------------------------------
 
+// Node's 1 MiB child-process default is too small for ordinary large PR diffs.
+// Keep Git output bounded because pull-request diff content is untrusted.
+export const MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024;
+
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf8",
     timeout: 10_000,
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
 }
@@ -397,12 +402,46 @@ export interface DiffHunk {
   text: string;
 }
 
+export type DiffFailureCode = "diff-command-failed" | "diff-too-large";
+
+export interface DiffFailure {
+  code: DiffFailureCode;
+  message: string;
+}
+
 export type DiffResult =
   | { kind: "success"; hunks: DiffHunk[] }
   | {
       kind: "failure";
-      failure: { code: "diff-command-failed"; message: string };
+      failure: DiffFailure;
     };
+
+/** Downstream bounds for untrusted pull-request diff content. */
+export const MAX_DIFF_HUNKS = 1_000;
+export const MAX_DIFF_TEXT_BYTES = 4 * 1024 * 1024;
+export const MAX_HUNK_TEXT_BYTES = 32 * 1024;
+const HUNK_TRUNCATION_MARKER = "\n... [hunk truncated by Lore] ...\n";
+
+class DiffLimitError extends Error {
+  override name = "DiffLimitError";
+}
+
+function truncateHunkText(text: string): string {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= MAX_HUNK_TEXT_BYTES) return text;
+
+  const markerBytes = Buffer.byteLength(HUNK_TRUNCATION_MARKER);
+  const available = MAX_HUNK_TEXT_BYTES - markerBytes;
+  const headBudget = Math.ceil(available / 2);
+  const tailBudget = Math.floor(available / 2);
+  let headEnd = headBudget;
+  while (headEnd > 0 && (bytes[headEnd] & 0xc0) === 0x80) headEnd--;
+  let tailStart = bytes.length - tailBudget;
+  while (tailStart < bytes.length && (bytes[tailStart] & 0xc0) === 0x80)
+    tailStart++;
+
+  return `${bytes.subarray(0, headEnd).toString("utf8")}${HUNK_TRUNCATION_MARKER}${bytes.subarray(tailStart).toString("utf8")}`;
+}
 
 /**
  * Files whose changes are NEVER judged: they are machine-authored or are lore's
@@ -480,11 +519,15 @@ export function parseDiffResult(
     );
     return { kind: "success", hunks: raw ? splitDiff(raw) : [] };
   } catch (error) {
+    const limited = error instanceof DiffLimitError;
     return {
       kind: "failure",
       failure: {
-        code: "diff-command-failed",
-        message: boundedMessage(error, "git diff failed"),
+        code: limited ? "diff-too-large" : "diff-command-failed",
+        message: boundedMessage(
+          error,
+          limited ? "Diff exceeds semantic lint limits" : "git diff failed",
+        ),
       },
     };
   }
@@ -495,6 +538,7 @@ export function parseDiffResult(
  *  call (or manufactures a false positive) on non-code changes. */
 export function splitDiff(raw: string): DiffHunk[] {
   const hunks: DiffHunk[] = [];
+  let textBytes = 0;
   const lines = raw.split("\n");
   let file = "";
   // Fallback path from the `--- a/` line, used for DELETED files whose `+++`
@@ -505,8 +549,21 @@ export function splitDiff(raw: string): DiffHunk[] {
   let cur: string[] | null = null;
   const flush = () => {
     const f = file || oldFile;
-    if (cur && f && cur.length && !isIgnoredFile(f))
-      hunks.push({ file: f, text: cur.join("\n") });
+    if (cur && f && cur.length && !isIgnoredFile(f)) {
+      if (hunks.length >= MAX_DIFF_HUNKS) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
+        );
+      }
+      const text = truncateHunkText(cur.join("\n"));
+      textBytes += Buffer.byteLength(text);
+      if (textBytes > MAX_DIFF_TEXT_BYTES) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
+        );
+      }
+      hunks.push({ file: f, text });
+    }
     cur = null;
   };
   for (const line of lines) {
@@ -841,7 +898,7 @@ export type HealthStatus = "healthy" | "degraded" | "failed" | "not-run";
 export interface DiffHealth {
   status: Extract<HealthStatus, "healthy" | "failed">;
   hunks: number;
-  failure?: { code: "diff-command-failed"; message: string };
+  failure?: DiffFailure;
 }
 
 export interface VectorHealth {
@@ -1866,9 +1923,8 @@ function loadInvariantVecs(entries: KnowledgeEntry[]): {
 
 /** Max characters of a single hunk fed to the embedder. A giant hunk (e.g. a
  *  generated/docs file) posts an oversized ONNX tensor → OOM (#1072 class). We
- *  only need enough text to gauge TOPICAL similarity for the prefilter, so the
- *  embed input is capped; the JUDGE still receives the full hunk. Mirrors the
- *  worker's own truncateTexts fallback. */
+ *  only need enough text to gauge TOPICAL similarity for the prefilter. Parsed
+ *  hunks already have a separate byte cap for judging and reporting. */
 export const MAX_EMBED_CHARS_PER_HUNK = 8_000;
 
 /** Embed all hunks (local ONNX → free), OOM-safely. Each hunk's embed text is
