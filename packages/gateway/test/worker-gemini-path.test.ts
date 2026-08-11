@@ -16,7 +16,10 @@ import { fetchArgUrl } from "./helpers/fetch-url";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
-import { createGatewayLLMClient } from "../src/llm-adapter";
+import {
+  createGatewayLLMClient,
+  parseGeminiWorkerResponse,
+} from "../src/llm-adapter";
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts } from "../src/cost-tracker";
 import { resetBackgroundLimiter } from "../src/background-limiter";
@@ -72,6 +75,25 @@ async function runWorker(cred: AuthCredential | null) {
 }
 
 describe("worker gemini native path", () => {
+  test("uses disjoint cached/tool/thought accounting in worker JSON", () => {
+    const parsed = parseGeminiWorkerResponse({
+      candidates: [{ content: { parts: [{ text: "ok" }] } }],
+      usageMetadata: {
+        promptTokenCount: 100,
+        cachedContentTokenCount: 80,
+        candidatesTokenCount: 20,
+        thoughtsTokenCount: 10,
+        toolUsePromptTokenCount: 5,
+        totalTokenCount: 135,
+      },
+    });
+    expect(parsed.usage).toMatchObject({
+      input_tokens: 25,
+      cache_read_input_tokens: 80,
+      output_tokens: 30,
+    });
+  });
+
   beforeEach(() => {
     mockFetch.mockReset();
     mockFetch.mockResolvedValue(geminiOkResponse());
@@ -114,5 +136,133 @@ describe("worker gemini native path", () => {
     });
     expect(headers?.Authorization).toBe("Bearer oauth_tok");
     expect(headers?.["x-goog-api-key"]).toBeUndefined();
+  });
+
+  test("non-stream worker validates later candidates and permits same-name calls with distinct IDs", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: { parts: [{ text: "worker ok" }] },
+              finishReason: "STOP",
+            },
+            {
+              content: {
+                parts: [
+                  { functionCall: { id: "one", name: "lookup", args: {} } },
+                  { functionCall: { id: "two", name: "lookup", args: {} } },
+                ],
+              },
+            },
+          ],
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    const { result } = await runWorker({ scheme: "api-key", value: "g_key" });
+    expect(result).toContain("worker ok");
+  });
+
+  test("non-stream worker permits the same tool identity in independent candidates", async () => {
+    expect(
+      parseGeminiWorkerResponse({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: "worker ok" },
+                { functionCall: { id: "shared", name: "lookup", args: {} } },
+              ],
+            },
+          },
+          {
+            content: {
+              parts: [
+                { functionCall: { id: "shared", name: "lookup", args: {} } },
+              ],
+            },
+          },
+        ],
+      }).text,
+    ).toBe("worker ok");
+  });
+
+  test("non-stream worker rejects duplicate effective IDs in a later candidate", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [
+            { content: { parts: [{ text: "must not escape" }] } },
+            {
+              content: {
+                parts: [
+                  { functionCall: { id: "duplicate", name: "one" } },
+                  { functionCall: { id: "duplicate", name: "two" } },
+                ],
+              },
+            },
+          ],
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    const { result } = await runWorker({ scheme: "api-key", value: "g_key" });
+    expect(result).toBeNull();
+  });
+
+  test("SSE worker preserves valid provider IDs and rejects ambiguous legacy calls", async () => {
+    const frame = (parts: unknown[]) =>
+      `data: ${JSON.stringify({ candidates: [{ content: { parts }, finishReason: "STOP" }] })}\n\n`;
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        frame([
+          { text: "worker ok" },
+          { functionCall: { id: "one", name: "lookup", args: {} } },
+          { functionCall: { id: "two", name: "lookup", args: {} } },
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const valid = await runWorker({ scheme: "api-key", value: "g_key" });
+    expect(valid.result).not.toBeNull();
+
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        frame([
+          { functionCall: { name: "lookup", args: {} } },
+          { functionCall: { name: "lookup", args: {} } },
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const invalid = await runWorker({ scheme: "api-key", value: "g_key" });
+    expect(invalid.result).toBeNull();
+  });
+
+  test("worker success-body inspection rejects invalid and split-invalid JSON UTF-8", async () => {
+    for (const chunks of [
+      [new Uint8Array([0xff])],
+      [new Uint8Array([0xe2]), new Uint8Array([0x28, 0xa1])],
+    ]) {
+      mockFetch.mockReset();
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (const chunk of chunks) controller.enqueue(chunk);
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+      const { result } = await runWorker({ scheme: "api-key", value: "g_key" });
+      expect(result).toBeNull();
+      // Partial malformed bodies are authoritative upstream responses, not
+      // zero-byte transport failures eligible for an automatic retry.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    }
   });
 });

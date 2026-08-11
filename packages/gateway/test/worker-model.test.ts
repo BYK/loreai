@@ -1774,6 +1774,23 @@ describe("openai worker selection: ChatGPT-backend reuse + luna preference", () 
     expect(result?.modelID).toBe("gpt-5.6-sol");
   });
 
+  test.each([
+    "https://proxy.internal/backend-apiary",
+    "https://proxy.internal/backend-api-v2",
+    "https://chatgpt.com/v1",
+  ])(
+    "does not reuse the session model for a non-backend path: %s",
+    async (url) => {
+      await warmCache(openaiCatalog());
+      const result = getWorkerModel({
+        providerID: "openai",
+        model: "gpt-5.6-sol",
+        url,
+      });
+      expect(result?.modelID).toBe("gpt-5.6-luna");
+    },
+  );
+
   test("real api.openai.com session prefers gpt-5.6-luna (not terra, not mini)", async () => {
     await warmCache(openaiCatalog());
 

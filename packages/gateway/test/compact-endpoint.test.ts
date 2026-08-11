@@ -7,7 +7,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
-import { shouldCancelCompactionFromBudget } from "../src/pipeline";
+import {
+  generateCompactionSummary,
+  handleCompactEndpoint,
+  shouldCancelCompactionFromBudget,
+} from "../src/pipeline";
+import { loadConfig } from "../src/config";
 
 async function postCompact(baseURL: string, body: string): Promise<Response> {
   return fetch(`${baseURL}/v1/compact`, {
@@ -34,6 +39,24 @@ describe("POST /v1/compact", () => {
     expect(body.message).toBe("Invalid JSON body");
   });
 
+  it("rejects missing authentication without reading an indefinite body", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      type: "bytes",
+      pull() {
+        return new Promise(() => {});
+      },
+    });
+    const req = new Request("http://gateway.test/v1/compact", {
+      method: "POST",
+      body: source,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const response = await handleCompactEndpoint(req, loadConfig());
+    expect(response.status).toBe(401);
+    expect(req.bodyUsed).toBe(false);
+    await response.body?.cancel();
+  });
+
   it("returns 400 when project_path is missing", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(harness.baseURL, JSON.stringify({}));
@@ -54,6 +77,19 @@ describe("POST /v1/compact", () => {
     expect(body.error).toBe("session_not_found");
     expect(body.message).toContain("No active session found");
   });
+});
+
+it("compaction summary generation rejects an already-aborted foreground signal", async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException("client disconnected", "AbortError"));
+  await expect(
+    generateCompactionSummary({
+      projectPath: process.cwd(),
+      sessionID: "aborted-compaction",
+      config: loadConfig(),
+      signal: controller.signal,
+    }),
+  ).rejects.toMatchObject({ name: "AbortError" });
 });
 
 /**

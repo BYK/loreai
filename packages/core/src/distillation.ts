@@ -968,6 +968,7 @@ export async function run(input: {
   skipMeta?: boolean;
   urgent?: boolean;
   callType?: "batch" | "direct";
+  signal?: AbortSignal;
   /** Optional hook for the gateway to record worker health events. When the
    *  LLM call returns null (no response), the hook is called with a categorical
    *  reason. The gateway uses this to escalate to Sentry / dashboard after
@@ -1005,6 +1006,7 @@ async function runInner(input: {
   /** Whether the LLM call will use batch or direct pricing. Recorded on the
    *  distillation row for accurate historical cost estimates. */
   callType?: "batch" | "direct";
+  signal?: AbortSignal;
   /** See run() — optional gateway worker-health hook. */
   workerHealth?: {
     recordFailure(reason: string): void;
@@ -1013,6 +1015,7 @@ async function runInner(input: {
   /** See run() — propagated to the `metadata` column on every minted row. */
   metadata?: KnowledgeMetadata;
 }): Promise<{ rounds: number; distilled: number }> {
+  input.signal?.throwIfAborted();
   // Reset orphaned messages (marked distilled by a deleted/migrated distillation)
   const orphans = resetOrphans(input.projectPath, input.sessionID);
   if (orphans > 0) {
@@ -1025,6 +1028,7 @@ async function runInner(input: {
   let distilled = 0;
 
   for (let round = 0; round < maxRounds; round++) {
+    input.signal?.throwIfAborted();
     // Check if there are enough undistilled messages
     const pending = temporal.undistilled(input.projectPath, input.sessionID);
     if (
@@ -1062,12 +1066,14 @@ async function runInner(input: {
           model: input.model,
           urgent: input.urgent,
           callType: input.callType,
+          signal: input.signal,
           workerHealth: input.workerHealth,
           // #627 Phase 1: propagate gitHead down the main distillation path so
           // observer/echo/tag entries minted here get stamped (not just the
           // urgent path).
           metadata: input.metadata,
         });
+        input.signal?.throwIfAborted();
         if (result) {
           distilled += segment.length;
           rounds++;
@@ -1091,11 +1097,13 @@ async function runInner(input: {
         model: input.model,
         urgent: input.urgent,
         callType: input.callType,
+        signal: input.signal,
         workerHealth: input.workerHealth,
         // #627 Phase 1: propagate gitHead so meta-distilled (gen-1+) entries
         // are stamped on the main path too.
         metadata: input.metadata,
       });
+      input.signal?.throwIfAborted();
       rounds++;
     }
 
@@ -1116,6 +1124,7 @@ async function distillSegment(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
+  signal?: AbortSignal;
   workerHealth?: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
@@ -1202,8 +1211,10 @@ async function distillSegment(input: {
       sessionID: input.sessionID,
       maxTokens,
       temperature: 0,
+      signal: input.signal,
     },
   );
+  input.signal?.throwIfAborted();
   if (!responseText) {
     // Transport failure / empty completion is already recorded by the LLM
     // adapter (single owner of transport-failure attribution) — recording
@@ -1494,6 +1505,7 @@ export async function metaDistill(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
+  signal?: AbortSignal;
   workerHealth?: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
@@ -1511,6 +1523,7 @@ async function metaDistillInner(input: {
   model?: { providerID: string; modelID: string };
   urgent?: boolean;
   callType?: "batch" | "direct";
+  signal?: AbortSignal;
   workerHealth?: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
@@ -1572,7 +1585,9 @@ async function metaDistillInner(input: {
     sessionID: input.sessionID,
     maxTokens,
     temperature: 0,
+    signal: input.signal,
   });
+  input.signal?.throwIfAborted();
   if (!responseText) {
     // Transport failure / empty completion is already recorded by the LLM
     // adapter (single owner of transport-failure attribution) — recording

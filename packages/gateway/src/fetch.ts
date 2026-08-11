@@ -59,6 +59,14 @@ let undiciHandles: UndiciHandles | null = null;
  */
 let dispatcherOverride: Dispatcher | null = null;
 
+/**
+ * Byte-based queue for the Bun Node-HTTP bridge. Once this queue is full the
+ * IncomingMessage is paused, which in turn bounds Node/socket buffering by its
+ * own readable high-water mark. The bridge can transiently hold this amount
+ * plus the single source chunk that crossed the threshold.
+ */
+const NODE_HTTP_BODY_QUEUE_BYTES = 64 * 1024;
+
 /** Inject (or clear, with `null`) the upstream dispatcher. Tests only. */
 export function setUpstreamDispatcherForTest(
   dispatcher: Dispatcher | null,
@@ -77,6 +85,118 @@ async function getUndici(): Promise<UndiciHandles> {
   const dispatcher = new undici.Agent({ bodyTimeout: 0, headersTimeout: 0 });
   undiciHandles = { fetch: undici.fetch, dispatcher };
   return undiciHandles;
+}
+
+/**
+ * Adapt a Node IncomingMessage to a backpressure-aware Web ReadableStream.
+ * Exported so the Bun bridge lifecycle can be regression-tested without a live
+ * socket; production callers should use {@link upstreamFetch}.
+ */
+export function nodeReadableToWebStream(
+  res: http.IncomingMessage,
+): ReadableStream<Uint8Array> {
+  let active = true;
+  let paused = false;
+  let controller: ReadableStreamDefaultController<Uint8Array>;
+
+  const cleanup = (): void => {
+    res.removeListener("data", onData);
+    res.removeListener("end", onEnd);
+    res.removeListener("error", onError);
+    res.removeListener("aborted", onAborted);
+    res.removeListener("close", onClose);
+  };
+
+  const close = (): void => {
+    if (!active) return;
+    active = false;
+    cleanup();
+    try {
+      controller.close();
+    } catch {
+      // The consumer may already have cancelled the Web stream.
+    }
+  };
+
+  const fail = (error: Error, destroy = false): void => {
+    if (!active) return;
+    active = false;
+    cleanup();
+    if (destroy && !res.destroyed) res.destroy();
+    try {
+      controller.error(error);
+    } catch {
+      // The consumer may already have cancelled the Web stream.
+    }
+  };
+
+  function onData(chunk: Buffer): void {
+    if (!active) return;
+    try {
+      controller.enqueue(new Uint8Array(chunk));
+      if ((controller.desiredSize ?? 0) <= 0 && !paused) {
+        paused = true;
+        res.pause();
+      }
+    } catch (error) {
+      fail(
+        error instanceof Error
+          ? error
+          : new Error("failed to enqueue upstream response body"),
+        true,
+      );
+    }
+  }
+
+  function onEnd(): void {
+    close();
+  }
+
+  function onError(error: Error): void {
+    fail(error, true);
+  }
+
+  function onAborted(): void {
+    fail(new Error("upstream response body aborted"), true);
+  }
+
+  function onClose(): void {
+    if (res.complete || res.readableEnded) {
+      close();
+    } else {
+      fail(new Error("upstream response closed before end"));
+    }
+  }
+
+  return new ReadableStream<Uint8Array>(
+    {
+      start(streamController) {
+        controller = streamController;
+        res.on("data", onData);
+        res.once("end", onEnd);
+        res.once("error", onError);
+        res.once("aborted", onAborted);
+        res.once("close", onClose);
+      },
+      pull() {
+        if (active && paused) {
+          paused = false;
+          res.resume();
+        }
+      },
+      cancel() {
+        if (!active) return;
+        active = false;
+        cleanup();
+        if (!res.destroyed) {
+          res.destroy();
+        }
+      },
+    },
+    new ByteLengthQueuingStrategy({
+      highWaterMark: NODE_HTTP_BODY_QUEUE_BYTES,
+    }),
+  );
 }
 
 /**
@@ -142,25 +262,10 @@ function nodeHttpFetch(
           }
         }
 
-        // Wrap the Node readable stream as a Web ReadableStream for the
-        // Response body. This gives callers the same streaming API they'd get
-        // from fetch() (response.body.getReader(), for await...of, etc.).
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            res.on("data", (chunk: Buffer) => {
-              controller.enqueue(new Uint8Array(chunk));
-            });
-            res.on("end", () => {
-              controller.close();
-            });
-            res.on("error", (err) => {
-              controller.error(err);
-            });
-          },
-          cancel() {
-            res.destroy();
-          },
-        });
+        // Pause the IncomingMessage whenever the Web stream's byte queue is
+        // full; resume only from pull(). This prevents a slow worker parser from
+        // turning the bridge into an unbounded second response buffer.
+        const body = nodeReadableToWebStream(res);
 
         resolve(
           new Response(body, {

@@ -44,6 +44,7 @@ import {
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
 import { upstreamFetch } from "./fetch";
+import { responseAgainstAbort } from "./abort-race";
 import {
   looksLikeSSE,
   type GatewayContentBlock,
@@ -57,8 +58,30 @@ import {
 import { accumulateOpenAISSEStream } from "./stream/openai";
 import { accumulateResponsesSSEStream } from "./stream/openai-responses";
 import { accumulateGeminiSSEStream } from "./stream/gemini";
-import { accumulateSSEResponse } from "./stream/anthropic";
+import {
+  geminiUsageFromMetadata,
+  validateGeminiFunctionCallIdentity,
+} from "./translate/gemini";
+import {
+  accumulateSSEResponse,
+  cancelAndReleaseReader,
+  readStreamChunk,
+  SSEStreamLimitError,
+  SSEStreamTransportError,
+} from "./stream/anthropic";
 import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
+import {
+  ANTHROPIC_CONTENT_BLOCK_TYPES,
+  ANTHROPIC_STOP_REASONS,
+  normalizeAnthropicStopReason,
+} from "./anthropic-protocol";
+import {
+  isRecord,
+  validateAnthropicUsage,
+  validateGeminiUsageMetadata,
+  validateOpenAIUsage,
+  validateResponsesUsage,
+} from "./usage-validation";
 import {
   toVertexBody,
   toVertexModelId,
@@ -501,9 +524,132 @@ const DEFAULT_MAX_RETRIES = 8;
  * tokens they actually produce.
  */
 const DEFAULT_WORKER_MAX_TOKENS = 16384;
+
+const WORKER_ERROR_BODY_MAX_BYTES = 64 * 1024;
 const WORKER_RESPONSE_SNIFF_BYTES = 64 * 1024;
+// Counts all wire bytes exposed to JSON/SSE decoding and accumulator retention,
+// including replay of the sniff prefix. The Bun HTTP bridge also pauses at a
+// 64 KiB byte queue; buffering below that transport boundary (and one already-
+// delivered source chunk) is outside adapter control. Decoded and accumulated
+// content can only derive from bytes admitted under this cap.
 const MAX_WORKER_RESPONSE_BYTES = 4 * 1024 * 1024;
+// Worker prompts are normally bounded to tens of KiB (distillation segments
+// are capped at 16K tokens). This generous wire cap prevents an accidental or
+// adversarial caller from materializing an unbounded serialized request while
+// preserving substantial headroom for JSON escaping and worker system prompts.
+const MAX_WORKER_REQUEST_BYTES = 4 * 1024 * 1024;
+// JSON can expand one input byte (an ASCII control character) to a six-byte
+// `\u00xx` escape. Cap raw prompt bytes at the derived worst-case ratio so the
+// serializer itself cannot transiently allocate far beyond the wire cap.
+const MAX_WORKER_PROMPT_SOURCE_BYTES = Math.floor(MAX_WORKER_REQUEST_BYTES / 6);
+const WORKER_RESPONSE_INACTIVITY_MS = 120_000;
 const WORKER_REQUEST_TIMEOUT_MS = 300_000;
+
+/** Return only URL origin metadata; userinfo, path, query, and fragment vanish. */
+function sanitizedWorkerOrigin(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return "invalid-origin";
+    }
+    return url.origin;
+  } catch {
+    return "invalid-origin";
+  }
+}
+
+/** Prevent control characters in non-body metadata from forging log lines. */
+function diagnosticToken(
+  value: string | undefined,
+  fallback = "unknown",
+): string {
+  if (!value) return fallback;
+  let safe = "";
+  for (const char of value.slice(0, 160)) {
+    const code = char.charCodeAt(0);
+    safe += code < 32 || code === 127 ? "?" : char;
+  }
+  return safe;
+}
+
+function diagnosticContentKind(contentType: string): string {
+  if (!contentType) return "missing";
+  if (looksLikeSSE(contentType, "")) return "sse";
+  return /(?:^|[/+])json(?:$|;)/i.test(contentType) ? "json" : "other";
+}
+
+function diagnosticFinishReason(reason: string | undefined): string {
+  if (!reason) return "n/a";
+  return new Set([
+    "stop",
+    "end_turn",
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+    "content_filter",
+    "tool_calls",
+    "tool_use",
+  ]).has(reason)
+    ? reason
+    : "unknown";
+}
+
+/** Extract a bounded structural transport code without exposing its message. */
+function transportErrorCode(error: unknown): string | undefined {
+  const code = isRecord(error) ? error.code : undefined;
+  return typeof code === "string" && /^[A-Z0-9_]{1,64}$/.test(code)
+    ? code
+    : undefined;
+}
+
+function transportErrorKind(error: unknown): string {
+  if (error instanceof WorkerTransportFailureError) return error.kind;
+  if (error instanceof SSEStreamTransportError) return error.kind;
+  if (error instanceof DOMException && error.name === "TimeoutError") {
+    return "deadline";
+  }
+  return "transport";
+}
+
+/**
+ * Error detail safe for logs/lastWorkerError. Provider body values and arbitrary
+ * stream error messages are deliberately excluded.
+ */
+function safeWorkerBodyErrorDetail(error: unknown): string {
+  if (error instanceof WorkerResponseTooLargeError) return error.message;
+  if (error instanceof SyntaxError) return "malformed JSON body";
+  const message = error instanceof Error ? error.message : "";
+  const safePatterns = [
+    /^SSE stream exceeded \d+ frame limit$/,
+    /^SSE event exceeded \d+ byte limit$/,
+    /^worker response exceeded \d+ byte limit$/,
+    /^unterminated SSE event at EOF$/,
+    /^missing (?:Anthropic message_stop|OpenAI finish_reason|Gemini finishReason) terminal$/,
+    /^missing terminal response status$/,
+    /^missing Responses compatibility terminal status$/,
+    /^malformed (?:Anthropic|OpenAI|Responses|Gemini) (?:stream event|response body|usage|terminal event)$/,
+    /^worker JSON response root must be an object$/,
+    /^non-success Responses response status$/,
+    /^response\.failed terminal$/,
+    /^Responses terminal reported failure$/,
+    /^Responses terminal event\/status mismatch$/,
+    /^incomplete Responses output lifecycle$/,
+    /^Anthropic stream error event$/,
+    /^(?:Response|Upstream response|Anthropic response) has no body$/,
+  ];
+  return safePatterns.some((pattern) => pattern.test(message))
+    ? message
+    : "invalid response body";
+}
+
+/** Initiate response-body cleanup before a retry without trusting cancel to settle. */
+function cancelWorkerResponseForRetry(
+  response: Response,
+  reason: unknown,
+): void {
+  if (!response.body || response.body.locked) return;
+  void response.body.cancel(reason).catch(() => {});
+}
 
 // Visible-output headroom added on top of an extended-thinking budget so the
 // model has room for the actual answer after reasoning (Anthropic counts thinking
@@ -594,9 +740,21 @@ export function parseRetryAfter(response: Response): number | null {
   const header = response.headers.get("retry-after");
   if (!header) return null;
   const seconds = Number(header);
-  if (!Number.isNaN(seconds)) return seconds * 1000;
+  if (!Number.isNaN(seconds)) {
+    if (!Number.isFinite(seconds) || seconds < 0) return null;
+    const milliseconds = seconds * 1000;
+    if (!Number.isFinite(milliseconds) || !Number.isSafeInteger(milliseconds)) {
+      return null;
+    }
+    return Math.min(milliseconds, MAX_DELAY_MS);
+  }
   const date = Date.parse(header);
-  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  if (!Number.isNaN(date)) {
+    const milliseconds = Math.max(0, date - Date.now());
+    return Number.isSafeInteger(milliseconds)
+      ? Math.min(milliseconds, MAX_DELAY_MS)
+      : null;
+  }
   return null;
 }
 
@@ -610,7 +768,9 @@ export function backoffMs(
   attempt: number,
   retryAfterMs: number | null,
 ): number {
-  if (retryAfterMs != null) return Math.min(retryAfterMs, MAX_DELAY_MS);
+  if (retryAfterMs != null && Number.isFinite(retryAfterMs)) {
+    return Math.min(Math.max(0, retryAfterMs), MAX_DELAY_MS);
+  }
   const base = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
   return base + Math.random() * 0.25 * base;
 }
@@ -637,21 +797,18 @@ export function abortableSleep(
 export async function readWorkerResponseText(
   response: Response,
   signal?: AbortSignal,
-  maxBytes = 64 * 1024,
+  maxBytes = WORKER_ERROR_BODY_MAX_BYTES,
 ): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return "";
   const chunks: Uint8Array[] = [];
   let bytes = 0;
-  const onAbort = (): void => {
-    void reader.cancel(signal?.reason).catch(() => {});
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     while (bytes < maxBytes) {
-      signal?.throwIfAborted();
-      const { done, value } = await reader.read();
-      signal?.throwIfAborted();
+      const { done, value } = await readStreamChunk(reader, {
+        signal,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+      });
       if (done) break;
       if (!value) continue;
       const chunk = value.subarray(0, maxBytes - bytes);
@@ -662,13 +819,15 @@ export async function readWorkerResponseText(
     if (signal?.aborted) throw signal.reason;
     return "(no body)";
   } finally {
-    signal?.removeEventListener("abort", onAbort);
-    void reader.cancel().catch(() => {});
+    cancelAndReleaseReader(reader);
   }
+  // This is bounded diagnostic text, not semantic response JSON. Replacement
+  // decoding preserves useful error classification when malformed bytes or a
+  // multibyte code point land at the truncation boundary.
   return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
-class WorkerResponseTooLargeError extends Error {
+class WorkerResponseTooLargeError extends SSEStreamLimitError {
   constructor() {
     super(`worker response exceeded ${MAX_WORKER_RESPONSE_BYTES} byte limit`);
     this.name = "WorkerResponseTooLargeError";
@@ -682,30 +841,114 @@ class IncompleteWorkerResponseError extends Error {
   }
 }
 
-type WorkerSuccessBody = { isSSE: boolean; text: string };
+class WorkerRequestTooLargeError extends Error {
+  readonly bytes: number;
 
-async function readWorkerStreamChunk(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  signal?: AbortSignal,
-) {
-  const onAbort = (): void => {
-    void reader.cancel(signal?.reason).catch(() => {});
-  };
-  signal?.throwIfAborted();
-  signal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    const result = await reader.read();
-    signal?.throwIfAborted();
-    return result;
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
+  constructor(bytes: number) {
+    super(`worker request exceeded ${MAX_WORKER_REQUEST_BYTES} byte limit`);
+    this.name = "WorkerRequestTooLargeError";
+    this.bytes = bytes;
   }
+}
+
+class WorkerTransportFailureError extends Error {
+  readonly kind: string;
+  readonly code?: string;
+
+  constructor(error: unknown) {
+    const kind = transportErrorKind(error);
+    const code = transportErrorCode(error);
+    super(
+      `Worker transport failure: kind=${kind}${code ? ` code=${code}` : ""}`,
+    );
+    this.name = "WorkerTransportFailureError";
+    this.kind = kind;
+    this.code = code;
+  }
+}
+
+function enforceWorkerRequestLimit<T extends { body: string }>(request: T): T {
+  const bytes = Buffer.byteLength(request.body);
+  if (bytes > MAX_WORKER_REQUEST_BYTES) {
+    throw new WorkerRequestTooLargeError(bytes);
+  }
+  return request;
+}
+
+type WorkerSuccessBody =
+  | { isSSE: true; response: Response }
+  | { isSSE: false; text: string };
+
+function replayWorkerStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  prefix: Uint8Array[],
+  signal?: AbortSignal,
+): Response {
+  let prefixIndex = 0;
+  let bytes = 0;
+  let finished = false;
+  let overflow = false;
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (finished) return;
+        try {
+          if (overflow) throw new WorkerResponseTooLargeError();
+          const result =
+            prefixIndex < prefix.length
+              ? { done: false as const, value: prefix[prefixIndex++] }
+              : await readStreamChunk(reader, {
+                  signal,
+                  inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+                });
+          signal?.throwIfAborted();
+          if (result.done) {
+            finished = true;
+            reader.releaseLock();
+            controller.close();
+            return;
+          }
+          const remaining = MAX_WORKER_RESPONSE_BYTES - bytes;
+          if (result.value.byteLength > remaining) {
+            if (remaining === 0) throw new WorkerResponseTooLargeError();
+            overflow = true;
+            bytes += remaining;
+            controller.enqueue(result.value.subarray(0, remaining));
+            return;
+          }
+          bytes += result.value.byteLength;
+          controller.enqueue(result.value);
+        } catch (error) {
+          finished = true;
+          void reader.cancel(error).catch(() => {});
+          try {
+            reader.releaseLock();
+          } catch {
+            // Cancellation remains non-blocking if a runtime keeps read pending.
+          }
+          controller.error(error);
+        }
+      },
+      cancel(reason) {
+        finished = true;
+        void reader.cancel(reason).catch(() => {});
+        try {
+          reader.releaseLock();
+        } catch {
+          // Never await an uncooperative source cancellation.
+        }
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
 }
 
 async function readCompleteWorkerBody(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   prefix: Uint8Array[],
   signal?: AbortSignal,
+  onBodyBytes?: () => void,
 ): Promise<string> {
   const chunks = [...prefix];
   let bytes = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
@@ -714,31 +957,47 @@ async function readCompleteWorkerBody(
       throw new WorkerResponseTooLargeError();
     }
     for (;;) {
-      const { done, value } = await readWorkerStreamChunk(reader, signal);
+      const { done, value } = await readStreamChunk(reader, {
+        signal,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+      });
       if (done) break;
       if (!value) continue;
+      if (value.byteLength > 0) onBodyBytes?.();
       bytes += value.byteLength;
       if (bytes > MAX_WORKER_RESPONSE_BYTES) {
         throw new WorkerResponseTooLargeError();
       }
       chunks.push(value);
     }
-    return new TextDecoder().decode(Buffer.concat(chunks));
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.concat(chunks),
+      );
+    } catch {
+      throw new Error("malformed worker response UTF-8");
+    }
   } finally {
     void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // See readWorkerResponseText: never wait on provider cancellation.
+    }
   }
 }
 
 async function inspectWorkerSuccessBody(
   response: Response,
   signal?: AbortSignal,
+  onNonSSEBodyBytes?: () => void,
 ): Promise<WorkerSuccessBody> {
   const reader = response.body?.getReader();
   if (!reader) return { isSSE: false, text: "" };
   const contentType = response.headers.get("content-type") ?? "";
   const prefix: Uint8Array[] = [];
   let prefixBytes = 0;
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let sniffToken = "";
   let skippingLeadingWhitespace = true;
 
@@ -751,8 +1010,9 @@ async function inspectWorkerSuccessBody(
         skippingLeadingWhitespace = false;
       }
       sniffToken += char;
-      if ("data:".startsWith(sniffToken) || "event:".startsWith(sniffToken)) {
-        if (sniffToken === "data:" || sniffToken === "event:") return true;
+      const sseFields = ["data:", "event:", "id:", "retry:"];
+      if (sseFields.some((field) => field.startsWith(sniffToken))) {
+        if (sseFields.includes(sniffToken)) return true;
         continue;
       }
       return false;
@@ -763,42 +1023,79 @@ async function inspectWorkerSuccessBody(
   if (looksLikeSSE(contentType, "")) {
     return {
       isSSE: true,
-      text: await readCompleteWorkerBody(reader, prefix, signal),
+      response: replayWorkerStream(reader, prefix, signal),
     };
   }
 
-  while (prefixBytes < WORKER_RESPONSE_SNIFF_BYTES) {
-    const { done, value } = await readWorkerStreamChunk(reader, signal);
-    if (done) {
-      if (prefixBytes > MAX_WORKER_RESPONSE_BYTES) {
-        throw new WorkerResponseTooLargeError();
+  try {
+    while (prefixBytes < WORKER_RESPONSE_SNIFF_BYTES) {
+      const { done, value } = await readStreamChunk(reader, {
+        signal,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+      });
+      if (done) {
+        if (prefixBytes > MAX_WORKER_RESPONSE_BYTES) {
+          throw new WorkerResponseTooLargeError();
+        }
+        reader.releaseLock();
+        if (prefix.some((chunk) => chunk.byteLength > 0)) {
+          onNonSSEBodyBytes?.();
+        }
+        let text: string;
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(
+            Buffer.concat(prefix),
+          );
+        } catch {
+          throw new Error("malformed worker response UTF-8");
+        }
+        return {
+          isSSE: false,
+          text,
+        };
       }
-      return {
-        isSSE: false,
-        text: new TextDecoder().decode(Buffer.concat(prefix)),
-      };
+      if (!value) continue;
+      prefix.push(value);
+      const sniffBytes = Math.min(
+        value.byteLength,
+        WORKER_RESPONSE_SNIFF_BYTES - prefixBytes,
+      );
+      prefixBytes += sniffBytes;
+      let ssePrefix: boolean | null;
+      try {
+        ssePrefix = sniffSSEPrefix(value.subarray(0, sniffBytes));
+      } catch {
+        onNonSSEBodyBytes?.();
+        throw new Error("malformed worker response UTF-8");
+      }
+      if (ssePrefix) {
+        return {
+          isSSE: true,
+          response: replayWorkerStream(reader, prefix, signal),
+        };
+      }
+      if (ssePrefix === false) break;
     }
-    if (!value) continue;
-    prefix.push(value);
-    const sniffBytes = Math.min(
-      value.byteLength,
-      WORKER_RESPONSE_SNIFF_BYTES - prefixBytes,
-    );
-    prefixBytes += sniffBytes;
-    const ssePrefix = sniffSSEPrefix(value.subarray(0, sniffBytes));
-    if (ssePrefix) {
-      return {
-        isSSE: true,
-        text: await readCompleteWorkerBody(reader, prefix, signal),
-      };
-    }
-    if (ssePrefix === false) break;
-  }
 
-  return {
-    isSSE: false,
-    text: await readCompleteWorkerBody(reader, prefix, signal),
-  };
+    if (prefix.some((chunk) => chunk.byteLength > 0)) onNonSSEBodyBytes?.();
+    return {
+      isSSE: false,
+      text: await readCompleteWorkerBody(
+        reader,
+        prefix,
+        signal,
+        onNonSSEBodyBytes,
+      ),
+    };
+  } catch (error) {
+    void reader.cancel(error).catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // Never await an uncooperative response-body cancellation.
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -808,8 +1105,9 @@ async function inspectWorkerSuccessBody(
 /** OpenAI Chat Completions response shape (subset we need). */
 type OpenAIChatResponse = {
   choices?: Array<{
+    index?: number;
     message?: {
-      content?: string;
+      content?: string | null | Array<Record<string, unknown>>;
       // Reasoning models (DeepSeek, Qwen-thinking, Nemotron, MiniMax, etc.)
       // commonly served on aggregators like OpenCode Zen put their answer in a
       // reasoning field and leave `content` empty/null. We read these as a
@@ -818,17 +1116,27 @@ type OpenAIChatResponse = {
       // `reasoning` is the OpenRouter/others field.
       reasoning_content?: string;
       reasoning?: string;
+      refusal?: string | null;
+      tool_calls?: Array<{ id?: string; function?: unknown }>;
     };
-    finish_reason?: string;
+    finish_reason?: string | null;
+    native_finish_reason?: string | null;
   }>;
-  model?: string;
+  model?: string | null;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
+    total_tokens?: number;
     prompt_tokens_details?: {
       cached_tokens?: number;
       cache_write_tokens?: number;
-    };
+    } | null;
+    completion_tokens_details?: {
+      reasoning_tokens?: number;
+      audio_tokens?: number;
+      accepted_prediction_tokens?: number;
+      rejected_prediction_tokens?: number;
+    } | null;
   };
 };
 
@@ -874,6 +1182,7 @@ export function disjointOpenAIInputTokens(
 export function normalizeOpenAIUsage(
   usage: OpenAIChatResponse["usage"],
 ): AnthropicUsage {
+  validateOpenAIUsage(usage, "malformed OpenAI usage");
   const cachedTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
   const cacheWriteTokens =
     usage?.prompt_tokens_details?.cache_write_tokens ?? 0;
@@ -911,7 +1220,7 @@ export type WorkerProtocol =
   | "gemini";
 
 /** Upstream URL, wire protocol, and provider label for a resolved target. */
-type ProviderTarget = {
+export type ProviderTarget = {
   url: string;
   protocol: WorkerProtocol;
   /** Provider label for Sentry spans and logging. */
@@ -938,6 +1247,158 @@ function alternateProtocolForUnsupportedApi(
     return null;
   }
   return target.protocol === "openai" ? "openai-responses" : "openai";
+}
+
+type WorkerProtocolFamily = "anthropic" | "openai" | "vertex" | "gemini";
+
+/** URL supplies lowercase/IDNA semantics; remove one optional DNS root dot. */
+export function normalizedWorkerHostname(url: string): string | null {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+  } catch {
+    return null;
+  }
+}
+
+const WORKER_PROVIDER_ALIAS_FAMILIES: readonly ReadonlySet<string>[] = [
+  new Set(["vertex", "google-vertex", "google-vertex-anthropic"]),
+  new Set(["bedrock", "amazon-bedrock"]),
+];
+
+const WORKER_PROVIDER_PROTOCOL_CAPABILITIES: Readonly<
+  Record<string, ReadonlySet<WorkerProtocolFamily>>
+> = {
+  bedrock: new Set(["anthropic"]),
+  "amazon-bedrock": new Set(["anthropic"]),
+  vertex: new Set(["vertex"]),
+  // The generic Vertex provider can serve native Gemini as well as the
+  // configured Claude rawPredict route. The Anthropic-specific identity may not.
+  "google-vertex": new Set(["vertex", "gemini"]),
+  "google-vertex-anthropic": new Set(["vertex"]),
+};
+
+/** Canonical ID for explicitly supported provider aliases; unrelated IDs stay distinct. */
+export function canonicalWorkerProviderID(providerID: string): string {
+  for (const family of WORKER_PROVIDER_ALIAS_FAMILIES) {
+    if (family.has(providerID)) return [...family][0];
+  }
+  return providerID;
+}
+
+function workerProviderAliasIDs(providerID: string): readonly string[] {
+  for (const family of WORKER_PROVIDER_ALIAS_FAMILIES) {
+    if (family.has(providerID)) {
+      return [providerID, ...[...family].filter((id) => id !== providerID)];
+    }
+  }
+  return [providerID];
+}
+
+function workerProvidersEquivalent(left: string, right: string): boolean {
+  return canonicalWorkerProviderID(left) === canonicalWorkerProviderID(right);
+}
+
+function workerProviderSupportsProtocol(
+  providerID: string,
+  protocol: WorkerProtocol,
+): boolean {
+  const capabilities = WORKER_PROVIDER_PROTOCOL_CAPABILITIES[providerID];
+  return capabilities?.has(workerProtocolFamily(protocol)) ?? true;
+}
+
+function workerProtocolFamily(value: WorkerProtocol): WorkerProtocolFamily {
+  if (value === "vertex") return "vertex";
+  if (value === "gemini") return "gemini";
+  if (
+    value === "openai" ||
+    value === "openai-responses" ||
+    value === "openai-codex-responses"
+  ) {
+    return "openai";
+  }
+  return "anthropic";
+}
+
+/** Trusted canonical origin capabilities. Unknown hosts require provenance. */
+export function workerOriginProtocolFamilies(
+  url: string,
+): ReadonlySet<WorkerProtocolFamily> | null {
+  try {
+    const parsed = new URL(url);
+    const host = normalizedWorkerHostname(url);
+    if (host === null) return new Set();
+    const knownHost =
+      host === "api.anthropic.com" ||
+      host === "api.openai.com" ||
+      host === "chatgpt.com" ||
+      host === "generativelanguage.googleapis.com" ||
+      vertexRegionFromUrl(host) !== null;
+    if (
+      knownHost &&
+      (parsed.protocol !== "https:" ||
+        (parsed.port !== "" && parsed.port !== "443"))
+    ) {
+      return new Set();
+    }
+    if (host === "api.anthropic.com") return new Set(["anthropic"]);
+    if (host === "api.openai.com") return new Set(["openai"]);
+    if (host === "chatgpt.com") {
+      return /(?:^|\/)backend-api(?:\/|$)/.test(parsed.pathname)
+        ? new Set(["openai"])
+        : new Set();
+    }
+    // Google's Developer API serves native Gemini and an OpenAI-compatible
+    // facade on the same canonical origin.
+    if (host === "generativelanguage.googleapis.com") {
+      return new Set(["gemini", "openai"]);
+    }
+    // Vertex hosts serve Claude rawPredict (`vertex`) and native Gemini
+    // generateContent under project/location paths.
+    if (vertexRegionFromUrl(host) !== null) {
+      return new Set(["vertex", "gemini"]);
+    }
+    return null;
+  } catch {
+    return new Set();
+  }
+}
+
+function workerOriginProviderIDs(url: string): ReadonlySet<string> | null {
+  try {
+    const parsed = new URL(url);
+    const host = normalizedWorkerHostname(url);
+    if (host === null) return new Set();
+    const knownHost =
+      host === "api.anthropic.com" ||
+      host === "api.openai.com" ||
+      host === "chatgpt.com" ||
+      host === "generativelanguage.googleapis.com" ||
+      vertexRegionFromUrl(host) !== null;
+    if (
+      knownHost &&
+      (parsed.protocol !== "https:" ||
+        (parsed.port !== "" && parsed.port !== "443"))
+    ) {
+      return new Set();
+    }
+    if (host === "api.anthropic.com") return new Set(["anthropic"]);
+    if (host === "api.openai.com") return new Set(["openai"]);
+    if (host === "chatgpt.com") {
+      return /(?:^|\/)backend-api(?:\/|$)/.test(parsed.pathname)
+        ? new Set(["openai", "openai-codex"])
+        : new Set();
+    }
+    if (host === "generativelanguage.googleapis.com") {
+      return new Set(["google"]);
+    }
+    if (vertexRegionFromUrl(host) !== null) {
+      return new Set(["vertex", "google-vertex", "google-vertex-anthropic"]);
+    }
+    return null;
+  } catch {
+    return new Set();
+  }
 }
 
 /**
@@ -1089,8 +1550,8 @@ function isResponsesOnlyModel(modelID: string): boolean {
 function isChatGPTBackend(url: string | URL | undefined): boolean {
   if (!url) return false;
   try {
-    const host = typeof url === "string" ? new URL(url).hostname : url.hostname;
-    return host === "chatgpt.com";
+    const target = typeof url === "string" ? new URL(url) : url;
+    return /(?:^|\/)backend-api(?:\/|$)/.test(target.pathname);
   } catch {
     return false;
   }
@@ -1112,30 +1573,72 @@ function isChatGPTBackend(url: string | URL | undefined): boolean {
  * @param modelProviderID  The worker model's provider (authoritative for routing)
  * @param overrideProviderID  The session/override provider, if known
  */
-function resolveTarget(
+export function resolveTarget(
   upstreams: { anthropic: string; openai: string },
   protocol: WorkerProtocol,
   upstreamOverride: string | undefined,
   modelProviderID: string,
   overrideProviderID?: string,
 ): ProviderTarget & { routeUnavailable?: boolean } {
+  const unavailable = (): ProviderTarget & { routeUnavailable: true } => ({
+    url: "",
+    protocol,
+    providerName: modelProviderID,
+    routeUnavailable: true,
+  });
+  const normalizedTargetUrl = (url: string): string => {
+    const families = workerOriginProtocolFamilies(url);
+    if (families !== null && families.size > 0) {
+      const parsed = new URL(url);
+      const hostname = normalizedWorkerHostname(url);
+      if (hostname) parsed.hostname = hostname;
+      return parsed.toString().replace(/\/$/, "");
+    }
+    return url.replace(/\/$/, "");
+  };
+  const canonicalOriginIsCompatible = (url: string): boolean => {
+    const families = workerOriginProtocolFamilies(url);
+    const providerIDs = workerOriginProviderIDs(url);
+    return (
+      (families === null || families.has(workerProtocolFamily(protocol))) &&
+      (providerIDs === null ||
+        [...providerIDs].some((providerID) =>
+          workerProvidersEquivalent(providerID, modelProviderID),
+        ))
+    );
+  };
+  if (!workerProviderSupportsProtocol(modelProviderID, protocol)) {
+    return unavailable();
+  }
+  if (
+    (modelProviderID === "openai" &&
+      workerProtocolFamily(protocol) !== "openai") ||
+    (modelProviderID === "anthropic" &&
+      workerProtocolFamily(protocol) !== "anthropic")
+  ) {
+    return unavailable();
+  }
   // Honor the session override ONLY when we have positive evidence it belongs
   // to this worker model's provider:
-  //  - overrideProviderID matches the model's provider (the normal case), OR
-  //  - overrideProviderID is unknown AND the model provider does NOT have its
-  //    own distinct provider route (so there's no safer endpoint to prefer —
-  //    e.g. the model provider IS the override's, or it's an aggregator).
-  // When overrideProviderID is unknown but the model HAS its own route (e.g.
-  // minimax → api.minimax.io), we do NOT trust the foreign override — we route
-  // by the model's own provider below. This fails safe: a future caller that
-  // sets `upstreamUrl` without `upstreamProviderID` cannot silently re-open the
-  // cross-provider collusion (the production minimax→Anthropic 401 loop).
-  const overrideMatchesModel = overrideProviderID
-    ? overrideProviderID === modelProviderID
-    : resolveProviderRoute(modelProviderID)?.url == null;
+  //  - overrideProviderID matches the model's provider (the normal case).
+  // An absent provider label is not evidence of ownership: trusting an
+  // unlabelled URL would let an arbitrary endpoint receive the model provider's
+  // credential, especially for route-less/custom providers. Without explicit
+  // provenance, ignore the override and use a trusted static route or fail
+  // closed below.
+  const overrideMatchesModel =
+    overrideProviderID !== undefined &&
+    workerProvidersEquivalent(overrideProviderID, modelProviderID);
   if (upstreamOverride && overrideMatchesModel) {
+    if (!workerProviderSupportsProtocol(overrideProviderID, protocol)) {
+      return unavailable();
+    }
+    // Unknown/custom aliases are accepted only with this exact provider
+    // provenance. Canonical origins remain authoritative and cannot be
+    // relabelled into another protocol family.
+    if (!canonicalOriginIsCompatible(upstreamOverride)) return unavailable();
     return {
-      url: upstreamOverride.replace(/\/$/, ""),
+      url: normalizedTargetUrl(upstreamOverride),
       protocol,
       // Prefer the actual provider label over the protocol. `overrideMatchesModel`
       // guarantees the override and worker model share a provider, so either the
@@ -1168,8 +1671,9 @@ function resolveTarget(
       // Codex has no static default upstream — fall back to its provider route.
       const route = resolveProviderRoute("openai-codex");
       if (route?.url) {
+        if (!canonicalOriginIsCompatible(route.url)) return unavailable();
         return {
-          url: route.url.replace(/\/$/, ""),
+          url: normalizedTargetUrl(route.url),
           protocol,
           providerName: "openai-codex",
         };
@@ -1177,8 +1681,25 @@ function resolveTarget(
     } else {
       const route = resolveProviderRoute(modelProviderID);
       if (route?.url) {
+        const routeFamily = route.protocol
+          ? workerProtocolFamily(
+              route.protocol === "openai-responses"
+                ? "openai-responses"
+                : route.protocol,
+            )
+          : undefined;
+        const canonicalFamilies = workerOriginProtocolFamilies(route.url);
+        if (
+          (canonicalFamilies !== null &&
+            !canonicalFamilies.has(workerProtocolFamily(protocol))) ||
+          (canonicalFamilies === null &&
+            routeFamily !== undefined &&
+            routeFamily !== workerProtocolFamily(protocol))
+        ) {
+          return unavailable();
+        }
         return {
-          url: route.url.replace(/\/$/, ""),
+          url: normalizedTargetUrl(route.url),
           protocol,
           providerName: modelProviderID,
         };
@@ -1187,22 +1708,29 @@ function resolveTarget(
     // No route URL for this provider (unknown, or a local provider needing an
     // explicit LORE_UPSTREAM_<PROVIDER>). Signal the caller to fail closed —
     // we must NOT fall back to a foreign default endpoint.
-    return {
-      url: "",
-      protocol,
-      providerName: modelProviderID,
-      routeUnavailable: true,
-    };
+    return unavailable();
   }
-  if (protocol === "openai") {
+  if (modelProviderID === "openai") {
+    if (workerProtocolFamily(protocol) !== "openai" || !upstreams.openai) {
+      return unavailable();
+    }
+    if (!canonicalOriginIsCompatible(upstreams.openai)) return unavailable();
     return {
-      url: upstreams.openai.replace(/\/$/, ""),
+      url: normalizedTargetUrl(upstreams.openai),
       protocol,
       providerName: "openai",
     };
   }
+  if (
+    modelProviderID !== "anthropic" ||
+    workerProtocolFamily(protocol) !== "anthropic" ||
+    !upstreams.anthropic ||
+    !canonicalOriginIsCompatible(upstreams.anthropic)
+  ) {
+    return unavailable();
+  }
   return {
-    url: upstreams.anthropic.replace(/\/$/, ""),
+    url: normalizedTargetUrl(upstreams.anthropic),
     protocol,
     providerName: "anthropic",
   };
@@ -1495,35 +2023,124 @@ function buildGeminiWorkerRequest(
 }
 
 /** Parse a native Gemini `generateContent` worker response into `{text,usage,model}`. */
-function parseGeminiWorkerResponse(data: {
-  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  usageMetadata?: {
-    promptTokenCount?: number;
-    candidatesTokenCount?: number;
-    cachedContentTokenCount?: number;
-  };
-  modelVersion?: string;
+export function parseGeminiWorkerResponse(data: {
+  candidates?: unknown;
+  usageMetadata?: unknown;
+  modelVersion?: unknown;
 }): {
   text: string | null;
   usage: AnthropicUsage | null;
   model: string | null;
 } {
-  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  const malformed = (): never => {
+    throw new Error("malformed Gemini response body");
+  };
+  if (data.candidates !== undefined && !Array.isArray(data.candidates)) {
+    malformed();
+  }
+  const candidates = (data.candidates ?? []) as unknown[];
+  for (const candidate of candidates) {
+    const toolIdentities = new Set<string>();
+    if (!isRecord(candidate)) malformed();
+    const typedCandidate = candidate as Record<string, unknown>;
+    if (
+      typedCandidate.index !== undefined &&
+      (!Number.isSafeInteger(typedCandidate.index) ||
+        (typedCandidate.index as number) < 0)
+    ) {
+      malformed();
+    }
+    if (
+      typedCandidate.finishReason !== undefined &&
+      typedCandidate.finishReason !== null &&
+      typeof typedCandidate.finishReason !== "string"
+    ) {
+      malformed();
+    }
+    if (
+      typedCandidate.tokenCount !== undefined &&
+      (!Number.isSafeInteger(typedCandidate.tokenCount) ||
+        (typedCandidate.tokenCount as number) < 0)
+    ) {
+      malformed();
+    }
+    if (typedCandidate.content === undefined) continue;
+    if (!isRecord(typedCandidate.content)) malformed();
+    const typedContent = typedCandidate.content as Record<string, unknown>;
+    if (
+      typedContent.role !== undefined &&
+      typeof typedContent.role !== "string"
+    ) {
+      malformed();
+    }
+    const parts = typedContent.parts;
+    if (parts === undefined) continue;
+    if (!Array.isArray(parts)) malformed();
+    for (const part of parts as unknown[]) {
+      if (!isRecord(part)) malformed();
+      const typedPart = part as Record<string, unknown>;
+      if (
+        typedPart.text !== undefined &&
+        typedPart.functionCall !== undefined
+      ) {
+        malformed();
+      }
+      if (typedPart.text !== undefined && typeof typedPart.text !== "string") {
+        malformed();
+      }
+      if (
+        typedPart.thought !== undefined &&
+        typeof typedPart.thought !== "boolean"
+      ) {
+        malformed();
+      }
+      if (typedPart.functionCall !== undefined) {
+        if (!isRecord(typedPart.functionCall)) malformed();
+        validateGeminiFunctionCallIdentity(
+          typedPart.functionCall,
+          toolIdentities,
+          "malformed Gemini response body",
+        );
+      }
+    }
+  }
+
+  const usageMetadata = validateGeminiUsageMetadata(
+    data.usageMetadata,
+    "malformed Gemini response body",
+  );
+  if (
+    data.modelVersion !== undefined &&
+    data.modelVersion !== null &&
+    typeof data.modelVersion !== "string"
+  ) {
+    malformed();
+  }
+
+  const first = candidates[0] as Record<string, unknown> | undefined;
+  const content = first?.content as Record<string, unknown> | undefined;
+  const parts = (content?.parts ?? []) as Array<Record<string, unknown>>;
   const text =
     parts
       .filter((p) => typeof p.text === "string")
       .map((p) => p.text)
       .join("") || null;
-  const um = data.usageMetadata;
-  const usage: AnthropicUsage | null = um
+  const normalizedUsage = usageMetadata
+    ? geminiUsageFromMetadata(usageMetadata)
+    : null;
+  const usage: AnthropicUsage | null = normalizedUsage
     ? {
-        input_tokens: um.promptTokenCount ?? 0,
-        output_tokens: um.candidatesTokenCount ?? 0,
-        cache_read_input_tokens: um.cachedContentTokenCount ?? 0,
+        input_tokens: normalizedUsage.inputTokens,
+        output_tokens: normalizedUsage.outputTokens,
+        cache_read_input_tokens: normalizedUsage.cacheReadInputTokens ?? 0,
         cache_creation_input_tokens: 0,
       }
     : null;
-  return { text, usage, model: data.modelVersion ?? null };
+  return {
+    text,
+    usage,
+    model: typeof data.modelVersion === "string" ? data.modelVersion : null,
+  };
 }
 
 /**
@@ -1642,16 +2259,118 @@ function buildOpenAIResponsesWorkerRequest(
   };
 }
 
+function validateAnthropicContentBlock(block: unknown): void {
+  const malformed = (): never => {
+    throw new Error("malformed Anthropic response body");
+  };
+  if (
+    !isRecord(block) ||
+    typeof block.type !== "string" ||
+    !ANTHROPIC_CONTENT_BLOCK_TYPES.has(block.type)
+  ) {
+    malformed();
+  }
+  const typedBlock = block as Record<string, unknown>;
+  switch (typedBlock.type) {
+    case "text":
+      if (typeof typedBlock.text !== "string") malformed();
+      break;
+    case "thinking":
+      if (
+        typeof typedBlock.thinking !== "string" ||
+        (typedBlock.signature !== undefined &&
+          typeof typedBlock.signature !== "string")
+      ) {
+        malformed();
+      }
+      break;
+    case "redacted_thinking":
+      if (typeof typedBlock.data !== "string") malformed();
+      break;
+    case "tool_use":
+    case "server_tool_use":
+      if (
+        typeof typedBlock.id !== "string" ||
+        typeof typedBlock.name !== "string" ||
+        (typedBlock.type === "tool_use"
+          ? !isRecord(typedBlock.input)
+          : typedBlock.input === undefined)
+      ) {
+        malformed();
+      }
+      break;
+    case "container_upload":
+      if (typeof typedBlock.file_id !== "string") malformed();
+      break;
+    case "web_search_tool_result":
+    case "web_fetch_tool_result":
+    case "code_execution_tool_result":
+    case "bash_code_execution_tool_result":
+    case "text_editor_code_execution_tool_result":
+    case "tool_search_tool_result":
+      if (
+        typeof typedBlock.tool_use_id !== "string" ||
+        typedBlock.content == null
+      ) {
+        malformed();
+      }
+      break;
+    case "fallback":
+      // A fallback block is a provider boundary marker and has no worker text.
+      break;
+  }
+}
+
 /** Extract text response from an Anthropic Messages API response. */
 export function parseAnthropicResponse(data: {
-  content?: Array<{ type: string; text?: string; thinking?: string }>;
-  model?: string;
+  content?: Array<
+    Record<string, unknown> & {
+      type: string;
+      text?: string;
+      thinking?: string;
+    }
+  >;
+  model?: string | null;
   usage?: AnthropicUsage;
+  stop_reason?: unknown;
 }): {
   text: string | null;
   usage: AnthropicUsage | null;
   model: string | null;
 } {
+  if (data.content !== undefined && !Array.isArray(data.content)) {
+    throw new Error("malformed Anthropic response body");
+  }
+  const toolIdentities = new Set<string>();
+  for (const block of data.content ?? []) {
+    validateAnthropicContentBlock(block);
+    if (block.type === "tool_use" || block.type === "server_tool_use") {
+      const id = (block as { id?: unknown }).id;
+      if (typeof id !== "string" || !id || toolIdentities.has(id)) {
+        throw new Error("malformed Anthropic response body");
+      }
+      toolIdentities.add(id);
+    }
+  }
+  if (
+    data.model !== undefined &&
+    data.model !== null &&
+    typeof data.model !== "string"
+  ) {
+    throw new Error("malformed Anthropic response body");
+  }
+  if (
+    data.stop_reason !== undefined &&
+    (typeof data.stop_reason !== "string" ||
+      !ANTHROPIC_STOP_REASONS.has(data.stop_reason))
+  ) {
+    throw new Error("malformed Anthropic response body");
+  }
+  validateAnthropicUsage(data.usage, {
+    message: "malformed Anthropic response body",
+    requireInput: true,
+    requireOutput: true,
+  });
   const textBlock = data.content?.find(
     (b) => b.type === "text" && typeof b.text === "string",
   );
@@ -1669,7 +2388,7 @@ export function parseAnthropicResponse(data: {
   return {
     text,
     usage: data.usage ?? null,
-    model: data.model ?? null,
+    model: typeof data.model === "string" ? data.model : null,
   };
 }
 
@@ -1679,7 +2398,97 @@ export function parseOpenAIResponse(data: OpenAIChatResponse): {
   usage: AnthropicUsage | null;
   model: string | null;
 } {
+  if (data.choices !== undefined && !Array.isArray(data.choices)) {
+    throw new Error("malformed OpenAI response body");
+  }
+  const logicalChoiceIndices = new Set<number>();
+  for (let position = 0; position < (data.choices?.length ?? 0); position++) {
+    const choice = data.choices?.[position];
+    if (!isRecord(choice)) throw new Error("malformed OpenAI response body");
+    const logicalIndex = choice.index === undefined ? position : choice.index;
+    if (
+      !Number.isSafeInteger(logicalIndex) ||
+      logicalIndex < 0 ||
+      logicalChoiceIndices.has(logicalIndex)
+    ) {
+      throw new Error("malformed OpenAI response body");
+    }
+    logicalChoiceIndices.add(logicalIndex);
+  }
+  for (const choice of data.choices ?? []) {
+    const toolIdentities = new Set<string>();
+    if (!isRecord(choice)) throw new Error("malformed OpenAI response body");
+    if (
+      choice.index !== undefined &&
+      (!Number.isSafeInteger(choice.index) || choice.index < 0)
+    ) {
+      throw new Error("malformed OpenAI response body");
+    }
+    if (
+      (choice.finish_reason !== undefined &&
+        choice.finish_reason !== null &&
+        typeof choice.finish_reason !== "string") ||
+      (choice.native_finish_reason !== undefined &&
+        choice.native_finish_reason !== null &&
+        typeof choice.native_finish_reason !== "string")
+    ) {
+      throw new Error("malformed OpenAI response body");
+    }
+    if (choice.message === undefined) continue;
+    if (!isRecord(choice.message)) {
+      throw new Error("malformed OpenAI response body");
+    }
+    const message = choice.message;
+    if (
+      message.content !== undefined &&
+      message.content !== null &&
+      typeof message.content !== "string" &&
+      !Array.isArray(message.content)
+    ) {
+      throw new Error("malformed OpenAI response body");
+    }
+    if (
+      Array.isArray(message.content) &&
+      message.content.some((part) => !isRecord(part))
+    ) {
+      throw new Error("malformed OpenAI response body");
+    }
+    for (const field of [
+      "reasoning_content",
+      "reasoning",
+      "refusal",
+    ] as const) {
+      if (
+        message[field] !== undefined &&
+        message[field] !== null &&
+        typeof message[field] !== "string"
+      ) {
+        throw new Error("malformed OpenAI response body");
+      }
+    }
+    const toolCalls = message.tool_calls;
+    if (toolCalls !== undefined && !Array.isArray(toolCalls)) {
+      throw new Error("malformed OpenAI response body");
+    }
+    for (const call of toolCalls ?? []) {
+      if (!isRecord(call) || typeof call.id !== "string" || !call.id) {
+        throw new Error("malformed OpenAI response body");
+      }
+      if (toolIdentities.has(call.id)) {
+        throw new Error("malformed OpenAI response body");
+      }
+      toolIdentities.add(call.id);
+    }
+  }
   const message = data.choices?.[0]?.message;
+  if (
+    data.model !== undefined &&
+    data.model !== null &&
+    typeof data.model !== "string"
+  ) {
+    throw new Error("malformed OpenAI response body");
+  }
+  validateOpenAIUsage(data.usage, "malformed OpenAI response body");
   // reasoning models put the answer in reasoning fields — never treat a present
   // reasoning body as no-response. Prefer real `content`; fall back to
   // `reasoning_content` (DeepSeek/Qwen) then `reasoning` (OpenRouter/others)
@@ -1695,11 +2504,14 @@ export function parseOpenAIResponse(data: OpenAIChatResponse): {
         ? message.reasoning
         : null;
   const text =
-    typeof content === "string" && content.length > 0 ? content : reasoning;
+    typeof content === "string" && content.length > 0
+      ? content
+      : reasoning ||
+        (typeof message?.refusal === "string" ? message.refusal : null);
   return {
     text: text ?? null,
     usage: data.usage ? normalizeOpenAIUsage(data.usage) : null,
-    model: data.model ?? null,
+    model: typeof data.model === "string" ? data.model : null,
   };
 }
 
@@ -1711,12 +2523,21 @@ export function parseOpenAIResponse(data: OpenAIChatResponse): {
 export function parseResponsesWorkerResponse(data: {
   output?: Array<{
     type?: string;
-    content?: Array<{ type?: string; text?: string; refusal?: string }>;
+    id?: string;
+    call_id?: string;
+    name?: string;
+    arguments?: string;
+    content?: Array<{
+      type?: string;
+      text?: string;
+      refusal?: string;
+    }>;
   }>;
   output_text?: string;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    total_tokens?: number;
     // Responses API reports cache details under `input_tokens_details`;
     // OpenAI-compatible providers may use `prompt_tokens_details` instead.
     input_tokens_details?: {
@@ -1727,14 +2548,21 @@ export function parseResponsesWorkerResponse(data: {
       cached_tokens?: number;
       cache_write_tokens?: number;
     };
+    output_tokens_details?: {
+      reasoning_tokens?: number;
+      audio_tokens?: number;
+      accepted_prediction_tokens?: number;
+      rejected_prediction_tokens?: number;
+    };
   };
-  model?: string;
+  model?: string | null;
   status?: string;
   incomplete_details?: { reason?: string } | null;
 }): {
   text: string | null;
   usage: AnthropicUsage | null;
   model: string | null;
+  incompleteDetails?: { reason: string } | null;
 } {
   if (
     data.status !== undefined &&
@@ -1743,34 +2571,93 @@ export function parseResponsesWorkerResponse(data: {
   ) {
     throw new Error("non-success Responses response status");
   }
-  if (data.status === "incomplete") {
-    throw new IncompleteWorkerResponseError(data.incomplete_details?.reason);
+  const incompleteDetails = data.incomplete_details;
+  if (
+    incompleteDetails !== undefined &&
+    incompleteDetails !== null &&
+    (!isRecord(incompleteDetails) ||
+      typeof incompleteDetails.reason !== "string" ||
+      incompleteDetails.reason.length === 0)
+  ) {
+    throw new Error("malformed Responses response body");
+  }
+  if (incompleteDetails != null && data.status !== "incomplete") {
+    throw new Error("malformed Responses response body");
   }
   if (data.output !== undefined && !Array.isArray(data.output)) {
     throw new Error("malformed Responses response body");
   }
+  const toolIdentities = new Set<string>();
+  const outputItemIds = new Set<string>();
+  for (const item of data.output ?? []) {
+    if (!isRecord(item)) throw new Error("malformed Responses response body");
+    if (item.type !== undefined && typeof item.type !== "string") {
+      throw new Error("malformed Responses response body");
+    }
+    if (
+      typeof item.id !== "string" ||
+      item.id.length === 0 ||
+      outputItemIds.has(item.id)
+    ) {
+      throw new Error("malformed Responses response body");
+    }
+    outputItemIds.add(item.id);
+    if (item.type === "function_call") {
+      const identity = item.call_id;
+      if (
+        typeof identity !== "string" ||
+        identity.length === 0 ||
+        toolIdentities.has(identity) ||
+        typeof item.name !== "string" ||
+        typeof item.arguments !== "string"
+      ) {
+        throw new Error("malformed Responses response body");
+      }
+      toolIdentities.add(identity);
+    }
+    if (item.content !== undefined && !Array.isArray(item.content)) {
+      throw new Error("malformed Responses response body");
+    }
+    for (const part of item.content ?? []) {
+      if (!isRecord(part)) {
+        throw new Error("malformed Responses response body");
+      }
+      if (part.type !== undefined && typeof part.type !== "string") {
+        throw new Error("malformed Responses response body");
+      }
+      if (part.type === "output_text" && typeof part.text !== "string") {
+        throw new Error("malformed Responses response body");
+      }
+      if (part.type === "refusal" && typeof part.refusal !== "string") {
+        throw new Error("malformed Responses response body");
+      }
+    }
+  }
   if (
-    data.output?.some(
-      (item) =>
-        !item ||
-        typeof item !== "object" ||
-        (item.content !== undefined && !Array.isArray(item.content)) ||
-        item.content?.some(
-          (part) =>
-            !part ||
-            typeof part !== "object" ||
-            (part.type === "output_text" && typeof part.text !== "string") ||
-            (part.type === "refusal" && typeof part.refusal !== "string"),
-        ),
-    )
+    data.output_text !== undefined &&
+    data.output_text !== null &&
+    typeof data.output_text !== "string"
   ) {
     throw new Error("malformed Responses response body");
   }
+  if (
+    data.model !== undefined &&
+    data.model !== null &&
+    typeof data.model !== "string"
+  ) {
+    throw new Error("malformed Responses response body");
+  }
+  const validatedUsage = validateResponsesUsage(
+    data.usage,
+    "malformed Responses response body",
+  );
 
   // Prefer the convenience `output_text` aggregate when present; otherwise
   // concatenate text parts from message output items.
   let text: string | null =
-    typeof data.output_text === "string" ? data.output_text : null;
+    typeof data.output_text === "string" && data.output_text.length > 0
+      ? data.output_text
+      : null;
   if (text === null && Array.isArray(data.output)) {
     const parts: string[] = [];
     for (const item of data.output) {
@@ -1778,6 +2665,11 @@ export function parseResponsesWorkerResponse(data: {
       for (const part of item.content) {
         if (part?.type === "output_text" && typeof part.text === "string") {
           parts.push(part.text);
+        } else if (
+          part?.type === "refusal" &&
+          typeof part.refusal === "string"
+        ) {
+          parts.push(part.refusal);
         }
       }
     }
@@ -1785,26 +2677,51 @@ export function parseResponsesWorkerResponse(data: {
   }
 
   let usage: AnthropicUsage | null = null;
-  if (data.usage) {
-    const details =
-      data.usage.input_tokens_details ?? data.usage.prompt_tokens_details;
-    const cachedTokens = details?.cached_tokens;
-    const cacheWriteTokens = details?.cache_write_tokens;
+  if (validatedUsage) {
+    const rawDetails =
+      validatedUsage.input_tokens_details ??
+      validatedUsage.prompt_tokens_details;
+    const details = isRecord(rawDetails) ? rawDetails : undefined;
+    const cachedTokens =
+      typeof details?.cached_tokens === "number"
+        ? details.cached_tokens
+        : undefined;
+    const cacheWriteTokens =
+      typeof details?.cache_write_tokens === "number"
+        ? details.cache_write_tokens
+        : undefined;
     usage = {
       // input_tokens is inclusive of cache reads/writes; convert to the
       // gateway's disjoint convention so cache tokens aren't double-counted.
       input_tokens: disjointOpenAIInputTokens(
-        data.usage.input_tokens,
+        typeof validatedUsage.input_tokens === "number"
+          ? validatedUsage.input_tokens
+          : undefined,
         cachedTokens,
         cacheWriteTokens,
       ),
-      output_tokens: data.usage.output_tokens ?? 0,
+      output_tokens:
+        typeof validatedUsage.output_tokens === "number"
+          ? validatedUsage.output_tokens
+          : 0,
       cache_read_input_tokens: cachedTokens ?? 0,
       cache_creation_input_tokens: cacheWriteTokens ?? 0,
     };
   }
 
-  return { text, usage, model: data.model ?? null };
+  return {
+    text,
+    usage,
+    model: typeof data.model === "string" ? data.model : null,
+    ...(incompleteDetails === undefined
+      ? {}
+      : {
+          incompleteDetails:
+            incompleteDetails === null
+              ? null
+              : { reason: incompleteDetails.reason as string },
+        }),
+  };
 }
 
 /**
@@ -1829,9 +2746,10 @@ async function buildVertexWorkerRequest(
   temperature?: number,
   disableThinking = false,
   reasoningEffort?: ReasoningEffort,
+  signal?: AbortSignal,
 ): Promise<{ url: string; headers: Record<string, string>; body: string }> {
   const region = vertexRegionFromUrl(target.url) ?? "global";
-  const project = await resolveVertexProject(vertexProject ?? "");
+  const project = await resolveVertexProject(vertexProject ?? "", signal);
   if (!project) {
     throw new Error(
       "Vertex worker: no GCP project. Set GOOGLE_CLOUD_PROJECT (or " +
@@ -1840,7 +2758,7 @@ async function buildVertexWorkerRequest(
     );
   }
   const vertexModel = toVertexModelId(model.modelID);
-  const token = await getVertexAccessToken();
+  const token = await getVertexAccessToken(signal);
   const vertexThinkingBudget = anthropicThinkingBudget(reasoningEffort) ?? 0;
   const vertexThinkingEnabled = vertexThinkingBudget > 0;
   // Worker system prompt is static across bursts → cache it. Use bare ephemeral
@@ -1906,6 +2824,7 @@ async function buildWorkerRequest(
   vertexProject?: string,
   disableThinking = false,
   reasoningEffort?: ReasoningEffort,
+  signal?: AbortSignal,
 ): Promise<{ url: string; headers: Record<string, string>; body: string }> {
   switch (target.protocol) {
     case "openai-codex-responses":
@@ -1952,6 +2871,7 @@ async function buildWorkerRequest(
         temperature,
         disableThinking,
         reasoningEffort,
+        signal,
       );
     case "gemini":
       return buildGeminiWorkerRequest(
@@ -2020,22 +2940,55 @@ function parseWorkerResponse(
 function accumulateWorkerSSE(
   protocol: WorkerProtocol,
   response: Response,
+  signal?: AbortSignal,
+  onSemanticContent?: () => void,
 ): Promise<GatewayResponse> {
   switch (protocol) {
     case "openai-codex-responses":
-      return accumulateResponsesSSEStream(response);
+      return accumulateResponsesSSEStream(response, {
+        validation: "codex",
+        stopAtTerminal: true,
+        signal,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        onSemanticContent,
+      });
     case "openai-responses":
       // OpenAI Responses API uses the same wire-shape SSE stream as the
       // Codex-Responses path (`event: response.*` deltas). Reuse the existing
       // accumulator.
-      return accumulateResponsesSSEStream(response);
+      return accumulateResponsesSSEStream(response, {
+        validation: "public",
+        stopAtTerminal: true,
+        signal,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        onSemanticContent,
+      });
     case "gemini":
-      return accumulateGeminiSSEStream(response);
+      return accumulateGeminiSSEStream(response, {
+        signal,
+        stopAtTerminal: true,
+        strict: true,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        onSemanticContent,
+      });
     case "openai":
-      return accumulateOpenAISSEStream(response);
+      return accumulateOpenAISSEStream(response, {
+        signal,
+        stopAtTerminal: true,
+        strict: true,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        onSemanticContent,
+        consumeUntilDone: true,
+      });
     default:
       // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
-      return accumulateSSEResponse(response);
+      return accumulateSSEResponse(response, {
+        signal,
+        stopAtTerminal: true,
+        strict: true,
+        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        onSemanticContent,
+      });
   }
 }
 
@@ -2247,6 +3200,23 @@ export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
           b.type === "thinking",
       )
       .map((b) => b.thinking)
+      .join("") ||
+    resp.content
+      .flatMap((block) => {
+        if (block.type !== "opaque") return [];
+        const content = block.raw.content;
+        if (!Array.isArray(content)) return [];
+        return content
+          .filter(
+            (part): part is Record<string, unknown> =>
+              !!part && typeof part === "object" && !Array.isArray(part),
+          )
+          .map((part) =>
+            part.type === "refusal" && typeof part.refusal === "string"
+              ? part.refusal
+              : "",
+          );
+      })
       .join("");
   const usage: AnthropicUsage | null = resp.usage
     ? {
@@ -2263,7 +3233,7 @@ export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
  * Summarize an upstream worker response body for diagnostics when the parser
  * found no usable text. Reports which fields were present (content vs the
  * reasoning/thinking fallbacks), the finish_reason, and a truncated body
- * sample — without dumping the full (potentially large) payload. This lets us
+ * shape summary without dumping response values. This lets us
  * classify an empty `no-response` as a genuinely empty completion, a
  * reasoning-field shape we don't read, or a truncation (`finish_reason:
  * "length"`), instead of an opaque failure.
@@ -2287,13 +3257,21 @@ function extractFinishReason(rawData: unknown): string | undefined {
         native_finish_reason?: string;
       }>;
       stop_reason?: string;
+      status?: string;
+      incomplete_details?: { reason?: string } | null;
     };
-    return (
+    const reason =
       d.choices?.[0]?.finish_reason ??
       d.choices?.[0]?.native_finish_reason ??
       d.stop_reason ??
-      undefined
-    );
+      (d.status === "incomplete" &&
+      d.incomplete_details?.reason === "max_output_tokens"
+        ? "length"
+        : d.status === "incomplete"
+          ? d.incomplete_details?.reason
+          : undefined) ??
+      undefined;
+    return reason === "refusal" ? normalizeAnthropicStopReason(reason) : reason;
   } catch {
     return undefined;
   }
@@ -2349,7 +3327,7 @@ function extractBodyErrorCode(rawData: unknown): number | null {
   return null;
 }
 
-function describeEmptyWorkerResponse(rawData: unknown): string {
+export function describeEmptyWorkerResponse(rawData: unknown): string {
   const fields: string[] = [];
   let finishReason: string | undefined;
   try {
@@ -2374,21 +3352,24 @@ function describeEmptyWorkerResponse(rawData: unknown): string {
       finishReason = d.choices?.[0]?.finish_reason;
     }
     if (Array.isArray(d.content)) {
-      for (const b of d.content) if (b.type) fields.push(`block:${b.type}`);
+      fields.push(`blocks:${d.content.length}`);
     }
   } catch {
     // ignore — best-effort introspection
   }
-  let sample = "";
-  try {
-    sample = JSON.stringify(rawData).slice(0, 300);
-  } catch {
-    sample = "(unserializable)";
-  }
+  const knownFinishReasons = new Set([
+    "stop",
+    "end_turn",
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+    "content_filter",
+    "tool_calls",
+    "tool_use",
+  ]);
   return (
     `fields=[${fields.join(",") || "none"}]` +
-    ` finish_reason=${finishReason ?? "n/a"}` +
-    ` body=${sample}`
+    ` finish_reason=${finishReason && knownFinishReasons.has(finishReason) ? finishReason : finishReason ? "unknown" : "n/a"}`
   );
 }
 
@@ -2589,7 +3570,7 @@ export function createGatewayLLMClient(
       if (candidateBlocked(model)) {
         recordPromptFailure(
           "model-unsupported",
-          `all ${model.providerID} worker model candidates blocked (likely auth, model-not-supported, or worker-incapable)`,
+          `all ${diagnosticToken(model.providerID)} worker model candidates blocked (likely auth, model-not-supported, or worker-incapable)`,
           { model },
         );
         return null;
@@ -2604,20 +3585,16 @@ export function createGatewayLLMClient(
       // provider route instead. This keeps protocol, URL, and credential all
       // consistent with the worker model's provider.
       const sameProviderAsSession =
-        !opts?.upstreamProviderID ||
-        opts.upstreamProviderID === model.providerID;
-      const protocolForModel = (candidate: {
-        providerID: string;
-        modelID: string;
-      }): WorkerProtocol =>
-        resolveWorkerProtocol(
-          candidate.providerID,
-          sameProviderAsSession ? opts?.protocol : undefined,
-          candidate.modelID,
-          // Preserve the existing same-provider ChatGPT backend detection.
-          upstreamOverride,
-        );
-      let protocol = protocolForModel(model);
+        opts?.upstreamProviderID !== undefined &&
+        workerProvidersEquivalent(opts.upstreamProviderID, model.providerID);
+      let protocol = resolveWorkerProtocol(
+        model.providerID,
+        sameProviderAsSession ? opts?.protocol : undefined,
+        model.modelID,
+        // Only inspect the session URL for same-provider workers. A foreign
+        // `/backend-api` URL must not change the model provider's protocol.
+        sameProviderAsSession ? upstreamOverride : undefined,
+      );
 
       // Vertex authenticates with lore's own GCP OAuth2 bearer token (minted
       // inside buildVertexWorkerRequest); the client credential is IGNORED on
@@ -2628,9 +3605,17 @@ export function createGatewayLLMClient(
       // background distillation/curation for such sessions). Synthesize a
       // placeholder so the shared worker pipeline proceeds; it is never sent
       // upstream (the vertex builder constructs its own headers and ignores it).
-      const cred =
-        getAuth(opts?.sessionID, model.providerID) ??
-        (protocol === "vertex" ? { scheme: "bearer", value: "" } : null);
+      let credentialProviderID = model.providerID;
+      let cred: AuthCredential | null = null;
+      for (const providerID of workerProviderAliasIDs(model.providerID)) {
+        if (!workerProviderSupportsProtocol(providerID, protocol)) continue;
+        cred = getAuth(opts?.sessionID, providerID);
+        if (cred) {
+          credentialProviderID = providerID;
+          break;
+        }
+      }
+      cred ??= protocol === "vertex" ? { scheme: "bearer", value: "" } : null;
       if (!cred) {
         log.warn("no auth credentials available for worker call");
         recordWorkerFailure(
@@ -2640,7 +3625,7 @@ export function createGatewayLLMClient(
         );
         recordPromptFailure(
           "no-auth",
-          `no auth credentials available for ${model.providerID} (set LORE_WORKER_API_KEY, ANTHROPIC_API_KEY, or similar)`,
+          `no auth credentials available for ${diagnosticToken(model.providerID)} (set LORE_WORKER_API_KEY, ANTHROPIC_API_KEY, or similar)`,
           { model, protocol },
         );
         return null;
@@ -2663,8 +3648,8 @@ export function createGatewayLLMClient(
       // on hidden reasoning and returning empty `finish_reason:"length"`. The
       // Anthropic/Vertex builders suppress this by sending
       // `thinking:{type:"disabled"}` (see `effectiveDisableThinking`), so they
-      // need no floor; the OpenAI and native-Gemini builders have no such lever
-      // (Gemini 2.5 reasons by default and counts thinking against
+      // need no floor; the OpenAI Chat/Responses and native-Gemini builders
+      // have no such lever (Gemini 2.5 reasons by default and counts thinking against
       // `maxOutputTokens`), so we raise the budget to the reasoning floor here.
       // Applied to the LOOP variable (not just the builder) so the floored value
       // is the retry's baseline — a subsequent `finish_reason:"length"` bumps
@@ -2672,15 +3657,21 @@ export function createGatewayLLMClient(
       // model's output limit. `off`/undefined effort + non-reasoning model → 0
       // floor → caller budget unchanged.
       const floorsReasoningBudget =
-        target.protocol === "openai" || target.protocol === "gemini";
+        target.protocol === "openai" ||
+        target.protocol === "openai-responses" ||
+        target.protocol === "gemini";
       const rawMaxTokens = opts?.maxTokens ?? DEFAULT_WORKER_MAX_TOKENS;
+      const outputTokenCeiling = workerLengthRetryCeiling(model.modelID);
       const reasoningFloor = floorsReasoningBudget
         ? Math.min(
             workerReasoningHeadroomFloor(model, opts?.reasoningEffort),
-            workerLengthRetryCeiling(model.modelID),
+            outputTokenCeiling,
           )
         : 0;
-      let maxTokens = Math.max(rawMaxTokens, reasoningFloor);
+      let maxTokens = Math.min(
+        Math.max(rawMaxTokens, reasoningFloor),
+        outputTokenCeiling,
+      );
 
       // Cross-provider fail-closed: the worker model's provider has no route
       // URL (unknown provider, or a local provider missing its explicit
@@ -2689,8 +3680,8 @@ export function createGatewayLLMClient(
       // Skip the call, record it, and soft-pause so it doesn't re-fire.
       if (target.routeUnavailable || !target.url) {
         log.warn(
-          `worker cross-provider: no route for model provider="${model.providerID}" ` +
-            `(model=${model.modelID}, worker=${opts?.workerID ?? "unknown"}, ` +
+          `worker cross-provider: no route for model provider="${diagnosticToken(model.providerID)}" ` +
+            `(model=${diagnosticToken(model.modelID)}, worker=${diagnosticToken(opts?.workerID)}, ` +
             `session=${opts?.sessionID?.slice(0, 16) ?? "none"}) — skipping`,
         );
         recordWorkerFailure(
@@ -2701,7 +3692,7 @@ export function createGatewayLLMClient(
         if (opts?.sessionID) markWorkerPaused(opts.sessionID);
         recordPromptFailure(
           "route-unavailable",
-          `no upstream route for ${model.providerID} — provider is unknown or unconfigured (check LORE_*_URL or models.dev cache)`,
+          `no upstream route for ${diagnosticToken(model.providerID)} — provider is unknown or unconfigured (check LORE_*_URL or models.dev cache)`,
           { model, protocol },
         );
         return null;
@@ -2737,7 +3728,8 @@ export function createGatewayLLMClient(
         const isAnthropicKey = cred.value.startsWith("sk-ant-");
         if (target.protocol === "anthropic" && !isAnthropicKey) {
           log.warn(
-            `worker protocol mismatch: ${target.protocol} target with non-Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+            `worker protocol mismatch: ${target.protocol} target with non-Anthropic API key — skipping ` +
+              `(model=${diagnosticToken(model.modelID)}, worker=${diagnosticToken(opts?.workerID)})`,
           );
           recordWorkerFailure(
             opts?.sessionID ?? "_unknown",
@@ -2751,9 +3743,15 @@ export function createGatewayLLMClient(
           );
           return null;
         }
-        if (target.protocol === "openai" && isAnthropicKey) {
+        if (
+          (target.protocol === "openai" ||
+            target.protocol === "openai-responses" ||
+            target.protocol === "openai-codex-responses") &&
+          isAnthropicKey
+        ) {
           log.warn(
-            `worker protocol mismatch: ${target.protocol} target with Anthropic API key — skipping (model=${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+            `worker protocol mismatch: ${target.protocol} target with Anthropic API key — skipping ` +
+              `(model=${diagnosticToken(model.modelID)}, worker=${diagnosticToken(opts?.workerID)})`,
           );
           recordWorkerFailure(
             opts?.sessionID ?? "_unknown",
@@ -2819,39 +3817,98 @@ export function createGatewayLLMClient(
       // non-null values) so the closure keeps the `if (!cred)` guard's narrowing.
       let activeCred: AuthCredential = cred;
 
-      // Build protocol-specific request
-      let req = await buildWorkerRequest(
-        target,
-        activeCred,
-        model,
-        system,
-        user,
-        maxTokens,
-        opts?.sessionID,
-        effectiveTemperature,
-        factoryVertexProject,
-        effectiveDisableThinking,
-        reasoningEffort,
-      );
+      // One deadline covers async request construction (including Vertex ADC
+      // discovery/token minting), every fetch, every retry rebuild, and backoff.
+      const deadlineController = new AbortController();
+      const deadlineTimer = setTimeout(() => {
+        deadlineController.abort(
+          new DOMException("Worker request deadline exceeded", "TimeoutError"),
+        );
+      }, WORKER_REQUEST_TIMEOUT_MS);
+      const requestSignal = opts?.signal
+        ? AbortSignal.any([opts.signal, deadlineController.signal])
+        : deadlineController.signal;
+
+      const promptSourceBytes =
+        Buffer.byteLength(system) + Buffer.byteLength(user);
+      if (promptSourceBytes > MAX_WORKER_PROMPT_SOURCE_BYTES) {
+        log.warn(
+          `worker prompt rejected before serialization: prompt_bytes=${promptSourceBytes} ` +
+            `limit_bytes=${MAX_WORKER_PROMPT_SOURCE_BYTES}`,
+        );
+        recordWorkerFailure(
+          opts?.sessionID ?? "_unknown",
+          opts?.workerID ?? "unknown",
+          "upstream-error",
+        );
+        lastWorkerError = `worker prompt exceeded ${MAX_WORKER_PROMPT_SOURCE_BYTES} byte limit`;
+        clearTimeout(deadlineTimer);
+        return null;
+      }
+
+      const buildCurrentRequest = async () =>
+        enforceWorkerRequestLimit(
+          await buildWorkerRequest(
+            target,
+            activeCred,
+            model,
+            system,
+            user,
+            maxTokens,
+            opts?.sessionID,
+            effectiveTemperature,
+            factoryVertexProject,
+            effectiveDisableThinking,
+            reasoningEffort,
+            requestSignal,
+          ),
+        );
+
+      // Build and cap the serialized body before opening a connection. The cap
+      // is re-applied by every request rebuild below (auth/model/param retries).
+      let req: Awaited<ReturnType<typeof buildCurrentRequest>>;
+      try {
+        req = await buildCurrentRequest();
+      } catch (error) {
+        if (requestSignal.aborted) {
+          clearTimeout(deadlineTimer);
+          throw requestSignal.reason;
+        }
+        if (!(error instanceof WorkerRequestTooLargeError)) {
+          clearTimeout(deadlineTimer);
+          throw error;
+        }
+        log.warn(
+          `worker request rejected before fetch: request_bytes=${error.bytes} ` +
+            `limit_bytes=${MAX_WORKER_REQUEST_BYTES}`,
+        );
+        recordWorkerFailure(
+          opts?.sessionID ?? "_unknown",
+          opts?.workerID ?? "unknown",
+          "upstream-error",
+        );
+        lastWorkerError = error.message;
+        clearTimeout(deadlineTimer);
+        return null;
+      }
 
       // Track this call so temporal capture can skip it
       const callID = `gw-worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       activeWorkerCalls.add(callID);
 
       const urgent = opts?.urgent === true;
-
       try {
         // Wrap the entire retry loop in a gen_ai.chat span so it captures
         // real wall-clock duration including retries and backoff delays.
         return await Sentry.startSpan(
           {
             op: "gen_ai.chat",
-            name: `chat ${model.modelID}`,
+            name: `chat ${diagnosticToken(model.modelID)}`,
             attributes: {
               "gen_ai.operation.name": "chat",
-              "gen_ai.request.model": model.modelID,
-              "gen_ai.provider.name": target.providerName,
-              "lore.worker_id": opts?.workerID ?? "unknown",
+              "gen_ai.request.model": diagnosticToken(model.modelID),
+              "gen_ai.provider.name": diagnosticToken(target.providerName),
+              "lore.worker_id": diagnosticToken(opts?.workerID),
               "lore.call_type": "direct",
               "lore.urgent": urgent,
             },
@@ -2900,37 +3957,63 @@ export function createGatewayLLMClient(
             // is wasteful.
             const maxRetries = maxRetriesFor();
 
+            const retryPostHeaderTransportFailure = async (
+              error: SSEStreamTransportError,
+              response: Response,
+              attempt: number,
+            ): Promise<void> => {
+              cancelWorkerResponseForRetry(response, error);
+              if (requestSignal.aborted) throw requestSignal.reason;
+              if (attempt >= maxRetries) {
+                throw new WorkerTransportFailureError(error);
+              }
+              const delay = backoffMs(attempt, null);
+              retryCount++;
+              totalDelayMs += delay;
+              const code = transportErrorCode(error);
+              log.warn(
+                `worker response transport failure ` +
+                  `(kind=${transportErrorKind(error)}${code ? ` code=${code}` : ""}, ` +
+                  `attempt=${attempt + 1}/${maxRetries + 1}, ` +
+                  `origin=${sanitizedWorkerOrigin(req.url)}), retrying in ${delay}ms`,
+              );
+              await abortableSleep(delay, requestSignal);
+            };
+
             // Retry loop for transient errors (429, 5xx)
             for (let attempt = 0; ; attempt++) {
               let response: Response;
               try {
-                const requestTimeout = AbortSignal.timeout(
-                  WORKER_REQUEST_TIMEOUT_MS,
-                );
-                const requestSignal = opts?.signal
-                  ? AbortSignal.any([opts.signal, requestTimeout])
-                  : requestTimeout;
                 recordPromptDispatch(model, target.protocol);
-                response = await upstreamFetch(req.url, {
-                  method: "POST",
-                  headers: req.headers,
-                  signal: requestSignal,
-                  // The request body may carry `thinking:{type:"disabled"}` for
-                  // Claude workers (built above) to SUPPRESS thinking — it never
-                  // ENABLES it. opts.thinking is not forwarded.
-                  body: req.body,
-                });
+                response = await responseAgainstAbort(
+                  () =>
+                    upstreamFetch(req.url, {
+                      method: "POST",
+                      headers: req.headers,
+                      signal: requestSignal,
+                      // The request body may carry `thinking:{type:"disabled"}` for
+                      // Claude workers (built above) to SUPPRESS thinking — it never
+                      // ENABLES it. opts.thinking is not forwarded.
+                      body: req.body,
+                    }),
+                  requestSignal,
+                );
               } catch (e) {
                 if (opts?.signal?.aborted) throw opts.signal.reason;
+                if (requestSignal.aborted) throw requestSignal.reason;
                 // Network/fetch error — retry if attempts remain
                 if (attempt < maxRetries) {
                   const delay = backoffMs(attempt, null);
                   retryCount++;
                   totalDelayMs += delay;
+                  const code = transportErrorCode(e);
                   log.warn(
-                    `worker request network error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms`,
+                    `worker request transport failure ` +
+                      `(kind=${transportErrorKind(e)}${code ? ` code=${code}` : ""}, ` +
+                      `attempt=${attempt + 1}/${maxRetries + 1}, ` +
+                      `origin=${sanitizedWorkerOrigin(req.url)}), retrying in ${delay}ms`,
                   );
-                  await abortableSleep(delay, opts?.signal);
+                  await abortableSleep(delay, requestSignal);
                   continue;
                 }
                 // Enrich span before rethrowing
@@ -2938,7 +4021,7 @@ export function createGatewayLLMClient(
                   span.setAttribute("lore.retry.count", retryCount);
                   span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
                 }
-                throw e; // exhausted retries — rethrow to outer catch
+                throw new WorkerTransportFailureError(e);
               }
 
               finalStatus = response.status;
@@ -2966,20 +4049,15 @@ export function createGatewayLLMClient(
                 // ..." text — LOREAI-GATEWAY-38 / -1P). A streamed body is a
                 // success, so the JSON error-envelope check below never applies
                 // to it (bodyErrCode stays null → the block is skipped).
-                const upstreamOrigin = new URL(req.url).origin;
-                const ct = response.headers.get("content-type") ?? "";
+                const upstreamOrigin = sanitizedWorkerOrigin(req.url);
+                const contentType = response.headers.get("content-type") ?? "";
                 const rejectInvalidWorkerBody = (error: unknown): null => {
-                  const detail =
-                    error instanceof SyntaxError
-                      ? "malformed JSON body"
-                      : error instanceof Error
-                        ? error.message
-                        : String(error);
+                  const detail = safeWorkerBodyErrorDetail(error);
                   log.error(
                     `worker upstream returned invalid ${target.protocol} response — ${detail}` +
                       ` — upstream=${upstreamOrigin}` +
-                      ` model=${model.providerID}/${model.modelID}` +
-                      ` worker=${opts?.workerID ?? "unknown"}` +
+                      ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                      ` worker=${diagnosticToken(opts?.workerID)}` +
                       ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
                   );
                   span.setStatus({
@@ -2997,7 +4075,7 @@ export function createGatewayLLMClient(
                       : error instanceof IncompleteWorkerResponseError
                         ? "incomplete-response"
                         : "invalid-response",
-                    `${model.providerID}/${model.modelID}: invalid ${target.protocol} response (${detail})`,
+                    `${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}: invalid ${target.protocol} response (${detail})`,
                     {
                       model,
                       protocol: target.protocol,
@@ -3011,17 +4089,33 @@ export function createGatewayLLMClient(
                 };
 
                 let successBody: WorkerSuccessBody;
+                let semanticContentConsumed = false;
                 try {
                   successBody = await inspectWorkerSuccessBody(
                     response,
-                    opts?.signal,
+                    requestSignal,
+                    () => {
+                      semanticContentConsumed = true;
+                    },
                   );
                 } catch (error) {
                   if (opts?.signal?.aborted) throw opts.signal.reason;
+                  if (requestSignal.aborted) throw requestSignal.reason;
+                  if (error instanceof SSEStreamTransportError) {
+                    if (semanticContentConsumed) {
+                      throw new WorkerTransportFailureError(error);
+                    }
+                    await retryPostHeaderTransportFailure(
+                      error,
+                      response,
+                      attempt,
+                    );
+                    continue;
+                  }
                   return rejectInvalidWorkerBody(error);
                 }
                 const isSSE = successBody.isSSE;
-                const bodyText = successBody.text;
+                const bodyText = successBody.isSSE ? "" : successBody.text;
                 let rawData: Record<string, unknown> = {};
                 if (!successBody.isSSE) {
                   try {
@@ -3073,9 +4167,11 @@ export function createGatewayLLMClient(
                     log.warn(
                       `worker upstream returned HTTP 200 with an embedded ${bodyErrCode} ` +
                         `error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms ` +
-                        `— model=${model.providerID}/${model.modelID} worker=${opts?.workerID ?? "unknown"}`,
+                        `— model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                        `worker=${diagnosticToken(opts?.workerID)} origin=${upstreamOrigin}`,
                     );
-                    await abortableSleep(delay, opts?.signal);
+                    cancelWorkerResponseForRetry(response, bodyErrCode);
+                    await abortableSleep(delay, requestSignal);
                     continue;
                   }
                   // Exhausted. Mirror the HTTP-level exhaustion path for full
@@ -3088,9 +4184,11 @@ export function createGatewayLLMClient(
                   // transient error, which must not mark a capable model incapable.
                   log.warn(
                     `worker upstream embedded ${bodyErrCode} error persisted after ` +
-                      `${maxRetries + 1} attempts — model=${model.providerID}/${model.modelID} ` +
-                      `worker=${opts?.workerID ?? "unknown"} ` +
-                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
+                      `${maxRetries + 1} attempts — ` +
+                      `model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                      `worker=${diagnosticToken(opts?.workerID)} ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"} ` +
+                      `origin=${upstreamOrigin}`,
                   );
                   Sentry.captureException(
                     new Error(
@@ -3110,8 +4208,9 @@ export function createGatewayLLMClient(
                         attempts: maxRetries + 1,
                         totalDelayMs,
                         lastRetryAfterMs,
-                        model: model.modelID,
-                        workerID: opts?.workerID ?? "unknown",
+                        model: diagnosticToken(model.modelID),
+                        workerID: diagnosticToken(opts?.workerID),
+                        origin: upstreamOrigin,
                       },
                     },
                   );
@@ -3168,10 +4267,12 @@ export function createGatewayLLMClient(
                   isDataPolicyBlocked404(bodyErrCode, bodyText)
                 ) {
                   log.warn(
-                    `worker model ${model.providerID}/${model.modelID} blocked by account data policy ` +
+                    `worker model ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                      `blocked by account data policy ` +
                       `(HTTP 200 error-envelope) — blocklisting and re-resolving ` +
-                      `(worker=${opts?.workerID ?? "unknown"}, ` +
-                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}): ${bodyText.slice(0, 160)}`,
+                      `(worker=${diagnosticToken(opts?.workerID)}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}, ` +
+                      `origin=${upstreamOrigin})`,
                   );
                   markWorkerIncapable(model.providerID, model.modelID);
                   if (model.modelID.endsWith(":free")) {
@@ -3188,7 +4289,7 @@ export function createGatewayLLMClient(
                   );
                   recordPromptFailure(
                     "data-policy",
-                    `HTTP 200/404: data policy blocked — ${model.providerID}/${model.modelID} unavailable (account has not opted in)`,
+                    `HTTP 200/404: data policy blocked — ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} unavailable (account has not opted in)`,
                     { model, protocol: target.protocol, httpStatus: 404 },
                   );
                   return null;
@@ -3209,28 +4310,31 @@ export function createGatewayLLMClient(
                   usage: AnthropicUsage | null;
                   model: string | null;
                 };
-                if (isSSE) {
-                  const streamFailure = validateWorkerSSE(
-                    target.protocol,
-                    bodyText,
-                  );
-                  if (streamFailure) {
-                    return rejectInvalidWorkerBody(streamFailure);
-                  }
+                if (successBody.isSSE) {
                   let gwResp: GatewayResponse;
                   try {
                     gwResp = await accumulateWorkerSSE(
                       target.protocol,
-                      // accumulateSSEResponse's buffered Anthropic parser uses
-                      // LF frame boundaries; normalize the equivalent SSE CRLF
-                      // wire form after validation so every protocol accumulates
-                      // the same complete stream.
-                      new Response(bodyText.replace(/\r\n/g, "\n"), {
-                        headers: { "content-type": "text/event-stream" },
-                      }),
+                      successBody.response,
+                      requestSignal,
+                      () => {
+                        semanticContentConsumed = true;
+                      },
                     );
                   } catch (error) {
                     if (opts?.signal?.aborted) throw opts.signal.reason;
+                    if (requestSignal.aborted) throw requestSignal.reason;
+                    if (error instanceof SSEStreamTransportError) {
+                      if (semanticContentConsumed) {
+                        throw new WorkerTransportFailureError(error);
+                      }
+                      await retryPostHeaderTransportFailure(
+                        error,
+                        response,
+                        attempt,
+                      );
+                      continue;
+                    }
                     return rejectInvalidWorkerBody(error);
                   }
                   sseStopReason = gwResp.stopReason;
@@ -3313,9 +4417,9 @@ export function createGatewayLLMClient(
                 // otherwise discarded here. For SSE the finish reason lives on
                 // the accumulated stream (rawData is `{}`), so prefer it.
                 log.warn(
-                  `worker empty response (HTTP ${response.status}, ct=${ct || "?"}) ` +
-                    `— model=${model.providerID}/${model.modelID} ` +
-                    `worker=${opts?.workerID ?? "unknown"} ` +
+                  `worker empty response (HTTP ${response.status}, ct=${diagnosticContentKind(contentType)}) ` +
+                    `— model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                    `worker=${diagnosticToken(opts?.workerID)} ` +
                     `session=${opts?.sessionID?.slice(0, 16) ?? "none"} ` +
                     `— ${describeEmptyWorkerResponse(rawData)}`,
                 );
@@ -3350,22 +4454,11 @@ export function createGatewayLLMClient(
                   log.warn(
                     `worker empty response was a budget truncation (finish_reason=${finishReason}) ` +
                       `— retrying once with max_tokens ${maxTokens} → ${bumped} ` +
-                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)})`,
                   );
                   maxTokens = bumped;
-                  req = await buildWorkerRequest(
-                    target,
-                    activeCred,
-                    model,
-                    system,
-                    user,
-                    maxTokens,
-                    opts?.sessionID,
-                    effectiveTemperature,
-                    factoryVertexProject,
-                    effectiveDisableThinking,
-                    reasoningEffort,
-                  );
+                  req = await buildCurrentRequest();
                   // Re-apply a runtime beta strip if one already happened this
                   // call (rebuilding restores the freshly-built header set) —
                   // mirrors the temperature-strip rebuild below.
@@ -3401,7 +4494,7 @@ export function createGatewayLLMClient(
                   );
                   recordPromptFailure(
                     "worker-incapable",
-                    `worker incapable: ${model.providerID}/${model.modelID} produced no usable text`,
+                    `worker incapable: ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} produced no usable text`,
                     { model, protocol: target.protocol, finishReason },
                   );
                   return null;
@@ -3421,7 +4514,7 @@ export function createGatewayLLMClient(
                   isLengthTruncation(finishReason)
                     ? "incomplete-response"
                     : "empty-response",
-                  `${model.providerID}/${model.modelID}: no usable text in response (finish=${finishReason ?? "n/a"})`,
+                  `${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}: no usable text in response (finish=${diagnosticFinishReason(finishReason)})`,
                   { model, protocol: target.protocol, finishReason },
                 );
                 return null;
@@ -3429,25 +4522,13 @@ export function createGatewayLLMClient(
 
               // --- Auth error: 401/403 — mark stale, re-resolve, retry once ---
               if (AUTH_ERROR_CODES.has(response.status)) {
-                const text = await readWorkerResponseText(
-                  response,
-                  opts?.signal,
-                );
-
-                // Always record the auth failure so the worker-health ladder
-                // sees it even for session-less paths (the adapter is the
-                // single owner of transport-failure attribution).
-                recordWorkerFailure(
-                  opts?.sessionID ?? "_unknown",
-                  opts?.workerID ?? "unknown",
-                  "auth-rejected",
-                );
+                await readWorkerResponseText(response, requestSignal);
                 // Mark this provider's credential stale so resolveAuth()
                 // falls through to global — but only for THIS provider,
                 // not other providers on the same session. Requires a real
                 // session ID (staleness is per-session state).
                 if (opts?.sessionID) {
-                  markAuthStale(opts.sessionID, model.providerID);
+                  markAuthStale(opts.sessionID, credentialProviderID);
                 } else {
                   // Session-less worker (e.g. entity-rebuild) — mark the
                   // global fallback as stale so resolveAuth(undefined)
@@ -3458,7 +4539,10 @@ export function createGatewayLLMClient(
                 }
 
                 // Re-resolve: credential may have been refreshed by a concurrent client request
-                const freshCred = getAuth(opts?.sessionID, model.providerID);
+                const freshCred = getAuth(
+                  opts?.sessionID,
+                  credentialProviderID,
+                );
                 const credentialChanged =
                   !!freshCred && freshCred.value !== cred.value;
                 if (credentialChanged && attempt === 0) {
@@ -3467,24 +4551,22 @@ export function createGatewayLLMClient(
                   // uses the fresh key, then rebuild request and retry once.
                   activeCred = freshCred;
                   log.info(
-                    `worker auth error ${response.status}, credential refreshed — retrying: ${text.slice(0, 200)}`,
+                    `worker auth error status=${response.status}, credential refreshed — retrying ` +
+                      `(origin=${sanitizedWorkerOrigin(req.url)})`,
                   );
-                  req = await buildWorkerRequest(
-                    target,
-                    activeCred,
-                    model,
-                    system,
-                    user,
-                    maxTokens,
-                    opts?.sessionID,
-                    effectiveTemperature,
-                    factoryVertexProject,
-                    effectiveDisableThinking,
-                    reasoningEffort,
-                  );
+                  req = await buildCurrentRequest();
                   retryCount++;
                   continue;
                 }
+
+                // Only the terminal auth failure reaches worker health. A
+                // rejected stale credential that refreshes successfully is an
+                // intermediate attempt, not a failed worker call.
+                recordWorkerFailure(
+                  opts?.sessionID ?? "_unknown",
+                  opts?.workerID ?? "unknown",
+                  "auth-rejected",
+                );
 
                 // No fresh credential or retry also failed — bail.
                 //
@@ -3496,24 +4578,16 @@ export function createGatewayLLMClient(
                 // status to the user via getLastWorkerError() (PR
                 // #1542/#1544); we don't need log.error to also scream.
                 //
-                // Truncate the response body (200 chars) — openrouter
-                // returns multi-KB JSON error blobs that produce
-                // unreadable log lines and bloat log files. The Sentry
-                // capture below keeps the truncated body for debugging
-                // but only the structured fields (status, model, etc.)
-                // are searchable.
-                const bodySample =
-                  text.length > 200 ? text.slice(0, 199) + "…" : text;
                 log.warn(
-                  `worker upstream auth error: ${response.status} ${response.statusText}` +
-                    ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
-                    ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
-                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
-                    ` — ${bodySample}`,
+                  `worker upstream auth error: status=${response.status}` +
+                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
+                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                    ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
                 );
                 Sentry.captureException(
                   new Error(
-                    `Worker upstream auth error: ${response.status} ${response.statusText}`,
+                    `Worker upstream auth error: HTTP ${response.status}`,
                   ),
                   {
                     fingerprint: [
@@ -3523,12 +4597,12 @@ export function createGatewayLLMClient(
                     ],
                     extra: {
                       status: response.status,
-                      model: model.modelID,
-                      workerID: opts?.workerID ?? "unknown",
+                      model: diagnosticToken(model.modelID),
+                      workerID: diagnosticToken(opts?.workerID),
                       sessionID: opts?.sessionID?.slice(0, 16),
+                      origin: sanitizedWorkerOrigin(req.url),
                       credentialChanged,
                       freshCredAvailable: !!freshCred,
-                      bodySample,
                     },
                   },
                 );
@@ -3544,16 +4618,9 @@ export function createGatewayLLMClient(
                 // still lets one probe through per 5 min so a refreshed
                 // credential recovers automatically. Urgent calls are exempt.
                 if (opts?.sessionID) markWorkerPaused(opts.sessionID);
-                // Surface the auth error to the chain's diagnostic. Even
-                // though the chain uses `abortedByAuth` (not lastError) for
-                // the per-candidate reason, including it here makes the
-                // FINAL "First error:" line more informative when a run
-                // is dominated by auth failures. Reuse the `text` variable
-                // already read at line 2491 (response body is a one-shot
-                // stream — calling .text() twice would return "").
                 recordPromptFailure(
                   "auth-rejected",
-                  `HTTP ${response.status}: ${text.slice(0, 200)}`,
+                  `HTTP ${response.status}: authentication rejected`,
                   {
                     model,
                     protocol: target.protocol,
@@ -3573,16 +4640,13 @@ export function createGatewayLLMClient(
               //    so the distiller/curator stop retrying every turn (a probe
               //    is allowed once per circuit interval to detect a top-up).
               if (INSUFFICIENT_CREDIT_CODES.has(response.status)) {
-                const text = await readWorkerResponseText(
-                  response,
-                  opts?.signal,
-                );
+                await readWorkerResponseText(response, requestSignal);
                 log.warn(
-                  `worker upstream insufficient credit: ${response.status} ${response.statusText}` +
-                    ` — model=${model.providerID}/${model.modelID}` +
-                    ` worker=${opts?.workerID ?? "unknown"}` +
-                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
-                    ` — ${text.slice(0, 200)}`,
+                  `worker upstream insufficient credit: status=${response.status}` +
+                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
+                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                    ` worker=${diagnosticToken(opts?.workerID)}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
                 );
                 if (opts?.sessionID) {
                   markWorkerPaused(opts.sessionID);
@@ -3613,7 +4677,7 @@ export function createGatewayLLMClient(
               if (!TRANSIENT_CODES.has(response.status)) {
                 const text = await readWorkerResponseText(
                   response,
-                  opts?.signal,
+                  requestSignal,
                 );
 
                 // 400 + a beta-related complaint → the request carries a beta
@@ -3636,7 +4700,8 @@ export function createGatewayLLMClient(
                   req = { ...req, headers: stripBetaHeaders(req.headers) };
                   log.warn(
                     `worker 400 looks long-context-beta-related — retrying once without the context-1m beta ` +
-                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"}): ${text.slice(0, 160)}`,
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
                   );
                   retryCount++;
                   continue;
@@ -3752,19 +4817,7 @@ export function createGatewayLLMClient(
                 ) {
                   temperatureStripped = true;
                   effectiveTemperature = undefined;
-                  req = await buildWorkerRequest(
-                    target,
-                    activeCred,
-                    model,
-                    system,
-                    user,
-                    maxTokens,
-                    opts?.sessionID,
-                    effectiveTemperature,
-                    factoryVertexProject,
-                    effectiveDisableThinking,
-                    reasoningEffort,
-                  );
+                  req = await buildCurrentRequest();
                   // Rebuilding restores the freshly-built header set, which
                   // resurrects a beta we may have already stripped at runtime.
                   // The upfront filter strips `context-1m` unconditionally for
@@ -3779,7 +4832,8 @@ export function createGatewayLLMClient(
                   }
                   log.warn(
                     `worker 400 reports temperature is unsupported — retrying once without the temperature param ` +
-                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"}): ${text.slice(0, 160)}`,
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
                   );
                   retryCount++;
                   continue;
@@ -3802,19 +4856,7 @@ export function createGatewayLLMClient(
                 ) {
                   thinkingStripped = true;
                   effectiveDisableThinking = false;
-                  req = await buildWorkerRequest(
-                    target,
-                    activeCred,
-                    model,
-                    system,
-                    user,
-                    maxTokens,
-                    opts?.sessionID,
-                    effectiveTemperature,
-                    factoryVertexProject,
-                    effectiveDisableThinking,
-                    reasoningEffort,
-                  );
+                  req = await buildCurrentRequest();
                   // Preserve a runtime beta strip across this rebuild (same
                   // reasoning as the temperature-strip path above).
                   if (betaStripped) {
@@ -3822,7 +4864,8 @@ export function createGatewayLLMClient(
                   }
                   log.warn(
                     `worker 400 reports thinking is unsupported — retrying once without the thinking param ` +
-                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"}): ${text.slice(0, 160)}`,
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
                   );
                   retryCount++;
                   continue;
@@ -3841,9 +4884,11 @@ export function createGatewayLLMClient(
                 // worker call against that sibling is the recovery probe.
                 if (isDataPolicyBlocked404(response.status, text)) {
                   log.warn(
-                    `worker model ${model.providerID}/${model.modelID} blocked by account data policy (404) — ` +
-                      `blocklisting and re-resolving (worker=${opts?.workerID ?? "unknown"}, ` +
-                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}): ${text.slice(0, 160)}`,
+                    `worker model ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                      `blocked by account data policy (404) — ` +
+                      `blocklisting and re-resolving (worker=${diagnosticToken(opts?.workerID)}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}, ` +
+                      `origin=${sanitizedWorkerOrigin(req.url)})`,
                   );
                   markWorkerIncapable(model.providerID, model.modelID);
                   if (model.modelID.endsWith(":free")) {
@@ -3862,7 +4907,7 @@ export function createGatewayLLMClient(
                   // different model, not pausing the session's workers.
                   recordPromptFailure(
                     "data-policy",
-                    `HTTP ${response.status}: data policy blocked — ${model.providerID}/${model.modelID} unavailable (account has not opted in)`,
+                    `HTTP ${response.status}: data policy blocked — ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} unavailable (account has not opted in)`,
                     {
                       model,
                       protocol: target.protocol,
@@ -3889,13 +4934,25 @@ export function createGatewayLLMClient(
                   // length-checked above, so a value is guaranteed.
                   const next = modelFallbacks.shift() ?? model;
                   log.warn(
-                    `worker model ${model.providerID}/${model.modelID} not supported on this account (400) — ` +
-                      `falling back to ${next.providerID}/${next.modelID} ` +
-                      `(worker=${opts?.workerID ?? "unknown"}, ` +
-                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}): ${text.slice(0, 160)}`,
+                    `worker model ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                      `not supported on this account (400) — ` +
+                      `falling back to ${diagnosticToken(next.providerID)}/${diagnosticToken(next.modelID)} ` +
+                      `(worker=${diagnosticToken(opts?.workerID)}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}, ` +
+                      `origin=${sanitizedWorkerOrigin(req.url)})`,
                   );
                   model = next;
-                  protocol = protocolForModel(model);
+                  // Protocol and target are model-dependent even within one
+                  // provider (GitHub Copilot serves gpt-5.6 on Responses but
+                  // gpt-5-mini on Chat Completions). Re-resolve the complete
+                  // route before rebuilding so URL, body, parser, and model
+                  // controls all describe the fallback model.
+                  protocol = resolveWorkerProtocol(
+                    model.providerID,
+                    sameProviderAsSession ? opts?.protocol : undefined,
+                    model.modelID,
+                    sameProviderAsSession ? upstreamOverride : undefined,
+                  );
                   target = resolveTarget(
                     upstreams,
                     protocol,
@@ -3903,45 +4960,41 @@ export function createGatewayLLMClient(
                     model.providerID,
                     opts?.upstreamProviderID,
                   );
-                  if (!temperatureStripped) {
-                    effectiveTemperature =
-                      isTemperatureUnsupportedModel(model) ||
-                      modelRejectsTemperatureByData(model.modelID)
-                        ? undefined
-                        : opts?.temperature;
+                  if (target.routeUnavailable || !target.url) {
+                    lastWorkerError = `no upstream route for ${diagnosticToken(model.providerID)} fallback`;
+                    return null;
                   }
-                  if (!thinkingStripped) {
-                    effectiveDisableThinking =
-                      (target.protocol === "anthropic" ||
-                        target.protocol === "vertex") &&
-                      workerThinkingOnByDefault(model) &&
-                      !isThinkingUnsupportedModel(model);
-                  }
-                  if (
+                  const fallbackFloorsReasoningBudget =
                     target.protocol === "openai" ||
-                    target.protocol === "gemini"
-                  ) {
-                    maxTokens = Math.max(
-                      maxTokens,
-                      Math.min(
-                        workerReasoningHeadroomFloor(model, reasoningEffort),
+                    target.protocol === "openai-responses" ||
+                    target.protocol === "gemini";
+                  const fallbackReasoningFloor = fallbackFloorsReasoningBudget
+                    ? Math.min(
+                        workerReasoningHeadroomFloor(
+                          model,
+                          opts?.reasoningEffort,
+                        ),
                         workerLengthRetryCeiling(model.modelID),
-                      ),
-                    );
-                  }
-                  req = await buildWorkerRequest(
-                    target,
-                    activeCred,
-                    model,
-                    system,
-                    user,
-                    maxTokens,
-                    opts?.sessionID,
-                    effectiveTemperature,
-                    factoryVertexProject,
-                    effectiveDisableThinking,
-                    reasoningEffort,
+                      )
+                    : 0;
+                  maxTokens = Math.min(
+                    Math.max(rawMaxTokens, fallbackReasoningFloor),
+                    workerLengthRetryCeiling(model.modelID),
                   );
+                  effectiveTemperature =
+                    isTemperatureUnsupportedModel(model) ||
+                    modelRejectsTemperatureByData(model.modelID)
+                      ? undefined
+                      : opts?.temperature;
+                  effectiveDisableThinking =
+                    (target.protocol === "anthropic" ||
+                      target.protocol === "vertex") &&
+                    workerThinkingOnByDefault(model) &&
+                    !isThinkingUnsupportedModel(model);
+                  temperatureStripped = false;
+                  thinkingStripped = false;
+                  lengthRetried = false;
+                  req = await buildCurrentRequest();
                   // Preserve any runtime beta strip across the rebuild (same
                   // reasoning as the temperature/thinking rebuilds above).
                   if (betaStripped) {
@@ -3959,11 +5012,11 @@ export function createGatewayLLMClient(
                 }
 
                 log.error(
-                  `worker upstream request failed: ${response.status} ${response.statusText}` +
-                    ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
-                    ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
-                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
-                    ` — ${text}`,
+                  `worker upstream request failed: status=${response.status}` +
+                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
+                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                    ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
                 );
                 span.setStatus({ code: 2, message: `HTTP ${response.status}` });
                 recordWorkerFailure(
@@ -3982,7 +5035,7 @@ export function createGatewayLLMClient(
                     : isModelUnsupported400(response.status, text)
                       ? "model-unsupported"
                       : "upstream-error",
-                  `HTTP ${response.status}: non-transient upstream error for ${model.providerID}/${model.modelID} — ${text.slice(0, 200)}`,
+                  `HTTP ${response.status}: non-transient upstream error for ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}`,
                   {
                     model,
                     protocol: target.protocol,
@@ -4016,13 +5069,16 @@ export function createGatewayLLMClient(
                 totalDelayMs += delay;
                 if (retryAfter != null) lastRetryAfterMs = retryAfter;
                 log.warn(
-                  `worker upstream ${response.status} (attempt ${attempt + 1}/${maxRetries + 1}), ` +
+                  `worker upstream status=${response.status} ` +
+                    `(attempt ${attempt + 1}/${maxRetries + 1}, ` +
+                    `origin=${sanitizedWorkerOrigin(req.url)}), ` +
                     `retrying in ${delay}ms` +
                     (retryAfter != null
                       ? ` (retry-after: ${Math.round(retryAfter / 1000)}s)`
                       : ""),
                 );
-                await abortableSleep(delay, opts?.signal);
+                cancelWorkerResponseForRetry(response, response.status);
+                await abortableSleep(delay, requestSignal);
                 continue;
               }
 
@@ -4036,13 +5092,13 @@ export function createGatewayLLMClient(
               // LORE_DEBUG) to avoid alarming red `[lore]` noise; non-urgent
               // background exhaustion stays at `error` since it can indicate a
               // sustained problem worth investigating.
-              const text = await readWorkerResponseText(response, opts?.signal);
+              await readWorkerResponseText(response, requestSignal);
               const exhaustionMsg =
-                `worker upstream request failed after ${maxRetries + 1} attempts: ${response.status} ${response.statusText}` +
-                ` — url=${target.url} model=${model.providerID}/${model.modelID}` +
-                ` cred=${cred.scheme} worker=${opts?.workerID ?? "unknown"}` +
-                ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}` +
-                ` — ${text}`;
+                `worker upstream request failed after ${maxRetries + 1} attempts:` +
+                ` status=${response.status} origin=${sanitizedWorkerOrigin(req.url)}` +
+                ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
+                ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`;
               if (urgent) {
                 log.warn(exhaustionMsg);
               } else {
@@ -4052,7 +5108,7 @@ export function createGatewayLLMClient(
               // Capture as Sentry error for alerting
               Sentry.captureException(
                 new Error(
-                  `Worker upstream exhausted ${maxRetries + 1} retries: ${response.status} ${response.statusText}`,
+                  `Worker upstream exhausted ${maxRetries + 1} retries: HTTP ${response.status}`,
                 ),
                 {
                   fingerprint: [
@@ -4065,8 +5121,9 @@ export function createGatewayLLMClient(
                     attempts: maxRetries + 1,
                     totalDelayMs,
                     lastRetryAfterMs,
-                    model: model.modelID,
-                    workerID: opts?.workerID ?? "unknown",
+                    model: diagnosticToken(model.modelID),
+                    workerID: diagnosticToken(opts?.workerID),
+                    origin: sanitizedWorkerOrigin(req.url),
                   },
                 },
               );
@@ -4087,15 +5144,9 @@ export function createGatewayLLMClient(
                 opts?.workerID ?? "unknown",
                 response.status === 429 ? "rate-limit" : "upstream-error",
               );
-              // Surface the final HTTP status + a body sample to the chain's
-              // diagnostic so the user sees WHY (e.g. "HTTP 400: model not
-              // found") instead of the opaque "did not answer". Use `text`
-              // (the response body) rather than `response.statusText` —
-              // HTTP/2 responses don't include reason phrases, so
-              // statusText is empty and produces unhelpful messages.
               recordPromptFailure(
                 response.status === 429 ? "rate-limited" : "upstream-error",
-                `HTTP ${response.status}: ${text || response.statusText || "no body"}`,
+                `HTTP ${response.status}: transient upstream error exhausted retries`,
                 {
                   retryable: true,
                   model,
@@ -4108,10 +5159,27 @@ export function createGatewayLLMClient(
           },
         );
       } catch (e) {
+        // Preserve the caller's exact abort reason regardless of its class.
+        if (opts?.signal?.aborted) throw opts.signal.reason;
+        if (e instanceof DOMException && e.name === "TimeoutError") throw e;
+
+        if (e instanceof WorkerRequestTooLargeError) {
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            "upstream-error",
+          );
+          log.warn(
+            `worker request rebuild rejected: request_bytes=${e.bytes} ` +
+              `limit_bytes=${MAX_WORKER_REQUEST_BYTES}`,
+          );
+          lastWorkerError = e.message;
+          return null;
+        }
+
         // Client disconnect / abort is benign — downgrade from error to info
         // to avoid Sentry noise from normal connection lifecycle events.
         const isAbort = e instanceof DOMException && e.name === "AbortError";
-        if (opts?.signal?.aborted) throw e;
         // Network/timeout error — no response was received. Record here so the
         // adapter remains the single owner of transport-failure attribution
         // (core workers no longer record on a null return).
@@ -4120,13 +5188,6 @@ export function createGatewayLLMClient(
           opts?.workerID ?? "unknown",
           "no-response",
         );
-        // Surface the ACTUAL exception message to the chain's diagnostic. The
-        // catch block is reached on any uncaught throw — the message gives the
-        // user the real reason (timeout, DNS failure, fetch error, etc.)
-        // instead of a generic "network error" placeholder. We use
-        // `??=` to preserve any earlier specific error (e.g. set by the
-        // retry-loop or data-policy path) rather than overwriting it with
-        // something less informative.
         if (isAbort) {
           log.info("worker prompt aborted (client disconnect or shutdown)");
           recordPromptFailure("aborted", "client disconnect or shutdown", {
@@ -4135,13 +5196,20 @@ export function createGatewayLLMClient(
             preserveExisting: true,
           });
         } else {
-          log.error("worker prompt failed:", e);
-          const msg = e instanceof Error ? e.message : String(e);
+          const kind = transportErrorKind(e);
+          const code = transportErrorCode(e);
+          log.error(
+            `worker prompt transport failure: kind=${kind}` +
+              (code ? ` code=${code}` : "") +
+              ` origin=${sanitizedWorkerOrigin(req.url)}` +
+              ` provider=${diagnosticToken(model.providerID)}`,
+          );
           recordPromptFailure(
             e instanceof DOMException && e.name === "TimeoutError"
               ? "timeout"
               : "network-error",
-            `network error: no response from ${model.providerID} (${msg.slice(0, 200)})`,
+            `network error: no response from ${diagnosticToken(model.providerID)} ` +
+              `(kind=${kind}${code ? `, code=${code}` : ""})`,
             {
               retryable: true,
               model,
@@ -4152,6 +5220,7 @@ export function createGatewayLLMClient(
         }
         return null;
       } finally {
+        clearTimeout(deadlineTimer);
         activeWorkerCalls.delete(callID);
       }
     },

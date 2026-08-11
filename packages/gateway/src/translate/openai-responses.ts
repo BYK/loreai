@@ -17,9 +17,40 @@ import type {
   GatewayRequest,
   GatewayResponse,
   GatewayTool,
+  GatewayUsage,
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
 import { extractAuth } from "../auth";
+import { safeTokenSum } from "../usage-validation";
+
+function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
+  const inclusiveInputTokens = safeTokenSum(
+    [
+      usage.inputTokens,
+      usage.cacheReadInputTokens,
+      usage.cacheCreationInputTokens,
+    ],
+    "Responses usage overflow",
+  );
+  const result: Record<string, unknown> = {
+    input_tokens: inclusiveInputTokens,
+    output_tokens: usage.outputTokens,
+    total_tokens: safeTokenSum(
+      [inclusiveInputTokens, usage.outputTokens],
+      "Responses usage overflow",
+    ),
+  };
+  if (
+    usage.cacheReadInputTokens != null ||
+    usage.cacheCreationInputTokens != null
+  ) {
+    result.input_tokens_details = {
+      cached_tokens: usage.cacheReadInputTokens ?? 0,
+      cache_write_tokens: usage.cacheCreationInputTokens ?? 0,
+    };
+  }
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // OpenAI Responses API → GatewayRequest
@@ -720,18 +751,7 @@ function buildOpenAIResponsesNonStreamResponse(
     model: resp.model,
     status: mapStopReasonToStatus(resp.stopReason),
     output,
-    usage: {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      total_tokens: usage.inputTokens + usage.outputTokens,
-      ...(usage.cacheReadInputTokens != null
-        ? {
-            prompt_tokens_details: {
-              cached_tokens: usage.cacheReadInputTokens,
-            },
-          }
-        : {}),
-    },
+    usage: responsesUsage(usage),
   };
 
   return new Response(JSON.stringify(response), {
@@ -975,18 +995,7 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
               return null;
             })
             .filter(Boolean),
-          usage: {
-            input_tokens: usage.inputTokens,
-            output_tokens: usage.outputTokens,
-            total_tokens: usage.inputTokens + usage.outputTokens,
-            ...(usage.cacheReadInputTokens != null
-              ? {
-                  prompt_tokens_details: {
-                    cached_tokens: usage.cacheReadInputTokens,
-                  },
-                }
-              : {}),
-          },
+          usage: responsesUsage(usage),
         },
       });
 

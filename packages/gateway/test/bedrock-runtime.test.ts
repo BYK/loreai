@@ -6,12 +6,14 @@
  * body) by intercepting the upstream via undici's `MockAgent` injected
  * through the `setUpstreamDispatcherForTest` seam in `fetch.ts`.
  */
-import { describe, test, expect, afterEach } from "vitest";
+import { describe, test, expect, afterEach, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import { MockAgent } from "undici";
 import {
   BEDROCK_RUNTIME_PATH_RE,
+  BEDROCK_RUNTIME_MAX_REQUEST_BYTES,
   BEDROCK_RUNTIME_VERBS,
+  bedrockRuntimeHeaders,
   bedrockRuntimeUrl,
   proxyBedrockRuntimeRequest,
 } from "../src/translate/bedrock-runtime";
@@ -43,6 +45,38 @@ describe("bedrockRuntimeUrl", () => {
     // final upstream path stays `/model/<id>/<verb>` (verified by the e2e
     // test below).
     expect(u.pathname).toBe("/");
+  });
+});
+
+describe("bedrockRuntimeHeaders", () => {
+  test("keeps AWS auth while stripping cross-origin and hop-by-hop fields", () => {
+    const headers = bedrockRuntimeHeaders(
+      new Headers({
+        authorization: "Bearer bedrock-token",
+        connection: "keep-alive, x-connection-secret",
+        cookie: "session=secret",
+        "proxy-authorization": "Basic proxy-secret",
+        "transfer-encoding": "chunked",
+        "x-amz-content-sha256": "signed-payload",
+        "x-connection-secret": "remove-me",
+        "x-lore-project": "/private/project",
+        "x-lore-session": "private-session",
+      }),
+    );
+
+    expect(headers.get("authorization")).toBe("Bearer bedrock-token");
+    expect(headers.get("x-amz-content-sha256")).toBe("signed-payload");
+    for (const name of [
+      "connection",
+      "cookie",
+      "proxy-authorization",
+      "transfer-encoding",
+      "x-connection-secret",
+      "x-lore-project",
+      "x-lore-session",
+    ]) {
+      expect(headers.has(name), name).toBe(false);
+    }
   });
 });
 
@@ -154,6 +188,267 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
     };
     expect(body.error.type).toBe("invalid_request_error");
     expect(body.error.message).toMatch(/path does not match/i);
+  });
+
+  test.each([
+    ["exact limit", BEDROCK_RUNTIME_MAX_REQUEST_BYTES, 200],
+    ["limit plus one", BEDROCK_RUNTIME_MAX_REQUEST_BYTES + 1, 413],
+  ] as const)(
+    "bounds request upload at the %s",
+    async (_name, size, status) => {
+      let fetchCalls = 0;
+      let uploaded: Uint8Array | undefined;
+      let sourceCancelled = false;
+      const bytes = new Uint8Array(size);
+      bytes[0] = 0x11;
+      bytes[size - 1] = 0xee;
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          if (size <= BEDROCK_RUNTIME_MAX_REQUEST_BYTES) controller.close();
+        },
+        cancel() {
+          sourceCancelled = true;
+        },
+      });
+      const request = new Request("http://gateway/v1/model/test/converse", {
+        method: "POST",
+        body: source,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      const response = await proxyBedrockRuntimeRequest(request, "us-east-1", {
+        upstreamFetch: async (_url, init) => {
+          fetchCalls++;
+          uploaded = init?.body as Uint8Array;
+          return new Response("ok");
+        },
+      });
+      expect(response.status).toBe(status);
+      if (status === 200) {
+        expect(fetchCalls).toBe(1);
+        expect(uploaded?.byteLength).toBe(size);
+        expect(uploaded?.[0]).toBe(0x11);
+        expect(uploaded?.[size - 1]).toBe(0xee);
+        await response.body?.cancel();
+        expect(sourceCancelled).toBe(false);
+      } else {
+        expect(fetchCalls).toBe(0);
+        expect(sourceCancelled).toBe(true);
+      }
+      expect(source.locked).toBe(false);
+    },
+  );
+
+  test.each(["caller", "deadline"] as const)(
+    "%s abort settles a stalled request upload and releases hostile input",
+    async (mode) => {
+      if (mode === "deadline") vi.useFakeTimers();
+      const caller = new AbortController();
+      let rejectPull!: (error: unknown) => void;
+      let markPull!: () => void;
+      const pulling = new Promise<void>((resolve) => (markPull = resolve));
+      let sourceCancelled = false;
+      const source = new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise<void>((_resolve, reject) => {
+            rejectPull = reject;
+            markPull();
+          });
+        },
+        cancel() {
+          sourceCancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const request = new Request("http://gateway/v1/model/test/converse", {
+        method: "POST",
+        body: source,
+        signal: mode === "caller" ? caller.signal : undefined,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      let fetchCalls = 0;
+      const pending = proxyBedrockRuntimeRequest(request, "us-east-1", {
+        upstreamFetch: async () => {
+          fetchCalls++;
+          return new Response("should not happen");
+        },
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: mode === "caller" ? "AbortError" : "TimeoutError",
+      });
+      await pulling;
+      if (mode === "caller") {
+        caller.abort(new DOMException("client disconnected", "AbortError"));
+      } else {
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      await rejected;
+      rejectPull(new Error("late upload rejection"));
+      await Promise.resolve();
+      expect(fetchCalls).toBe(0);
+      expect(sourceCancelled).toBe(true);
+      expect(source.locked).toBe(false);
+      if (mode === "deadline") vi.useRealTimers();
+    },
+  );
+
+  test.each(["caller", "deadline"] as const)(
+    "%s abort settles a signal-ignoring upstream fetch",
+    async (mode) => {
+      if (mode === "deadline") vi.useFakeTimers();
+      const caller = new AbortController();
+      let upstreamSignal: AbortSignal | undefined;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => (markStarted = resolve));
+      const pending = proxyBedrockRuntimeRequest(
+        new Request("http://gateway/v1/model/test/converse", {
+          method: "POST",
+          body: "{}",
+          signal: mode === "caller" ? caller.signal : undefined,
+        }),
+        "us-east-1",
+        {
+          upstreamFetch: async (_url, init) => {
+            upstreamSignal = init?.signal ?? undefined;
+            markStarted();
+            return new Promise(() => {});
+          },
+        },
+      );
+      await started;
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: mode === "caller" ? "AbortError" : "TimeoutError",
+      });
+      if (mode === "caller") {
+        caller.abort(new DOMException("client disconnected", "AbortError"));
+      } else {
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      await rejected;
+      expect(upstreamSignal?.aborted).toBe(true);
+      if (mode === "deadline") vi.useRealTimers();
+    },
+  );
+
+  test.each(["caller", "deadline"] as const)(
+    "%s abort preserves metadata and cancels a hostile upstream body",
+    async (mode) => {
+      if (mode === "deadline") vi.useFakeTimers();
+      const caller = new AbortController();
+      let cancelled = false;
+      const upstream = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("partial"));
+          },
+          pull() {
+            return new Promise(() => {});
+          },
+          cancel() {
+            cancelled = true;
+            return new Promise<void>(() => {});
+          },
+        }),
+        {
+          status: 207,
+          statusText: "Multi-Status",
+          headers: { "x-bedrock": "preserved" },
+        },
+      );
+      const response = await proxyBedrockRuntimeRequest(
+        new Request("http://gateway/v1/model/test/converse-stream", {
+          method: "POST",
+          body: "{}",
+          signal: mode === "caller" ? caller.signal : undefined,
+        }),
+        "us-east-1",
+        { upstreamFetch: async () => upstream },
+      );
+      expect(response.status).toBe(207);
+      expect(response.statusText).toBe("Multi-Status");
+      expect(response.headers.get("x-bedrock")).toBe("preserved");
+      const body = response.text();
+      const rejected = expect(body).rejects.toMatchObject({
+        name: mode === "caller" ? "AbortError" : "TimeoutError",
+      });
+      await Promise.resolve();
+      if (mode === "caller") {
+        caller.abort(new DOMException("client disconnected", "AbortError"));
+      } else {
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      await rejected;
+      expect(cancelled).toBe(true);
+      expect(upstream.body?.locked).toBe(false);
+      if (mode === "deadline") vi.useRealTimers();
+    },
+  );
+
+  test("normal body completion disposes the foreground deadline", async () => {
+    vi.useFakeTimers();
+    let upstreamSignal: AbortSignal | undefined;
+    const caller = new AbortController();
+    const request = new Request("http://gateway/v1/model/test/converse", {
+      method: "POST",
+      body: "{}",
+      signal: caller.signal,
+    });
+    const remove = vi.spyOn(request.signal, "removeEventListener");
+    try {
+      const response = await proxyBedrockRuntimeRequest(request, "us-east-1", {
+        upstreamFetch: async (_url, init) => {
+          upstreamSignal = init?.signal ?? undefined;
+          return new Response("complete", {
+            status: 201,
+            headers: { "x-bedrock": "complete" },
+          });
+        },
+      });
+      expect(response.status).toBe(201);
+      expect(response.headers.get("x-bedrock")).toBe("complete");
+      await expect(response.text()).resolves.toBe("complete");
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(upstreamSignal?.aborted).toBe(false);
+      expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("downstream cancellation promptly cancels the hostile body and disposes the deadline", async () => {
+    vi.useFakeTimers();
+    let cancelled = false;
+    let upstreamSignal: AbortSignal | undefined;
+    try {
+      const upstream = new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelled = true;
+            return new Promise<void>(() => {});
+          },
+        }),
+      );
+      const response = await proxyBedrockRuntimeRequest(
+        new Request("http://gateway/v1/model/test/converse-stream", {
+          method: "POST",
+          body: "{}",
+        }),
+        "us-east-1",
+        {
+          upstreamFetch: async (_url, init) => {
+            upstreamSignal = init?.signal ?? undefined;
+            return upstream;
+          },
+        },
+      );
+      await expect(response.body?.cancel()).resolves.toBeUndefined();
+      expect(cancelled).toBe(true);
+      expect(upstream.body?.locked).toBe(false);
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(upstreamSignal?.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

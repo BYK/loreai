@@ -41,8 +41,12 @@ import {
   handleRequest,
   handleCompactEndpoint,
   handleResponsesCompactEndpoint,
+  createForegroundAbortScope,
+  wrapBodyWithCleanup,
 } from "./pipeline";
 import { upstreamFetch } from "./fetch";
+import { responseAgainstAbort } from "./abort-race";
+import { cancelAndReleaseReader, readStreamChunk } from "./stream/anthropic";
 import { decodeRequestBody } from "./http-body";
 import {
   BEDROCK_RUNTIME_PATH_RE,
@@ -117,6 +121,34 @@ function errorResponse(
   );
 }
 
+function requestWithSignal(req: Request, signal: AbortSignal): Request {
+  return new Request(req.url, {
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    signal,
+    ...(req.body ? { duplex: "half" } : {}),
+  });
+}
+
+export async function handleForegroundBodyRoute(
+  req: Request,
+  handle: (scopedRequest: Request) => Promise<Response>,
+): Promise<Response> {
+  const abortScope = createForegroundAbortScope(req.signal);
+  try {
+    const scopedRequest = requestWithSignal(req, abortScope.signal);
+    const response = await responseAgainstAbort(
+      () => handle(scopedRequest),
+      abortScope.signal,
+    );
+    return wrapBodyWithCleanup(response, abortScope.dispose, abortScope.signal);
+  } catch (error) {
+    abortScope.dispose();
+    throw error;
+  }
+}
+
 /**
  * Detect a WebSocket upgrade request.
  *
@@ -176,6 +208,7 @@ async function handleAnthropicMessages(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseAnthropicRequest(body, headersToRecord(req.headers));
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -196,10 +229,11 @@ async function handleAnthropicMessages(
 // calling GET /v1/models will have their request forwarded to Anthropic,
 // which will likely reject the OpenAI API key. A proper fix would route
 // based on auth header type, but that's a separate enhancement.
-async function handleModelsPassthrough(
+export async function handleModelsPassthrough(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
+  const abortScope = createForegroundAbortScope(req.signal);
   try {
     // Forward auth headers from the original request so upstream
     // providers that require authentication don't reject with 401.
@@ -219,20 +253,23 @@ async function handleModelsPassthrough(
       headers[key] = value;
     }
 
-    const upstream = await upstreamFetch(
-      `${config.upstreamAnthropic}/v1/models`,
-      {
-        headers,
-      },
+    const upstream = await responseAgainstAbort(
+      () =>
+        upstreamFetch(`${config.upstreamAnthropic}/v1/models`, {
+          headers,
+          signal: abortScope.signal,
+        }),
+      abortScope.signal,
     );
     // Clone to a new Response so we can append CORS headers
-    const response = new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: new Headers(upstream.headers),
-    });
+    const response = wrapBodyWithCleanup(
+      upstream,
+      abortScope.dispose,
+      abortScope.signal,
+    );
     return withCors(response);
   } catch (e) {
+    abortScope.dispose();
     const msg = e instanceof Error ? e.message : "Upstream unreachable";
     return errorResponse(502, "api_error", `Failed to fetch models: ${msg}`);
   }
@@ -277,6 +314,7 @@ async function handleOpenAIChatCompletions(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseOpenAIRequest(body, headersToRecord(req.headers));
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -332,6 +370,7 @@ async function handleGeminiGenerateContent(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseGeminiRequest(body, headers, model, stream);
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -367,6 +406,7 @@ async function handleOpenAIResponses(
       body,
       headersToRecord(req.headers),
     );
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -407,6 +447,7 @@ async function handleOpenAICodexResponses(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseOpenAICodexRequest(body, headersToRecord(req.headers));
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -498,7 +539,9 @@ export async function startServer(config: GatewayConfig): Promise<{
     try {
       // POST /v1/messages — Anthropic protocol
       if (method === "POST" && pathname === "/v1/messages") {
-        return await handleAnthropicMessages(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleAnthropicMessages(scoped, config),
+        );
       }
 
       // POST /v1/chat/completions — OpenAI protocol.
@@ -510,7 +553,9 @@ export async function startServer(config: GatewayConfig): Promise<{
         (pathname === "/v1/chat/completions" ||
           pathname === "/chat/completions")
       ) {
-        return await handleOpenAIChatCompletions(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleOpenAIChatCompletions(scoped, config),
+        );
       }
 
       // POST /v1beta/models/{model}:generateContent (or :streamGenerateContent)
@@ -519,23 +564,31 @@ export async function startServer(config: GatewayConfig): Promise<{
       if (method === "POST") {
         const gm = pathname.match(GEMINI_PATH_RE);
         if (gm) {
-          return await handleGeminiGenerateContent(
-            req,
-            config,
-            gm[1],
-            gm[2] === "streamGenerateContent",
+          return await handleForegroundBodyRoute(req, (scoped) =>
+            handleGeminiGenerateContent(
+              scoped,
+              config,
+              gm[1],
+              gm[2] === "streamGenerateContent",
+            ),
           );
         }
       }
 
       // POST /v1/responses/compact — Codex compaction (Responses API)
       if (method === "POST" && pathname === "/v1/responses/compact") {
-        return withCors(await handleResponsesCompactEndpoint(req, config));
+        return withCors(
+          await handleForegroundBodyRoute(req, (scoped) =>
+            handleResponsesCompactEndpoint(scoped, config),
+          ),
+        );
       }
 
       // POST /v1/codex/responses — Codex (ChatGPT) ingress (Responses format)
       if (method === "POST" && pathname === "/v1/codex/responses") {
-        return await handleOpenAICodexResponses(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleOpenAICodexResponses(scoped, config),
+        );
       }
 
       // POST /v1/responses — OpenAI Responses API protocol.
@@ -545,12 +598,18 @@ export async function startServer(config: GatewayConfig): Promise<{
       // against api.githubcopilot.com (its endpoints omit /v1). Wiring that needs
       // a host-aware responses path (like buildOpenAIChatCompletionsUrl) first.
       if (method === "POST" && pathname === "/v1/responses") {
-        return await handleOpenAIResponses(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleOpenAIResponses(scoped, config),
+        );
       }
 
       // POST /v1/compact — explicit compaction summary (Pi plugin, etc.)
       if (method === "POST" && pathname === "/v1/compact") {
-        return withCors(await handleCompactEndpoint(req, config));
+        return withCors(
+          await handleForegroundBodyRoute(req, (scoped) =>
+            handleCompactEndpoint(scoped, config),
+          ),
+        );
       }
 
       // POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough.
@@ -859,6 +918,107 @@ export function bracketHost(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
+export function bindNodeIngressAbort(
+  nodeReq: IncomingMessage,
+  nodeRes: ServerResponse,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const abort = (reason: unknown): void => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const onRequestAborted = (): void =>
+    abort(new DOMException("client request aborted", "AbortError"));
+  const onRequestClose = (): void => {
+    if (!nodeReq.complete) onRequestAborted();
+  };
+  const onRequestError = (error: Error): void => abort(error);
+  const onResponseClose = (): void => {
+    if (!nodeRes.writableEnded) {
+      abort(new DOMException("client response closed", "AbortError"));
+    }
+  };
+  const onResponseError = (error: Error): void => abort(error);
+  const onSocketClose = (): void => {
+    if (!nodeRes.writableEnded) {
+      abort(new DOMException("client socket closed", "AbortError"));
+    }
+  };
+  const onSocketError = (error: Error): void => abort(error);
+  nodeReq.on("aborted", onRequestAborted);
+  nodeReq.on("close", onRequestClose);
+  nodeReq.on("error", onRequestError);
+  nodeRes.on("close", onResponseClose);
+  nodeRes.on("error", onResponseError);
+  nodeReq.socket.on("close", onSocketClose);
+  nodeReq.socket.on("error", onSocketError);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      nodeReq.removeListener("aborted", onRequestAborted);
+      nodeReq.removeListener("close", onRequestClose);
+      nodeReq.removeListener("error", onRequestError);
+      nodeRes.removeListener("close", onResponseClose);
+      nodeRes.removeListener("error", onResponseError);
+      nodeReq.socket.removeListener("close", onSocketClose);
+      nodeReq.socket.removeListener("error", onSocketError);
+    },
+  };
+}
+
+export function waitForNodeResponseDrain(
+  nodeRes: ServerResponse,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      nodeRes.removeListener("drain", onDrain);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const finish = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      operation();
+    };
+    const onDrain = (): void => finish(resolve);
+    const onAbort = (): void => finish(() => reject(signal.reason));
+    nodeRes.on("drain", onDrain);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
+export function waitForNodeResponseCompletion(
+  nodeRes: ServerResponse,
+  signal: AbortSignal,
+): Promise<void> {
+  if (nodeRes.writableFinished || nodeRes.destroyed) return Promise.resolve();
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      nodeRes.removeListener("finish", onFinish);
+      nodeRes.removeListener("close", onClose);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const finish = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      operation();
+    };
+    const onFinish = (): void => finish(resolve);
+    const onClose = (): void => finish(resolve);
+    const onAbort = (): void => finish(() => reject(signal.reason));
+    nodeRes.on("finish", onFinish);
+    nodeRes.on("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
 /**
  * Convert a node:http `IncomingMessage` to a Web `Request`, run the shared
  * `fetch` handler, and stream the resulting Web `Response` back over the
@@ -868,13 +1028,15 @@ export function bracketHost(host: string): string {
  * `Response` (streaming or buffered), we write the status + headers, then
  * pipe the body chunk-by-chunk to keep long-lived SSE streams alive.
  */
-async function handleNodeRequest(
+export async function handleNodeRequest(
   nodeReq: IncomingMessage,
   nodeRes: ServerResponse,
   fetch: (req: Request) => Response | Promise<Response>,
   host: string,
   port: number,
 ): Promise<void> {
+  const ingressAbort = bindNodeIngressAbort(nodeReq, nodeRes);
+  let responseStarted = false;
   try {
     const url = `http://${bracketHost(host)}:${port}${nodeReq.url ?? "/"}`;
 
@@ -887,41 +1049,76 @@ async function handleNodeRequest(
       method: nodeReq.method,
       headers: nodeReq.headers as Record<string, string>,
       body,
+      signal: ingressAbort.signal,
       // @ts-expect-error — required for Node.js request body streaming
       duplex: "half",
     });
 
-    const response = await fetch(req);
+    const response = await responseAgainstAbort(
+      () => Promise.resolve(fetch(req)),
+      ingressAbort.signal,
+    );
 
     const headerEntries: [string, string][] = [];
     response.headers.forEach((value, key) => {
       headerEntries.push([key, value]);
     });
     nodeRes.writeHead(response.status, Object.fromEntries(headerEntries));
+    responseStarted = true;
 
     if (response.body) {
       const reader = response.body.getReader();
       try {
         while (true) {
-          const { done, value } = await reader.read();
+          const { done, value } = await readStreamChunk(reader, {
+            signal: ingressAbort.signal,
+          });
           if (done) break;
           // Coerce SharedArrayBuffer-typed Uint8Array views to a regular
           // Buffer — Node's write() expects a string, Buffer, or
           // Uint8Array<ArrayBuffer>, not ArrayBufferLike.
-          nodeRes.write(
+          const canContinue = nodeRes.write(
             Buffer.from(value.buffer, value.byteOffset, value.byteLength),
           );
+          if (!canContinue) {
+            await waitForNodeResponseDrain(nodeRes, ingressAbort.signal);
+          }
         }
       } finally {
-        reader.releaseLock();
+        cancelAndReleaseReader(reader, ingressAbort.signal.reason);
       }
     }
-    nodeRes.end();
-  } catch (err) {
-    log.error("request handler error:", err);
-    if (!nodeRes.headersSent) {
-      nodeRes.writeHead(500, { "content-type": "application/json" });
+    if (!nodeRes.destroyed) {
+      const completed = waitForNodeResponseCompletion(
+        nodeRes,
+        ingressAbort.signal,
+      );
+      nodeRes.end();
+      await completed;
     }
-    nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+  } catch (err) {
+    if (!ingressAbort.signal.aborted) log.error("request handler error:", err);
+    if (
+      !responseStarted &&
+      !nodeRes.headersSent &&
+      !nodeRes.destroyed &&
+      !ingressAbort.signal.aborted
+    ) {
+      try {
+        const completed = waitForNodeResponseCompletion(
+          nodeRes,
+          ingressAbort.signal,
+        );
+        nodeRes.writeHead(500, { "content-type": "application/json" });
+        nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+        await completed;
+      } catch {
+        if (!nodeRes.destroyed) nodeRes.destroy();
+      }
+    } else if (!nodeRes.destroyed) {
+      nodeRes.destroy();
+    }
+  } finally {
+    ingressAbort.cleanup();
   }
 }

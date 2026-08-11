@@ -264,6 +264,115 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // The recall tool_use must NOT leak to the client.
     expect(bodyText).not.toContain('"name":"recall"');
     expect(bodyText).not.toContain('"name": "recall"');
+
+    const requestWithoutTools = async (
+      path: "/v1/codex/responses" | "/v1/responses",
+      upstream: Response,
+    ): Promise<string> => {
+      setUpstreamInterceptor(async () => upstream);
+      const response = await fetch(`${baseURL}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer test-token",
+          "x-lore-agent": "coder",
+          "x-lore-project": projectDir,
+        },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          stream: true,
+          input: "plain",
+        }),
+      });
+      return response.text();
+    };
+    const sparse = new Response(
+      sseEvent("response.output_item.added", {
+        item: { type: "message", id: "msg_sparse_real" },
+      }) +
+        sseEvent("response.output_text.done", {
+          item_id: "msg_sparse_real",
+          text: "sparse real caller",
+        }) +
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "message",
+            id: "msg_sparse_real",
+            content: [{ type: "output_text", text: "sparse real caller" }],
+          },
+        }) +
+        sseEvent("response.completed", {
+          response: {
+            status: "completed",
+            output: [{ type: "item_reference", id: "msg_sparse_real" }],
+          },
+        }),
+    );
+    const sparseCodex = await requestWithoutTools(
+      "/v1/codex/responses",
+      sparse,
+    );
+    expect(sparseCodex).toContain("sparse real caller");
+    expect(sparseCodex).not.toContain("server_error");
+
+    const sparsePublic = await requestWithoutTools(
+      "/v1/responses",
+      new Response(
+        sseEvent("response.output_item.added", {
+          item: { type: "message", id: "public-mismatch" },
+        }),
+      ),
+    );
+    expect(sparsePublic).not.toContain("public-mismatch");
+    expect(sparsePublic).toContain("response.failed");
+
+    const malformed = await requestWithoutTools(
+      "/v1/codex/responses",
+      new Response("event: response.created\ndata: {bad}\n\n"),
+    );
+    expect(malformed).not.toContain("{bad}");
+    expect(malformed).toContain("response.failed");
+
+    const duplicate = await requestWithoutTools(
+      "/v1/codex/responses",
+      new Response(
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "function_call",
+            id: "one",
+            call_id: "duplicate",
+            name: "one",
+            arguments: "{}",
+          },
+        }) +
+          sseEvent("response.output_item.added", {
+            item: {
+              type: "function_call",
+              id: "two",
+              call_id: "duplicate",
+              name: "two",
+              arguments: "{}",
+            },
+          }),
+      ),
+    );
+    expect(duplicate).toContain('"id":"one"');
+    expect(duplicate).not.toContain('"id":"two"');
+    expect(duplicate).toContain("response.failed");
+
+    const failure = await requestWithoutTools(
+      "/v1/codex/responses",
+      new Response(
+        sseEvent("response.failed", {
+          response: {
+            status: "failed",
+            error: { type: "server_error", message: "provider terminal" },
+          },
+        }),
+      ),
+    );
+    expect(failure.match(/event: response\.failed/g)).toHaveLength(1);
+    expect(failure).toContain("provider terminal");
   });
 
   test("non-codex openai-responses also streams the follow-up", async () => {

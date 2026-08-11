@@ -668,17 +668,16 @@ function lineageKey(family: string): string {
  *
  * This is the only robust discriminator: a ChatGPT-backend session reports the
  * same `providerID` ("openai") and `protocol` ("openai-responses") as a real
- * `api.openai.com` API-key session (config.ts PROVIDER_ROUTES) — only the host
- * differs.
+ * `api.openai.com` API-key session. The `/backend-api` path is preserved by
+ * compatible proxies, unlike the host.
  */
 function isChatGPTBackend(url: string | undefined): boolean {
   if (!url) return false;
   try {
     const u = new URL(url);
-    return u.hostname === "chatgpt.com" || u.pathname.includes("/backend-api");
+    return /(?:^|\/)backend-api(?:\/|$)/.test(u.pathname);
   } catch {
-    // Scheme-less or malformed URL — fall back to a substring check.
-    return url.includes("chatgpt.com") || url.includes("/backend-api");
+    return false;
   }
 }
 
