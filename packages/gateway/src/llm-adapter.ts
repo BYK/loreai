@@ -4542,19 +4542,7 @@ export function createGatewayLLMClient(
                     reasoningNoneCapabilityKey(target, model),
                   );
                   reasoningEffort = undefined;
-                  req = await buildWorkerRequest(
-                    target,
-                    activeCred,
-                    model,
-                    system,
-                    user,
-                    maxTokens,
-                    opts?.sessionID,
-                    effectiveTemperature,
-                    factoryVertexProject,
-                    effectiveDisableThinking,
-                    reasoningEffort,
-                  );
+                  req = await buildCurrentRequest();
                   if (betaStripped) {
                     req = { ...req, headers: stripBetaHeaders(req.headers) };
                   }
@@ -4599,19 +4587,7 @@ export function createGatewayLLMClient(
                       ),
                     );
                   }
-                  req = await buildWorkerRequest(
-                    target,
-                    activeCred,
-                    model,
-                    system,
-                    user,
-                    maxTokens,
-                    opts?.sessionID,
-                    effectiveTemperature,
-                    factoryVertexProject,
-                    effectiveDisableThinking,
-                    reasoningEffort,
-                  );
+                  req = await buildCurrentRequest();
                   log.warn(
                     `worker 400 reports API unsupported for model — retrying once via ${protocol} ` +
                       `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,

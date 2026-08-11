@@ -393,6 +393,37 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     expect(alternateBody.messages).toBeUndefined();
   });
 
+  test("alternate-protocol rebuild reapplies the serialized request cap", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: "unsupported_api_for_model" } }),
+        { status: 400 },
+      ),
+    );
+    const model = { providerID: "github-copilot", modelID: "future-model" };
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "tok" }),
+      model,
+    );
+
+    const outcome = await client.promptDetailed("", "\u0000".repeat(699_029), {
+      sessionID: "sess-alternate-protocol-cap",
+      workerID: "lore-invariant-check",
+      model,
+      maxTokens: 4096,
+      upstreamProviderID: "github-copilot",
+    });
+
+    expect(outcome.kind).toBe("failure");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(
+      Buffer.byteLength(
+        String((mockFetch.mock.calls[0]?.[1] as { body?: string })?.body ?? ""),
+      ),
+    ).toBeLessThanOrEqual(4 * 1024 * 1024);
+  });
+
   test("model fallback recomputes Responses protocol for a chat-only backup", async () => {
     mockFetch
       .mockResolvedValueOnce(
