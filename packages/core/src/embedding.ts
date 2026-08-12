@@ -624,11 +624,11 @@ export class LocalProviderUnavailableError extends Error {
   }
 }
 
-/** PERMANENT break: the local provider is disabled for the rest of the process
- *  lifetime (recall degrades to FTS-only). Set only for a non-self-healing cause
- *  — the optional embedding stack is absent, a WASM-fatal abort, a floor OOM, or
- *  the transient-init-retry budget below being exhausted. */
-let localProviderKnownBroken = false;
+type LocalProviderFailureCause = "terminal" | "transient-init-exhausted";
+/** A terminal cause must dominate concurrent transient failures. Otherwise a
+ * late healthy sibling could clear a missing-stack / WASM / OOM latch after
+ * another slot exhausts the transient retry budget. */
+let localProviderFailureCause: LocalProviderFailureCause | null = null;
 let localProviderErrorLogged = false;
 /** True when the latch cause is the ONE that never recovers on a re-probe: the
  *  optional embedding stack is absent (needs a reinstall, not a retry). Every
@@ -652,12 +652,25 @@ const SELF_HEAL_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 // (the optional stack being absent).
 const LOCAL_INIT_MAX_ATTEMPTS = 3;
 let localInitFailures = 0;
+/** Monotonic generation for transient failures. Recovery slots capture this at
+ * admission and may clear retry debt only if no newer failure has occurred. */
+let localInitFailureGeneration = 0;
 /** Epoch ms; `> 0` means "cooling down after a transient init failure — retry a
  *  fresh worker once `Date.now()` reaches it". Reset to 0 on retry/recovery. */
 let localInitRetryAt = 0;
 // Ceiling for the init-retry cooldown; the first retries are much faster (see
 // computeInitRetryDelayMs). Also the test seam: 0 → retry immediately.
 let localInitCooldownMs = 30_000;
+
+function latchLocalProvider(cause: LocalProviderFailureCause): void {
+  if (cause === "terminal" || localProviderFailureCause === null) {
+    localProviderFailureCause = cause;
+  }
+}
+
+function clearLocalProviderLatch(): void {
+  localProviderFailureCause = null;
+}
 
 /** Base delay for the first init-retry, and the geometric backoff factor. A
  *  transient init failure (e.g. a cold ORT "protobuf parsing failed" in the Bun
@@ -700,10 +713,11 @@ export function _setLocalInitRetryAtForTest(at: number): void {
 
 /** For tests: reset the local provider probe + transient-retry state. */
 export function _resetLocalProviderProbe(): void {
-  localProviderKnownBroken = false;
+  clearLocalProviderLatch();
   localProviderErrorLogged = false;
   localStackMissing = false;
   localInitFailures = 0;
+  localInitFailureGeneration = 0;
   localInitRetryAt = 0;
   lastSelfHealAt = 0;
 }
@@ -713,7 +727,7 @@ export function _resetLocalProviderProbe(): void {
  *  false for the local provider. Pass `stackMissing: true` to simulate the
  *  ONE terminal (non-self-healing) cause. */
 export function _markLocalProviderUnavailable(stackMissing = false): void {
-  localProviderKnownBroken = true;
+  latchLocalProvider("terminal");
   localStackMissing = stackMissing;
   localProviderErrorLogged = true; // suppress the info log in tests
 }
@@ -729,7 +743,7 @@ export function _markLocalProviderUnavailable(stackMissing = false): void {
  * latch on this call. `nowMs` is injectable for tests.
  */
 export function maybeSelfHealEmbeddingProvider(nowMs = Date.now()): boolean {
-  if (!localProviderKnownBroken || localStackMissing) return false;
+  if (localProviderFailureCause === null || localStackMissing) return false;
   if (lastSelfHealAt === 0) {
     // Prime: wait a full interval before the first re-probe.
     lastSelfHealAt = nowMs;
@@ -740,9 +754,10 @@ export function maybeSelfHealEmbeddingProvider(nowMs = Date.now()): boolean {
   // Clear the latch + transient counters so getProvider() rebuilds a fresh pool
   // and the next embed re-inits. If it fails again it simply re-latches — cheap
   // at this cadence.
-  localProviderKnownBroken = false;
+  clearLocalProviderLatch();
   localProviderErrorLogged = false;
   localInitFailures = 0;
+  localInitFailureGeneration = 0;
   localInitRetryAt = 0;
   log.info(
     "self-heal: re-probing a previously-latched local embedding provider " +
@@ -901,7 +916,7 @@ function drainEmbeddingWorkerOutput(
 
 /** True iff the local provider has been probed and found broken. */
 function localProviderKnownUnavailable(): boolean {
-  return localProviderKnownBroken;
+  return localProviderFailureCause !== null;
 }
 
 /**
@@ -946,6 +961,8 @@ class LocalProvider implements EmbeddingProvider {
   >();
   private nextRequestId = 0;
   private initPromise: Promise<void> | null = null;
+  private closing = false;
+  private shutdownPromise: Promise<void> | null = null;
   private modelId: string;
   private dimensions: number;
   /** Memory-aware input token cap, owned by the main thread and passed to the
@@ -978,11 +995,18 @@ class LocalProvider implements EmbeddingProvider {
    *  `init-needs-wasm` (WASM also failing, which shouldn't happen) is treated as
    *  a genuine init failure instead of looping respawns. */
   private wasmFallbackTried = false;
+  private readonly onUnavailable?: () => void;
 
-  constructor(modelId: string, dimensions: number, memDivisor = 1) {
+  constructor(
+    modelId: string,
+    dimensions: number,
+    memDivisor = 1,
+    onUnavailable?: () => void,
+  ) {
     this.modelId = modelId;
     this.dimensions = dimensions;
     this.memDivisor = Math.max(1, memDivisor);
+    this.onUnavailable = onUnavailable;
     // Seed lastOomCap from the persisted known-bad cap so an upward re-probe in
     // THIS process still respects a ceiling the WASM heap rejected in a PRIOR
     // one (a rising freemem doesn't prove the fixed heap grew). Read once and
@@ -1011,6 +1035,8 @@ class LocalProvider implements EmbeddingProvider {
    * broken and degrade to FTS-only search.
    */
   private async ensureWorker(): Promise<void> {
+    if (this.closing)
+      throw new LocalProviderUnavailableError("embedding worker is closing");
     if (this.workerReady) return;
     if (this.workerInitError)
       throw new LocalProviderUnavailableError(this.workerInitError);
@@ -1018,9 +1044,14 @@ class LocalProvider implements EmbeddingProvider {
 
     this.initPromise = (async () => {
       // Fast-fail if a previous attempt already marked local broken.
-      if (localProviderKnownBroken) throw new LocalProviderUnavailableError();
+      if (localProviderFailureCause !== null) {
+        throw new LocalProviderUnavailableError();
+      }
 
       const { Worker } = await import("node:worker_threads");
+      if (this.closing) {
+        throw new LocalProviderUnavailableError("embedding worker is closing");
+      }
 
       // Resolve how to spawn the worker.
       //
@@ -1152,17 +1183,6 @@ class LocalProvider implements EmbeddingProvider {
             if (pending) {
               this.pendingRequests.delete(msg.id);
               this.updateWorkerRef();
-              // A successful embed means init succeeded — clear any transient
-              // init-failure debt so a future one-off blip gets the full retry
-              // budget again (and re-enables the one-time failure log).
-              if (localInitFailures > 0 || localInitRetryAt > 0) {
-                log.info(
-                  `local embedding provider recovered after ${localInitFailures} failed init attempt(s)`,
-                );
-                localInitFailures = 0;
-                localInitRetryAt = 0;
-                localProviderErrorLogged = false;
-              }
               pending.resolve(msg.vectors);
             }
             break;
@@ -1179,7 +1199,7 @@ class LocalProvider implements EmbeddingProvider {
               // Uses the same isWasmFatalError() from embedding-worker-types.ts
               // that the worker uses — single source of truth for classification.
               if (isWasmFatalError(msg.error)) {
-                localProviderKnownBroken = true;
+                latchLocalProvider("terminal");
                 pending.reject(new LocalProviderUnavailableError(msg.error));
               } else {
                 pending.reject(
@@ -1222,20 +1242,23 @@ class LocalProvider implements EmbeddingProvider {
         }
       });
 
-      // Worker crash / exit — reject all in-flight requests.
-      // Null out `this.worker` in both handlers so the `?.` optional chaining
-      // in embed() prevents postMessage on a terminated Worker (LOREAI-GATEWAY-1T).
+      // Worker crash / exit — reject all in-flight requests. Keep an errored
+      // worker owned until exit/shutdown so retirement can drain it completely.
+      let workerErrorHandled = false;
+      this.worker.prependOnceListener("error", () => {
+        workerErrorHandled = true;
+      });
       this.worker.on("error", (err: Error) => {
         if (this.worker !== spawned) return; // superseded worker — ignore
-        this.workerInitError = err.message;
+        if (this.closing) return;
         this.workerReady = false;
-        this.worker = null;
         this.initPromise = null;
         log.error("embedding worker crashed:", err);
-        for (const [, p] of this.pendingRequests) {
-          p.reject(new LocalProviderUnavailableError(err));
-        }
-        this.pendingRequests.clear();
+        // Worker errors can be transient (runtime/model startup pressure), so
+        // give them the same bounded cooldown/retry treatment as init-error.
+        // Keep the worker handle until exit/shutdown so pool retirement can
+        // drain it. The exit handler recognizes this already-classified error.
+        this.handleInitError(err.message);
       });
 
       this.worker.on("exit", (code) => {
@@ -1257,12 +1280,12 @@ class LocalProvider implements EmbeddingProvider {
         // Any other non-zero exit is a genuine fatal crash — latch the
         // provider broken so future ensureWorker() calls fast-fail instead of
         // respawning a worker that will just crash again (event-storm guard).
-        if (code !== 0) {
+        if (code !== 0 && !workerErrorHandled && !this.closing) {
           if (!this.workerInitError) {
             this.workerInitError = `embedding worker exited with code ${code}`;
             log.error(this.workerInitError, new Error(this.workerInitError));
           }
-          localProviderKnownBroken = true;
+          latchLocalProvider("terminal");
         }
         for (const [, p] of this.pendingRequests) {
           p.reject(
@@ -1272,12 +1295,16 @@ class LocalProvider implements EmbeddingProvider {
           );
         }
         this.pendingRequests.clear();
+        if (!this.closing) this.onUnavailable?.();
       });
 
       this.workerReady = true;
     })().catch((err) => {
       this.initPromise = null; // allow retry
-      throw err;
+      if (err instanceof LocalProviderUnavailableError) throw err;
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.handleInitError(errorMsg);
+      throw new LocalProviderUnavailableError(errorMsg);
     });
 
     return this.initPromise;
@@ -1355,7 +1382,7 @@ class LocalProvider implements EmbeddingProvider {
       // Already at the floor and still OOMing → the host genuinely can't run
       // local embeddings (system-wide exhaustion, not input size). Latch
       // FTS-only and surface the remote-provider hint.
-      localProviderKnownBroken = true;
+      latchLocalProvider("terminal");
       if (!localProviderErrorLogged) {
         localProviderErrorLogged = true;
         log.error(
@@ -1450,9 +1477,13 @@ class LocalProvider implements EmbeddingProvider {
       p.payload.maxTokens = this.effectiveMaxTokens();
       try {
         worker.postMessage(p.payload satisfies WorkerInbound);
-      } catch {
-        // Worker died again between ensureWorker() and here — its exit handler
-        // drives the next backoff/latch. Leave pending in place.
+      } catch (error) {
+        const errorMsg =
+          error instanceof Error
+            ? error.message
+            : "embedding worker died during OOM resubmit";
+        this.handleInitError(errorMsg);
+        return;
       }
     }
     this.updateWorkerRef();
@@ -1474,7 +1505,7 @@ class LocalProvider implements EmbeddingProvider {
       // actionable degraded state that will NOT self-heal on its own). Latch
       // permanently; recall degrades to FTS-only. Flag it so the self-heal
       // re-probe skips it (a reinstall, not a retry, is what recovers this).
-      localProviderKnownBroken = true;
+      latchLocalProvider("terminal");
       localStackMissing = true;
       if (!localProviderErrorLogged) {
         localProviderErrorLogged = true;
@@ -1493,8 +1524,9 @@ class LocalProvider implements EmbeddingProvider {
       // local embeddings for the whole process lifetime; only give up (latch)
       // once the retry budget is exhausted.
       localInitFailures++;
+      localInitFailureGeneration++;
       if (localInitFailures >= LOCAL_INIT_MAX_ATTEMPTS) {
-        localProviderKnownBroken = true;
+        latchLocalProvider("transient-init-exhausted");
         localInitRetryAt = 0;
         if (!localProviderErrorLogged) {
           localProviderErrorLogged = true;
@@ -1521,6 +1553,7 @@ class LocalProvider implements EmbeddingProvider {
     }
     this.pendingRequests.clear();
     this.updateWorkerRef();
+    this.onUnavailable?.();
   }
 
   /**
@@ -1575,9 +1608,13 @@ class LocalProvider implements EmbeddingProvider {
       p.payload.maxTokens = this.effectiveMaxTokens();
       try {
         worker.postMessage(p.payload satisfies WorkerInbound);
-      } catch {
-        // Worker died between ensureWorker() and here — its exit handler drives
-        // the next step. Leave pending in place.
+      } catch (error) {
+        const errorMsg =
+          error instanceof Error
+            ? error.message
+            : "embedding worker died during WASM resubmit";
+        this.handleInitError(errorMsg);
+        return;
       }
     }
     this.updateWorkerRef();
@@ -1588,6 +1625,12 @@ class LocalProvider implements EmbeddingProvider {
     inputType: "document" | "query",
   ): Promise<Float32Array[]> {
     await this.ensureWorker();
+    const worker = this.worker;
+    if (this.closing || !worker) {
+      throw new LocalProviderUnavailableError(
+        "embedding worker closed during initialization",
+      );
+    }
     // Opportunistically raise the cap if free memory has recovered (cheap,
     // throttled). Takes effect via the per-request cap below — no respawn.
     this.maybeReprobeCap();
@@ -1623,17 +1666,13 @@ class LocalProvider implements EmbeddingProvider {
       this.pendingRequests.set(id, { resolve, reject, payload });
       this.updateWorkerRef();
       try {
-        this.worker?.postMessage(payload satisfies WorkerInbound);
+        worker.postMessage(payload satisfies WorkerInbound);
       } catch {
         // Worker may have been terminated between ensureWorker() and here
         // (race with process.exit(1) in the worker thread). Clean up and
         // reject with the expected error type so callers degrade gracefully.
-        this.pendingRequests.delete(id);
-        this.updateWorkerRef();
-        reject(
-          new LocalProviderUnavailableError(
-            "embedding worker terminated before request could be sent",
-          ),
+        this.handleInitError(
+          "embedding worker terminated before request could be sent",
         );
       }
     });
@@ -1647,16 +1686,10 @@ class LocalProvider implements EmbeddingProvider {
    *  that need a clean teardown (tests, config change) should await the result.
    *  Fire-and-forget callers (process exit) can ignore it. */
   shutdown(): Promise<void> {
-    if (!this.worker) return Promise.resolve();
-
-    const worker = this.worker;
-    this.worker = null;
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.closing = true;
     this.workerReady = false;
     this.workerInitError = null;
-    this.initPromise = null;
-    // Don't let a mid-backfill ref keep the event loop alive while we wait for
-    // the worker to exit.
-    worker.unref();
 
     // Reject any in-flight requests with LocalProviderUnavailableError so
     // fire-and-forget callers' catch blocks handle it the same way as other
@@ -1666,7 +1699,19 @@ class LocalProvider implements EmbeddingProvider {
     }
     this.pendingRequests.clear();
 
-    return awaitWorkerShutdown(worker, WORKER_SHUTDOWN_TIMEOUT_MS);
+    const init = this.initPromise;
+    this.shutdownPromise = (async () => {
+      await init?.catch(() => {});
+      const worker = this.worker;
+      this.worker = null;
+      this.initPromise = null;
+      if (!worker) return;
+      // Don't let a mid-backfill ref keep the event loop alive while we wait for
+      // the worker to exit.
+      worker.unref();
+      await awaitWorkerShutdown(worker, WORKER_SHUTDOWN_TIMEOUT_MS);
+    })();
+    return this.shutdownPromise;
   }
 }
 
@@ -1760,6 +1805,8 @@ export function _setPoolFreememForTest(bytes: number | null): void {
 interface EmbedSlot {
   provider: LocalProvider;
   inflight: number;
+  healthy: boolean;
+  recoveryGeneration: number | null;
 }
 
 /**
@@ -1781,9 +1828,9 @@ interface EmbedSlot {
  * behavior); a secondary spawns only under genuine concurrent demand, below the
  * ceiling, AND when a full {@link PER_WORKER_MEM_BUDGET_BYTES} is free at spawn
  * time — so a light or constrained host never loads a second ~680 MB model. The
- * module-global `localProviderKnownBroken` latch is shared across all workers, so
- * a deterministic model failure (init-error / WASM-fatal / floor-OOM) on any
- * worker degrades the whole provider to FTS-only, exactly as today.
+ * Terminal failures (missing stack / WASM-fatal / floor-OOM) latch the whole
+ * provider. Transient init failures retire only their slot; proven siblings stay
+ * usable while replacement spawning observes the bounded retry cooldown.
  */
 class EmbeddingPool implements EmbeddingProvider {
   readonly maxBatchSize = 256;
@@ -1794,6 +1841,9 @@ class EmbeddingPool implements EmbeddingProvider {
    *  recompute). Live freemem re-gates each actual spawn on top of this. */
   private readonly ceiling: number;
   private readonly slots: EmbedSlot[] = [];
+  private readonly retiredShutdowns = new Set<Promise<void>>();
+  private closing = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(modelId: string, dimensions: number) {
     this.modelId = modelId;
@@ -1823,24 +1873,60 @@ class EmbeddingPool implements EmbeddingProvider {
   /** Pick the slot to dispatch the next request to, growing the pool lazily
    *  when there's concurrent demand, headroom below the ceiling, and memory. */
   private pickSlot(): EmbedSlot {
+    const now = Date.now();
+    const healthySlots = this.slots.filter((slot) => slot.healthy);
+    const terminallyUnavailable =
+      localProviderFailureCause === "terminal" ||
+      (localProviderFailureCause === "transient-init-exhausted" &&
+        healthySlots.length === 0);
+    if (this.closing || terminallyUnavailable) {
+      throw new LocalProviderUnavailableError("embedding pool is unavailable");
+    }
     // Primary worker: always present (its own OOM backoff, not pool sizing,
     // protects a constrained host — identical to today's single worker).
-    if (this.slots.length === 0) return this.spawnSlot();
+    if (this.slots.length === 0) {
+      if (localInitRetryAt > now) {
+        throw new LocalProviderUnavailableError(
+          "embedding worker retry cooldown is active",
+        );
+      }
+      // Admit exactly one recovery probe after the cooldown. The outstanding
+      // failure debt below prevents pool growth until this slot succeeds.
+      if (localInitRetryAt > 0) localInitRetryAt = 0;
+      return this.spawnSlot(localInitFailures > 0);
+    }
 
-    let best = this.slots[0];
-    for (const s of this.slots) {
+    // During transient failure debt, route new work only to proven siblings.
+    // Unproven slots may still finish their existing requests, but cannot
+    // amplify a bad generation with more work or replacement spawns.
+    const eligible =
+      healthySlots.length > 0 &&
+      (localInitFailures > 0 ||
+        localInitRetryAt > 0 ||
+        localProviderFailureCause === "transient-init-exhausted")
+        ? healthySlots
+        : this.slots;
+    let best = eligible[0];
+    for (const s of eligible) {
       if (s.inflight < best.inflight) best = s;
     }
 
     // Every worker is busy: add capacity if we're below the ceiling and a full
     // per-worker memory budget is free right now (re-checked live, so a box that
     // has since gone tight won't load another ~680 MB model).
-    if (
+    const canGrow =
       best.inflight > 0 &&
       this.slots.length < this.ceiling &&
-      this.liveFreemem() >= PER_WORKER_MEM_BUDGET_BYTES
-    ) {
-      return this.spawnSlot();
+      this.liveFreemem() >= PER_WORKER_MEM_BUDGET_BYTES;
+    if (canGrow) {
+      if (localInitRetryAt > 0) {
+        if (localInitRetryAt > now) return best;
+        // The cooldown admits one recovery slot. Failure re-arms the next
+        // backoff; success clears all transient debt.
+        localInitRetryAt = 0;
+        return this.spawnSlot(true);
+      }
+      if (localInitFailures === 0) return this.spawnSlot(false);
     }
     return best;
   }
@@ -1855,18 +1941,50 @@ class EmbeddingPool implements EmbeddingProvider {
     return clampFreeToContainerLimit(raw, constrainedMemoryLimit());
   }
 
-  private spawnSlot(): EmbedSlot {
-    const slot: EmbedSlot = {
+  private spawnSlot(recoveryProbe = false): EmbedSlot {
+    let slot: EmbedSlot;
+    const provider = new LocalProvider(
+      this.modelId,
+      this.dimensions,
+      this.ceiling,
+      () => this.retireSlot(slot),
+    );
+    slot = {
       // Pass the pool ceiling as the memory divisor so every worker sizes its
       // token cap from `free / ceiling`. The ceiling is itself memory-gated
       // (desiredEmbedPoolSize), so the workers the host is provisioned for
       // collectively stay within one `EMBED_MEM_FRACTION` share of free memory
       // instead of each independently claiming half and summing to an OOM.
-      provider: new LocalProvider(this.modelId, this.dimensions, this.ceiling),
+      provider,
       inflight: 0,
+      healthy: false,
+      recoveryGeneration: recoveryProbe ? localInitFailureGeneration : null,
     };
     this.slots.push(slot);
     return slot;
+  }
+
+  private retireSlot(slot: EmbedSlot): void {
+    const index = this.slots.indexOf(slot);
+    if (index === -1) return;
+    this.slots.splice(index, 1);
+    this.preserveHealthyServiceAfterExhaustion();
+    const retirement = slot.provider.shutdown().catch(() => {});
+    this.retiredShutdowns.add(retirement);
+    void retirement.finally(() => this.retiredShutdowns.delete(retirement));
+  }
+
+  private preserveHealthyServiceAfterExhaustion(): void {
+    if (
+      localProviderFailureCause !== "transient-init-exhausted" ||
+      !this.hasHealthySlot()
+    ) {
+      return;
+    }
+    // The retry budget still stays exhausted, preventing another replacement
+    // storm. Only the global FTS-only latch is invalid when a sibling works.
+    clearLocalProviderLatch();
+    localProviderErrorLogged = false;
   }
 
   async embed(
@@ -1876,19 +1994,63 @@ class EmbeddingPool implements EmbeddingProvider {
     const slot = this.pickSlot();
     slot.inflight++;
     try {
-      return await slot.provider.embed(texts, inputType);
+      const vectors = await slot.provider.embed(texts, inputType);
+      slot.healthy = true;
+      if (
+        slot.recoveryGeneration !== null &&
+        slot.recoveryGeneration === localInitFailureGeneration
+      ) {
+        slot.recoveryGeneration = null;
+        if (localInitFailures > 0) {
+          log.info(
+            `local embedding provider recovered after ${localInitFailures} failed init attempt(s)`,
+          );
+        }
+        localInitFailures = 0;
+        localInitRetryAt = 0;
+        if (localProviderFailureCause === "transient-init-exhausted") {
+          clearLocalProviderLatch();
+        }
+        localProviderErrorLogged = false;
+      } else {
+        slot.recoveryGeneration = null;
+        // An already in-flight sibling proves service is still available, but
+        // must not erase another slot's retry debt or admit immediate respawns.
+        this.preserveHealthyServiceAfterExhaustion();
+      }
+      return vectors;
+    } catch (error) {
+      if (error instanceof LocalProviderUnavailableError) {
+        // A transient init failure belongs to this worker, not every slot in the
+        // pool. Retire it so a sibling's successful recovery cannot leave the
+        // failed slot eligible for later backfill or lint requests.
+        this.retireSlot(slot);
+      }
+      throw error;
     } finally {
       slot.inflight--;
     }
   }
 
+  hasHealthySlot(): boolean {
+    return this.slots.some((slot) => slot.healthy);
+  }
+
   /** Shut every worker down and clear the pool. Resolves once all have exited
    *  (or been force-terminated). Idempotent. */
   shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.closing = true;
     const providers = this.slots.splice(0).map((s) => s.provider);
-    return Promise.all(providers.map((p) => p.shutdown())).then(
-      () => undefined,
-    );
+    this.shutdownPromise = (async () => {
+      await Promise.all(providers.map((p) => p.shutdown()));
+      // Retirements can be added by request rejection microtasks triggered by
+      // the active shutdowns above, so drain until the owned set stays empty.
+      while (this.retiredShutdowns.size > 0) {
+        await Promise.all(this.retiredShutdowns);
+      }
+    })();
+    return this.shutdownPromise;
   }
 }
 
@@ -2133,7 +2295,13 @@ export function isAvailable(): boolean {
   const provider = getProvider();
   if (!provider) return false;
   if (provider instanceof EmbeddingPool) {
-    if (localProviderKnownUnavailable()) {
+    if (
+      localProviderKnownUnavailable() &&
+      !(
+        localProviderFailureCause === "transient-init-exhausted" &&
+        provider.hasHealthySlot()
+      )
+    ) {
       // One-time log so the user knows why vector search is degraded.
       if (!localProviderErrorLogged) {
         localProviderErrorLogged = true;
@@ -2145,13 +2313,13 @@ export function isAvailable(): boolean {
       return false;
     }
     if (localInitRetryAt > 0) {
+      // A proven sibling remains usable while a failed slot cools down. The
+      // pool blocks replacement spawning but continues routing to that sibling.
+      if (provider.hasHealthySlot()) return true;
       // A transient init failure is cooling down before its next retry.
       if (Date.now() < localInitRetryAt) return false; // FTS-only until then
-      // Cooldown elapsed → discard the failed pool (fire-and-forget shutdown of
-      // its dead worker) so getProvider() spawns a FRESH worker — a new init
-      // attempt — on the next embed.
-      localInitRetryAt = 0;
-      void resetProvider();
+      // Cooldown elapsed: report available so the next embed can enter the
+      // pool, which admits exactly one fresh recovery slot and clears the arm.
     }
   }
   return true;
@@ -2192,7 +2360,13 @@ export function embeddingStatus(): EmbeddingHealth {
     };
   }
   if (provider instanceof EmbeddingPool) {
-    if (localProviderKnownUnavailable()) {
+    if (
+      localProviderKnownUnavailable() &&
+      !(
+        localProviderFailureCause === "transient-init-exhausted" &&
+        provider.hasHealthySlot()
+      )
+    ) {
       return {
         available: false,
         state: "unavailable",
@@ -2202,6 +2376,15 @@ export function embeddingStatus(): EmbeddingHealth {
       };
     }
     if (localInitRetryAt > 0) {
+      if (provider.hasHealthySlot()) {
+        return {
+          available: true,
+          state: "ok",
+          provider: "local",
+          detail:
+            "local ONNX embeddings active on a healthy pool slot (failed slot retry pending)",
+        };
+      }
       // A transient init failure has a retry armed. This is a pure read, so —
       // unlike isAvailable() — we do NOT clear the deadline or trigger the
       // reset here; the provider is not confirmed healthy until a later embed
