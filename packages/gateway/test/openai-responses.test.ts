@@ -701,6 +701,7 @@ describe("parseOpenAIResponsesRequest", () => {
         previous_response_id: "resp_abc123",
         reasoning: { effort: "high" },
         truncation: "auto",
+        provider: { only: ["google-vertex/europe"], allow_fallbacks: false },
       },
       headers,
     );
@@ -708,6 +709,10 @@ describe("parseOpenAIResponsesRequest", () => {
     expect(req.extras?.previous_response_id).toBe("resp_abc123");
     expect(req.extras?.reasoning).toEqual({ effort: "high" });
     expect(req.extras?.truncation).toBe("auto");
+    expect(req.extras?.provider).toEqual({
+      only: ["google-vertex/europe"],
+      allow_fallbacks: false,
+    });
   });
 
   test("parses message with content array (input_text parts)", () => {
@@ -761,16 +766,17 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
         stream: true,
         max_output_tokens: 2048,
         temperature: 0.5,
+        provider: { only: ["google-vertex/europe"] },
       },
       { authorization: "Bearer sk-test" },
     );
 
     const result = buildOpenAIResponsesUpstreamRequest(
       req,
-      "https://api.openai.com",
+      "https://openrouter.ai/api",
     );
 
-    expect(result.url).toBe("https://api.openai.com/v1/responses");
+    expect(result.url).toBe("https://openrouter.ai/api/v1/responses");
     expect(result.headers["content-type"]).toBe("application/json");
     expect(result.headers.Authorization).toBe("Bearer sk-test");
 
@@ -780,7 +786,47 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(body.instructions).toBe("Be helpful");
     expect(body.max_output_tokens).toBe(2048);
     expect(body.temperature).toBe(0.5);
+    expect(body.provider).toEqual({ only: ["google-vertex/europe"] });
     expect(Array.isArray(body.input)).toBe(true);
+  });
+
+  test("does not forward OpenRouter provider options to another provider", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5-mini",
+        input: "Hello",
+        provider: { only: ["must-not-leak"] },
+      },
+      { "x-lore-provider": "openai" },
+    );
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as Record<string, unknown>;
+
+    expect(Object.hasOwn(body, "provider")).toBe(false);
+  });
+
+  test.each([
+    ["explicit null", null],
+    ["empty object", {}],
+  ])("preserves %s OpenRouter provider values", (_label, provider) => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "anthropic/claude-sonnet-4-6",
+        input: "Hello",
+        provider,
+      },
+      {},
+    );
+    req.metadata.provider = { only: ["stale-metadata-provider"] };
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://openrouter.ai/api",
+    ).body as Record<string, unknown>;
+    expect(Object.hasOwn(body, "provider")).toBe(true);
+    expect(body.provider).toEqual(provider);
   });
 
   test("round-trips tool definitions", () => {

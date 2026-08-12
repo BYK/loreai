@@ -12,7 +12,11 @@
  * placeholders).
  */
 import { describe, test, expect } from "vitest";
-import { parseOpenAIRequest } from "../src/translate/openai";
+import {
+  buildOpenAIUpstreamRequest,
+  parseOpenAIRequest,
+} from "../src/translate/openai";
+import { parseAnthropicRequest } from "../src/translate/anthropic";
 import {
   loreMessagesToGateway,
   removeOrphanedToolResults,
@@ -338,5 +342,111 @@ describe("parseOpenAIRequest — tool message coalescing", () => {
     );
     if (!assistant) throw new Error("expected assistant message");
     expect(toolUseIds(assistant.content).sort()).toEqual(["call_A", "call_B"]);
+  });
+});
+
+describe("OpenAI provider routing passthrough", () => {
+  test("preserves OpenRouter provider preferences in the upstream body", () => {
+    const provider = {
+      only: ["google-vertex/europe", "amazon-bedrock/eu-west-1"],
+      allow_fallbacks: false,
+    };
+    const req = parseOpenAIRequest(
+      {
+        model: "anthropic/claude-sonnet-4-6",
+        messages: [{ role: "user", content: "Hello" }],
+        provider,
+      },
+      headers,
+    );
+
+    expect(req.extras?.provider).toEqual(provider);
+    const body = buildOpenAIUpstreamRequest(req, "https://openrouter.ai/api/v1")
+      .body as Record<string, unknown>;
+    expect(body.provider).toEqual(provider);
+  });
+
+  test("preserves provider preferences when translating Anthropic ingress", () => {
+    const provider = {
+      only: ["google-vertex/europe"],
+      allow_fallbacks: false,
+    };
+    const req = parseAnthropicRequest(
+      {
+        model: "anthropic/claude-sonnet-4-6",
+        max_tokens: 4096,
+        messages: [{ role: "user", content: "Hello" }],
+        provider,
+      },
+      headers,
+    );
+
+    const body = buildOpenAIUpstreamRequest(req, "https://openrouter.ai/api/v1")
+      .body as Record<string, unknown>;
+    expect(body.provider).toEqual(provider);
+  });
+
+  test.each([
+    ["explicit null", null],
+    ["empty object", {}],
+  ])(
+    "preserves %s provider values by property presence",
+    (_label, provider) => {
+      const req = parseOpenAIRequest(
+        {
+          model: "anthropic/claude-sonnet-4-6",
+          messages: [{ role: "user", content: "Hello" }],
+          provider,
+        },
+        headers,
+      );
+      req.metadata.provider = { only: ["stale-metadata-provider"] };
+
+      const body = buildOpenAIUpstreamRequest(
+        req,
+        "https://openrouter.ai/api/v1",
+      ).body as Record<string, unknown>;
+      expect(Object.hasOwn(body, "provider")).toBe(true);
+      expect(body.provider).toEqual(provider);
+    },
+  );
+
+  test.each([
+    ["explicit null", null],
+    ["empty object", {}],
+  ])(
+    "preserves Anthropic-ingress %s provider values when forwarding to OpenAI",
+    (_label, provider) => {
+      const req = parseAnthropicRequest(
+        {
+          model: "anthropic/claude-sonnet-4-6",
+          max_tokens: 4096,
+          messages: [{ role: "user", content: "Hello" }],
+          provider,
+        },
+        headers,
+      );
+      const body = buildOpenAIUpstreamRequest(
+        req,
+        "https://openrouter.ai/api/v1",
+      ).body as Record<string, unknown>;
+      expect(Object.hasOwn(body, "provider")).toBe(true);
+      expect(body.provider).toEqual(provider);
+    },
+  );
+
+  test("does not forward OpenRouter provider options to another provider", () => {
+    const req = parseOpenAIRequest(
+      {
+        model: "deepseek-chat",
+        messages: [{ role: "user", content: "Hello" }],
+        provider: { only: ["must-not-leak"] },
+      },
+      { ...headers, "x-lore-provider": "deepseek" },
+    );
+    const body = buildOpenAIUpstreamRequest(req, "https://api.deepseek.com")
+      .body as Record<string, unknown>;
+
+    expect(Object.hasOwn(body, "provider")).toBe(false);
   });
 });

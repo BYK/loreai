@@ -108,6 +108,8 @@ import {
   isEmptyCompletion,
   looksLikeSSE,
   forwardClientHeaders,
+  providerRoutingValue,
+  requestTargetsOpenRouter,
   ZERO_USAGE,
 } from "./translate/types";
 import type { GatewayConfig } from "./config";
@@ -225,8 +227,11 @@ import {
   deterministicID,
 } from "./temporal-adapter";
 import {
+  canonicalWorkerProviderID,
   createGatewayLLMClient,
   disjointOpenAIInputTokens,
+  workerProviderSupportsProtocol,
+  type GatewayPromptOptions,
 } from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
 import {
@@ -252,9 +257,9 @@ import { flushPendingImport } from "./pending-import";
 import { upstreamErrorHint } from "./upstream-error-hint";
 import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
+import { hasWorkerSessionAuth } from "./worker-auth";
 import {
   makeWorkerHealth,
-  recordWorkerFailure,
   allowWorkerProbe,
   isWorkerCreditPaused,
   getDegradationWarning,
@@ -599,6 +604,20 @@ function containsGitCommit(req: GatewayRequest): boolean {
 
 /** Active upstream interceptor — used for recording/replay. */
 let activeInterceptor: UpstreamInterceptor | undefined;
+/** Monotonic request-start order for concurrency-safe upstream snapshots. */
+let upstreamRequestOrder = 0;
+/** Test-only seam for forcing adversarial request ordering before capture. */
+let beforeUpstreamCaptureForTest:
+  | ((req: GatewayRequest, state: SessionState) => Promise<void>)
+  | undefined;
+
+export function setBeforeUpstreamCaptureForTest(
+  hook:
+    | ((req: GatewayRequest, state: SessionState) => Promise<void>)
+    | undefined,
+): void {
+  beforeUpstreamCaptureForTest = hook;
+}
 
 /**
  * Set (or clear) the module-level upstream interceptor.
@@ -671,6 +690,7 @@ export async function resetPipelineState(opts?: {
   }
   llmClient = null;
   activeInterceptor = undefined;
+  beforeUpstreamCaptureForTest = undefined;
   if (stopFileWatcher) {
     stopFileWatcher();
     stopFileWatcher = null;
@@ -3193,78 +3213,6 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       },
     );
 
-    // Workers always use the same provider as the session. Route worker
-    // calls through the session's upstream URL and wire protocol so they
-    // use the session's credentials, endpoint, and request format. The
-    // protocol from the UpstreamSnapshot is the source of truth — it was
-    // resolved at conversation-turn time and correctly handles aggregator
-    // providers (e.g. OpenCode Zen) whose route has protocol=null.
-    //
-    // When a dedicated worker API key is set (LORE_WORKER_API_KEY), skip
-    // injection — the worker uses its own credentials and default upstream.
-    //
-    // CROSS-PROVIDER GUARD: The model was resolved at idle-handler start
-    // from state.lastUpstream, but the URL is resolved HERE (lazily) from
-    // the CURRENT state.lastUpstream. If the user switched providers
-    // between those two points, the model and URL come from different
-    // providers → 404. Detect this and re-resolve the worker model from
-    // the current upstream. See: LOREAI-GATEWAY-2A.
-    const inner: LLMClient = {
-      async prompt(system, user, opts) {
-        if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
-          const state = sessions.get(opts.sessionID);
-          if (state?.lastUpstream?.url) {
-            // Cross-provider guard: if the model's provider doesn't match
-            // the current upstream provider, re-resolve to avoid sending
-            // e.g. MiniMax-M3 to api.anthropic.com.
-            //
-            // When opts.model is undefined, the rawClient will use
-            // defaultModel (hardcoded at construction time, typically
-            // Anthropic). We must also guard against THAT mismatch —
-            // otherwise an unknown-provider session (MiniMax, xAI, etc.)
-            // gets the Anthropic defaultModel sent to its upstream URL.
-            let effectiveOpts = opts;
-            const modelProvider =
-              opts?.model?.providerID ?? defaultModel.providerID;
-            const upstreamProvider = state.lastUpstream.providerID;
-            if (upstreamProvider && modelProvider !== upstreamProvider) {
-              const reResolved = getWorkerModel(state.lastUpstream);
-              if (reResolved) {
-                effectiveOpts = { ...opts, model: reResolved };
-              } else {
-                // Can't resolve a valid worker model for the current
-                // provider — skip this call rather than send cross-provider.
-                log.warn(
-                  `worker cross-provider guard: model=${modelProvider}/${opts?.model?.modelID ?? defaultModel.modelID} vs upstream=${upstreamProvider} — skipping (worker=${opts?.workerID ?? "unknown"}, session=${opts.sessionID})`,
-                );
-                recordWorkerFailure(
-                  opts.sessionID,
-                  opts?.workerID ?? "unknown",
-                  "cross-provider",
-                );
-                return null;
-              }
-            }
-            // Thread the session's provider so the adapter can enforce
-            // cross-provider safety: it only honors `upstreamUrl` when the
-            // (possibly re-resolved) worker model's provider matches
-            // `upstreamProviderID`. If a configured `workerModel` re-resolves
-            // to a DIFFERENT provider than the session (the production
-            // minimax-on-Anthropic case), the adapter routes by the worker
-            // model's own provider route — or fails closed if it has none —
-            // instead of sending it to the session's foreign endpoint.
-            return rawClient.prompt(system, user, {
-              ...effectiveOpts,
-              upstreamUrl: state.lastUpstream.url,
-              upstreamProviderID: upstreamProvider,
-              protocol: state.lastUpstream.protocol,
-            });
-          }
-        }
-        return rawClient.prompt(system, user, opts);
-      },
-    };
-
     // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
     // Enabled by default — disable via LORE_BATCH_DISABLED=1.
     /**
@@ -3280,20 +3228,66 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     if (Sentry.isInitialized()) {
       Sentry.setTag("batch_enabled", String(!batchDisabled));
     }
-    if (batchDisabled) {
-      llmClient = inner;
-      batchQueueEnabled = false;
-    } else {
-      llmClient = createBatchLLMClient(
-        inner,
-        workerUpstreams,
-        getWorkerAuth,
-        defaultModel,
-      );
-      batchQueueEnabled = true;
+    const dispatchClient = batchDisabled
+      ? rawClient
+      : createBatchLLMClient(
+          rawClient,
+          workerUpstreams,
+          getWorkerAuth,
+          defaultModel,
+        );
+    batchQueueEnabled = !batchDisabled;
+
+    // Resolve routing BEFORE the batch client sees opts. Batch enqueue chooses
+    // provider, model, auth, and grouping immediately; wrapping it on the inside
+    // would queue stale/default opts and only correct them during sync fallback.
+    // Current session state is authoritative over a caller's stale opts.model.
+    const routedClient: LLMClient & {
+      shutdown?: (options?: { drainQueue?: boolean }) => Promise<void>;
+      stats?: () => unknown;
+    } = {
+      async prompt(system, user, opts) {
+        if (!opts?.sessionID || opts.upstreamUrl) {
+          return dispatchClient.prompt(system, user, opts);
+        }
+        const state = sessions.get(opts.sessionID);
+        const effectiveModel =
+          (state ? getWorkerModel(state.lastUpstream) : undefined) ??
+          opts.model ??
+          defaultModel;
+        const snapshot = state
+          ? matchingProviderSnapshot(state, effectiveModel.providerID)
+          : undefined;
+        const effectiveOpts: GatewayPromptOptions = {
+          ...opts,
+          model: effectiveModel,
+        };
+        if (
+          snapshot?.providerOptions &&
+          canonicalWorkerProviderID(effectiveModel.providerID) === "openrouter"
+        ) {
+          effectiveOpts.providerOptions = snapshot.providerOptions;
+        }
+        if (!workerApiKey && snapshot?.url && snapshot.providerID) {
+          effectiveOpts.upstreamUrl = snapshot.url;
+          effectiveOpts.upstreamProviderID = snapshot.providerID;
+          effectiveOpts.protocol = snapshot.protocol;
+        }
+        return dispatchClient.prompt(system, user, effectiveOpts);
+      },
+    };
+    if ("shutdown" in dispatchClient && "stats" in dispatchClient) {
+      routedClient.shutdown = (options) => dispatchClient.shutdown(options);
+      routedClient.stats = () => dispatchClient.stats();
     }
+    llmClient = routedClient;
   }
   return llmClient;
+}
+
+/** Test-only access to the fully wrapped gateway worker client. */
+export function getLLMClientForTest(config: GatewayConfig): LLMClient {
+  return getLLMClient(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -3664,6 +3658,283 @@ function syntheticToolUseResponse(
 // Session management helpers
 // ---------------------------------------------------------------------------
 
+const UPSTREAM_STATE_VERSION = 2;
+const MAX_UPSTREAM_SNAPSHOTS_PER_SESSION = 16;
+const MAX_PROVIDER_OPTIONS_BYTES = 64 * 1024;
+const UPSTREAM_PROTOCOLS = new Set<UpstreamSnapshot["protocol"]>([
+  "anthropic",
+  "openai",
+  "openai-responses",
+  "vertex",
+  "gemini",
+]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function freezeRecursively<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
+    return value;
+  }
+  for (const child of Object.values(value)) freezeRecursively(child);
+  return Object.freeze(value);
+}
+
+function freezeUpstreamSnapshot(snapshot: UpstreamSnapshot): UpstreamSnapshot {
+  const providerOptions = snapshot.providerOptions
+    ? freezeRecursively(structuredClone(snapshot.providerOptions))
+    : undefined;
+  return Object.freeze({
+    ...snapshot,
+    headers: Object.freeze({ ...snapshot.headers }),
+    ...(providerOptions ? { providerOptions } : {}),
+  });
+}
+
+function validatedUpstreamSnapshot(value: unknown): UpstreamSnapshot | null {
+  if (!isPlainRecord(value)) return null;
+  if (typeof value.url !== "string") return null;
+  if (!UPSTREAM_PROTOCOLS.has(value.protocol as UpstreamSnapshot["protocol"])) {
+    return null;
+  }
+  if (typeof value.model !== "string" || value.model.length === 0) return null;
+  if (
+    value.providerID !== undefined &&
+    (typeof value.providerID !== "string" || value.providerID.length === 0)
+  ) {
+    return null;
+  }
+  if (
+    !isPlainRecord(value.headers) ||
+    !Object.values(value.headers).every((header) => typeof header === "string")
+  ) {
+    return null;
+  }
+  if (
+    Object.hasOwn(value, "providerOptions") &&
+    !isPlainRecord(value.providerOptions)
+  ) {
+    return null;
+  }
+  return freezeUpstreamSnapshot({
+    url: value.url,
+    protocol: value.protocol as UpstreamSnapshot["protocol"],
+    ...(value.providerID ? { providerID: value.providerID } : {}),
+    model: value.model,
+    headers: value.headers as Record<string, string>,
+    ...(isPlainRecord(value.providerOptions)
+      ? { providerOptions: value.providerOptions }
+      : {}),
+  });
+}
+
+function providersEquivalent(left: string, right: string): boolean {
+  return canonicalWorkerProviderID(left) === canonicalWorkerProviderID(right);
+}
+
+function matchingProviderSnapshot(
+  state: SessionState,
+  providerID: string,
+): UpstreamSnapshot | undefined {
+  const direct = state.upstreamByProvider.get(providerID);
+  if (direct?.providerID === providerID) return direct;
+  for (const snapshot of state.upstreamByProvider.values()) {
+    if (
+      snapshot.providerID &&
+      providersEquivalent(snapshot.providerID, providerID) &&
+      workerProviderSupportsProtocol(providerID, snapshot.protocol)
+    ) {
+      return snapshot;
+    }
+  }
+  return undefined;
+}
+
+/** Test-only visibility into protocol-aware alias selection. */
+export function matchingProviderSnapshotForTest(
+  state: SessionState,
+  providerID: string,
+): UpstreamSnapshot | undefined {
+  return matchingProviderSnapshot(state, providerID);
+}
+
+function serializeUpstreamState(state: SessionState): string {
+  const stripHeaders = (snapshot: UpstreamSnapshot) => ({
+    ...snapshot,
+    headers: {},
+  });
+  const upstreamByProvider: Record<string, unknown> = Object.create(null);
+  for (const [providerID, snapshot] of state.upstreamByProvider) {
+    upstreamByProvider[providerID] = stripHeaders(snapshot);
+  }
+  return JSON.stringify({
+    version: UPSTREAM_STATE_VERSION,
+    ...(state.lastUpstream
+      ? { lastUpstream: stripHeaders(state.lastUpstream) }
+      : {}),
+    upstreamByProvider,
+  });
+}
+
+function deserializeUpstreamState(serialized: string): {
+  lastUpstream?: UpstreamSnapshot;
+  upstreamByProvider: Map<string, UpstreamSnapshot>;
+} {
+  const parsed = JSON.parse(serialized) as unknown;
+  const legacy = validatedUpstreamSnapshot(parsed);
+  if (legacy) {
+    return {
+      lastUpstream: legacy,
+      upstreamByProvider: new Map(
+        legacy.providerID ? [[legacy.providerID, legacy]] : [],
+      ),
+    };
+  }
+  if (
+    !isPlainRecord(parsed) ||
+    parsed.version !== UPSTREAM_STATE_VERSION ||
+    !isPlainRecord(parsed.upstreamByProvider)
+  ) {
+    throw new Error("invalid persisted upstream state");
+  }
+
+  const upstreamByProvider = new Map<string, UpstreamSnapshot>();
+  for (const [providerID, rawSnapshot] of Object.entries(
+    parsed.upstreamByProvider,
+  )) {
+    const snapshot = validatedUpstreamSnapshot(rawSnapshot);
+    if (
+      providerID.length === 0 ||
+      !snapshot?.providerID ||
+      providerID !== snapshot.providerID
+    ) {
+      throw new Error("invalid persisted provider upstream snapshot");
+    }
+    upstreamByProvider.set(providerID, snapshot);
+  }
+
+  let lastUpstream: UpstreamSnapshot | undefined;
+  if (Object.hasOwn(parsed, "lastUpstream")) {
+    lastUpstream = validatedUpstreamSnapshot(parsed.lastUpstream) ?? undefined;
+    if (!lastUpstream) throw new Error("invalid persisted last upstream");
+    const lastProviderID = lastUpstream.providerID;
+    if (lastProviderID) {
+      const providerSnapshot = upstreamByProvider.get(lastProviderID);
+      if (
+        !providerSnapshot ||
+        providerSnapshot.url !== lastUpstream.url ||
+        providerSnapshot.protocol !== lastUpstream.protocol ||
+        providerSnapshot.model !== lastUpstream.model ||
+        JSON.stringify(providerSnapshot.providerOptions) !==
+          JSON.stringify(lastUpstream.providerOptions)
+      ) {
+        throw new Error("inconsistent persisted last upstream");
+      }
+    }
+  }
+  return { lastUpstream, upstreamByProvider };
+}
+
+function buildRequestUpstreamSnapshot(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  route: ResolvedRequestUpstreamRoute,
+): UpstreamSnapshot {
+  const providerRouting = providerRoutingValue(req);
+  const providerOptions =
+    !req.codex &&
+    requestTargetsOpenRouter(req, route.effectiveUpstreamBase) &&
+    providerRouting.present &&
+    isPlainRecord(providerRouting.value)
+      ? providerRouting.value
+      : undefined;
+  if (
+    providerOptions &&
+    Buffer.byteLength(JSON.stringify(providerOptions)) >
+      MAX_PROVIDER_OPTIONS_BYTES
+  ) {
+    throw new Error(
+      `OpenRouter provider routing options exceed ${MAX_PROVIDER_OPTIONS_BYTES} bytes`,
+    );
+  }
+  const snapshot: UpstreamSnapshot = {
+    url: route.effectiveUpstreamBase,
+    protocol: route.effectiveProtocol,
+    ...(route.providerID ? { providerID: route.providerID } : {}),
+    model: req.model,
+    headers: forwardClientHeaders(req.rawHeaders),
+    ...(providerOptions ? { providerOptions } : {}),
+  };
+  applyUpstreamExtraHeaders(snapshot.headers, config.upstreamExtraHeaders);
+  return freezeUpstreamSnapshot(snapshot);
+}
+
+/**
+ * Capture request routing before awaiting the upstream. Failed tightening
+ * requests remain authoritative, while request-start order prevents an older
+ * concurrent turn from rolling back a newer policy when it resumes later.
+ */
+function captureRequestUpstream(
+  req: GatewayRequest,
+  state: SessionState,
+  config: GatewayConfig,
+  requestOrder: number,
+): ResolvedRequestUpstreamRoute {
+  const route = resolveRequestUpstreamRoute(req, config);
+  const snapshot = buildRequestUpstreamSnapshot(req, config, route);
+  let changed = false;
+
+  if (requestOrder >= (state._upstreamRequestOrder ?? 0)) {
+    const previous = state.lastUpstream;
+    if (
+      previous &&
+      (previous.model !== snapshot.model ||
+        previous.providerID !== snapshot.providerID)
+    ) {
+      state.cacheAnalytics.lastRequestBody = null;
+    }
+    state.lastUpstream = snapshot;
+    state._upstreamRequestOrder = requestOrder;
+    changed = true;
+  }
+
+  if (snapshot.providerID) {
+    state._upstreamRequestOrderByProvider ??= new Map();
+    const previousOrder =
+      state._upstreamRequestOrderByProvider.get(snapshot.providerID) ?? 0;
+    if (requestOrder >= previousOrder) {
+      if (
+        !state.upstreamByProvider.has(snapshot.providerID) &&
+        state.upstreamByProvider.size >= MAX_UPSTREAM_SNAPSHOTS_PER_SESSION
+      ) {
+        const oldestProviderID = state.upstreamByProvider.keys().next().value;
+        if (oldestProviderID !== undefined) {
+          state.upstreamByProvider.delete(oldestProviderID);
+          state._upstreamRequestOrderByProvider.delete(oldestProviderID);
+        }
+      }
+      state.upstreamByProvider.set(snapshot.providerID, snapshot);
+      state._upstreamRequestOrderByProvider.set(
+        snapshot.providerID,
+        requestOrder,
+      );
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    saveSessionTracking(state.sessionID, {
+      lastUpstream: serializeUpstreamState(state),
+    });
+  }
+  return route;
+}
+
 function getOrCreateSession(
   sessionID: string,
   projectPath: string,
@@ -3805,35 +4076,9 @@ function getOrCreateSession(
     }
     if (persisted?.lastUpstream != null) {
       try {
-        const parsed = JSON.parse(persisted.lastUpstream) as unknown;
-        if (
-          parsed &&
-          typeof parsed === "object" &&
-          typeof (parsed as UpstreamSnapshot).url === "string" &&
-          [
-            "anthropic",
-            "openai",
-            "openai-responses",
-            "vertex",
-            "gemini",
-          ].includes((parsed as UpstreamSnapshot).protocol) &&
-          typeof (parsed as UpstreamSnapshot).model === "string" &&
-          (parsed as UpstreamSnapshot).model.length > 0 &&
-          (parsed as UpstreamSnapshot).headers &&
-          typeof (parsed as UpstreamSnapshot).headers === "object" &&
-          !Array.isArray((parsed as UpstreamSnapshot).headers) &&
-          Object.values((parsed as UpstreamSnapshot).headers).every(
-            (value) => typeof value === "string",
-          )
-        ) {
-          state.lastUpstream = parsed as UpstreamSnapshot;
-          if (state.lastUpstream.providerID) {
-            state.upstreamByProvider.set(
-              state.lastUpstream.providerID,
-              state.lastUpstream,
-            );
-          }
-        }
+        const restored = deserializeUpstreamState(persisted.lastUpstream);
+        state.lastUpstream = restored.lastUpstream;
+        state.upstreamByProvider = restored.upstreamByProvider;
       } catch {
         log.warn(
           `corrupt last upstream for session ${sessionID.slice(0, 16)}, ignoring`,
@@ -4453,6 +4698,104 @@ async function identifySession(
 // Upstream forwarding
 // ---------------------------------------------------------------------------
 
+type EffectiveUpstreamProtocol = UpstreamSnapshot["protocol"];
+
+type ResolvedRequestUpstreamRoute = {
+  /** Explicit, sanitized X-Lore-Provider value (not inferred signals). */
+  providerHeader?: string;
+  /** Provider identity actually selected, including Copilot inference. */
+  providerID?: string;
+  headerUpstream?: string;
+  headerUpstreamPath?: string;
+  providerRoute: ReturnType<typeof resolveProviderRoute>;
+  modelRoute: ReturnType<typeof resolveUpstreamRoute>;
+  effectiveProtocol: EffectiveUpstreamProtocol;
+  effectiveUpstreamBase: string;
+  bedrockMantle: boolean;
+};
+
+/**
+ * Single source of truth for foreground routing and its durable snapshot.
+ * This is deliberately synchronous: dynamic models.dev lookup is cache-only,
+ * so capture can run before any fetch/interceptor and failed requests still
+ * retain the exact route intent used by forwardToUpstream.
+ */
+function resolveRequestUpstreamRoute(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): ResolvedRequestUpstreamRoute {
+  const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
+  const headerUpstreamPath = extractUpstreamPathHeader(req.rawHeaders);
+  const providerHeader = extractProviderHeader(req.rawHeaders);
+  let providerID = providerHeader;
+  let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
+  if (!providerRoute && providerID) {
+    providerRoute = lookupProviderRoute(providerID);
+  }
+  if (
+    !providerRoute &&
+    !headerUpstream &&
+    hasCopilotIntegrationHeader(req.rawHeaders)
+  ) {
+    providerID = "github-copilot";
+    providerRoute = resolveProviderRoute(providerID);
+  }
+  const modelRoute = resolveUpstreamRoute(req.model);
+  const selfUrlBuildingProtocol =
+    providerRoute?.bedrockMantle === true ||
+    providerRoute?.protocol === "vertex";
+  const providerRouteUsable =
+    providerRoute &&
+    (providerRoute.url != null || headerUpstream || selfUrlBuildingProtocol)
+      ? providerRoute
+      : null;
+  const nativeIngressAnthropicOverride =
+    providerHeader != null && providerRouteUsable?.protocol === "anthropic";
+  const effectiveProtocol: EffectiveUpstreamProtocol =
+    req.protocol === "openai-responses"
+      ? nativeIngressAnthropicOverride
+        ? "anthropic"
+        : "openai-responses"
+      : req.protocol === "gemini"
+        ? nativeIngressAnthropicOverride
+          ? "anthropic"
+          : "gemini"
+        : (providerRouteUsable?.protocol ??
+          modelRoute?.protocol ??
+          req.protocol);
+  const bedrockMantle = isBedrockMantleDispatch(
+    providerRouteUsable,
+    effectiveProtocol,
+  );
+  const selfBuiltUpstreamUrl = bedrockMantle
+    ? bedrockMantleUrl(config.bedrockRegion)
+    : effectiveProtocol === "vertex"
+      ? `https://${vertexHost(config.vertexRegion)}`
+      : null;
+  const effectiveUpstreamBase =
+    headerUpstream ??
+    selfBuiltUpstreamUrl ??
+    providerRoute?.url ??
+    modelRoute?.url ??
+    (effectiveProtocol === "anthropic"
+      ? config.upstreamAnthropic
+      : effectiveProtocol === "gemini"
+        ? GEMINI_DEFAULT_UPSTREAM
+        : config.upstreamOpenAI);
+
+  return {
+    providerHeader,
+    providerID,
+    headerUpstream,
+    headerUpstreamPath,
+    providerRoute,
+    modelRoute,
+    effectiveProtocol,
+    effectiveUpstreamBase,
+    bedrockMantle,
+  };
+}
+
 /** Result from forwardToUpstream — includes the serialized body for cache analytics. */
 type UpstreamResult = {
   response: Response;
@@ -4483,131 +4826,24 @@ async function forwardToUpstream(
   interceptor?: UpstreamInterceptor,
   cache?: AnthropicCacheOptions,
   signal?: AbortSignal,
+  resolvedRoute?: ResolvedRequestUpstreamRoute,
 ): Promise<UpstreamResult> {
   let url: string;
   let headers: Record<string, string>;
   let body: unknown;
 
-  // Resolve upstream URL and protocol via a four-tier priority chain:
-  //   1. X-Lore-Upstream-URL header  (explicit user override)
-  //   2. X-Lore-Provider header      (plugin identifies the provider)
-  //      a. Static PROVIDER_ROUTES table (fast, no network)
-  //      b. Dynamic models.dev lookup  (async, cached 1h, covers new providers)
-  //   3. Model prefix route           (fallback for bare agents like Claude Code)
-  //   4. Config defaults              (upstreamAnthropic / upstreamOpenAI)
-  // Preserve "openai-responses" from ingress — model prefix routing returns
-  // "openai" for OpenAI models, but we must not downgrade the wire protocol.
-  const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
-  // The client's ORIGINAL endpoint pathname (set by the fetch interceptor), used
-  // below to forward verbatim instead of synthesizing a canonical `/v1/...` path.
-  const headerUpstreamPath = extractUpstreamPathHeader(req.rawHeaders);
-  const providerID = extractProviderHeader(req.rawHeaders);
-  let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
-  // Dynamic fallback: look up unknown providers from models.dev cache.
-  // Non-blocking — returns cached data or null (triggers background refresh).
-  if (!providerRoute && providerID) {
-    providerRoute = lookupProviderRoute(providerID);
-  }
-  // GitHub Copilot CLI (default GitHub-hosted mode) is redirected at the gateway
-  // via COPILOT_API_URL. It sends OpenAI-format requests with its own exchanged
-  // Copilot bearer token and a `Copilot-Integration-Id` header, but has no way to
-  // set X-Lore-Provider — so its model ids (gpt-*, claude-*, gemini-*) would route
-  // by model prefix to the WRONG upstream (api.openai.com / api.anthropic.com).
-  // Treat the integration header as the routing signal → github-copilot upstream
-  // (api.githubcopilot.com). Explicit X-Lore-Provider and X-Lore-Upstream-URL
-  // (incl. BYOK, where the user points COPILOT_PROVIDER_BASE_URL at the gateway)
-  // still win, since both set providerRoute / headerUpstream first.
-  if (
-    !providerRoute &&
-    !headerUpstream &&
-    hasCopilotIntegrationHeader(req.rawHeaders)
-  ) {
-    providerRoute = resolveProviderRoute("github-copilot");
-  }
-  const modelRoute = resolveUpstreamRoute(req.model);
-
-  // Only use provider route protocol when we also have a usable URL from it
-  // (either providerRoute.url or headerUpstream). When url is null (local/
-  // custom providers like vllm, github-copilot), the protocol should come
-  // from whichever tier actually provides the URL to avoid mismatches.
-  //
-  // EXCEPTION: self-URL-building routes are usable with a null url and no
-  // X-Lore-Upstream-URL because they build a region-specific base from config:
-  //   - bedrock-mantle: `bedrock-mantle.<region>.api.aws/anthropic` (Anthropic
-  //     protocol — only the base URL + model id differ from native Anthropic);
-  //   - vertex: `<region>-aiplatform.googleapis.com` (part 2, not yet wired).
-  // Without this, `X-Lore-Provider: bedrock` would fall through to the model-
-  // prefix route (api.anthropic.com for claude-* IDs) and silently bypass it.
-  const selfUrlBuildingProtocol =
-    providerRoute?.bedrockMantle === true ||
-    providerRoute?.protocol === "vertex";
-  const providerRouteUsable =
-    providerRoute &&
-    (providerRoute.url != null || headerUpstream || selfUrlBuildingProtocol)
-      ? providerRoute
-      : null;
-
-  // Protocol resolution: provider routes with `protocol: null` are proxy/
-  // aggregator providers (OpenCode Zen, Vercel AI Gateway) that accept
-  // whichever protocol the client sent — preserve the ingress protocol.
-  // Direct providers (DeepSeek, Groq, etc.) specify their protocol explicitly
-  // so the gateway can translate (e.g., Claude Code → OpenAI-only backend).
-  const nativeIngressAnthropicOverride =
-    providerID != null && providerRouteUsable?.protocol === "anthropic";
-  const effectiveProtocol =
-    req.protocol === "openai-responses"
-      ? nativeIngressAnthropicOverride
-        ? "anthropic"
-        : "openai-responses"
-      : req.protocol === "gemini"
-        ? // A native Gemini ingress normally stays gemini. The provider route still
-          // supplies the upstream URL (e.g. X-Lore-Provider: google →
-          // generativelanguage), but its protocol must not downgrade a native
-          // generateContent request: the `gemini-` model-prefix route and the
-          // `google` provider route are both the OpenAI-compat layer
-          // (protocol "openai"), which would wrongly re-translate to Chat
-          // Completions. opencode/pi's @ai-sdk/google speaks native generateContent.
-          // An explicit Anthropic-wire provider is the narrow exception: meta
-          // calls use the strict Anthropic→Gemini translator below.
-          nativeIngressAnthropicOverride
-          ? "anthropic"
-          : "gemini"
-        : (providerRouteUsable?.protocol ??
-          modelRoute?.protocol ??
-          req.protocol);
-
-  // Self-URL-building routes derive their base from config (region), not from
-  // the route tables. This must take precedence over `modelRoute?.url`: a
-  // claude-* model ID resolves to api.anthropic.com via the model-prefix route,
-  // which would otherwise mask the real Bedrock/Vertex base. For bedrock-mantle
-  // the base is the regional mantle endpoint and the wire protocol stays
-  // `anthropic` (so the normal Anthropic path handles it; only body.model is
-  // remapped below). An explicit X-Lore-Upstream-URL header still wins.
-  // bedrock-mantle ALWAYS rides the anthropic wire path (the model remap below
-  // lives only in the anthropic branch). Shared with the snapshot path so the
-  // two can never diverge; see isBedrockMantleDispatch for the invariant.
-  const bedrockMantle = isBedrockMantleDispatch(
-    providerRouteUsable,
+  const route = resolvedRoute ?? resolveRequestUpstreamRoute(req, config);
+  const {
+    providerHeader,
+    providerID,
+    headerUpstream,
+    headerUpstreamPath,
+    providerRoute,
+    modelRoute,
     effectiveProtocol,
-  );
-  const selfBuiltUpstreamUrl = bedrockMantle
-    ? bedrockMantleUrl(config.bedrockRegion)
-    : effectiveProtocol === "vertex"
-      ? `https://${vertexHost(config.vertexRegion)}`
-      : null;
-  const effectiveUpstreamBase =
-    headerUpstream ??
-    selfBuiltUpstreamUrl ??
-    providerRoute?.url ??
-    modelRoute?.url ??
-    (effectiveProtocol === "anthropic"
-      ? config.upstreamAnthropic
-      : effectiveProtocol === "gemini"
-        ? // Native Gemini default upstream (Generative Language API). `gemini-*`
-          // models resolve this via modelRoute.url already; this covers a native
-          // gemini ingress whose model id doesn't match the `gemini-` prefix.
-          GEMINI_DEFAULT_UPSTREAM
-        : config.upstreamOpenAI);
+    effectiveUpstreamBase,
+    bedrockMantle,
+  } = route;
 
   // Warn when a provider route exists but has no URL and no header override —
   // the request will fall through to config defaults which likely have wrong
@@ -4875,7 +5111,7 @@ async function forwardToUpstream(
     req.rawHeaders["content-encoding"],
     buildUpstreamRouteContext({
       upstreamUrlHeader: headerUpstream,
-      providerHeader: providerID,
+      providerHeader,
       ingressProtocol: req.protocol,
       effectiveProtocol,
       ingressUpstreamBase,
@@ -4974,6 +5210,7 @@ export function buildStreamingResponse(
     config: GatewayConfig;
     sessionState: SessionState;
     cacheOptions: AnthropicCacheOptions;
+    upstreamRoute?: ResolvedRequestUpstreamRoute;
     /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
      *  recall marker is emitted as its own Anthropic SSE message envelope
      *  (split) or as an inline synthetic text content block (which the
@@ -5495,6 +5732,7 @@ export function buildStreamingResponse(
                       cacheConversation: false,
                     },
                     signal,
+                    recallContext.upstreamRoute,
                   ),
                 // JSON parsing is unused on the streaming path (assertSSEResponse
                 // guarantees an SSE body); provide a guard that throws if reached.
@@ -9596,94 +9834,6 @@ function postResponse(
         }
       }
     }
-    // Capture the full routing snapshot from this request. Workers, cache
-    // warmer, and idle handler all read from this single source of truth
-    // instead of reconstructing from individual last* fields.
-    const lpProvider = extractProviderHeader(req.rawHeaders);
-    const lpRoute = lpProvider ? resolveProviderRoute(lpProvider) : null;
-    const lpHeaderUpstream = extractUpstreamUrlHeader(req.rawHeaders);
-    // MUST mirror `providerRouteUsable` in forwardToUpstream: self-URL-building
-    // routes (bedrock-mantle builds its region URL from config; vertex likewise)
-    // are usable with a null route url. Without this, a `X-Lore-Provider:
-    // bedrock` session would record the wrong base URL in the UpstreamSnapshot
-    // that workers/warmer/idle treat as source of truth.
-    const lpSelfUrlBuilding =
-      lpRoute?.bedrockMantle === true || lpRoute?.protocol === "vertex";
-    const lpRouteUsable =
-      lpRoute && (lpRoute.url != null || lpHeaderUpstream || lpSelfUrlBuilding)
-        ? lpRoute
-        : null;
-    const snapshotProtocol:
-      | "anthropic"
-      | "openai"
-      | "openai-responses"
-      | "vertex"
-      | "gemini" =
-      req.protocol === "openai-responses"
-        ? "openai-responses"
-        : req.protocol === "gemini"
-          ? // Mirror forwardToUpstream: native gemini ingress always stays gemini.
-            "gemini"
-          : (lpRouteUsable?.protocol ??
-            resolveUpstreamRoute(req.model)?.protocol ??
-            req.protocol);
-    // Mirror forwardToUpstream exactly (same shared predicate).
-    const lpBedrockMantle = isBedrockMantleDispatch(
-      lpRouteUsable,
-      snapshotProtocol,
-    );
-
-    // Self-URL-building routes derive their base from config (region) — mirror
-    // effectiveUpstreamBase so the snapshot url isn't empty/wrong. bedrock-mantle
-    // uses the regional mantle endpoint (wire protocol stays anthropic).
-    const lpSelfBuiltUrl = lpBedrockMantle
-      ? bedrockMantleUrl(config.bedrockRegion)
-      : snapshotProtocol === "vertex"
-        ? `https://${vertexHost(config.vertexRegion)}`
-        : null;
-
-    const upstreamSnapshot: UpstreamSnapshot = {
-      url: lpHeaderUpstream ?? lpSelfBuiltUrl ?? lpRoute?.url ?? "",
-      protocol: snapshotProtocol,
-      providerID: lpProvider || undefined,
-      model: req.model,
-      headers: forwardClientHeaders(req.rawHeaders),
-    };
-    // Apply LORE_UPSTREAM_EXTRA_HEADERS to the snapshot so cache-warming
-    // and other session-level follow-up requests inherit the user-supplied
-    // extra headers. (The per-request `forwardToUpstream` already overlays
-    // extras on the actual upstream call — this keeps the snapshot in sync
-    // for any consumer that reads it back.)
-    applyUpstreamExtraHeaders(
-      upstreamSnapshot.headers,
-      config.upstreamExtraHeaders,
-    );
-    // Detect provider switch: if the model or provider changed, the cached
-    // warmup body is stale (different model field at byte 10). Clear it to
-    // avoid false cache-bust warnings ("early divergence at byte 10") and
-    // wasted warmup requests that can never hit the cache prefix.
-    const prevUpstream = sessionState.lastUpstream;
-    if (
-      prevUpstream &&
-      (prevUpstream.model !== upstreamSnapshot.model ||
-        prevUpstream.providerID !== upstreamSnapshot.providerID)
-    ) {
-      sessionState.cacheAnalytics.lastRequestBody = null;
-    }
-
-    sessionState.lastUpstream = upstreamSnapshot;
-    saveSessionTracking(sessionID, {
-      lastUpstream: JSON.stringify({ ...upstreamSnapshot, headers: {} }),
-    });
-    // Store per-provider snapshot so workers/cache-warmer can look up the
-    // correct URL and credentials when the session uses multiple providers.
-    if (upstreamSnapshot.providerID) {
-      sessionState.upstreamByProvider.set(
-        upstreamSnapshot.providerID,
-        upstreamSnapshot,
-      );
-    }
-
     // Reset warming state if session was marked dead or had active warming.
     // Dead flag is cleared so the next break gets a fresh ROI analysis.
     // warmupCount is reset so the break-even cap starts from 0 on the next break.
@@ -9769,7 +9919,7 @@ function trackBackground(p: Promise<unknown>): void {
   void p.finally(() => inFlightBackground.delete(p));
 }
 
-function scheduleBackgroundWork(
+export function scheduleBackgroundWork(
   sessionState: SessionState,
   config: GatewayConfig,
 ): void {
@@ -9807,7 +9957,11 @@ function scheduleBackgroundWork(
   if (
     !config.workerApiKey &&
     model &&
-    !resolveAuth(sessionID, model.providerID)
+    !hasWorkerSessionAuth(
+      sessionID,
+      model.providerID,
+      matchingProviderSnapshot(sessionState, model.providerID)?.protocol,
+    )
   )
     return;
 
@@ -11360,6 +11514,7 @@ export function mergeRecallUsage(
 async function handleConversationTurn(
   req: GatewayRequest,
   config: GatewayConfig,
+  requestOrder: number,
 ): Promise<Response> {
   // --- 1. Project path & init ---
   // Enrich headers with context markers injected by lore-hermes plugin.
@@ -11400,6 +11555,18 @@ async function handleConversationTurn(
     cred ? authFingerprint(cred) : "",
   );
   let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+
+  // Routing and policy are request intent, not a property of a successful
+  // response. Capture now so a failed policy-tightening request still governs
+  // workers, and use the order assigned synchronously in handleRequest so an
+  // older concurrent turn can never overwrite a newer one.
+  await beforeUpstreamCaptureForTest?.(req, sessionState);
+  const requestUpstreamRoute = captureRequestUpstream(
+    req,
+    sessionState,
+    config,
+    requestOrder,
+  );
 
   // --- Synthetic project-resolution: capture a returning tool_result ---
   // If we previously injected a synthetic tool_use for project detection,
@@ -13051,20 +13218,9 @@ async function handleConversationTurn(
     attributes: {
       "gen_ai.operation.name": "chat",
       "gen_ai.request.model": req.model,
-      "gen_ai.provider.name": (() => {
-        if (req.protocol === "openai-responses") return "openai-responses";
-        // Apply the same providerRouteUsable guard as forwardToUpstream:
-        // only trust provider route protocol when it has a usable URL.
-        const pid = extractProviderHeader(req.rawHeaders);
-        const pr = pid ? resolveProviderRoute(pid) : null;
-        const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
-        const prUsable = pr && (pr.url != null || hdrUp) ? pr : null;
-        return (
-          prUsable?.protocol ??
-          resolveUpstreamRoute(req.model)?.protocol ??
-          "anthropic"
-        );
-      })(),
+      "gen_ai.provider.name":
+        requestUpstreamRoute.providerID ??
+        requestUpstreamRoute.effectiveProtocol,
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },
@@ -13078,6 +13234,7 @@ async function handleConversationTurn(
       undefined,
       cacheOptions,
       foregroundAbort.signal,
+      requestUpstreamRoute,
     );
   } catch (error) {
     foregroundAbort.dispose();
@@ -13334,6 +13491,7 @@ async function handleConversationTurn(
               cacheConversation: false,
             },
             signal,
+            requestUpstreamRoute,
           ),
         parseJSON: (response, protocol, signal) =>
           accumulateNonStreamResponse(response, protocol, false, signal),
@@ -13676,6 +13834,7 @@ async function handleConversationTurn(
                         cacheConversation: false,
                       },
                       followUpSignal,
+                      requestUpstreamRoute,
                     ),
                   parseJSON: () => {
                     throw new Error(
@@ -13776,6 +13935,7 @@ async function handleConversationTurn(
             config,
             sessionState,
             cacheOptions,
+            upstreamRoute: requestUpstreamRoute,
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
@@ -14687,6 +14847,7 @@ export async function handleRequest(
   config: GatewayConfig,
 ): Promise<Response> {
   const requestStartMs = Date.now();
+  const requestOrder = ++upstreamRequestOrder;
   try {
     // Guard against malformed invocations (e.g. fuzzers / direct module calls
     // that pass an undefined or header-less request). The real server path
@@ -14781,12 +14942,13 @@ export async function handleRequest(
     // keepalive while the gateway prepares.
     if (req.stream && req.protocol === "openai-responses") {
       return earlyFlushStreamingResponse(
-        (signal) => handleConversationTurn({ ...req, signal }, config),
+        (signal) =>
+          handleConversationTurn({ ...req, signal }, config, requestOrder),
         req.model,
         req.signal,
       );
     }
-    return await handleConversationTurn(req, config);
+    return await handleConversationTurn(req, config, requestOrder);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Unknown gateway error";

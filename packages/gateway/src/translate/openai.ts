@@ -12,7 +12,13 @@ import type {
   GatewayTool,
   GatewayUsage,
 } from "./types";
-import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
+import {
+  blocksToText,
+  forwardClientHeaders,
+  providerRoutingValue,
+  requestTargetsOpenRouter,
+  ZERO_USAGE,
+} from "./types";
 import type { AnthropicCacheOptions } from "./anthropic";
 import { asString } from "@loreai/core";
 import { extractAuth } from "../auth";
@@ -86,6 +92,9 @@ export function parseOpenAIRequest(
   }
   if (typeof raw.top_logprobs === "number") {
     extras.top_logprobs = raw.top_logprobs;
+  }
+  if (Object.hasOwn(raw, "provider")) {
+    extras.provider = raw.provider;
   }
   if (raw.stream_options && typeof raw.stream_options === "object") {
     const so = raw.stream_options as Record<string, unknown>;
@@ -771,6 +780,11 @@ export function buildOpenAIUpstreamRequest(
     if (req.extras.stream_options !== undefined) {
       body.stream_options = req.extras.stream_options;
     }
+  }
+
+  const providerRouting = providerRoutingValue(req);
+  if (providerRouting.present && requestTargetsOpenRouter(req, upstreamBase)) {
+    body.provider = providerRouting.value;
   }
 
   return {

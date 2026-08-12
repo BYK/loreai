@@ -242,6 +242,8 @@ export type GatewayRequest = {
     user?: string;
     logprobs?: boolean;
     top_logprobs?: number;
+    /** OpenRouter provider routing preferences, preserved verbatim. */
+    provider?: unknown;
     /** OpenAI Responses API: previous response ID for conversation continuation. */
     previous_response_id?: string;
     /** OpenAI Responses API: reasoning configuration. */
@@ -456,7 +458,7 @@ export type CacheAnalytics = {
   probePrefixSha?: string;
 };
 
-/** Routing snapshot captured from the last successful session request.
+/** Routing snapshot captured from a session request before upstream dispatch.
  *  Workers (distillation, curation) and the cache warmer use this
  *  to route through the same upstream with matching credentials.
  *  Single source of truth — replaces lastModel, lastProtocol,
@@ -472,6 +474,41 @@ export interface UpstreamSnapshot {
   model: string;
   /** Non-managed headers to forward upstream (anthropic-beta, etc.). */
   headers: Record<string, string>;
+  /** OpenRouter routing preferences inherited by same-provider workers. */
+  providerOptions?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Resolve OpenRouter's top-level `provider` value without losing presence.
+ * OpenAI ingress stores it in `extras`; Anthropic ingress stores unknown fields
+ * in `metadata`. An explicitly present extras property wins even when its value
+ * is null (or undefined in a directly constructed test request).
+ */
+export function providerRoutingValue(
+  req: GatewayRequest,
+): { present: true; value: unknown } | { present: false } {
+  if (req.extras && Object.hasOwn(req.extras, "provider")) {
+    return { present: true, value: req.extras.provider };
+  }
+  if (Object.hasOwn(req.metadata, "provider")) {
+    return { present: true, value: req.metadata.provider };
+  }
+  return { present: false };
+}
+
+/** Whether an OpenAI-compatible request is actually routed to OpenRouter. */
+export function requestTargetsOpenRouter(
+  req: GatewayRequest,
+  upstreamBase: string,
+): boolean {
+  if (req.rawHeaders["x-lore-provider"]?.toLowerCase() === "openrouter") {
+    return true;
+  }
+  try {
+    return new URL(upstreamBase).hostname.toLowerCase() === "openrouter.ai";
+  } catch {
+    return false;
+  }
 }
 
 /** Per-session state tracked by the gateway for Lore pipeline decisions. */
@@ -587,7 +624,7 @@ export type SessionState = {
   warmup?: WarmupState;
   /** Per-session survival model (inter-turn gap histogram). */
   survivalModel?: InterTurnHistogram;
-  /** Routing snapshot from the most recent session request.
+  /** Routing snapshot from the most recent session request start.
    *  Used by cache warmer (targets the most-recent provider) and as
    *  a convenience accessor. For provider-specific lookups (workers,
    *  auth), use `upstreamByProvider` instead. */
@@ -597,6 +634,10 @@ export type SessionState = {
    *  this to find the correct URL/credentials when the session has used
    *  multiple providers within the same conversation. */
   upstreamByProvider: Map<string, UpstreamSnapshot>;
+  /** Request-start order of the current `lastUpstream` (transient). */
+  _upstreamRequestOrder?: number;
+  /** Request-start order per raw provider ID (transient). */
+  _upstreamRequestOrderByProvider?: Map<string, number>;
 
   // --- Synthetic project-resolution probe ---
 
