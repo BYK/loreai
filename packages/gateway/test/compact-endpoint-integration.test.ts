@@ -20,7 +20,7 @@ import { createHarness, type Harness } from "./helpers/harness";
 import { makeFixtureEntry } from "./helpers/fixtures";
 
 async function postCompact(
-  baseURL: string,
+  harness: Harness,
   body: string,
   sessionID: string,
   apiKey: string | null = "test-key",
@@ -32,7 +32,7 @@ async function postCompact(
     ...extraHeaders,
   };
   if (apiKey) headers["x-api-key"] = apiKey;
-  return fetch(`${baseURL}/v1/compact`, {
+  return harness.request("/v1/compact", {
     method: "POST",
     headers,
     body,
@@ -40,12 +40,12 @@ async function postCompact(
 }
 
 async function postResponsesCompact(
-  baseURL: string,
+  harness: Harness,
   sessionID: string,
   apiKey: string,
   extraHeaders: Record<string, string> = {},
 ): Promise<Response> {
-  return fetch(`${baseURL}/v1/responses/compact`, {
+  return harness.request("/v1/responses/compact", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -162,7 +162,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     // 50_000 tokens fits in claude-sonnet-4-6's 872K budget (1M context
     // minus 128K output) — the gateway should cancel and skip the summary.
     const compactResp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: PROJECT_PATH,
         tokens_before: 50_000,
@@ -206,7 +206,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
 
       const mismatchedProject = `${PROJECT_PATH}-other-tenant`;
       const compactResp = await postCompact(
-        harness.baseURL,
+        harness,
         JSON.stringify({
           project_path: mismatchedProject,
           tokens_before: tokensBefore,
@@ -247,7 +247,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
 
     const attackerSession = "attacker-bootstrap-session";
     const bootstrap = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({ project_path: PROJECT_PATH }),
       attackerSession,
       "garbage-credential",
@@ -255,7 +255,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     expect(bootstrap.status).toBe(404);
 
     const exfiltration = await postResponsesCompact(
-      harness.baseURL,
+      harness,
       attackerSession,
       "garbage-credential",
     );
@@ -290,7 +290,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
 
     const unknownCanonical = "unknown-canonical-compaction";
     const compact = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({ project_path: PROJECT_PATH }),
       unknownCanonical,
       "test-key",
@@ -299,7 +299,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     expect(compact.status).toBe(404);
 
     const responsesCompact = await postResponsesCompact(
-      harness.baseURL,
+      harness,
       unknownCanonical,
       "test-key",
       { "x-session-affinity": alias },
@@ -333,7 +333,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     ).toBe(200);
 
     const response = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({ project_path: PROJECT_PATH, tokens_before: 50_000 }),
       sessionID,
       null,
@@ -369,7 +369,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       ).toBe(200);
 
       const response = await postCompact(
-        harness.baseURL,
+        harness,
         JSON.stringify({
           project_path: PROJECT_PATH,
           tokens_before: tokensBefore,
@@ -410,7 +410,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       await harness.restartPipeline();
 
       const response = await postCompact(
-        harness.baseURL,
+        harness,
         JSON.stringify({
           project_path: PROJECT_PATH,
           tokens_before: tokensBefore,
@@ -456,7 +456,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     // Exactly at the budget: budget = 1_000_000 - 128_000 = 872_000. The
     // boundary is INCLUSIVE — see shouldCancelCompactionFromBudget docstring.
     const compactResp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: PROJECT_PATH,
         tokens_before: 872_000,
@@ -498,7 +498,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
     // signal is absent and the gateway attempted (or attempted to attempt)
     // a summary rather than silently canceling.
     const compactResp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: PROJECT_PATH,
         tokens_before: 873_000,
@@ -565,7 +565,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
 
     // 100K fits in 111_616 budget → cancel.
     const cancelResp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: PROJECT_PATH,
         tokens_before: 100_000,
@@ -581,7 +581,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
 
     // 130K exceeds 111_616 budget → must compact (cancel:false).
     const compactResp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: PROJECT_PATH,
         tokens_before: 130_000,

@@ -16,6 +16,7 @@
  */
 import { describe, test, expect, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 /** A non-streaming Anthropic message response (mantle returns native shape). */
 function mantleJSONResponse(): Response {
@@ -86,7 +87,7 @@ describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

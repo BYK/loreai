@@ -89,6 +89,15 @@ export type {
   LLMClient,
 } from "./types";
 export { isTextPart, isReasoningPart, isToolPart } from "./types";
+export {
+  WARMUP_HISTOGRAM_BIN_COUNT,
+  MAX_WARMUP_HISTOGRAM_TOTAL,
+  emptyWarmupHistogramCounts,
+  mergeWarmupHistogramCounts,
+  normalizeWarmupHistogram,
+  encodeWarmupHistogram,
+  decodeWarmupHistogram,
+} from "./warmup-histogram";
 
 export { dataDir } from "./data-dir";
 export { isVecAvailable } from "./db/vec";

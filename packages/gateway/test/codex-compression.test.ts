@@ -48,7 +48,7 @@ describe("zstd-compressed request bodies (issue #1032)", () => {
     const compressed = zstdCompressSync(
       Buffer.from(JSON.stringify(anthropicBody(marker))),
     );
-    const resp = await fetch(`${harness.baseURL}/v1/messages`, {
+    const resp = await harness.request("/v1/messages", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -102,7 +102,7 @@ describe("zstd-compressed request bodies (issue #1032)", () => {
     const compressed = zstdCompressSync(
       Buffer.from(JSON.stringify(responsesBody)),
     );
-    const resp = await fetch(`${harness.baseURL}/v1/responses`, {
+    const resp = await harness.request("/v1/responses", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -173,7 +173,7 @@ describe("zstd-compressed request bodies (issue #1032)", () => {
       Buffer.from(JSON.stringify(anthropicBody(marker))),
     );
     try {
-      await fetch(`${harness.baseURL}/v1/messages`, {
+      await harness.request("/v1/messages", {
         method: "POST",
         headers: {
           "content-type": "application/json",

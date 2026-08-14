@@ -627,7 +627,10 @@ let pipelineResetPauseForTest: Promise<void> | undefined;
 let pipelinePreUpstreamPauseForTest:
   | { pause: Promise<void>; onWait: () => void }
   | undefined;
-let pipelineResetActiveSettleTimeoutMs = 5000;
+let provisionalFinalizerPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let pipelineResetSettleTimeoutMs = 5000;
 let pipelineResetInProgress = false;
 let pipelineResetPromise: Promise<void> | undefined;
 
@@ -738,6 +741,10 @@ export function detachedPipelineRequestCountForTest(): number {
   return detachedPipelineRequests.size;
 }
 
+export function pendingPipelineSessionClaimCountForTest(): number {
+  return pendingSessionClaims.size;
+}
+
 export function setMaxActivePipelineRequestsForTest(
   limit = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS,
 ): void {
@@ -787,10 +794,15 @@ export function setPipelinePreUpstreamPauseForTest(
   pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
 }
 
-export function setPipelineResetActiveSettleTimeoutForTest(
-  timeoutMs = 5000,
+export function setProvisionalFinalizerPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
 ): void {
-  pipelineResetActiveSettleTimeoutMs = timeoutMs;
+  provisionalFinalizerPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setPipelineResetSettleTimeoutForTest(timeoutMs = 5000): void {
+  pipelineResetSettleTimeoutMs = timeoutMs;
 }
 
 /**
@@ -833,7 +845,7 @@ async function resetPipelineStateInner(opts?: {
   for (const request of activeRequests) request.abort(resetReason);
   await boundedSettle(
     activeRequests.map((request) => request.settled),
-    pipelineResetActiveSettleTimeoutMs,
+    pipelineResetSettleTimeoutMs,
   );
   for (const request of activeRequests) {
     if (!activePipelineRequests.has(request)) continue;
@@ -853,6 +865,7 @@ async function resetPipelineStateInner(opts?: {
   // non-fast drain below will then observe.
   await boundedSettle(
     [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
+    pipelineResetSettleTimeoutMs,
   );
   streamingPostResponseGeneration++;
   pipelineGenerationAbort = new AbortController();
@@ -920,6 +933,7 @@ async function resetPipelineStateInner(opts?: {
   activeInterceptor = undefined;
   beforeUpstreamCaptureForTest = undefined;
   postResponseStartObserver = undefined;
+  provisionalFinalizerPauseForTest = undefined;
   if (stopFileWatcher) {
     stopFileWatcher();
     stopFileWatcher = null;
@@ -1193,7 +1207,7 @@ export function rebindActiveSession(
 const headerSessionIndex = new Map<string, string>();
 const provisionalHeaderSessionIndex = new Map<
   string,
-  { sessionID: string; createdAt: number }
+  { sessionID: string; createdAt: number; guardProject: boolean }
 >();
 const identityAdmissionTails = new Map<string, Promise<void>>();
 const MAX_PROVISIONAL_HEADER_MAPPINGS = 1024;
@@ -1245,7 +1259,11 @@ async function withIdentityAdmission<T>(
   }
 }
 
-function setProvisionalHeaderMapping(key: string, sessionID: string): void {
+function setProvisionalHeaderMapping(
+  key: string,
+  sessionID: string,
+  guardProject = false,
+): void {
   const now = Date.now();
   for (const [candidate, entry] of provisionalHeaderSessionIndex) {
     if (now - entry.createdAt > PROVISIONAL_HEADER_MAPPING_TTL_MS) {
@@ -1264,7 +1282,11 @@ function setProvisionalHeaderMapping(key: string, sessionID: string): void {
     if (oldest === undefined) break;
     provisionalHeaderSessionIndex.delete(oldest);
   }
-  provisionalHeaderSessionIndex.set(key, { sessionID, createdAt: now });
+  provisionalHeaderSessionIndex.set(key, {
+    sessionID,
+    createdAt: now,
+    guardProject,
+  });
 }
 
 function getProvisionalHeaderMapping(key: string): string | undefined {
@@ -1277,6 +1299,14 @@ function getProvisionalHeaderMapping(key: string): string | undefined {
   return entry.sessionID;
 }
 
+function provisionalMappingGuardsProject(
+  key: string,
+  sessionID: string,
+): boolean {
+  if (getProvisionalHeaderMapping(key) !== sessionID) return false;
+  return provisionalHeaderSessionIndex.get(key)?.guardProject === true;
+}
+
 /** @internal Test seam for exercising ownership expiry during an in-flight turn. */
 export function expireProvisionalHeaderMappingsForTest(): void {
   provisionalHeaderSessionIndex.clear();
@@ -1286,6 +1316,43 @@ function provisionalKeyOwned(key: string, sessionID: string): boolean {
   return (
     headerSessionIndex.get(key) === sessionID ||
     getProvisionalHeaderMapping(key) === sessionID
+  );
+}
+
+function dropOwnedProvisionalKey(
+  key: string | undefined,
+  sessionID: string,
+): void {
+  if (key && getProvisionalHeaderMapping(key) === sessionID) {
+    provisionalHeaderSessionIndex.delete(key);
+  }
+}
+
+function conflictsWithConfidentSessionProject(
+  sessionID: string,
+  pathResult: ProjectPathResult,
+): boolean {
+  if (pathResult.source !== "header" && pathResult.source !== "inferred") {
+    return false;
+  }
+  const live = sessions.get(sessionID);
+  if (live?.projectPath && live.projectPathProvisional === false) {
+    return live.projectPath !== pathResult.path;
+  }
+  const persisted = loadSessionTracking(sessionID);
+  return (
+    !!persisted?.projectPath &&
+    persisted.projectPathProvisional === false &&
+    persisted.projectPath !== pathResult.path
+  );
+}
+
+function isConfidentlyBoundToProject(
+  state: SessionState,
+  projectPath: string,
+): boolean {
+  return (
+    state.projectPathProvisional !== true && state.projectPath === projectPath
   );
 }
 
@@ -5282,6 +5349,7 @@ type IdentifiedSession = {
   tier: 1 | 2 | 2.5 | 3;
   provisionalIdentity?: boolean;
   provisionalKey?: string;
+  guardProject?: boolean;
 };
 
 async function identifySession(
@@ -5308,6 +5376,7 @@ async function identifySession(
     );
     let existingSid = headerSessionIndex.get(indexKey);
     let provisionalIdentity = false;
+    let guardProject = false;
     if (!existingSid) {
       hydrateHeaderSessionIndex();
       existingSid = headerSessionIndex.get(indexKey);
@@ -5315,6 +5384,9 @@ async function identifySession(
     if (!existingSid) {
       existingSid = getProvisionalHeaderMapping(indexKey);
       provisionalIdentity = existingSid !== undefined;
+      guardProject =
+        existingSid !== undefined &&
+        provisionalMappingGuardsProject(indexKey, existingSid);
     }
     if (existingSid) {
       if (
@@ -5324,7 +5396,7 @@ async function identifySession(
         throw new Error("ambiguous session headers");
       }
       if (provisionalIdentity) {
-        setProvisionalHeaderMapping(indexKey, existingSid);
+        setProvisionalHeaderMapping(indexKey, existingSid, guardProject);
       }
       // Session may only exist in DB (after gateway restart) — that's fine,
       // getOrCreateSession() will hydrate it from the session_state table.
@@ -5334,6 +5406,7 @@ async function identifySession(
         tier: 1,
         provisionalIdentity,
         ...(provisionalIdentity ? { provisionalKey: indexKey } : {}),
+        ...(guardProject ? { guardProject: true } : {}),
       };
     }
 
@@ -5372,7 +5445,7 @@ async function identifySession(
         existing.projectPathProvisional === false &&
         existing.projectPath !== incomingProject;
       if (!conflictsWithConfidentProject) {
-        setProvisionalHeaderMapping(indexKey, fallbackMatch.sessionID);
+        setProvisionalHeaderMapping(indexKey, fallbackMatch.sessionID, true);
         log.info(
           `session ${fallbackMatch.sessionID.slice(0, 16)}: provisional migration from ${fallbackMatch.headerName} to ${known.headerName}`,
         );
@@ -5382,6 +5455,7 @@ async function identifySession(
           tier: 1,
           provisionalIdentity: true,
           provisionalKey: indexKey,
+          guardProject: true,
         };
       }
       log.warn(
@@ -5465,7 +5539,7 @@ async function identifySession(
     }
 
     if (predecessor) {
-      setProvisionalHeaderMapping(indexKey, predecessor.sid);
+      setProvisionalHeaderMapping(indexKey, predecessor.sid, true);
       log.info(
         `session ${predecessor.sid.slice(0, 16)}: provisional ${known.headerName} value rotation`,
       );
@@ -5475,6 +5549,7 @@ async function identifySession(
         tier: 1,
         provisionalIdentity: true,
         provisionalKey: indexKey,
+        guardProject: true,
       };
     }
 
@@ -11506,9 +11581,16 @@ async function handleCompactionInner(
     );
   }
   const sessionID = sessionState.sessionID;
+  const authorizedProjectPath = sessionState.projectPath;
   await claimSession(sessionID);
   await awaitStreamingPostResponse(sessionID, req.signal);
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  if (!isConfidentlyBoundToProject(sessionState, authorizedProjectPath)) {
+    return errorResponse(
+      403,
+      "Project path does not match the authenticated session",
+    );
+  }
   stripContextMarkers(req.messages);
   const projectPath = sessionState.projectPath;
   setSessionAuth(sessionID, credential, sessionState.lastUpstream?.providerID);
@@ -11942,10 +12024,7 @@ async function handleCompactEndpointInner(
     );
   }
 
-  if (
-    state.projectPathProvisional === true ||
-    state.projectPath !== projectPath
-  ) {
+  if (!isConfidentlyBoundToProject(state, projectPath)) {
     return new Response(
       JSON.stringify({
         error: "project_mismatch",
@@ -11958,6 +12037,18 @@ async function handleCompactEndpointInner(
   await claimSession(sessionID);
   await awaitStreamingPostResponse(sessionID, signal);
   assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (
+    state.projectPathProvisional === true ||
+    state.projectPath !== projectPath
+  ) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project_path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
   setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
 
   await initIfNeeded(
@@ -12193,10 +12284,7 @@ async function handleResponsesCompactEndpointInner(
       { status: 404, headers: { "content-type": "application/json" } },
     );
   }
-  if (
-    state.projectPathProvisional === true ||
-    state.projectPath !== pathResult.path
-  ) {
+  if (!isConfidentlyBoundToProject(state, pathResult.path)) {
     return new Response(
       JSON.stringify({
         error: "project_mismatch",
@@ -12209,6 +12297,18 @@ async function handleResponsesCompactEndpointInner(
   await claimSession(sessionID);
   await awaitStreamingPostResponse(sessionID, signal);
   assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (
+    state.projectPathProvisional === true ||
+    state.projectPath !== pathResult.path
+  ) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
   setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
 
   await initIfNeeded(
@@ -13010,6 +13110,7 @@ async function handleProvisionalConversationTurn(
   req: GatewayRequest,
   config: GatewayConfig,
   identified: IdentifiedSession,
+  pathResult: ProjectPathResult,
   requestOrder: number,
   requestGeneration: number,
   downstreamSettled: Promise<void>,
@@ -13086,6 +13187,22 @@ async function handleProvisionalConversationTurn(
       async () => {
         await downstreamSettled;
         await new Promise<void>((resolve) => setImmediate(resolve));
+        const pause = provisionalFinalizerPauseForTest;
+        if (pause) {
+          pause.onWait();
+          await pause.pause;
+        }
+        if (requestGeneration !== streamingPostResponseGeneration) return;
+        if (
+          identified.guardProject &&
+          conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+        ) {
+          dropOwnedProvisionalKey(
+            identified.provisionalKey,
+            identified.sessionID,
+          );
+          return;
+        }
         accountUnsuccessfulResponse(
           error.response,
           identified.sessionID,
@@ -13133,7 +13250,6 @@ async function handleProvisionalConversationTurn(
     ) {
       return;
     }
-    const pathResult = getProjectPath(req.system, req.rawHeaders);
     const credential = extractAuth(req.rawHeaders);
     const persisted = loadSessionTracking(identified.sessionID);
     const liveState = sessions.get(identified.sessionID);
@@ -13182,6 +13298,16 @@ async function handleProvisionalConversationTurn(
     let projectPath = pathResult.path;
     let projectPathProvisional = pathResult.source === "cwd";
     withSavepoint("commit_provisional_turn", () => {
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("session project changed during provisional migration");
+      }
       // Project creation/reattribution belongs to the same transaction as the
       // turn, tracking, route, and header confirmation. A local write failure
       // must leave the provisional project and identity wholly unchanged.
@@ -13282,6 +13408,22 @@ async function handleProvisionalConversationTurn(
     async () => {
       await downstreamSettled;
       await new Promise<void>((resolve) => setImmediate(resolve));
+      const pause = provisionalFinalizerPauseForTest;
+      if (pause) {
+        pause.onWait();
+        await pause.pause;
+      }
+      if (requestGeneration !== streamingPostResponseGeneration) return;
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        return;
+      }
       accountConversationUsage(
         accumulated.usage ?? ZERO_USAGE,
         accumulated.model,
@@ -13445,12 +13587,28 @@ async function handleConversationTurn(
   const cred = extractAuth(req.rawHeaders);
 
   // --- 3. Session identification ---
-  const identified = await withIdentityAdmission(req, () =>
-    identifySession(req, pathResult.path, pathResult.source, requestGeneration),
-  );
+  const admitted = await withIdentityAdmission(req, async () => {
+    const result = await identifySession(
+      req,
+      pathResult.path,
+      pathResult.source,
+      requestGeneration,
+    );
+    const claimed = result.isNew || result.provisionalIdentity === true;
+    if (claimed) await claimSession(result.sessionID);
+    return { identified: result, claimed };
+  });
+  const { identified } = admitted;
   const { sessionID, isNew, tier } = identified;
   await beforeUpstreamCaptureForTest?.(req);
-  await claimSession(sessionID);
+  if (!admitted.claimed) await claimSession(sessionID);
+  if (
+    identified.guardProject &&
+    conflictsWithConfidentSessionProject(sessionID, pathResult)
+  ) {
+    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
+    throw new Error("session project changed during provisional migration");
+  }
   await awaitStreamingPostResponse(sessionID, req.signal);
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
   // Marker-derived project/session data has already been copied into headers;
@@ -13467,6 +13625,7 @@ async function handleConversationTurn(
       req,
       config,
       identified,
+      pathResult,
       requestOrder,
       requestGeneration,
       downstreamSettled,

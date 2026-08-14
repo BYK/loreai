@@ -3847,13 +3847,15 @@ describe("streamResponsesRecallAware", () => {
           commit: () => committed++,
           rollback: () => rolledBack++,
         }),
-        runFollowUp: async () => ({
-          reader: streamFrom([
+        runFollowUp: async () => {
+          const body = streamFrom([
             created("resp_commit_followup", "gpt-5.6-terra"),
             textItem(0, "answer", "msg_commit_answer"),
             completed("resp_commit_followup"),
-          ]).body!.getReader(),
-        }),
+          ]).body;
+          if (!body) throw new Error("expected continuation body");
+          return { reader: body.getReader() };
+        },
       },
     );
 

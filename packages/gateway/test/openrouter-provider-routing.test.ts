@@ -4,8 +4,6 @@
  */
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { Readable } from "node:stream";
 import {
   close as closeDB,
   loadSessionTracking,
@@ -15,6 +13,7 @@ import { upstreamFetch } from "../src/fetch";
 import { setSessionAuth } from "../src/auth";
 import type { GatewayConfig } from "../src/config";
 import { fetchArgUrl } from "./helpers/fetch-url";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -232,41 +231,10 @@ function localRequest(
   headers: Record<string, string>,
   body: string,
 ): Promise<Response> {
-  const port = Number(new URL(run.baseURL).port);
-  return new Promise<Response>((resolve, reject) => {
-    const request = httpRequest(
-      {
-        hostname: "127.0.0.1",
-        port,
-        path,
-        method: "POST",
-        headers: {
-          ...headers,
-          "content-length": String(Buffer.byteLength(body)),
-        },
-      },
-      (incoming) => {
-        const responseHeaders = new Headers();
-        for (let i = 0; i < incoming.rawHeaders.length; i += 2) {
-          responseHeaders.append(
-            incoming.rawHeaders[i],
-            incoming.rawHeaders[i + 1],
-          );
-        }
-        resolve(
-          new Response(
-            Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>,
-            {
-              status: incoming.statusCode ?? 500,
-              statusText: incoming.statusMessage,
-              headers: responseHeaders,
-            },
-          ),
-        );
-      },
-    );
-    request.once("error", reject);
-    request.end(body);
+  return loopbackRequest(`${run.baseURL}${path}`, {
+    method: "POST",
+    headers,
+    body,
   });
 }
 
@@ -650,7 +618,7 @@ describe("OpenRouter provider routing", () => {
   test("protocol-distinct Vertex aliases coexist, persist, and select compatibly", async () => {
     const run = await start();
     await useNormalForegroundInterceptor();
-    const gemini = await fetch(
+    const gemini = await loopbackRequest(
       `${run.baseURL}/v1beta/models/gemini-2.5-flash:generateContent`,
       {
         method: "POST",

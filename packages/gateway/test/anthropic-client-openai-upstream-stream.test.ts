@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 function sseChunk(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`;
@@ -163,7 +164,7 @@ describe("Anthropic client + OpenAI upstream (streaming re-emission, #1052)", ()
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

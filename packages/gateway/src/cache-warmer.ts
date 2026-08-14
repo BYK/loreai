@@ -40,6 +40,11 @@ import {
   estimateMetaDistillCostPerCall,
   getPrefixChurnRate,
   PREFIX_CHURN_WARM_BLOCK,
+  decodeWarmupHistogram,
+  emptyWarmupHistogramCounts,
+  encodeWarmupHistogram,
+  mergeWarmupHistogramCounts,
+  normalizeWarmupHistogram,
 } from "@loreai/core";
 import type {
   InterTurnHistogram,
@@ -2533,30 +2538,22 @@ const dirtyProjects = new Set<string>();
 /** Unflushed observations, tracked separately so project merges can rebase them. */
 const dirtyHistograms = new Map<string, InterTurnHistogram>();
 
-function loadPersistedHistogram(pid: string): InterTurnHistogram {
-  const merged = createHistogram();
+function loadPersistedHistogramCounts(pid: string): bigint[] {
+  let merged = emptyWarmupHistogramCounts();
   const rows = db()
-    .query("SELECT counts, total FROM warmup_histograms WHERE project_id = ?")
-    .all(pid) as Array<{ counts: string; total: number }>;
+    .query(
+      "SELECT counts, CAST(total AS TEXT) AS total FROM warmup_histograms WHERE project_id = ?",
+    )
+    .all(pid) as Array<{ counts: string; total: string }>;
   for (const row of rows) {
-    try {
-      const counts = JSON.parse(row.counts) as unknown;
-      if (
-        !Array.isArray(counts) ||
-        counts.length !== BIN_COUNT ||
-        !counts.every((value) => Number.isSafeInteger(value) && value >= 0) ||
-        !Number.isSafeInteger(row.total) ||
-        row.total < 0 ||
-        counts.reduce((sum, value) => sum + value, 0) !== row.total
-      ) {
-        continue;
-      }
-      for (let i = 0; i < BIN_COUNT; i++) merged.counts[i] += counts[i];
-      merged.total += row.total;
-    } catch {
-      // Corrupt rows do not contribute to cache-warming decisions.
-    }
+    const counts = decodeWarmupHistogram(row.counts, row.total);
+    if (counts) merged = mergeWarmupHistogramCounts(merged, counts);
   }
+  return merged;
+}
+
+function loadPersistedHistogram(pid: string): InterTurnHistogram {
+  const merged = normalizeWarmupHistogram(loadPersistedHistogramCounts(pid));
   return merged;
 }
 
@@ -2564,8 +2561,14 @@ function addHistogram(
   target: InterTurnHistogram,
   source: InterTurnHistogram,
 ): void {
-  for (let i = 0; i < BIN_COUNT; i++) target.counts[i] += source.counts[i];
-  target.total += source.total;
+  const merged = normalizeWarmupHistogram(
+    mergeWarmupHistogramCounts(
+      target.counts.map(BigInt),
+      source.counts.map(BigInt),
+    ),
+  );
+  target.counts = merged.counts;
+  target.total = merged.total;
 }
 
 function reconcileProjectMerges(): void {
@@ -2693,8 +2696,12 @@ export function flushGlobalHistograms(): void {
         // overwriting a merge or another gateway's committed history.
         resolvedPid = canonicalProjectId(pid);
         if (resolvedPid) {
-          hist = loadPersistedHistogram(resolvedPid);
-          addHistogram(hist, pending);
+          const exact = mergeWarmupHistogramCounts(
+            loadPersistedHistogramCounts(resolvedPid),
+            pending.counts.map(BigInt),
+          );
+          const encoded = encodeWarmupHistogram(exact);
+          hist = normalizeWarmupHistogram(encoded.weights);
           // Delete old slot-segmented rows (backward compat cleanup)
           d.query(
             "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot != 'all'",
@@ -2707,7 +2714,7 @@ export function flushGlobalHistograms(): void {
                counts = excluded.counts,
                total = excluded.total,
                updated_at = excluded.updated_at`,
-          ).run(resolvedPid, JSON.stringify(hist.counts), hist.total, now);
+          ).run(resolvedPid, encoded.counts, encoded.total, now);
         }
         d.exec("COMMIT");
         if (resolvedPid && hist) {

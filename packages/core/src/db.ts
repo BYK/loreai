@@ -13,6 +13,11 @@ import { getGitRemote } from "./git";
 import { isHostedMode } from "./hosted";
 import { dataDir } from "./data-dir";
 import { tracedDatabase } from "./db/traced";
+import {
+  decodeWarmupHistogram,
+  encodeWarmupHistogram,
+  mergeWarmupHistogramCounts,
+} from "./warmup-histogram";
 
 export type ProjectMutation =
   | { type: "create"; projectId: string }
@@ -204,7 +209,7 @@ export function repoNameFromRemote(remote: string | null): string | null {
   return name.length > 0 ? name : null;
 }
 
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: readonly string[] = Object.freeze([
   `
   -- Version 1: Initial schema
 
@@ -2023,7 +2028,7 @@ const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_project_id_aliases_project
     ON project_id_aliases(project_id);
   `,
-];
+]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
 // step instead of plain SQL, because it is destructive (DROP COLUMN) and its
@@ -2505,6 +2510,8 @@ export function dbPath(): string {
 }
 
 let instance: Database | undefined;
+/** Actual file backing `instance`; absent for private in-memory databases. */
+let instanceFilePath: string | undefined;
 
 export function db(): Database {
   if (instance) return instance;
@@ -2602,6 +2609,13 @@ export function db(): Database {
 
   // LORE_NO_DB_TRACING=1 returns the raw connection instead of the query-tracing Proxy (disables automatic per-query DB spans).
   const dbTracingDisabled = process.env.LORE_NO_DB_TRACING === "1";
+  const mainDatabase = database
+    .query("PRAGMA database_list")
+    .all()
+    .find((row) => row.name === "main") as
+    | { name: string; file: string }
+    | undefined;
+  instanceFilePath = mainDatabase?.file || undefined;
   instance = dbTracingDisabled ? database : tracedDatabase(database);
   return instance;
 }
@@ -3769,7 +3783,6 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "warmup_histograms",
 ] as const);
 
-const WARMUP_HISTOGRAM_BIN_COUNT = 21;
 const SQLITE_MAX_INTEGER = "9223372036854775807";
 
 function assertProjectMergeCountersSafe(
@@ -4022,54 +4035,16 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
         sourceUpdatedAt !== null &&
         (targetUpdatedAt === null || sourceUpdatedAt > targetUpdatedAt);
       try {
-        const sourceValues = JSON.parse(source.counts) as unknown;
-        const targetValues = JSON.parse(target.counts) as unknown;
-        const sourceTotal = parseSqliteInteger(source.total);
-        const targetTotal = parseSqliteInteger(target.total);
-        if (
-          !Array.isArray(sourceValues) ||
-          !Array.isArray(targetValues) ||
-          sourceValues.length !== WARMUP_HISTOGRAM_BIN_COUNT ||
-          targetValues.length !== WARMUP_HISTOGRAM_BIN_COUNT ||
-          !sourceValues.every(
-            (value) => Number.isSafeInteger(value) && value >= 0,
-          ) ||
-          !targetValues.every(
-            (value) => Number.isSafeInteger(value) && value >= 0,
-          ) ||
-          sourceTotal === null ||
-          sourceTotal > BigInt(Number.MAX_SAFE_INTEGER) ||
-          targetTotal === null ||
-          targetTotal > BigInt(Number.MAX_SAFE_INTEGER)
-        ) {
+        const sourceValues = decodeWarmupHistogram(source.counts, source.total);
+        const targetValues = decodeWarmupHistogram(target.counts, target.total);
+        if (!sourceValues || !targetValues) {
           throw new Error("invalid histogram counts");
         }
-        const sourceCountTotal = sourceValues.reduce(
-          (sum, value) => sum + BigInt(value),
-          0n,
+        const encoded = encodeWarmupHistogram(
+          mergeWarmupHistogramCounts(targetValues, sourceValues),
         );
-        const targetCountTotal = targetValues.reduce(
-          (sum, value) => sum + BigInt(value),
-          0n,
-        );
-        if (
-          sourceCountTotal !== sourceTotal ||
-          targetCountTotal !== targetTotal
-        ) {
-          throw new Error("histogram total does not match counts");
-        }
-        const merged = targetValues.map(
-          (value, index) => value + sourceValues[index],
-        );
-        const mergedTotal = Number(targetTotal + sourceTotal);
-        if (
-          !merged.every(Number.isSafeInteger) ||
-          !Number.isSafeInteger(mergedTotal)
-        ) {
-          throw new Error("histogram counter overflow");
-        }
-        counts = JSON.stringify(merged);
-        total = mergedTotal;
+        counts = encoded.counts;
+        total = encoded.total;
       } catch {
         if (sourceIsNewer) {
           d.query(
@@ -4220,6 +4195,7 @@ export function close() {
     instance.close();
     instance = undefined;
   }
+  instanceFilePath = undefined;
   // The sqlite-vec extension is loaded per-connection; reset loader state so a
   // subsequent db() on a fresh connection re-attempts the load. This also clears
   // the sticky vec0 storage-mode latch (a fresh connection may point at a
@@ -4732,7 +4708,11 @@ function canonicalProjectIdFrom(
   return row?.id;
 }
 
-/** Resolve a live project UUID or a durable redirect left by a local merge. */
+/**
+ * Resolve a live project UUID or a durable redirect left by a local merge.
+ * A committed read inside a private in-memory transaction returns undefined:
+ * SQLite cannot expose that connection's pre-transaction snapshot to a reader.
+ */
 export function canonicalProjectId(
   id: string,
   options?: { committed?: boolean },
@@ -4744,9 +4724,18 @@ export function canonicalProjectId(
 
   // The writer sees its own uncommitted redirects. A short-lived WAL reader
   // observes only committed state, so read-only caches cannot publish a merge
-  // that an outer savepoint may still roll back.
-  const reader = new Database(dbPath());
+  // that an outer savepoint may still roll back. Use the file captured from the
+  // live connection rather than dbPath(): LORE_DB_PATH is mutable, and changing
+  // it must not redirect a reader away from the already-open writer.
+  //
+  // Private in-memory databases have no second connection that can observe the
+  // writer's last committed snapshot. Fail closed instead of exposing its
+  // speculative redirects or opening a distinct, empty `:memory:` database.
+  if (!instanceFilePath) return undefined;
+  const reader = new Database(instanceFilePath);
   try {
+    reader.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    reader.exec("PRAGMA query_only = TRUE");
     return canonicalProjectIdFrom(reader, id);
   } finally {
     reader.close();

@@ -53,14 +53,17 @@ import {
   isPipelineSessionActiveForTest,
   expireProvisionalHeaderMappingsForTest,
   mergeRecallUsage,
+  pendingPipelineSessionClaimCountForTest,
   resetPipelineState,
   scheduleStreamingPostResponseForTest,
   setPipelinePreUpstreamPauseForTest,
   setMaxActivePipelineRequestsForTest,
   setMaxDetachedPipelineRequestsForTest,
-  setPipelineResetActiveSettleTimeoutForTest,
+  setPipelineResetSettleTimeoutForTest,
   setPipelineResetPauseForTest,
+  setBeforeUpstreamCaptureForTest,
   setPostResponseStartObserverForTest,
+  setProvisionalFinalizerPauseForTest,
   setStreamingPostResponseLimitsForTest,
   setStreamingPostResponseWaitObserverForTest,
   setUpstreamInterceptor,
@@ -955,6 +958,56 @@ describe("Pipeline — streaming responses", () => {
       expect(upstreamCancellations).toBe(4);
     } finally {
       setStreamingPostResponseLimitsForTest();
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not start Responses post-processing before the final EOF read", async () => {
+    let postResponses = 0;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    setPostResponseStartObserverForTest(() => postResponses++);
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_terminal_before_eof"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "terminal-before-eof-session",
+          },
+        }),
+        loadConfig(),
+      );
+      reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      if (!reader) throw new Error("missing response body");
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        if (chunk.value) {
+          output += decoder.decode(chunk.value, { stream: true });
+        }
+      }
+
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(postResponses).toBe(0);
+
+      for (;;) {
+        const finalChunk = await reader.read();
+        if (finalChunk.done) break;
+      }
+      await vi.waitFor(() => expect(postResponses).toBe(1));
+    } finally {
+      if (reader) await reader.cancel().catch(() => {});
       setPostResponseStartObserverForTest(undefined);
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
@@ -1862,6 +1915,11 @@ describe("Pipeline — streaming responses", () => {
   });
 
   it("fences an early-flush producer that resumes after the reset timeout", async () => {
+    const sessionHeader = "late-stale-producer-session";
+    const staleProjectPath = "/tmp";
+    const freshProjectPath = process.cwd();
+    const staleUpstream = "https://stale-reset.example";
+    const freshUpstream = "https://fresh-reset.example";
     let releaseProducer: (() => void) | undefined;
     const producerPause = new Promise<void>((resolve) => {
       releaseProducer = resolve;
@@ -1873,7 +1931,7 @@ describe("Pipeline — streaming responses", () => {
     setPipelinePreUpstreamPauseForTest(producerPause, () =>
       producerWaitingResolve?.(),
     );
-    setPipelineResetActiveSettleTimeoutForTest(0);
+    setPipelineResetSettleTimeoutForTest(0);
     let upstreamCalls = 0;
     setUpstreamInterceptor(async () => {
       upstreamCalls++;
@@ -1883,14 +1941,14 @@ describe("Pipeline — streaming responses", () => {
     });
 
     try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "late-stale-producer-session",
-          },
-        }),
-        loadConfig(),
-      );
+      const staleRequest = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": sessionHeader,
+        },
+      });
+      staleRequest.rawHeaders["x-lore-project"] = staleProjectPath;
+      staleRequest.rawHeaders["x-lore-upstream-url"] = staleUpstream;
+      const response = await handleRequest(staleRequest, loadConfig());
       const body = response.text();
       await producerWaiting;
       await resetPipelineState();
@@ -1916,16 +1974,28 @@ describe("Pipeline — streaming responses", () => {
           headers: { "content-type": "text/event-stream" },
         });
       });
-      const reopened = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "late-stale-producer-session",
-          },
-        }),
-        loadConfig(),
-      );
+      const freshRequest = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": sessionHeader,
+        },
+      });
+      freshRequest.rawHeaders["x-lore-project"] = freshProjectPath;
+      freshRequest.rawHeaders["x-lore-upstream-url"] = freshUpstream;
+      const reopened = await handleRequest(freshRequest, loadConfig());
       expect(await reopened.text()).toContain("event: response.completed");
       expect(upstreamCalls).toBe(1);
+      const freshState = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === sessionHeader,
+      );
+      expect(freshState).toBeDefined();
+      await vi.waitFor(() => {
+        expect(loadSessionTracking(freshState?.sessionID ?? "")).toMatchObject({
+          projectPath: freshProjectPath,
+          projectPathProvisional: false,
+          lastUpstream: expect.stringContaining(freshUpstream),
+        });
+      });
+      const freshTracking = loadSessionTracking(freshState?.sessionID ?? "");
 
       releaseProducer?.();
       expect(await body).toContain("event: response.failed");
@@ -1933,11 +2003,21 @@ describe("Pipeline — streaming responses", () => {
         expect(detachedPipelineRequestCountForTest()).toBe(0),
       );
       expect(upstreamCalls).toBe(1);
+      expect(freshState).toMatchObject({
+        projectPath: freshProjectPath,
+        projectPathProvisional: false,
+        lastUpstream: expect.objectContaining({ url: freshUpstream }),
+      });
+      expect(loadSessionTracking(freshState?.sessionID ?? "")).toMatchObject({
+        projectPath: freshProjectPath,
+        projectPathProvisional: false,
+        lastUpstream: freshTracking?.lastUpstream,
+      });
     } finally {
       releaseProducer?.();
       setMaxDetachedPipelineRequestsForTest();
       setPipelinePreUpstreamPauseForTest(undefined);
-      setPipelineResetActiveSettleTimeoutForTest();
+      setPipelineResetSettleTimeoutForTest();
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
@@ -2950,6 +3030,91 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it.each(["completed", "incomplete"] as const)(
+    "drops stale provisional %s accounting after a bounded reset drain",
+    async (status) => {
+      const alias = `stale-${status}-accounting-alias`;
+      const canonical = `stale-${status}-accounting-canonical`;
+      let upstreamCall = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCall++;
+        return new Response(
+          upstreamCall === 1 || status === "completed"
+            ? validResponsesSSE(`resp_stale_${status}_${upstreamCall}`)
+            : incompleteResponsesSSE("resp_stale_incomplete_accounting"),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+      let releaseFinalizer!: () => void;
+      const finalizerPause = new Promise<void>((resolve) => {
+        releaseFinalizer = resolve;
+      });
+      let finalizerWaitingResolve!: () => void;
+      const finalizerWaiting = new Promise<void>((resolve) => {
+        finalizerWaitingResolve = resolve;
+      });
+
+      try {
+        await (
+          await handleRequest(
+            makeResponsesRequest({
+              sessionHeaders: { "x-session-affinity": alias },
+            }),
+            loadConfig(),
+          )
+        ).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === alias,
+        );
+        expect(state).toBeDefined();
+        clearAllCosts();
+
+        setProvisionalFinalizerPauseForTest(
+          finalizerPause,
+          finalizerWaitingResolve,
+        );
+        setPipelineResetSettleTimeoutForTest(0);
+        const response = await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: {
+              "x-lore-session-id": canonical,
+              "x-session-affinity": alias,
+            },
+          }),
+          loadConfig(),
+        );
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body).toContain(
+          status === "completed"
+            ? "event: response.completed"
+            : "event: response.failed",
+        );
+        await finalizerWaiting;
+        await resetPipelineState();
+
+        clearAllCosts();
+        const today = new Date().toISOString().slice(0, 10);
+        const ledgerBefore = getDailyCostForDay(today);
+        releaseFinalizer();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
+        expect(getDailyCostForDay(today)).toBe(ledgerBefore);
+      } finally {
+        releaseFinalizer();
+        setPipelineResetSettleTimeoutForTest();
+        setProvisionalFinalizerPauseForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearAllCosts();
+      }
+    },
+  );
+
   it("strips context markers before provisional migration reaches upstream", async () => {
     const alias = "marker-provisional-alias";
     let upstreamCall = 0;
@@ -3418,6 +3583,111 @@ describe("Pipeline — streaming responses", () => {
       expect(independent?.sessionID).not.toBe(original?.sessionID);
       expect(upstreamCall).toBe(2);
     } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rechecks project binding after a concurrent first turn claims the fallback session", async () => {
+    const alias = "concurrent-project-migration-alias";
+    const canonical = "concurrent-project-migration-canonical";
+    const projectA = "/tmp/lore-concurrent-project-a";
+    const projectB = "/tmp/lore-concurrent-project-b";
+    let releaseFirst!: () => void;
+    const firstPause = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstWaitingResolve!: () => void;
+    const firstWaiting = new Promise<void>((resolve) => {
+      firstWaitingResolve = resolve;
+    });
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(
+        validResponsesSSE(`resp_project_race_${upstreamCalls}`),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    setBeforeUpstreamCaptureForTest(async (request) => {
+      if (
+        request.rawHeaders["x-session-affinity"] === alias &&
+        !request.rawHeaders["x-lore-session-id"]
+      ) {
+        firstWaitingResolve();
+        await firstPause;
+      }
+    });
+
+    try {
+      const first = makeResponsesRequest({
+        sessionHeaders: { "x-session-affinity": alias },
+      });
+      first.rawHeaders["x-lore-project"] = projectA;
+      const firstResponse = await handleRequest(first, loadConfig());
+      const firstBody = firstResponse.text();
+      await firstWaiting;
+
+      const migration = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": canonical,
+          "x-session-affinity": alias,
+        },
+      });
+      migration.rawHeaders["x-lore-project"] = projectB;
+      const migrationResponse = await handleRequest(migration, loadConfig());
+      const migrationBody = migrationResponse.text();
+      await vi.waitFor(() =>
+        expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+      );
+
+      releaseFirst();
+      expect(await firstBody).toContain("event: response.completed");
+      const boundAfterFirst = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === alias,
+      );
+      expect(boundAfterFirst).toMatchObject({
+        projectPath: projectA,
+        projectPathProvisional: false,
+      });
+      expect(await migrationBody).toContain("event: response.failed");
+      expect(upstreamCalls).toBe(1);
+
+      setBeforeUpstreamCaptureForTest(undefined);
+      const retry = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": canonical,
+          "x-session-affinity": alias,
+        },
+      });
+      retry.rawHeaders["x-lore-project"] = projectB;
+      expect(await (await handleRequest(retry, loadConfig())).text()).toContain(
+        "event: response.completed",
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const original = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === alias,
+      );
+      const independent = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === canonical,
+      );
+      expect(original).toMatchObject({
+        projectPath: projectA,
+        projectPathProvisional: false,
+      });
+      expect(independent).toMatchObject({
+        projectPath: projectB,
+        projectPathProvisional: false,
+      });
+      expect(independent?.sessionID).not.toBe(original?.sessionID);
+      expect(upstreamCalls).toBe(2);
+    } finally {
+      releaseFirst();
+      setBeforeUpstreamCaptureForTest(undefined);
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
@@ -4501,6 +4771,133 @@ describe("Pipeline — streaming responses", () => {
     },
   );
 
+  it.each(["structural", "compact", "responses-compact"] as const)(
+    "rechecks %s project authorization after a queued session claim",
+    async (endpoint) => {
+      const sessionHeaders = {
+        "x-lore-session-id": `queued-project-${endpoint}-session`,
+      };
+      const projectA = `/tmp/lore-queued-${endpoint}-a`;
+      const projectB = `/tmp/lore-queued-${endpoint}-b`;
+      let upstreamCalls = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCalls++;
+        return new Response(validResponsesSSE(`resp_queued_${endpoint}`), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+      let releaseRebind!: () => void;
+      const rebindPause = new Promise<void>((resolve) => {
+        releaseRebind = resolve;
+      });
+      let rebindWaitingResolve!: () => void;
+      const rebindWaiting = new Promise<void>((resolve) => {
+        rebindWaitingResolve = resolve;
+      });
+      const undistilled = vi.spyOn(temporal, "undistilled");
+
+      try {
+        const setup = makeResponsesRequest({ sessionHeaders });
+        setup.rawHeaders["x-lore-project"] = projectA;
+        await (await handleRequest(setup, loadConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        undistilled.mockClear();
+
+        setPipelinePreUpstreamPauseForTest(rebindPause, rebindWaitingResolve);
+        const rebind = makeResponsesRequest({ sessionHeaders });
+        rebind.rawHeaders["x-lore-project"] = projectB;
+        const rebindResponse = await handleRequest(rebind, loadConfig());
+        const rebindBody = rebindResponse.text();
+        await rebindWaiting;
+        setPipelinePreUpstreamPauseForTest(undefined);
+
+        const headers = {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": projectA,
+          "x-lore-provider": "openai",
+          "x-lore-upstream-url": "https://api.openai.com/v1",
+          ...sessionHeaders,
+        };
+        let pending: Promise<Response>;
+        if (endpoint === "structural") {
+          const structural = makeResponsesRequest({
+            sessionHeaders,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: "Create an anchored summary from the conversation history above.",
+                  },
+                ],
+              },
+            ],
+            tools: [],
+          });
+          structural.stream = false;
+          structural.rawHeaders["x-lore-project"] = projectA;
+          pending = handleRequest(structural, loadConfig());
+        } else if (endpoint === "compact") {
+          pending = handleCompactEndpoint(
+            new Request("http://gateway.test/v1/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ project_path: projectA }),
+            }),
+            loadConfig(),
+          );
+        } else {
+          pending = handleResponsesCompactEndpoint(
+            new Request("http://gateway.test/v1/responses/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                model: "gpt-5.6-sol",
+                instructions: "You are a coding agent.",
+                input: [
+                  {
+                    role: "user",
+                    content: [{ type: "input_text", text: "compact" }],
+                  },
+                ],
+                tools: [],
+              }),
+            }),
+            loadConfig(),
+          );
+        }
+        await vi.waitFor(() =>
+          expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+        );
+
+        releaseRebind();
+        expect(await rebindBody).toContain("event: response.completed");
+        const response = await pending;
+        expect(response.status).toBe(403);
+        expect(await response.text()).toMatch(/project[_ ]path/i);
+        expect(undistilled).not.toHaveBeenCalled();
+        expect(upstreamCalls).toBe(2);
+        const state = [...getActiveSessions().values()].find(
+          (candidate) =>
+            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+        );
+        expect(state).toMatchObject({
+          projectPath: projectB,
+          projectPathProvisional: false,
+        });
+      } finally {
+        releaseRebind();
+        undistilled.mockRestore();
+        setPipelinePreUpstreamPauseForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
   it("drops a captured post-response finalizer after session eviction", async () => {
     const sessionHeaders = {
       "x-lore-session-id": "evicted-finalizer-session",
@@ -5174,7 +5571,7 @@ describe("Pipeline — streaming responses", () => {
 
     for (const testCase of cases) {
       nextStatus = testCase.status;
-      const response = await fetch(`${harness.baseURL}${testCase.path}`, {
+      const response = await harness.request(testCase.path, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -5558,7 +5955,7 @@ describe("Pipeline — streaming responses", () => {
             headers: { "content-type": "text/event-stream" },
           }),
       );
-      const response = await fetch(`${harness.baseURL}${path}`, {
+      const response = await harness.request(path, {
         method: "POST",
         headers: {
           "content-type": "application/json",

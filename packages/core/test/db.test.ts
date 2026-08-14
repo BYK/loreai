@@ -41,6 +41,7 @@ import {
   isUnattributedProjectPath,
   UNATTRIBUTED_PROJECT_PREFIX,
   assertFts5Available,
+  MIGRATIONS,
 } from "../src/db";
 import { enableHostedMode, _resetHostedModeForTest } from "../src/hosted";
 import {
@@ -49,6 +50,12 @@ import {
   listProjects,
   mergeProjects,
 } from "../src/data";
+import {
+  decodeWarmupHistogram,
+  encodeWarmupHistogram,
+  emptyWarmupHistogramCounts,
+  normalizeWarmupHistogram,
+} from "../src/warmup-histogram";
 
 const passthroughLogSink: LogSink = {
   info() {},
@@ -137,7 +144,7 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(81);
+    expect(row.version).toBe(MIGRATIONS.length);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -773,6 +780,64 @@ describe("db", () => {
         _resetHostedModeForTest();
       }
     });
+
+    test("does not publish a lookup under a data version committed after its query", () => {
+      const path = `/test/query-memo-race-${crypto.randomUUID()}`;
+      const movedPath = `${path}-moved`;
+      const oldId = crypto.randomUUID();
+      db()
+        .query(
+          "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          oldId,
+          path,
+          "old owner",
+          `github.com/test/query-memo-race-${crypto.randomUUID()}`,
+          Date.now(),
+        );
+      invalidateProjectIdCache();
+
+      const freshId = crypto.randomUUID();
+      const external = new DatabaseSync(process.env.LORE_DB_PATH as string);
+      external.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON");
+      let reassigned = false;
+      registerSink({
+        ...passthroughLogSink,
+        withDbSpan<T>(sql: string, fn: () => T): T {
+          const result = fn();
+          if (
+            !reassigned &&
+            sql.includes("SELECT id, git_remote FROM projects WHERE path = ?")
+          ) {
+            reassigned = true;
+            external.exec("BEGIN IMMEDIATE");
+            external
+              .prepare("UPDATE projects SET path = ? WHERE id = ?")
+              .run(movedPath, oldId);
+            external
+              .prepare(
+                "INSERT INTO projects (id, path, name, created_at) VALUES (?, ?, ?, ?)",
+              )
+              .run(freshId, path, "fresh owner", Date.now());
+            external.exec("COMMIT");
+          }
+          return result;
+        },
+      });
+      try {
+        // This query legitimately saw oldId, but the external commit lands
+        // after the SQL completes and before memo publication.
+        expect(projectId(path)).toBe(oldId);
+      } finally {
+        registerSink(passthroughLogSink);
+        external.close();
+      }
+
+      expect(reassigned).toBe(true);
+      // The lookup-start data_version must invalidate the stale result here.
+      expect(projectId(path)).toBe(freshId);
+    });
   });
 
   test("ensureProject deduplicates via git_remote", () => {
@@ -940,6 +1005,56 @@ describe("db", () => {
       expect(projectId(path)).toBe(freshId);
       expect(ensureProject(path)).toBe(freshId);
     });
+  });
+
+  test("committed canonical reads stay bound to the live database path", () => {
+    const sourceId = ensureProject(
+      `/test/committed-reader-source-${crypto.randomUUID()}`,
+    );
+    const targetId = ensureProject(
+      `/test/committed-reader-target-${crypto.randomUUID()}`,
+    );
+    mergeProjectInternal(sourceId, targetId);
+
+    const originalPath = process.env.LORE_DB_PATH;
+    process.env.LORE_DB_PATH = ":memory:";
+    try {
+      withSavepoint("committed_reader_live_path", () => {
+        expect(canonicalProjectId(sourceId, { committed: true })).toBe(
+          targetId,
+        );
+      });
+    } finally {
+      if (originalPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = originalPath;
+    }
+  });
+
+  test("committed canonical reads fail closed for private in-memory databases", () => {
+    const originalPath = process.env.LORE_DB_PATH;
+    close();
+    try {
+      const memoryPaths = [
+        ":memory:",
+        `file:lore-committed-${crypto.randomUUID()}?mode=memory&cache=shared`,
+      ];
+      for (const [index, memoryPath] of memoryPaths.entries()) {
+        process.env.LORE_DB_PATH = memoryPath;
+        const sourceId = ensureProject(`/test/in-memory-source-${index}`);
+        const targetId = ensureProject(`/test/in-memory-target-${index}`);
+        withSavepoint("in_memory_committed_reader", () => {
+          mergeProjectInternal(sourceId, targetId);
+          expect(
+            canonicalProjectId(sourceId, { committed: true }),
+          ).toBeUndefined();
+        });
+        close();
+      }
+    } finally {
+      close();
+      if (originalPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = originalPath;
+    }
   });
 
   // Regression: the "git-remote magnet" bug. A non-repo path (e.g. a parent
@@ -1618,6 +1733,100 @@ describe("db", () => {
         .query("SELECT COUNT(*) AS count FROM projects WHERE id IN (?, ?)")
         .get(transferSource, transferTarget),
     ).toEqual({ count: 2 });
+  });
+
+  test("mergeProjectInternal preserves valid histogram distributions across aggregate overflow", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-overflow-histogram/source");
+    const targetId = ensureProject("/test/merge-overflow-histogram/target");
+    const laterId = ensureProject("/test/merge-overflow-histogram/later");
+    const sourceTotal = Number.MAX_SAFE_INTEGER;
+    const emptyCounts = Array.from({ length: 21 }, () => 0);
+    const sourceCounts = [...emptyCounts];
+    const targetCounts = [...emptyCounts];
+    const laterCounts = [...emptyCounts];
+    sourceCounts[0] = sourceTotal - 1;
+    sourceCounts[1] = 1;
+    targetCounts[2] = 1;
+    laterCounts[3] = 1;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, ?, 100),
+              (?, 'all', ?, ?, 100),
+              (?, 'all', ?, ?, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      sourceTotal,
+      targetId,
+      JSON.stringify(targetCounts),
+      1,
+      laterId,
+      JSON.stringify(laterCounts),
+      1,
+    );
+
+    mergeProjectInternal(sourceId, targetId);
+    mergeProjectInternal(targetId, laterId);
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(laterId) as { counts: string; total: number };
+    const exact = decodeWarmupHistogram(row.counts, row.total);
+    expect(exact).toBeDefined();
+    const counts = normalizeWarmupHistogram(exact ?? []).counts;
+    expect(Number.isSafeInteger(row.total)).toBe(true);
+    expect(counts.reduce((sum, count) => sum + count, 0)).toBe(row.total);
+    expect(counts.slice(0, 4).every((count) => count > 0)).toBe(true);
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM warmup_histograms WHERE project_id IN (?, ?)",
+        )
+        .get(sourceId, targetId),
+    ).toEqual({ count: 0 });
+  });
+
+  test("mergeProjectInternal persists a decodable row when exact weights gain a digit", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-exact-boundary/source");
+    const targetId = ensureProject("/test/merge-exact-boundary/target");
+    const boundary = 10n ** 1000n - 1n;
+    const sourceWeights = emptyWarmupHistogramCounts();
+    const targetWeights = emptyWarmupHistogramCounts();
+    sourceWeights[0] = boundary;
+    sourceWeights[1] = 1n;
+    targetWeights[0] = boundary;
+    targetWeights[2] = 1n;
+    const source = encodeWarmupHistogram(sourceWeights);
+    const target = encodeWarmupHistogram(targetWeights);
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, ?, 100), (?, 'all', ?, ?, 100)`,
+    ).run(
+      sourceId,
+      source.counts,
+      source.total,
+      targetId,
+      target.counts,
+      target.total,
+    );
+
+    mergeProjectInternal(sourceId, targetId);
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(targetId) as { counts: string; total: number };
+    const decoded = decodeWarmupHistogram(row.counts, row.total);
+    expect(decoded).toBeDefined();
+    expect(decoded?.[0].toString()).toHaveLength(1001);
+    expect(decoded?.slice(0, 3).every((count) => count > 0n)).toBe(true);
   });
 
   test.each([

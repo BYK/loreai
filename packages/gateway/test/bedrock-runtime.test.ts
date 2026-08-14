@@ -8,8 +8,6 @@
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { Readable } from "node:stream";
 import { MockAgent } from "undici";
 import {
   BEDROCK_RUNTIME_PATH_RE,
@@ -24,6 +22,7 @@ import { resetPipelineState } from "../src/pipeline";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import { close as closeDB } from "@loreai/core";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 function localRequest(
   baseURL: string,
@@ -34,41 +33,7 @@ function localRequest(
     body?: string;
   },
 ): Promise<Response> {
-  const port = Number(new URL(baseURL).port);
-  return new Promise<Response>((resolve, reject) => {
-    const request = httpRequest(
-      {
-        hostname: "127.0.0.1",
-        port,
-        path,
-        method: options.method,
-        headers: {
-          ...options.headers,
-          ...(options.body === undefined
-            ? {}
-            : { "content-length": String(Buffer.byteLength(options.body)) }),
-        },
-      },
-      (incoming) => {
-        const headers = new Headers();
-        for (let i = 0; i < incoming.rawHeaders.length; i += 2) {
-          headers.append(incoming.rawHeaders[i], incoming.rawHeaders[i + 1]);
-        }
-        resolve(
-          new Response(
-            Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>,
-            {
-              status: incoming.statusCode ?? 500,
-              statusText: incoming.statusMessage,
-              headers,
-            },
-          ),
-        );
-      },
-    );
-    request.once("error", reject);
-    request.end(options.body);
-  });
+  return loopbackRequest(`${baseURL}${path}`, options);
 }
 
 describe("bedrockRuntimeUrl", () => {

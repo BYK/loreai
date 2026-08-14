@@ -60,7 +60,7 @@ describe("gateway test harness", () => {
     expect(port).not.toBe(1);
   });
 
-  test("chat works when the OS selects a WHATWG fetch-blocked port", async () => {
+  test("loopback requests work on a WHATWG fetch-blocked port", async () => {
     const forbiddenPorts = [6667, 6666, 6668, 6669, 6697, 6566, 6000, 5060];
     const userMessage = "Test the loopback harness transport.";
     const fixtures = makeConversationFixtures([
@@ -86,6 +86,9 @@ describe("gateway test harness", () => {
         `could not bind any WHATWG forbidden port: ${unavailable.join(", ")}`,
       );
     }
+
+    const health = await harness.request("/health");
+    expect(health.status).toBe(200);
 
     const response = await harness.chat({
       model: DEFAULT_MODEL,

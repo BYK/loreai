@@ -14,8 +14,8 @@ import {
 } from "../src/pipeline";
 import { loadConfig } from "../src/config";
 
-async function postCompact(baseURL: string, body: string): Promise<Response> {
-  return fetch(`${baseURL}/v1/compact`, {
+async function postCompact(harness: Harness, body: string): Promise<Response> {
+  return harness.request("/v1/compact", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -32,7 +32,7 @@ describe("POST /v1/compact", () => {
 
   it("rejects an unknown session before parsing invalid JSON", async () => {
     harness = await createHarness({ fixtures: [] });
-    const resp = await postCompact(harness.baseURL, "{ not json");
+    const resp = await postCompact(harness, "{ not json");
     expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
     expect(body.error).toBe("session_not_found");
@@ -80,7 +80,7 @@ describe("POST /v1/compact", () => {
 
   it("rejects an unknown session before validating project_path", async () => {
     harness = await createHarness({ fixtures: [] });
-    const resp = await postCompact(harness.baseURL, JSON.stringify({}));
+    const resp = await postCompact(harness, JSON.stringify({}));
     expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
     expect(body.error).toBe("session_not_found");
@@ -89,7 +89,7 @@ describe("POST /v1/compact", () => {
   it("returns 404 when no active session exists for the project", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({ project_path: process.cwd() }),
     );
     expect(resp.status).toBe(404);
@@ -134,7 +134,7 @@ describe("POST /v1/compact — tokens_before field", () => {
   it("ignores tokens_before when the project has no active session (404 wins)", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: process.cwd(),
         tokens_before: 50_000,
@@ -150,7 +150,7 @@ describe("POST /v1/compact — tokens_before field", () => {
     // schema is exercised.
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: process.cwd(),
         tokens_before: 0,
@@ -165,7 +165,7 @@ describe("POST /v1/compact — tokens_before field", () => {
     // The `typeof === "number"` guard drops all of these safely.
     for (const bad of [null, "100", '"NaN"', true, false, {}]) {
       const resp = await postCompact(
-        harness.baseURL,
+        harness,
         JSON.stringify({
           project_path: process.cwd(),
           tokens_before: bad,
@@ -179,7 +179,7 @@ describe("POST /v1/compact — tokens_before field", () => {
   it("rejects negative tokens_before — falls through to summary path", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: process.cwd(),
         tokens_before: -100,
