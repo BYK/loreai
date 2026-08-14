@@ -1,0 +1,1950 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+RED='\033[0;31m'
+MUTED='\033[0;2m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+die() {
+  echo -e "${RED}$1${NC}" >&2
+  exit 1
+}
+
+# Catch unexpected failures from set -e / pipefail
+trap 'die "Unexpected failure at line $LINENO"' ERR
+
+usage() {
+  cat <<EOF
+Lore Installer — persistent memory for AI coding agents
+
+Usage: install [options]
+
+Options:
+    -h, --help              Display this help message
+    -v, --version <version> Install a specific version (e.g., 0.14.0) or "nightly"
+        --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
+
+Environment Variables:
+    LORE_INSTALL_DIR        Override the installation directory
+    LORE_VERSION            Install a specific version (e.g., 0.14.0, nightly)
+
+Examples:
+    curl -fsSL https://withlore.ai/install | bash
+    curl -fsSL https://withlore.ai/install | bash -s -- --version 0.14.0
+    export LORE_VERSION=nightly && curl -fsSL https://withlore.ai/install | bash
+    export LORE_INSTALL_DIR=~/.local/bin && curl -fsSL https://withlore.ai/install | bash
+EOF
+}
+
+requested_version="${LORE_VERSION:-}"
+no_modify_path=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -v|--version)
+      if [[ -n "${2:-}" ]]; then
+        requested_version="$2"
+        shift 2
+      else
+        die "Error: --version requires a version argument"
+      fi
+      ;;
+    --no-modify-path)
+      no_modify_path=true
+      shift
+      ;;
+    *) shift ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Detect platform
+# ---------------------------------------------------------------------------
+
+case "$(uname -s)" in
+  Darwin*) os="darwin" ;;
+  Linux*)  os="linux" ;;
+  MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+  *) die "Unsupported OS: $(uname -s)" ;;
+esac
+
+arch=$(uname -m)
+case "$arch" in
+  x86_64)       arch="x64" ;;
+  aarch64|arm64) arch="arm64" ;;
+  *) die "Unsupported architecture: $arch" ;;
+esac
+
+suffix=""
+if [[ "$os" == "windows" ]]; then
+  suffix=".exe"
+  if [[ "$arch" != "x64" ]]; then
+    die "Unsupported: windows-$arch (only windows-x64 is supported)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve version & download binary
+# ---------------------------------------------------------------------------
+
+tmpdir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
+tmp_workdir=""
+tmp_binary=""
+install_tmp=""
+installed_dest=""
+receipt_tmp=""
+receipt_path=""
+receipt_committed=false
+receipt_publication_started=false
+previous_receipt=""
+previous_dest=""
+binary_publication_started=false
+channel_tmp=""
+channel_path=""
+channel_sha256=""
+channel_identity=""
+channel_committed=false
+channel_publication_started=false
+previous_channel=""
+previous_channel_sha256=""
+previous_channel_identity=""
+executable_sha256=""
+installed_identity=""
+receipt_sha256=""
+receipt_identity=""
+installed_device=""
+installed_inode=""
+installed_size=""
+installed_mtime_ns=""
+dest=""
+lifecycle_lock_path=""
+lifecycle_lock_token=""
+lifecycle_lock_held=false
+lifecycle_lock_bash_pid=""
+lifecycle_lock_pid=""
+lifecycle_lock_process_identity=""
+lifecycle_lock_directory_identity=""
+lifecycle_lock_owner_identity=""
+lifecycle_lock_owner_content=""
+lifecycle_initialization_claim_path=""
+lifecycle_initialization_claim_identity=""
+lifecycle_initialization_claim_content=""
+lifecycle_initialization_stage_identity=""
+lifecycle_initialization_claim_held=false
+lifecycle_initialization_claim_bash_pid=""
+lifecycle_initialization_stage_path=""
+lifecycle_initialization_lease_seconds=10
+lifecycle_state_dir=""
+lifecycle_state_dir_identity=""
+lifecycle_state_dir_fd=""
+lifecycle_state_dir_fd_path=""
+inspected_lock_token=""
+inspected_lock_pid=""
+inspected_lock_process_identity=""
+inspected_lock_directory_identity=""
+inspected_lock_owner_identity=""
+inspected_lock_owner_content=""
+uninstall_tombstone_path=""
+observed_tombstone_present=false
+observed_tombstone_token=""
+install_tombstone_present=false
+install_tombstone_token=""
+read_tombstone_present=false
+read_tombstone_token=""
+read_tombstone_identity=""
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    die "Could not hash installed files (sha256sum or shasum is required)"
+  fi
+}
+
+sync_path() {
+  local path=$1
+  if [[ "$os" == "darwin" ]]; then
+    # macOS sync(8) has no per-path form. A global sync still provides the
+    # required durability before the transaction advances.
+    sync
+  else
+    if [[ -d "$path" ]]; then
+      sync -f "$path"
+    else
+      sync "$path"
+    fi
+  fi
+}
+
+file_identity() {
+  if [[ "$os" == "darwin" ]]; then
+    stat -f '%d:%i' "$1"
+  else
+    stat -c '%d:%i' "$1"
+  fi
+}
+
+stable_file_identity() {
+  local path=$1
+  local identity device inode
+  identity=$(file_identity "$path") || return 1
+  IFS=: read -r device inode <<< "$identity"
+  if [[ ! "$device" =~ ^[1-9][0-9]*$ || ! "$inode" =~ ^[1-9][0-9]*$ ]]; then
+    return 1
+  fi
+  printf '%s' "$identity"
+}
+
+stable_followed_file_identity() {
+  local path=$1 identity device inode
+  if [[ "$os" == "darwin" ]]; then
+    identity=$(stat -Lf '%d:%i' "$path") || return 1
+  else
+    identity=$(stat -Lc '%d:%i' "$path") || return 1
+  fi
+  IFS=: read -r device inode <<< "$identity"
+  if [[ ! "$device" =~ ^[1-9][0-9]*$ || ! "$inode" =~ ^[1-9][0-9]*$ ]]; then
+    return 1
+  fi
+  printf '%s' "$identity"
+}
+
+require_file_identity() {
+  local path=$1
+  local description=$2
+  local identity
+  if ! identity=$(stable_file_identity "$path"); then
+    die "Could not capture a stable ${description} identity"
+  fi
+  printf '%s' "$identity"
+}
+
+preflight_stable_file_identity() {
+  local directory=$1
+  local probe
+  probe=$(mktemp "${directory}/.lore.identity-probe.XXXXXX")
+  chmod 600 "$probe"
+  if ! stable_file_identity "$probe" >/dev/null; then
+    rm -f -- "$probe"
+    die "This filesystem does not expose stable file IDs; install is unavailable and any existing binary must be removed manually"
+  fi
+  rm -f -- "$probe"
+}
+
+capture_receipt_identity() {
+  local path=$1
+  local seconds identity after_identity after_sha256
+  assert_lifecycle_lock_owned
+  [[ -f "$path" && ! -L "$path" ]] || die "Installed executable is not a regular file: ${path}"
+  # Normalize the freshly installed file to whole-second mtime so Bash can
+  # publish an exact nanosecond identity consumed by Node on every platform,
+  # including macOS stat(1), which does not expose fractional mtime portably.
+  if [[ "$os" == "darwin" ]]; then
+    seconds=$(stat -f '%m' "$path")
+    touch -t "$(date -r "$seconds" '+%Y%m%d%H%M.%S')" "$path"
+    identity=$(stat -f '%d:%i:%z:%m' "$path")
+  else
+    seconds=$(stat -c '%Y' "$path")
+    touch -d "@${seconds}" "$path"
+    identity=$(stat -c '%d:%i:%s:%Y' "$path")
+  fi
+  IFS=: read -r installed_device installed_inode installed_size seconds <<< "$identity"
+  installed_mtime_ns="${seconds}000000000"
+  if [[ ! "$installed_device" =~ ^[1-9][0-9]*$ ||
+        ! "$installed_inode" =~ ^[1-9][0-9]*$ ||
+        ! "$installed_size" =~ ^[0-9]+$ ||
+        ! "$installed_mtime_ns" =~ ^[0-9]+$ ]]; then
+    die "Could not capture a stable installed executable identity"
+  fi
+  after_sha256=$(hash_file "$path")
+  after_identity=$(require_file_identity "$path" "installed executable")
+  if [[ "$after_sha256" != "$executable_sha256" || "$after_identity" != "$installed_identity" ]]; then
+    die "Installed executable changed while its receipt identity was captured: ${path}"
+  fi
+  assert_lifecycle_lock_owned
+}
+
+file_matches_receipt_identity() {
+  local path=$1
+  local sha256=$2
+  local identity
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  if [[ "$os" == "darwin" ]]; then
+    identity=$(stat -f '%d:%i:%z:%m' "$path") || return 1
+  else
+    identity=$(stat -c '%d:%i:%s:%Y' "$path") || return 1
+  fi
+  [[ "$identity" == "${installed_device}:${installed_inode}:${installed_size}:${installed_mtime_ns%000000000}" ]] || return 1
+  [[ "$(hash_file "$path")" == "$sha256" ]]
+}
+
+file_is_generation() {
+  local path=$1
+  local identity=$2
+  local sha256=$3
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$(file_identity "$path")" == "$identity" ]] || return 1
+  [[ "$(hash_file "$path")" == "$sha256" ]]
+}
+
+read_trusted_uninstall_tombstone() {
+  local path=$1
+  local before after size mode content token
+  read_tombstone_present=false
+  read_tombstone_token=""
+  read_tombstone_identity=""
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  if [[ -L "$path" || ! -f "$path" ]]; then
+    die "Refusing unsafe uninstall marker: ${path}"
+  fi
+  if [[ "$os" != "windows" && ! -O "$path" ]]; then
+    die "Refusing uninstall marker owned by another user: ${path}"
+  fi
+  if [[ "$os" == "darwin" ]]; then
+    size=$(stat -f '%z' "$path")
+    mode=$(stat -f '%Lp' "$path")
+  else
+    size=$(stat -c '%s' "$path")
+    mode=$(stat -c '%a' "$path")
+  fi
+  if [[ ! "$size" =~ ^[0-9]+$ ]] || (( size > 16384 )); then
+    die "Uninstall marker is too large: ${path}"
+  fi
+  if [[ "$os" != "windows" ]]; then
+    if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$mode & 077) != 0 )); then
+      die "Uninstall marker is not owner-only: ${path}"
+    fi
+  fi
+  before=$(require_file_identity "$path" "uninstall marker")
+  content=$(<"$path")
+  after=$(require_file_identity "$path" "uninstall marker")
+  if [[ "$before" != "$after" ]]; then
+    die "Uninstall marker changed while it was read: ${path}"
+  fi
+  token=$(printf '%s\n' "$content" | sed -n \
+    's/^{"version":1,"token":"\([A-Za-z0-9_-]\{32,256\}\)","createdAt":"[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\.[0-9]\{3\}Z"}$/\1/p')
+  if [[ -z "$token" ]]; then
+    die "Uninstall marker is malformed or invalid: ${path}"
+  fi
+  read_tombstone_present=true
+  read_tombstone_token="$token"
+  read_tombstone_identity="$after"
+}
+
+same_tombstone_observation() {
+  [[ "$observed_tombstone_present" == "$read_tombstone_present" ]] || return 1
+  if [[ "$observed_tombstone_present" == "true" ]]; then
+    [[ "$observed_tombstone_token" == "$read_tombstone_token" ]]
+  fi
+}
+
+lifecycle_iso_timestamp_is_valid() {
+  local value=$1 year month day hour minute second
+  [[ "$value" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{3}Z$ ]] || return 1
+  year=${BASH_REMATCH[1]}
+  month=${BASH_REMATCH[2]}
+  day=${BASH_REMATCH[3]}
+  hour=${BASH_REMATCH[4]}
+  minute=${BASH_REMATCH[5]}
+  second=${BASH_REMATCH[6]}
+  lifecycle_calendar_date_is_valid "$year" "$month" "$day" &&
+    (( 10#$hour <= 23 && 10#$minute <= 59 && 10#$second <= 59 ))
+}
+
+lifecycle_calendar_date_is_valid() {
+  local year=$1 month=$2 day=$3 max_day
+  [[ "$year" =~ ^[0-9]{4}$ && "$month" =~ ^[0-9]{2}$ && "$day" =~ ^[0-9]{2}$ ]] || return 1
+  (( 10#$month >= 1 && 10#$month <= 12 && 10#$day >= 1 )) || return 1
+  case $((10#$month)) in
+    2)
+      max_day=28
+      if (( 10#$year % 400 == 0 || (10#$year % 4 == 0 && 10#$year % 100 != 0) )); then
+        max_day=29
+      fi
+      ;;
+    4|6|9|11) max_day=30 ;;
+    *) max_day=31 ;;
+  esac
+  (( 10#$day <= max_day ))
+}
+
+lifecycle_process_timestamp_is_valid() {
+  local value=$1 month_name month day hour minute second year
+  lifecycle_iso_timestamp_is_valid "$value" && return 0
+  [[ "$value" =~ ^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[[:space:]]+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[[:space:]]+([0-9]{1,2})[[:space:]]+([0-9]{2}):([0-9]{2}):([0-9]{2})[[:space:]]+([0-9]{4})$ ]] || return 1
+  month_name=${BASH_REMATCH[2]}
+  day=${BASH_REMATCH[3]}
+  hour=${BASH_REMATCH[4]}
+  minute=${BASH_REMATCH[5]}
+  second=${BASH_REMATCH[6]}
+  year=${BASH_REMATCH[7]}
+  case "$month_name" in
+    Jan) month=01 ;; Feb) month=02 ;; Mar) month=03 ;; Apr) month=04 ;;
+    May) month=05 ;; Jun) month=06 ;; Jul) month=07 ;; Aug) month=08 ;;
+    Sep) month=09 ;; Oct) month=10 ;; Nov) month=11 ;; Dec) month=12 ;;
+  esac
+  printf -v day '%02d' "$((10#$day))"
+  lifecycle_calendar_date_is_valid "$year" "$month" "$day" &&
+    (( 10#$hour <= 23 && 10#$minute <= 59 && 10#$second <= 59 ))
+}
+
+lifecycle_pid_is_valid() {
+  local pid=$1 max_pid=9007199254740991
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  (( ${#pid} < ${#max_pid} )) && return 0
+  (( ${#pid} == ${#max_pid} )) || return 1
+  (( 10#$pid <= max_pid ))
+}
+
+path_owner_only_mode() {
+  local path=$1 mode
+  [[ "$os" == "windows" ]] && return 0
+  if [[ "$os" == "darwin" ]]; then
+    mode=$(stat -f '%Lp' "$path") || return 1
+  else
+    mode=$(stat -c '%a' "$path") || return 1
+  fi
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 077) == 0 ))
+}
+
+path_has_exact_mode() {
+  local path=$1 expected=$2 mode
+  [[ "$os" == "windows" ]] && return 0
+  if [[ "$os" == "darwin" ]]; then
+    mode=$(stat -f '%Lp' "$path") || return 1
+  else
+    mode=$(stat -c '%a' "$path") || return 1
+  fi
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( 8#$mode == 8#$expected ))
+}
+
+followed_path_has_exact_mode() {
+  local path=$1 expected=$2 mode
+  [[ "$os" == "windows" ]] && return 0
+  if [[ "$os" == "darwin" ]]; then
+    mode=$(stat -Lf '%Lp' "$path") || return 1
+  else
+    mode=$(stat -Lc '%a' "$path") || return 1
+  fi
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( 8#$mode == 8#$expected ))
+}
+
+lifecycle_state_dir_is_trusted() {
+  local path_identity fd_identity
+  [[ -n "$lifecycle_state_dir" && -n "$lifecycle_state_dir_identity" ]] || return 1
+  [[ -n "$lifecycle_state_dir_fd_path" ]] || return 1
+  [[ -d "$lifecycle_state_dir" && ! -L "$lifecycle_state_dir" ]] || return 1
+  [[ -d "$lifecycle_state_dir_fd_path" ]] || return 1
+  if [[ "$os" != "windows" ]] &&
+     { [[ ! -O "$lifecycle_state_dir" ]] ||
+       ! path_has_exact_mode "$lifecycle_state_dir" 700 ||
+       ! followed_path_has_exact_mode "$lifecycle_state_dir_fd_path" 700; }; then
+    return 1
+  fi
+  path_identity=$(stable_file_identity "$lifecycle_state_dir") || return 1
+  fd_identity=$(stable_followed_file_identity "$lifecycle_state_dir_fd_path") || return 1
+  [[ "$path_identity" == "$lifecycle_state_dir_identity" &&
+     "$fd_identity" == "$lifecycle_state_dir_identity" ]]
+}
+
+assert_lifecycle_state_dir_trusted() {
+  lifecycle_state_dir_is_trusted ||
+    die "Installer state directory changed during lifecycle acquisition"
+}
+
+secure_lifecycle_state_dir() {
+  local state_dir=$1 before opened after_path after_fd
+  if [[ -L "$state_dir" || ( -e "$state_dir" && ! -d "$state_dir" ) ]]; then
+    die "Refusing unsafe installer state directory: ${state_dir}"
+  fi
+  if [[ ! -e "$state_dir" ]]; then
+    mkdir -m 700 "$state_dir" ||
+      die "Could not create installer state directory: ${state_dir}"
+  fi
+  [[ -d "$state_dir" && ! -L "$state_dir" ]] ||
+    die "Refusing unsafe installer state directory: ${state_dir}"
+  if [[ "$os" != "windows" && ! -O "$state_dir" ]]; then
+    die "Refusing installer state directory owned by another user: ${state_dir}"
+  fi
+  before=$(require_file_identity "$state_dir" "installer state directory")
+  if ! exec {lifecycle_state_dir_fd}<"$state_dir"; then
+    die "Could not open installer state directory safely: ${state_dir}"
+  fi
+  lifecycle_state_dir_fd_path="/dev/fd/${lifecycle_state_dir_fd}"
+  opened=$(stable_followed_file_identity "$lifecycle_state_dir_fd_path") ||
+    die "Could not capture opened installer state directory identity"
+  if [[ "$before" != "$opened" ]]; then
+    die "Installer state directory changed while it was opened"
+  fi
+  # Tightening happens before lifecycle.lock can be created. The held directory
+  # descriptor pins the generation so a path replacement during chmod is
+  # detected instead of being trusted as the secured parent.
+  if [[ "$os" != "windows" ]] && ! chmod 700 "$lifecycle_state_dir_fd_path"; then
+    die "Could not secure installer state directory: ${state_dir}"
+  fi
+  after_path=$(require_file_identity "$state_dir" "secured installer state directory")
+  after_fd=$(stable_followed_file_identity "$lifecycle_state_dir_fd_path") ||
+    die "Could not recapture opened installer state directory identity"
+  if [[ "$before" != "$after_path" ]] || [[ "$before" != "$after_fd" ]]; then
+    die "Installer state directory was replaced while permissions were tightened"
+  fi
+  if [[ "$os" != "windows" ]] &&
+     { [[ ! -O "$state_dir" ]] ||
+       ! path_has_exact_mode "$state_dir" 700 ||
+       ! followed_path_has_exact_mode "$lifecycle_state_dir_fd_path" 700; }; then
+    die "Installer state directory is not current-owner mode 0700: ${state_dir}"
+  fi
+  lifecycle_state_dir="$state_dir"
+  lifecycle_state_dir_identity="$before"
+  assert_lifecycle_state_dir_trusted
+}
+
+lifecycle_owner_file_identity() {
+  if [[ "$os" == "darwin" ]]; then
+    stat -f '%d:%i:%z:%m:%c:%Lp:%u' "$1"
+  else
+    stat -c '%d:%i:%s:%Y:%Z:%a:%u' "$1"
+  fi
+}
+
+# Capture one immutable, strictly validated lifecycle owner record. This
+# accepts only the compact v1 record emitted by the TypeScript lifecycle helper
+# and by this installer: no extra JSON fields, escaping, links, loose modes, or
+# owner changes are tolerated.
+inspect_lifecycle_owner_record() {
+  local owner_path=$1 before_owner after_owner
+  local owner_size owner_content owner_content_size owner_token owner_pid owner_operation
+  local owner_created_at owner_process_started_at owner_process_identity
+  local unix_process_start
+  local owner_pattern
+
+  inspected_lock_token=""
+  inspected_lock_pid=""
+  inspected_lock_process_identity=""
+  inspected_lock_owner_identity=""
+  inspected_lock_owner_content=""
+
+  [[ -f "$owner_path" && ! -L "$owner_path" ]] || return 1
+  if [[ "$os" != "windows" && ! -O "$owner_path" ]]; then
+    return 1
+  fi
+  path_owner_only_mode "$owner_path" || return 1
+  if [[ "$os" == "darwin" ]]; then
+    owner_size=$(stat -f '%z' "$owner_path") || return 1
+  else
+    owner_size=$(stat -c '%s' "$owner_path") || return 1
+  fi
+  [[ "$owner_size" =~ ^[0-9]+$ ]] || return 1
+  (( owner_size > 0 && owner_size <= 16384 )) || return 1
+  before_owner=$(lifecycle_owner_file_identity "$owner_path") || return 1
+  owner_content=$(<"$owner_path") || return 1
+  [[ "$(wc -l < "$owner_path")" == "1" ]] || return 1
+  owner_content_size=$(LC_ALL=C printf '%s' "$owner_content" | wc -c)
+  [[ "$owner_content_size" =~ ^[0-9]+$ ]] || return 1
+  (( owner_content_size + 1 == owner_size )) || return 1
+  [[ -f "$owner_path" && ! -L "$owner_path" ]] || return 1
+  if [[ "$os" != "windows" ]] &&
+     { [[ ! -O "$owner_path" ]] || ! path_owner_only_mode "$owner_path"; }; then
+    return 1
+  fi
+  after_owner=$(lifecycle_owner_file_identity "$owner_path") || return 1
+  [[ "$before_owner" == "$after_owner" ]] || return 1
+
+  owner_pattern='^\{"version":1,"token":"([A-Za-z0-9_-]{32,256})","pid":([1-9][0-9]*),"operation":"(gateway-start|gateway-shutdown|upgrade|setup|uninstall|hosted-install)","createdAt":"([^"]{1,64})","processStartedAt":"([^"]{1,64})","processIdentity":"([^"]{1,1024})"\}$'
+  [[ "$owner_content" =~ $owner_pattern ]] || return 1
+  owner_token=${BASH_REMATCH[1]}
+  owner_pid=${BASH_REMATCH[2]}
+  owner_operation=${BASH_REMATCH[3]}
+  owner_created_at=${BASH_REMATCH[4]}
+  owner_process_started_at=${BASH_REMATCH[5]}
+  owner_process_identity=${BASH_REMATCH[6]}
+  [[ -n "$owner_operation" ]] || return 1
+  lifecycle_pid_is_valid "$owner_pid" || return 1
+  [[ "$owner_created_at" != *'\'* && "$owner_process_started_at" != *'\'* && "$owner_process_identity" != *'\'* ]] || return 1
+  lifecycle_iso_timestamp_is_valid "$owner_created_at" || return 1
+  lifecycle_process_timestamp_is_valid "$owner_process_started_at" || return 1
+  case "$owner_process_identity" in
+    linux:*)
+      [[ "$owner_process_identity" =~ ^linux:[A-Za-z0-9-]{1,128}:[0-9]+$ ]] || return 1
+      ;;
+    unix:*)
+      unix_process_start=${owner_process_identity#unix:}
+      lifecycle_process_timestamp_is_valid "$unix_process_start" || return 1
+      ;;
+    unverified:*)
+      [[ "$owner_process_identity" == "unverified:${owner_token}" ]] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+
+  inspected_lock_token=$owner_token
+  inspected_lock_pid=$owner_pid
+  inspected_lock_process_identity=$owner_process_identity
+  inspected_lock_owner_identity=$before_owner
+  inspected_lock_owner_content=$owner_content
+}
+
+# Capture one immutable lifecycle directory + owner generation.
+inspect_lifecycle_lock_generation() {
+  local lock_path=$1 before_dir after_dir
+  inspected_lock_directory_identity=""
+  [[ -d "$lock_path" && ! -L "$lock_path" ]] || return 1
+  if [[ "$os" != "windows" && ! -O "$lock_path" ]]; then
+    return 1
+  fi
+  path_owner_only_mode "$lock_path" || return 1
+  before_dir=$(stable_file_identity "$lock_path") || return 1
+  inspect_lifecycle_owner_record "${lock_path}/owner.json" || return 1
+  [[ -d "$lock_path" && ! -L "$lock_path" ]] || return 1
+  if [[ "$os" != "windows" ]] &&
+     { [[ ! -O "$lock_path" ]] || ! path_owner_only_mode "$lock_path"; }; then
+    return 1
+  fi
+  after_dir=$(stable_file_identity "$lock_path") || return 1
+  [[ "$before_dir" == "$after_dir" ]] || return 1
+  inspected_lock_directory_identity=$before_dir
+}
+
+lifecycle_owner_is_definitively_dead() {
+  local pid=$1 process_identity=$2 stat_line stat_suffix boot_id live_identity process_start
+  local -a stat_fields
+  lifecycle_pid_is_valid "$pid" || return 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # Portable fallback used on macOS/MSYS and when procfs is unavailable.
+    # Do not mistake a permission-denied signal probe for death when ps can
+    # still see the PID.
+    process_start=$(ps -o pid= -p "$pid" 2>/dev/null || true)
+    [[ "$process_start" =~ ^[[:space:]]*${pid}[[:space:]]*$ ]] && return 1
+    return 0
+  fi
+  if [[ "$process_identity" == linux:* &&
+        -r "/proc/${pid}/stat" && -r /proc/sys/kernel/random/boot_id ]]; then
+    stat_line=$(<"/proc/${pid}/stat") || return 1
+    stat_suffix=${stat_line##*) }
+    read -r -a stat_fields <<< "$stat_suffix"
+    boot_id=$(< /proc/sys/kernel/random/boot_id) || return 1
+    [[ "${stat_fields[19]:-}" =~ ^[0-9]+$ &&
+       "$boot_id" =~ ^[A-Za-z0-9-]{1,128}$ ]] || return 1
+    live_identity="linux:${boot_id}:${stat_fields[19]}"
+    # A present PID with a different boot/start-tick generation is a reused PID:
+    # the recorded owner is dead even though the numeric PID remains live.
+    [[ "$live_identity" != "$process_identity" ]]
+    return
+  fi
+  if [[ "$process_identity" == unix:* ]]; then
+    process_start=$(ps -o lstart= -p "$pid" 2>/dev/null || true)
+    [[ -n "$process_start" ]] || return 1
+    live_identity="unix:${process_start}"
+    [[ "$live_identity" != "$process_identity" ]]
+    return
+  fi
+  # A live PID without a comparable start identity remains conservatively busy.
+  return 1
+}
+
+same_inspected_lifecycle_generation() {
+  local expected_token=$1 expected_pid=$2 expected_process_identity=$3
+  local expected_dir=$4 expected_owner=$5 expected_content=$6 path=$7
+  inspect_lifecycle_lock_generation "$path" || return 1
+  [[ "$inspected_lock_token" == "$expected_token" &&
+     "$inspected_lock_pid" == "$expected_pid" &&
+     "$inspected_lock_process_identity" == "$expected_process_identity" &&
+     "$inspected_lock_directory_identity" == "$expected_dir" &&
+     "$inspected_lock_owner_identity" == "$expected_owner" &&
+      "$inspected_lock_owner_content" == "$expected_content" ]]
+}
+
+same_inspected_lifecycle_owner_record() {
+  local expected_token=$1 expected_pid=$2 expected_process_identity=$3
+  local expected_owner=$4 expected_content=$5 path=$6
+  inspect_lifecycle_owner_record "$path" || return 1
+  [[ "$inspected_lock_token" == "$expected_token" &&
+     "$inspected_lock_pid" == "$expected_pid" &&
+     "$inspected_lock_process_identity" == "$expected_process_identity" &&
+     "$inspected_lock_owner_identity" == "$expected_owner" &&
+     "$inspected_lock_owner_content" == "$expected_content" ]]
+}
+
+release_lifecycle_initialization_claim() {
+  [[ "$lifecycle_initialization_claim_held" == "true" ]] || return 0
+  [[ "$BASHPID" == "$lifecycle_initialization_claim_bash_pid" ]] || return 0
+  if same_inspected_lifecycle_owner_record \
+    "$lifecycle_lock_token" "$lifecycle_lock_pid" "$lifecycle_lock_process_identity" \
+    "$lifecycle_initialization_claim_identity" \
+    "$lifecycle_initialization_claim_content" \
+    "$lifecycle_initialization_claim_path"; then
+    rm -f -- "$lifecycle_initialization_claim_path" || return 0
+  else
+    return 0
+  fi
+  lifecycle_initialization_claim_held=false
+}
+
+remove_lifecycle_initialization_stage() {
+  [[ -n "$lifecycle_initialization_stage_path" ]] || return 0
+  if [[ "$(stable_file_identity "$lifecycle_initialization_stage_path" 2>/dev/null || true)" == \
+        "$lifecycle_initialization_stage_identity" ]]; then
+    rm -f -- "$lifecycle_initialization_stage_path" || return 0
+  fi
+  lifecycle_initialization_stage_path=""
+}
+
+quarantine_dead_lifecycle_initialization_claim() {
+  local claim_path=$1 expected_token=$inspected_lock_token
+  local expected_pid=$inspected_lock_pid
+  local expected_process_identity=$inspected_lock_process_identity
+  local expected_owner=$inspected_lock_owner_identity
+  local expected_content=$inspected_lock_owner_content
+  local archive_path expected_file
+  lifecycle_owner_is_definitively_dead \
+    "$expected_pid" "$expected_process_identity" || return 1
+  archive_path="$(dirname "$claim_path")/.lifecycle.lock.claim.init.${expected_token}"
+  if [[ -e "$archive_path" || -L "$archive_path" ]]; then
+    return 1
+  fi
+  same_inspected_lifecycle_owner_record \
+    "$expected_token" "$expected_pid" "$expected_process_identity" \
+    "$expected_owner" "$expected_content" "$claim_path" || return 1
+  expected_file=$(stable_file_identity "$claim_path") || return 1
+  lifecycle_owner_is_definitively_dead \
+    "$expected_pid" "$expected_process_identity" || return 1
+  assert_lifecycle_state_dir_trusted
+  # mv -n is portable across GNU/BSD/MSYS and gives a regular-file claim
+  # compare-and-swap: a delayed reclaimer cannot overwrite an archived claim
+  # or move a successor claim beneath it.
+  mv -n "$claim_path" "$archive_path" || return 1
+  if inspect_lifecycle_owner_record "$archive_path" &&
+     [[ "$inspected_lock_token" == "$expected_token" &&
+        "$inspected_lock_pid" == "$expected_pid" &&
+        "$inspected_lock_process_identity" == "$expected_process_identity" &&
+        "$inspected_lock_owner_content" == "$expected_content" &&
+        "$(stable_file_identity "$archive_path" 2>/dev/null || true)" == "$expected_file" ]]; then
+    [[ ! -e "$claim_path" && ! -L "$claim_path" ]]
+    return
+  fi
+  die "Lifecycle initialization claim changed during stale-owner quarantine"
+}
+
+directory_has_only_entry() {
+  local directory=$1 expected=$2
+  local -a entries
+  shopt -s dotglob nullglob
+  entries=("$directory"/*)
+  shopt -u dotglob nullglob
+  [[ ${#entries[@]} -eq 1 && "${entries[0]}" == "$expected" ]]
+}
+
+directory_is_empty() {
+  local directory=$1
+  local -a entries
+  shopt -s dotglob nullglob
+  entries=("$directory"/*)
+  shopt -u dotglob nullglob
+  [[ ${#entries[@]} -eq 0 ]]
+}
+
+lifecycle_reclaim_guard_is_valid() {
+  local guard=$1 nested="${1}/lifecycle.lock" sentinel="${1}/lifecycle.lock/sentinel"
+  [[ -d "$guard" && ! -L "$guard" &&
+     -d "$nested" && ! -L "$nested" &&
+     -d "$sentinel" && ! -L "$sentinel" ]] || return 1
+  if [[ "$os" != "windows" ]] &&
+     { [[ ! -O "$guard" || ! -O "$nested" || ! -O "$sentinel" ]] ||
+       ! path_has_exact_mode "$guard" 700 ||
+       ! path_has_exact_mode "$nested" 700 ||
+       ! path_has_exact_mode "$sentinel" 700; }; then
+    return 1
+  fi
+  directory_has_only_entry "$guard" "$nested" &&
+    directory_has_only_entry "$nested" "$sentinel" &&
+    directory_is_empty "$sentinel"
+}
+
+lifecycle_portable_reclaim_guard_is_valid() {
+  local guard=$1 size
+  [[ -f "$guard" && ! -L "$guard" ]] || return 1
+  if [[ "$os" != "windows" ]] &&
+     { [[ ! -O "$guard" ]] || ! path_owner_only_mode "$guard"; }; then
+    return 1
+  fi
+  if [[ "$os" == "darwin" ]]; then
+    size=$(stat -f '%z' "$guard") || return 1
+  else
+    size=$(stat -c '%s' "$guard") || return 1
+  fi
+  [[ "$size" == "0" ]]
+}
+
+quarantine_definitively_stale_lifecycle_lock() {
+  local lock_path=$1 expected_token=$inspected_lock_token
+  local expected_pid=$inspected_lock_pid
+  local expected_process_identity=$inspected_lock_process_identity
+  local expected_dir=$inspected_lock_directory_identity
+  local expected_owner=$inspected_lock_owner_identity
+  local expected_content=$inspected_lock_owner_content
+  local claim_path guard_tmp portable_guard stale_fd stale_fd_path
+
+  lifecycle_owner_is_definitively_dead \
+    "$expected_pid" "$expected_process_identity" || return 1
+  claim_path="$(dirname "$lock_path")/.$(basename "$lock_path").claim.${expected_token}"
+  assert_lifecycle_state_dir_trusted
+  if [[ -e "$claim_path" || -L "$claim_path" ]]; then
+    # Legacy/pre-move reservation crashes could leave only an empty private
+    # claim. Remove exactly that inert shape; never reclaim populated claims.
+    if [[ ! -d "$claim_path" || -L "$claim_path" ]] ||
+       { [[ "$os" != "windows" && ! -O "$claim_path" ]] ||
+         ! path_has_exact_mode "$claim_path" 700; } ||
+       ! rmdir "$claim_path" 2>/dev/null; then
+      return 1
+    fi
+  fi
+  same_inspected_lifecycle_generation \
+    "$expected_token" "$expected_pid" "$expected_process_identity" \
+    "$expected_dir" "$expected_owner" "$expected_content" "$lock_path" || return 1
+  lifecycle_owner_is_definitively_dead \
+    "$expected_pid" "$expected_process_identity" || return 1
+  assert_lifecycle_state_dir_trusted
+  # Pin the stale directory before adding a compatibility guard. An older Bash
+  # reclaimer that already reserved claim/lock must not be able to wake later
+  # and move a canonical successor beneath the archived token claim.
+  if ! exec {stale_fd}<"$lock_path"; then
+    return 1
+  fi
+  stale_fd_path="/dev/fd/${stale_fd}"
+  if [[ "$(stable_followed_file_identity "$stale_fd_path" 2>/dev/null || true)" != "$expected_dir" ]]; then
+    exec {stale_fd}<&-
+    return 1
+  fi
+  # Portable mv treats an existing directory as a parent. Reserve the source
+  # basename inside the stale generation with a non-directory entry, so a
+  # delayed same-generation move cannot nest a live successor under the claim.
+  portable_guard="$stale_fd_path/lifecycle.lock"
+  if [[ -e "$portable_guard" || -L "$portable_guard" ]]; then
+    if ! lifecycle_portable_reclaim_guard_is_valid "$portable_guard"; then
+      exec {stale_fd}<&-
+      return 1
+    fi
+  else
+    set -o noclobber
+    if ! : > "$portable_guard"; then
+      set +o noclobber
+      exec {stale_fd}<&-
+      return 1
+    fi
+    set +o noclobber
+  fi
+  # Preserve the legacy GNU-mv guard where -T exists. The direct portable
+  # source-basename guard above is sufficient on BSD/macOS.
+  if [[ "$os" != "darwin" ]]; then
+    if [[ -e "$stale_fd_path/lock" || -L "$stale_fd_path/lock" ]]; then
+      if ! lifecycle_reclaim_guard_is_valid "$stale_fd_path/lock"; then
+        exec {stale_fd}<&-
+        return 1
+      fi
+    else
+      guard_tmp=$(mktemp -d "$(dirname "$lock_path")/.lifecycle.guard.${expected_token}.XXXXXX")
+      chmod 700 "$guard_tmp"
+      mkdir -m 700 "$guard_tmp/lifecycle.lock"
+      mkdir -m 700 "$guard_tmp/lifecycle.lock/sentinel"
+      if ! mv -T "$guard_tmp" "$stale_fd_path/lock"; then
+        rmdir "$guard_tmp/lifecycle.lock/sentinel" 2>/dev/null || true
+        rmdir "$guard_tmp/lifecycle.lock" 2>/dev/null || true
+        rmdir "$guard_tmp" 2>/dev/null || true
+        exec {stale_fd}<&-
+        return 1
+      fi
+    fi
+  fi
+  exec {stale_fd}<&-
+  same_inspected_lifecycle_generation \
+    "$expected_token" "$expected_pid" "$expected_process_identity" \
+    "$expected_dir" "$expected_owner" "$expected_content" "$lock_path" || return 1
+  lifecycle_owner_is_definitively_dead \
+    "$expected_pid" "$expected_process_identity" || return 1
+  # The direct portable guard above gives plain mv the same no-nesting safety
+  # as GNU mv -T while remaining available on macOS and MSYS.
+  if ! mv "$lock_path" "$claim_path"; then
+    if [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
+      if same_inspected_lifecycle_generation \
+           "$expected_token" "$expected_pid" "$expected_process_identity" \
+           "$expected_dir" "$expected_owner" "$expected_content" "$claim_path"; then
+        return 0
+      fi
+      die "Lifecycle lock disappeared during stale-owner quarantine"
+    fi
+    return 1
+  fi
+  if same_inspected_lifecycle_generation \
+    "$expected_token" "$expected_pid" "$expected_process_identity" \
+    "$expected_dir" "$expected_owner" "$expected_content" "$claim_path"; then
+    return 0
+  fi
+  if [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
+    # The source changed in the final inspection/rename window. Restore that
+    # exact moved generation only if the canonical name is still absent; -n
+    # must never overwrite a successor that has already published there.
+    mv -n "$claim_path" "$lock_path" 2>/dev/null || true
+  fi
+  die "Lifecycle lock changed during stale-owner quarantine"
+}
+
+lifecycle_lock_is_owned() {
+  [[ "$lifecycle_lock_held" == "true" ]] || return 1
+  lifecycle_state_dir_is_trusted || return 1
+  same_inspected_lifecycle_generation \
+    "$lifecycle_lock_token" "$lifecycle_lock_pid" "$lifecycle_lock_process_identity" \
+    "$lifecycle_lock_directory_identity" "$lifecycle_lock_owner_identity" \
+    "$lifecycle_lock_owner_content" "$lifecycle_lock_path"
+}
+
+assert_lifecycle_lock_owned() {
+  lifecycle_lock_is_owned || die "Lore lifecycle lock was lost during install"
+}
+
+release_lifecycle_lock() {
+  [[ "$lifecycle_lock_held" == "true" ]] || return 0
+  # EXIT traps can run in command subshells. Only the Bash process that
+  # acquired the lock may release it.
+  [[ "$BASHPID" == "$lifecycle_lock_bash_pid" ]] || return 0
+  # A predecessor must never remove a successor's lock or an owner file that
+  # was swapped while retaining the predecessor token.
+  lifecycle_lock_is_owned || return 0
+  rm -f -- "${lifecycle_lock_path}/owner.json" || return 0
+  rmdir "$lifecycle_lock_path" 2>/dev/null || return 0
+  lifecycle_lock_held=false
+}
+
+incomplete_lifecycle_lock_is_lease_expired() {
+  local lock_path=$1 expected_identity=${2:-} before after modified now
+  [[ -d "$lock_path" && ! -L "$lock_path" ]] || return 1
+  if [[ "$os" != "windows" ]] &&
+     { [[ ! -O "$lock_path" ]] || ! path_has_exact_mode "$lock_path" 700; }; then
+    return 1
+  fi
+  before=$(stable_file_identity "$lock_path") || return 1
+  [[ -z "$expected_identity" || "$before" == "$expected_identity" ]] || return 1
+  directory_is_empty "$lock_path" || return 1
+  if [[ "$os" == "darwin" ]]; then
+    modified=$(stat -f '%m' "$lock_path") || return 1
+  else
+    modified=$(stat -c '%Y' "$lock_path") || return 1
+  fi
+  now=$(date '+%s') || return 1
+  [[ "$modified" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] || return 1
+  (( 10#$now >= 10#$modified + lifecycle_initialization_lease_seconds )) || return 1
+  after=$(stable_file_identity "$lock_path") || return 1
+  [[ "$before" == "$after" ]] && directory_is_empty "$lock_path"
+}
+
+claim_expired_incomplete_lifecycle_lock() {
+  local lock_path=$1 lock_identity claim claim_token
+  local -a initialization_claims
+  incomplete_lifecycle_lock_is_lease_expired "$lock_path" || return 1
+  lock_identity=$(stable_file_identity "$lock_path") || return 1
+
+  shopt -s nullglob
+  initialization_claims=("$(dirname "$lock_path")"/.lifecycle.lock.init.*)
+  shopt -u nullglob
+  for claim in "${initialization_claims[@]}"; do
+    claim_token=${claim##*.lifecycle.lock.init.}
+    [[ "$claim_token" =~ ^[A-Za-z0-9_-]{32,256}$ ]] || return 1
+    inspect_lifecycle_owner_record "$claim" || return 1
+    [[ "$inspected_lock_token" == "$claim_token" ]] || return 1
+    if [[ "$claim" == "$lifecycle_initialization_claim_path" ]]; then
+      same_inspected_lifecycle_owner_record \
+        "$lifecycle_lock_token" "$lifecycle_lock_pid" \
+        "$lifecycle_lock_process_identity" \
+        "$lifecycle_initialization_claim_identity" \
+        "$lifecycle_initialization_claim_content" "$claim" || return 1
+      continue
+    fi
+    # A live (or unverifiable) claim may be the initializer between mkdir and
+    # owner publication. It remains authoritative regardless of lock age.
+    if ! quarantine_dead_lifecycle_initialization_claim "$claim"; then
+      return 1
+    fi
+  done
+
+  incomplete_lifecycle_lock_is_lease_expired "$lock_path" "$lock_identity" || return 1
+  assert_lifecycle_state_dir_trusted
+  # Hard-link publication is the atomic takeover point. It succeeds only while
+  # owner.json is still absent, and publishes the already-complete tokenized
+  # record without a partially-written owner file.
+  ln "$lifecycle_initialization_stage_path" "${lock_path}/owner.json" || return 1
+  [[ "$(stable_file_identity "$lock_path" 2>/dev/null || true)" == "$lock_identity" ]] ||
+    die "Lifecycle lock changed during incomplete-lock recovery"
+  if ! inspect_lifecycle_owner_record "${lock_path}/owner.json" ||
+     [[ "$inspected_lock_token" != "$lifecycle_lock_token" ||
+        "$inspected_lock_pid" != "$lifecycle_lock_pid" ||
+        "$inspected_lock_process_identity" != "$lifecycle_lock_process_identity" ||
+        "$inspected_lock_owner_content" != "$lifecycle_initialization_claim_content" ||
+        "$(stable_file_identity "${lock_path}/owner.json" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]]; then
+    die "Lifecycle lock owner changed during incomplete-lock recovery"
+  fi
+  lifecycle_initialization_claim_identity="$inspected_lock_owner_identity"
+  return 0
+}
+
+acquire_lifecycle_lock() {
+  local state_dir created_at process_started_at process_identity owner owner_pid
+  local acquired_lock_identity owner_content owner_path_identity
+  local owner_fd owner_fd_path
+  state_dir="${HOME}/.lore"
+  secure_lifecycle_state_dir "$state_dir"
+  state_dir=$(cd "$state_dir" && pwd -P)
+  if [[ "$state_dir" != "$canonical_home" && "$state_dir" != "$canonical_home/"* ]]; then
+    die "Refusing installer state directory outside HOME: ${state_dir}"
+  fi
+  lifecycle_state_dir="$state_dir"
+  assert_lifecycle_state_dir_trusted
+
+  lifecycle_lock_path="${state_dir}/lifecycle.lock"
+  uninstall_tombstone_path="${state_dir}/uninstalled.json"
+  assert_lifecycle_state_dir_trusted
+  read_trusted_uninstall_tombstone "$uninstall_tombstone_path"
+  assert_lifecycle_state_dir_trusted
+  observed_tombstone_present="$read_tombstone_present"
+  observed_tombstone_token="$read_tombstone_token"
+  if ! lifecycle_lock_token=$(od -An -N32 -tx1 /dev/urandom | tr -d '[:space:]'); then
+    die "Could not generate a lifecycle lock token"
+  fi
+  if [[ ! "$lifecycle_lock_token" =~ ^[a-f0-9]{64}$ ]]; then
+    die "Could not generate a lifecycle lock token"
+  fi
+  if ! created_at=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z'); then
+    die "Could not timestamp Lore lifecycle lock"
+  fi
+  process_started_at="$created_at"
+  owner_pid=$$
+  if [[ "$os" == "windows" && -r "/proc/$$/winpid" ]]; then
+    owner_pid=$(<"/proc/$$/winpid")
+  fi
+  [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] || owner_pid=$$
+  local process_start
+  process_start=$(ps -o lstart= -p "$$" 2>/dev/null || true)
+  [[ -n "$process_start" ]] && process_started_at="$process_start"
+  process_identity="unverified:${lifecycle_lock_token}"
+  if [[ "$os" == "linux" && -r "/proc/$$/stat" && -r /proc/sys/kernel/random/boot_id ]]; then
+    local stat_line stat_suffix boot_id
+    local -a stat_fields
+    stat_line=$(<"/proc/$$/stat")
+    stat_suffix=${stat_line##*) }
+    read -r -a stat_fields <<< "$stat_suffix"
+    boot_id=$(< /proc/sys/kernel/random/boot_id)
+    if [[ "${stat_fields[19]:-}" =~ ^[0-9]+$ && -n "$boot_id" ]]; then
+      process_identity="linux:${boot_id}:${stat_fields[19]}"
+    fi
+  elif [[ "$os" != "windows" ]]; then
+    [[ -n "$process_start" ]] && process_identity="unix:${process_start}"
+  fi
+  owner="${lifecycle_lock_path}/owner.json"
+  printf -v owner_content '{"version":1,"token":"%s","pid":%s,"operation":"hosted-install","createdAt":"%s","processStartedAt":"%s","processIdentity":"%s"}' \
+    "$lifecycle_lock_token" "$owner_pid" "$created_at" "$process_started_at" "$process_identity"
+  lifecycle_lock_pid="$owner_pid"
+  lifecycle_lock_process_identity="$process_identity"
+  lifecycle_initialization_stage_path="${state_dir}/.lifecycle.lock.owner.${lifecycle_lock_token}.tmp"
+  lifecycle_initialization_claim_path="${state_dir}/.lifecycle.lock.init.${lifecycle_lock_token}"
+  # Prepare and validate the complete owner generation before mkdir. The
+  # tokenized initialization claim is published before the canonical directory
+  # can exist, leaving only mkdir -> hard-link as the crash-sensitive window.
+  set -o noclobber
+  if ! exec {owner_fd}>"$lifecycle_initialization_stage_path"; then
+    set +o noclobber
+    die "Could not stage Lore lifecycle lock owner"
+  fi
+  set +o noclobber
+  owner_fd_path="/dev/fd/${owner_fd}"
+  if ! chmod 600 "$owner_fd_path" ||
+     ! printf '%s\n' "$owner_content" >&"$owner_fd" ||
+     ! lifecycle_initialization_stage_identity=$(stable_followed_file_identity "$owner_fd_path") ||
+     [[ "$(stable_file_identity "$lifecycle_initialization_stage_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]] ||
+     { [[ "$os" != "windows" && ! -O "$lifecycle_initialization_stage_path" ]] ||
+        ! followed_path_has_exact_mode "$owner_fd_path" 600; }; then
+    exec {owner_fd}>&- 2>/dev/null || true
+    remove_lifecycle_initialization_stage
+    die "Could not stage Lore lifecycle lock owner"
+  fi
+  sync_path "$owner_fd_path" 2>/dev/null || true
+  if ! lifecycle_state_dir_is_trusted ||
+     [[ "$(stable_file_identity "$lifecycle_initialization_stage_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]]; then
+    exec {owner_fd}>&- 2>/dev/null || true
+    remove_lifecycle_initialization_stage
+    die "Lifecycle owner generation changed before claim publication"
+  fi
+  if ! ln "$lifecycle_initialization_stage_path" "$lifecycle_initialization_claim_path"; then
+    exec {owner_fd}>&- 2>/dev/null || true
+    remove_lifecycle_initialization_stage
+    die "Could not publish Lore lifecycle initialization claim"
+  fi
+  lifecycle_initialization_claim_content="$owner_content"
+  lifecycle_initialization_claim_bash_pid=$BASHPID
+  lifecycle_initialization_claim_held=true
+  if ! inspect_lifecycle_owner_record "$lifecycle_initialization_claim_path" ||
+     [[ "$inspected_lock_token" != "$lifecycle_lock_token" ||
+        "$inspected_lock_pid" != "$owner_pid" ||
+        "$inspected_lock_process_identity" != "$process_identity" ||
+        "$inspected_lock_owner_content" != "$owner_content" ||
+        "$(stable_file_identity "$lifecycle_initialization_claim_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]]; then
+    exec {owner_fd}>&- 2>/dev/null || true
+    release_lifecycle_initialization_claim
+    remove_lifecycle_initialization_stage
+    die "Lore lifecycle initialization claim changed during publication"
+  fi
+  lifecycle_initialization_claim_identity="$inspected_lock_owner_identity"
+  exec {owner_fd}>&-
+  sync_path "$lifecycle_initialization_claim_path" 2>/dev/null || true
+
+  while true; do
+    assert_lifecycle_state_dir_trusted
+    if mkdir -m 700 "$lifecycle_lock_path" 2>/dev/null; then
+      # Keep this the first operation after atomic mkdir: owner.json becomes a
+      # complete hard link, never a partially-written record.
+      if ! ln "$lifecycle_initialization_stage_path" "$owner"; then
+        rmdir "$lifecycle_lock_path" 2>/dev/null || true
+        die "Could not publish Lore lifecycle lock owner"
+      fi
+      acquired_lock_identity=$(require_file_identity "$lifecycle_lock_path" "new lifecycle lock")
+    elif [[ ! -e "$lifecycle_lock_path" && ! -L "$lifecycle_lock_path" ]]; then
+      die "Could not acquire Lore lifecycle lock"
+    elif lifecycle_state_dir_is_trusted &&
+         inspect_lifecycle_lock_generation "$lifecycle_lock_path" &&
+         quarantine_definitively_stale_lifecycle_lock "$lifecycle_lock_path"; then
+      continue
+    elif claim_expired_incomplete_lifecycle_lock "$lifecycle_lock_path"; then
+      acquired_lock_identity=$(require_file_identity "$lifecycle_lock_path" "recovered lifecycle lock")
+    else
+      die "Lore lifecycle is busy; retry after the active operation completes"
+    fi
+    assert_lifecycle_state_dir_trusted
+    if [[ ! -d "$lifecycle_lock_path" || -L "$lifecycle_lock_path" ]] ||
+       [[ "$(stable_file_identity "$lifecycle_lock_path" 2>/dev/null || true)" != "$acquired_lock_identity" ]] ||
+       { [[ "$os" != "windows" && ! -O "$lifecycle_lock_path" ]] ||
+         ! path_has_exact_mode "$lifecycle_lock_path" 700; }; then
+      die "Could not validate new Lore lifecycle lock"
+    fi
+    break
+  done
+  owner_path_identity=$(stable_file_identity "$owner" 2>/dev/null || true)
+  if [[ "$owner_path_identity" != "$lifecycle_initialization_stage_identity" ]] ||
+     { [[ "$os" != "windows" && ! -O "$owner" ]] || ! path_has_exact_mode "$owner" 600; }; then
+    die "Lore lifecycle lock owner changed during publication"
+  fi
+  sync_path "$owner" 2>/dev/null || true
+  if ! inspect_lifecycle_owner_record "$owner" ||
+     [[ "$inspected_lock_token" != "$lifecycle_lock_token" ||
+        "$inspected_lock_pid" != "$owner_pid" ||
+        "$inspected_lock_process_identity" != "$process_identity" ||
+        "$inspected_lock_owner_content" != "$owner_content" ]]; then
+    die "Lore lifecycle lock owner changed during publication"
+  fi
+  # Hard-link creation/removal updates inode ctime. Refresh the claim identity,
+  # remove both temporary names by token, then snapshot the final owner inode.
+  lifecycle_initialization_claim_identity="$inspected_lock_owner_identity"
+  release_lifecycle_initialization_claim
+  remove_lifecycle_initialization_stage
+  assert_lifecycle_state_dir_trusted
+  if ! inspect_lifecycle_lock_generation "$lifecycle_lock_path" ||
+     [[ "$inspected_lock_token" != "$lifecycle_lock_token" ||
+        "$inspected_lock_pid" != "$owner_pid" ||
+        "$inspected_lock_process_identity" != "$process_identity" ||
+        "$inspected_lock_owner_content" != "$owner_content" ]]; then
+    die "Lore lifecycle lock owner changed during publication"
+  fi
+  lifecycle_lock_directory_identity="$inspected_lock_directory_identity"
+  lifecycle_lock_owner_identity="$inspected_lock_owner_identity"
+  lifecycle_lock_owner_content="$inspected_lock_owner_content"
+  lifecycle_lock_bash_pid=$BASHPID
+  lifecycle_lock_held=true
+  assert_lifecycle_lock_owned
+  read_trusted_uninstall_tombstone "$uninstall_tombstone_path"
+  if ! same_tombstone_observation; then
+    release_lifecycle_lock
+    die "Refusing stale hosted-install invocation because uninstall state changed while it was waiting"
+  fi
+  install_tombstone_present="$read_tombstone_present"
+  install_tombstone_token="$read_tombstone_token"
+}
+
+clear_uninstall_tombstone_for_verified_install() {
+  local current_identity claim claim_identity claim_token
+  assert_lifecycle_lock_owned
+  if ! file_matches_receipt_identity "$dest" "$executable_sha256" || \
+     ! file_is_generation "$receipt_path" "$receipt_identity" "$receipt_sha256"; then
+    die "Refusing to clear uninstall marker before binary/receipt verification"
+  fi
+  read_trusted_uninstall_tombstone "$uninstall_tombstone_path"
+  if [[ "$read_tombstone_present" != "$install_tombstone_present" ]] || \
+     { [[ "$install_tombstone_present" == "true" ]] && \
+       [[ "$read_tombstone_token" != "$install_tombstone_token" ]]; }; then
+    die "Fresh install no longer matches the current uninstall generation"
+  fi
+  if [[ "$install_tombstone_present" == "true" ]]; then
+    current_identity="$read_tombstone_identity"
+    if [[ "$(require_file_identity "$uninstall_tombstone_path" "uninstall marker")" != "$current_identity" ]]; then
+      die "Fresh install no longer matches the current uninstall generation"
+    fi
+    assert_lifecycle_lock_owned
+    claim="${uninstall_tombstone_path}.clear-${lifecycle_lock_token}"
+    if [[ -e "$claim" || -L "$claim" ]]; then
+      die "Refusing occupied uninstall marker recovery path: ${claim}"
+    fi
+    mv "$uninstall_tombstone_path" "$claim"
+    claim_identity=$(require_file_identity "$claim" "claimed uninstall marker")
+    read_trusted_uninstall_tombstone "$claim"
+    claim_token="$read_tombstone_token"
+    if [[ "$claim_identity" != "$current_identity" || \
+          "$claim_token" != "$install_tombstone_token" ]]; then
+      if [[ ! -e "$uninstall_tombstone_path" && ! -L "$uninstall_tombstone_path" ]]; then
+        ln "$claim" "$uninstall_tombstone_path" || true
+      fi
+      die "Refusing to remove a successor uninstall marker"
+    fi
+    if [[ -e "$uninstall_tombstone_path" || -L "$uninstall_tombstone_path" ]]; then
+      die "A successor uninstall marker appeared during verified install"
+    fi
+    if ! rm -f -- "$claim"; then
+      ln "$claim" "$uninstall_tombstone_path" || true
+      die "Could not clear the verified uninstall marker"
+    fi
+  fi
+}
+
+cleanup_failed_install() {
+  [[ -n "$tmp_workdir" ]] && rm -rf -- "$tmp_workdir"
+  # Once ownership is lost, never mutate live installation paths, transaction
+  # temporaries, or recovery copies that may now belong to a successor.
+  if [[ "$lifecycle_lock_held" == "true" ]] && ! lifecycle_lock_is_owned; then
+    return
+  fi
+  if [[ -n "$receipt_tmp" ]]; then
+    rm -f -- "$receipt_tmp"
+  fi
+  if [[ -n "$install_tmp" ]]; then
+    rm -f -- "$install_tmp"
+  fi
+  if [[ -n "$channel_tmp" ]]; then
+    rm -f -- "$channel_tmp"
+  fi
+  concurrent_install=false
+  if [[ "$binary_publication_started" == "true" && -z "$installed_dest" && \
+        -n "$dest" && ( -e "$dest" || -L "$dest" ) ]]; then
+    concurrent_install=true
+  fi
+  if [[ "$receipt_publication_started" == "true" && "$receipt_committed" != "true" && \
+        -n "$receipt_path" && ( -e "$receipt_path" || -L "$receipt_path" ) ]]; then
+    concurrent_install=true
+  fi
+  if [[ -n "$installed_dest" && ( -e "$installed_dest" || -L "$installed_dest" ) ]] && \
+     ! file_is_generation "$installed_dest" "$installed_identity" "$executable_sha256"; then
+    concurrent_install=true
+  fi
+  if [[ "$receipt_committed" == "true" && -n "$receipt_path" && ( -e "$receipt_path" || -L "$receipt_path" ) ]] && \
+     ! file_is_generation "$receipt_path" "$receipt_identity" "$receipt_sha256"; then
+    concurrent_install=true
+  fi
+  if [[ "$channel_publication_started" == "true" && "$channel_committed" != "true" && \
+        -n "$channel_path" && ( -e "$channel_path" || -L "$channel_path" ) ]]; then
+    concurrent_install=true
+  fi
+  if [[ "$channel_committed" == "true" && -n "$channel_path" && ( -e "$channel_path" || -L "$channel_path" ) ]] && \
+     ! file_is_generation "$channel_path" "$channel_identity" "$channel_sha256"; then
+    concurrent_install=true
+  fi
+  if [[ "$concurrent_install" == "true" ]]; then
+    # Preserve every displaced generation when a non-cooperating writer wins.
+    # The canonical replacements and hidden recovery files are safer than
+    # deleting state whose ownership can no longer be proven.
+    return
+  fi
+  if [[ "$channel_committed" == "true" && -n "$channel_path" ]]; then
+    if file_is_generation "$channel_path" "$channel_identity" "$channel_sha256"; then
+      assert_lifecycle_lock_owned
+      rm -f -- "$channel_path"
+      sync_path "$(dirname "$channel_path")"
+    fi
+    if [[ ! -e "$channel_path" && ! -L "$channel_path" && \
+          -n "$previous_channel" && -e "$previous_channel" ]] && \
+       file_is_generation "$previous_channel" "$previous_channel_identity" "$previous_channel_sha256"; then
+      assert_lifecycle_lock_owned
+      if ln "$previous_channel" "$channel_path" && \
+         file_is_generation "$channel_path" "$previous_channel_identity" "$previous_channel_sha256"; then
+        sync_path "$channel_path"
+        sync_path "$(dirname "$channel_path")"
+        rm -f -- "$previous_channel"
+        sync_path "$(dirname "$channel_path")"
+      fi
+    fi
+  elif [[ -n "$previous_channel" && -e "$previous_channel" && \
+          ! -e "$channel_path" && ! -L "$channel_path" ]] && \
+       file_is_generation "$previous_channel" "$previous_channel_identity" "$previous_channel_sha256"; then
+    assert_lifecycle_lock_owned
+    if ln "$previous_channel" "$channel_path" && \
+       file_is_generation "$channel_path" "$previous_channel_identity" "$previous_channel_sha256"; then
+      sync_path "$channel_path"
+      sync_path "$(dirname "$channel_path")"
+      rm -f -- "$previous_channel"
+      sync_path "$(dirname "$channel_path")"
+    fi
+  fi
+  if [[ "$receipt_committed" == "true" && -n "$receipt_path" ]]; then
+    if file_is_generation "$receipt_path" "$receipt_identity" "$receipt_sha256"; then
+      assert_lifecycle_lock_owned
+      rm -f -- "$receipt_path"
+      if [[ -n "$previous_receipt" && -e "$previous_receipt" ]]; then
+        assert_lifecycle_lock_owned
+        mv "$previous_receipt" "$receipt_path"
+      fi
+    elif [[ ! -e "$receipt_path" && ! -L "$receipt_path" ]]; then
+      if [[ -n "$previous_receipt" && -e "$previous_receipt" ]]; then
+        assert_lifecycle_lock_owned
+        mv "$previous_receipt" "$receipt_path"
+      fi
+    elif [[ -n "$previous_receipt" ]]; then
+      rm -f -- "$previous_receipt"
+    fi
+  elif [[ -n "$previous_receipt" && -e "$previous_receipt" ]]; then
+    if [[ ! -e "$receipt_path" && ! -L "$receipt_path" ]]; then
+      assert_lifecycle_lock_owned
+      mv "$previous_receipt" "$receipt_path"
+    fi
+    # If a replacement occupies the canonical path, preserve the prior receipt
+    # under its recovery name rather than deleting an uncommitted generation.
+  fi
+  if [[ -n "$installed_dest" ]]; then
+    if file_is_generation "$installed_dest" "$installed_identity" "$executable_sha256"; then
+      assert_lifecycle_lock_owned
+      rm -f -- "$installed_dest"
+      if [[ -n "$previous_dest" && -e "$previous_dest" ]]; then
+        assert_lifecycle_lock_owned
+        mv "$previous_dest" "$dest"
+      fi
+    elif [[ ! -e "$installed_dest" && ! -L "$installed_dest" ]]; then
+      if [[ -n "$previous_dest" && -e "$previous_dest" ]]; then
+        assert_lifecycle_lock_owned
+        mv "$previous_dest" "$dest"
+      fi
+    elif [[ -n "$previous_dest" ]]; then
+      rm -f -- "$previous_dest"
+    fi
+  elif [[ -n "$previous_dest" && -e "$previous_dest" ]]; then
+    if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+      assert_lifecycle_lock_owned
+      mv "$previous_dest" "$dest"
+    fi
+    # Preserve the displaced binary if a successor occupies the canonical path.
+  fi
+}
+
+cleanup_installer() {
+  local status=${1:-$?}
+  set +e
+  cleanup_failed_install
+  release_lifecycle_lock
+  release_lifecycle_initialization_claim
+  remove_lifecycle_initialization_stage
+  if [[ -n "$lifecycle_state_dir_fd" ]]; then
+    exec {lifecycle_state_dir_fd}<&-
+    lifecycle_state_dir_fd=""
+    lifecycle_state_dir_fd_path=""
+  fi
+  return "$status"
+}
+
+trap 'cleanup_installer "$?"' EXIT
+
+# The lock parent is fixed at ~/.lore so the Bash installer interoperates with
+# the gateway's lifecycle protocol regardless of LORE_CONFIG_DIR. Acquisition
+# precedes download and every persistent mutation, so an active uninstall makes
+# install fail immediately without even preparing a candidate generation.
+canonical_home=$(cd "$HOME" && pwd -P)
+if [[ "$canonical_home" == "/" ]]; then
+  die "Refusing to install with HOME set to the filesystem root"
+fi
+acquire_lifecycle_lock
+tmp_workdir=$(mktemp -d "${tmpdir%/}/lore-install.XXXXXX")
+tmp_binary="${tmp_workdir}/lore${suffix}"
+
+version=""
+if [[ "$requested_version" == "nightly" ]]; then
+  # --- Nightly: download from GHCR via OCI blob protocol ---
+  # ghcr.io blob downloads redirect to Azure Blob Storage. curl -L would
+  # forward the Authorization header to Azure, which returns 404. Instead,
+  # extract the redirect URL and follow it without the auth header.
+
+  echo -e "${MUTED}Fetching nightly build from GHCR...${NC}"
+
+  # Step 1: Get anonymous pull token
+  GHCR_TOKEN=$(curl -sf \
+    "https://ghcr.io/token?scope=repository:byk/loreai:pull" \
+    | awk -F'"' '{for(i=1;i<=NF;i++) if($i=="token"){print $(i+2);exit}}')
+  if [[ -z "$GHCR_TOKEN" ]]; then
+    die "Failed to get GHCR token"
+  fi
+
+  # Step 2: Fetch the OCI manifest for the :nightly tag
+  MANIFEST=$(curl -sf \
+    -H "Authorization: Bearer $GHCR_TOKEN" \
+    -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+    "https://ghcr.io/v2/byk/loreai/manifests/nightly")
+  if [[ -z "$MANIFEST" ]]; then
+    die "Failed to fetch nightly manifest from GHCR"
+  fi
+
+  # Step 3: Extract version from manifest annotation
+  version=$(echo "$MANIFEST" \
+    | awk -F'"' '{for(i=1;i<=NF;i++) if($i=="version"){print $(i+2);exit}}')
+  if [[ -z "$version" ]]; then
+    die "Failed to extract version from nightly manifest"
+  fi
+
+  echo -e "${MUTED}Installing lore nightly ${version} (${os}-${arch})...${NC}"
+
+  # Step 4: Find the blob digest for this platform's .gz file
+  gz_filename="lore-${os}-${arch}${suffix}.gz"
+  digest=$(echo "$MANIFEST" \
+    | awk -F'"' -v target="$gz_filename" '{
+        for(i=1;i<=NF;i++){
+          if($i=="digest") d=$(i+2)
+          if($i=="org.opencontainers.image.title"&&$(i+2)==target){print d;exit}
+        }
+      }')
+  if [[ -z "$digest" ]]; then
+    die "No nightly build found for ${gz_filename}"
+  fi
+
+  # Step 5: Get the redirect URL (don't follow — auth must not reach Azure)
+  redir_url=$(curl -s -w '\n%{redirect_url}' -o /dev/null \
+    -H "Authorization: Bearer $GHCR_TOKEN" \
+    "https://ghcr.io/v2/byk/loreai/blobs/${digest}" | tail -1)
+  if [[ -z "$redir_url" ]]; then
+    die "Failed to get blob redirect URL from GHCR"
+  fi
+
+  # Step 6: Download the .gz blob and decompress (without auth header)
+  if ! curl -sf "$redir_url" | gunzip > "$tmp_binary"; then
+    die "Failed to download or decompress nightly binary for ${gz_filename}"
+  fi
+
+else
+  # --- Stable: resolve version and download from GitHub Releases ---
+
+  if [[ -z "$requested_version" ]]; then
+    echo -e "${MUTED}Fetching latest version...${NC}"
+    version=$(curl -fsSL https://api.github.com/repos/BYK/loreai/releases/latest \
+      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+    if [[ -z "$version" ]]; then
+      die "Failed to fetch latest version from GitHub"
+    fi
+  else
+    version="$requested_version"
+  fi
+
+  # Strip leading 'v' if present
+  version="${version#v}"
+
+  echo -e "${MUTED}Installing lore v${version} (${os}-${arch})...${NC}"
+
+  filename="lore-${os}-${arch}${suffix}"
+  url="https://github.com/BYK/loreai/releases/download/${version}/${filename}"
+
+  # Try gzip-compressed first (~60% smaller), fall back to raw binary
+  if curl -fsSL "${url}.gz" 2>/dev/null | gunzip > "$tmp_binary" 2>/dev/null; then
+    : # Compressed download succeeded
+  else
+    curl -fsSL --progress-bar "$url" -o "$tmp_binary"
+  fi
+fi
+
+chmod +x "$tmp_binary"
+
+# macOS: remove quarantine flag so the binary can execute without
+# Gatekeeper blocking it. Curl may set this attribute on downloads.
+if [[ "$os" == "darwin" ]]; then
+  xattr -d com.apple.quarantine "$tmp_binary" 2>/dev/null || true
+fi
+
+# Quick sanity check
+if ! "$tmp_binary" --version >/dev/null 2>&1; then
+  die "Downloaded binary failed sanity check. Platform: ${os}-${arch}"
+fi
+executable_sha256=$(hash_file "$tmp_binary")
+if [[ ! "$executable_sha256" =~ ^[a-f0-9]{64}$ ]]; then
+  die "Could not verify the downloaded executable digest"
+fi
+# ---------------------------------------------------------------------------
+# Install to destination
+# ---------------------------------------------------------------------------
+
+install_dir="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
+if [[ "$install_dir" == *$'\n'* || "$install_dir" == *$'\r'* ]]; then
+  die "LORE_INSTALL_DIR must not contain newline characters"
+fi
+install_dir_existed=false
+if [[ -d "$install_dir" ]]; then
+  install_dir_existed=true
+fi
+mkdir -p "$install_dir"
+install_dir=$(cd "$install_dir" && pwd -P)
+if [[ "$install_dir" == *$'\n'* || "$install_dir" == *$'\r'* ]]; then
+  die "Canonical install directory must not contain newline characters"
+fi
+
+quote_posix() {
+  local value=${1//\'/\'"\'"\'}
+  printf "'%s'" "$value"
+}
+
+quote_fish() {
+  local value=${1//\\/\\\\}
+  value=${value//\'/\\\'}
+  printf "'%s'" "$value"
+}
+
+path_is_in_home() {
+  [[ "$1" == "$canonical_home" || "$1" == "$canonical_home/"* ]]
+}
+
+if [[ "$install_dir_existed" == "false" ]] && path_is_in_home "$install_dir"; then
+  assert_lifecycle_lock_owned
+  chmod 700 "$install_dir"
+fi
+if [[ "$os" != "windows" ]]; then
+  if [[ ! -O "$install_dir" ]]; then
+    die "Refusing install directory owned by another user: ${install_dir}"
+  fi
+  if [[ "$os" == "darwin" ]]; then
+    install_dir_mode=$(stat -f '%Lp' "$install_dir")
+  else
+    install_dir_mode=$(stat -c '%a' "$install_dir")
+  fi
+  if [[ ! "$install_dir_mode" =~ ^[0-7]{3,4}$ ]]; then
+    die "Could not validate install directory permissions: ${install_dir}"
+  fi
+  if (( (8#$install_dir_mode & 022) != 0 )); then
+    die "Refusing group/world-writable install directory: ${install_dir}"
+  fi
+fi
+preflight_stable_file_identity "$install_dir"
+
+dest="${install_dir}/lore${suffix}"
+assert_lifecycle_lock_owned
+if [[ -L "$dest" || ( -e "$dest" && ! -f "$dest" ) ]]; then
+  die "Refusing unsafe install destination: ${dest}"
+fi
+install_tmp=$(mktemp "${install_dir}/.lore.installing.XXXXXX")
+if ! cp "$tmp_binary" "$install_tmp" || ! chmod 755 "$install_tmp"; then
+  die "Failed to stage binary in ${install_dir}"
+fi
+if [[ "$(hash_file "$install_tmp")" != "$executable_sha256" ]]; then
+  die "Staged executable changed before publication: ${install_tmp}"
+fi
+if [[ -f "$dest" ]]; then
+  previous_dest=$(mktemp "${install_dir}/.lore.previous.XXXXXX")
+  rm -f -- "$previous_dest"
+  assert_lifecycle_lock_owned
+  mv "$dest" "$previous_dest"
+fi
+assert_lifecycle_lock_owned
+binary_publication_started=true
+if ! ln "$install_tmp" "$dest"; then
+  die "Failed to install binary to ${dest}"
+fi
+installed_dest="$dest"
+installed_identity=$(require_file_identity "$dest" "installed executable")
+if [[ "$(require_file_identity "$install_tmp" "staged executable")" != "$installed_identity" ]]; then
+  die "Installed executable generation changed during publication: ${dest}"
+fi
+capture_receipt_identity "$dest"
+rm -f -- "$install_tmp"
+install_tmp=""
+sync_path "$dest"
+sync_path "$install_dir"
+rm -rf -- "$tmp_workdir"
+tmp_workdir=""
+
+installed_version=$("$dest" --version 2>/dev/null || echo "$version")
+
+# Record standalone-installer ownership so `lore uninstall` can distinguish
+# this binary from Homebrew/distro/package-managed executables. This fixed
+# location is intentionally independent of LORE_CONFIG_DIR: it is install
+# provenance, not runtime configuration.
+install_state_dir="${HOME}/.lore"
+if [[ -L "$install_state_dir" ]]; then
+  die "Refusing symlinked installer state directory: ${install_state_dir}"
+fi
+mkdir -p "$install_state_dir"
+canonical_install_state_dir=$(cd "$install_state_dir" && pwd -P)
+if ! path_is_in_home "$canonical_install_state_dir"; then
+  die "Refusing installer state directory outside HOME: ${install_state_dir}"
+fi
+chmod 700 "$install_state_dir"
+receipt_path="${install_state_dir}/install-path"
+assert_lifecycle_lock_owned
+if [[ -L "$receipt_path" || ( -e "$receipt_path" && ! -f "$receipt_path" ) ]]; then
+  die "Refusing unsafe installer receipt path: ${receipt_path}"
+fi
+receipt_tmp=$(mktemp "${install_state_dir}/.install-path.XXXXXX")
+receipt_dest="$dest"
+if [[ "$os" == "windows" ]]; then
+  command -v cygpath >/dev/null 2>&1 || die "Could not convert the Windows install path (cygpath is required)"
+  receipt_dest=$(cygpath -w "$dest")
+fi
+if [[ "$receipt_dest" == *$'\n'* || "$receipt_dest" == *$'\r'* ]]; then
+  die "Converted install path must not contain newline characters"
+fi
+if ! file_matches_receipt_identity "$dest" "$executable_sha256"; then
+  die "Installed executable changed before receipt commit: ${dest}"
+fi
+printf 'lore-install-receipt-v3\nexecutable=%s\npath-install-dir=%s\nsha256=%s\ndevice=%s\ninode=%s\nsize=%s\nmtime-ns=%s\n' \
+  "$receipt_dest" "$install_dir" "$executable_sha256" "$installed_device" \
+  "$installed_inode" "$installed_size" "$installed_mtime_ns" > "$receipt_tmp"
+chmod 600 "$receipt_tmp"
+sync_path "$receipt_tmp"
+receipt_sha256=$(hash_file "$receipt_tmp")
+receipt_identity=$(require_file_identity "$receipt_tmp" "install receipt")
+if [[ -f "$receipt_path" ]]; then
+  previous_receipt=$(mktemp "${install_state_dir}/.install-path.previous.XXXXXX")
+  rm -f -- "$previous_receipt"
+  assert_lifecycle_lock_owned
+  mv "$receipt_path" "$previous_receipt"
+fi
+if ! file_matches_receipt_identity "$dest" "$executable_sha256"; then
+  die "Installed executable changed before receipt commit: ${dest}"
+fi
+assert_lifecycle_lock_owned
+receipt_publication_started=true
+if ! ln "$receipt_tmp" "$receipt_path"; then
+  die "Failed to publish install receipt: ${receipt_path}"
+fi
+receipt_committed=true
+rm -f -- "$receipt_tmp"
+receipt_tmp=""
+sync_path "$receipt_path"
+sync_path "$install_state_dir"
+if ! file_is_generation "$receipt_path" "$receipt_identity" "$receipt_sha256"; then
+  die "Install receipt changed during commit: ${receipt_path}"
+fi
+
+# ---------------------------------------------------------------------------
+# Persist release channel
+# ---------------------------------------------------------------------------
+
+lore_config_dir="${LORE_CONFIG_DIR:-${HOME}/.lore}"
+assert_lifecycle_lock_owned
+if [[ -L "$lore_config_dir" ]]; then
+  die "Refusing symlinked Lore config directory: ${lore_config_dir}"
+fi
+mkdir -p "$lore_config_dir"
+channel_path="${lore_config_dir}/channel"
+if [[ -L "$channel_path" || ( -e "$channel_path" && ! -f "$channel_path" ) ]]; then
+  die "Refusing unsafe release channel path: ${channel_path}"
+fi
+channel_tmp=$(mktemp "${lore_config_dir}/.channel.XXXXXX")
+printf '%s' "$([[ "$requested_version" == "nightly" ]] && echo nightly || echo stable)" > "$channel_tmp"
+chmod 600 "$channel_tmp"
+sync_path "$channel_tmp"
+channel_sha256=$(hash_file "$channel_tmp")
+channel_identity=$(require_file_identity "$channel_tmp" "release channel")
+if [[ -f "$channel_path" ]]; then
+  previous_channel_identity=$(require_file_identity "$channel_path" "previous release channel")
+  previous_channel_sha256=$(hash_file "$channel_path")
+  if ! file_is_generation "$channel_path" "$previous_channel_identity" "$previous_channel_sha256"; then
+    die "Release channel changed before replacement: ${channel_path}"
+  fi
+  previous_channel=$(mktemp "${lore_config_dir}/.channel.previous.XXXXXX")
+  rm -f -- "$previous_channel"
+  assert_lifecycle_lock_owned
+  mv "$channel_path" "$previous_channel"
+  if ! file_is_generation "$previous_channel" "$previous_channel_identity" "$previous_channel_sha256"; then
+    if [[ ! -e "$channel_path" && ! -L "$channel_path" ]]; then
+      ln "$previous_channel" "$channel_path" || true
+    fi
+    die "Release channel changed during replacement: ${channel_path}"
+  fi
+fi
+assert_lifecycle_lock_owned
+channel_publication_started=true
+if ! ln "$channel_tmp" "$channel_path"; then
+  die "Failed to publish release channel: ${channel_path}"
+fi
+channel_committed=true
+rm -f -- "$channel_tmp"
+channel_tmp=""
+sync_path "$channel_path"
+sync_path "$lore_config_dir"
+if ! file_is_generation "$channel_path" "$channel_identity" "$channel_sha256"; then
+  die "Release channel changed during commit: ${channel_path}"
+fi
+
+# Binary, ownership receipt, and channel are now durable. PATH setup below is
+# an optional convenience and does not determine installation provenance.
+if ! file_matches_receipt_identity "$dest" "$executable_sha256" || \
+   ! file_is_generation "$receipt_path" "$receipt_identity" "$receipt_sha256"; then
+  die "Installed executable or receipt changed before install commit"
+fi
+clear_uninstall_tombstone_for_verified_install
+set +e
+trap - ERR
+if [[ -n "$previous_dest" ]] && ! rm -f "$previous_dest"; then
+  echo "Warning: could not remove old binary backup: ${previous_dest}" >&2
+fi
+if [[ -n "$previous_receipt" ]] && ! rm -f "$previous_receipt"; then
+  echo "Warning: could not remove old receipt backup: ${previous_receipt}" >&2
+fi
+if [[ -n "$previous_channel" ]]; then
+  if file_is_generation "$previous_channel" "$previous_channel_identity" "$previous_channel_sha256"; then
+    if ! rm -f "$previous_channel"; then
+      echo "Warning: could not remove old channel backup: ${previous_channel}" >&2
+    fi
+  else
+    echo "Warning: old channel backup changed and was preserved: ${previous_channel}" >&2
+  fi
+fi
+previous_dest=""
+previous_receipt=""
+previous_channel=""
+installed_dest=""
+receipt_committed=false
+channel_committed=false
+binary_publication_started=false
+receipt_publication_started=false
+channel_publication_started=false
+echo -e "${GREEN}✓ lore v${installed_version} installed to ${dest}${NC}"
+
+# ---------------------------------------------------------------------------
+# PATH setup
+# ---------------------------------------------------------------------------
+
+configure_path() {
+if [[ "$no_modify_path" == "true" ]]; then
+  if ! echo "$PATH" | tr ':' '\n' | grep -Fqx "$install_dir"; then
+    echo ""
+    echo "Add lore to your PATH:"
+    printf '  export PATH=%s:"%sPATH"\n' "$(quote_posix "$install_dir")" '$'
+  fi
+  exit 0
+fi
+
+# Check if install_dir is already in PATH
+if echo "$PATH" | tr ':' '\n' | grep -Fqx "$install_dir"; then
+  exit 0
+fi
+
+path_line="export PATH=$(quote_posix "$install_dir"):\"\$PATH\""
+fish_path_line="set -gx PATH $(quote_fish "$install_dir") \$PATH"
+modified=false
+
+append_path_block() {
+  local rc=$1
+  local line=$2
+  local parent canonical_parent temp before_identity before_sha256
+  local current_identity current_sha256 claim temp_identity temp_sha256
+
+  if [[ -L "$rc" ]]; then
+    die "Shell profile became a symlink during install: ${rc}"
+  fi
+  if [[ -e "$rc" && ! -f "$rc" ]]; then
+    die "Refusing non-file shell profile: ${rc}"
+  fi
+
+  assert_lifecycle_lock_owned
+  parent=$(dirname "$rc")
+  mkdir -p "$parent"
+  canonical_parent=$(cd "$parent" && pwd -P)
+  if ! path_is_in_home "$canonical_parent"; then
+    die "Refusing shell profile outside HOME: ${rc}"
+  fi
+
+  # A hard kill can leave the previous profile under its generation-bound
+  # claim after the canonical name was moved away. Recover exactly one trusted
+  # claim before deciding that the profile is new; ambiguous state is unsafe.
+  if [[ ! -e "$rc" && ! -L "$rc" ]]; then
+    local -a recovery_claims=()
+    local recovery_claim recovery_suffix recovery_identity recovery_sha256
+    for recovery_claim in "${rc}.lore-original."*; do
+      if [[ -e "$recovery_claim" || -L "$recovery_claim" ]]; then
+        recovery_claims+=("$recovery_claim")
+      fi
+    done
+    if (( ${#recovery_claims[@]} > 1 )); then
+      die "Refusing ambiguous shell profile recovery claims: ${rc}"
+    fi
+    if (( ${#recovery_claims[@]} == 1 )); then
+      recovery_claim=${recovery_claims[0]}
+      recovery_suffix=${recovery_claim#"${rc}.lore-original."}
+      if [[ ! "$recovery_suffix" =~ ^[A-Za-z0-9_-]{32,256}\.([1-9][0-9]*)\.([1-9][0-9]*)\.([a-f0-9]{64})$ ||
+            -L "$recovery_claim" || ! -f "$recovery_claim" ||
+            ( "$os" != "windows" && ! -O "$recovery_claim" ) ]]; then
+        die "Refusing unsafe shell profile recovery claim: ${recovery_claim}"
+      fi
+      recovery_identity="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+      recovery_sha256=${BASH_REMATCH[3]}
+      if ! file_is_generation "$recovery_claim" "$recovery_identity" "$recovery_sha256"; then
+        die "Shell profile recovery claim changed: ${recovery_claim}"
+      fi
+      assert_lifecycle_lock_owned
+      if ! ln "$recovery_claim" "$rc"; then
+        die "Shell profile was replaced during recovery: ${rc}"
+      fi
+      if ! file_is_generation "$rc" "$recovery_identity" "$recovery_sha256"; then
+        die "Shell profile changed during recovery: ${rc}"
+      fi
+      sync_path "$rc"
+      sync_path "$parent"
+      if file_is_generation "$recovery_claim" "$recovery_identity" "$recovery_sha256"; then
+        rm -f -- "$recovery_claim"
+      elif [[ -e "$recovery_claim" || -L "$recovery_claim" ]]; then
+        die "Shell profile recovery claim was replaced: ${recovery_claim}"
+      fi
+      sync_path "$parent"
+    fi
+  fi
+
+  temp=$(mktemp "${rc}.lore-install.XXXXXX")
+  chmod 600 "$temp"
+  if [[ -f "$rc" ]]; then
+    before_identity=$(require_file_identity "$rc" "shell profile")
+    before_sha256=$(hash_file "$rc")
+    cp -p "$rc" "$temp"
+  else
+    before_identity="missing"
+    before_sha256="missing"
+  fi
+  printf '\n# Added by lore installer\n%s\n' "$line" >> "$temp"
+  temp_identity=$(require_file_identity "$temp" "staged shell profile")
+  temp_sha256=$(hash_file "$temp")
+
+  if [[ -L "$rc" ]]; then
+    rm -f "$temp"
+    die "Shell profile became a symlink during install: ${rc}"
+  fi
+  if [[ -f "$rc" ]]; then
+    current_identity=$(require_file_identity "$rc" "shell profile")
+    current_sha256=$(hash_file "$rc")
+  else
+    current_identity="missing"
+    current_sha256="missing"
+  fi
+  if [[ "$current_identity" != "$before_identity" || "$current_sha256" != "$before_sha256" ]]; then
+    rm -f "$temp"
+    die "Shell profile changed during install: ${rc}"
+  fi
+  assert_lifecycle_lock_owned
+
+  if [[ "$before_identity" != "missing" ]]; then
+    claim="${rc}.lore-original.${lifecycle_lock_token}.${before_identity/:/.}.${before_sha256}"
+    if [[ -e "$claim" || -L "$claim" ]]; then
+      rm -f -- "$temp"
+      die "Refusing occupied shell profile recovery claim: ${claim}"
+    fi
+    mv "$rc" "$claim"
+    if ! file_is_generation "$claim" "$before_identity" "$before_sha256"; then
+      if [[ ! -e "$rc" && ! -L "$rc" ]]; then
+        ln "$claim" "$rc" || true
+      fi
+      rm -f -- "$temp"
+      die "Shell profile changed during install: ${rc}"
+    fi
+    sync_path "$claim"
+    sync_path "$parent"
+  else
+    claim=""
+  fi
+
+  assert_lifecycle_lock_owned
+  if ! ln "$temp" "$rc"; then
+    if [[ -n "$claim" && ! -e "$rc" && ! -L "$rc" ]]; then
+      ln "$claim" "$rc" || true
+    fi
+    rm -f -- "$temp"
+    die "Shell profile was replaced during install: ${rc}"
+  fi
+  if ! file_is_generation "$rc" "$temp_identity" "$temp_sha256"; then
+    rm -f -- "$temp"
+    die "Shell profile changed during publication: ${rc}"
+  fi
+  rm -f -- "$temp"
+  if [[ -n "$claim" ]]; then
+    if file_is_generation "$claim" "$before_identity" "$before_sha256"; then
+      rm -f -- "$claim"
+    elif [[ -e "$claim" || -L "$claim" ]]; then
+      die "Shell profile recovery claim was replaced: ${claim}"
+    fi
+  fi
+  sync_path "$rc"
+  sync_path "$parent"
+}
+
+# Detect shell config files to modify
+configs=()
+shell_name=$(basename "${SHELL:-/bin/sh}")
+case "$shell_name" in
+  zsh)  configs+=("$HOME/.zshrc") ;;
+  bash)
+    # .bash_profile for login shells, .bashrc for interactive
+    [[ -f "$HOME/.bash_profile" ]] && configs+=("$HOME/.bash_profile")
+    configs+=("$HOME/.bashrc")
+    ;;
+  fish) configs+=("$HOME/.config/fish/config.fish") ;;
+  *)    configs+=("$HOME/.profile") ;;
+esac
+
+for rc in "${configs[@]}"; do
+  if [[ "$shell_name" == "fish" ]]; then
+    line="$fish_path_line"
+  else
+    line="$path_line"
+  fi
+  if [[ -L "$rc" ]]; then
+    echo -e "${MUTED}Skipped symlinked shell profile ${rc}${NC}" >&2
+    continue
+  fi
+  if [[ -f "$rc" ]] && grep -Fqx "$line" "$rc" 2>/dev/null; then
+    continue  # Already configured
+  fi
+  append_path_block "$rc" "$line"
+  modified=true
+  echo -e "${MUTED}Updated ${rc}${NC}"
+done
+
+if [[ "$modified" == "true" ]]; then
+  echo ""
+  echo "Restart your shell or run:"
+  echo "  $path_line"
+fi
+}
+
+# The binary, receipt, and release channel have already committed. Run PATH
+# convenience setup as a separate best-effort phase: a profile error must not
+# report the durable installation as failed.
+(
+  trap - EXIT ERR
+  set -e
+  configure_path
+)
+path_setup_status=$?
+if [[ "$path_setup_status" -ne 0 ]]; then
+  echo "Warning: lore was installed, but automatic PATH setup failed." >&2
+  echo "Add lore to your PATH manually:" >&2
+  printf '  export PATH=%s:"%sPATH"\n' "$(quote_posix "$install_dir")" '$' >&2
+fi
+if ! lifecycle_lock_is_owned; then
+  echo "Warning: lore was installed, but lifecycle lock ownership was lost during PATH setup." >&2
+  echo "Verify the current installation before retrying." >&2
+fi
+release_lifecycle_lock
+if [[ -n "$lifecycle_state_dir_fd" ]]; then
+  exec {lifecycle_state_dir_fd}<&-
+  lifecycle_state_dir_fd=""
+  lifecycle_state_dir_fd_path=""
+fi
+exit 0
