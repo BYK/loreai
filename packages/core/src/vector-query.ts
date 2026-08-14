@@ -37,9 +37,14 @@ export type DistillationVectorHit = {
  *  boundary (~3 KB for 768 dims) — never transferred: a transfer would detach
  *  the caller's buffer and corrupt the in-process fallback that reuses it. */
 export type VectorQuerySpec =
-  | { kind: "knowledge"; limit: number; excludeCategories?: string[] }
-  | { kind: "entities"; limit: number }
-  | { kind: "distillations"; limit: number }
+  | {
+      kind: "knowledge";
+      tenantId?: string;
+      limit: number;
+      excludeCategories?: string[];
+    }
+  | { kind: "entities"; tenantId?: string; limit: number }
+  | { kind: "distillations"; tenantId?: string; limit: number }
   | { kind: "allDistillations"; projectId: string; limit: number }
   | {
       kind: "temporal";
@@ -220,9 +225,21 @@ export function runVectorQuery(
     case "knowledge":
       return runKnowledge(conn, readMode, queryEmbedding, spec);
     case "entities":
-      return runEntities(conn, readMode, queryEmbedding, spec.limit);
+      return runEntities(
+        conn,
+        readMode,
+        queryEmbedding,
+        spec.tenantId,
+        spec.limit,
+      );
     case "distillations":
-      return runDistillations(conn, readMode, queryEmbedding, spec.limit);
+      return runDistillations(
+        conn,
+        readMode,
+        queryEmbedding,
+        spec.tenantId,
+        spec.limit,
+      );
     case "allDistillations":
       return runAllDistillations(
         conn,
@@ -264,10 +281,10 @@ function runKnowledge(
   conn: VectorQueryConn,
   readMode: VecReadMode,
   queryEmbedding: Float32Array,
-  spec: { limit: number; excludeCategories?: string[] },
+  spec: { tenantId?: string; limit: number; excludeCategories?: string[] },
 ): VectorHit[] {
   if (readMode === "degraded") return [];
-  const { limit, excludeCategories } = spec;
+  const { tenantId = "", limit, excludeCategories } = spec;
   if (readMode === "vec0") {
     // DiskANN-free FLAT vec0: exact KNN over the whole corpus (no recency cap).
     // Post-filter confidence/category (mutable / per-version) by joining the
@@ -277,8 +294,8 @@ function runKnowledge(
       let sql =
         "WITH knn AS (SELECT id, distance FROM knowledge_vec WHERE embedding MATCH ? AND k = ?) " +
         "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
-        "FROM knn JOIN knowledge_current c ON c.id = knn.id WHERE c.confidence > 0.2";
-      const params: unknown[] = [toBlob(queryEmbedding), k];
+        "FROM knn JOIN knowledge_current c ON c.id = knn.id WHERE c.tenant_id = ? AND c.confidence > 0.2";
+      const params: unknown[] = [toBlob(queryEmbedding), k, tenantId];
       if (excludeCategories?.length) {
         sql += ` AND c.category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
         params.push(...excludeCategories);
@@ -297,8 +314,8 @@ function runKnowledge(
   if (readMode === "blob-native") {
     try {
       let sql =
-        "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
-      const params: unknown[] = [toBlob(queryEmbedding)];
+        "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM knowledge_current WHERE tenant_id = ? AND embedding IS NOT NULL AND confidence > 0.2";
+      const params: unknown[] = [toBlob(queryEmbedding), tenantId];
       if (excludeCategories?.length) {
         sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
         params.push(...excludeCategories);
@@ -311,8 +328,8 @@ function runKnowledge(
     }
   }
   let sql =
-    "SELECT id, embedding FROM knowledge_current WHERE embedding IS NOT NULL AND confidence > 0.2";
-  const params: string[] = [];
+    "SELECT id, embedding FROM knowledge_current WHERE tenant_id = ? AND embedding IS NOT NULL AND confidence > 0.2";
+  const params: string[] = [tenantId];
   if (excludeCategories?.length) {
     sql += ` AND category NOT IN (${excludeCategories.map(() => "?").join(",")})`;
     params.push(...excludeCategories);
@@ -335,31 +352,41 @@ function runEntities(
   conn: VectorQueryConn,
   readMode: VecReadMode,
   queryEmbedding: Float32Array,
+  tenantId = "",
   limit: number,
 ): VectorHit[] {
   if (readMode === "degraded") return [];
   if (readMode === "vec0") {
-    return conn
-      .query(
-        "SELECT id, 1 - distance AS similarity FROM entity_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-      )
-      .all(toBlob(queryEmbedding), vecK(limit)) as VectorHit[];
+    const run = (k: number): VectorHit[] =>
+      conn
+        .query(
+          "WITH knn AS (SELECT id, distance FROM entity_vec WHERE embedding MATCH ? AND k = ?) " +
+            "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
+            "FROM knn JOIN entities e ON e.id = knn.id WHERE e.tenant_id = ? " +
+            "ORDER BY knn.distance LIMIT ?",
+        )
+        .all(toBlob(queryEmbedding), k, tenantId, limit) as VectorHit[];
+    const k0 = overfetchK(limit);
+    const hits = run(k0);
+    return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
   }
   assertBlobReadMode(readMode);
   if (readMode === "blob-native") {
     try {
       return conn
         .query(
-          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM entities WHERE embedding IS NOT NULL ORDER BY similarity DESC LIMIT ?",
+          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM entities WHERE tenant_id = ? AND embedding IS NOT NULL ORDER BY similarity DESC LIMIT ?",
         )
-        .all(toBlob(queryEmbedding), limit) as VectorHit[];
+        .all(toBlob(queryEmbedding), tenantId, limit) as VectorHit[];
     } catch {
       // fall through to JS brute-force
     }
   }
   const rows = conn
-    .query("SELECT id, embedding FROM entities WHERE embedding IS NOT NULL")
-    .all() as Array<{ id: string; embedding: Buffer }>;
+    .query(
+      "SELECT id, embedding FROM entities WHERE tenant_id = ? AND embedding IS NOT NULL",
+    )
+    .all(tenantId) as Array<{ id: string; embedding: Buffer }>;
 
   const topK: VectorHit[] = [];
   for (const row of rows) {
@@ -374,6 +401,7 @@ function runDistillations(
   conn: VectorQueryConn,
   readMode: VecReadMode,
   queryEmbedding: Float32Array,
+  tenantId = "",
   limit: number,
 ): VectorHit[] {
   if (readMode === "degraded") return [];
@@ -386,10 +414,12 @@ function runDistillations(
         .query(
           "WITH knn AS (SELECT id, distance FROM distillation_vec WHERE embedding MATCH ? AND k = ?) " +
             "SELECT knn.id AS id, 1 - knn.distance AS similarity " +
-            "FROM knn JOIN distillations d ON d.id = knn.id WHERE d.archived = 0 " +
+            "FROM knn JOIN distillations d ON d.id = knn.id " +
+            "JOIN projects p ON p.id = d.project_id " +
+            "WHERE p.tenant_id = ? AND d.archived = 0 " +
             "ORDER BY knn.distance LIMIT ?",
         )
-        .all(toBlob(queryEmbedding), k, limit) as VectorHit[];
+        .all(toBlob(queryEmbedding), k, tenantId, limit) as VectorHit[];
     const k0 = overfetchK(limit);
     const hits = run(k0);
     return hits.length >= limit || k0 >= VEC0_MAX_K ? hits : run(VEC0_MAX_K);
@@ -399,18 +429,18 @@ function runDistillations(
     try {
       return conn
         .query(
-          "SELECT id, 1 - vec_distance_cosine(embedding, ?) AS similarity FROM distillations WHERE embedding IS NOT NULL AND archived = 0 ORDER BY similarity DESC LIMIT ?",
+          "SELECT d.id, 1 - vec_distance_cosine(d.embedding, ?) AS similarity FROM distillations d JOIN projects p ON p.id = d.project_id WHERE p.tenant_id = ? AND d.embedding IS NOT NULL AND d.archived = 0 ORDER BY similarity DESC LIMIT ?",
         )
-        .all(toBlob(queryEmbedding), limit) as VectorHit[];
+        .all(toBlob(queryEmbedding), tenantId, limit) as VectorHit[];
     } catch {
       // fall through to JS brute-force
     }
   }
   const rows = conn
     .query(
-      "SELECT id, embedding FROM distillations WHERE embedding IS NOT NULL AND archived = 0",
+      "SELECT d.id, d.embedding FROM distillations d JOIN projects p ON p.id = d.project_id WHERE p.tenant_id = ? AND d.embedding IS NOT NULL AND d.archived = 0",
     )
-    .all() as Array<{ id: string; embedding: Buffer }>;
+    .all(tenantId) as Array<{ id: string; embedding: Buffer }>;
 
   const topK: VectorHit[] = [];
   for (const row of rows) {

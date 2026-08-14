@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { log } from "@loreai/core";
 
 // Bridge: upstreamFetch now uses undici's own fetch (not globalThis.fetch),
 // so tests that mock globalThis.fetch need this shim to intercept calls.
@@ -61,6 +62,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -298,6 +300,50 @@ describe("fetchOAuthQuotaSnapshot", () => {
 
     const snap = await fetchOAuthQuotaSnapshot(BEARER);
     expect(snap).toBeNull();
+  });
+
+  test("malformed JSON diagnostics never include the response prefix or statusText", async () => {
+    const bodyMarker = "PRIVATE_QUOTA_MALFORMED_PREFIX";
+    const reasonMarker = "PRIVATE_QUOTA_REASON_MARKER";
+    const messages: string[] = [];
+    vi.spyOn(log, "warn").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(`${bodyMarker} not-json`, {
+          status: 200,
+          statusText: reasonMarker,
+        }),
+      ),
+    ) as unknown as typeof fetch;
+
+    expect(await fetchOAuthQuotaSnapshot(BEARER)).toBeNull();
+    const output = messages.join("\n");
+    expect(output).toContain("200");
+    expect(output).not.toContain(bodyMarker);
+    expect(output).not.toContain(reasonMarker);
+  });
+
+  test("network diagnostics do not log thrown URL or error details", async () => {
+    const userinfoMarker = "PRIVATE_QUOTA_THROWN_USERINFO";
+    const queryMarker = "PRIVATE_QUOTA_THROWN_QUERY";
+    const messages: string[] = [];
+    vi.spyOn(log, "warn").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.reject(
+        new Error(
+          `request failed at https://user:${userinfoMarker}@example.com/quota?token=${queryMarker}`,
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    expect(await fetchOAuthQuotaSnapshot(BEARER)).toBeNull();
+    const output = messages.join("\n");
+    expect(output).not.toContain(userinfoMarker);
+    expect(output).not.toContain(queryMarker);
   });
 });
 

@@ -23,7 +23,20 @@
  * Use `lore logs` to view; disabled during tests (`NODE_ENV=test`).
  */
 
-import { appendFileSync, renameSync, statSync, mkdirSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  type Stats,
+} from "node:fs";
+import { redactCredentialHeaderAssignments } from "./credential-headers";
 import { join } from "node:path";
 import { dataDir } from "./data-dir";
 
@@ -150,16 +163,211 @@ function findError(args: unknown[]): Error | undefined {
   return undefined;
 }
 
+const LOG_FILTERED = "[Filtered]";
+const LOG_SENSITIVE_KEY = String.raw`(?:proxy[\s._-]*authorization|authorization|x[\s._-]*api[\s._-]*key|api[\s._-]*key|(?:api|access|auth|bearer|client|consumer|identity|private|refresh|security|subscription)[\s._-]*(?:id|key|secret|token)|ocp[\s._-]*apim[\s._-]*subscription[\s._-]*key|cf[\s._-]*access[\s._-]*client[\s._-]*id|set[\s._-]*cookie|(?:[a-z0-9]+[\s._-]+)*signatures?|token|secret|password|passwd|passphrase|credentials?|cookies?)`;
+
+/**
+ * Redact practical credential/header forms before text reaches stderr, an
+ * external sink, or persistent storage. This deliberately preserves ordinary
+ * operational text, paths, and entity names; raw response bodies are omitted
+ * at their call sites because free-form text cannot identify them reliably.
+ */
+export function redactSensitiveLogText(value: string): string {
+  return redactCredentialHeaderAssignments(value, LOG_FILTERED)
+    .replace(
+      /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+      LOG_FILTERED,
+    )
+    .replace(
+      /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi,
+      (match, scheme: string, offset: number, source: string) =>
+        /(?:^|[\s._-])scheme\s*=\s*$/i.test(
+          source.slice(Math.max(0, offset - 32), offset),
+        )
+          ? match
+          : `${scheme} ${LOG_FILTERED}`,
+    )
+    .replace(
+      new RegExp(
+        String.raw`(^|[\r\n])([\t ]*(?:${LOG_SENSITIVE_KEY})[\t ]*:[\t ]*)[^\r\n]*`,
+        "gi",
+      ),
+      `$1$2${LOG_FILTERED}`,
+    )
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, LOG_FILTERED)
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, LOG_FILTERED)
+    .replace(/\bAKIA[A-Z0-9]{16}\b/g, LOG_FILTERED)
+    .replace(
+      /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+      LOG_FILTERED,
+    );
+}
+
+function safeArgs(args: unknown[]): string[] {
+  return args.map((arg) =>
+    redactSensitiveLogText(
+      typeof arg === "string"
+        ? arg
+        : arg instanceof Error
+          ? (arg.stack ?? arg.message)
+          : String(arg),
+    ),
+  );
+}
+
+function sanitizedError(error: Error): Error {
+  const copy = new Error(redactSensitiveLogText(error.message));
+  copy.name = error.name;
+  if (error.stack) copy.stack = redactSensitiveLogText(error.stack);
+  return copy;
+}
+
 // ---------------------------------------------------------------------------
 // File sink — persistent log file, independent of LORE_DEBUG
 // ---------------------------------------------------------------------------
 
 const LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 const ROTATION_CHECK_INTERVAL = 1000; // check size every N writes
+const LOG_DIRECTORY_MODE = 0o700;
+const LOG_FILE_MODE = 0o600;
+const NO_FOLLOW = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 
 let logPath: string | undefined;
 let logPathResolved = false;
 let writeCount = 0;
+
+function assertCurrentOwner(info: Stats, path: string): void {
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+    throw new Error(`Refusing log path not owned by the current user: ${path}`);
+  }
+}
+
+function assertSameFile(before: Stats, after: Stats, path: string): void {
+  if (before.dev !== after.dev || before.ino !== after.ino) {
+    throw new Error(`Log path changed while opening: ${path}`);
+  }
+}
+
+function validateLogDirectory(dir: string): void {
+  const pathInfo = lstatSync(dir);
+  if (pathInfo.isSymbolicLink() || !pathInfo.isDirectory()) {
+    throw new Error(`Refusing non-directory log data path: ${dir}`);
+  }
+  assertCurrentOwner(pathInfo, dir);
+
+  if (process.platform === "win32") return;
+  const fd = openSync(
+    dir,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
+  try {
+    const info = fstatSync(fd);
+    if (!info.isDirectory()) {
+      throw new Error(`Refusing non-directory log data path: ${dir}`);
+    }
+    assertCurrentOwner(info, dir);
+    assertSameFile(pathInfo, info, dir);
+    if ((info.mode & 0o7777) !== LOG_DIRECTORY_MODE) {
+      fchmodSync(fd, LOG_DIRECTORY_MODE);
+    }
+    const finalInfo = fstatSync(fd);
+    if ((finalInfo.mode & 0o077) !== 0) {
+      throw new Error(`Log data directory is not owner-only: ${dir}`);
+    }
+    assertSameFile(lstatSync(dir), finalInfo, dir);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function openLogFileForAppend(path: string): number {
+  let existing: Stats | undefined;
+  try {
+    existing = lstatSync(path);
+    if (!existing.isFile() || existing.isSymbolicLink()) {
+      throw new Error(`Refusing non-regular log file: ${path}`);
+    }
+    assertCurrentOwner(existing, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  // O_NONBLOCK prevents a raced-in FIFO from blocking before fstat rejects it.
+  const fd = openSync(
+    path,
+    constants.O_WRONLY |
+      constants.O_APPEND |
+      constants.O_CREAT |
+      constants.O_NONBLOCK |
+      NO_FOLLOW,
+    LOG_FILE_MODE,
+  );
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile())
+      throw new Error(`Refusing non-regular log file: ${path}`);
+    assertCurrentOwner(info, path);
+    validateLogDirectory(dataDir());
+    assertSameFile(lstatSync(path), info, path);
+    if (existing) assertSameFile(existing, info, path);
+    if (process.platform !== "win32") fchmodSync(fd, LOG_FILE_MODE);
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+function tightenExistingLogFile(path: string): void {
+  const existing = lstatSync(path);
+  if (!existing.isFile() || existing.isSymbolicLink()) {
+    throw new Error(`Refusing non-regular log file: ${path}`);
+  }
+  assertCurrentOwner(existing, path);
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_NONBLOCK | NO_FOLLOW,
+  );
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile())
+      throw new Error(`Refusing non-regular log file: ${path}`);
+    assertCurrentOwner(info, path);
+    assertSameFile(existing, info, path);
+    if (process.platform !== "win32") fchmodSync(fd, LOG_FILE_MODE);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function removeExistingRotationBackup(path: string): void {
+  let existing: Stats;
+  try {
+    existing = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!existing.isFile() || existing.isSymbolicLink()) {
+    throw new Error(`Refusing non-regular rotated log file: ${path}`);
+  }
+  assertCurrentOwner(existing, path);
+  const fd = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NONBLOCK | NO_FOLLOW,
+  );
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) {
+      throw new Error(`Refusing non-regular rotated log file: ${path}`);
+    }
+    assertCurrentOwner(info, path);
+    assertSameFile(existing, info, path);
+    unlinkSync(path);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /**
  * Resolve the log file path. Returns `undefined` in test environments
@@ -169,8 +377,19 @@ function resolveLogPath(): string | undefined {
   if (process.env.NODE_ENV === "test") return undefined;
   try {
     const dir = dataDir();
-    mkdirSync(dir, { recursive: true });
-    return join(dir, "lore.log");
+    mkdirSync(dir, { recursive: true, mode: LOG_DIRECTORY_MODE });
+    validateLogDirectory(dir);
+    const path = join(dir, "lore.log");
+    // Harden both active and previously rotated logs immediately. Otherwise a
+    // legacy 0644 backup could remain readable indefinitely.
+    for (const existingPath of [path, `${path}.1`]) {
+      try {
+        tightenExistingLogFile(existingPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    return path;
   } catch {
     return undefined;
   }
@@ -188,13 +407,25 @@ export function logFilePath(): string | undefined {
 /** Rotate the log file if it exceeds the size cap. */
 function maybeRotate(): void {
   if (!logPath) return;
+  let fd: number | undefined;
   try {
-    const stat = statSync(logPath);
+    // Tighten the active file before it becomes the rotated backup.
+    fd = openLogFileForAppend(logPath);
+    const stat = fstatSync(fd);
     if (stat.size > LOG_MAX_BYTES) {
-      renameSync(logPath, `${logPath}.1`);
+      closeSync(fd);
+      fd = undefined;
+      const backup = `${logPath}.1`;
+      removeExistingRotationBackup(backup);
+      renameSync(logPath, backup);
+      // Another process may have raced the rename. Validate what now occupies
+      // the backup name before leaving it as persistent sensitive data.
+      tightenExistingLogFile(backup);
     }
   } catch {
     // File doesn't exist yet or stat failed — fine
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -214,10 +445,14 @@ function writeToFile(level: string, message: string): void {
   const flat = message.replace(/\n/g, "\\n");
   const line = `${ts} [${tag}] ${flat}\n`;
 
+  let fd: number | undefined;
   try {
-    appendFileSync(path, line);
+    fd = openLogFileForAppend(path);
+    writeFileSync(fd, line, "utf8");
   } catch {
     // Silently degrade — logging failure shouldn't crash the app
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -227,16 +462,18 @@ function writeToFile(level: string, message: string): void {
 
 /** Log an informational status message. Suppressed unless LORE_DEBUG=1. */
 export function info(...args: unknown[]): void {
-  if (isDebug && !readStderrSilenced()) console.error("[lore]", ...args);
-  const msg = formatArgs(args);
+  const msg = redactSensitiveLogText(formatArgs(args));
+  if (isDebug && !readStderrSilenced())
+    console.error("[lore]", ...safeArgs(args));
   sink?.info(msg);
   writeToFile("info", msg);
 }
 
 /** Log a warning. Suppressed unless LORE_DEBUG=1. */
 export function warn(...args: unknown[]): void {
-  if (isDebug && !readStderrSilenced()) console.error("[lore] WARN:", ...args);
-  const msg = formatArgs(args);
+  const msg = redactSensitiveLogText(formatArgs(args));
+  if (isDebug && !readStderrSilenced())
+    console.error("[lore] WARN:", ...safeArgs(args));
   sink?.warn(msg);
   writeToFile("warn", msg);
 }
@@ -250,19 +487,19 @@ export function warn(...args: unknown[]): void {
  * silenced on stderr in embedded/TUI mode but still hits the file and sink.
  */
 export function notice(...args: unknown[]): void {
-  if (!readStderrSilenced()) console.error("[lore]", ...args);
-  const msg = formatArgs(args);
+  const msg = redactSensitiveLogText(formatArgs(args));
+  if (!readStderrSilenced()) console.error("[lore]", ...safeArgs(args));
   sink?.warn(msg);
   writeToFile("warn", msg);
 }
 
 /** Log an error. Always visible — these indicate real failures. */
 export function error(...args: unknown[]): void {
-  if (!readStderrSilenced()) console.error("[lore]", ...args);
-  const msg = formatArgs(args);
+  const msg = redactSensitiveLogText(formatArgs(args));
+  if (!readStderrSilenced()) console.error("[lore]", ...safeArgs(args));
   sink?.error(msg);
   writeToFile("error", msg);
 
   const err = findError(args);
-  if (err) sink?.captureException(err);
+  if (err) sink?.captureException(sanitizedError(err));
 }

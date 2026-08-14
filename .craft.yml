@@ -20,7 +20,7 @@ artifactProvider:
     artifacts:
       # CI workflow uploads three artifact groups on release branches:
       #   npm-tarball      — workspace .tgz files for npm publish
-      #   release-binaries — gzipped standalone CLI binaries per platform
+      #   release-binaries — gzipped standalone CLI binaries + checksums
       #   release-patches  — delta patches from previous stable release
       CI:
         - npm-tarball
@@ -55,9 +55,11 @@ targets:
     access: public
     oidc: true
     includeNames: /^loreai-onnxruntime-.*\.tgz$/
-  # Create GitHub Release with binaries and delta patches attached.
-  # The includeNames filter ensures only .gz binaries and .patch deltas
+  # Create GitHub Release with binaries, deterministic checksum metadata, and
+  # delta patches attached. GitHub's API adds its own SHA-256 digest to the
+  # checksum asset, which installers verify before trusting its entries.
+  # The includeNames filter ensures only those distribution artifacts
   # are uploaded as release assets — npm tarballs are published via the
   # npm targets above, not attached to the GitHub Release.
   - name: github
-    includeNames: /\.(gz|patch)$/
+    includeNames: /(\.(gz|patch)|^lore-checksums\.txt)$/

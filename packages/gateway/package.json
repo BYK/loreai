@@ -31,6 +31,7 @@
     "@stricli/core": "1.2.8",
     "@supabase/supabase-js": "^2.58.0",
     "google-auth-library": "^10.9.0",
+    "jsonc-parser": "3.3.1",
     "p-limit": "7",
     "qrcode-terminal": "^0.12.0",
     "semver": "^7.7.3",

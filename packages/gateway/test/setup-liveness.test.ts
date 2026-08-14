@@ -8,21 +8,26 @@ import {
 describe("chooseSetupPort", () => {
   it("returns undefined for the remote path (port is irrelevant)", () => {
     expect(
-      chooseSetupPort({ remoteUrl: "http://remote:3207", livePort: 5673 }),
+      chooseSetupPort({
+        remoteUrl: "http://remote:3207",
+        authenticatedPort: 5673,
+      }),
     ).toBeUndefined();
   });
 
   it("honors an explicit --port over a detected live port", () => {
-    expect(chooseSetupPort({ explicitPort: 8080, livePort: 5673 })).toBe(8080);
+    expect(
+      chooseSetupPort({ explicitPort: 8080, authenticatedPort: 5673 }),
+    ).toBe(8080);
   });
 
   it("uses a detected live gateway port when no explicit port is given", () => {
     // This is the fix for the 3207 → 5673 → random fallback mismatch.
-    expect(chooseSetupPort({ livePort: 5673 })).toBe(5673);
+    expect(chooseSetupPort({ authenticatedPort: 5673 })).toBe(5673);
   });
 
   it("returns undefined (→ default port) when nothing is detected", () => {
-    expect(chooseSetupPort({ livePort: null })).toBeUndefined();
+    expect(chooseSetupPort({ authenticatedPort: null })).toBeUndefined();
     expect(chooseSetupPort({})).toBeUndefined();
   });
 });

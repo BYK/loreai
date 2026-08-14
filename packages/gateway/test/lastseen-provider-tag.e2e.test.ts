@@ -1,21 +1,13 @@
 /**
- * End-to-end wiring guard for #942 (follow-up to #829/#940).
+ * End-to-end wiring guard for process-global auth capture.
  *
- * These drive the FULL pipeline (handleRequest → handleConversationTurn →
- * setLastSeenAuth) over HTTP, then observe the global fallback credential via
- * getLastSeenAuth(). They pin the BEHAVIOR — not just the pure helper — so a
- * revert of the two `setLastSeenAuth(..., resolveLastSeenProvider(...))` call
- * sites back to `extractProviderHeader(...) || undefined` fails here (the
- * unit tests in upstream-routes.test.ts would still pass on such a revert).
- *
- * The credential and the upstream destination are built together by the SDK on
- * the same outbound request, so deriving the tag from `x-lore-upstream-url`
- * always names the credential's true owner — closing the null-tag cross-borrow
- * window without reintroducing the #829 cross-contamination.
+ * The global fallback is legacy single-user state. It may be populated only by
+ * an unambiguous local request to a configured direct provider. Client-selected
+ * routes and remote/hosted gateways must keep credentials session-scoped.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
-import { createHarness } from "./helpers/harness";
+import { createHarness, TEST_GATEWAY_AUTH_TOKEN } from "./helpers/harness";
 import {
   makeConversationFixtures,
   STANDARD_TOOLS,
@@ -35,7 +27,7 @@ function body(userMessage: string): Record<string, unknown> {
   };
 }
 
-describe("global fallback provider tag derived from upstream URL (#942)", () => {
+describe("legacy process-global auth capture", () => {
   let harness: Harness | undefined;
 
   afterEach(async () => {
@@ -43,16 +35,13 @@ describe("global fallback provider tag derived from upstream URL (#942)", () => 
     harness = undefined;
   });
 
-  it("tags the global from x-lore-upstream-url when no x-lore-provider header is sent", async () => {
+  it("does not capture auth from a client-selected upstream URL", async () => {
     harness = await createHarness({
       fixtures: makeConversationFixtures([
         { userMessage: "header-less credentialed turn", assistantText: "ok" },
       ]),
     });
 
-    // A credentialed request that carries NO x-lore-provider (the shape
-    // produced by title/summary-gen calls bypassing chat.headers), but whose
-    // upstream destination is recognizable.
     const r = await harness.chat(
       body("header-less credentialed turn"),
       "anthropic-key-942",
@@ -61,32 +50,46 @@ describe("global fallback provider tag derived from upstream URL (#942)", () => 
     expect(r.status).toBe(200);
     await r.text();
 
-    // The global is now tagged "anthropic" (derived from the URL) — a worker
-    // for a DIFFERENT provider must NOT be able to borrow it (#829 guard).
     expect(getLastSeenAuth("openai")).toBeNull();
-    // The credential's OWN provider still resolves it.
-    expect(getLastSeenAuth("anthropic")).toEqual({
-      scheme: "api-key",
-      value: "anthropic-key-942",
-    });
+    expect(getLastSeenAuth("anthropic")).toBeNull();
   });
 
-  it("leaves the global agnostic (legacy) when neither provider nor upstream-url header is present", async () => {
+  it("does not capture auth on a remote gateway", async () => {
     harness = await createHarness({
       fixtures: makeConversationFixtures([
-        { userMessage: "plain legacy turn", assistantText: "ok" },
+        { userMessage: "remote credentialed turn", assistantText: "ok" },
       ]),
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
     });
 
-    // No x-lore-provider AND no x-lore-upstream-url → null/agnostic tag, which
-    // every provider lookup may borrow. This is the load-bearing single-
-    // provider legacy path the fix must NOT break.
-    const r = await harness.chat(body("plain legacy turn"), "legacy-key-942");
+    const r = await harness.chat(
+      body("remote credentialed turn"),
+      "remote-key-942",
+      { "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN },
+    );
     expect(r.status).toBe(200);
     await r.text();
 
-    const cred = { scheme: "api-key", value: "legacy-key-942" };
-    expect(getLastSeenAuth("openai")).toEqual(cred);
-    expect(getLastSeenAuth("anthropic")).toEqual(cred);
+    expect(getLastSeenAuth("openai")).toBeNull();
+    expect(getLastSeenAuth("anthropic")).toBeNull();
+  });
+
+  it("captures auth for a local header-less configured direct-provider route", async () => {
+    harness = await createHarness({ fixtures: [] });
+
+    // An intercepted slash command avoids background worker activity while
+    // still exercising handleRequest's early auth-capture path end-to-end.
+    const r = await harness.chat(body("/lore:unknown"), "local-key-942");
+    expect(r.status).toBe(200);
+    await r.text();
+
+    expect(getLastSeenAuth("openai")).toBeNull();
+    expect(getLastSeenAuth("anthropic")).toEqual({
+      scheme: "api-key",
+      value: "local-key-942",
+    });
   });
 });

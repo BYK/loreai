@@ -38,6 +38,8 @@ describe("in-process gateway startup", () => {
     const gw = (await import(gwPkg)) as unknown as GatewayModule;
     const config = gw.loadConfig();
     config.port = 0; // ephemeral
+    config.remoteGateway = false;
+    config.hostedMode = false;
 
     const server = await gw.startServer(config);
     shutdowns.push(async () => server.stop());
@@ -85,6 +87,8 @@ describe("in-process gateway startup", () => {
 
     const config = gw.loadConfig();
     config.port = freePort;
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await gw.startServer(config);
     shutdowns.push(async () => server.stop());
 

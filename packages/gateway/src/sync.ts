@@ -35,6 +35,7 @@ import {
   convergeProjectsByRemote,
 } from "@loreai/core";
 import { getAuthedClient, getCurrentUser } from "./supabase";
+import type { GatewayConfig } from "./config";
 
 const PAGE = 200;
 const pushKey = (t: string) => `sync.push.${t}`;
@@ -75,6 +76,13 @@ export interface SyncProgress {
   pulled: number;
 }
 export type SyncProgressFn = (p: SyncProgress) => void;
+
+const emptySyncResult = (): SyncResult => ({
+  pushed: 0,
+  pulled: 0,
+  conflicts: 0,
+  skipped: 0,
+});
 
 type PushErrorKind = "quota" | "poison" | "transient";
 
@@ -344,6 +352,7 @@ export async function pushOnce(
   client: SupabaseClient,
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
+  if (!syncData.isLocalSyncContext()) return emptySyncResult();
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
   const enc = makeEncryptionResolver();
   for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
@@ -741,6 +750,7 @@ export async function pullOnce(
   client: SupabaseClient,
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
+  if (!syncData.isLocalSyncContext()) return emptySyncResult();
   const res: SyncResult = { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
   const encResolver = makeEncryptionResolver();
 
@@ -1054,6 +1064,16 @@ function applyRemote(
   enc: EncSnapshot,
 ): void {
   const rowId = syncData.rowIdOf(meta.table, remote);
+  const isDeleted = remote.is_deleted === true || remote.is_deleted === 1;
+
+  // Local SQLite FKs key only by id and therefore accept a child that points
+  // at a request tenant's same-database parent. Validate the complete registry
+  // before ANY apply/state side effect. Missing upsert parents use the existing
+  // FK-orphan quarantine path; tombstones may outlive a missing parent but may
+  // never target a parent that exists under non-local ownership.
+  syncData.assertLocalSyncParents(meta.table, remote, {
+    allowMissing: isDeleted,
+  });
 
   // A2 sub-PR 3b-2: the CRDT counter table is a grow-only join-semilattice — its
   // per-key MAX merge is idempotent + monotonic, so a remote row is ALWAYS safe to
@@ -1061,7 +1081,7 @@ function applyRemote(
   // (no hash classify, never a skip/conflict). Track sync_state from the MERGED LOCAL
   // row so the push side sees the post-merge value as in-sync and never re-pushes a
   // peer's counter (this device only pushes its OWN replica's rows).
-  if (meta.table === "knowledge_meta_crdt") {
+  if (meta.table === "knowledge_meta_crdt" && !isDeleted) {
     syncData.applyRemoteMetaCrdt(stripSyncCols(remote));
     const localRow = syncData.getRowById(meta.table, rowId);
     syncData.setSyncState(meta.table, rowId, {
@@ -1074,8 +1094,6 @@ function applyRemote(
     res.pulled++;
     return;
   }
-
-  const isDeleted = remote.is_deleted === true || remote.is_deleted === 1;
 
   // classifyRemoteRow's contract: "remoteHash is null for a tombstone". A delete
   // has no content to compare, so a tombstone is NEVER a content-match "skip".
@@ -1253,6 +1271,7 @@ async function reportDeviceProgress(client: SupabaseClient): Promise<void> {
 export async function refreshRegistryMirror(
   client: SupabaseClient,
 ): Promise<void> {
+  if (!syncData.isLocalSyncContext()) return;
   const PAGE = 1000; // registry tables are tiny; a page cap is pure defense-in-depth.
   for (const meta of syncData.syncedTablesFor(syncData.currentSyncTier())) {
     if (!meta.mirrorSnapshot) continue;
@@ -1301,6 +1320,7 @@ const IDENTITY_PUB_KV = "sync.identityPub"; // base64 of the last-published publ
 export async function publishIdentityPub(
   client: SupabaseClient,
 ): Promise<void> {
+  if (!syncData.isLocalSyncContext()) return;
   try {
     if (keystore.encryptionState() !== "on") return; // no unlocked identity to publish
     const pub = Buffer.from(keystore.getAccountIdentity().publicKey).toString(
@@ -1365,6 +1385,7 @@ async function fetchMemberPubKey(
 export async function reconcileScopeWraps(
   client: SupabaseClient,
 ): Promise<{ wrapped: number }> {
+  if (!syncData.isLocalSyncContext()) return { wrapped: 0 };
   const u = await getCurrentUser();
   if (!u) return { wrapped: 0 };
   const self = u.user_id;
@@ -1420,8 +1441,12 @@ export async function syncOnce(
   onProgress?: SyncProgressFn,
 ): Promise<SyncResult> {
   if (!syncData.isSyncEnabled()) {
-    return { pushed: 0, pulled: 0, conflicts: 0, skipped: 0 };
+    return emptySyncResult();
   }
+  // v81 quarantines pre-provenance outbox/state rows. Recover every live local
+  // upsert exactly once before the first post-upgrade cycle; ambiguous legacy
+  // deletes remain quarantined rather than crossing an account boundary.
+  syncData.reconcileTenantIsolationMigration();
   const client = await getAuthedClient();
   if (!client)
     return { pushed: 0, pulled: 0, conflicts: 0, skipped: 0, notAuthed: true };
@@ -1497,6 +1522,15 @@ export async function syncOnce(
 
 const DEFAULT_SYNC_INTERVAL_MS = 60_000;
 
+export type SyncSchedulerMode = Pick<
+  GatewayConfig,
+  "remoteGateway" | "hostedMode"
+>;
+
+function schedulerAllowed(mode: SyncSchedulerMode): boolean {
+  return !mode.remoteGateway && !mode.hostedMode;
+}
+
 /**
  * Start periodic background sync. Self-contained (owns its interval). Runs one
  * cycle ~5s after startup, then every `intervalMs`. Best-effort. The returned
@@ -1504,12 +1538,19 @@ const DEFAULT_SYNC_INTERVAL_MS = 60_000;
  * shutdown push never races a periodic push (which would corrupt cursors).
  */
 export function startSyncScheduler(
+  mode: SyncSchedulerMode,
   intervalMs = DEFAULT_SYNC_INTERVAL_MS,
 ): () => Promise<void> {
+  // Do not even allocate timers in a multi-tenant gateway. `mode` is retained
+  // by reference and re-checked below so an in-process local→remote/hosted
+  // transition also stops cycles and suppresses the shutdown flush.
+  if (!schedulerAllowed(mode)) return async () => {};
+
   let inflight: Promise<unknown> | null = null;
 
   const tick = () => {
-    if (inflight || !syncData.isSyncEnabled()) return;
+    if (inflight || !schedulerAllowed(mode) || !syncData.isSyncEnabled())
+      return;
     inflight = syncOnce()
       // A quota pause is already reported once per table by pushEntry (deduped) — no
       // per-cycle scheduler summary, which would re-spam the same state every interval.
@@ -1533,7 +1574,7 @@ export function startSyncScheduler(
     clearTimeout(startupTimer);
     clearInterval(timer);
     if (inflight) await inflight.catch(() => {}); // don't race the in-flight cycle
-    if (!syncData.isSyncEnabled()) return;
+    if (!schedulerAllowed(mode) || !syncData.isSyncEnabled()) return;
     try {
       const client = await getAuthedClient();
       if (client) await pushOnce(client); // final best-effort flush

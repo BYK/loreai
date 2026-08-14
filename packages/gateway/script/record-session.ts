@@ -100,15 +100,14 @@ console.error("[record] Press Ctrl+C to stop recording.");
 // SIGINT handler — print stats and exit
 // ---------------------------------------------------------------------------
 
-process.on("SIGINT", () => {
+async function shutdown(): Promise<void> {
   // stopRecording() clears the module-level path; seqCounter stays at its
   // final value, which equals the number of turns captured.
   // We import stopRecording lazily to read seqCounter after all turns.
-  void import("../src/recorder").then(({ stopRecording }) => {
-    stopRecording();
-  });
+  const { stopRecording } = await import("../src/recorder");
+  stopRecording();
 
-  server.stop();
+  await server.stop();
 
   // Re-read the fixture file to count lines (most reliable turn count)
   try {
@@ -124,4 +123,11 @@ process.on("SIGINT", () => {
   }
 
   process.exit(0);
+}
+
+process.on("SIGINT", () => {
+  void shutdown().catch((error: unknown) => {
+    console.error("[record] Failed to stop recording cleanly:", error);
+    process.exit(1);
+  });
 });

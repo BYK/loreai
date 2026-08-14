@@ -44,35 +44,99 @@ export function workerKeyScheme(providerID?: string): AuthCredential["scheme"] {
 // Header extraction / formatting
 // ---------------------------------------------------------------------------
 
+export const PROVIDER_AUTH_HEADER_NAMES = [
+  "x-api-key",
+  "x-goog-api-key",
+  "authorization",
+] as const;
+type AuthHeaderName = (typeof PROVIDER_AUTH_HEADER_NAMES)[number];
+
+function isAuthHeaderName(name: string): name is AuthHeaderName {
+  return PROVIDER_AUTH_HEADER_NAMES.some((candidate) => candidate === name);
+}
+
+function getHeaderValue(
+  headers: Record<string, string>,
+  target: AuthHeaderName,
+): string | undefined {
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === target) {
+      return typeof value === "string" ? value : undefined;
+    }
+  }
+  return undefined;
+}
+
+function isValidApiKey(value: string | undefined): value is string {
+  return value !== undefined && /^\S+$/.test(value);
+}
+
 /**
  * Extract auth from request headers.
  *
- * Prefers `x-api-key` (Anthropic SDK default), falls back to
- * `Authorization: Bearer` (OAuth / Claude Code subscriptions).
- * Returns `null` if neither is present.
+ * Accepts one of `x-api-key` (Anthropic SDK default), `x-goog-api-key`
+ * (Gemini), or `Authorization: Bearer` (OAuth / Claude Code subscriptions).
+ * Returns `null` when no valid credential is present or when multiple auth
+ * mechanisms are present. Rejecting ambiguity here prevents fingerprint and
+ * upstream-routing callers from silently selecting one credential by priority.
  */
 export function extractAuth(
   headers: Record<string, string> | null | undefined,
 ): AuthCredential | null {
-  if (!headers) return null;
+  if (!headers || hasConflictingAuthHeaders(headers)) return null;
 
-  const apiKey = headers["x-api-key"] || headers["X-Api-Key"];
-  if (apiKey) return { scheme: "api-key", value: apiKey };
+  const apiKey = getHeaderValue(headers, "x-api-key");
+  if (isValidApiKey(apiKey)) return { scheme: "api-key", value: apiKey };
 
   // Google Gemini's native API authenticates with `x-goog-api-key`. Capture it
   // as an api-key credential so gemini sessions get a stable identity and their
   // background workers can resolve auth (worker builders emit it as
   // `x-goog-api-key`, not the generic `x-api-key`, via buildGeminiWorkerRequest).
-  const googKey = headers["x-goog-api-key"] || headers["X-Goog-Api-Key"];
-  if (googKey) return { scheme: "api-key", value: googKey };
+  const googKey = getHeaderValue(headers, "x-goog-api-key");
+  if (isValidApiKey(googKey)) return { scheme: "api-key", value: googKey };
 
-  const authHeader = headers.authorization || headers.Authorization;
+  const authHeader = getHeaderValue(headers, "authorization");
   if (authHeader) {
     const match = /^Bearer\s+(\S+)$/i.exec(authHeader);
     if (match) return { scheme: "bearer", value: match[1] };
   }
 
   return null;
+}
+
+/**
+ * Whether more than one recognized authentication mechanism was supplied.
+ *
+ * Header names are matched case-insensitively because direct module callers do
+ * not necessarily pass a Web `Headers`-normalized record. Presence is enough:
+ * two auth mechanisms are ambiguous even when either value is empty or both
+ * happen to contain the same bytes.
+ */
+export function hasConflictingAuthHeaders(
+  headers: Record<string, string> | null | undefined,
+): boolean {
+  if (!headers) return false;
+  const present = new Set<AuthHeaderName>();
+  for (const name of Object.keys(headers)) {
+    const lower = name.toLowerCase();
+    if (!isAuthHeaderName(lower)) continue;
+    present.add(lower);
+    if (present.size > 1) return true;
+  }
+  return false;
+}
+
+/** Copy the one provider-auth variant without changing its header scheme. */
+export function copyProviderAuthHeaders(
+  headers: Record<string, string> | null | undefined,
+): Record<string, string> {
+  if (!headers || hasConflictingAuthHeaders(headers)) return {};
+  const copied: Record<string, string> = {};
+  for (const name of PROVIDER_AUTH_HEADER_NAMES) {
+    const value = getHeaderValue(headers, name);
+    if (value !== undefined) copied[name] = value;
+  }
+  return copied;
 }
 
 /**
@@ -94,15 +158,34 @@ export function authHeaders(cred: AuthCredential): Record<string, string> {
  * Privacy-safe credential fingerprint — SHA-256 of scheme + value, truncated
  * to 16 hex chars (64 bits).
  *
- * Used to differentiate sessions that share the same first message but use
- * different API keys or OAuth tokens. The scheme prefix prevents collisions
- * between an API key and a bearer token with the same value. Not reversible.
+ * Used for local fallback session correlation, telemetry, quotas, and batching.
+ * Remote session identity uses `credentialTenantFingerprint()` below so its
+ * persisted tenant boundary retains the full SHA-256 output. The scheme prefix
+ * prevents collisions between an API key and bearer token with equal bytes.
  */
 export function authFingerprint(cred: AuthCredential): string {
   return createHash("sha256")
     .update(`${cred.scheme}|${cred.value}`)
     .digest("hex")
     .slice(0, 16);
+}
+
+/**
+ * Server-derived tenant identity for remote session binding.
+ *
+ * Unlike the short diagnostic/quota fingerprint above, this uses the full
+ * SHA-256 output and a versioned domain separator. It is safe to persist as a
+ * one-way tenant identifier; the credential itself is never stored. The auth
+ * scheme is part of the material, so equal API-key and bearer bytes remain
+ * distinct tenants.
+ */
+export function credentialTenantFingerprint(cred: AuthCredential): string {
+  return createHash("sha256")
+    .update("lore.remote-session-tenant.v1\0")
+    .update(cred.scheme)
+    .update("\0")
+    .update(cred.value)
+    .digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +199,12 @@ export function authFingerprint(cred: AuthCredential): string {
  * within the same OpenCode session.
  */
 const sessionAuth = new Map<string, Map<string, AuthCredential>>();
+
+/** Credential/provider observed on the session's most recent authenticated turn. */
+const currentSessionAuth = new Map<
+  string,
+  { providerID?: string; credential: AuthCredential }
+>();
 
 /**
  * Store a credential for a specific (session, provider) pair.
@@ -136,6 +225,7 @@ export function setSessionAuth(
   }
   const key = providerID || "_default";
   byProvider.set(key, cred);
+  currentSessionAuth.set(sessionID, { providerID, credential: cred });
   // Only set _default when no explicit providerID was given (legacy callers).
   // When a named provider stores its credential (e.g. "minimax"), do NOT
   // overwrite _default — that causes cross-contamination: a MiniMax API key
@@ -177,6 +267,13 @@ export function getSessionAuth(
   return byProvider.get("_default") ?? null;
 }
 
+/** Return the credential/provider from a session's latest authenticated turn. */
+export function getCurrentSessionAuth(
+  sessionID: string,
+): { providerID?: string; credential: AuthCredential } | null {
+  return currentSessionAuth.get(sessionID) ?? null;
+}
+
 /** Dedup guard so the mismatch warning fires once per session+lookup-key. */
 const warnedAuthKeyMismatch = new Set<string>();
 
@@ -201,6 +298,7 @@ function warnAuthKeyMismatch(
 /** Delete a session's credentials (for eviction). */
 export function deleteSessionAuth(sessionID: string): void {
   sessionAuth.delete(sessionID);
+  currentSessionAuth.delete(sessionID);
   clearAuthStale(sessionID);
   // Drop this session's mismatch-warning dedup entries so the set doesn't grow
   // unbounded over a long-lived gateway (keys are `${sessionID}:${lookupKey}`).
@@ -384,71 +482,52 @@ export function isGlobalAuthStale(): boolean {
 /**
  * Resolve auth credentials for a given session (and optionally a specific provider).
  *
- * 1. If `sessionID` is provided, check the per-session registry first.
- *    When `providerID` is also given, returns the credential stored for
- *    that specific provider — preventing cross-contamination when a session
- *    uses multiple providers (e.g. Anthropic + MiniMax).
- *    Skips credentials whose specific provider is marked stale (401/403)
- *    so the global fallback can provide a potentially-refreshed token.
- * 2. Fall back to the global `lastSeenAuth` (for cold-start or callers
- *    that don't pass a session ID).
- * 3. If the global fallback holds the same value as the stale session
- *    credential, return `null` — the token is expired everywhere and
- *    retrying would just generate another 401. This prevents the
- *    background worker 401 storm in single-session OAuth setups where
- *    session and global credentials are the same expired token.
+ * 1. If `sessionID` is provided, resolve ONLY from that session.
+ *    Provider-agnostic callers use the credential from that session's most
+ *    recent authenticated turn, not a historical `_default` slot.
+ *    When `providerID` is also given, returns the credential stored for that
+ *    specific provider — preventing cross-contamination when a session uses
+ *    multiple providers (e.g. Anthropic + MiniMax). A cold or stale session
+ *    never inherits another client's process-global credential.
+ * 2. The process-global fallback is available only to callers that omit a
+ *    session ID. Runtime callers should additionally gate that legacy path to
+ *    local, configured direct-provider routes.
  */
 export function resolveAuth(
   sessionID?: string,
   providerID?: string,
 ): AuthCredential | null {
   if (sessionID) {
-    const cred = getSessionAuth(sessionID, providerID);
-    // Check staleness for the specific provider being requested.
-    // A stale MiniMax credential should NOT cause the Anthropic credential
-    // to be skipped (or vice versa).
-    const staleKey = providerID || "_default";
-    if (cred && !isAuthStale(sessionID, staleKey)) return cred;
-
-    // CROSS-PROVIDER GUARD: when a SPECIFIC providerID is requested and this
-    // session has no credential for it, do NOT borrow the global fallback —
-    // it belongs to whatever provider the session authenticated with, NOT the
-    // requested one. Returning it produces the exact production bug: a worker
-    // configured for `minimax` borrows the session's Anthropic key and gets
-    // sent off as a doomed cross-provider request (401 "invalid x-api-key"
-    // loop). The global fallback is only safe for provider-agnostic callers
-    // (no providerID) and for cold-start when the session genuinely has no
-    // provider-specific store yet.
-    if (providerID && !cred && sessionHasProviderStore(sessionID)) {
+    if (!providerID) {
+      const current = currentSessionAuth.get(sessionID);
+      if (current) {
+        const staleKey = current.providerID || "_default";
+        if (!isAuthStale(sessionID, staleKey)) return current.credential;
+      }
       return null;
     }
-
-    // Global fallback — provider-aware (never borrows a different provider's
-    // credential, #829) — and guarded against returning the same stale token.
-    // In single-session OAuth setups, session and global hold the exact
-    // same expired bearer token. Returning it would cause callers to make
-    // a request that immediately 401s again.
-    const global = getLastSeenAuth(providerID);
-    if (cred && global && global.value === cred.value) return null;
-    return global;
+    return resolveSessionProviderAuth(sessionID, providerID);
   }
   return getLastSeenAuth(providerID);
 }
 
 /**
- * Whether a session has any provider-specific credential stored (i.e. the
- * gateway has observed at least one real authenticated turn for it). Used by
- * `resolveAuth` to decide that a missing credential for a SPECIFIC provider is
- * a genuine "this provider isn't authenticated here" signal — not a cold-start
- * — so the global (foreign-provider) fallback must be suppressed.
+ * Resolve a credential only from one session for one provider.
+ *
+ * Unlike `resolveAuth`, this never consults the process-global fallback. That
+ * distinction is required for provider-owned account endpoints and background
+ * workers: the last credential observed anywhere in the process is not evidence
+ * that it belongs to this session or provider.
  */
-function sessionHasProviderStore(sessionID: string): boolean {
+export function resolveSessionProviderAuth(
+  sessionID: string,
+  providerID: string,
+): AuthCredential | null {
   const byProvider = sessionAuth.get(sessionID);
-  if (!byProvider) return false;
-  for (const key of byProvider.keys()) {
-    if (key !== "_default") return true;
-  }
-  return false;
+  if (!byProvider) return null;
+  const credential = byProvider.get(providerID);
+  if (!credential || isAuthStale(sessionID, providerID)) return null;
+  return credential;
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +537,7 @@ function sessionHasProviderStore(sessionID: string): boolean {
 /** Reset all auth state — test-only. */
 export function _resetAuthForTest(): void {
   sessionAuth.clear();
+  currentSessionAuth.clear();
   staleSessionAuth.clear();
   warnedAuthKeyMismatch.clear();
   lastSeenAuth = null;

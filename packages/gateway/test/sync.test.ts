@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   db,
+  close as closeDb,
   ensureProject as ensureProjectCore,
   getKV,
   setKV,
   deleteTeamConfig,
   reinstallSyncCapture,
+  withTenant,
 } from "@loreai/core";
 import {
   ltm,
@@ -518,21 +520,13 @@ beforeEach(() => {
   db().exec("DELETE FROM sync_outbox");
   db().exec("DELETE FROM sync_state");
   db().exec("DELETE FROM sync_conflicts");
-  for (const t of [
-    "knowledge",
-    "entities",
-    "entity_aliases",
-    "entity_relations",
-    "knowledge_entity_refs",
-    "profiles",
-    "account_escrow",
-    "scope_keys",
-    "distillations",
-    "temporal_messages",
-    "projects",
+  for (const meta of [
+    ...syncData.SYNCED_TABLES.basic,
+    ...syncData.SYNCED_TABLES.pro,
+    ...syncData.SYNCED_TABLES.max,
   ]) {
-    setKV(`sync.push.${t}`, "0");
-    setKV(`sync.pull.${t}`, "0|");
+    setKV(`sync.push.${meta.table}`, "0");
+    setKV(`sync.pull.${meta.table}`, "0|");
   }
   // Reset change-capture to the free-tier baseline (drops any Pro fanout trigger a
   // prior test installed) so tier-gated capture doesn't leak across tests (#826/D).
@@ -1952,7 +1946,609 @@ describe("profiles (pull-only mirror)", () => {
   });
 });
 
+describe("cloud sync tenant boundary", () => {
+  const TENANT_A = "a".repeat(64);
+  const TENANT_B = "b".repeat(64);
+  const LOCAL = "";
+
+  function insertTenantKnowledge(
+    tenantId: string,
+    id: string,
+    content: string,
+  ): void {
+    withTenant(tenantId, () => {
+      const projectId = ensureProject("/tmp/lore-sync-tenant-boundary");
+      db()
+        .query(
+          `INSERT INTO knowledge
+             (id, logical_id, tenant_id, project_id, category, title, content, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'pattern', ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          id,
+          tenantId,
+          projectId,
+          `tenant-${tenantId || "local"}`,
+          content,
+          now(),
+          now(),
+        );
+    });
+  }
+
+  test.each([
+    [TENANT_A, LOCAL, TENANT_B],
+    [TENANT_B, LOCAL, TENANT_A],
+  ])(
+    "real capture and push expose only local rows in adversarial order %#",
+    async (...tenantOrder) => {
+      syncData.enableSync("basic");
+      const ids: Record<string, string> = {
+        [LOCAL]: "tenant-boundary-local",
+        [TENANT_A]: "tenant-boundary-a",
+        [TENANT_B]: "tenant-boundary-b",
+      };
+
+      for (const tenantId of tenantOrder) {
+        insertTenantKnowledge(
+          tenantId,
+          ids[tenantId],
+          `private-${tenantId || "local"}`,
+        );
+      }
+
+      // The real TEMP trigger must not capture request-owned rows at all.
+      // Removing its lore_current_tenant() gate makes this assertion fail even
+      // though the read boundary below would still prevent an upload.
+      expect(
+        db()
+          .query(
+            "SELECT row_id, tenant_id FROM sync_outbox WHERE table_name = 'knowledge' ORDER BY seq",
+          )
+          .all(),
+      ).toEqual([{ row_id: ids[LOCAL], tenant_id: LOCAL }]);
+
+      // Pre-remediation rows have no trustworthy owner. Reproduce them with the
+      // migration's NULL quarantine marker, then put a newer LOCAL capture after
+      // them so the local cursor advances numerically beyond their seq values.
+      const insertLegacy = db().query(
+        `INSERT INTO sync_outbox
+           (table_name, row_id, op, changed_at, tenant_id)
+         VALUES ('knowledge', ?, 'upsert', ?, NULL)`,
+      );
+      insertLegacy.run(ids[TENANT_A], now());
+      insertLegacy.run(ids[TENANT_B], now());
+      withTenant(LOCAL, () => {
+        db()
+          .query(
+            "UPDATE knowledge SET content = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+          )
+          .run("local-after-legacy", now(), LOCAL, ids[LOCAL]);
+      });
+
+      const visible = syncData.readOutbox(0, 500, "knowledge");
+      expect(new Set(visible.map((entry) => entry.row_id))).toEqual(
+        new Set([ids[LOCAL]]),
+      );
+      expect(visible.every((entry) => entry.tenant_id === LOCAL)).toBe(true);
+
+      // Manual/internal entry points also fail closed when invoked from a
+      // request tenant, independently of scheduler policy.
+      const tenantAttempt = await withTenant(TENANT_A, () =>
+        pushOnce(makeClient() as never),
+      );
+      expect(tenantAttempt).toEqual({
+        pushed: 0,
+        pulled: 0,
+        conflicts: 0,
+        skipped: 0,
+      });
+      expect(tableRows("knowledge")).toEqual([]);
+
+      const localProjectId = (
+        db()
+          .query("SELECT id FROM projects WHERE tenant_id = ? AND path = ?")
+          .get(LOCAL, "/tmp/lore-sync-tenant-boundary") as { id: string }
+      ).id;
+      tableRows("knowledge").push({
+        id: "tenant-pull-probe",
+        project_id: localProjectId,
+        category: "pattern",
+        title: "must not pull",
+        content: "request tenant must not observe account cloud data",
+        content_hash: "tenant-pull-probe-hash",
+        revision: 1,
+        is_deleted: false,
+        created_at: new Date(2_000_000).toISOString(),
+        updated_at: new Date(2_000_000).toISOString(),
+      });
+      const tenantPull = await withTenant(TENANT_A, () =>
+        pullOnce(makeClient() as never),
+      );
+      expect(tenantPull).toEqual({
+        pushed: 0,
+        pulled: 0,
+        conflicts: 0,
+        skipped: 0,
+      });
+      expect(
+        db()
+          .query("SELECT COUNT(*) AS n FROM knowledge WHERE id = ?")
+          .get("tenant-pull-probe"),
+      ).toEqual({ n: 0 });
+      remote.delete("knowledge");
+
+      await pushOnce(makeClient() as never);
+      expect(tableRows("knowledge").map((row) => row.id)).toEqual([ids[LOCAL]]);
+      expect(tableRows("knowledge")[0].content).toBe("local-after-legacy");
+
+      // Only the local row is acknowledged. Removing the outbox tenant filter
+      // causes the quarantined rows to be processed and recorded in sync_state;
+      // removing the prune filter deletes them as if acknowledged.
+      expect(
+        db()
+          .query(
+            `SELECT row_id, tenant_id FROM sync_state
+              WHERE row_id IN (?, ?, ?) ORDER BY row_id`,
+          )
+          .all(ids[LOCAL], ids[TENANT_A], ids[TENANT_B]),
+      ).toEqual([{ row_id: ids[LOCAL], tenant_id: LOCAL }]);
+      expect(
+        db()
+          .query(
+            "SELECT row_id FROM sync_outbox WHERE tenant_id IS NULL ORDER BY row_id",
+          )
+          .all(),
+      ).toEqual([{ row_id: ids[TENANT_A] }, { row_id: ids[TENANT_B] }]);
+    },
+  );
+
+  test.each([
+    { remoteGateway: true, hostedMode: false },
+    { remoteGateway: false, hostedMode: true },
+  ])("scheduler allocates no cycles or shutdown flush in %o", async (mode) => {
+    syncData.enableSync("basic");
+    insertTenantKnowledge(LOCAL, "scheduler-local", "must-stay-local");
+    vi.useFakeTimers();
+    try {
+      const stop = startSyncScheduler(mode, 60_000);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await stop();
+      expect(tableRows("knowledge")).toEqual([]);
+      expect(syncData.getSyncState("knowledge", "scheduler-local")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("an in-process local-to-remote transition stops ticks and the final flush", async () => {
+    syncData.enableSync("basic");
+    insertTenantKnowledge(LOCAL, "scheduler-transition", "must-stay-local");
+    const mode = { remoteGateway: false, hostedMode: false };
+    vi.useFakeTimers();
+    try {
+      const stop = startSyncScheduler(mode, 60_000);
+      mode.remoteGateway = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      await stop();
+      expect(tableRows("knowledge")).toEqual([]);
+      expect(
+        syncData.getSyncState("knowledge", "scheduler-transition"),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("pull parent-ownership registry", () => {
+  const REQUEST_TENANT = "c".repeat(64);
+  const PRO_TABLES = new Set(["distillations", "temporal_messages"]);
+  const PARENT_CASES = Object.entries(syncData.SYNC_TENANT_PARENT_REFS).flatMap(
+    ([table, refs]) =>
+      refs.map((ref) => ({
+        table,
+        ref,
+        label: `${table}.${ref.column}`,
+      })),
+  );
+
+  type ParentCase = (typeof PARENT_CASES)[number];
+
+  function parentId(c: ParentCase, column = c.ref.column): string {
+    return `pull-parent-${c.table}-${column}`;
+  }
+
+  function insertOwnedParent(
+    ref: syncData.SyncTenantParentRef,
+    id: string,
+    tenantId: string,
+  ): void {
+    withTenant(tenantId, () =>
+      syncData.withApplying(() => {
+        if (ref.parentTable === "projects") {
+          db()
+            .query(
+              `INSERT INTO projects
+                 (id, path, name, git_remote, created_at, tenant_id)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              id,
+              `/tmp/${id}-${tenantId || "local"}`,
+              id,
+              `test:${id}`,
+              now(),
+              tenantId,
+            );
+          return;
+        }
+
+        const projectId = `${id}-project`;
+        db()
+          .query(
+            `INSERT INTO projects
+               (id, path, name, git_remote, created_at, tenant_id)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            projectId,
+            `/tmp/${projectId}-${tenantId || "local"}`,
+            projectId,
+            `test:${projectId}`,
+            now(),
+            tenantId,
+          );
+        if (ref.parentTable === "entities") {
+          db()
+            .query(
+              `INSERT INTO entities
+                 (id, tenant_id, project_id, entity_type, canonical_name, created_at, updated_at)
+               VALUES (?, ?, ?, 'service', ?, ?, ?)`,
+            )
+            .run(id, tenantId, projectId, id, now(), now());
+          return;
+        }
+        db()
+          .query(
+            `INSERT INTO knowledge
+               (id, logical_id, tenant_id, project_id, category, title, content, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'pattern', ?, ?, ?, ?)`,
+          )
+          .run(id, id, tenantId, projectId, id, id, now(), now());
+      }),
+    );
+  }
+
+  function prepareParents(
+    c: ParentCase,
+    targetTenant: string | null,
+  ): Record<string, string> {
+    const values: Record<string, string> = {};
+    for (const ref of syncData.SYNC_TENANT_PARENT_REFS[c.table]) {
+      const id = parentId(c, ref.column);
+      values[ref.column] = id;
+      if (ref.column === c.ref.column) {
+        if (targetTenant !== null) insertOwnedParent(ref, id, targetTenant);
+      } else {
+        insertOwnedParent(ref, id, "");
+      }
+    }
+    return values;
+  }
+
+  function remoteChild(
+    c: ParentCase,
+    parents: Record<string, string>,
+    updatedAt = 2_000_000,
+  ): RemoteRow {
+    const id = `pull-child-${c.table}-${c.ref.column}`;
+    const updated_at = new Date(updatedAt).toISOString();
+    const common = {
+      content_hash: `hash-${id}`,
+      revision: 1,
+      is_deleted: false,
+      updated_at,
+    };
+    switch (c.table) {
+      case "knowledge":
+        return {
+          ...common,
+          id,
+          project_id: parents.project_id,
+          category: "pattern",
+          title: id,
+          content: id,
+          created_at: new Date(1_000_000).toISOString(),
+        };
+      case "entities":
+        return {
+          ...common,
+          id,
+          project_id: parents.project_id,
+          entity_type: "service",
+          canonical_name: id,
+          metadata: null,
+          cross_project: 0,
+          sync_rank: 0,
+          created_at: new Date(1_000_000).toISOString(),
+        };
+      case "entity_aliases":
+        return {
+          ...common,
+          id,
+          entity_id: parents.entity_id,
+          alias_type: "name",
+          alias_value: id,
+          source: "sync-test",
+          created_at: new Date(1_000_000).toISOString(),
+        };
+      case "entity_relations":
+        return {
+          ...common,
+          id,
+          entity_a: parents.entity_a,
+          entity_b: parents.entity_b,
+          relation: `relation-${c.ref.column}`,
+          source: "sync-test",
+          metadata: null,
+          created_at: new Date(1_000_000).toISOString(),
+        };
+      case "knowledge_entity_refs":
+        return {
+          ...common,
+          knowledge_id: parents.knowledge_id,
+          entity_id: parents.entity_id,
+        };
+      case "knowledge_meta":
+        return {
+          ...common,
+          logical_id: parents.logical_id,
+          base_confidence: 0.8,
+        };
+      case "knowledge_meta_crdt":
+        return {
+          ...common,
+          logical_id: parents.logical_id,
+          replica_id: `replica-${c.ref.column}`,
+          pos: 1,
+          neg: 0,
+        };
+      case "distillations":
+        return {
+          ...common,
+          id,
+          project_id: parents.project_id,
+          session_id: `session-${id}`,
+          narrative: id,
+          facts: "[]",
+          observations: "[]",
+          source_ids: "[]",
+          generation: 0,
+          token_count: 1,
+          r_compression: 1,
+          c_norm: 1,
+          call_type: "observer",
+          archived: 0,
+          created_at: new Date(1_000_000).toISOString(),
+        };
+      case "temporal_messages":
+        return {
+          id,
+          project_id: parents.project_id,
+          session_id: `session-${id}`,
+          role: "user",
+          content: id,
+          tokens: 1,
+          metadata: null,
+          created_at: new Date(1_000_000).toISOString(),
+          updated_at,
+        };
+      default:
+        throw new Error(`missing remote child fixture: ${c.table}`);
+    }
+  }
+
+  function enableTierFor(table: string): void {
+    if (PRO_TABLES.has(table)) {
+      syncData.withApplying(() =>
+        db()
+          .query(
+            "INSERT INTO profiles (id, tier, created_at, updated_at) VALUES ('parent-contract-pro', 'pro', ?, ?)",
+          )
+          .run(now(), now()),
+      );
+      reinstallSyncCapture();
+    }
+    syncData.enableSync(PRO_TABLES.has(table) ? "pro" : "basic");
+  }
+
+  function rawChildRows(
+    table: string,
+    row: RemoteRow,
+  ): Array<Record<string, unknown>> {
+    const meta = syncData.metaFor(table);
+    return db()
+      .query(
+        `SELECT * FROM ${table}
+          WHERE ${meta.idColumns.map((column) => `${column} = ?`).join(" AND ")}`,
+      )
+      .all(...meta.idColumns.map((column) => row[column]));
+  }
+
+  function tenantVisibleChildRows(
+    c: ParentCase,
+    row: RemoteRow,
+  ): Array<Record<string, unknown>> {
+    const meta = syncData.metaFor(c.table);
+    const parentJoin =
+      c.ref.parentKey === "logical_id"
+        ? `COALESCE(parent.logical_id, parent.id) = child.${c.ref.column}`
+        : `parent.id = child.${c.ref.column}`;
+    return withTenant(REQUEST_TENANT, () =>
+      db()
+        .query(
+          `SELECT child.* FROM ${c.table} child
+             JOIN ${c.ref.parentTable} parent ON ${parentJoin}
+            WHERE parent.tenant_id = ?
+              AND ${meta.idColumns.map((column) => `child.${column} = ?`).join(" AND ")}`,
+        )
+        .all(REQUEST_TENANT, ...meta.idColumns.map((column) => row[column])),
+    );
+  }
+
+  function expectQuarantined(
+    c: ParentCase,
+    row: RemoteRow,
+    before: Array<Record<string, unknown>>,
+    tenantVisibleBefore: Array<Record<string, unknown>>,
+  ): void {
+    const table = c.table;
+    const rowId = syncData.rowIdOf(table, row);
+    expect(rawChildRows(table, row)).toEqual(before);
+    expect(tenantVisibleChildRows(c, row)).toEqual(tenantVisibleBefore);
+    expect(syncData.getSyncState(table, rowId)).toBeNull();
+    expect(
+      db()
+        .query(
+          `SELECT 1 FROM sync_conflicts
+            WHERE table_name = ? AND row_id = ? AND resolution = 'pull_constraint_skip'`,
+        )
+        .get(table, rowId),
+    ).not.toBeNull();
+  }
+
+  test("battery is non-empty and covers every registered parent field", () => {
+    expect(PARENT_CASES.map((c) => c.label).sort()).toEqual([
+      "distillations.project_id",
+      "entities.project_id",
+      "entity_aliases.entity_id",
+      "entity_relations.entity_a",
+      "entity_relations.entity_b",
+      "knowledge.project_id",
+      "knowledge_entity_refs.entity_id",
+      "knowledge_entity_refs.knowledge_id",
+      "knowledge_meta.logical_id",
+      "knowledge_meta_crdt.logical_id",
+      "temporal_messages.project_id",
+    ]);
+  });
+
+  test.each(PARENT_CASES)(
+    "$label rejects a parent-first request tenant after restart",
+    async (c) => {
+      const parents = prepareParents(c, REQUEST_TENANT);
+      const row = remoteChild(c, parents);
+      tableRows(c.table).push(row);
+      enableTierFor(c.table);
+
+      closeDb();
+      const before = rawChildRows(c.table, row);
+      const tenantVisibleBefore = tenantVisibleChildRows(c, row);
+      const result = await pullOnce(makeClient() as never);
+
+      expect(result.skipped).toBe(1);
+      expectQuarantined(c, row, before, tenantVisibleBefore);
+
+      row.is_deleted = true;
+      row.updated_at = new Date(3_000_000).toISOString();
+      const tombstone = await pullOnce(makeClient() as never);
+      expect(tombstone.skipped).toBe(1);
+      expectQuarantined(c, row, before, tenantVisibleBefore);
+    },
+  );
+
+  test.each(PARENT_CASES)(
+    "$label quarantines missing-first, then rejects child-first non-local parent",
+    async (c) => {
+      const parents = prepareParents(c, null);
+      const row = remoteChild(c, parents);
+      const missingBefore = rawChildRows(c.table, row);
+      const missingTenantVisibleBefore = tenantVisibleChildRows(c, row);
+      tableRows(c.table).push(row);
+      enableTierFor(c.table);
+
+      const missing = await pullOnce(makeClient() as never);
+      expect(missing.skipped).toBe(1);
+      expectQuarantined(c, row, missingBefore, missingTenantVisibleBefore);
+
+      // Tombstones may legitimately outlive a missing parent. They remain a
+      // no-op locally and receive no per-row sync_state acknowledgement.
+      row.is_deleted = true;
+      row.updated_at = new Date(2_500_000).toISOString();
+      const missingTombstone = await pullOnce(makeClient() as never);
+      expect(missingTombstone.pulled).toBe(1);
+      expect(missingTombstone.skipped).toBe(0);
+      expect(rawChildRows(c.table, row)).toEqual(missingBefore);
+      expect(tenantVisibleChildRows(c, row)).toEqual(
+        missingTenantVisibleBefore,
+      );
+      expect(
+        syncData.getSyncState(c.table, syncData.rowIdOf(c.table, row)),
+      ).toBeNull();
+
+      insertOwnedParent(c.ref, parents[c.ref.column], REQUEST_TENANT);
+      row.is_deleted = false;
+      row.updated_at = new Date(3_000_000).toISOString();
+      closeDb();
+      const nonLocalBefore = rawChildRows(c.table, row);
+      const nonLocalTenantVisibleBefore = tenantVisibleChildRows(c, row);
+      const nonLocal = await pullOnce(makeClient() as never);
+
+      expect(nonLocal.skipped).toBe(1);
+      expectQuarantined(c, row, nonLocalBefore, nonLocalTenantVisibleBefore);
+    },
+  );
+
+  test.each(PARENT_CASES)(
+    "$label accepts a legitimate local parent and records sync_state",
+    async (c) => {
+      const parents = prepareParents(c, "");
+      const row = remoteChild(c, parents);
+      tableRows(c.table).push(row);
+      enableTierFor(c.table);
+
+      const result = await pullOnce(makeClient() as never);
+
+      expect(result.pulled).toBe(1);
+      expect(result.skipped).toBe(0);
+      expect(rawChildRows(c.table, row)).toHaveLength(1);
+      expect(
+        syncData.getSyncState(c.table, syncData.rowIdOf(c.table, row)),
+      ).not.toBeNull();
+
+      row.is_deleted = true;
+      row.updated_at = new Date(3_000_000).toISOString();
+      const tombstone = await pullOnce(makeClient() as never);
+      expect(tombstone.pulled).toBe(1);
+      expect(tombstone.skipped).toBe(0);
+      expect(
+        syncData.getSyncState(c.table, syncData.rowIdOf(c.table, row)),
+      ).toBeNull();
+      if (c.table === "knowledge") {
+        expect(currentContent(String(row.id))).toBeNull();
+      }
+    },
+  );
+});
+
 describe("syncOnce", () => {
+  test("the v81 marker re-seeds trustworthy live local rows after legacy quarantine", async () => {
+    syncData.enableSync("basic");
+    syncData.withApplying(() => insertKnowledge("v81-local", "live local"));
+    db().exec("DELETE FROM sync_outbox; DELETE FROM sync_state;");
+    setKV("sync.tenantIsolationReconcile", "1");
+
+    await syncOnce();
+
+    expect(tableRows("knowledge").some((row) => row.id === "v81-local")).toBe(
+      true,
+    );
+    expect(getKV("sync.tenantIsolationReconcile")).toBe("0");
+  });
+
   test("no-op when disabled; notAuthed when logged out", async () => {
     expect(await syncOnce()).toEqual({
       pushed: 0,
@@ -2029,7 +2625,10 @@ describe("syncOnce", () => {
     const errSpy = vi.spyOn(log, "error").mockImplementation(() => {});
     vi.useFakeTimers();
     try {
-      const stop = startSyncScheduler(60_000);
+      const stop = startSyncScheduler(
+        { remoteGateway: false, hostedMode: false },
+        60_000,
+      );
       // The scheduler runs its first cycle ~5s after start; drive it deterministically.
       await vi.advanceTimersByTimeAsync(5_000);
       await stop();

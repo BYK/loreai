@@ -1,6 +1,8 @@
 import { describe, test, expect } from "vitest";
 import {
+  deterministicID,
   gatewayMessagesToLore,
+  legacyDeterministicID,
   resolveToolResults,
 } from "../src/temporal-adapter";
 import type { GatewayMessage } from "../src/translate/types";
@@ -75,6 +77,63 @@ function makeToolConversation(): GatewayMessage[] {
     },
   ];
 }
+
+describe("deterministic message identity", () => {
+  test("is stable within a session and distinct across sessions", () => {
+    const content = [{ type: "text" as const, text: "identical response" }];
+    const first = deterministicID("session-a", "assistant", 0, content);
+
+    expect(deterministicID("session-a", "assistant", 0, content)).toBe(first);
+    expect(deterministicID("session-b", "assistant", 0, content)).not.toBe(
+      first,
+    );
+  });
+
+  test("uses the supplied absolute start index for single-message responses", () => {
+    const content = [{ type: "text" as const, text: "repeated answer" }];
+    const first = gatewayMessagesToLore(
+      [{ role: "assistant", content }],
+      "session-a",
+      1,
+    )[0].info.id;
+    const later = gatewayMessagesToLore(
+      [{ role: "assistant", content }],
+      "session-a",
+      3,
+    )[0].info.id;
+
+    expect(later).not.toBe(first);
+  });
+
+  test("carries exact invocation-relative pre-v82 IDs beside absolute modern IDs", () => {
+    const history: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "assistant", content: [{ type: "text", text: "second" }] },
+      { role: "user", content: [{ type: "text", text: "third" }] },
+    ];
+    const converted = gatewayMessagesToLore(history, "bridge-session");
+    expect(converted[2].legacySourceID).toBe(
+      legacyDeterministicID("user", 2, history[2].content),
+    );
+
+    const response = gatewayMessagesToLore(
+      [history[1]],
+      "bridge-session",
+      history.length,
+    )[0];
+    expect(response.info.id).toBe(
+      deterministicID(
+        "bridge-session",
+        "assistant",
+        history.length,
+        history[1].content,
+      ),
+    );
+    expect(response.legacySourceID).toBe(
+      legacyDeterministicID("assistant", 0, history[1].content),
+    );
+  });
+});
 
 // ---------------------------------------------------------------------------
 // resolveToolResults: pairing + stripping

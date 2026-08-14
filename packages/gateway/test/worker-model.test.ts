@@ -214,6 +214,96 @@ describe("fetchModelData", () => {
     expect(data.size).toBe(0);
   });
 
+  test("malformed models.dev JSON never reaches diagnostics", async () => {
+    const bodyMarker = "PRIVATE_MODELS_DEV_MALFORMED_PREFIX";
+    const reasonMarker = "PRIVATE_MODELS_DEV_REASON_MARKER";
+    const messages: string[] = [];
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(`${bodyMarker} not-json`, {
+          status: 200,
+          statusText: reasonMarker,
+        }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const data = await fetchModelData();
+
+    expect(data.size).toBe(0);
+    expect(messages.join("\n")).toContain("models.dev API");
+    expect(messages.join("\n")).not.toContain(bodyMarker);
+    expect(messages.join("\n")).not.toContain(reasonMarker);
+    warnSpy.mockRestore();
+  });
+
+  test("models.dev network diagnostics do not log thrown URL secrets", async () => {
+    const userinfoMarker = "PRIVATE_MODELS_DEV_THROWN_USERINFO";
+    const queryMarker = "PRIVATE_MODELS_DEV_THROWN_QUERY";
+    const fragmentMarker = "PRIVATE_MODELS_DEV_THROWN_FRAGMENT";
+    const messages: string[] = [];
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.reject(
+        new Error(
+          `fetch https://user:${userinfoMarker}@models.example/api?token=${queryMarker}#${fragmentMarker} failed`,
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    expect((await fetchModelData()).size).toBe(0);
+    const output = messages.join("\n");
+    expect(output).not.toContain(userinfoMarker);
+    expect(output).not.toContain(queryMarker);
+    expect(output).not.toContain(fragmentMarker);
+    warnSpy.mockRestore();
+  });
+
+  test("models.dev-derived model IDs never reach resolution logs", async () => {
+    const modelMarker = "private-model-response-marker";
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            anthropic: { models: {} },
+            private_provider: {
+              models: {
+                "expensive-session-model": {
+                  id: "expensive-session-model",
+                  cost: { input: 4, output: 8 },
+                },
+                [modelMarker]: {
+                  id: modelMarker,
+                  cost: { input: 0.1, output: 0.2 },
+                },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+    await fetchModelData();
+    const messages: string[] = [];
+    const infoSpy = vi.spyOn(log, "info").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+
+    const selected = getWorkerModel({
+      providerID: "private_provider",
+      model: "expensive-session-model",
+    });
+
+    expect(selected?.modelID).toBe(modelMarker);
+    expect(infoSpy).not.toHaveBeenCalled();
+    expect(messages.join("\n")).not.toContain(modelMarker);
+    infoSpy.mockRestore();
+  });
+
   test("deduplicates concurrent in-flight requests", async () => {
     globalThis.fetch = vi.fn(() =>
       Promise.resolve(
@@ -581,6 +671,15 @@ describe("lookupProviderRoute", () => {
     expect(route).toBeNull();
     // Background fetch was triggered.
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("can fail closed on a cold cache without triggering a refresh", () => {
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response("{}", { status: 200 })),
+    ) as unknown as typeof fetch;
+
+    expect(lookupProviderRoute("untrusted-provider", false)).toBeNull();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });
 
@@ -1860,7 +1959,7 @@ describe("openai worker selection: ChatGPT-backend reuse + luna preference", () 
 });
 
 // ---------------------------------------------------------------------------
-// resolution memoization (skip rescan + collapse the per-call INFO log)
+// resolution memoization (skip rescans without logging remote model IDs)
 // ---------------------------------------------------------------------------
 
 describe("worker-model resolution memoization", () => {
@@ -1919,14 +2018,7 @@ describe("worker-model resolution memoization", () => {
     };
   }
 
-  const familyLines = (spy: ReturnType<typeof vi.spyOn>): unknown[][] =>
-    (spy.mock.calls as unknown[][]).filter(
-      (c) =>
-        typeof c[0] === "string" &&
-        c[0].includes("worker model: newest in family"),
-    );
-
-  test("family path: the 'newest in family' line is logged once per snapshot despite repeated getWorkerModel calls", async () => {
+  test("family path stays silent despite repeated getWorkerModel calls", async () => {
     await warmCache(anthropicSnapshot("claude-sonnet-6"));
 
     // Spy AFTER warming so we only observe resolution logs, not fetch logs.
@@ -1940,11 +2032,10 @@ describe("worker-model resolution memoization", () => {
       expect(r?.modelID).toBe("claude-sonnet-6");
     }
 
-    // Without memoization this fires 5×; memoized it collapses to exactly 1.
-    expect(familyLines(infoSpy)).toHaveLength(1);
+    expect(infoSpy).not.toHaveBeenCalled();
   });
 
-  test("unknown-provider path: the 'dynamic worker model' line is logged once per snapshot despite repeated calls", async () => {
+  test("unknown-provider path stays silent despite repeated calls", async () => {
     await warmCache({
       anthropic: { api: "https://api.anthropic.com/v1", models: {} },
       google: {
@@ -1978,16 +2069,13 @@ describe("worker-model resolution memoization", () => {
       expect(r?.modelID).toBe("gemini-3-flash-lite");
     }
 
-    const dynamicLines = infoSpy.mock.calls.filter(
-      (c) => typeof c[0] === "string" && c[0].includes("dynamic worker model:"),
-    );
-    expect(dynamicLines).toHaveLength(1);
+    expect(infoSpy).not.toHaveBeenCalled();
   });
 
   test("distinct query inputs are memoized independently (no cross-key collision)", async () => {
     // One snapshot serving both the family path (anthropic) and the
-    // cheaper path (google) — repeated calls to each must each log once,
-    // proving the memo key discriminates rather than sharing one slot.
+    // cheaper path (google) — repeated calls to each stay independently
+    // memoized and silent.
     await warmCache({
       anthropic: anthropicSnapshot("claude-sonnet-6").anthropic,
       google: {
@@ -2018,11 +2106,7 @@ describe("worker-model resolution memoization", () => {
     getWorkerModel({ providerID: "google", model: "gemini-3.1-pro" });
     getWorkerModel({ providerID: "google", model: "gemini-3.1-pro" });
 
-    expect(familyLines(infoSpy)).toHaveLength(1);
-    const dynamicLines = infoSpy.mock.calls.filter(
-      (c) => typeof c[0] === "string" && c[0].includes("dynamic worker model:"),
-    );
-    expect(dynamicLines).toHaveLength(1);
+    expect(infoSpy).not.toHaveBeenCalled();
   });
 
   test("a new models.dev snapshot re-resolves (memo is snapshot-scoped, never permanently stale)", async () => {
@@ -2033,15 +2117,17 @@ describe("worker-model resolution memoization", () => {
     ).toBe("claude-sonnet-6");
 
     // A later refresh introduces an even newer sonnet. The memo must not pin
-    // the stale answer — resolution reflects the new snapshot and re-announces.
+    // the stale answer — resolution reflects the new snapshot without logging
+    // the body-derived model ID.
     const infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
     await warmCache(anthropicSnapshot("claude-sonnet-7"));
+    infoSpy.mockClear();
 
     expect(
       getWorkerModel({ providerID: "anthropic", model: "claude-opus-4-6" })
         ?.modelID,
     ).toBe("claude-sonnet-7");
-    expect(familyLines(infoSpy).length).toBeGreaterThanOrEqual(1);
+    expect(infoSpy).not.toHaveBeenCalled();
   });
 });
 

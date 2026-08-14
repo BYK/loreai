@@ -545,14 +545,14 @@ const MAX_WORKER_PROMPT_SOURCE_BYTES = Math.floor(MAX_WORKER_REQUEST_BYTES / 6);
 const WORKER_RESPONSE_INACTIVITY_MS = 120_000;
 const WORKER_REQUEST_TIMEOUT_MS = 300_000;
 
-/** Return only URL origin metadata; userinfo, path, query, and fragment vanish. */
+/** Retain endpoint routing while stripping userinfo, query, and fragment. */
 function sanitizedWorkerOrigin(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       return "invalid-origin";
     }
-    return url.origin;
+    return `${url.origin}${url.pathname}`;
   } catch {
     return "invalid-origin";
   }
@@ -3338,6 +3338,17 @@ export function _clearLastWorkerError(): void {
   lastWorkerError = undefined;
 }
 
+/** Details about a worker upstream auth rejection (HTTP 401/403). */
+export type AuthRejectionInfo = {
+  status: number;
+  providerID: string;
+  modelID: string;
+  url: string;
+  scheme: "api-key" | "bearer";
+  workerID: string | undefined;
+  sessionID: string | undefined;
+};
+
 /**
  * Create an LLMClient that sends single-turn prompts to the appropriate provider.
  *
@@ -3355,13 +3366,19 @@ export function createGatewayLLMClient(
   upstreams: { anthropic: string; openai: string },
   getAuth: (sessionID?: string, providerID?: string) => AuthCredential | null,
   defaultModel: { providerID: string; modelID: string },
-  opts?: { dedicatedWorkerKey?: boolean; vertexProject?: string },
+  opts?: {
+    dedicatedWorkerKey?: boolean;
+    vertexProject?: string;
+    /** Called with body-independent, URL-sanitized auth rejection details. */
+    onAuthRejected?: (info: AuthRejectionInfo) => void;
+  },
 ): GatewayLLMClient {
   const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
   // Configured GCP project for Vertex workers (else derived from ADC at call
   // time). Threaded so an explicit LORE_VERTEX_PROJECT (without GOOGLE_CLOUD_*)
   // is honored — the session base URL carries the region but never the project.
   const factoryVertexProject = opts?.vertexProject;
+  const onAuthRejected = opts?.onAuthRejected;
   const client: GatewayLLMClient = {
     async prompt(system, user, opts) {
       // Reset at the START of every call so callers see only the last
@@ -4357,6 +4374,21 @@ export function createGatewayLLMClient(
               // --- Auth error: 401/403 — mark stale, re-resolve, retry once ---
               if (AUTH_ERROR_CODES.has(response.status)) {
                 await readWorkerResponseText(response, requestSignal);
+                if (onAuthRejected) {
+                  try {
+                    onAuthRejected({
+                      status: response.status,
+                      providerID: model.providerID,
+                      modelID: model.modelID,
+                      url: sanitizedWorkerOrigin(target.url).replace(/\/$/, ""),
+                      scheme: cred.scheme,
+                      workerID: opts?.workerID,
+                      sessionID: opts?.sessionID,
+                    });
+                  } catch {
+                    // Diagnostics must never break the adapter's null contract.
+                  }
+                }
                 // Mark this provider's credential stale so resolveAuth()
                 // falls through to global — but only for THIS provider,
                 // not other providers on the same session. Requires a real

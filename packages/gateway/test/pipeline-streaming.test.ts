@@ -32,6 +32,13 @@ import {
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
 
+function loadLocalConfig() {
+  const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
+  return config;
+}
+
 function makeStreamBody(userMessage: string): Record<string, unknown> {
   return {
     model: DEFAULT_MODEL,
@@ -589,7 +596,7 @@ describe("Pipeline — streaming responses", () => {
           rawHeaders: { "x-lore-agent": "title" },
           signal: controller.signal,
         },
-        loadConfig(),
+        loadLocalConfig(),
       );
       await Promise.resolve();
       controller.abort(new DOMException("client disconnected", "AbortError"));
@@ -619,7 +626,7 @@ describe("Pipeline — streaming responses", () => {
           metadata: {},
           rawHeaders: { "x-lore-agent": "title" },
         },
-        loadConfig(),
+        loadLocalConfig(),
       );
       await vi.advanceTimersByTimeAsync(300_000);
       const response = await pending;
@@ -654,14 +661,13 @@ describe("Pipeline — streaming responses", () => {
               metadata: {},
               rawHeaders: {
                 "x-api-key": "test-key",
-                authorization: "Bearer test-key",
                 "x-lore-agent": "title",
                 "x-lore-provider": provider,
                 "x-lore-upstream-url": upstream,
               },
               signal: caller.signal,
             },
-            loadConfig(),
+            loadLocalConfig(),
           ),
           new Promise<never>((_resolve, reject) => {
             responseTimer = setTimeout(
@@ -717,13 +723,12 @@ describe("Pipeline — streaming responses", () => {
             metadata: {},
             rawHeaders: {
               "x-api-key": "test-key",
-              authorization: "Bearer test-key",
               "x-lore-agent": "title",
               "x-lore-provider": provider,
               "x-lore-upstream-url": upstream,
             },
           },
-          loadConfig(),
+          loadLocalConfig(),
         );
         await Promise.resolve();
         await vi.advanceTimersByTimeAsync(300_000);
@@ -864,7 +869,7 @@ describe("Pipeline — streaming responses", () => {
               "x-lore-upstream-url": "https://api.anthropic.com",
             },
           },
-          loadConfig(),
+          loadLocalConfig(),
         );
         await new Promise((resolve) => setImmediate(resolve));
         expect(pulls).toBeLessThan(chunks.length);
@@ -950,7 +955,7 @@ describe("Pipeline — streaming responses", () => {
               "x-lore-upstream-url": "https://api.anthropic.com",
             },
           },
-          loadConfig(),
+          loadLocalConfig(),
         );
         await expect(
           response.text(),

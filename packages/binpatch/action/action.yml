@@ -380,11 +380,14 @@ runs:
         SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
       run: |
         set -euo pipefail
-        oras push "${REGISTRY}/${REPO}:${NIGHTLY_TAG}" \
-          --artifact-type "${ARTIFACT_TYPE_PREFIX}.nightly" \
-          --annotation "org.opencontainers.image.source=${SOURCE_URL}" \
-          --annotation "version=${VERSION}" \
-          ./*.gz
+          # lore-checksums.txt is deterministic metadata for every raw and
+          # compressed target. Each layer, including this metadata, is itself
+          # content-addressed by the resulting OCI manifest.
+          oras push "${REGISTRY}/${REPO}:${NIGHTLY_TAG}" \
+            --artifact-type "${ARTIFACT_TYPE_PREFIX}.nightly" \
+            --annotation "org.opencontainers.image.source=${SOURCE_URL}" \
+            --annotation "version=${VERSION}" \
+            ./*.gz ./lore-checksums.txt
 
     - name: Tag versioned nightly
       # Immutable versioned tag via zero-copy `oras tag` so patch-chain

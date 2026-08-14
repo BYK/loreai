@@ -87,6 +87,8 @@ import {
   enableHostedMode,
   importLoreFileAs,
   resolveWorkspaces,
+  currentTenantId,
+  withTenant,
 } from "@loreai/core";
 
 import type {
@@ -104,10 +106,10 @@ import type {
 } from "./translate/types";
 import {
   applyUpstreamExtraHeaders,
+  buildUpstreamSnapshotHeaders,
   blocksToText,
   isEmptyCompletion,
   looksLikeSSE,
-  forwardClientHeaders,
   providerRoutingValue,
   requestTargetsOpenRouter,
   ZERO_USAGE,
@@ -123,8 +125,12 @@ import {
   verbatimUpstreamUrl,
   extractProviderHeader,
   hasCopilotIntegrationHeader,
-  resolveLastSeenProvider,
   resolveProviderRoute,
+  extraHeadersForUpstream,
+  upstreamUrlForLog,
+  isUpstreamWithinBase,
+  isCallerUpstreamAllowed,
+  normalizeUpstreamBase,
   unattributedBucketPath,
   type ProjectPathResult,
 } from "./config";
@@ -136,6 +142,7 @@ import {
   extractKnownSessionHeader,
   learnHeaders,
   findRotationPredecessor,
+  isCredentialHeaderName,
 } from "./session";
 import {
   detectCompactionRequest,
@@ -225,6 +232,7 @@ import {
   updateAssistantMessageTokens,
   resolveToolResults,
   deterministicID,
+  legacyDeterministicID,
 } from "./temporal-adapter";
 import {
   canonicalWorkerProviderID,
@@ -242,19 +250,21 @@ import {
   boundedSettle,
 } from "./background-limiter";
 import {
+  copyProviderAuthHeaders,
   extractAuth,
   authFingerprint,
+  credentialTenantFingerprint,
   setLastSeenAuth,
   setSessionAuth,
   resolveAuth,
   isAuthStale,
+  hasConflictingAuthHeaders,
   workerKeyScheme,
   type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { flushPendingImport } from "./pending-import";
-import { upstreamErrorHint } from "./upstream-error-hint";
 import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
 import { hasWorkerSessionAuth } from "./worker-auth";
@@ -610,6 +620,8 @@ let upstreamRequestOrder = 0;
 let beforeUpstreamCaptureForTest:
   | ((req: GatewayRequest, state: SessionState) => Promise<void>)
   | undefined;
+/** Foreground request lifetimes cancelled when the pipeline is reset. */
+const activeForegroundAbortControllers = new Set<AbortController>();
 
 export function setBeforeUpstreamCaptureForTest(
   hook:
@@ -643,6 +655,16 @@ export function setUpstreamInterceptor(
 export async function resetPipelineState(opts?: {
   fast?: boolean;
 }): Promise<void> {
+  // Cancel client-facing request/stream work before clearing singleton state.
+  // Gateway shutdown starts listener closure first, then reaches this abort;
+  // active streams settle and allow node:http's server.close() to complete.
+  const foregroundControllers = [...activeForegroundAbortControllers];
+  activeForegroundAbortControllers.clear();
+  const resetReason = new DOMException("gateway pipeline reset", "AbortError");
+  for (const controller of foregroundControllers) {
+    if (!controller.signal.aborted) controller.abort(resetReason);
+  }
+
   // Quiesce background work before tearing anything down. Only the non-fast
   // path drains — today that's test/eval teardown (the fast process-exit path,
   // the sole production caller, skips this to keep Ctrl+C snappy). Stop the
@@ -769,17 +791,59 @@ export function rebindActiveSession(
 }
 
 /**
- * Reverse lookup: maps header-based session ID values to internal session IDs.
+ * Reverse lookup: maps tenant-scoped header values to internal session IDs.
  * Key: `credentialFingerprint\x1fheaderName\x1fheaderValue`.
- * Value: internal session ID (the key in `sessions`).
- *
- * Populated for both Tier 1 (known headers) and Tier 2 (learned headers).
  */
 const headerSessionIndex = new Map<string, string>();
 const SESSION_INDEX_SEPARATOR = "\x1f";
+const TENANT_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
 
-function requestCredentialFingerprint(headers: Record<string, string>): string {
+/** Remote and hosted gateways treat the request credential as a tenant boundary. */
+function usesRemoteSessionBinding(config: GatewayConfig): boolean {
+  return config.remoteGateway || config.hostedMode;
+}
+
+/** Server-derived durable storage owner; client headers never select it. */
+function requestStorageTenant(
+  headers: Record<string, string>,
+  config: GatewayConfig,
+): string {
+  if (!usesRemoteSessionBinding(config)) return "";
   const credential = extractAuth(headers);
+  return credential
+    ? credentialTenantFingerprint(credential)
+    : `unauthenticated:${crypto.randomUUID()}`;
+}
+
+/** Run a request under the same server-derived storage owner as the main pipeline. */
+function withRequestStorageTenant<T>(
+  headers: Record<string, string>,
+  config: GatewayConfig,
+  fn: () => T,
+): T {
+  return withTenant(requestStorageTenant(headers, config), fn);
+}
+
+function requestHeaders(headers: Headers): Record<string, string> {
+  const rawHeaders: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+  return rawHeaders;
+}
+
+/**
+ * Resolve the credential scope used by every session-identity mechanism.
+ * `null` means an unauthenticated remote request and must never be correlated.
+ */
+function requestCredentialFingerprint(
+  headers: Record<string, string>,
+  config: GatewayConfig,
+): string | null {
+  const credential = extractAuth(headers);
+  if (usesRemoteSessionBinding(config)) {
+    return credential ? credentialTenantFingerprint(credential) : null;
+  }
   return credential ? authFingerprint(credential) : "";
 }
 
@@ -806,6 +870,67 @@ function parseSessionIndexKey(key: string): {
     headerName: key.slice(first + 1, second),
     headerValue: key.slice(second + 1),
   };
+}
+
+/**
+ * Restore persisted header mappings under the current gateway trust policy.
+ * Remote mode accepts only full tenant-bound rows; local mode never interprets
+ * a remote tenant row as a local identity. Credential-shaped historical header
+ * mappings are cleared rather than merely ignored.
+ */
+function restoreHeaderSessionMappings(config: GatewayConfig): {
+  restored: number;
+  cleared: number;
+} {
+  let restored = 0;
+  let cleared = 0;
+  for (const entry of loadHeaderSessionIndex()) {
+    if (isCredentialHeaderName(entry.headerName)) {
+      saveSessionTracking(entry.sessionId, {
+        headerSessionId: null,
+        headerName: null,
+      });
+      cleared++;
+      continue;
+    }
+    const remoteFingerprint = TENANT_FINGERPRINT_RE.test(
+      entry.credentialFingerprint,
+    );
+    if (
+      usesRemoteSessionBinding(config) ? !remoteFingerprint : remoteFingerprint
+    ) {
+      continue;
+    }
+    headerSessionIndex.set(
+      sessionIndexKey(
+        entry.credentialFingerprint,
+        entry.headerName,
+        entry.headerSessionId,
+      ),
+      entry.sessionId,
+    );
+    restored++;
+  }
+  return { restored, cleared };
+}
+
+/** Resolve an active header-bound session under the current tenant policy. */
+function activeSessionForKnownHeader(
+  req: GatewayRequest,
+  allSessions: ReadonlyMap<string, SessionState>,
+  config: GatewayConfig,
+): SessionState | undefined {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) return undefined;
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return undefined;
+  const sid = headerSessionIndex.get(
+    sessionIndexKey(credentialFingerprint, known.headerName, known.sessionId),
+  );
+  return sid ? allSessions.get(sid) : undefined;
 }
 
 /**
@@ -3082,19 +3207,14 @@ async function initIfNeeded(
   // with a known session header generates a new session ID and orphans the
   // old session's persisted state.
   try {
-    const headerEntries = loadHeaderSessionIndex();
-    for (const entry of headerEntries) {
-      const indexKey = sessionIndexKey(
-        entry.credentialFingerprint,
-        entry.headerName,
-        entry.headerSessionId,
+    const restored = restoreHeaderSessionMappings(config);
+    if (restored.cleared > 0) {
+      log.warn(
+        `cleared ${restored.cleared} unsafe persisted header→session mapping(s)`,
       );
-      headerSessionIndex.set(indexKey, entry.sessionId);
     }
-    if (headerEntries.length > 0) {
-      log.info(
-        `restored ${headerEntries.length} header→session mappings from DB`,
-      );
+    if (restored.restored > 0) {
+      log.info(`restored ${restored.restored} header→session mappings from DB`);
     }
   } catch (e) {
     log.warn("header session index restore failed:", e);
@@ -3119,10 +3239,11 @@ async function initIfNeeded(
     // session tracking) so the resume turn reads it from cache instead. The
     // compute is single-flighted per session; a concurrent turn's
     // `singleFlightStableLtm` shares the same in-flight promise.
-    const idleHandler = async (sessionID: string, state: SessionState) => {
-      void precomputeStableLtmForIdleSession(sessionID, state);
-      await baseIdleHandler(sessionID, state);
-    };
+    const idleHandler = async (sessionID: string, state: SessionState) =>
+      withTenant(state.storageTenantId ?? "", async () => {
+        void precomputeStableLtmForIdleSession(sessionID, state);
+        await baseIdleHandler(sessionID, state);
+      });
     stopIdleScheduler = startIdleScheduler(
       config,
       sessions,
@@ -3155,7 +3276,7 @@ async function initIfNeeded(
   // Start background cloud sync (no-op until the user runs `lore sync enable`).
   if (!stopSyncScheduler) {
     const { startSyncScheduler } = await import("./sync");
-    stopSyncScheduler = startSyncScheduler();
+    stopSyncScheduler = startSyncScheduler(config);
   }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);
@@ -3187,7 +3308,12 @@ function getLLMClient(config: GatewayConfig): LLMClient {
           scheme: workerKeyScheme(providerID),
           value: workerApiKey,
         })
-      : resolveAuth;
+      : (sessionID, providerID) => {
+          if (sessionID) return resolveAuth(sessionID, providerID);
+          return usesRemoteSessionBinding(config)
+            ? null
+            : resolveAuth(undefined, providerID);
+        };
 
     // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker
     // calls route to this URL instead of the default upstream URLs.
@@ -3198,8 +3324,12 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     if (config.workerApiKey || config.workerUpstream) {
       log.info(
         `worker routing: ` +
-          `auth=${config.workerApiKey ? "dedicated key" : "session"}, ` +
-          `upstream=${config.workerUpstream ?? "default"}`,
+          `source=${config.workerApiKey ? "dedicated key" : "session"}, ` +
+          `upstream=${
+            config.workerUpstream
+              ? upstreamUrlForLog(config.workerUpstream)
+              : "default"
+          }`,
       );
     }
 
@@ -3723,10 +3853,19 @@ function validatedUpstreamSnapshot(value: unknown): UpstreamSnapshot | null {
   }
   return freezeUpstreamSnapshot({
     url: value.url,
+    // Legacy snapshots predate provenance. Treat them as caller-selected so a
+    // remote gateway never revives a pre-policy arbitrary destination.
+    callerSelected:
+      typeof value.callerSelected === "boolean" ? value.callerSelected : true,
     protocol: value.protocol as UpstreamSnapshot["protocol"],
     ...(value.providerID ? { providerID: value.providerID } : {}),
     model: value.model,
-    headers: value.headers as Record<string, string>,
+    // Older persisted snapshots may contain credentials from before routing
+    // state became credential-safe. Re-run the current forwarding filter when
+    // hydrating instead of trusting those historical header bytes.
+    headers: buildUpstreamSnapshotHeaders(
+      value.headers as Record<string, string>,
+    ),
     ...(isPlainRecord(value.providerOptions)
       ? { providerOptions: value.providerOptions }
       : {}),
@@ -3781,19 +3920,23 @@ function serializeUpstreamState(state: SessionState): string {
   });
 }
 
-function deserializeUpstreamState(serialized: string): {
+function deserializeUpstreamState(
+  serialized: string,
+  config: GatewayConfig,
+): {
   lastUpstream?: UpstreamSnapshot;
   upstreamByProvider: Map<string, UpstreamSnapshot>;
 } {
   const parsed = JSON.parse(serialized) as unknown;
   const legacy = validatedUpstreamSnapshot(parsed);
   if (legacy) {
-    return {
+    const restored = {
       lastUpstream: legacy,
       upstreamByProvider: new Map(
         legacy.providerID ? [[legacy.providerID, legacy]] : [],
       ),
     };
+    return filterRestoredUpstreamState(restored, config);
   }
   if (
     !isPlainRecord(parsed) ||
@@ -3828,6 +3971,7 @@ function deserializeUpstreamState(serialized: string): {
       if (
         !providerSnapshot ||
         providerSnapshot.url !== lastUpstream.url ||
+        providerSnapshot.callerSelected !== lastUpstream.callerSelected ||
         providerSnapshot.protocol !== lastUpstream.protocol ||
         providerSnapshot.model !== lastUpstream.model ||
         JSON.stringify(providerSnapshot.providerOptions) !==
@@ -3837,12 +3981,57 @@ function deserializeUpstreamState(serialized: string): {
       }
     }
   }
-  return { lastUpstream, upstreamByProvider };
+  return filterRestoredUpstreamState(
+    { lastUpstream, upstreamByProvider },
+    config,
+  );
+}
+
+/**
+ * Re-apply the current remote-gateway origin policy to persisted route state.
+ * Legacy snapshots are marked caller-selected by validation above, so an
+ * upgrade cannot revive an arbitrary pre-policy URL for workers or warmups.
+ */
+function filterRestoredUpstreamState(
+  restored: {
+    lastUpstream?: UpstreamSnapshot;
+    upstreamByProvider: Map<string, UpstreamSnapshot>;
+  },
+  config: GatewayConfig,
+): {
+  lastUpstream?: UpstreamSnapshot;
+  upstreamByProvider: Map<string, UpstreamSnapshot>;
+} {
+  if (!usesRemoteSessionBinding(config)) return restored;
+  const allowed = (snapshot: UpstreamSnapshot): boolean =>
+    snapshot.callerSelected === false ||
+    (snapshot.callerSelected === true &&
+      isCallerUpstreamAllowed(config, snapshot.url));
+  return {
+    ...(restored.lastUpstream && allowed(restored.lastUpstream)
+      ? { lastUpstream: restored.lastUpstream }
+      : {}),
+    upstreamByProvider: new Map(
+      [...restored.upstreamByProvider].filter(([, snapshot]) =>
+        allowed(snapshot),
+      ),
+    ),
+  };
+}
+
+/** Test-only access to persisted-route policy revalidation. */
+export function restoreUpstreamStateForTest(
+  serialized: string,
+  config: GatewayConfig,
+): {
+  lastUpstream?: UpstreamSnapshot;
+  upstreamByProvider: Map<string, UpstreamSnapshot>;
+} {
+  return deserializeUpstreamState(serialized, config);
 }
 
 function buildRequestUpstreamSnapshot(
   req: GatewayRequest,
-  config: GatewayConfig,
   route: ResolvedRequestUpstreamRoute,
 ): UpstreamSnapshot {
   const providerRouting = providerRoutingValue(req);
@@ -3864,13 +4053,13 @@ function buildRequestUpstreamSnapshot(
   }
   const snapshot: UpstreamSnapshot = {
     url: route.effectiveUpstreamBase,
+    callerSelected: route.headerUpstream !== undefined,
     protocol: route.effectiveProtocol,
     ...(route.providerID ? { providerID: route.providerID } : {}),
     model: req.model,
-    headers: forwardClientHeaders(req.rawHeaders),
+    headers: buildUpstreamSnapshotHeaders(req.rawHeaders),
     ...(providerOptions ? { providerOptions } : {}),
   };
-  applyUpstreamExtraHeaders(snapshot.headers, config.upstreamExtraHeaders);
   return freezeUpstreamSnapshot(snapshot);
 }
 
@@ -3886,16 +4075,28 @@ function captureRequestUpstream(
   requestOrder: number,
 ): ResolvedRequestUpstreamRoute {
   const route = resolveRequestUpstreamRoute(req, config);
-  const snapshot = buildRequestUpstreamSnapshot(req, config, route);
+  const snapshot = buildRequestUpstreamSnapshot(req, route);
   let changed = false;
 
   if (requestOrder >= (state._upstreamRequestOrder ?? 0)) {
     const previous = state.lastUpstream;
     if (
-      previous &&
-      (previous.model !== snapshot.model ||
-        previous.providerID !== snapshot.providerID)
+      (previous &&
+        (previous.url !== snapshot.url ||
+          previous.protocol !== snapshot.protocol ||
+          previous.model !== snapshot.model ||
+          previous.providerID !== snapshot.providerID ||
+          !isDeepStrictEqual(
+            previous.providerOptions,
+            snapshot.providerOptions,
+          ))) ||
+      (Object.keys(config.upstreamExtraHeaders).length > 0 &&
+        Object.keys(extraHeadersForUpstream(config, snapshot.url)).length === 0)
     ) {
+      // The cached body is route-specific and may contain a prior turn's full
+      // transcript. Clear it synchronously with route capture so a failed or
+      // in-flight policy-tightening request cannot let the idle warmer replay
+      // that body (or admin extras) to the newly selected destination.
       state.cacheAnalytics.lastRequestBody = null;
     }
     state.lastUpstream = snapshot;
@@ -3935,16 +4136,54 @@ function captureRequestUpstream(
   return route;
 }
 
+class SessionTenantMismatchError extends Error {
+  constructor() {
+    super("Session storage tenant does not match the authenticated request");
+    this.name = "SessionTenantMismatchError";
+  }
+}
+
 function getOrCreateSession(
   sessionID: string,
   projectPath: string,
-  pathSource: ProjectPathResult["source"] = "cwd",
-  credentialFingerprint = "",
+  pathSource: ProjectPathResult["source"],
+  credentialFingerprint: string,
+  config: GatewayConfig,
 ): SessionState {
+  const storageTenantId = currentTenantId();
   let state = sessions.get(sessionID);
+  if (state) {
+    // A session's storage owner is immutable. Reassigning it to whichever
+    // request happened to touch it most recently turns an isolation failure
+    // into durable cross-tenant background work. Missing ownership is accepted
+    // only for the historical local namespace.
+    if (
+      (state.storageTenantId === undefined && storageTenantId !== "") ||
+      (state.storageTenantId !== undefined &&
+        state.storageTenantId !== storageTenantId) ||
+      (usesRemoteSessionBinding(config) &&
+        credentialFingerprint !== "" &&
+        state.credentialFingerprint !== credentialFingerprint)
+    ) {
+      throw new SessionTenantMismatchError();
+    }
+    state.storageTenantId ??= "";
+  }
   if (!state) {
     // Restore persisted tracking state from DB (survives process restarts)
     const persisted = loadSessionTracking(sessionID);
+    // In remote mode the full credential fingerprint is both the authenticated
+    // session owner and the durable storage tenant. A corrupt/stale index must
+    // never hydrate a row owned by a different credential.
+    if (
+      usesRemoteSessionBinding(config) &&
+      credentialFingerprint !== "" &&
+      (storageTenantId !== credentialFingerprint ||
+        (persisted !== null &&
+          persisted.credentialFingerprint !== credentialFingerprint))
+    ) {
+      throw new SessionTenantMismatchError();
+    }
     // Project binding (v36): a persisted binding must survive restart so the
     // session's project_id never splits. A persisted CONFIDENT binding wins
     // over the current request's path — otherwise a path-less first
@@ -3980,6 +4219,7 @@ function getOrCreateSession(
       fingerprint: persisted?.fingerprint || "",
       credentialFingerprint:
         persisted?.credentialFingerprint || credentialFingerprint,
+      storageTenantId,
       lastRequestTime: Date.now(),
       lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
@@ -4076,7 +4316,10 @@ function getOrCreateSession(
     }
     if (persisted?.lastUpstream != null) {
       try {
-        const restored = deserializeUpstreamState(persisted.lastUpstream);
+        const restored = deserializeUpstreamState(
+          persisted.lastUpstream,
+          config,
+        );
         state.lastUpstream = restored.lastUpstream;
         state.upstreamByProvider = restored.upstreamByProvider;
       } catch {
@@ -4123,6 +4366,9 @@ function getOrCreateSession(
   // Ensure upstreamByProvider exists (upgrade from older session state)
   if (!state.upstreamByProvider) {
     state.upstreamByProvider = new Map();
+  }
+  if (credentialFingerprint) {
+    state.credentialFingerprint = credentialFingerprint;
   }
 
   return state;
@@ -4274,23 +4520,41 @@ async function adoptByFingerprint(input: {
   projectPath: string;
   known: { headerName: string; sessionId: string } | null;
   msgCount: number;
+  config: GatewayConfig;
+  credentialFingerprint: string;
 }): Promise<{ sessionID: string; isNew: false; tier: 3 } | null> {
-  const { req, headers, projectPath, known, msgCount } = input;
+  const {
+    req,
+    headers,
+    projectPath,
+    known,
+    msgCount,
+    config,
+    credentialFingerprint,
+  } = input;
   if (!projectPath) return null;
 
   const cred = extractAuth(req.rawHeaders);
-  const credentialFingerprint = cred ? authFingerprint(cred) : "";
   const fingerprintInput = req.messages.map((m) => ({
     role: m.role,
     content: m.content,
   }));
-  const fingerprint = await fingerprintMessages(fingerprintInput, {
-    authSuffix: cred ? authFingerprint(cred) : "",
-  });
+  const remoteBinding = usesRemoteSessionBinding(config);
+  const fingerprint = await fingerprintMessages(
+    fingerprintInput,
+    remoteBinding
+      ? { tenantFingerprint: credentialFingerprint }
+      : { authSuffix: cred ? authFingerprint(cred) : "" },
+  );
 
   const reqIsSubagent = !!headers["x-parent-session-id"];
-  const candidates = findSessionStatesByFingerprint(fingerprint);
-  if (cred) {
+  const candidates = findSessionStatesByFingerprint(fingerprint).filter(
+    (candidate) =>
+      !remoteBinding ||
+      loadSessionTracking(candidate.session_id)?.credentialFingerprint ===
+        credentialFingerprint,
+  );
+  if (cred && !remoteBinding) {
     // v78 added the credential suffix to conversation fingerprints. Legacy
     // candidates have the old unsuffixed fingerprint and no persisted owner;
     // they still require the same project-scoped multi-message overlap below.
@@ -4314,21 +4578,21 @@ async function adoptByFingerprint(input: {
   // an early message only lowers overlap (graceful miss → no adoption), never a
   // false positive. The primary target (opencode x-lore-session-id) sends no
   // such markers, and marker clients carry them on the latest turn only.
-  const probeIDs: string[] = [];
+  const probeMessages: Array<{ index: number; message: GatewayMessage }> = [];
   let probedUsers = 0;
   const probeLimit = Math.min(req.messages.length, ADOPT_PROBE_MESSAGES);
   for (let i = 0; i < probeLimit; i++) {
     const m = req.messages[i];
     if (m.role !== "user") continue;
     probedUsers++;
-    probeIDs.push(deterministicID(m.role, i, m.content));
+    probeMessages.push({ index: i, message: m });
   }
-  if (probeIDs.length < ADOPT_MIN_OVERLAP) return null;
+  if (probeMessages.length < ADOPT_MIN_OVERLAP) return null;
 
   const pid = ensureProject(projectPath);
   const minOverlap = Math.max(ADOPT_MIN_OVERLAP, Math.ceil(probedUsers * 0.5));
   let best: { sid: string; overlap: number; countDiff: number } | null = null;
-  // temporal_messages.id is globally unique, so valid rows cannot give two
+  // Source IDs include the candidate session, so valid rows cannot give two
   // sessions the same positive overlap set. Keep the tie guard as defense in
   // depth for a corrupt/imported database rather than selecting by row order.
   let ambiguousBest = false;
@@ -4338,6 +4602,24 @@ async function adoptByFingerprint(input: {
     if (msgCount - c.message_count < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) {
       continue;
     }
+    const probeIDs = probeMessages.map(({ index, message }) => {
+      const sourceID = deterministicID(
+        c.session_id,
+        message.role,
+        index,
+        message.content,
+      );
+      return temporal.storedMessageId({
+        projectPath,
+        sessionID: c.session_id,
+        sourceID,
+        legacySourceID: legacyDeterministicID(
+          message.role,
+          index,
+          message.content,
+        ),
+      });
+    });
     const overlap = countMatchingTemporalIds(pid, c.session_id, probeIDs);
     if (overlap < minOverlap) continue;
     const countDiff = Math.abs(msgCount - c.message_count);
@@ -4378,9 +4660,17 @@ async function adoptByFingerprint(input: {
 async function identifySession(
   req: GatewayRequest,
   projectPath: string,
+  config: GatewayConfig,
 ): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 2.5 | 3 }> {
   const headers = req.rawHeaders;
-  const credentialFingerprint = requestCredentialFingerprint(headers);
+  const credentialFingerprint = requestCredentialFingerprint(headers, config);
+
+  // Remote correlation is authenticated. Without a usable credential, every
+  // request receives an unindexed session rather than inheriting another
+  // client's header, marker, fingerprint, or worker credential.
+  if (credentialFingerprint === null) {
+    return { sessionID: generateSessionID(), isNew: true, tier: 3 };
+  }
 
   // --- Tier 1: Known headers ---
   // Sub-agent requests (carrying x-parent-session-id) are NOT merged into the
@@ -4397,16 +4687,7 @@ async function identifySession(
     );
     let existingSid = headerSessionIndex.get(indexKey);
     if (!existingSid) {
-      for (const entry of loadHeaderSessionIndex()) {
-        headerSessionIndex.set(
-          sessionIndexKey(
-            entry.credentialFingerprint,
-            entry.headerName,
-            entry.headerSessionId,
-          ),
-          entry.sessionId,
-        );
-      }
+      restoreHeaderSessionMappings(config);
       existingSid = headerSessionIndex.get(indexKey);
     }
     if (existingSid) {
@@ -4567,6 +4848,8 @@ async function identifySession(
       projectPath,
       known,
       msgCount: req.messages.length,
+      config,
+      credentialFingerprint,
     });
     if (adopted) return adopted;
 
@@ -4620,15 +4903,19 @@ async function identifySession(
     content: m.content,
   }));
   const cred = extractAuth(req.rawHeaders);
-  const fingerprint = await fingerprintMessages(rawMessages, {
-    authSuffix: cred ? authFingerprint(cred) : "",
-  });
+  const fingerprint = await fingerprintMessages(
+    rawMessages,
+    usesRemoteSessionBinding(config)
+      ? { tenantFingerprint: credentialFingerprint }
+      : { authSuffix: cred ? authFingerprint(cred) : "" },
+  );
   const msgCount = req.messages.length;
 
   // Find the best matching session: same fingerprint + closest message count
   let bestMatch: { sid: string; countDiff: number } | null = null;
 
   for (const [sid, state] of sessions) {
+    if ((state.credentialFingerprint ?? "") !== credentialFingerprint) continue;
     if (state.fingerprint !== fingerprint) continue;
 
     const diff = msgCount - state.messageCount;
@@ -4686,6 +4973,8 @@ async function identifySession(
     projectPath,
     known: null,
     msgCount,
+    config,
+    credentialFingerprint,
   });
   if (adopted) return adopted;
 
@@ -4715,6 +5004,45 @@ type ResolvedRequestUpstreamRoute = {
 };
 
 /**
+ * Preserve the legacy process-global credential only for a local, unambiguous
+ * direct-provider request to the exact configured base. Remote/hosted gateways,
+ * explicit provider selection, and client-selected URLs never populate it.
+ */
+function captureLegacyGlobalAuth(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  cred: AuthCredential,
+): string | undefined {
+  if (usesRemoteSessionBinding(config)) return undefined;
+  if (
+    req.rawHeaders["x-lore-provider"] ||
+    req.rawHeaders["x-lore-upstream-url"]
+  ) {
+    return undefined;
+  }
+  const route = resolveRequestUpstreamRoute(req, config);
+  const providerID =
+    route.effectiveProtocol === "anthropic"
+      ? "anthropic"
+      : route.effectiveProtocol === "openai" ||
+          route.effectiveProtocol === "openai-responses"
+        ? "openai"
+        : undefined;
+  if (!providerID) return undefined;
+  const configuredBase =
+    providerID === "anthropic"
+      ? config.upstreamAnthropic
+      : config.upstreamOpenAI;
+  const routeBase = normalizeUpstreamBase(route.effectiveUpstreamBase);
+  const trustedBase = normalizeUpstreamBase(configuredBase);
+  if (!routeBase || !trustedBase || routeBase !== trustedBase) {
+    return undefined;
+  }
+  setLastSeenAuth(cred, providerID);
+  return providerID;
+}
+
+/**
  * Single source of truth for foreground routing and its durable snapshot.
  * This is deliberately synchronous: dynamic models.dev lookup is cache-only,
  * so capture can run before any fetch/interceptor and failed requests still
@@ -4727,10 +5055,23 @@ function resolveRequestUpstreamRoute(
   const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
   const headerUpstreamPath = extractUpstreamPathHeader(req.rawHeaders);
   const providerHeader = extractProviderHeader(req.rawHeaders);
+  if (req.rawHeaders["x-lore-provider"] && !providerHeader) {
+    throw new Error("Unsupported or invalid X-Lore-Provider");
+  }
+  if (req.rawHeaders["x-lore-upstream-url"] && !headerUpstream) {
+    throw new Error("Invalid X-Lore-Upstream-URL");
+  }
+  if (headerUpstream && !isCallerUpstreamAllowed(config, headerUpstream)) {
+    throw new Error(
+      "X-Lore-Upstream-URL origin is not allowed by this remote gateway",
+    );
+  }
   let providerID = providerHeader;
   let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
   if (!providerRoute && providerID) {
-    providerRoute = lookupProviderRoute(providerID);
+    // Explicit request routing is cache-only. An unknown untrusted provider
+    // must fail closed without triggering side-channel network activity.
+    providerRoute = lookupProviderRoute(providerID, false);
   }
   if (
     !providerRoute &&
@@ -4744,6 +5085,32 @@ function resolveRequestUpstreamRoute(
   const selfUrlBuildingProtocol =
     providerRoute?.bedrockMantle === true ||
     providerRoute?.protocol === "vertex";
+  if (headerUpstream && !extractAuth(req.rawHeaders)) {
+    throw new Error("An explicit upstream URL requires client authentication");
+  }
+  if (
+    headerUpstream &&
+    headerUpstreamPath &&
+    !isUpstreamWithinBase(
+      new URL(headerUpstreamPath, new URL(headerUpstream).origin).href,
+      headerUpstream,
+    )
+  ) {
+    throw new Error("Explicit upstream path escapes its upstream base");
+  }
+  if (providerID && !providerRoute && !headerUpstream) {
+    throw new Error(`Unsupported provider "${providerID}"`);
+  }
+  if (
+    providerID &&
+    providerRoute?.url == null &&
+    !headerUpstream &&
+    !selfUrlBuildingProtocol
+  ) {
+    throw new Error(
+      `Provider "${providerID}" requires an explicit upstream URL`,
+    );
+  }
   const providerRouteUsable =
     providerRoute &&
     (providerRoute.url != null || headerUpstream || selfUrlBuildingProtocol)
@@ -4865,13 +5232,13 @@ async function forwardToUpstream(
   // provider routing issues without guessing.
   const routingAuth = extractAuth(req.rawHeaders);
   log.info(
-    `upstream: ${effectiveUpstreamBase} ` +
+    `upstream: ${upstreamUrlForLog(effectiveUpstreamBase)} ` +
       `(provider=${providerID ?? "none"}, ` +
-      `providerURL=${providerRoute?.url ?? "none"}, ` +
-      `modelRoute=${modelRoute?.url ?? "none"}, ` +
+      `providerURL=${upstreamUrlForLog(providerRoute?.url)}, ` +
+      `modelRoute=${upstreamUrlForLog(modelRoute?.url)}, ` +
       `headerUpstream=${headerUpstream ? "yes" : "no"}, ` +
       `protocol=${effectiveProtocol}, ` +
-      `auth=${routingAuth ? `${routingAuth.scheme}:${routingAuth.value.slice(0, 8)}…` : "none"})`,
+      `scheme=${routingAuth?.scheme ?? "none"})`,
   );
 
   // Defense-in-depth: warn when a bearer token prefix clearly mismatches
@@ -4882,7 +5249,7 @@ async function forwardToUpstream(
     !effectiveUpstreamBase.includes("githubcopilot")
   ) {
     log.error(
-      `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${effectiveUpstreamBase} — ` +
+      `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${upstreamUrlForLog(effectiveUpstreamBase)} — ` +
         `provider: ${providerID ?? "none"}`,
     );
   }
@@ -5052,7 +5419,7 @@ async function forwardToUpstream(
   // corporate proxies, LiteLLM team-routing tokens, Cloudflare AI Gateway
   // auth, and service-account scenarios can override any header — including
   // the gateway-reconstructed `x-api-key` / `Authorization`.
-  applyUpstreamExtraHeaders(headers, config.upstreamExtraHeaders);
+  applyUpstreamExtraHeaders(headers, extraHeadersForUpstream(config, url));
 
   let serializedBody = JSON.stringify(body);
 
@@ -5506,13 +5873,17 @@ export function buildStreamingResponse(
               recallDepth++;
               const { result, input } = await promiseAgainstAbort(
                 () =>
-                  executeRecall(
-                    recallBlock,
-                    recallContext.sessionState.projectPath,
-                    recallContext.sessionState.sessionID,
-                    getLLMClient(recallContext.config),
-                    alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
-                    streamSignal,
+                  withTenant(
+                    recallContext.sessionState.storageTenantId ?? "",
+                    () =>
+                      executeRecall(
+                        recallBlock,
+                        recallContext.sessionState.projectPath,
+                        recallContext.sessionState.sessionID,
+                        getLLMClient(recallContext.config),
+                        alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
+                        streamSignal,
+                      ),
                   ),
                 streamSignal,
               );
@@ -5755,10 +6126,9 @@ export function buildStreamingResponse(
                   recallBlock,
                   streamSignal,
                 );
-              } catch (fetchErr) {
+              } catch {
                 log.error(
-                  `recall follow-up fetch error (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
-                  fetchErr,
+                  `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
                 );
                 // takeHeldBackEvents() — for Anthropic this is a no-op
                 // (already consumed before the marker envelope emission
@@ -5780,7 +6150,7 @@ export function buildStreamingResponse(
 
               if (!streamingFollowUp.ok) {
                 log.error(
-                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"} ${streamingFollowUp.detail}`,
+                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
                   new Error(
                     `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
                   ),
@@ -9532,7 +9902,7 @@ export function recordCacheTurnUsage(
  * is pure in-memory (temporal-adapter.ts) and MUST run BETWEEN the two stores —
  * the user message is stored with its ORIGINAL tool_result content, before
  * resolveToolResults strips it — so it stays inside the same savepoint. The
- * stores are idempotent UPSERTs keyed by message id, so the all-or-nothing
+ * stores are idempotent UPSERTs keyed by owned message identity, so the all-or-nothing
  * rollback on a mid-batch error is recoverable: the next turn re-includes and
  * re-stores these messages.
  *
@@ -9554,7 +9924,16 @@ export function storeTurnTemporal(input: {
 
   if (noStore) {
     // Still resolve tool results in-memory (needed downstream), but write nothing.
-    resolveToolResults(loreMessages);
+    resolveToolResults(
+      loreMessages,
+      (message) =>
+        temporal.storedMessageIdIfProjectExists({
+          projectPath,
+          sessionID: message.info.sessionID,
+          sourceID: message.info.id,
+          legacySourceID: message.legacySourceID,
+        }) ?? message.info.id,
+    );
     return;
   }
 
@@ -9576,6 +9955,7 @@ export function storeTurnTemporal(input: {
           projectPath,
           info: loreMessages[i].info,
           parts: loreMessages[i].parts,
+          legacySourceID: loreMessages[i].legacySourceID,
         });
         // The latest user message carries tool_result blocks that resolve the
         // PRIOR assistant turn's tool calls — record their outcomes
@@ -9584,6 +9964,7 @@ export function storeTurnTemporal(input: {
           projectPath,
           info: loreMessages[i].info,
           parts: loreMessages[i].parts,
+          legacySourceID: loreMessages[i].legacySourceID,
         });
         break;
       }
@@ -9592,7 +9973,14 @@ export function storeTurnTemporal(input: {
     // Resolve tool results for gradient transform (merges tool_result into
     // assistant parts, strips from user messages — needed for reconstruct-
     // after-eviction pattern but not for temporal storage above).
-    resolveToolResults(loreMessages);
+    resolveToolResults(loreMessages, (message) =>
+      temporal.storedMessageId({
+        projectPath,
+        sessionID: message.info.sessionID,
+        sourceID: message.info.id,
+        legacySourceID: message.legacySourceID,
+      }),
+    );
 
     // Build and store the assistant response message.
     // Strip recall marker text blocks — they contain the raw query string and
@@ -9603,6 +9991,7 @@ export function storeTurnTemporal(input: {
     const assistantMsg = gatewayMessagesToLore(
       [{ role: "assistant", content: assistantContent }],
       sessionID,
+      loreMessages.length,
     )[0];
     updateAssistantMessageTokens(assistantMsg, input.usage, input.model);
     if (assistantContent.length > 0) {
@@ -9610,6 +9999,7 @@ export function storeTurnTemporal(input: {
         projectPath,
         info: assistantMsg.info,
         parts: assistantMsg.parts,
+        legacySourceID: assistantMsg.legacySourceID,
       });
     }
     // Always record structured tool-call traces — even when the assistant
@@ -9620,6 +10010,7 @@ export function storeTurnTemporal(input: {
       projectPath,
       info: assistantMsg.info,
       parts: assistantMsg.parts,
+      legacySourceID: assistantMsg.legacySourceID,
     });
   });
 }
@@ -9628,7 +10019,7 @@ export function storeTurnTemporal(input: {
  * Run after a successful response: calibrate, store temporal messages,
  * and schedule background work (distillation, curation).
  */
-function postResponse(
+function postResponseForTenant(
   req: GatewayRequest,
   resp: GatewayResponse,
   sessionState: SessionState,
@@ -9690,6 +10081,19 @@ function postResponse(
       requestBody,
       genAiSpan,
     );
+    // Admin credentials are authorized at dispatch time and never retained in
+    // session snapshots. The idle warmer still receives gateway-global extras,
+    // so prevent it from replaying a cached body to a client-selected endpoint
+    // that is outside every configured trusted base.
+    if (
+      Object.keys(config.upstreamExtraHeaders).length > 0 &&
+      sessionState.lastUpstream &&
+      Object.keys(
+        extraHeadersForUpstream(config, sessionState.lastUpstream.url),
+      ).length === 0
+    ) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+    }
 
     // Capture previous stop reason before it's overwritten below (line ~1667).
     // Used to detect tool-use continuation turns for gap recording filtering.
@@ -9904,6 +10308,26 @@ function postResponse(
   }
 }
 
+function postResponse(
+  req: GatewayRequest,
+  resp: GatewayResponse,
+  sessionState: SessionState,
+  config: GatewayConfig,
+  requestBody?: string,
+  genAiSpan?: Sentry.Span,
+): void {
+  withTenant(sessionState.storageTenantId ?? "", () =>
+    postResponseForTenant(
+      req,
+      resp,
+      sessionState,
+      config,
+      requestBody,
+      genAiSpan,
+    ),
+  );
+}
+
 /**
  * Schedule background distillation and curation (fire-and-forget).
  */
@@ -9919,7 +10343,7 @@ function trackBackground(p: Promise<unknown>): void {
   void p.finally(() => inFlightBackground.delete(p));
 }
 
-export function scheduleBackgroundWork(
+function scheduleBackgroundWorkForTenant(
   sessionState: SessionState,
   config: GatewayConfig,
 ): void {
@@ -10001,23 +10425,25 @@ export function scheduleBackgroundWork(
   }
   if (urgentFromGradient || urgentFromCompaction) {
     trackBackground(
-      distillation
-        .run({
-          llm,
-          projectPath,
-          sessionID,
-          model,
-          force: true,
-          urgent: true,
-          callType: "direct",
-          // Never run meta-distillation while the conversation cache is warm.
-          // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
-          // synthetic distilled prefix at messages[0/1] on the next turn. That
-          // early-message rewrite is a real prompt-cache bust. Idle-time meta in
-          // idle.ts remains enabled because the cache is already cold there.
-          skipMeta: true,
-        })
-        .catch((e) => log.error("background distillation failed:", e)),
+      withTenant(sessionState.storageTenantId ?? "", () =>
+        distillation
+          .run({
+            llm,
+            projectPath,
+            sessionID,
+            model,
+            force: true,
+            urgent: true,
+            callType: "direct",
+            // Never run meta-distillation while the conversation cache is warm.
+            // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
+            // synthetic distilled prefix at messages[0/1] on the next turn. That
+            // early-message rewrite is a real prompt-cache bust. Idle-time meta in
+            // idle.ts remains enabled because the cache is already cold there.
+            skipMeta: true,
+          })
+          .catch((e) => log.error("background distillation failed:", e)),
+      ),
     );
   } else if (
     !isBackgroundPaused(workerProviderID) &&
@@ -10045,17 +10471,19 @@ export function scheduleBackgroundWork(
         );
         runBackground(
           () =>
-            distillation.run({
-              llm,
-              projectPath,
-              sessionID,
-              model,
-              skipMeta: true,
-              callType: batchQueueEnabled ? "batch" : "direct",
-              workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-              // #627 Phase 1: stamp the session's gitHead on every distilled row.
-              metadata: buildSessionMetadata(sessionState.gitHead),
-            }),
+            withTenant(sessionState.storageTenantId ?? "", () =>
+              distillation.run({
+                llm,
+                projectPath,
+                sessionID,
+                model,
+                skipMeta: true,
+                callType: batchQueueEnabled ? "batch" : "direct",
+                workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+                // #627 Phase 1: stamp the session's gitHead on every distilled row.
+                metadata: buildSessionMetadata(sessionState.gitHead),
+              }),
+            ),
           `incremental-distill session=${sessionID.slice(0, 16)}`,
           workerProviderID,
         ).catch((e) => log.error("background distillation failed:", e));
@@ -10120,22 +10548,24 @@ export function scheduleBackgroundWork(
     trackBackground(
       runBackground(
         () =>
-          Sentry.startSpan(
-            {
-              name: "lore.curator",
-              op: "lore.curation",
-              attributes: { trigger: "in-flight" },
-            },
-            () =>
-              curator.run({
-                llm,
-                projectPath,
-                sessionID,
-                model,
-                workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
-                // #627 Phase 1: stamp the session's gitHead on curator entries.
-                metadata: buildSessionMetadata(sessionState.gitHead),
-              }),
+          withTenant(sessionState.storageTenantId ?? "", () =>
+            Sentry.startSpan(
+              {
+                name: "lore.curator",
+                op: "lore.curation",
+                attributes: { trigger: "in-flight" },
+              },
+              () =>
+                curator.run({
+                  llm,
+                  projectPath,
+                  sessionID,
+                  model,
+                  workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                  // #627 Phase 1: stamp the session's gitHead on curator entries.
+                  metadata: buildSessionMetadata(sessionState.gitHead),
+                }),
+            ),
           ),
         `in-flight-curation session=${sessionID.slice(0, 16)}`,
         workerProviderID,
@@ -10168,6 +10598,15 @@ export function scheduleBackgroundWork(
         }),
     );
   }
+}
+
+export function scheduleBackgroundWork(
+  sessionState: SessionState,
+  config: GatewayConfig,
+): void {
+  withTenant(sessionState.storageTenantId ?? "", () =>
+    scheduleBackgroundWorkForTenant(sessionState, config),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -10288,13 +10727,14 @@ async function handleCompactionInner(
   }
   const pathResult = getProjectPath(req.system, req.rawHeaders);
 
-  const { sessionID } = await identifySession(req, pathResult.path);
+  const { sessionID } = await identifySession(req, pathResult.path, config);
   stripContextMarkers(req.messages);
   const sessionState = getOrCreateSession(
     sessionID,
     pathResult.path,
     pathResult.source,
-    requestCredentialFingerprint(req.rawHeaders),
+    requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+    config,
   );
   const projectPath = resolveSessionProjectPath(
     pathResult,
@@ -10515,13 +10955,20 @@ async function handleCompactEndpointInner(
   req: Request,
   config: GatewayConfig,
   signal: AbortSignal,
+  rawHeaders: Record<string, string>,
 ): Promise<Response> {
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message:
+          "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
   // Authenticate from headers before touching a potentially unbounded or
   // stalled upload. This endpoint always requires a provider credential.
-  const rawHeaders: Record<string, string> = {};
-  req.headers.forEach((value, key) => {
-    rawHeaders[key] = value;
-  });
   const credential = extractAuth(rawHeaders);
   if (!credential) {
     return new Response(
@@ -10580,7 +11027,11 @@ async function handleCompactEndpointInner(
     rawHeaders,
   };
 
-  const { sessionID, isNew } = await identifySession(minimalReq, projectPath);
+  const { sessionID, isNew } = await identifySession(
+    minimalReq,
+    projectPath,
+    config,
+  );
 
   if (isNew) {
     // No prior session found — the caller's session header didn't match any
@@ -10597,14 +11048,28 @@ async function handleCompactEndpointInner(
     );
   }
 
-  const state = getOrCreateSession(
-    sessionID,
-    projectPath,
-    "header",
-    authFingerprint(credential),
-  );
+  let state: SessionState;
+  try {
+    state = getOrCreateSession(
+      sessionID,
+      projectPath,
+      "header",
+      requestCredentialFingerprint(rawHeaders, config) ?? "",
+      config,
+    );
+  } catch (error) {
+    if (error instanceof SessionTenantMismatchError) {
+      return new Response(
+        JSON.stringify({
+          error: "session_not_found",
+          message: "No session found for the authenticated storage tenant",
+        }),
+        { status: 404, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw error;
+  }
   if (
-    !state ||
     state.projectPathProvisional === true ||
     state.projectPath !== projectPath
   ) {
@@ -10710,18 +11175,26 @@ export async function handleCompactEndpoint(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
-  const abortScope = createForegroundAbortScope(req.signal);
-  try {
-    const response = await handleCompactEndpointInner(
-      req,
-      config,
-      abortScope.signal,
-    );
-    return wrapBodyWithCleanup(response, abortScope.dispose, abortScope.signal);
-  } catch (error) {
-    abortScope.dispose();
-    throw error;
-  }
+  const rawHeaders = requestHeaders(req.headers);
+  return withRequestStorageTenant(rawHeaders, config, async () => {
+    const abortScope = createForegroundAbortScope(req.signal);
+    try {
+      const response = await handleCompactEndpointInner(
+        req,
+        config,
+        abortScope.signal,
+        rawHeaders,
+      );
+      return wrapBodyWithCleanup(
+        response,
+        abortScope.dispose,
+        abortScope.signal,
+      );
+    } catch (error) {
+      abortScope.dispose();
+      throw error;
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -10745,7 +11218,28 @@ async function handleResponsesCompactEndpointInner(
   req: Request,
   config: GatewayConfig,
   signal: AbortSignal,
+  rawHeaders: Record<string, string>,
 ): Promise<Response> {
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message:
+          "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+  const credential = extractAuth(rawHeaders);
+  if (usesRemoteSessionBinding(config) && !credential) {
+    return new Response(
+      JSON.stringify({
+        error: "unauthorized",
+        message: "A provider credential is required",
+      }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
   // Read the body as text so we can both parse it and replay it for passthrough.
   // Decode any Content-Encoding (Codex sends zstd by default) first — otherwise
   // the raw compressed bytes fail to JSON.parse and the passthrough replays
@@ -10775,11 +11269,6 @@ async function handleResponsesCompactEndpointInner(
     );
   }
 
-  const rawHeaders: Record<string, string> = {};
-  req.headers.forEach((value, key) => {
-    rawHeaders[key] = value;
-  });
-
   // Parse the body as a Responses API request to get messages for session
   // fingerprinting. The compact request body has the same shape as a normal
   // /v1/responses request (model, instructions, input, tools, etc.).
@@ -10802,22 +11291,60 @@ async function handleResponsesCompactEndpointInner(
   const pathResult = getProjectPath(gatewayReq.system, rawHeaders);
   const gitRemote = extractGitRemoteHeader(rawHeaders);
 
-  await initIfNeeded(pathResult.path, config, gitRemote);
-
   const { sessionID, isNew } = await identifySession(
     gatewayReq,
     pathResult.path,
+    config,
   );
 
   // If no prior session, skip Lore compaction and passthrough to upstream.
   if (!isNew) {
+    let state: SessionState;
+    try {
+      state = getOrCreateSession(
+        sessionID,
+        pathResult.path,
+        pathResult.source,
+        requestCredentialFingerprint(rawHeaders, config) ?? "",
+        config,
+      );
+    } catch (error) {
+      if (error instanceof SessionTenantMismatchError) {
+        return new Response(
+          JSON.stringify({
+            error: "session_not_found",
+            message: "No session found for the authenticated storage tenant",
+          }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw error;
+    }
+    if (
+      usesRemoteSessionBinding(config) &&
+      (state.projectPathProvisional === true ||
+        state.projectPath !== pathResult.path)
+    ) {
+      return new Response(
+        JSON.stringify({
+          error: "project_mismatch",
+          message: "project path does not match the authenticated session",
+        }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      );
+    }
+    const compactProjectPath = usesRemoteSessionBinding(config)
+      ? state.projectPath
+      : pathResult.path;
+    await initIfNeeded(compactProjectPath, config, gitRemote);
+
     log.info(
       `responses/compact: generating Lore summary for session ${sessionID.slice(0, 16)}`,
     );
 
     try {
       const summary = await generateCompactionSummary({
-        projectPath: pathResult.path,
+        projectPath: compactProjectPath,
         sessionID,
         config,
         signal,
@@ -10872,6 +11399,7 @@ async function handleResponsesCompactEndpointInner(
     rawHeaders,
     config,
     signal,
+    gatewayReq,
   );
 }
 
@@ -10879,18 +11407,26 @@ export async function handleResponsesCompactEndpoint(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
-  const abortScope = createForegroundAbortScope(req.signal);
-  try {
-    const response = await handleResponsesCompactEndpointInner(
-      req,
-      config,
-      abortScope.signal,
-    );
-    return wrapBodyWithCleanup(response, abortScope.dispose, abortScope.signal);
-  } catch (error) {
-    abortScope.dispose();
-    throw error;
-  }
+  const rawHeaders = requestHeaders(req.headers);
+  return withRequestStorageTenant(rawHeaders, config, async () => {
+    const abortScope = createForegroundAbortScope(req.signal);
+    try {
+      const response = await handleResponsesCompactEndpointInner(
+        req,
+        config,
+        abortScope.signal,
+        rawHeaders,
+      );
+      return wrapBodyWithCleanup(
+        response,
+        abortScope.dispose,
+        abortScope.signal,
+      );
+    } catch (error) {
+      abortScope.dispose();
+      throw error;
+    }
+  });
 }
 
 /**
@@ -10901,18 +11437,155 @@ export async function passthroughResponsesCompact(
   rawHeaders: Record<string, string>,
   config: GatewayConfig,
   callerSignal?: AbortSignal,
+  parsedRequest?: GatewayRequest,
 ): Promise<Response> {
   const abortScope = createForegroundAbortScope(callerSignal);
-  const upstreamUrl = `${config.upstreamOpenAI}/v1/responses/compact`;
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    abortScope.dispose();
+    return errorResponse(
+      400,
+      "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+    );
+  }
+
+  // Resolve with the same provider/header/model priority chain as a normal
+  // Responses request. If parsing failed, an explicit validated URL override is
+  // the only safe custom route; an explicit provider without a compatible URL
+  // fails closed because model routing is unavailable.
+  const headerUpstream = extractUpstreamUrlHeader(rawHeaders);
+  if (headerUpstream && !extractAuth(rawHeaders)) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: "An explicit upstream URL requires client authentication",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  let route: ResolvedRequestUpstreamRoute | undefined;
+  if (parsedRequest) {
+    try {
+      route = resolveRequestUpstreamRoute(parsedRequest, config);
+    } catch (error) {
+      abortScope.dispose();
+      return new Response(
+        JSON.stringify({
+          error: "compaction_routing_failed",
+          message:
+            error instanceof Error ? error.message : "Invalid compact route",
+        }),
+        { status: 502, headers: { "content-type": "application/json" } },
+      );
+    }
+  }
+  const fallbackProviderID = route
+    ? route.providerID
+    : extractProviderHeader(rawHeaders);
+  if (rawHeaders["x-lore-provider"] && !fallbackProviderID) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: "Unsupported or invalid X-Lore-Provider",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (rawHeaders["x-lore-upstream-url"] && !headerUpstream) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: "Invalid X-Lore-Upstream-URL",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (headerUpstream && !isCallerUpstreamAllowed(config, headerUpstream)) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message:
+          "X-Lore-Upstream-URL origin is not allowed by this remote gateway",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const fallbackProviderRoute =
+    !route && fallbackProviderID
+      ? (resolveProviderRoute(fallbackProviderID) ??
+        lookupProviderRoute(fallbackProviderID, false))
+      : null;
+  if (
+    route?.providerID &&
+    !route.headerUpstream &&
+    (!route.providerRoute?.url ||
+      (route.providerRoute.protocol !== null &&
+        route.providerRoute.protocol !== "openai-responses"))
+  ) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: `Cannot safely resolve a Responses compact endpoint for provider "${route.providerID}"`,
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (
+    !route &&
+    fallbackProviderID &&
+    !headerUpstream &&
+    (!fallbackProviderRoute?.url ||
+      (fallbackProviderRoute.protocol !== null &&
+        fallbackProviderRoute.protocol !== "openai-responses"))
+  ) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: `Cannot safely resolve a Responses compact endpoint for provider "${fallbackProviderID}"`,
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const effectiveUpstreamBase =
+    route?.effectiveUpstreamBase ??
+    headerUpstream ??
+    fallbackProviderRoute?.url ??
+    config.upstreamOpenAI;
+  const effectiveProtocol =
+    route?.effectiveProtocol ??
+    fallbackProviderRoute?.protocol ??
+    "openai-responses";
+  if (effectiveProtocol !== "openai-responses") {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message:
+          "The resolved upstream does not support the OpenAI Responses compact protocol",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const upstreamPath = extractUpstreamPathHeader(rawHeaders);
+  const compactPath = upstreamPath?.endsWith("/responses/compact")
+    ? upstreamPath
+    : undefined;
+  const upstreamUrl = compactPath
+    ? new URL(compactPath, `${effectiveUpstreamBase.replace(/\/+$/, "")}/`).href
+    : fallbackProviderID === "openai-codex"
+      ? `${effectiveUpstreamBase}/codex/responses/compact`
+      : `${effectiveUpstreamBase}/v1/responses/compact`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
 
-  // Forward auth headers (keys are lowercase — Fetch API normalizes them).
-  const auth = rawHeaders.authorization;
-  if (auth) headers.authorization = auth;
-  const apiKey = rawHeaders["x-api-key"];
-  if (apiKey) headers["x-api-key"] = apiKey;
+  // Preserve the one centrally-approved provider-auth scheme exactly.
+  Object.assign(headers, copyProviderAuthHeaders(rawHeaders));
 
   // Forward OpenAI-specific headers
   const openAiBeta = rawHeaders["openai-beta"];
@@ -10928,12 +11601,12 @@ export async function passthroughResponsesCompact(
     bodyText,
     rawHeaders["content-encoding"],
     buildUpstreamRouteContext({
-      upstreamUrlHeader: undefined,
-      providerHeader: undefined,
+      upstreamUrlHeader: headerUpstream,
+      providerHeader: fallbackProviderID,
       ingressProtocol: "openai-responses",
-      effectiveProtocol: "openai-responses",
+      effectiveProtocol,
       ingressUpstreamBase: config.upstreamOpenAI,
-      effectiveUpstreamBase: config.upstreamOpenAI,
+      effectiveUpstreamBase,
     }),
   );
   if (contentEncoding) headers["content-encoding"] = contentEncoding;
@@ -10941,7 +11614,10 @@ export async function passthroughResponsesCompact(
   // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as a final overlay so
   // corporate proxies / LiteLLM team-routing tokens / Cloudflare AI Gateway
   // / service-account scenarios work for compaction-passthrough calls too.
-  applyUpstreamExtraHeaders(headers, config.upstreamExtraHeaders);
+  applyUpstreamExtraHeaders(
+    headers,
+    extraHeadersForUpstream(config, upstreamUrl),
+  );
 
   try {
     const upstream = await responseAgainstAbort(
@@ -10955,14 +11631,13 @@ export async function passthroughResponsesCompact(
       abortScope.signal,
     );
     return wrapBodyWithCleanup(upstream, abortScope.dispose, abortScope.signal);
-  } catch (err) {
+  } catch {
     abortScope.dispose();
-    const msg = err instanceof Error ? err.message : "Upstream unreachable";
-    log.error("responses/compact upstream passthrough error:", err);
+    log.error("responses/compact upstream passthrough failed");
     return new Response(
       JSON.stringify({
         error: "compaction_failed",
-        message: `Failed to reach upstream: ${msg}`,
+        message: "Failed to reach upstream",
       }),
       { status: 502, headers: { "content-type": "application/json" } },
     );
@@ -11013,6 +11688,7 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   dispose: () => void;
 } {
   const controller = new AbortController();
+  activeForegroundAbortControllers.add(controller);
   const onCallerAbort = () => controller.abort(caller?.reason);
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
@@ -11026,6 +11702,7 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   return {
     signal: controller.signal,
     dispose: () => {
+      activeForegroundAbortControllers.delete(controller);
       clearTimeout(timer);
       caller?.removeEventListener("abort", onCallerAbort);
     },
@@ -11528,19 +12205,15 @@ async function handleConversationTurn(
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
-  if (cred) {
-    // Tag the global fallback with the request's provider so a worker for a
-    // different provider can't borrow this credential (cross-contamination,
-    // #829). Falls back to the upstream destination URL when no x-lore-provider
-    // header is present — e.g. credentialed title/summary-gen requests that
-    // bypass the per-turn chat.headers hook (#942).
-    setLastSeenAuth(cred, resolveLastSeenProvider(req.rawHeaders));
-  }
+  const legacyGlobalProvider = cred
+    ? captureLegacyGlobalAuth(req, config, cred)
+    : undefined;
 
   // --- 3. Session identification ---
   const { sessionID, isNew, tier } = await identifySession(
     req,
     pathResult.path,
+    config,
   );
 
   // Strip [lore:session-id=...] and [lore:project=...] context markers from
@@ -11552,7 +12225,8 @@ async function handleConversationTurn(
     sessionID,
     pathResult.path,
     pathResult.source,
-    cred ? authFingerprint(cred) : "",
+    requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+    config,
   );
   let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
 
@@ -11667,8 +12341,13 @@ async function handleConversationTurn(
   // and a warning is logged.
   {
     const parentClientId = req.rawHeaders["x-parent-session-id"];
+    const credentialFingerprint = requestCredentialFingerprint(
+      req.rawHeaders,
+      config,
+    );
     if (
       parentClientId &&
+      credentialFingerprint !== null &&
       (!sessionState.isSubagent || !sessionState.parentSessionId)
     ) {
       if (!sessionState.isSubagent) {
@@ -11679,8 +12358,7 @@ async function handleConversationTurn(
       for (const [key, loreId] of headerSessionIndex) {
         const parsed = parseSessionIndexKey(key);
         if (
-          parsed?.credentialFingerprint ===
-            (sessionState.credentialFingerprint ?? "") &&
+          parsed?.credentialFingerprint === credentialFingerprint &&
           parsed.headerValue === parentClientId
         ) {
           resolvedParent = loreId;
@@ -11717,8 +12395,17 @@ async function handleConversationTurn(
   // cross-contamination when a session switches providers mid-conversation
   // (e.g. Anthropic → MiniMax → Anthropic).
   if (cred) {
-    const reqProviderID = extractProviderHeader(req.rawHeaders);
-    setSessionAuth(sessionID, cred, reqProviderID || undefined);
+    const reqProviderID =
+      requestUpstreamRoute.providerID ??
+      (requestUpstreamRoute.effectiveProtocol === "anthropic"
+        ? "anthropic"
+        : requestUpstreamRoute.effectiveProtocol === "openai" ||
+            requestUpstreamRoute.effectiveProtocol === "openai-responses"
+          ? "openai"
+          : requestUpstreamRoute.effectiveProtocol === "gemini"
+            ? "google"
+            : undefined);
+    setSessionAuth(sessionID, cred, reqProviderID);
     clearWarmupAuthDisabled(sessionID); // Re-enable cache warming on fresh credential
 
     // One-time "it's working" signal. A fresh user has no easy way to tell
@@ -11731,18 +12418,12 @@ async function handleConversationTurn(
       );
     }
 
-    // A credential just landed. If `lore run` deferred a conversation import
-    // (no credential existed at startup), run it now — this is the first
-    // authenticated turn. Forward the provider the GLOBAL fallback was tagged
-    // with — resolveLastSeenProvider (x-lore-provider ?? URL inference), the
-    // same value setLastSeenAuth used above — because the session-less import
-    // job resolves auth against that global. Using the bare header
-    // (extractProviderHeader) here would pass undefined when the provider was
-    // URL-inferred, re-introducing the silent cross-provider drop. One-shot and
-    // self-guarded; a no-op otherwise.
-    trackBackground(
-      flushPendingImport(resolveLastSeenProvider(req.rawHeaders)),
-    );
+    // A session-less import may use only the deliberately captured local,
+    // configured direct-provider credential. Remote/custom routes never expose
+    // their credential through the process-global fallback.
+    if (legacyGlobalProvider) {
+      trackBackground(flushPendingImport(legacyGlobalProvider));
+    }
   }
 
   // Capture billing header prefix for worker cch computation, scoped to
@@ -11759,15 +12440,17 @@ async function handleConversationTurn(
 
   // Track fingerprint for future correlation
   if (isNew) {
+    const credentialFingerprint =
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "";
     const fingerprint = await fingerprintMessages(
       req.messages.map((m) => ({ role: m.role, content: m.content })),
-      {
-        authSuffix: cred ? authFingerprint(cred) : "",
-      },
+      usesRemoteSessionBinding(config)
+        ? { tenantFingerprint: credentialFingerprint }
+        : { authSuffix: cred ? authFingerprint(cred) : "" },
     );
     sessionState.fingerprint = fingerprint;
     // Persist fingerprint immediately — rare event (new session only)
-    saveSessionTracking(sessionID, { fingerprint });
+    saveSessionTracking(sessionID, { fingerprint, credentialFingerprint });
 
     // Seed header learning for new sessions (Tier 2 bootstrap).
     // Even Tier 1 sessions don't need this, but it's harmless and
@@ -11829,6 +12512,7 @@ async function handleConversationTurn(
     consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
     projectPath: sessionState.projectPath || null,
     projectPathProvisional: sessionState.projectPathProvisional === true,
+    credentialFingerprint: sessionState.credentialFingerprint ?? "",
     // v37: persist the compaction anomaly flag so a gateway restart between
     // detection (this turn) and consumption (next turn's scheduleBackgroundWork)
     // doesn't lose the urgent-distillation signal.
@@ -12144,7 +12828,14 @@ async function handleConversationTurn(
     req.messages,
     loreMessages,
   );
-  resolveToolResults(loreMessages);
+  resolveToolResults(loreMessages, (message) =>
+    temporal.storedMessageId({
+      projectPath,
+      sessionID: message.info.sessionID,
+      sourceID: message.info.id,
+      legacySourceID: message.legacySourceID,
+    }),
+  );
 
   // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
   // system[0]: Host prompt              [no cache_control]
@@ -13274,21 +13965,7 @@ async function handleConversationTurn(
         foregroundAbort.signal,
       ),
     );
-    // Friendly diagnostic suffix for a pass-through 429 misread as a Lore bug.
-    // 🔴 credScheme is the LOAD-BEARING exclusion for Bedrock: Bedrock also
-    // reports effectiveProtocol === "anthropic", so the protocol gate does NOT
-    // exclude it — only its "api-key" scheme (x-api-key) does. Never drop the
-    // credScheme arg or hardcode it, or Bedrock 429s would misfire the
-    // "your Anthropic subscription's rate limit" hint.
-    const errorHint = upstreamErrorHint({
-      status: upstreamResponse.status,
-      body: errorBody,
-      protocol: effectiveProtocol,
-      credScheme: resolveAuth(sessionID)?.scheme,
-    });
-    log.error(
-      `upstream error: ${upstreamResponse.status} ${errorBody.slice(0, 500)}${errorHint}`,
-    );
+    log.error(`upstream error: ${upstreamResponse.status}`);
 
     // When the API rejects with a context-length error, escalate the compression
     // layer for the next turn so the session doesn't get stuck in a loop.
@@ -13521,10 +14198,9 @@ async function handleConversationTurn(
               recallBlock,
               foregroundAbort.signal,
             );
-      } catch (fetchErr) {
+      } catch {
         log.error(
-          `recall follow-up fetch error (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}:`,
-          fetchErr,
+          `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
@@ -13549,7 +14225,7 @@ async function handleConversationTurn(
 
       if (!jsonFollowUp.ok) {
         log.error(
-          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"} ${jsonFollowUp.detail}`,
+          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"}`,
           new Error(`recall follow-up upstream ${jsonFollowUp.status ?? "?"}`),
         );
         captureToolPairing400({
@@ -13716,18 +14392,22 @@ async function handleConversationTurn(
                   stableLtmText,
                   pendingKnowledgeDelta,
                 );
-                const { result, input } = await executeRecall(
-                  {
-                    type: "tool_use",
-                    id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
-                    name: RECALL_TOOL_NAME,
-                    input: { query, scope, id },
-                  },
-                  sessionState.projectPath,
-                  sessionState.sessionID,
-                  getLLMClient(config),
-                  alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
-                  signal,
+                const { result, input } = await withTenant(
+                  sessionState.storageTenantId ?? "",
+                  () =>
+                    executeRecall(
+                      {
+                        type: "tool_use",
+                        id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
+                        name: RECALL_TOOL_NAME,
+                        input: { query, scope, id },
+                      },
+                      sessionState.projectPath,
+                      sessionState.sessionID,
+                      getLLMClient(config),
+                      alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
+                      signal,
+                    ),
                 );
                 const recallBlock = acc.content[contentPosition];
                 if (
@@ -14302,13 +14982,13 @@ async function handleLoreSlashCommand(
   if (!text.toLowerCase().startsWith("/lore:")) return null;
 
   // Route to specific handlers
-  const warmupResult = handleWarmupSlashCommand(req, allSessions);
+  const warmupResult = handleWarmupSlashCommand(req, allSessions, config);
   if (warmupResult) return warmupResult;
 
   const curateResult = await handleCurateSlashCommand(req, allSessions, config);
   if (curateResult) return curateResult;
 
-  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions);
+  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions, config);
   if (amnesiaResult) return amnesiaResult;
 
   // Unknown /lore:* command — return error instead of forwarding upstream
@@ -14335,6 +15015,7 @@ async function handleLoreSlashCommand(
 function handleAmnesiaSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
 ): Response | null {
   const text = lastUserTextTrimmed(req);
   const lower = text.toLowerCase();
@@ -14347,13 +15028,19 @@ function handleAmnesiaSlashCommand(
   const known = extractKnownSessionHeader(req.rawHeaders);
   let state: SessionState | undefined;
   if (known) {
-    const indexKey = sessionIndexKey(
-      requestCredentialFingerprint(req.rawHeaders),
-      known.headerName,
-      known.sessionId,
+    const credentialFingerprint = requestCredentialFingerprint(
+      req.rawHeaders,
+      config,
     );
-    const sid = headerSessionIndex.get(indexKey);
-    if (sid) state = allSessions.get(sid);
+    if (credentialFingerprint !== null) {
+      const indexKey = sessionIndexKey(
+        credentialFingerprint,
+        known.headerName,
+        known.sessionId,
+      );
+      const sid = headerSessionIndex.get(indexKey);
+      if (sid) state = allSessions.get(sid);
+    }
   }
 
   if (state) {
@@ -14391,6 +15078,7 @@ function handleAmnesiaSlashCommand(
 function handleWarmupSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
 ): Response | null {
   const text = lastUserTextTrimmed(req);
   const lower = text.toLowerCase();
@@ -14402,6 +15090,16 @@ function handleWarmupSlashCommand(
   const isOff = lower === "/lore:warm:off";
   const isOn = lower === "/lore:warm:on";
   if (!isStop && !isKeep && !isAuto && !isReset && !isOff && !isOn) return null;
+
+  if (
+    (isReset || isOff || isOn) &&
+    (config.remoteGateway || config.hostedMode)
+  ) {
+    return errorResponse(
+      403,
+      "Global cache-warming administration is unavailable on remote gateways",
+    );
+  }
 
   // Reset is a breaker-wide admin action — clear every tripped bucket and
   // return immediately (it does not depend on resolving this session).
@@ -14437,13 +15135,19 @@ function handleWarmupSlashCommand(
   const known = extractKnownSessionHeader(req.rawHeaders);
   let state: SessionState | undefined;
   if (known) {
-    const indexKey = sessionIndexKey(
-      requestCredentialFingerprint(req.rawHeaders),
-      known.headerName,
-      known.sessionId,
+    const credentialFingerprint = requestCredentialFingerprint(
+      req.rawHeaders,
+      config,
     );
-    const sid = headerSessionIndex.get(indexKey);
-    if (sid) state = allSessions.get(sid);
+    if (credentialFingerprint !== null) {
+      const indexKey = sessionIndexKey(
+        credentialFingerprint,
+        known.headerName,
+        known.sessionId,
+      );
+      const sid = headerSessionIndex.get(indexKey);
+      if (sid) state = allSessions.get(sid);
+    }
   }
 
   // Update session warmup state
@@ -14508,15 +15212,21 @@ async function handleCurateSlashCommand(
   let state: SessionState | undefined;
   let sessionID: string | undefined;
   if (known) {
-    const indexKey = sessionIndexKey(
-      requestCredentialFingerprint(req.rawHeaders),
-      known.headerName,
-      known.sessionId,
+    const credentialFingerprint = requestCredentialFingerprint(
+      req.rawHeaders,
+      config,
     );
-    const sid = headerSessionIndex.get(indexKey);
-    if (sid) {
-      state = allSessions.get(sid);
-      sessionID = sid;
+    if (credentialFingerprint !== null) {
+      const indexKey = sessionIndexKey(
+        credentialFingerprint,
+        known.headerName,
+        known.sessionId,
+      );
+      const sid = headerSessionIndex.get(indexKey);
+      if (sid) {
+        state = allSessions.get(sid);
+        sessionID = sid;
+      }
     }
   }
 
@@ -14524,11 +15234,16 @@ async function handleCurateSlashCommand(
   if (!sessionID) {
     // Use the most recently active session
     let latest: SessionState | undefined;
-    const credentialFingerprint = requestCredentialFingerprint(req.rawHeaders);
-    for (const s of allSessions.values()) {
-      if ((s.credentialFingerprint ?? "") !== credentialFingerprint) continue;
-      if (!latest || s.lastRequestTime > latest.lastRequestTime) {
-        latest = s;
+    const credentialFingerprint = requestCredentialFingerprint(
+      req.rawHeaders,
+      config,
+    );
+    if (credentialFingerprint !== null) {
+      for (const s of allSessions.values()) {
+        if ((s.credentialFingerprint ?? "") !== credentialFingerprint) continue;
+        if (!latest || s.lastRequestTime > latest.lastRequestTime) {
+          latest = s;
+        }
       }
     }
     if (latest) {
@@ -14842,7 +15557,7 @@ export function earlyFlushStreamingResponse(
  * Returns a standard `Response` object — either a streaming SSE response
  * or a JSON response, depending on the client's `stream` setting.
  */
-export async function handleRequest(
+async function handleRequestForTenant(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
@@ -14857,27 +15572,35 @@ export async function handleRequest(
       return errorResponse(400, "Malformed request: missing headers");
     }
 
-    // Capture auth credentials early for background workers. Tag by the
-    // explicit x-lore-provider header, falling back to the upstream URL for
-    // header-less credentialed requests (#829/#942).
+    if (hasConflictingAuthHeaders(req.rawHeaders)) {
+      return errorResponse(
+        400,
+        "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+      );
+    }
+
+    // Validate explicit provider/upstream selection before slash, side-channel,
+    // compaction, and meta branches can take alternate paths. This resolver is
+    // synchronous and performs no network I/O.
+    try {
+      resolveRequestUpstreamRoute(req, config);
+    } catch (error) {
+      return errorResponse(
+        400,
+        error instanceof Error ? error.message : "Invalid upstream route",
+      );
+    }
+
+    // Preserve the process-global legacy credential only for a local,
+    // header-less request to the exact configured provider base.
     const earlyAuth = extractAuth(req.rawHeaders);
     if (earlyAuth) {
-      setLastSeenAuth(earlyAuth, resolveLastSeenProvider(req.rawHeaders));
+      captureLegacyGlobalAuth(req, config, earlyAuth);
     }
 
     // --- Quick Tier-1 session lookup for structural compaction detection ---
     // O(1) header + map lookup — lets us compare message counts before routing.
-    let priorState: SessionState | undefined;
-    const known = extractKnownSessionHeader(req.rawHeaders);
-    if (known) {
-      const indexKey = sessionIndexKey(
-        earlyAuth ? authFingerprint(earlyAuth) : "",
-        known.headerName,
-        known.sessionId,
-      );
-      const sid = headerSessionIndex.get(indexKey);
-      if (sid) priorState = sessions.get(sid);
-    }
+    const priorState = activeSessionForKnownHeader(req, sessions, config);
 
     // --- Case 0: Slash command interception (/lore:*) ---
     // All /lore:* commands are intercepted here and never forwarded upstream.
@@ -14962,8 +15685,18 @@ export async function handleRequest(
         route: "request",
       });
     } else {
-      log.error("pipeline error:", err);
+      log.error("pipeline request failed");
     }
     return errorResponse(502, message);
   }
+}
+
+export async function handleRequest(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): Promise<Response> {
+  if (!req?.rawHeaders) return handleRequestForTenant(req, config);
+  return withRequestStorageTenant(req.rawHeaders, config, () =>
+    handleRequestForTenant(req, config),
+  );
 }

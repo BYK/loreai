@@ -151,10 +151,10 @@ function anthropicFinalStream(text: string): Response {
 // Test lifecycle
 // ---------------------------------------------------------------------------
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -171,6 +171,8 @@ async function spinUpGateway(projectDir: string) {
   await loadLoreConfig(projectDir);
 
   const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
   const server = await startServer(config);
   return {
     baseURL: `http://127.0.0.1:${server.port}`,
@@ -180,14 +182,14 @@ async function spinUpGateway(projectDir: string) {
   };
 }
 
-function teardownAll(
+async function teardownAll(
   dbPath: string,
   projectDir: string,
-  server: { stop: () => void },
+  server: { stop: () => Promise<void> },
   closeDB: () => void,
   setUpstreamInterceptor: (i: undefined) => void,
-) {
-  server.stop();
+): Promise<void> {
+  await server.stop();
   closeDB();
   setUpstreamInterceptor(undefined);
   for (const suffix of ["", "-shm", "-wal"]) {

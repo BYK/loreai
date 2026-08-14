@@ -18,6 +18,7 @@
  * Adapted from Sentry CLI's ghcr.ts for Lore.
  */
 
+import { createHash } from "node:crypto";
 import { getUserAgent } from "./binary";
 import { UpgradeError } from "./errors";
 
@@ -29,6 +30,8 @@ const GHCR_MAX_RETRIES = 1;
 
 /** Timeout for large blob downloads (30 seconds) */
 const GHCR_BLOB_TIMEOUT = 30_000;
+
+const SHA256_OCI_DIGEST = /^sha256:([a-f0-9]{64})$/;
 
 function isRetryableError(error: Error): boolean {
   if (error.name === "TimeoutError" || error.name === "AbortError") {
@@ -242,6 +245,13 @@ export async function downloadNightlyBlob(
   digest: string,
   signal?: AbortSignal,
 ): Promise<Response> {
+  const expectedDigest = SHA256_OCI_DIGEST.exec(digest)?.[1];
+  if (!expectedDigest) {
+    throw new UpgradeError(
+      "execution_failed",
+      `Invalid OCI blob digest: ${digest}`,
+    );
+  }
   const blobUrl = `${GHCR_REGISTRY}/v2/${GHCR_REPO}/blobs/${digest}`;
 
   let blobResponse: Response;
@@ -263,7 +273,7 @@ export async function downloadNightlyBlob(
   }
 
   if (blobResponse.status === 200) {
-    return blobResponse;
+    return verifyBlobResponse(blobResponse, expectedDigest);
   }
 
   if (
@@ -279,12 +289,31 @@ export async function downloadNightlyBlob(
         `GHCR blob redirect (${blobResponse.status}) had no Location header`,
       );
     }
+    let parsedRedirect: URL;
+    try {
+      parsedRedirect = new URL(redirectUrl);
+    } catch {
+      throw new UpgradeError(
+        "network_error",
+        "GHCR blob redirect had an invalid Location URL",
+      );
+    }
+    if (
+      parsedRedirect.protocol !== "https:" ||
+      parsedRedirect.username !== "" ||
+      parsedRedirect.password !== ""
+    ) {
+      throw new UpgradeError(
+        "network_error",
+        "GHCR blob redirect was not an authenticated HTTPS URL",
+      );
+    }
 
     let redirectResponse: Response;
     try {
-      redirectResponse = await fetch(redirectUrl, {
+      redirectResponse = await fetch(parsedRedirect, {
         headers: { "User-Agent": getUserAgent() },
-        signal,
+        signal: buildSignal(GHCR_BLOB_TIMEOUT, signal),
       });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -301,13 +330,39 @@ export async function downloadNightlyBlob(
       );
     }
 
-    return redirectResponse;
+    return verifyBlobResponse(redirectResponse, expectedDigest);
   }
 
   throw new UpgradeError(
     "network_error",
     `Unexpected GHCR blob response: HTTP ${blobResponse.status}`,
   );
+}
+
+/**
+ * Materialize and verify a blob before exposing any bytes to a decompressor or
+ * patch consumer. The manifest digest is the OCI content-addressing boundary;
+ * GHCR package write access remains the publisher-identity trust boundary.
+ */
+async function verifyBlobResponse(
+  response: Response,
+  expectedDigest: string,
+): Promise<Response> {
+  const bytes = await response.arrayBuffer();
+  const actualDigest = createHash("sha256")
+    .update(new Uint8Array(bytes))
+    .digest("hex");
+  if (actualDigest !== expectedDigest) {
+    throw new UpgradeError(
+      "execution_failed",
+      `OCI blob digest mismatch: got sha256:${actualDigest}, expected sha256:${expectedDigest}`,
+    );
+  }
+  return new Response(bytes, {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
 }
 
 /** Page size for tag listing pagination */

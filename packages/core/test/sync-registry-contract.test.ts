@@ -22,6 +22,7 @@ import {
   enableSync,
   readOutbox,
   SYNCED_TABLES,
+  SYNC_TENANT_PARENT_REFS,
   seedOutbox,
 } from "../src/sync-data";
 
@@ -190,6 +191,94 @@ describe("SYNCED_TABLES registry contract", () => {
           enableSync();
           expect(outboxFor(m.table)).toHaveLength(0);
         });
+      }
+    });
+  }
+});
+
+describe("SYNC_TENANT_PARENT_REFS registry contract", () => {
+  const EXPECTED: Record<
+    string,
+    Array<{
+      column: string;
+      parentTable: "projects" | "entities" | "knowledge";
+      parentKey: "id" | "logical_id";
+      optional?: boolean;
+    }>
+  > = {
+    knowledge: [
+      {
+        column: "project_id",
+        parentTable: "projects",
+        parentKey: "id",
+        optional: true,
+      },
+    ],
+    knowledge_meta: [
+      {
+        column: "logical_id",
+        parentTable: "knowledge",
+        parentKey: "logical_id",
+      },
+    ],
+    knowledge_meta_crdt: [
+      {
+        column: "logical_id",
+        parentTable: "knowledge",
+        parentKey: "logical_id",
+      },
+    ],
+    entities: [
+      {
+        column: "project_id",
+        parentTable: "projects",
+        parentKey: "id",
+        optional: true,
+      },
+    ],
+    entity_aliases: [
+      { column: "entity_id", parentTable: "entities", parentKey: "id" },
+    ],
+    entity_relations: [
+      { column: "entity_a", parentTable: "entities", parentKey: "id" },
+      { column: "entity_b", parentTable: "entities", parentKey: "id" },
+    ],
+    knowledge_entity_refs: [
+      {
+        column: "knowledge_id",
+        parentTable: "knowledge",
+        parentKey: "logical_id",
+      },
+      { column: "entity_id", parentTable: "entities", parentKey: "id" },
+    ],
+    distillations: [
+      { column: "project_id", parentTable: "projects", parentKey: "id" },
+    ],
+    temporal_messages: [
+      { column: "project_id", parentTable: "projects", parentKey: "id" },
+    ],
+  };
+
+  test("has an explicit entry for every synced table", () => {
+    expect(Object.keys(SYNC_TENANT_PARENT_REFS).sort()).toEqual(
+      ALL_REGISTERED.map((m) => m.table).sort(),
+    );
+  });
+
+  for (const m of ALL_REGISTERED) {
+    test(`${m.table}: tenant-sensitive parent mapping is complete and schema-valid`, () => {
+      expect(SYNC_TENANT_PARENT_REFS[m.table]).toEqual(EXPECTED[m.table] ?? []);
+      for (const ref of SYNC_TENANT_PARENT_REFS[m.table]) {
+        expect(m.syncColumns).toContain(ref.column);
+        const parentColumns = (
+          db().query(`PRAGMA table_info(${ref.parentTable})`).all() as Array<{
+            name: string;
+          }>
+        ).map((column) => column.name);
+        expect(parentColumns).toContain("tenant_id");
+        expect(parentColumns).toContain(
+          ref.parentKey === "logical_id" ? "logical_id" : "id",
+        );
       }
     });
   }

@@ -2681,6 +2681,69 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(text).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
+
+  test("invokes onAuthRejected without retaining the upstream body or URL secrets", async () => {
+    const privateBodyMarker = "PRIVATE_AUTH_RESPONSE_BODY_MARKER";
+    const userinfoMarker = "PRIVATE_AUTH_INFO_USERINFO";
+    const queryMarker = "PRIVATE_AUTH_INFO_QUERY";
+    const fragmentMarker = "PRIVATE_AUTH_INFO_FRAGMENT";
+    mockFetch.mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: privateBodyMarker } }), {
+        status: 401,
+        statusText: "private reason",
+      }),
+    );
+    const onAuthRejected = vi.fn();
+    const client = createGatewayLLMClient(
+      {
+        anthropic:
+          `https://user:${userinfoMarker}@example.com/custom` +
+          `?token=${queryMarker}#${fragmentMarker}`,
+        openai: UPSTREAMS.openai,
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test-stale" }),
+      { providerID: "anthropic", modelID: "claude-sonnet-5" },
+      { onAuthRejected },
+    );
+
+    await expect(
+      client.prompt("system", "user", { workerID: "lore-import" }),
+    ).resolves.toBeNull();
+
+    expect(onAuthRejected).toHaveBeenCalledTimes(1);
+    const info = onAuthRejected.mock.calls[0]?.[0];
+    expect(info).toMatchObject({
+      status: 401,
+      providerID: "anthropic",
+      modelID: "claude-sonnet-5",
+      url: "https://example.com/custom",
+      scheme: "api-key",
+      workerID: "lore-import",
+    });
+    const serialized = JSON.stringify(info);
+    expect(serialized).not.toContain(privateBodyMarker);
+    expect(serialized).not.toContain(userinfoMarker);
+    expect(serialized).not.toContain(queryMarker);
+    expect(serialized).not.toContain(fragmentMarker);
+  });
+
+  test("onAuthRejected hook exceptions preserve the null-return contract", async () => {
+    mockFetch.mockResolvedValue(new Response("", { status: 403 }));
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+      {
+        onAuthRejected: () => {
+          throw new Error("diagnostic handler bug");
+        },
+      },
+    );
+
+    await expect(
+      client.prompt("system", "user", { workerID: "lore-import" }),
+    ).resolves.toBeNull();
+  });
 });
 
 describe("worker provider body validation", () => {
@@ -6489,13 +6552,13 @@ describe("worker diagnostic redaction", () => {
   });
 
   test.each([400, 401, 429, 500])(
-    "HTTP %i exposes neither provider body nor URL credentials/path/query in diagnostics",
+    "HTTP %i exposes neither provider body, statusText, nor URL credentials/query in diagnostics",
     async (status) => {
       const bodySentinel = `BODY_SECRET_${status}\nFORGED_LOG_LINE_${status}`;
+      const reasonSentinel = `STATUS_TEXT_SECRET_${status}`;
       const urlSentinels = [
         "URL_USER_SECRET",
         "URL_PASSWORD_SECRET",
-        "private-worker-path",
         "QUERY_SECRET",
       ];
       const upstreamUrl =
@@ -6505,7 +6568,11 @@ describe("worker diagnostic redaction", () => {
         async () =>
           new Response(
             JSON.stringify({ error: { code: status, message: bodySentinel } }),
-            { status, headers: { "retry-after": "0" } },
+            {
+              status,
+              statusText: reasonSentinel,
+              headers: { "retry-after": "0" },
+            },
           ),
       );
       const client = createGatewayLLMClient(
@@ -6543,11 +6610,93 @@ describe("worker diagnostic redaction", () => {
       for (const dump of [logDump, sentryDump, lastError]) {
         expect(dump).not.toContain(bodySentinel);
         expect(dump).not.toContain("FORGED_LOG_LINE");
+        expect(dump).not.toContain(reasonSentinel);
         for (const sentinel of urlSentinels) {
           expect(dump).not.toContain(sentinel);
         }
       }
-      expect(logDump).toContain("https://example.com");
+      expect(logDump).toContain("https://example.com/private-worker-path");
     },
   );
+
+  test("malformed successful responses never expose their prefix or statusText", async () => {
+    const bodyMarker = "PRIVATE_MALFORMED_WORKER_BODY_MARKER";
+    const reasonMarker = "PRIVATE_WORKER_REASON_MARKER";
+    mockFetch.mockResolvedValueOnce(
+      new Response(`${bodyMarker} not-json`, {
+        status: 200,
+        statusText: reasonMarker,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    await expect(
+      client.prompt("system", "user", { workerID: "lore-distill" }),
+    ).resolves.toBeNull();
+
+    const output = capturedLogs.join("\n");
+    expect(output).toContain("invalid");
+    expect(output).not.toContain(bodyMarker);
+    expect(output).not.toContain(reasonMarker);
+  });
+
+  test("response diagnostics exclude body-controlled fields and content-type values", async () => {
+    const bodyMarker = "PRIVATE_WORKER_EMPTY_FIELD_MARKER";
+    const headerMarker = "PRIVATE_WORKER_CONTENT_TYPE_MARKER";
+    mockFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          content: [{ type: bodyMarker }],
+          stop_reason: bodyMarker,
+        }),
+        {
+          status: 200,
+          headers: { "content-type": `application/json; note=${headerMarker}` },
+        },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    await expect(
+      client.prompt("system", "user", { workerID: "lore-distill" }),
+    ).resolves.toBeNull();
+
+    const output = capturedLogs.join("\n");
+    expect(output).toContain("invalid anthropic response");
+    expect(output).not.toContain(bodyMarker);
+    expect(output).not.toContain(headerMarker);
+  });
+
+  test("thrown transport details never reach retry or terminal logs", async () => {
+    const thrownMarker = "PRIVATE_WORKER_THROWN_ERROR_MARKER";
+    mockFetch.mockRejectedValue(new Error(thrownMarker));
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.anthropic.com",
+        openai: "https://api.openai.com",
+      },
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+    );
+
+    await expect(
+      client.prompt("system", "user", { workerID: "lore-distill" }),
+    ).resolves.toBeNull();
+    expect(capturedLogs.join("\n")).not.toContain(thrownMarker);
+  });
 });

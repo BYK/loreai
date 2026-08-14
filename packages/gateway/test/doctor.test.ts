@@ -538,11 +538,11 @@ describe("fetchMemoryHealth", () => {
         { status: 200 },
       ),
     );
-    const h = await fetchMemoryHealth("http://127.0.0.1:3207");
+    const h = await fetchMemoryHealth("http://gateway.example.test:3207");
     expect(h?.embeddings?.available).toBe(true);
     expect(h?.worker?.ok).toBe(true);
     expect(fetchSpy).toHaveBeenCalledWith(
-      "http://127.0.0.1:3207/health",
+      "http://gateway.example.test:3207/health",
       expect.anything(),
     );
   });
@@ -551,7 +551,9 @@ describe("fetchMemoryHealth", () => {
     fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("nope", { status: 500 }));
-    expect(await fetchMemoryHealth("http://127.0.0.1:3207")).toBeNull();
+    expect(
+      await fetchMemoryHealth("http://gateway.example.test:3207"),
+    ).toBeNull();
   });
 
   it("returns null when the gateway predates the fields (no embeddings/worker)", async () => {
@@ -560,13 +562,17 @@ describe("fetchMemoryHealth", () => {
         status: 200,
       }),
     );
-    expect(await fetchMemoryHealth("http://127.0.0.1:3207")).toBeNull();
+    expect(
+      await fetchMemoryHealth("http://gateway.example.test:3207"),
+    ).toBeNull();
   });
 
   it("returns null when the request throws", async () => {
     fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("connection refused"));
-    expect(await fetchMemoryHealth("http://127.0.0.1:3207")).toBeNull();
+    expect(
+      await fetchMemoryHealth("http://gateway.example.test:3207"),
+    ).toBeNull();
   });
 });

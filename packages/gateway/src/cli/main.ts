@@ -10,6 +10,7 @@
  *   data           → inspect and manage stored data
  *   recall         → search project memory from the terminal
  *   upgrade        → self-update
+ *   uninstall      → undo persistent setup and remove standalone Lore
  *   help           → print usage
  */
 import { parseArgs } from "node:util";
@@ -116,6 +117,7 @@ const OPTIONS = {
   "import-lore-md": { type: "boolean" as const },
   gate: { type: "boolean" as const },
   "dry-run": { type: "boolean" as const },
+  purge: { type: "boolean" as const },
   "no-children": { type: "boolean" as const },
   // `lore import` flag — restrict detection to the current directory only
   // (skip sibling git worktrees / clone paths of the same repo).
@@ -588,6 +590,12 @@ export async function _cli(): Promise<void> {
         break;
       }
 
+      case "uninstall": {
+        const { commandUninstall } = await import("./uninstall");
+        await commandUninstall(rest, values);
+        break;
+      }
+
       case "help":
         printHelp();
         break;
@@ -621,6 +629,7 @@ export async function _cli(): Promise<void> {
               "import",
               "entity",
               "upgrade",
+              "uninstall",
               "help",
               ...knownBinaries,
             ];
