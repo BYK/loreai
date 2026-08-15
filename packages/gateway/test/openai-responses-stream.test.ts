@@ -1232,6 +1232,66 @@ describe("accumulateResponsesSSEStream", () => {
     },
   );
 
+  test.each([
+    ["role", "user"],
+    ["status", "in_progress"],
+  ] as const)(
+    "public rejects a terminal message with changed %s",
+    async (field, value) => {
+      const itemId = `msg-changed-${field}`;
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                output_index: 0,
+                item: {
+                  type: "message",
+                  id: itemId,
+                  role: "assistant",
+                  status: "in_progress",
+                },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                output_index: 0,
+                item: {
+                  type: "message",
+                  id: itemId,
+                  role: "assistant",
+                  status: "completed",
+                  content: [],
+                },
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [
+                    {
+                      type: "message",
+                      id: itemId,
+                      role: "assistant",
+                      status: "completed",
+                      content: [],
+                      [field]: value,
+                    },
+                  ],
+                },
+              },
+            },
+          ]),
+          { validation: "public", stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
   test.each(["public", "codex"] as const)(
     "%s requires a present terminal output snapshot to be a one-to-one complete mapping",
     async (validation) => {

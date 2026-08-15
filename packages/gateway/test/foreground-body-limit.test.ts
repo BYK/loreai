@@ -261,6 +261,39 @@ describe("foreground response body limits", () => {
     ).rejects.toThrow("upstream Responses request did not complete");
   });
 
+  test.each([
+    {
+      type: "reasoning",
+      id: "rs_in_progress",
+      status: "in_progress",
+      summary: [],
+    },
+    {
+      type: "item_reference",
+      id: "ref_extra",
+      content: [],
+    },
+    {
+      type: "provider_specific_output",
+      id: "unknown_output",
+    },
+  ])("rejects malformed non-stream output item $type", async (item) => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_malformed_item",
+        model: "gpt-test",
+        status: "completed",
+        output: [item],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(response, "openai-responses"),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
+
   test("rejects provider-specific incomplete reasons in sniffed Codex SSE", async () => {
     const wire =
       'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"id":"resp_codex_sse_incomplete","status":"incomplete","incomplete_details":{"reason":"provider_specific"}}}\n\n';

@@ -10196,6 +10196,47 @@ function assertValidNonStreamCompletion(
         ) {
           throw new Error("upstream Responses request did not complete");
         }
+      } else if (item.type === "reasoning") {
+        const validItemStatus =
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (!validItemStatus) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const [field, partType] of [
+          ["summary", "summary_text"],
+          ["content", "reasoning_text"],
+        ] as const) {
+          const parts = item[field];
+          if (parts === undefined) continue;
+          if (!Array.isArray(parts)) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          for (const rawPart of parts) {
+            if (
+              !rawPart ||
+              typeof rawPart !== "object" ||
+              Array.isArray(rawPart) ||
+              (rawPart as Record<string, unknown>).type !== partType ||
+              typeof (rawPart as Record<string, unknown>).text !== "string"
+            ) {
+              throw new Error("upstream Responses request did not complete");
+            }
+          }
+        }
+        if (
+          item.encrypted_content !== undefined &&
+          item.encrypted_content !== null &&
+          typeof item.encrypted_content !== "string"
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      } else if (item.type === "item_reference") {
+        if (Object.keys(item).some((key) => key !== "type" && key !== "id")) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      } else {
+        throw new Error("upstream Responses request did not complete");
       }
     }
     if (status === "incomplete") {

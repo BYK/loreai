@@ -1657,6 +1657,10 @@ export async function accumulateResponsesSSEStream(
               "name",
               "arguments",
               "content",
+              "role",
+              "status",
+              "summary",
+              "encrypted_content",
             ] as const) {
               if (
                 JSON.stringify(snapshot[field]) !==
