@@ -386,11 +386,22 @@ describe("captureUserUpstream", () => {
       "http://localhost:8080",
       "http://127.0.0.5:1234",
       "http://[::1]:3000",
+      "http://[::ffff:127.0.0.1]:3207",
+      "http://[0:0:0:0:0:ffff:7f00:5]:3207",
+      "http://[::ffff:0.0.0.0]:3207",
     ]) {
       expect(
         captureUserUpstream(claude, GATEWAY, { ANTHROPIC_BASE_URL: url }),
       ).toBe(null);
     }
+  });
+
+  test("does not reject an IPv4-mapped public address", () => {
+    expect(
+      captureUserUpstream(claude, GATEWAY, {
+        ANTHROPIC_BASE_URL: "https://[::ffff:192.0.2.1]/v1",
+      }),
+    ).toMatchObject({ wireProtocol: "anthropic" });
   });
 
   test("rejects a non-URL / unparseable value", () => {

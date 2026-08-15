@@ -82,7 +82,17 @@ function isLoopbackHost(hostname: string): boolean {
   if (h === "localhost" || h === "::1" || h === "0.0.0.0" || h === "::")
     return true;
   // 127.0.0.0/8
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  // URL canonicalizes IPv4-mapped IPv6, e.g. ::ffff:127.0.0.1 becomes
+  // ::ffff:7f00:1. Decode its high IPv4 octet so mapped loopback/wildcard
+  // addresses cannot bypass the self-proxy guard.
+  const mapped = h.match(
+    /^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/,
+  );
+  if (!mapped) return false;
+  const high = Number.parseInt(mapped[1], 16);
+  const low = Number.parseInt(mapped[2], 16);
+  return high >>> 8 === 127 || (high === 0 && low === 0);
 }
 
 /**
