@@ -48,6 +48,7 @@ import { parseArgs } from "node:util";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import { MODEL_DIR_NAME, MODEL_FILES } from "./vendor-paths";
 import { ortNativePlugin } from "./ort-native-plugin";
+import { jsoncParserEsmPlugin } from "./jsonc-parser-plugin";
 import { ensureVecBinaries, vecAssetKey } from "./vendor-sqlite-vec";
 import { ortNativeAssets } from "./vendor-ort-native";
 import { fossilize } from "fossilize";
@@ -525,6 +526,7 @@ async function buildBinary() {
     plugins: [
       binaryExternalsPlugin(),
       sentryBunToNodePlugin(),
+      jsoncParserEsmPlugin(packageDir),
       stubSqliteVecPlugin(),
     ],
     inject: [

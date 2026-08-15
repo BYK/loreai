@@ -28,6 +28,7 @@ import type {
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
 import { asString } from "@loreai/core";
+import { extractAuth } from "../auth";
 import { safeTokenSum, validateGeminiUsageMetadata } from "../usage-validation";
 
 /** Default Gemini API version segment used when building upstream URLs. */
@@ -344,6 +345,12 @@ export function buildGeminiUpstreamRequest(
     ...forwardClientHeaders(req.rawHeaders),
     "content-type": "application/json",
   };
+  const credential = extractAuth(req.rawHeaders);
+  if (credential?.scheme === "api-key") {
+    headers["x-goog-api-key"] = credential.value;
+  } else if (credential?.scheme === "bearer") {
+    headers.authorization = `Bearer ${credential.value}`;
+  }
 
   const contents: Array<Record<string, unknown>> = [];
   for (const msg of req.messages) {

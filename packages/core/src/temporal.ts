@@ -1,4 +1,5 @@
-import { db, ensureProject, withSyncApplying } from "./db";
+import { createHash } from "node:crypto";
+import { db, ensureProject, projectId, withSyncApplying } from "./db";
 import { deleteEmbeddings } from "./db/vec-store";
 import { runRelaxedSearch, runRelaxedSearchAsync } from "./search";
 import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
@@ -14,6 +15,7 @@ import {
 import type { LoreMessage, LorePart, LoreToolState } from "./types";
 import { isTextPart, isReasoningPart, isToolPart } from "./types";
 import { estimateTokens } from "./tokenize";
+import { currentTenantId } from "./tenant";
 
 /**
  * Chunk-boundary terminator inserted between chunks by `partsToText`.
@@ -76,42 +78,152 @@ function messageMetadata(info: LoreMessage, parts: LorePart[]): string {
   return JSON.stringify(meta);
 }
 
+const TEMPORAL_ID_PREFIX = "lore_tm_v1_";
+
+/**
+ * Derive the globally unique storage key for a caller-supplied message ID.
+ *
+ * `source_id` remains the caller's opaque, request-stable identity. The primary
+ * key is always a domain-separated hash of its durable owner, so an input that
+ * happens to look like a Lore key is still hashed as input and can never be
+ * mistaken for a storage key.
+ */
+function derivedMessageId(
+  projectId: string,
+  sessionId: string,
+  sourceId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify([
+        "lore-temporal-message-v1",
+        currentTenantId(),
+        projectId,
+        sessionId,
+        sourceId,
+      ]),
+    )
+    .digest("base64url");
+  return `${TEMPORAL_ID_PREFIX}${digest}`;
+}
+
+/** Resolve a source ID to an existing legacy/restored row or its v82 key. */
+function resolveMessageId(
+  projectId: string,
+  sessionId: string,
+  sourceId: string,
+  legacySourceId?: string,
+): string {
+  const derivedId = derivedMessageId(projectId, sessionId, sourceId);
+  const existing = db()
+    .query(
+      `SELECT t.id FROM temporal_messages t
+        JOIN projects p ON p.id = t.project_id
+        WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
+          AND (t.source_id = ?
+               OR (t.source_id = t.id AND t.source_id = ?)
+               OR (t.source_id IS NULL AND t.id = ?))
+        LIMIT 1`,
+    )
+    .get(
+      projectId,
+      currentTenantId(),
+      sessionId,
+      sourceId,
+      legacySourceId ?? sourceId,
+      derivedId,
+    ) as { id: string } | null;
+  return existing?.id ?? derivedId;
+}
+
+/**
+ * Return the recall/storage ID corresponding to a caller-supplied message ID.
+ * Existing pre-v82 rows retain their original IDs; new rows use a namespaced ID.
+ */
+export function storedMessageId(input: {
+  projectPath: string;
+  sessionID: string;
+  sourceID: string;
+  /** Pre-v82 gateway source ID, used only to resolve persisted local rows. */
+  legacySourceID?: string;
+}): string {
+  return resolveMessageId(
+    ensureProject(input.projectPath),
+    input.sessionID,
+    input.sourceID,
+    input.legacySourceID,
+  );
+}
+
+/** Read-only variant for no-store paths; never creates or backfills a project. */
+export function storedMessageIdIfProjectExists(input: {
+  projectPath: string;
+  sessionID: string;
+  sourceID: string;
+  legacySourceID?: string;
+}): string | undefined {
+  const pid = projectId(input.projectPath);
+  if (!pid) return undefined;
+  return resolveMessageId(
+    pid,
+    input.sessionID,
+    input.sourceID,
+    input.legacySourceID,
+  );
+}
+
 export function store(input: {
   projectPath: string;
   info: LoreMessage;
   parts: LorePart[];
-}) {
+  legacySourceID?: string;
+}): string | undefined {
   const pid = ensureProject(input.projectPath);
   const content = partsToText(input.parts);
   if (!content.trim()) return;
 
+  const storageId = resolveMessageId(
+    pid,
+    input.info.sessionID,
+    input.info.id,
+    input.legacySourceID,
+  );
   const existing = db()
-    .query("SELECT id FROM temporal_messages WHERE id = ?")
-    .get(input.info.id);
+    .query(
+      "SELECT id FROM temporal_messages WHERE id = ? AND project_id = ? AND session_id = ?",
+    )
+    .get(storageId, pid, input.info.sessionID);
   if (existing) {
     db()
       .query(
-        "UPDATE temporal_messages SET content = ?, tokens = ?, metadata = ? WHERE id = ?",
+        `UPDATE temporal_messages
+            SET content = ?, tokens = ?, metadata = ?,
+                source_id = ?
+          WHERE id = ? AND project_id = ? AND session_id = ?`,
       )
       .run(
         content,
         estimateTokens(content),
         messageMetadata(input.info, input.parts),
         input.info.id,
+        storageId,
+        pid,
+        input.info.sessionID,
       );
     // Re-embed on content update (fire-and-forget)
     if (embedding.isAvailable()) {
-      embedding.embedTemporalMessage(input.info.id, content);
+      embedding.embedTemporalMessage(storageId, content);
     }
-    return;
+    return storageId;
   }
 
   db()
     .query(
-      `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      `INSERT INTO temporal_messages (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     )
     .run(
+      storageId,
       input.info.id,
       pid,
       input.info.sessionID,
@@ -124,8 +236,9 @@ export function store(input: {
 
   // Embed new message for vector search (fire-and-forget)
   if (embedding.isAvailable()) {
-    embedding.embedTemporalMessage(input.info.id, content);
+    embedding.embedTemporalMessage(storageId, content);
   }
+  return storageId;
 }
 
 /**
@@ -138,7 +251,7 @@ export function store(input: {
  *     (state `completed` or `error`, after the gateway adapter resolves it)
  *     with the OUTCOME, keyed by the same `callID`.
  *
- * Both phases UPSERT on the globally-unique `call_id` primary key: the tool_use
+ * Both phases correlate on `(project_id, session_id, call_id)`: the tool_use
  * seeds the name + `pending`; the result updates status/error/duration in place.
  * The result branch deliberately does NOT overwrite the recorded tool name with
  * the synthetic `"result"` (it preserves the seeded name).
@@ -153,12 +266,19 @@ export function recordToolCalls(input: {
   projectPath: string;
   info: LoreMessage;
   parts: LorePart[];
+  legacySourceID?: string;
 }): void {
   const toolParts = input.parts.filter(isToolPart);
   if (!toolParts.length) return;
 
   const pid = ensureProject(input.projectPath);
   const createdAt = input.info.time.created;
+  const messageId = resolveMessageId(
+    pid,
+    input.info.sessionID,
+    input.info.id,
+    input.legacySourceID,
+  );
 
   // Split into the two phases up front so the seed (tool_use) phase can be
   // flattened into ONE multi-row upsert instead of one INSERT per part. The
@@ -200,7 +320,7 @@ export function recordToolCalls(input: {
         `INSERT INTO tool_calls
            (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at, verifier, input_paths_json)
          VALUES ${Array.from({ length: batch.length }, () => rowSql).join(", ")}
-         ON CONFLICT(call_id) DO UPDATE SET
+         ON CONFLICT(project_id, session_id, call_id) DO UPDATE SET
            status = CASE WHEN tool_calls.status = 'pending' THEN excluded.status ELSE tool_calls.status END,
            error_type = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_type ELSE tool_calls.error_type END,
            error_message = CASE WHEN tool_calls.status = 'pending' THEN excluded.error_message ELSE tool_calls.error_message END,
@@ -222,7 +342,7 @@ export function recordToolCalls(input: {
         const inputPathsJson = paths.length > 0 ? JSON.stringify(paths) : null;
         params.push(
           p.callID,
-          input.info.id,
+          messageId,
           pid,
           input.info.sessionID,
           p.tool,
@@ -239,13 +359,13 @@ export function recordToolCalls(input: {
     }
   }
 
-  // Phase B: user tool_result parts — update outcome by call_id, preserving
-  // the previously-seeded tool name and message_id.
+  // Phase B: user tool_result parts — update only the call owned by this
+  // project/session, preserving the previously-seeded tool name and message_id.
   if (resultParts.length) {
     const updateStmt = db().query(
       `UPDATE tool_calls
          SET status = ?, error_type = ?, error_message = ?, duration_ms = ?
-       WHERE call_id = ?`,
+       WHERE project_id = ? AND session_id = ? AND call_id = ?`,
     );
     for (const p of resultParts) {
       const outcome = toolOutcome(p.tool, p.state);
@@ -254,6 +374,8 @@ export function recordToolCalls(input: {
         outcome.errorType,
         outcome.errorMessage,
         outcome.duration,
+        pid,
+        input.info.sessionID,
         p.callID,
       );
     }
@@ -294,6 +416,7 @@ function toolOutcome(
 
 export type TemporalMessage = {
   id: string;
+  source_id?: string | null;
   project_id: string;
   session_id: string;
   role: string;
@@ -483,9 +606,11 @@ export function markDistilled(ids: string[]) {
   const placeholders = ids.map(() => "?").join(",");
   db()
     .query(
-      `UPDATE temporal_messages SET distilled = 1 WHERE id IN (${placeholders})`,
+      `UPDATE temporal_messages SET distilled = 1
+        WHERE id IN (${placeholders})
+          AND project_id IN (SELECT id FROM projects WHERE tenant_id = ?)`,
     )
-    .run(...ids);
+    .run(...ids, currentTenantId());
 }
 
 // Searches all temporal messages (including distilled). Distilled messages
@@ -579,14 +704,14 @@ export async function searchScored(input: {
   // is pure waste even in-process — `ScoredTemporalMessage` has no embedding
   // field. Mirrors the hydration SELECT in recall.ts.
   const ftsSQL = input.sessionID
-    ? `SELECT m.id, m.project_id, m.session_id, m.role, m.content, m.tokens,
-              m.distilled, m.created_at, m.metadata, rank
+    ? `SELECT m.id, m.source_id, m.project_id, m.session_id, m.role, m.content, m.tokens,
+               m.distilled, m.created_at, m.metadata, rank
        FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ? AND m.session_id = ?
        ORDER BY rank LIMIT ?`
-    : `SELECT m.id, m.project_id, m.session_id, m.role, m.content, m.tokens,
-              m.distilled, m.created_at, m.metadata, rank
+    : `SELECT m.id, m.source_id, m.project_id, m.session_id, m.role, m.content, m.tokens,
+               m.distilled, m.created_at, m.metadata, rank
        FROM temporal_fts f
        CROSS JOIN temporal_messages m ON m.rowid = f.rowid
        WHERE f.content MATCH ? AND m.project_id = ?
@@ -755,7 +880,9 @@ function clearPrunedSyncState(
   if (ids.length === 0) return;
   const ph = ids.map(() => "?").join(",");
   database
-    .query(`DELETE FROM sync_state WHERE table_name = ? AND row_id IN (${ph})`)
+    .query(
+      `DELETE FROM sync_state WHERE tenant_id = '' AND table_name = ? AND row_id IN (${ph})`,
+    )
     .run(table, ...ids);
 }
 

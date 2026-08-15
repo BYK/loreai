@@ -62,6 +62,7 @@ The URL is the server root — do not include `/v1` (the gateway appends API pat
 - **Compaction is intercepted.** Pi's compaction goes through its extension API rather than HTTP. The Pi extension calls the gateway's `POST /v1/compact` endpoint to get a full LLM-synthesized compaction summary (force-distill + knowledge + compact prompt).
 - **Provider headers are auto-injected.** The extension's `registerProviders()` walks the configured providers and sets the gateway base URL, `x-lore-session-id`, `x-lore-project`, and `x-lore-git-remote` headers on each request.
 - **`LORE_GATEWAY_URL` overrides auto-detection.** If the gateway is on a non-default host or port, set `LORE_GATEWAY_URL` in your environment before launching Pi.
+- **Remote access is separate from provider auth.** For a remote/hosted gateway, set both `LORE_REMOTE_URL` and `LORE_GATEWAY_AUTH_TOKEN`. The extension adds `x-lore-gateway-token` to provider registrations, intercepted fetches, and `/v1/compact` calls without treating it as model-provider auth.
 
 ## Next steps
 

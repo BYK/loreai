@@ -35,6 +35,7 @@ import {
   onKnowledgeTeamPromotionChanged,
   rematerializeConfidence,
 } from "./ltm";
+import { currentTenantId, LOCAL_TENANT_ID } from "./tenant";
 
 // The stable per-device id (also used by the confidence CRDT) doubles as the device id
 // for sync's server-side reaper watermark (#909). Re-exported so the gateway can report
@@ -47,6 +48,21 @@ export { replicaId } from "./ltm";
  * share one mechanism.
  */
 export const withApplying = withSyncApplying;
+
+/**
+ * Cloud sync is intentionally single-account and may only touch the historical
+ * local storage tenant. Request-owned remote/hosted tenants fail closed rather
+ * than sharing installation-global cursors, mirrors, or credentials.
+ */
+export function isLocalSyncContext(): boolean {
+  return currentTenantId() === LOCAL_TENANT_ID;
+}
+
+function assertLocalSyncContext(operation: string): void {
+  if (!isLocalSyncContext()) {
+    throw new Error(`${operation}: cloud sync is unavailable in tenant scope`);
+  }
+}
 
 export type SyncTier = "basic" | "pro" | "max";
 
@@ -556,6 +572,89 @@ export const SYNCED_TABLES: Record<SyncTier, SyncTableMeta[]> = {
   max: [],
 };
 
+export interface SyncTenantParentRef {
+  /** Incoming child column carrying the parent's durable identity. */
+  column: string;
+  /** Tenant-owned local table the reference resolves against. */
+  parentTable: "projects" | "entities" | "knowledge";
+  /** `knowledge.logical_id` is logical identity; all other parents use `id`. */
+  parentKey: "id" | "logical_id";
+  /** NULL means "no parent" and is valid for this child column. */
+  optional?: boolean;
+}
+
+/**
+ * Tenant-sensitive parent references for EVERY synced row shape. Empty entries
+ * are deliberate: those tables either have no parent or only reference
+ * installation-local cloud mirrors (which request tenants cannot own). Keeping
+ * this separate from remote FK assumptions is load-bearing: Supabase may accept
+ * orphan/cross-tenant children, while local SQLite FKs key only by id and cannot
+ * express `(tenant_id, id)` ownership.
+ */
+export const SYNC_TENANT_PARENT_REFS: Readonly<
+  Record<string, readonly SyncTenantParentRef[]>
+> = Object.freeze({
+  account_escrow: [],
+  scope_keys: [],
+  projects: [],
+  knowledge: [
+    {
+      column: "project_id",
+      parentTable: "projects",
+      parentKey: "id",
+      optional: true,
+    },
+  ],
+  knowledge_meta: [
+    {
+      column: "logical_id",
+      parentTable: "knowledge",
+      parentKey: "logical_id",
+    },
+  ],
+  knowledge_meta_crdt: [
+    {
+      column: "logical_id",
+      parentTable: "knowledge",
+      parentKey: "logical_id",
+    },
+  ],
+  entities: [
+    {
+      column: "project_id",
+      parentTable: "projects",
+      parentKey: "id",
+      optional: true,
+    },
+  ],
+  entity_aliases: [
+    { column: "entity_id", parentTable: "entities", parentKey: "id" },
+  ],
+  entity_relations: [
+    { column: "entity_a", parentTable: "entities", parentKey: "id" },
+    { column: "entity_b", parentTable: "entities", parentKey: "id" },
+  ],
+  knowledge_entity_refs: [
+    {
+      column: "knowledge_id",
+      parentTable: "knowledge",
+      parentKey: "logical_id",
+    },
+    { column: "entity_id", parentTable: "entities", parentKey: "id" },
+  ],
+  profiles: [],
+  orgs: [],
+  org_members: [],
+  scopes: [],
+  scope_members: [],
+  distillations: [
+    { column: "project_id", parentTable: "projects", parentKey: "id" },
+  ],
+  temporal_messages: [
+    { column: "project_id", parentTable: "projects", parentKey: "id" },
+  ],
+});
+
 // Every registered table across ALL tiers — so meta()/metaFor() resolve a table
 // regardless of the caller's current tier (a Pro table's shape is tier-independent;
 // tier only gates whether it is SYNCED, not whether its meta exists).
@@ -589,6 +688,7 @@ export function syncedTablesFor(tier: SyncTier): SyncTableMeta[] {
  * whose cumulative table set should sync. free → basic; pro → pro; max → max.
  */
 export function currentSyncTier(): SyncTier {
+  if (!isLocalSyncContext()) return "basic";
   const plan = currentTier();
   if (plan === "max") return "max";
   if (plan === "pro") return "pro";
@@ -611,6 +711,7 @@ export function metaFor(table: string): SyncTableMeta {
  * propagates here on the next pull (no bespoke "did I become pro?" path).
  */
 export function currentTier(): string {
+  if (!isLocalSyncContext()) return "free";
   // INVARIANT: the mirror holds AT MOST the currently-authenticated user's row.
   // `clearPullOnlyMirrors()` is called on logout and on account switch, so a stale
   // OR foreign account's tier can never linger here — making this unqualified
@@ -634,6 +735,7 @@ export function currentTier(): string {
  * mirror intact — callers gate on a user_id change.
  */
 export function clearPullOnlyMirrors(): void {
+  if (!isLocalSyncContext()) return;
   for (const m of [
     ...SYNCED_TABLES.basic,
     ...SYNCED_TABLES.pro,
@@ -641,7 +743,9 @@ export function clearPullOnlyMirrors(): void {
   ]) {
     if (!m.pullOnly) continue;
     db().exec(`DELETE FROM ${m.table}`);
-    db().query("DELETE FROM sync_state WHERE table_name = ?").run(m.table);
+    db()
+      .query("DELETE FROM sync_state WHERE tenant_id = ? AND table_name = ?")
+      .run(LOCAL_TENANT_ID, m.table);
     // Reset the pull cursor so the (new) account's rows are re-pulled from the
     // start rather than skipped by a cursor inherited from the previous account.
     setKV(`sync.pull.${m.table}`, "0|");
@@ -652,6 +756,62 @@ function meta(table: string): SyncTableMeta {
   const m = META_BY_TABLE.get(table);
   if (!m) throw new Error(`not a synced table: ${table}`);
   return m;
+}
+
+export class SyncParentConstraintError extends Error {
+  readonly code = "SQLITE_CONSTRAINT_FOREIGNKEY";
+  readonly errcode = 787;
+
+  constructor(
+    readonly table: string,
+    readonly column: string,
+    readonly reason: "missing" | "non-local",
+  ) {
+    super(
+      `sync parent constraint failed: ${table}.${column} has ${reason} parent`,
+    );
+    this.name = "SyncParentConstraintError";
+  }
+}
+
+/**
+ * Validate every tenant-sensitive parent reference before a pulled row can
+ * mutate local storage or receive sync_state. Missing parents follow the
+ * existing FK-orphan quarantine behavior for upserts; tombstones may outlive
+ * their parents, but still fail closed if a matching non-local parent exists.
+ */
+export function assertLocalSyncParents(
+  table: string,
+  row: Record<string, unknown>,
+  opts: { allowMissing?: boolean } = {},
+): void {
+  meta(table);
+  if (!Object.hasOwn(SYNC_TENANT_PARENT_REFS, table)) {
+    throw new Error(`missing sync parent registry entry: ${table}`);
+  }
+
+  for (const ref of SYNC_TENANT_PARENT_REFS[table]) {
+    const value = row[ref.column];
+    if (value === null || value === undefined) {
+      if (ref.optional || opts.allowMissing) continue;
+      throw new SyncParentConstraintError(table, ref.column, "missing");
+    }
+
+    const parentWhere =
+      ref.parentKey === "logical_id"
+        ? "COALESCE(logical_id, id) = ?"
+        : "id = ?";
+    const parents = db()
+      .query(`SELECT tenant_id FROM ${ref.parentTable} WHERE ${parentWhere}`)
+      .all(asString(value)) as Array<{ tenant_id: string }>;
+    if (parents.length === 0) {
+      if (opts.allowMissing) continue;
+      throw new SyncParentConstraintError(table, ref.column, "missing");
+    }
+    if (parents.some((parent) => parent.tenant_id !== LOCAL_TENANT_ID)) {
+      throw new SyncParentConstraintError(table, ref.column, "non-local");
+    }
+  }
 }
 
 /**
@@ -760,13 +920,72 @@ function hashRowColumns(
   return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }
 
+/**
+ * Ownership predicate for a live synced row. Tables with direct durable tenant
+ * ownership use it; child/register rows derive ownership from their parent.
+ * Installation-local key/mirror tables have no tenant column and are reachable
+ * only after the local-context guard above this DB boundary.
+ */
+function localRowGate(table: string): string {
+  switch (table) {
+    case "projects":
+    case "knowledge":
+    case "entities":
+    case "entity_aliases":
+      return `${table}.tenant_id = ''`;
+    case "knowledge_meta":
+    case "knowledge_meta_crdt":
+      return `EXISTS (SELECT 1 FROM knowledge k WHERE COALESCE(k.logical_id, k.id) = ${table}.logical_id AND k.tenant_id = '')`;
+    case "entity_relations":
+      return (
+        "EXISTS (SELECT 1 FROM entities e WHERE e.id = entity_relations.entity_a AND e.tenant_id = '') " +
+        "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = entity_relations.entity_b AND e.tenant_id = '')"
+      );
+    case "knowledge_entity_refs":
+      return (
+        "EXISTS (SELECT 1 FROM knowledge k WHERE COALESCE(k.logical_id, k.id) = knowledge_entity_refs.knowledge_id AND k.tenant_id = '') " +
+        "AND EXISTS (SELECT 1 FROM entities e WHERE e.id = knowledge_entity_refs.entity_id AND e.tenant_id = '')"
+      );
+    case "distillations":
+    case "temporal_messages":
+      return `EXISTS (SELECT 1 FROM projects p WHERE p.id = ${table}.project_id AND p.tenant_id = '')`;
+    default:
+      return "1 = 1";
+  }
+}
+
+/** Refuse to update a same-primary-key row owned by a request tenant. */
+function assertNoNonLocalRowCollision(table: string, rowId: string): void {
+  const gate = localRowGate(table);
+  if (gate === "1 = 1") return;
+  const m = meta(table);
+  const idWhere = m.idColumns.map((c) => `${c} = ?`).join(" AND ");
+  const params = splitRowId(rowId);
+  const existing = db()
+    .query(`SELECT 1 FROM ${table} WHERE ${idWhere} LIMIT 1`)
+    .get(...params);
+  if (!existing) return;
+  const local = db()
+    .query(`SELECT 1 FROM ${table} WHERE ${idWhere} AND ${gate} LIMIT 1`)
+    .get(...params);
+  if (!local) {
+    throw new Error(
+      `cloud sync refused non-local row collision: ${table}/${rowId}`,
+    );
+  }
+}
+
 /** Read a synced row by its `row_id` (payload columns only). Null if absent. */
 export function getRowById(
   table: string,
   rowId: string,
 ): Record<string, unknown> | null {
+  if (!isLocalSyncContext()) return null;
   const m = meta(table);
-  const where = m.idColumns.map((c) => `${c} = ?`).join(" AND ");
+  const where = [
+    ...m.idColumns.map((c) => `${c} = ?`),
+    localRowGate(table),
+  ].join(" AND ");
   const cols = columns(table).filter((c) => !PAYLOAD_EXCLUDE.has(c));
   const row = db()
     .query(`SELECT ${cols.join(", ")} FROM ${table} WHERE ${where}`)
@@ -784,6 +1003,7 @@ export interface OutboxEntry {
   row_id: string;
   op: "upsert" | "delete";
   changed_at: number;
+  tenant_id: string;
 }
 
 /**
@@ -796,21 +1016,22 @@ export function readOutbox(
   limit = 500,
   table?: string,
 ): OutboxEntry[] {
+  if (!isLocalSyncContext()) return [];
   if (table) {
     return db()
       .query(
-        `SELECT seq, table_name, row_id, op, changed_at
-           FROM sync_outbox WHERE table_name = ? AND seq > ?
+        `SELECT seq, table_name, row_id, op, changed_at, tenant_id
+           FROM sync_outbox WHERE tenant_id = ? AND table_name = ? AND seq > ?
            ORDER BY seq LIMIT ?`,
       )
-      .all(table, sinceSeq, limit) as unknown as OutboxEntry[];
+      .all(LOCAL_TENANT_ID, table, sinceSeq, limit) as unknown as OutboxEntry[];
   }
   return db()
     .query(
-      `SELECT seq, table_name, row_id, op, changed_at
-         FROM sync_outbox WHERE seq > ? ORDER BY seq LIMIT ?`,
+      `SELECT seq, table_name, row_id, op, changed_at, tenant_id
+         FROM sync_outbox WHERE tenant_id = ? AND seq > ? ORDER BY seq LIMIT ?`,
     )
-    .all(sinceSeq, limit) as unknown as OutboxEntry[];
+    .all(LOCAL_TENANT_ID, sinceSeq, limit) as unknown as OutboxEntry[];
 }
 
 /**
@@ -819,9 +1040,10 @@ export function readOutbox(
  * `minCursor` is the lowest per-table push cursor the engine has persisted.
  */
 export function pruneOutbox(minCursor: number): number {
-  if (minCursor <= 0) return 0;
-  return db().query(`DELETE FROM sync_outbox WHERE seq <= ?`).run(minCursor)
-    .changes;
+  if (!isLocalSyncContext() || minCursor <= 0) return 0;
+  return db()
+    .query(`DELETE FROM sync_outbox WHERE tenant_id = ? AND seq <= ?`)
+    .run(LOCAL_TENANT_ID, minCursor).changes;
 }
 
 /**
@@ -834,12 +1056,13 @@ export function hasPendingChange(
   rowId: string,
   sinceSeq: number,
 ): boolean {
+  if (!isLocalSyncContext()) return false;
   const row = db()
     .query(
       `SELECT 1 FROM sync_outbox
-        WHERE table_name = ? AND row_id = ? AND seq > ? LIMIT 1`,
+        WHERE tenant_id = ? AND table_name = ? AND row_id = ? AND seq > ? LIMIT 1`,
     )
-    .get(table, rowId, sinceSeq);
+    .get(LOCAL_TENANT_ID, table, rowId, sinceSeq);
   return row != null;
 }
 
@@ -853,30 +1076,37 @@ export function hasPendingKnowledgeChange(
   logicalId: string,
   sinceSeq: number,
 ): boolean {
+  if (!isLocalSyncContext()) return false;
   const row = db()
     .query(
       `SELECT 1 FROM sync_outbox
-        WHERE table_name = 'knowledge' AND seq > ? AND row_id = ? LIMIT 1`,
+        WHERE tenant_id = ? AND table_name = 'knowledge' AND seq > ? AND row_id = ? LIMIT 1`,
     )
-    .get(sinceSeq, logicalId);
+    .get(LOCAL_TENANT_ID, sinceSeq, logicalId);
   return row != null;
 }
 
 /** True when the outbox has at least one entry for `table`. */
 export function hasOutboxEntries(table: string): boolean {
+  if (!isLocalSyncContext()) return false;
   return (
     db()
-      .query(`SELECT 1 FROM sync_outbox WHERE table_name = ? LIMIT 1`)
-      .get(table) != null
+      .query(
+        `SELECT 1 FROM sync_outbox WHERE tenant_id = ? AND table_name = ? LIMIT 1`,
+      )
+      .get(LOCAL_TENANT_ID, table) != null
   );
 }
 
 /** Highest outbox `seq` currently present (0 when empty). */
 export function maxOutboxSeq(): number {
+  if (!isLocalSyncContext()) return 0;
   return (
-    db().query(`SELECT COALESCE(MAX(seq), 0) AS m FROM sync_outbox`).get() as {
-      m: number;
-    }
+    db()
+      .query(
+        `SELECT COALESCE(MAX(seq), 0) AS m FROM sync_outbox WHERE tenant_id = ?`,
+      )
+      .get(LOCAL_TENANT_ID) as { m: number }
   ).m;
 }
 
@@ -929,8 +1159,9 @@ function rowIdExpr(m: SyncTableMeta): string {
 // trigger gate (db.ts installSyncCapture) — the two MUST stay in lockstep.
 function remoteBackedGate(prefix = ""): string {
   return (
-    `(${prefix}cross_project = 1 OR ${prefix}project_id IS NULL OR ` +
-    `${prefix}project_id IN (SELECT id FROM projects WHERE git_remote IS NOT NULL))`
+    `(${prefix}tenant_id = '' AND (` +
+    `${prefix}cross_project = 1 OR ${prefix}project_id IS NULL OR ` +
+    `${prefix}project_id IN (SELECT id FROM projects WHERE tenant_id = '' AND git_remote IS NOT NULL)))`
   );
 }
 
@@ -946,7 +1177,7 @@ function entityParentGate(idExpr: string): string {
 // P2c (#1246): the Pro tables are always project-scoped (project_id NOT NULL, no
 // cross_project) — they sync only when their project is remote-backed.
 function projectRemoteGate(idExpr: string): string {
-  return `EXISTS (SELECT 1 FROM projects p WHERE p.id = ${idExpr} AND p.git_remote IS NOT NULL)`;
+  return `EXISTS (SELECT 1 FROM projects p WHERE p.id = ${idExpr} AND p.tenant_id = '' AND p.git_remote IS NOT NULL)`;
 }
 
 function seedSelect(table: string): string {
@@ -1034,23 +1265,24 @@ function seedSelect(table: string): string {
     // Mirrors the capture trigger's git_remote gate. path is not synced (pickSyncColumns
     // drops it — not in syncColumns).
     case "projects":
-      return "SELECT * FROM projects WHERE git_remote IS NOT NULL ORDER BY created_at DESC, id";
+      return "SELECT * FROM projects WHERE tenant_id = '' AND git_remote IS NOT NULL ORDER BY created_at DESC, id";
     default:
       return `SELECT * FROM ${table}`;
   }
 }
 
 export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
+  if (!isLocalSyncContext()) return;
   const now = Date.now();
   const enqueue = db().query(
-    `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-     VALUES (?, ?, 'upsert', ?)`,
+    `INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+     VALUES (?, ?, 'upsert', ?, ?)`,
   );
   // Latest pending op for a row among entries the push hasn't consumed yet. An
   // already-pushed (seq <= cursor) entry is stale — never re-read — so excluded.
   const latestUnpushed = db().query(
     `SELECT op FROM sync_outbox
-      WHERE table_name = ? AND row_id = ? AND seq > ?
+      WHERE tenant_id = ? AND table_name = ? AND row_id = ? AND seq > ?
       ORDER BY seq DESC LIMIT 1`,
   );
   // One transaction for the whole seed: the per-row loop does N inserts, and
@@ -1075,7 +1307,7 @@ export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
       if (m.table === "knowledge") {
         const latestForLogical = db().query(
           `SELECT op FROM sync_outbox
-            WHERE table_name = 'knowledge' AND seq > ? AND row_id = ?
+            WHERE tenant_id = ? AND table_name = 'knowledge' AND seq > ? AND row_id = ?
             ORDER BY seq DESC LIMIT 1`,
         );
         // Value-ranked so a capped free tier syncs the MOST USEFUL entries first. The
@@ -1096,15 +1328,18 @@ export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
           .all() as { lid: string }[];
         for (const { lid } of lids) {
           const pending =
-            (latestForLogical.get(pushCursor, lid) as { op: string } | null)
-              ?.op ?? null;
+            (
+              latestForLogical.get(LOCAL_TENANT_ID, pushCursor, lid) as {
+                op: string;
+              } | null
+            )?.op ?? null;
           if (pending === "upsert") continue; // already queued
           if (pending === null) {
             const synced = getSyncState("knowledge", lid)?.content_hash ?? null;
             const row = currentKnowledgeRow(lid);
             if (row && contentHash("knowledge", row) === synced) continue;
           }
-          enqueue.run("knowledge", lid, now);
+          enqueue.run("knowledge", lid, now, LOCAL_TENANT_ID);
         }
         continue;
       }
@@ -1117,7 +1352,7 @@ export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
         const rowId = rowIdOf(m.table, row);
         const pending =
           (
-            latestUnpushed.get(m.table, rowId, pushCursor) as {
+            latestUnpushed.get(LOCAL_TENANT_ID, m.table, rowId, pushCursor) as {
               op: string;
             } | null
           )?.op ?? null;
@@ -1127,7 +1362,7 @@ export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
           const synced = getSyncState(m.table, rowId)?.content_hash ?? null;
           if (hashRowColumns(cols, row) === synced) continue;
         }
-        enqueue.run(m.table, rowId, now);
+        enqueue.run(m.table, rowId, now, LOCAL_TENANT_ID);
       }
     }
   });
@@ -1148,6 +1383,7 @@ export function seedOutbox(tier: SyncTier = currentSyncTier()): void {
  * while sync was disabled are not silently dropped from the push queue.
  */
 export function reconcile(tier: SyncTier = currentSyncTier()): void {
+  if (!isLocalSyncContext()) return;
   const now = Date.now();
   seedOutbox(tier);
   for (const m of syncedTablesFor(tier)) {
@@ -1176,19 +1412,21 @@ export function reconcile(tier: SyncTier = currentSyncTier()): void {
         : `NOT EXISTS (SELECT 1 FROM ${m.table} t WHERE ${rowIdExpr(m)} = s.row_id)`;
     db()
       .query(
-        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-         SELECT s.table_name, s.row_id, 'delete', ?
+        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+         SELECT s.table_name, s.row_id, 'delete', ?, s.tenant_id
            FROM sync_state s
-          WHERE s.table_name = ?
+          WHERE s.tenant_id = ?
+            AND s.table_name = ?
             AND ${livenessNotExists}
             AND COALESCE(
               (SELECT o.op FROM sync_outbox o
-                WHERE o.table_name = s.table_name AND o.row_id = s.row_id
+                WHERE o.tenant_id = s.tenant_id
+                  AND o.table_name = s.table_name AND o.row_id = s.row_id
                 ORDER BY o.seq DESC LIMIT 1),
               'none'
             ) <> 'delete'`,
       )
-      .run(now, m.table);
+      .run(now, LOCAL_TENANT_ID, m.table);
   }
 }
 
@@ -1199,14 +1437,21 @@ export function reconcile(tier: SyncTier = currentSyncTier()): void {
 // BEGIN IMMEDIATE would nest). cross_project=0 only: global/cross-project rows were never
 // gated (they always sync) so they're already queued/synced. Only fires when sync is on.
 export function reseedProjectContent(projectId: string): void {
-  if (getTeamConfig(ENABLED_KEY) !== "1") return;
+  if (!isLocalSyncContext() || getTeamConfig(ENABLED_KEY) !== "1") return;
+  if (
+    db()
+      .query("SELECT 1 FROM projects WHERE id = ? AND tenant_id = ?")
+      .get(projectId, LOCAL_TENANT_ID) == null
+  )
+    return;
   const now = Date.now();
   const enqueue = (sql: string, ...params: unknown[]) =>
     db()
       .query(
-        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at) ${sql}`,
+        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+         SELECT queued.*, ? FROM (${sql}) queued`,
       )
-      .run(...params);
+      .run(LOCAL_TENANT_ID, ...params);
   // The project's own project-scoped rows (this project's cross_project=0 knowledge in
   // one sub-select, reused for the children so they align 1:1 with the seeded knowledge).
   // knowledge_current (live-only) so a deleted entry's lingering meta/refs aren't
@@ -1303,14 +1548,15 @@ onProjectRemoteBackfilled(reseedProjectContent);
  * Idempotent: an unchanged row short-circuits in the push (same content_hash AND scope).
  */
 export function reenqueueKnowledgeTeamGraph(logicalId: string): void {
-  if (getTeamConfig(ENABLED_KEY) !== "1") return;
+  if (!isLocalSyncContext() || getTeamConfig(ENABLED_KEY) !== "1") return;
   const now = Date.now();
   const enqueue = (sql: string, ...params: unknown[]) =>
     db()
       .query(
-        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at) ${sql}`,
+        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+         SELECT queued.*, ? FROM (${sql}) queued`,
       )
-      .run(...params);
+      .run(LOCAL_TENANT_ID, ...params);
   const linkedEntities =
     "SELECT entity_id FROM knowledge_entity_refs WHERE knowledge_id = ?";
   // The refs of this knowledge (they follow the knowledge → team).
@@ -1358,16 +1604,17 @@ onKnowledgeTeamPromotionChanged(reenqueueKnowledgeTeamGraph);
  * an unchanged row (same scope AND content_hash) short-circuits in the push.
  */
 export function reenqueueDeletedKnowledgeGraph(entityIds: string[]): void {
-  if (getTeamConfig(ENABLED_KEY) !== "1") return;
+  if (!isLocalSyncContext() || getTeamConfig(ENABLED_KEY) !== "1") return;
   if (entityIds.length === 0) return;
   const now = Date.now();
   const placeholders = entityIds.map(() => "?").join(", ");
   const enqueue = (sql: string, ...params: unknown[]) =>
     db()
       .query(
-        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at) ${sql}`,
+        `INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+         SELECT queued.*, ? FROM (${sql}) queued`,
       )
-      .run(...params);
+      .run(LOCAL_TENANT_ID, ...params);
   // The affected entities (their team-scope may have dropped now the referencing knowledge is gone).
   // NOTE: remove()'s recomputeEntityRank already UPDATEs each entity and trigger-enqueues it, so this
   // entity clause is redundant; the LOAD-BEARING part is the aliases + relations below (no trigger
@@ -1418,13 +1665,14 @@ export function getSyncState(
   table: string,
   rowId: string,
 ): SyncRowState | null {
+  if (!isLocalSyncContext()) return null;
   meta(table);
   const row = db()
     .query(
       `SELECT content_hash, revision, remote_updated_at, scope_id
-         FROM sync_state WHERE table_name = ? AND row_id = ?`,
+         FROM sync_state WHERE tenant_id = ? AND table_name = ? AND row_id = ?`,
     )
-    .get(table, rowId) as unknown as SyncRowState | undefined;
+    .get(LOCAL_TENANT_ID, table, rowId) as unknown as SyncRowState | undefined;
   return row ?? null;
 }
 
@@ -1433,16 +1681,18 @@ export function setSyncState(
   rowId: string,
   state: SyncRowState,
 ): void {
+  if (!isLocalSyncContext()) return;
   meta(table);
   db()
     .query(
-      `INSERT INTO sync_state (table_name, row_id, content_hash, revision, remote_updated_at, scope_id)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO sync_state (table_name, row_id, content_hash, revision, remote_updated_at, scope_id, tenant_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(table_name, row_id) DO UPDATE SET
-         content_hash = excluded.content_hash,
-         revision = excluded.revision,
-         remote_updated_at = excluded.remote_updated_at,
-         scope_id = excluded.scope_id`,
+          content_hash = excluded.content_hash,
+          revision = excluded.revision,
+          remote_updated_at = excluded.remote_updated_at,
+          scope_id = excluded.scope_id,
+          tenant_id = excluded.tenant_id`,
     )
     .run(
       table,
@@ -1451,14 +1701,18 @@ export function setSyncState(
       state.revision,
       state.remote_updated_at,
       state.scope_id ?? null,
+      LOCAL_TENANT_ID,
     );
 }
 
 export function clearSyncState(table: string, rowId: string): void {
+  if (!isLocalSyncContext()) return;
   meta(table);
   db()
-    .query(`DELETE FROM sync_state WHERE table_name = ? AND row_id = ?`)
-    .run(table, rowId);
+    .query(
+      `DELETE FROM sync_state WHERE tenant_id = ? AND table_name = ? AND row_id = ?`,
+    )
+    .run(LOCAL_TENANT_ID, table, rowId);
 }
 
 // ---------------------------------------------------------------------------
@@ -1478,7 +1732,8 @@ function knowledgeTeamScope(logicalId: string): string | null {
   const row = db()
     .query(
       `SELECT p.scope_id FROM knowledge_current k JOIN projects p ON p.id = k.project_id
-       WHERE k.logical_id = ? AND k.approval_status = 'approved' AND p.scope_id IS NOT NULL`,
+       WHERE k.tenant_id = '' AND p.tenant_id = '' AND k.logical_id = ?
+         AND k.approval_status = 'approved' AND p.scope_id IS NOT NULL`,
     )
     .get(logicalId) as { scope_id: string } | undefined;
   return row?.scope_id ?? null;
@@ -1496,7 +1751,8 @@ function entityTeamScope(entityId: string): string | null {
       `SELECT MIN(p.scope_id) AS scope_id FROM knowledge_entity_refs r
        JOIN knowledge_current k ON k.logical_id = r.knowledge_id
        JOIN projects p ON p.id = k.project_id
-       WHERE r.entity_id = ? AND k.approval_status = 'approved' AND p.scope_id IS NOT NULL`,
+       WHERE k.tenant_id = '' AND p.tenant_id = '' AND r.entity_id = ?
+         AND k.approval_status = 'approved' AND p.scope_id IS NOT NULL`,
     )
     .get(entityId) as { scope_id: string | null } | undefined;
   return row?.scope_id ?? null;
@@ -1517,6 +1773,7 @@ export function teamScopeForContent(
   table: string,
   rowId: string,
 ): string | null {
+  if (!isLocalSyncContext()) return null;
   switch (table) {
     case "knowledge":
       return knowledgeTeamScope(rowId);
@@ -1528,7 +1785,9 @@ export function teamScopeForContent(
     }
     case "entity_aliases": {
       const r = db()
-        .query("SELECT entity_id FROM entity_aliases WHERE id = ?")
+        .query(
+          "SELECT entity_id FROM entity_aliases WHERE tenant_id = '' AND id = ?",
+        )
         .get(rowId) as { entity_id: string } | undefined;
       return r ? entityTeamScope(r.entity_id) : null;
     }
@@ -1585,7 +1844,9 @@ export function applyRemoteUpsert(
   table: string,
   row: Record<string, unknown>,
 ): void {
+  assertLocalSyncContext("applyRemoteUpsert");
   const m = meta(table);
+  assertNoNonLocalRowCollision(table, rowIdOf(table, row));
   decodeBlobColumns(table, row);
   const cols = columns(table).filter(
     (c) => !PAYLOAD_EXCLUDE.has(c) && c in row,
@@ -1621,6 +1882,7 @@ export function replaceRegistryTable(
   table: string,
   remoteRows: Record<string, unknown>[],
 ): void {
+  assertLocalSyncContext("replaceRegistryTable");
   const m = meta(table);
   if (!m.mirrorSnapshot)
     throw new Error(
@@ -1687,22 +1949,26 @@ export function replaceRegistryTable(
  * convergeProjectsByRemote() pass merges them deterministically (min-id winner).
  */
 export function applyRemoteProject(row: Record<string, unknown>): void {
+  assertLocalSyncContext("applyRemoteProject");
   const id = String(row.id);
+  assertNoNonLocalRowCollision("projects", id);
   const gitRemote = typeof row.git_remote === "string" ? row.git_remote : null;
   const name = typeof row.name === "string" ? row.name : null;
   const createdAt = Number(row.created_at) || Date.now();
   withApplying(() => {
     const existing = db()
-      .query("SELECT id FROM projects WHERE id = ?")
-      .get(id) as { id: string } | null | undefined;
+      .query("SELECT id FROM projects WHERE tenant_id = ? AND id = ?")
+      .get(LOCAL_TENANT_ID, id) as { id: string } | null | undefined;
     if (existing) {
       // Update identity fields only; NEVER touch path (device-local). COALESCE keeps a
       // locally-known git_remote/name if the incoming row hasn't resolved one yet.
       db()
         .query(
-          "UPDATE projects SET git_remote = COALESCE(?, git_remote), name = COALESCE(?, name) WHERE id = ?",
+          `UPDATE projects
+              SET git_remote = COALESCE(?, git_remote), name = COALESCE(?, name)
+            WHERE tenant_id = ? AND id = ?`,
         )
-        .run(gitRemote, name, id);
+        .run(gitRemote, name, LOCAL_TENANT_ID, id);
     } else {
       db()
         .query(
@@ -1729,7 +1995,9 @@ function temporalLiveColumns(): Set<string> {
 }
 
 export function applyRemoteTemporal(row: Record<string, unknown>): void {
+  assertLocalSyncContext("applyRemoteTemporal");
   const table = "temporal_messages";
+  assertNoNonLocalRowCollision(table, rowIdOf(table, row));
   const m = meta(table);
   decodeBlobColumns(table, row);
   const insertRow: Record<string, unknown> = {
@@ -1764,8 +2032,12 @@ export function applyRemoteTemporal(row: Record<string, unknown>): void {
 
 /** Delete a pulled-as-removed row locally (under apply-suppression). */
 export function applyRemoteDelete(table: string, rowId: string): void {
+  assertLocalSyncContext("applyRemoteDelete");
   const m = meta(table);
-  const where = m.idColumns.map((c) => `${c} = ?`).join(" AND ");
+  const where = [
+    ...m.idColumns.map((c) => `${c} = ?`),
+    localRowGate(table),
+  ].join(" AND ");
   withApplying(() =>
     db()
       .query(`DELETE FROM ${table} WHERE ${where}`)
@@ -1783,7 +2055,9 @@ export function applyRemoteDelete(table: string, rowId: string): void {
  * `confidence = base`; re-materialize then folds in any counters already present.
  */
 export function applyRemoteMeta(row: Record<string, unknown>): void {
+  assertLocalSyncContext("applyRemoteMeta");
   const logicalId = String(row.logical_id);
+  assertNoNonLocalRowCollision("knowledge_meta", logicalId);
   const base = Number(row.base_confidence ?? 1.0);
   withApplying(() => {
     db()
@@ -1807,6 +2081,7 @@ export function applyRemoteMeta(row: Record<string, unknown>): void {
  * remote row (not stripped) because it needs `scope_id`.
  */
 export function applyRemoteScopeKey(remote: Record<string, unknown>): void {
+  assertLocalSyncContext("applyRemoteScopeKey");
   const scopeId = String(remote.scope_id);
   const memberUserId = String(remote.member_user_id);
   const wrapped =
@@ -1829,7 +2104,12 @@ export function applyRemoteScopeKey(remote: Record<string, unknown>): void {
  * not re-pushed (this device only ever pushes its OWN replica's rows).
  */
 export function applyRemoteMetaCrdt(row: Record<string, unknown>): void {
+  assertLocalSyncContext("applyRemoteMetaCrdt");
   const logicalId = String(row.logical_id);
+  assertNoNonLocalRowCollision(
+    "knowledge_meta_crdt",
+    rowIdOf("knowledge_meta_crdt", row),
+  );
   withApplying(() => {
     db()
       .query(
@@ -1924,7 +2204,9 @@ function insertKnowledgeVersion(
  * current content converges across devices.
  */
 export function applyRemoteKnowledge(row: Record<string, unknown>): void {
+  assertLocalSyncContext("applyRemoteKnowledge");
   const logicalId = String(row.id);
+  assertNoNonLocalRowCollision("knowledge", logicalId);
   const syncCols = columns("knowledge").filter(
     (c) => !PAYLOAD_EXCLUDE.has(c) && c in row,
   );
@@ -1932,14 +2214,17 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
     withTransaction(() => {
       const agg = db()
         .query(
-          "SELECT MAX(version) AS maxV, COUNT(*) AS n FROM knowledge WHERE COALESCE(logical_id, id) = ?",
+          "SELECT MAX(version) AS maxV, COUNT(*) AS n FROM knowledge WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?",
         )
-        .get(logicalId) as { maxV: number | null; n: number };
+        .get(LOCAL_TENANT_ID, logicalId) as {
+        maxV: number | null;
+        n: number;
+      };
       const cur = db()
         .query(
-          "SELECT content FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
+          "SELECT content FROM knowledge_current WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?",
         )
-        .get(logicalId) as { content: string } | undefined;
+        .get(LOCAL_TENANT_ID, logicalId) as { content: string } | undefined;
 
       if (agg.n === 0) {
         // Brand-new entry: v1 carries the remote id AS the logical_id (id == logical_id).
@@ -1967,18 +2252,23 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
         if (setCols.length > 0) {
           db()
             .query(
-              `UPDATE knowledge SET ${setCols.map((c) => `${c} = ?`).join(", ")} WHERE COALESCE(logical_id, id) = ? AND is_current = 1`,
+              `UPDATE knowledge SET ${setCols.map((c) => `${c} = ?`).join(", ")}
+                WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1`,
             )
-            .run(...setCols.map((c) => row[c] as never), logicalId);
+            .run(
+              ...setCols.map((c) => row[c] as never),
+              LOCAL_TENANT_ID,
+              logicalId,
+            );
         }
         return;
       }
       // Content differs (or no live current → revive) → append a new current version.
       db()
         .query(
-          "UPDATE knowledge SET is_current = 0 WHERE COALESCE(logical_id, id) = ? AND is_current = 1",
+          "UPDATE knowledge SET is_current = 0 WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1",
         )
-        .run(logicalId);
+        .run(LOCAL_TENANT_ID, logicalId);
       insertKnowledgeVersion(row, syncCols, {
         id: uuidv7(),
         logicalId,
@@ -1996,26 +2286,27 @@ export function applyRemoteKnowledge(row: Record<string, unknown>): void {
  * + transactional (single-current invariant).
  */
 export function applyRemoteKnowledgeDelete(logicalId: string): void {
+  assertLocalSyncContext("applyRemoteKnowledgeDelete");
   withApplying(() =>
     withTransaction(() => {
       const cur = db()
         .query(
-          "SELECT * FROM knowledge_current WHERE COALESCE(logical_id, id) = ?",
+          "SELECT * FROM knowledge_current WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?",
         )
-        .get(logicalId) as Record<string, unknown> | undefined;
+        .get(LOCAL_TENANT_ID, logicalId) as Record<string, unknown> | undefined;
       if (!cur) return; // already no live current — nothing to delete
       const maxV = (
         db()
           .query(
-            "SELECT MAX(version) AS m FROM knowledge WHERE COALESCE(logical_id, id) = ?",
+            "SELECT MAX(version) AS m FROM knowledge WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?",
           )
-          .get(logicalId) as { m: number }
+          .get(LOCAL_TENANT_ID, logicalId) as { m: number }
       ).m;
       db()
         .query(
-          "UPDATE knowledge SET is_current = 0 WHERE COALESCE(logical_id, id) = ? AND is_current = 1",
+          "UPDATE knowledge SET is_current = 0 WHERE tenant_id = ? AND COALESCE(logical_id, id) = ? AND is_current = 1",
         )
-        .run(logicalId);
+        .run(LOCAL_TENANT_ID, logicalId);
       const syncCols = columns("knowledge").filter(
         (c) => !PAYLOAD_EXCLUDE.has(c) && c in cur,
       );
@@ -2060,12 +2351,14 @@ export type KnowledgePushPlan =
 export function currentKnowledgeRow(
   logicalId: string,
 ): Record<string, unknown> | null {
+  if (!isLocalSyncContext()) return null;
   const cols = columns("knowledge").filter((c) => !PAYLOAD_EXCLUDE.has(c));
   const row = db()
     .query(
-      `SELECT ${cols.join(", ")} FROM knowledge_current WHERE COALESCE(logical_id, id) = ?`,
+      `SELECT ${cols.join(", ")} FROM knowledge_current
+        WHERE tenant_id = ? AND COALESCE(logical_id, id) = ?`,
     )
-    .get(logicalId) as Record<string, unknown> | undefined;
+    .get(LOCAL_TENANT_ID, logicalId) as Record<string, unknown> | undefined;
   if (!row) return null;
   row.id = logicalId; // re-key on the stable logical_id (the remote row key)
   return row;
@@ -2083,6 +2376,7 @@ export function knowledgePushPlan(outboxRowId: string): KnowledgePushPlan {
 
 /** Rebuild an external-content FTS5 index after a batch of pulled changes. */
 export function rebuildFts(ftsTable: string): void {
+  assertLocalSyncContext("rebuildFts");
   if (ftsTable === "knowledge_fts") {
     // knowledge_fts is a PARTIAL mirror — only current, non-deleted versions are
     // indexed (A2, #823). FTS5 'rebuild' re-indexes EVERY physical row (incl.
@@ -2160,6 +2454,7 @@ export function recordConflict(
   resolution: string,
   localContent?: Record<string, unknown> | null,
 ): void {
+  assertLocalSyncContext("recordConflict");
   meta(table);
   db()
     .query(
@@ -2310,10 +2605,11 @@ export function resolveRelationUniqueConflict(
 // ---------------------------------------------------------------------------
 
 const ENABLED_KEY = "sync.enabled";
+const TENANT_ISOLATION_RECONCILE_KEY = "sync.tenantIsolationReconcile";
 
 /** True when local change-capture is active. */
 export function isSyncEnabled(): boolean {
-  return getTeamConfig(ENABLED_KEY) === "1";
+  return isLocalSyncContext() && getTeamConfig(ENABLED_KEY) === "1";
 }
 
 /**
@@ -2325,12 +2621,29 @@ export function isSyncEnabled(): boolean {
  * `seedOutbox`).
  */
 export function enableSync(tier: SyncTier = currentSyncTier()): void {
+  if (!isLocalSyncContext()) return;
   setTeamConfig(ENABLED_KEY, "1");
   reconcile(tier);
+  setKV(TENANT_ISOLATION_RECONCILE_KEY, "0");
+}
+
+/** Re-seed live local rows once after v81 quarantines legacy bookkeeping. */
+export function reconcileTenantIsolationMigration(
+  tier: SyncTier = currentSyncTier(),
+): void {
+  if (
+    !isLocalSyncContext() ||
+    !isSyncEnabled() ||
+    getKV(TENANT_ISOLATION_RECONCILE_KEY) !== "1"
+  )
+    return;
+  reconcile(tier);
+  setKV(TENANT_ISOLATION_RECONCILE_KEY, "0");
 }
 
 /** Disable change-capture. Leaves the outbox/state intact for re-enable. */
 export function disableSync(): void {
+  if (!isLocalSyncContext()) return;
   deleteTeamConfig(ENABLED_KEY);
 }
 
@@ -2357,8 +2670,10 @@ export function assertSyncInvariants(): void {
     if (!m.pullOnly) continue;
     const n = (
       db()
-        .query("SELECT COUNT(*) AS n FROM sync_outbox WHERE table_name = ?")
-        .get(m.table) as { n: number }
+        .query(
+          "SELECT COUNT(*) AS n FROM sync_outbox WHERE tenant_id = ? AND table_name = ?",
+        )
+        .get(LOCAL_TENANT_ID, m.table) as { n: number }
     ).n;
     if (n > 0) {
       violations.push(
@@ -2393,12 +2708,29 @@ export function assertSyncInvariants(): void {
   );
   for (const tbl of ["sync_outbox", "sync_state"] as const) {
     const names = db()
-      .query(`SELECT DISTINCT table_name FROM ${tbl}`)
-      .all() as Array<{ table_name: string }>;
+      .query(`SELECT DISTINCT table_name FROM ${tbl} WHERE tenant_id = ?`)
+      .all(LOCAL_TENANT_ID) as Array<{ table_name: string }>;
     for (const { table_name } of names) {
       if (!known.has(table_name)) {
         violations.push(`${tbl} references unregistered table "${table_name}"`);
       }
+    }
+
+    // Request-owned tenant provenance must never enter installation-global
+    // cloud-sync bookkeeping. NULL is the explicit quarantine marker for rows
+    // that predate tenant provenance; only the empty local tenant is active.
+    const foreign = (
+      db()
+        .query(
+          `SELECT COUNT(*) AS n FROM ${tbl}
+            WHERE tenant_id IS NOT NULL AND tenant_id <> ?`,
+        )
+        .get(LOCAL_TENANT_ID) as { n: number }
+    ).n;
+    if (foreign > 0) {
+      violations.push(
+        `${tbl} holds ${foreign} non-local tenant row${foreign === 1 ? "" : "s"}`,
+      );
     }
   }
 

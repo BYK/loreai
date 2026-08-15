@@ -22,7 +22,14 @@ export type { GatewayConfig } from "./config";
 export { startServer } from "./server";
 export { handleRequest, resetPipelineState } from "./pipeline";
 export { readPortFile } from "./portfile";
-export { startGateway, probeGateway } from "./cli/start";
+export { readGatewayProcessFile } from "./pidfile";
+export {
+  startGateway,
+  probeGateway,
+  probeGatewayProcess,
+  probeGatewayProcessHost,
+  probeUrlFor,
+} from "./cli/start";
 export type { GatewayHandle, StartOptions } from "./cli/start";
 
 // ---------------------------------------------------------------------------

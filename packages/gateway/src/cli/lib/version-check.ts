@@ -47,6 +47,7 @@ const JITTER_FACTOR = 0.2;
 /** Commands/flags that should not show update notifications */
 const SUPPRESSED_ARGS = new Set([
   "upgrade",
+  "uninstall",
   "--version",
   "-v",
   "--json",

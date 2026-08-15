@@ -2,6 +2,23 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { EventEmitter } from "node:events";
 
+function listen(server: Server): Promise<number> {
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve((server.address() as { port: number }).port);
+    });
+  });
+}
+
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 class FakeIncomingMessage extends EventEmitter {
   paused = 0;
   resumed = 0;
@@ -253,8 +270,10 @@ describe("upstreamFetch runtime split", () => {
     vi.resetModules();
 
     const undiciFetch = vi.fn(
-      async (_input: unknown, _init?: { dispatcher?: unknown }) =>
-        new Response("ok"),
+      async (
+        _input: unknown,
+        _init?: { dispatcher?: unknown; redirect?: RequestRedirect },
+      ) => new Response("ok"),
     );
     const agentArgs: unknown[] = [];
     class FakeAgent {
@@ -278,5 +297,51 @@ describe("upstreamFetch runtime split", () => {
     expect(agentArgs[0]).toEqual({ bodyTimeout: 0, headersTimeout: 0 });
     const init = undiciFetch.mock.calls[0][1];
     expect(init?.dispatcher).toBeInstanceOf(FakeAgent);
+    expect(init?.redirect).toBe("manual");
   });
+
+  test.each(["x-api-key", "api-key", "cf-aig-authorization"])(
+    "Node: never replays %s across a live cross-origin redirect",
+    async (credentialHeader) => {
+      delete (globalThis as { Bun?: unknown }).Bun;
+      vi.resetModules();
+      vi.doUnmock("undici");
+
+      let initialCredential: string | undefined;
+      let destinationRequests = 0;
+      let destinationCredential: string | undefined;
+      const destination = createServer((req, res) => {
+        destinationRequests++;
+        destinationCredential = req.headers[credentialHeader] as
+          | string
+          | undefined;
+        res.end("credential reached redirect destination");
+      });
+      const destinationPort = await listen(destination);
+      const redirector = createServer((req, res) => {
+        initialCredential = req.headers[credentialHeader] as string | undefined;
+        res.writeHead(307, {
+          location: `http://127.0.0.1:${destinationPort}/destination`,
+        });
+        res.end();
+      });
+      const redirectorPort = await listen(redirector);
+
+      try {
+        const { upstreamFetch } = await import("../src/fetch");
+        await expect(
+          upstreamFetch(`http://127.0.0.1:${redirectorPort}/initial`, {
+            headers: { [credentialHeader]: "credential-secret" },
+            redirect: "follow",
+          }),
+        ).rejects.toThrow(/redirect/i);
+
+        expect(initialCredential).toBe("credential-secret");
+        expect(destinationCredential).toBeUndefined();
+        expect(destinationRequests).toBe(0);
+      } finally {
+        await Promise.all([close(redirector), close(destination)]);
+      }
+    },
+  );
 });

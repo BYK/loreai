@@ -17,6 +17,8 @@ sidebar:
 - **Hermes Agent without `lore run`** — `lore setup hermes` writes `~/.hermes/.env` with `OPENAI_BASE_URL` (the gateway URL, including `/v1`) and `HERMES_INFERENCE_PROVIDER=custom`. Hermes loads that `.env` at launch (via python-dotenv), so a standalone `hermes` routes through the gateway — the persistent equivalent of what `lore run hermes` injects.
 - **Remote gateway** — `lore setup <app> -r http://remote:3207` writes the config pointing at a non-default gateway URL, useful when the gateway runs on a different machine (Tailscale, LAN, a hosted deployment) and you want the local client to talk to it.
 
+Remote/hosted gateways require a separate access credential. `lore setup -r` intentionally writes only non-secret routing configuration; it never persists the token. Export `LORE_REMOTE_URL` and `LORE_GATEWAY_AUTH_TOKEN` when launching an adapter-capable client (OpenCode or Pi), or configure the direct client to send one `x-lore-gateway-token` header. A provider API key or bearer token is not gateway authorization. Clients that support only a base URL and no custom headers need an adapter or a trusted header-injecting edge proxy.
+
 If you launch your agent through `lore run`, you do **not** need `lore setup` — `lore run` injects the right config (env vars or `-c` overrides) into the child process at launch. `lore setup <app>` is for the other case: launching the agent directly (a GUI/IDE app, or a standalone CLI) where a persistent config file is the only integration point. Each supported app reads provider config from its own file — Codex/Pi from a JSON/TOML config, Claude Code/Hermes from an env file, OpenCode from JSON plus a plugin — so `lore setup` writes the persistent config they need.
 
 ## Usage
@@ -50,7 +52,19 @@ If the named app isn't installed (for example, `lore setup codex` on a machine w
 
 `model_auto_compact_token_limit = 999999999` disables Codex's built-in auto-compaction so Lore's gradient context manager and distillation pipeline can do their job. Re-running `lore setup` resets this value to `999999999` — any custom value you set is overwritten.
 
-To remove the configuration and restore Codex's default behavior, delete the relevant lines from `~/.codex/config.toml` or run `git checkout -- ~/.codex/config.toml` if you keep the file under version control.
+## Undoing setup
+
+`lore setup undo [app]` restores only settings previously changed by `lore setup`. Lore records each prior value and restores it only when the current value still matches what Lore wrote, so a setting you changed afterward is left untouched.
+
+```bash
+lore setup undo              # Restore every app with a Lore setup backup
+lore setup undo codex        # Restore one app
+lore setup undo opencode
+```
+
+This command does not remove the `lore` executable, Lore's database or caches, project `.lore.md` files, or globally installed npm packages. Copilot setup is guidance-only and writes no config, so there is nothing to restore; if `COPILOT_API_URL` or `COPILOT_PROVIDER_BASE_URL` is set outside `lore run`, unset it where your shell or service defines it.
+
+To remove the standalone installation as well, use [`lore uninstall`](/docs/install/#uninstall). It first validates every setup backup, stages the verified standalone executable for reversible removal, applies setup undo, then finalizes executable and installer-owned file removal. If setup restoration fails, the executable is restored. Use `lore uninstall --purge` only when you also want to delete the default local Lore runtime data; custom data paths are always preserved for manual review.
 
 ## Verifying the setup
 

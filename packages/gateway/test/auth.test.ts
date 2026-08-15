@@ -2,11 +2,16 @@ import { describe, test, expect, beforeEach, vi } from "vitest";
 import { log } from "@loreai/core";
 import {
   extractAuth,
+  copyProviderAuthHeaders,
+  hasConflictingAuthHeaders,
+  authFingerprint,
+  credentialTenantFingerprint,
   setSessionAuth,
   getSessionAuth,
   deleteSessionAuth,
   setLastSeenAuth,
   resolveAuth,
+  resolveSessionProviderAuth,
   markAuthStale,
   isAuthStale,
   clearAuthStale,
@@ -51,6 +56,16 @@ describe("extractAuth", () => {
     });
   });
 
+  test.each(["x-goog-api-key", "X-gOoG-aPi-KeY"])(
+    "extracts a single %s as api-key credential",
+    (headerName) => {
+      expect(extractAuth({ [headerName]: "goog-123" })).toEqual({
+        scheme: "api-key",
+        value: "goog-123",
+      });
+    },
+  );
+
   test("extracts Bearer token as bearer credential", () => {
     expect(extractAuth({ authorization: "Bearer tok-abc" })).toEqual({
       scheme: "bearer",
@@ -62,12 +77,147 @@ describe("extractAuth", () => {
     expect(extractAuth({})).toBeNull();
   });
 
+  test("never treats gateway access as provider authentication", () => {
+    const headers = {
+      "x-lore-gateway-token": "gateway-access-token",
+      "x-goog-api-key": "google-provider-key",
+    };
+    expect(extractAuth(headers)).toEqual({
+      scheme: "api-key",
+      value: "google-provider-key",
+    });
+    expect(hasConflictingAuthHeaders(headers)).toBe(false);
+    expect(copyProviderAuthHeaders(headers)).toEqual({
+      "x-goog-api-key": "google-provider-key",
+    });
+  });
+
   // Regression: a fuzzer (/opt/audit/fuzz-exports.js) called extractAuth()
   // with undefined, triggering "Cannot read properties of undefined
   // (reading 'x-api-key')" (Sentry LOREAI-GATEWAY-28). Guard returns null.
   test("returns null for null/undefined headers instead of throwing", () => {
     expect(extractAuth(null)).toBeNull();
     expect(extractAuth(undefined)).toBeNull();
+  });
+
+  test.each<Record<string, string>>([
+    { "x-api-key": "" },
+    { "x-api-key": "   " },
+    { "x-goog-api-key": "" },
+    { "x-goog-api-key": "   " },
+    { authorization: "" },
+    { authorization: "Basic basic-token" },
+    { authorization: "Bearer " },
+  ])("returns null for an empty or malformed credential %#", (headers) => {
+    expect(extractAuth(headers)).toBeNull();
+  });
+});
+
+describe("credential fingerprints", () => {
+  test("tenant fingerprint is full SHA-256, deterministic, and domain-separated", () => {
+    const tenant = credentialTenantFingerprint(apiKeyCred);
+    expect(tenant).toMatch(/^[a-f0-9]{64}$/);
+    expect(credentialTenantFingerprint(apiKeyCred)).toBe(tenant);
+    expect(tenant).not.toContain(apiKeyCred.value);
+    expect(tenant.startsWith(authFingerprint(apiKeyCred))).toBe(false);
+  });
+
+  test("tenant fingerprint separates credentials and auth schemes", () => {
+    expect(credentialTenantFingerprint(apiKeyCred)).not.toBe(
+      credentialTenantFingerprint({
+        scheme: "bearer",
+        value: apiKeyCred.value,
+      }),
+    );
+    expect(credentialTenantFingerprint(apiKeyCred)).not.toBe(
+      credentialTenantFingerprint({
+        scheme: "api-key",
+        value: `${apiKeyCred.value}-other`,
+      }),
+    );
+  });
+});
+
+describe("hasConflictingAuthHeaders", () => {
+  test.each<{ label: string; headers: Record<string, string> }>([
+    {
+      label: "generic and Google API keys",
+      headers: {
+        "X-aPi-KeY": "same-api-key",
+        "x-GoOg-aPi-kEy": "same-api-key",
+      },
+    },
+    {
+      label: "generic API key and bearer",
+      headers: {
+        "X-Api-Key": "api-key",
+        Authorization: "Bearer token",
+      },
+    },
+    {
+      label: "Google API key and bearer",
+      headers: {
+        "X-Goog-Api-Key": "google-key",
+        aUtHoRiZaTiOn: "Bearer token",
+      },
+    },
+  ])("rejects $label without choosing a credential", ({ headers }) => {
+    expect(hasConflictingAuthHeaders(headers)).toBe(true);
+    expect(extractAuth(headers)).toBeNull();
+
+    const reversedHeaders = Object.fromEntries(
+      Object.entries(headers).reverse(),
+    );
+    expect(hasConflictingAuthHeaders(reversedHeaders)).toBe(true);
+    expect(extractAuth(reversedHeaders)).toBeNull();
+  });
+
+  test("rejects all three authentication mechanisms without choosing a credential", () => {
+    const headers = {
+      "x-api-key": "api-key",
+      "x-goog-api-key": "google-key",
+      authorization: "Bearer token",
+    };
+
+    expect(hasConflictingAuthHeaders(headers)).toBe(true);
+    expect(extractAuth(headers)).toBeNull();
+
+    const reversedHeaders = Object.fromEntries(
+      Object.entries(headers).reverse(),
+    );
+    expect(hasConflictingAuthHeaders(reversedHeaders)).toBe(true);
+    expect(extractAuth(reversedHeaders)).toBeNull();
+  });
+
+  test.each<Record<string, string>>([
+    {
+      "x-api-key": "",
+      "x-goog-api-key": "",
+    },
+    {
+      "x-api-key": "",
+      authorization: "Basic malformed-token",
+    },
+    {
+      "x-goog-api-key": "",
+      authorization: "Bearer ",
+    },
+  ])(
+    "treats empty or malformed values as present when detecting conflicts %#",
+    (headers) => {
+      expect(hasConflictingAuthHeaders(headers)).toBe(true);
+      expect(extractAuth(headers)).toBeNull();
+    },
+  );
+
+  test("does not reject a single authentication mechanism", () => {
+    expect(hasConflictingAuthHeaders({ "x-api-key": "api-key" })).toBe(false);
+    expect(hasConflictingAuthHeaders({ "x-goog-api-key": "google-key" })).toBe(
+      false,
+    );
+    expect(hasConflictingAuthHeaders({ authorization: "Bearer token" })).toBe(
+      false,
+    );
   });
 });
 
@@ -231,14 +381,13 @@ describe("resolveAuth with staleness", () => {
     expect(result).toEqual(bearerCred);
   });
 
-  test("skips stale session credential and falls through to global", () => {
+  test("stale session credential never falls through to another client's global", () => {
     setSessionAuth("sess-1", bearerCred);
     setLastSeenAuth(apiKeyCred);
     markAuthStale("sess-1");
 
     const result = resolveAuth("sess-1");
-    // Should skip the stale session credential and return global
-    expect(result).toEqual(apiKeyCred);
+    expect(result).toBeNull();
   });
 
   test("returns null when session is stale and no global set", () => {
@@ -272,14 +421,22 @@ describe("resolveAuth with staleness", () => {
     expect(resolveAuth("sess-1")).toBe(null);
   });
 
-  test("returns global when stale session and global hold different tokens", () => {
+  test("returns null when stale session and global hold different tokens", () => {
     // Multi-session setup: another client refreshed the global credential
     setSessionAuth("sess-1", bearerCred);
     setLastSeenAuth(bearerCred2);
     markAuthStale("sess-1");
 
-    // Global has a different (potentially fresh) token — return it
-    expect(resolveAuth("sess-1")).toEqual(bearerCred2);
+    expect(resolveAuth("sess-1")).toBeNull();
+  });
+
+  test("provider-agnostic resolution follows the session's latest provider switch", () => {
+    setSessionAuth("sess-switch", bearerCred, "anthropic");
+    setSessionAuth("sess-switch", bearerCred2, "openai");
+    setLastSeenAuth(apiKeyCred, "anthropic");
+
+    expect(resolveAuth("sess-switch")).toEqual(bearerCred2);
+    expect(resolveAuth("sess-switch")).not.toEqual(apiKeyCred);
   });
 
   // -------------------------------------------------------------------------
@@ -308,11 +465,11 @@ describe("resolveAuth with staleness", () => {
     expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
   });
 
-  test("still allows global fallback for cold-start sessions with no provider store", () => {
+  test("cold-start sessions never inherit a process-global credential", () => {
     // No setSessionAuth at all — a cold-start worker before the first turn's
-    // credential was registered. The global fallback is still legitimate here.
+    // credential was registered. A named session remains an isolation boundary.
     setLastSeenAuth(apiKeyCred);
-    expect(resolveAuth("sess-cold", "anthropic")).toEqual(apiKeyCred);
+    expect(resolveAuth("sess-cold", "anthropic")).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -338,27 +495,18 @@ describe("resolveAuth with staleness", () => {
 
   test("a _default-only session does not leak a cross-provider global (#829)", () => {
     // Foreground request arrived WITHOUT x-lore-provider → stored under
-    // _default — while the global was tagged with the real provider. A
-    // _default store does not satisfy a specific-provider lookup, and
-    // sessionHasProviderStore() is false, so the 359 guard cannot fire: the
-    // provider-aware global is the only thing standing between the OpenAI
-    // worker and the Anthropic key.
+    // _default — while the global was tagged with the real provider. A named
+    // provider lookup does not reinterpret either source as session-owned.
     setSessionAuth("sess-1", apiKeyCred); // no providerID → _default
     setLastSeenAuth(apiKeyCred, "anthropic");
 
     expect(resolveAuth("sess-1", "openai")).toBe(null);
-    // The captured provider still resolves through the global fallback.
-    expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
+    expect(resolveAuth("sess-1", "anthropic")).toBeNull();
   });
 
   test("end-to-end #829: Anthropic session + OpenAI worker resolves null, not the Anthropic key", () => {
     // Mixed-provider setup: chat on Anthropic, a worker/aux model on OpenAI.
-    // NOTE: this scenario is actually closed by the pre-existing 359 guard
-    // (the session has a non-_default "anthropic" store, so
-    // sessionHasProviderStore() is true and the global fallback is never
-    // reached) — it passes even WITHOUT the provider-aware tag. It documents
-    // the full #829 shape; the provider-tag logic itself is guarded by the
-    // session-less and _default-only tests above.
+    // A named session lookup is strict, so it cannot reach process-global auth.
     setSessionAuth("sess-1", apiKeyCred, "anthropic");
     setLastSeenAuth(apiKeyCred, "anthropic");
 
@@ -367,12 +515,12 @@ describe("resolveAuth with staleness", () => {
     expect(workerCred).not.toEqual(apiKeyCred);
   });
 
-  test("an UNTAGGED global still serves any provider (legacy single-provider client)", () => {
+  test("an UNTAGGED global is sessionless only", () => {
     // A client that sends no x-lore-provider produces a null tag. Single-
     // provider setups must keep working: the global is the only credential and
     // is necessarily the right one — suppressing it would break their workers.
     setLastSeenAuth(minimaxCred); // no providerID → null tag
-    expect(resolveAuth("sess-cold", "openai")).toEqual(minimaxCred);
+    expect(resolveAuth("sess-cold", "openai")).toBeNull();
     expect(resolveAuth(undefined, "anthropic")).toEqual(minimaxCred);
   });
 
@@ -381,14 +529,43 @@ describe("resolveAuth with staleness", () => {
     setLastSeenAuth(apiKeyCred);
     markAuthStale("sess-1");
 
-    // Stale — returns global
-    expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
+    expect(resolveAuth("sess-1")).toBeNull();
 
     // Fresh credential arrives, clears staleness
     setSessionAuth("sess-1", bearerCred2);
 
     // Now returns the fresh session credential
     expect(resolveAuth("sess-1")).toEqual(bearerCred2);
+  });
+});
+
+describe("resolveSessionProviderAuth", () => {
+  test("uses only the requested session and never the process-global fallback", () => {
+    setSessionAuth("anthropic-session", bearerCred, "anthropic");
+    setSessionAuth("openai-session", bearerCred2, "openai");
+    setLastSeenAuth(bearerCred2, "openai");
+
+    expect(
+      resolveSessionProviderAuth("anthropic-session", "anthropic"),
+    ).toEqual(bearerCred);
+    expect(
+      resolveSessionProviderAuth("missing-session", "anthropic"),
+    ).toBeNull();
+  });
+
+  test("does not model-route a default credential after named lookup failure", () => {
+    setSessionAuth("claude-code", bearerCred);
+    setLastSeenAuth(bearerCred2, "openai");
+
+    expect(resolveSessionProviderAuth("claude-code", "anthropic")).toBeNull();
+  });
+
+  test("does not replace a stale named credential with the default credential", () => {
+    setSessionAuth("mixed", bearerCred2);
+    setSessionAuth("mixed", bearerCred, "anthropic");
+    markAuthStale("mixed", "anthropic");
+
+    expect(resolveSessionProviderAuth("mixed", "anthropic")).toBeNull();
   });
 });
 
@@ -408,8 +585,7 @@ describe("resolveAuth per-provider staleness", () => {
 
     // Anthropic credential should still resolve normally
     expect(resolveAuth("sess-1", "anthropic")).toEqual(apiKeyCred);
-    // MiniMax should fall through to global
-    expect(resolveAuth("sess-1", "minimax")).toEqual(apiKeyCred);
+    expect(resolveAuth("sess-1", "minimax")).toBeNull();
   });
 
   test("stale Anthropic does not poison MiniMax credential", () => {
@@ -421,21 +597,21 @@ describe("resolveAuth per-provider staleness", () => {
 
     // MiniMax credential should still resolve
     expect(resolveAuth("sess-1", "minimax")).toEqual(minimaxCred);
-    // Anthropic falls through to global (same value → null)
+    // The stale Anthropic slot fails closed without consulting global auth.
     expect(resolveAuth("sess-1", "anthropic")).toBe(null);
   });
 
-  test("named provider does NOT contaminate _default slot", () => {
+  test("provider-agnostic resolution follows the current named provider without contaminating _default", () => {
     // Storing a named provider credential must NOT set _default — this
     // prevents cross-contamination (e.g. MiniMax key leaking to Anthropic
     // workers that resolve auth without a providerID).
     setSessionAuth("sess-1", minimaxCred, "minimax");
     setLastSeenAuth(apiKeyCred);
 
-    // _default was never set (no dual-write), so resolveAuth without
-    // providerID falls through to global.
+    // _default was never set (no dual-write), while provider-agnostic callers
+    // follow the session's current authenticated turn rather than global state.
     expect(getSessionAuth("sess-1")).toBe(null);
-    expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
+    expect(resolveAuth("sess-1")).toEqual(minimaxCred);
 
     // minimax credential resolves correctly via its providerID
     expect(resolveAuth("sess-1", "minimax")).toEqual(minimaxCred);
@@ -454,10 +630,8 @@ describe("resolveAuth per-provider staleness", () => {
     expect(isAuthStale("sess-1", "minimax")).toBe(true);
     // _default should NOT be stale — it holds a different credential
     expect(isAuthStale("sess-1", "_default")).toBe(false);
-    // resolveAuth without providerID returns _default — not stale
-    expect(resolveAuth("sess-1")).toEqual(apiKeyCred);
-    // MiniMax stale → falls to global
-    expect(resolveAuth("sess-1", "minimax")).toEqual(bearerCred);
+    expect(resolveAuth("sess-1")).toBeNull();
+    expect(resolveAuth("sess-1", "minimax")).toBeNull();
   });
 
   test("refreshing one provider clears only that provider staleness", () => {
@@ -473,8 +647,7 @@ describe("resolveAuth per-provider staleness", () => {
 
     // Anthropic is fresh — resolves to new credential
     expect(resolveAuth("sess-1", "anthropic")).toEqual(bearerCred2);
-    // MiniMax still stale — falls through to global
-    expect(resolveAuth("sess-1", "minimax")).toEqual(apiKeyCred);
+    expect(resolveAuth("sess-1", "minimax")).toBeNull();
     // _default was never set (named providers don't dual-write to _default)
     expect(isAuthStale("sess-1", "_default")).toBe(false);
     // But session-level still stale (minimax)

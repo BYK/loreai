@@ -94,7 +94,8 @@ describe("bust-spiral Sentry wiring (#797 / #952)", () => {
       // level:error→warning and fingerprint mutations): a past-grace spiral is
       // a high-severity, fingerprint-grouped issue. The BustSpiralInfo —
       // including the #952 `capFit` field — must reach the Sentry context so
-      // dashboards can distinguish structural busts from growth busts.
+      // dashboards can distinguish structural busts from growth busts without
+      // exporting the session identifier.
       const hook = installAndGetHook();
       hook.onSpiral?.(sampleInfo({ capFit: false }));
 
@@ -106,7 +107,7 @@ describe("bust-spiral Sentry wiring (#797 / #952)", () => {
       expect(opts.level).toBe("error");
       expect(opts.fingerprint).toEqual(["bust-spiral-past-grace"]);
       const contexts = opts.contexts as { bust_spiral: core.BustSpiralInfo };
-      expect(contexts.bust_spiral.sessionID).toBe("sess-abc");
+      expect(contexts.bust_spiral.sessionID).toBeUndefined();
       expect(contexts.bust_spiral.capFit).toBe(false);
     });
 

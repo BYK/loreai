@@ -20,7 +20,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import type { Harness } from "./helpers/harness";
-import { createHarness } from "./helpers/harness";
+import { createHarness, TEST_GATEWAY_AUTH_TOKEN } from "./helpers/harness";
 import { makeReplayInterceptor } from "./helpers/replay";
 import { fingerprintMessages } from "../src/session";
 import { deterministicID } from "../src/temporal-adapter";
@@ -319,8 +319,13 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
 
     const rows = loreSessionRows(harness);
     expect(rows).toEqual([original]);
-    expect(resolveAuth(original.session_id)?.value).toBe("key-A");
-    expect(getLastSeenAuth("anthropic")?.value).toBe(globalAuthBefore);
+    // A failed provisional turn must not repopulate worker credentials after
+    // restart; only a successfully committed turn may publish them.
+    expect(resolveAuth(original.session_id)).toBeNull();
+    // Local direct-provider requests refresh the legacy process-global fallback
+    // at ingress even when their provisional session commit later fails.
+    expect(globalAuthBefore).toBeUndefined();
+    expect(getLastSeenAuth("anthropic")?.value).toBe("key-A");
 
     const retryReplay = makeReplayInterceptor([
       makeFixtureEntry({
@@ -520,12 +525,19 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     const originalPath = "/client/checkouts/adoption-original";
     const clonePath = "/client/checkouts/adoption-clone";
     const remote = `github.com/test/adoption-${crypto.randomUUID()}`;
-    harness = await createHarness({ fixtures: fixtures() });
+    harness = await createHarness({
+      fixtures: fixtures(),
+      configOverrides: {
+        hostedMode: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
+    });
 
     let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
       "x-lore-session-id": "clone-V1",
       "x-lore-project": originalPath,
       "x-lore-git-remote": remote,
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     });
     expect(r.status).toBe(200);
     await r.text();
@@ -540,6 +552,7 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
         "x-lore-session-id": "clone-V1",
         "x-lore-project": originalPath,
         "x-lore-git-remote": remote,
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
     expect(r.status).toBe(200);
@@ -563,6 +576,7 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
         "x-lore-session-id": "clone-V2",
         "x-lore-project": clonePath,
         "x-lore-git-remote": remote,
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
     expect(r.status).toBe(200);
@@ -1245,12 +1259,15 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
         state.is_subagent,
       );
       for (const index of [2, 6]) {
-        const id = deterministicID("user", index, [
+        const sourceId = deterministicID(first.session_id, "user", index, [
+          { type: "text", text: users[index / 2] },
+        ]);
+        const nextSourceId = deterministicID(secondSession, "user", index, [
           { type: "text", text: users[index / 2] },
         ]);
         db.prepare(
-          "UPDATE temporal_messages SET session_id = ? WHERE id = ?",
-        ).run(secondSession, id);
+          "UPDATE temporal_messages SET session_id = ?, source_id = ? WHERE source_id = ?",
+        ).run(secondSession, nextSourceId, sourceId);
       }
     } finally {
       db.close();

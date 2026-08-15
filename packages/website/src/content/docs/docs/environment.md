@@ -36,6 +36,8 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | Variable | Description |
 |---|---|
 | `LORE_CONFIG_DIR` | Get the Lore config directory. Uses $LORE_CONFIG_DIR if set, otherwise ~/.lore |
+| `LORE_DB_PATH` | Resolved path of the SQLite database file. Reads `LORE_DB_PATH` first; falls back to `${dataDir}/lore.db` (typically `~/.local/share/lore/lore.db`). The test preload (`packages/core/test/setup.ts`) sets `LORE_DB_PATH` to a temp directory so tests never touch the production DB. Setting it to a non-existent path will create the file on first use. The gateway itself does not set this — it expects a stable location for the DB so the SQLite WAL and FTS5 indices persist across restarts. Env: `LORE_DB_PATH`. |
+| `LORE_GATEWAY_AUTH_TOKEN` | Gateway access credential required for remote/hosted data-plane requests. It is sent as `x-lore-gateway-token` and remains separate from provider API keys/bearer tokens. Remote/hosted startup fails closed unless it is 32-256 visible ASCII characters without commas. OpenCode/Pi consume LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code supports a per-request custom header directly. Never place it in a URL or CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN. |
 | `LORE_GIT_REMOTE` | Git remote URL (e.g. `git@github.com:org/repo.git`) of the project the spawned Codex CLI is operating in. Exported by the gateway so a user-defined `env_http_headers` in `~/.codex/config.toml` can map it to a custom header for upstream telemetry. Set only when `git remote get-url origin` returns a value; the gateway does not read this env var itself. |
 | `LORE_HOSTED_MODE` | Hosted/remote mode — disables all filesystem operations that use client-controlled paths (git subprocess, .lore.json/.lore.md read/write, lat.md/ directory scan, file watchers). Env: LORE_HOSTED_MODE. |
 | `LORE_INSTALL_DIR` | Determine the install directory for a curl-installed binary. Priority: 1. $LORE_INSTALL_DIR environment variable 2. ~/.local/bin (if exists AND in $PATH) 3. ~/bin (if exists AND in $PATH) 4. ~/.lore/bin (fallback) |
@@ -44,7 +46,6 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_PROJECT` | Expose project path & git remote as env vars so downstream agents can map them to custom headers if supported in the future. The gateway resolves the project from system-prompt inference and cwd for now. |
 | `LORE_REMOTE_GATEWAY` | Remote/central gateway mode. When true, the gateway is serving agents running on OTHER machines, so its own `process.cwd()` has no relationship to any client's project. In this mode the gateway MUST NOT attribute path-less requests to its own cwd (doing so merges unrelated projects). Instead, requests that cannot resolve a confident project path are routed to a per-session synthetic "unattributed" bucket (`/__lore_unattributed__/<sessionID>`) that can later self-heal or be consolidated. Env: LORE_REMOTE_GATEWAY. Note: hosted mode (`LORE_HOSTED_MODE`) implies remote-gateway behavior — a hosted gateway never shares a filesystem with its clients. Auto-detection: when neither `LORE_REMOTE_GATEWAY` nor `LORE_HOSTED_MODE` is set, the gateway auto-enables remote-gateway mode if its bind address(es) include any non-loopback host. This catches the common case of running a long-lived gateway on a server (Tailscale, LAN IP, `0.0.0.0`, etc.) without requiring an explicit env var. |
 | `LORE_REMOTE_URL` | CLI remote helper — shared utilities for CLI commands that need to call the remote gateway REST API when `LORE_REMOTE_URL` is set. |
-| `LORE_SHUTDOWN_TIMEOUT_MS` | Hard cap (ms) on how long graceful shutdown may run before the gateway force-exits, so Ctrl+C can never hang. Env: `LORE_SHUTDOWN_TIMEOUT_MS` (default 4000). Invalid / non-positive / non-finite values fall back to the default — the timeout can never be disabled. |
 | `LORE_TARGET`<br>**Default:** ``${process.platform}-${process.arch}`` | Platform target string used to locate the vendored embedding model directory when running the SEA (single executable) binary. Format: `${platform}-${arch}` (e.g. `darwin-arm64`, `linux-x64`). Defaults to the current host. Override this to pre-warm the embedding model cache on a machine of one platform and run the binary on another (CI cross-builds, OCI images). Env: `LORE_TARGET=<platform>-<arch>`. |
 | `LORE_UPSTREAM_EXTRA_HEADERS` | Forward LORE_UPSTREAM_EXTRA_HEADERS to Codex via the `openai_provider_headers` config key (TOML map of header name → value). Codex appends these to every outbound request to the OpenAI-compatible upstream, which now points at the Lore gateway. The gateway reads the same env var and re-injects them on the actual upstream call — this is a belt-and-suspenders pass-through so a user with a custom corporate proxy gets headers on both hops. |
 | `LORE_WORKER_MODEL`<br>**Parser:** `parseWorkerModelEnv` | Parse the `LORE_WORKER_MODEL` env-var override into a `{providerID, modelID}`. Format: `"providerID/modelID"` (e.g. `openai/gpt-5.4-mini`) or a bare `"modelID"` which assumes the `anthropic` provider (the historical default). Returns `undefined` only for an unset/empty value. Single source of truth shared by the live worker-model selection ({@link getWorkerModel}) and standalone `lore import`, so the env override behaves identically in both paths. |
@@ -54,6 +55,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | Variable | Description |
 |---|---|
 | `LORE_BEDROCK_REGION` | AWS Bedrock region. Selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint. Resolves from `LORE_BEDROCK_REGION` first, then falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`, finally defaulting to `"us-east-1"`. Env: LORE_BEDROCK_REGION |
+| `LORE_CALLER_UPSTREAM_ALLOWLIST` | Normalized HTTPS origins that remote/hosted clients may select with `X-Lore-Upstream-URL`. Empty by default, so caller-selected upstreams are denied unless the gateway administrator explicitly allows their origins. Local gateways do not consult this list. Env: LORE_CALLER_UPSTREAM_ALLOWLIST (comma-separated origins). |
 | `LORE_DEBUG`<br>**Parser:** `isTruthy` | Whether to log requests. Default: false. Env: LORE_DEBUG |
 | `LORE_IDLE_TIMEOUT`<br>**Default:** `parsePositiveInt(60)`<br>**Parser:** `parsePositiveInt` | Idle timeout in seconds. After this many seconds with no active request, the gateway stops the per-session in-memory cache warmer and distillation loop to free resources. State is preserved in the DB so a new request resumes from where the session left off. Default: 60. Env: `LORE_IDLE_TIMEOUT`. |
 | `LORE_LISTEN_HOST`<br>**Parser:** `parseHosts` | Hosts to bind to. Default: ["127.0.0.1"]. Env: LORE_LISTEN_HOST (comma-separated for multiple addresses). CLI: --host (can be specified multiple times, or comma-separated). |
@@ -72,12 +74,25 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 |---|---|
 | `LORE_BATCH_DISABLED` | Disables the batch-queue wrapper for non-urgent worker calls (distillation, curation, embedding). With batching on, the gateway groups these calls and submits them via the Anthropic Message Batches API for ~50% cost savings. Set `LORE_BATCH_DISABLED=1` to bypass batching and dispatch each call immediately (useful for low-latency debugging or when the upstream rejects batch submissions). Env: `LORE_BATCH_DISABLED=1`. |
 
+## runtime-files
+
+| Variable | Description |
+|---|---|
+| `LORE_RUNTIME_ACL_ACTION` | _no description in source_ |
+| `LORE_RUNTIME_ACL_KIND` | _no description in source_ |
+| `LORE_RUNTIME_ACL_PATH` | _no description in source_ |
+
+## shutdown-deadline
+
+| Variable | Description |
+|---|---|
+| `LORE_SHUTDOWN_TIMEOUT_MS` | Bound for the bounded vector-pool shutdown on graceful shutdown (#1599). The pool teardown must wait for every worker's SQLite reader to close before the writer can TRUNCATE the WAL — leaving readers up would strand the `-wal` file and force WAL recovery on the next boot. Sized to fit under the global deadline after the embedding drain (60%) so a stuck worker still leaves room for the writer's checkpoint+close. Mirrors {@link EMBED_DRAIN_DEADLINE_MS}'s safety floor of 500ms so an aggressive `LORE_SHUTDOWN_TIMEOUT_MS` (e.g. 1000ms) doesn't shrink the pool budget into a guaranteed timeout. |
+
 ## Memory engine (`@loreai/core`)
 
 | Variable | Description |
 |---|---|
 | `LORE_BACKFILL_CPU_DUTY` | Resolve the configured backfill CPU duty cycle: `LORE_BACKFILL_CPU_DUTY` wins, then `search.embeddings.backfillCpuDuty`, else `undefined` (auto-scaled by CPU count — full speed on roomy hosts, gentler on small ones). Invalid values are ignored (fall through). Read per-call so config reloads take effect. |
-| `LORE_DB_PATH` | Resolved path of the SQLite database file. Reads `LORE_DB_PATH` first; falls back to `${dataDir}/lore.db` (typically `~/.local/share/lore/lore.db`). The test preload (`packages/core/test/setup.ts`) sets `LORE_DB_PATH` to a temp directory so tests never touch the production DB. Setting it to a non-existent path will create the file on first use. The gateway itself does not set this — it expects a stable location for the DB so the SQLite WAL and FTS5 indices persist across restarts. Env: `LORE_DB_PATH`. |
 | `LORE_DISABLE_VEC` | LORE_DISABLE_VEC=1 forces the JS brute-force vector-search path. Useful as a production kill-switch if the native extension causes issues, and as a test seam for the JS fallback. Set before the first `db()` call — once attempted=true is sticky for the connection lifetime, the env var won't be re-read until resetVecState() runs (in close()). |
 | `LORE_DISABLE_VEC_WORKER` | Kill switch: force the in-process vector-search path, disabling the off-thread read-worker pool. Default-on escape hatch, not opt-in. |
 | `LORE_EMBED_POOL_SIZE` | Resolve the configured embedding-pool ceiling: `LORE_EMBED_POOL_SIZE` wins (the escape hatch — `=1` forces today's single worker), then `search.embeddings.embedPoolSize`, else `undefined` (memory-gated default). Read per-construction (not cached) so config reloads / env changes take effect on the next provider. Invalid values are ignored (fall through). |

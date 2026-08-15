@@ -1169,7 +1169,7 @@ describe("streamResponsesRecallAware", () => {
     },
   );
 
-  test("persists recursive null enrichment from the terminal snapshot", async () => {
+  test("rejects recursive explicit null replacement in the terminal snapshot", async () => {
     let completedResponse: GatewayResponse | undefined;
     const item = {
       type: "image_generation_call",
@@ -1214,8 +1214,8 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).not.toContain("response.failed");
-    expect(completedResponse?.rawOutputItems).toEqual([terminalItem]);
+    expect(await drain(client)).toContain("response.failed");
+    expect(completedResponse?.rawOutputItems).toEqual([item]);
   });
 
   test("never forwards response-side item_reference lifecycle events", async () => {

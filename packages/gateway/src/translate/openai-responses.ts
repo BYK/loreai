@@ -131,10 +131,7 @@ export function parseOpenAIResponsesRequest(
     stream,
     maxTokens,
     metadata: {},
-    rawHeaders: {
-      ...headers,
-      "x-api-key": headers["x-api-key"] ?? "",
-    },
+    rawHeaders: { ...headers },
     extras,
   };
 }

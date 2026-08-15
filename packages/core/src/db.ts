@@ -1,4 +1,4 @@
-import { Database } from "#db/driver";
+import { Database, registerScalarFunction } from "#db/driver";
 import { isVecAvailable, loadVecExtension, resetVecState } from "./db/vec";
 import {
   ensureVec0Store,
@@ -18,6 +18,7 @@ import {
   encodeWarmupHistogram,
   mergeWarmupHistogramCounts,
 } from "./warmup-histogram";
+import { currentTenantId } from "./tenant";
 
 export type ProjectMutation =
   | { type: "create"; projectId: string }
@@ -102,6 +103,10 @@ export function fireProjectRemoteBackfilled(projectId: string): void {
  */
 const projectIdByPathCache = new WeakMap<Database, Map<string, string>>();
 const projectIdCacheDataVersion = new WeakMap<Database, number>();
+
+function tenantPathKey(path: string): string {
+  return `${currentTenantId()}\x1f${path}`;
+}
 
 function projectIdCacheFor(conn: Database): Map<string, string> {
   let m = projectIdByPathCache.get(conn);
@@ -2014,11 +2019,23 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   // Version 79: local-only routing snapshot for restart-safe explicit compaction.
   // Auth headers are excluded before serialization by gateway forwardClientHeaders().
   `ALTER TABLE session_state ADD COLUMN last_upstream TEXT;`,
-  // Version 80: persist session-scoped amnesia across eviction and restart.
+  // Version 80: durable tenant ownership for shared remote/hosted storage.
+  // Applied by applyTenantOwnership(): projects/path aliases and entity aliases
+  // require table recreation to widen legacy global UNIQUE constraints.
+  `-- Version 80: see applyTenantOwnership — no-op SQL marker.`,
+  // Version 81: tag sync bookkeeping with its capture tenant. The migration
+  // quarantines every pre-v81 row as untrusted (tenant_id=NULL); local reconcile
+  // safely rebuilds live upserts, while ambiguous legacy deletes never cross an
+  // account boundary. Applied atomically by applySyncTenantIsolation().
+  `-- Version 81: see applySyncTenantIsolation — no-op SQL marker.`,
+  // Version 82: tenant/session-safe temporal and tool-call identities. Applied
+  // idempotently by applyTemporalIdentity() because tool_calls needs a PK rebuild.
+  `-- Version 82: see applyTemporalIdentity — no-op SQL marker.`,
+  // Version 83: persist session-scoped amnesia across eviction and restart.
   // Local-only privacy state; never synchronized between devices.
   `ALTER TABLE session_state ADD COLUMN amnesia INTEGER NOT NULL DEFAULT 0;`,
   `
-  -- Version 81: durable local redirects for retired project UUIDs.
+  -- Version 84: durable local redirects for retired project UUIDs.
   -- Paths can be reused or repointed, so cross-process consumers need the
   -- immutable source UUID to recover the live merge target safely.
   CREATE TABLE IF NOT EXISTS project_id_aliases (
@@ -2055,6 +2072,393 @@ const REF_FK_DROP_MIGRATION_INDEX = 65; // 0-based index of version-66
 // mid-recreate rolls back instead of boot-looping. Idempotent (skips if key_epoch already
 // in the PK). The MIGRATIONS entry at this index is a no-op documentation marker.
 const SCOPE_KEY_EPOCH_MIGRATION_INDEX = 68; // 0-based index of version-69
+const TENANT_OWNERSHIP_MIGRATION_INDEX = 79; // 0-based index of version-80
+const SYNC_TENANT_ISOLATION_MIGRATION_INDEX = 80; // 0-based index of version-81
+const TEMPORAL_IDENTITY_MIGRATION_INDEX = 81; // 0-based index of version-82
+
+/**
+ * Add durable tenant ownership without re-keying or deleting historical local
+ * rows. The empty tenant is the legacy local namespace. Table recreation is
+ * required because projects.path and entity aliases were globally unique.
+ */
+function applyTenantOwnership(database: Database): void {
+  const hasColumn = (table: string, column: string): boolean =>
+    (
+      database.query(`PRAGMA table_info(${table})`).all() as Array<{
+        name: string;
+      }>
+    ).some((entry) => entry.name === column);
+
+  if (!hasColumn("knowledge", "tenant_id")) {
+    database.exec(
+      "ALTER TABLE knowledge ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';",
+    );
+  }
+  if (!hasColumn("entities", "tenant_id")) {
+    database.exec(
+      "ALTER TABLE entities ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';",
+    );
+  }
+  if (!hasColumn("knowledge_tombstones", "tenant_id")) {
+    database.exec(
+      "ALTER TABLE knowledge_tombstones ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';",
+    );
+  }
+  if (!hasColumn("dedup_feedback", "tenant_id")) {
+    database.exec(
+      "ALTER TABLE dedup_feedback ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';",
+    );
+  }
+
+  if (!hasColumn("knowledge_contradictions", "tenant_id")) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE knowledge_contradictions_tenant_v80 (
+        tenant_id   TEXT NOT NULL DEFAULT '',
+        logical_id_a TEXT NOT NULL,
+        logical_id_b TEXT NOT NULL,
+        project_id   TEXT,
+        similarity   REAL NOT NULL DEFAULT 0,
+        rationale    TEXT,
+        status       TEXT NOT NULL DEFAULT 'open',
+        detected_at  INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        PRIMARY KEY (tenant_id, logical_id_a, logical_id_b)
+      );
+      INSERT INTO knowledge_contradictions_tenant_v80
+        (tenant_id, logical_id_a, logical_id_b, project_id, similarity,
+         rationale, status, detected_at, updated_at)
+      SELECT '', logical_id_a, logical_id_b, project_id, similarity,
+             rationale, status, detected_at, updated_at
+        FROM knowledge_contradictions;
+      DROP TABLE knowledge_contradictions;
+      ALTER TABLE knowledge_contradictions_tenant_v80
+        RENAME TO knowledge_contradictions;
+      CREATE INDEX idx_knowledge_contradictions_status
+        ON knowledge_contradictions (tenant_id, status);
+      COMMIT;
+    `);
+  }
+
+  if (!hasColumn("projects", "tenant_id")) {
+    database.exec("PRAGMA foreign_keys = OFF");
+    try {
+      database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE projects_tenant_v80 (
+          id TEXT PRIMARY KEY,
+          path TEXT NOT NULL,
+          name TEXT,
+          created_at INTEGER NOT NULL,
+          git_remote TEXT,
+          last_import_at INTEGER,
+          last_decay_at INTEGER,
+          last_refcheck_at INTEGER,
+          scope_id TEXT,
+          promotion_policy TEXT,
+          tenant_id TEXT NOT NULL DEFAULT '',
+          UNIQUE (tenant_id, path)
+        );
+        INSERT INTO projects_tenant_v80
+          (id, path, name, created_at, git_remote, last_import_at, last_decay_at,
+           last_refcheck_at, scope_id, promotion_policy, tenant_id)
+        SELECT id, path, name, created_at, git_remote, last_import_at, last_decay_at,
+               last_refcheck_at, scope_id, promotion_policy, ''
+          FROM projects;
+
+        CREATE TABLE project_path_aliases_tenant_v80 (
+          tenant_id TEXT NOT NULL DEFAULT '',
+          path TEXT NOT NULL,
+          project_id TEXT NOT NULL REFERENCES projects_tenant_v80(id) ON DELETE CASCADE,
+          PRIMARY KEY (tenant_id, path)
+        );
+        INSERT INTO project_path_aliases_tenant_v80 (tenant_id, path, project_id)
+          SELECT '', path, project_id FROM project_path_aliases;
+
+        DROP TABLE project_path_aliases;
+        DROP TABLE projects;
+        ALTER TABLE projects_tenant_v80 RENAME TO projects;
+        ALTER TABLE project_path_aliases_tenant_v80 RENAME TO project_path_aliases;
+        CREATE INDEX idx_projects_git_remote ON projects(git_remote);
+        CREATE INDEX idx_projects_tenant_remote ON projects(tenant_id, git_remote);
+        CREATE INDEX idx_project_aliases_project ON project_path_aliases(project_id);
+        COMMIT;
+      `);
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {
+        // no active transaction
+      }
+      throw error;
+    } finally {
+      database.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
+  if (!hasColumn("entity_aliases", "tenant_id")) {
+    database.exec("PRAGMA foreign_keys = OFF");
+    try {
+      database.exec(`
+        BEGIN IMMEDIATE;
+        DROP TRIGGER IF EXISTS entity_aliases_fts_insert;
+        DROP TRIGGER IF EXISTS entity_aliases_fts_delete;
+        DROP TRIGGER IF EXISTS entity_aliases_fts_update;
+        CREATE TABLE entity_aliases_tenant_v80 (
+          id TEXT PRIMARY KEY,
+          entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+          alias_type TEXT NOT NULL,
+          alias_value TEXT NOT NULL,
+          source TEXT,
+          created_at INTEGER NOT NULL,
+          tenant_id TEXT NOT NULL DEFAULT '',
+          UNIQUE(tenant_id, alias_type, alias_value)
+        );
+        INSERT INTO entity_aliases_tenant_v80
+          (id, entity_id, alias_type, alias_value, source, created_at, tenant_id)
+        SELECT a.id, a.entity_id, a.alias_type, a.alias_value, a.source,
+               a.created_at, COALESCE(e.tenant_id, '')
+          FROM entity_aliases a JOIN entities e ON e.id = a.entity_id;
+        DROP TABLE entity_aliases;
+        ALTER TABLE entity_aliases_tenant_v80 RENAME TO entity_aliases;
+        CREATE INDEX idx_entity_aliases_value ON entity_aliases(alias_value COLLATE NOCASE);
+        CREATE INDEX idx_entity_aliases_entity ON entity_aliases(entity_id);
+        CREATE INDEX idx_entity_aliases_tenant_value
+          ON entity_aliases(tenant_id, alias_type, alias_value);
+        CREATE TRIGGER entity_aliases_fts_insert AFTER INSERT ON entity_aliases BEGIN
+          INSERT INTO entity_aliases_fts(rowid, alias_value)
+          VALUES (new.rowid, new.alias_value);
+        END;
+        CREATE TRIGGER entity_aliases_fts_delete AFTER DELETE ON entity_aliases BEGIN
+          INSERT INTO entity_aliases_fts(entity_aliases_fts, rowid, alias_value)
+          VALUES('delete', old.rowid, old.alias_value);
+        END;
+        CREATE TRIGGER entity_aliases_fts_update AFTER UPDATE ON entity_aliases BEGIN
+          INSERT INTO entity_aliases_fts(entity_aliases_fts, rowid, alias_value)
+          VALUES('delete', old.rowid, old.alias_value);
+          INSERT INTO entity_aliases_fts(rowid, alias_value)
+          VALUES (new.rowid, new.alias_value);
+        END;
+        INSERT INTO entity_aliases_fts(entity_aliases_fts) VALUES('rebuild');
+        COMMIT;
+      `);
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {
+        // no active transaction
+      }
+      throw error;
+    } finally {
+      database.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_knowledge_tenant_project
+      ON knowledge(tenant_id, project_id);
+    CREATE INDEX IF NOT EXISTS idx_entities_tenant_project
+      ON entities(tenant_id, project_id);
+    CREATE INDEX IF NOT EXISTS idx_dedup_feedback_tenant_project
+      ON dedup_feedback(tenant_id, project_id);
+  `);
+}
+
+/**
+ * Add tenant provenance to the installation-global cloud-sync bookkeeping.
+ *
+ * Existing rows cannot be attributed safely: an outbox delete has no live row
+ * to inspect, and sync_state historically carried no storage owner. Quarantine
+ * all rows that predate this migration with NULL rather than guessing that they
+ * belong to the currently configured cloud account. New local rows default to
+ * the historical local tenant (empty string), while trigger capture writes the
+ * active tenant explicitly. ALTER + quarantine are one transaction so a crash
+ * cannot leave legacy rows mislabeled as local.
+ */
+function applySyncTenantIsolation(database: Database): void {
+  const hasColumn = (table: string): boolean =>
+    (
+      database.query(`PRAGMA table_info(${table})`).all() as Array<{
+        name: string;
+      }>
+    ).some((entry) => entry.name === "tenant_id");
+
+  const outboxMissing = !hasColumn("sync_outbox");
+  const stateMissing = !hasColumn("sync_state");
+  if (!outboxMissing && !stateMissing) return;
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (outboxMissing) {
+      database.exec(
+        "ALTER TABLE sync_outbox ADD COLUMN tenant_id TEXT DEFAULT '';",
+      );
+      database.exec("UPDATE sync_outbox SET tenant_id = NULL");
+    }
+    if (stateMissing) {
+      database.exec(
+        "ALTER TABLE sync_state ADD COLUMN tenant_id TEXT DEFAULT '';",
+      );
+      database.exec("UPDATE sync_state SET tenant_id = NULL");
+    }
+    // The next local enable/cycle re-seeds every live local row. This recovers
+    // trustworthy pending upserts without ever guessing ownership for legacy
+    // deletes (which remain quarantined).
+    database.exec(
+      `INSERT INTO kv_meta (key, value)
+       VALUES ('sync.tenantIsolationReconcile', '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    );
+    database.exec("COMMIT");
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // no active transaction
+    }
+    throw error;
+  }
+}
+
+/**
+ * Separate caller-supplied temporal IDs from global storage IDs and scope raw
+ * provider tool-call IDs to their durable project/session owner.
+ *
+ * Existing temporal primary keys are intentionally preserved: distillation
+ * source_ids, sync bookkeeping, recall links, and vector rows all refer to
+ * them. `source_id=id` lets a re-delivered legacy message find that same row.
+ */
+function applyTemporalIdentity(database: Database): void {
+  const temporalColumns = database
+    .query("PRAGMA table_info(temporal_messages)")
+    .all() as Array<{ name: string }>;
+  if (!temporalColumns.some((column) => column.name === "source_id")) {
+    database.exec("SAVEPOINT temporal_source_identity_v82");
+    try {
+      database.exec("ALTER TABLE temporal_messages ADD COLUMN source_id TEXT;");
+      database.exec(
+        "UPDATE temporal_messages SET source_id = id WHERE source_id IS NULL;",
+      );
+      database.exec(
+        `CREATE INDEX idx_temporal_source_identity
+           ON temporal_messages(project_id, session_id, source_id);`,
+      );
+      database.exec("RELEASE temporal_source_identity_v82");
+    } catch (error) {
+      database.exec("ROLLBACK TO temporal_source_identity_v82");
+      database.exec("RELEASE temporal_source_identity_v82");
+      throw error;
+    }
+  } else {
+    const sourceIndex = database
+      .query(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_temporal_source_identity'",
+      )
+      .get() as { sql: string } | null;
+    // Normalize an interrupted development build that created this as UNIQUE.
+    // Dedup is enforced by the deterministic global PK; keeping this a lookup
+    // index avoids introducing a local-only sync convergence constraint.
+    if (sourceIndex && /CREATE\s+UNIQUE\s+INDEX/i.test(sourceIndex.sql)) {
+      database.exec("DROP INDEX idx_temporal_source_identity;");
+    }
+    database.exec(
+      `CREATE INDEX IF NOT EXISTS idx_temporal_source_identity
+         ON temporal_messages(project_id, session_id, source_id);`,
+    );
+  }
+
+  let toolColumns = database
+    .query("PRAGMA table_info(tool_calls)")
+    .all() as Array<{
+    name: string;
+    pk: number;
+  }>;
+  if (toolColumns.length === 0) {
+    database.exec(`
+      CREATE TABLE tool_calls (
+        call_id          TEXT NOT NULL,
+        message_id       TEXT NOT NULL,
+        project_id       TEXT NOT NULL,
+        session_id       TEXT NOT NULL,
+        tool             TEXT NOT NULL,
+        status           TEXT NOT NULL,
+        error_type       TEXT,
+        error_message    TEXT,
+        duration_ms      INTEGER,
+        created_at       INTEGER NOT NULL,
+        verifier         INTEGER,
+        input_paths_json TEXT,
+        PRIMARY KEY (project_id, session_id, call_id)
+      );
+    `);
+    toolColumns = database
+      .query("PRAGMA table_info(tool_calls)")
+      .all() as Array<{
+      name: string;
+      pk: number;
+    }>;
+  }
+  if (!toolColumns.some((column) => column.name === "verifier")) {
+    database.exec("ALTER TABLE tool_calls ADD COLUMN verifier INTEGER;");
+  }
+  if (!toolColumns.some((column) => column.name === "input_paths_json")) {
+    database.exec("ALTER TABLE tool_calls ADD COLUMN input_paths_json TEXT;");
+  }
+
+  const primaryKey = toolColumns
+    .filter((column) => column.pk > 0)
+    .sort((a, b) => a.pk - b.pk)
+    .map((column) => column.name);
+  if (
+    primaryKey.length !== 3 ||
+    primaryKey[0] !== "project_id" ||
+    primaryKey[1] !== "session_id" ||
+    primaryKey[2] !== "call_id"
+  ) {
+    database.exec("SAVEPOINT tool_call_identity_v82");
+    try {
+      database.exec(`
+        DROP TABLE IF EXISTS tool_calls_identity_v82;
+        CREATE TABLE tool_calls_identity_v82 (
+          call_id          TEXT NOT NULL,
+          message_id       TEXT NOT NULL,
+          project_id       TEXT NOT NULL,
+          session_id       TEXT NOT NULL,
+          tool             TEXT NOT NULL,
+          status           TEXT NOT NULL,
+          error_type       TEXT,
+          error_message    TEXT,
+          duration_ms      INTEGER,
+          created_at       INTEGER NOT NULL,
+          verifier         INTEGER,
+          input_paths_json TEXT,
+          PRIMARY KEY (project_id, session_id, call_id)
+        );
+        INSERT INTO tool_calls_identity_v82
+          (call_id, message_id, project_id, session_id, tool, status,
+           error_type, error_message, duration_ms, created_at, verifier,
+           input_paths_json)
+        SELECT call_id, message_id, project_id, session_id, tool, status,
+               error_type, error_message, duration_ms, created_at, verifier,
+               input_paths_json
+          FROM tool_calls;
+        DROP TABLE tool_calls;
+        ALTER TABLE tool_calls_identity_v82 RENAME TO tool_calls;
+      `);
+      database.exec("RELEASE tool_call_identity_v82");
+    } catch (error) {
+      database.exec("ROLLBACK TO tool_call_identity_v82");
+      database.exec("RELEASE tool_call_identity_v82");
+      throw error;
+    }
+  }
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_project_tool_status
+      ON tool_calls (project_id, tool, status);
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_project_session
+      ON tool_calls (project_id, session_id);
+  `);
+}
 
 /**
  * Idempotent, column-presence-aware application of the v55 knowledge_meta register
@@ -2556,6 +2960,10 @@ export function db(): Database {
   // module-level singleton must remain undefined so the next db() call
   // retries initialization instead of returning an un-migrated handle.
   const database = new Database(path);
+  // TEMP sync-capture triggers consult the live AsyncLocalStorage tenant on
+  // every statement. Register before migrations/trigger installation so a
+  // connection can never capture with a missing or stale tenant value.
+  registerScalarFunction(database, "lore_current_tenant", currentTenantId);
   // The DB stores bearer credentials (the Supabase auth session / refresh
   // token in team_config) — make it owner-only so another local user/process
   // can't read it. Best-effort: chmod is a no-op / may throw on Windows & some
@@ -2647,7 +3055,8 @@ function installSyncCapture(database: Database) {
     "CREATE TEMP TABLE IF NOT EXISTS _sync_applying (marker INTEGER)",
   );
   const gate =
-    "(SELECT value FROM team_config WHERE key='sync.enabled')='1' " +
+    "lore_current_tenant() = '' " +
+    "AND (SELECT value FROM team_config WHERE key='sync.enabled')='1' " +
     "AND NOT EXISTS (SELECT 1 FROM temp._sync_applying)";
   const ts = "CAST(strftime('%s','now') AS INTEGER)*1000";
   // P2 (#1246) content git_remote gates. A row syncs only if it is REMOTE-BACKED or
@@ -2709,8 +3118,8 @@ function installSyncCapture(database: Database) {
         CREATE TEMP TRIGGER IF NOT EXISTS ${t}_outbox_${suffix}
         AFTER ${evt} ON ${t} WHEN (${gate}${contentGate})
         BEGIN
-          INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-          VALUES ('${t}', ${rowExpr}, '${op}', ${ts});
+          INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+          VALUES ('${t}', ${rowExpr}, '${op}', ${ts}, lore_current_tenant());
         END;`;
     }
   }
@@ -2723,14 +3132,14 @@ function installSyncCapture(database: Database) {
     AFTER INSERT ON knowledge_entity_refs
     WHEN (${gate} AND ${knowledgeParentGate("new.knowledge_id")} AND ${entityParentGate("new.entity_id")})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('knowledge_entity_refs', new.knowledge_id || char(31) || new.entity_id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('knowledge_entity_refs', new.knowledge_id || char(31) || new.entity_id, 'upsert', ${ts}, lore_current_tenant());
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_entity_refs_outbox_del
     AFTER DELETE ON knowledge_entity_refs WHEN (${gate})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('knowledge_entity_refs', old.knowledge_id || char(31) || old.entity_id, 'delete', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('knowledge_entity_refs', old.knowledge_id || char(31) || old.entity_id, 'delete', ${ts}, lore_current_tenant());
     END;`;
   // A2 sub-PR 3b-2: knowledge_meta base register, keyed by logical_id. Only the
   // IMMUTABLE base_confidence syncs, so the UPDATE trigger fires ONLY when it
@@ -2742,15 +3151,15 @@ function installSyncCapture(database: Database) {
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_outbox_ins
     AFTER INSERT ON knowledge_meta WHEN (${gate} AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts}, lore_current_tenant());
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_outbox_upd
     AFTER UPDATE ON knowledge_meta
     WHEN ((${gate}) AND new.base_confidence IS NOT old.base_confidence AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('knowledge_meta', new.logical_id, 'upsert', ${ts}, lore_current_tenant());
     END;`;
   // A2 sub-PR 3b-2: knowledge_meta_crdt grow-only counters, composite key
   // (logical_id || US || replica_id). Single-owner per (logical_id, replica_id):
@@ -2762,15 +3171,15 @@ function installSyncCapture(database: Database) {
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_crdt_outbox_ins
     AFTER INSERT ON knowledge_meta_crdt WHEN (${gate} AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts}, lore_current_tenant());
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS knowledge_meta_crdt_outbox_upd
     AFTER UPDATE ON knowledge_meta_crdt
     WHEN (${gate} AND (new.pos > old.pos OR new.neg > old.neg) AND ${knowledgeParentGate("new.logical_id")})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('knowledge_meta_crdt', new.logical_id || char(31) || new.replica_id, 'upsert', ${ts}, lore_current_tenant());
     END;`;
   // C-3 (#825): encryption key store. account_escrow is single-row (keyed by id=1);
   // scope_keys is keyed by (member_user_id, key_epoch) — one wrap per member PER epoch since
@@ -2780,26 +3189,26 @@ function installSyncCapture(database: Database) {
     CREATE TEMP TRIGGER IF NOT EXISTS account_escrow_outbox_ins
     AFTER INSERT ON account_escrow WHEN (${gate})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('account_escrow', new.id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('account_escrow', new.id, 'upsert', ${ts}, lore_current_tenant());
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS account_escrow_outbox_upd
     AFTER UPDATE ON account_escrow WHEN (${gate})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('account_escrow', new.id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('account_escrow', new.id, 'upsert', ${ts}, lore_current_tenant());
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS scope_keys_outbox_ins
     AFTER INSERT ON scope_keys WHEN (${gate})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('scope_keys', new.member_user_id || char(31) || new.key_epoch, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('scope_keys', new.member_user_id || char(31) || new.key_epoch, 'upsert', ${ts}, lore_current_tenant());
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS scope_keys_outbox_upd
     AFTER UPDATE ON scope_keys WHEN (${gate})
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('scope_keys', new.member_user_id || char(31) || new.key_epoch, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('scope_keys', new.member_user_id || char(31) || new.key_epoch, 'upsert', ${ts}, lore_current_tenant());
     END;`;
   // #1246: projects identity mapping (id→git_remote). Gated on git_remote IS NOT NULL —
   // only remote-backed projects sync (a remote-less project's random id can't correlate
@@ -2814,14 +3223,14 @@ function installSyncCapture(database: Database) {
     CREATE TEMP TRIGGER IF NOT EXISTS projects_outbox_ins
     AFTER INSERT ON projects WHEN (${gate} AND new.git_remote IS NOT NULL)
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('projects', new.id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('projects', new.id, 'upsert', ${ts}, lore_current_tenant());
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS projects_outbox_upd
     AFTER UPDATE ON projects WHEN (${gate} AND new.git_remote IS NOT NULL)
     BEGIN
-      INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-      VALUES ('projects', new.id, 'upsert', ${ts});
+      INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+      VALUES ('projects', new.id, 'upsert', ${ts}, lore_current_tenant());
     END;`;
   // D (#826): Pro-tier distillation-fanout capture. Installed ONLY when the plan
   // tier (from the pulled profiles mirror) is pro/max — a free user creating
@@ -2855,18 +3264,18 @@ function installSyncCapture(database: Database) {
       CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_ins
       AFTER INSERT ON distillations WHEN (${gate} AND ${projectRemoteGate("new.project_id")})
       BEGIN
-        INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-        VALUES ('distillations', new.id, 'upsert', ${ts});
-        INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-        SELECT 'temporal_messages', value, 'upsert', ${ts} FROM json_each(new.source_ids)
+        INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+        VALUES ('distillations', new.id, 'upsert', ${ts}, lore_current_tenant());
+        INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+        SELECT 'temporal_messages', value, 'upsert', ${ts}, lore_current_tenant() FROM json_each(new.source_ids)
          WHERE EXISTS (SELECT 1 FROM temporal_messages t
                         WHERE t.id = value AND ${projectRemoteGate("t.project_id")});
       END;
       CREATE TEMP TRIGGER IF NOT EXISTS distillations_outbox_upd
       AFTER UPDATE ON distillations WHEN (${gate} AND ${projectRemoteGate("new.project_id")})
       BEGIN
-        INSERT INTO sync_outbox (table_name, row_id, op, changed_at)
-        VALUES ('distillations', new.id, 'upsert', ${ts});
+        INSERT INTO sync_outbox (table_name, row_id, op, changed_at, tenant_id)
+        VALUES ('distillations', new.id, 'upsert', ${ts}, lore_current_tenant());
       END;`;
   } else {
     sql += `
@@ -3073,6 +3482,12 @@ function migrate(database: Database) {
       // Recreate scope_keys with key_epoch in the PK, atomically (SAVEPOINT), idempotent
       // (skips if already migrated) so a partial apply can't boot-loop (#827 E-4c-3a).
       applyScopeKeyEpochPk(database);
+    } else if (i === TENANT_OWNERSHIP_MIGRATION_INDEX) {
+      applyTenantOwnership(database);
+    } else if (i === SYNC_TENANT_ISOLATION_MIGRATION_INDEX) {
+      applySyncTenantIsolation(database);
+    } else if (i === TEMPORAL_IDENTITY_MIGRATION_INDEX) {
+      applyTemporalIdentity(database);
     } else {
       // Pre-strip any column-side ALTERs that are already satisfied by the
       // current schema (ADD COLUMN where the column exists, RENAME COLUMN
@@ -3194,6 +3609,7 @@ function stripAppliedAlters(migration: string, database: Database): string {
  * aborting the exec before a subsequent CREATE TABLE in the same string).
  */
 function recoverMissingObjects(database: Database) {
+  applyTenantOwnership(database);
   database.exec(`
     CREATE TABLE IF NOT EXISTS kv_meta (
       key TEXT PRIMARY KEY,
@@ -3205,8 +3621,10 @@ function recoverMissingObjects(database: Database) {
       updated_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS project_path_aliases (
-      path TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+      tenant_id TEXT NOT NULL DEFAULT '',
+      path TEXT NOT NULL,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      PRIMARY KEY (tenant_id, path)
     );
     CREATE TABLE IF NOT EXISTS entities (
       id             TEXT PRIMARY KEY,
@@ -3271,7 +3689,7 @@ function recoverMissingObjects(database: Database) {
       PRIMARY KEY (day, bucket)
     );
     CREATE TABLE IF NOT EXISTS tool_calls (
-      call_id       TEXT PRIMARY KEY,
+      call_id       TEXT NOT NULL,
       message_id    TEXT NOT NULL,
       project_id    TEXT NOT NULL,
       session_id    TEXT NOT NULL,
@@ -3281,7 +3699,9 @@ function recoverMissingObjects(database: Database) {
       error_message TEXT,
       duration_ms   INTEGER,
       created_at    INTEGER NOT NULL,
-      verifier      INTEGER
+      verifier      INTEGER,
+      input_paths_json TEXT,
+      PRIMARY KEY (project_id, session_id, call_id)
     );
     CREATE INDEX IF NOT EXISTS idx_tool_calls_project_tool_status
       ON tool_calls (project_id, tool, status);
@@ -3318,6 +3738,7 @@ function recoverMissingObjects(database: Database) {
       PRIMARY KEY (logical_id, kind, anchor)
     );
     CREATE TABLE IF NOT EXISTS knowledge_contradictions (
+      tenant_id   TEXT NOT NULL DEFAULT '',
       logical_id_a TEXT NOT NULL,
       logical_id_b TEXT NOT NULL,
       project_id   TEXT,
@@ -3326,10 +3747,10 @@ function recoverMissingObjects(database: Database) {
       status       TEXT NOT NULL DEFAULT 'open',
       detected_at  INTEGER NOT NULL,
       updated_at   INTEGER NOT NULL,
-      PRIMARY KEY (logical_id_a, logical_id_b)
+      PRIMARY KEY (tenant_id, logical_id_a, logical_id_b)
     );
     CREATE INDEX IF NOT EXISTS idx_knowledge_contradictions_status
-      ON knowledge_contradictions (status);
+      ON knowledge_contradictions (tenant_id, status);
     CREATE TABLE IF NOT EXISTS knowledge_transfers (
       knowledge_id           TEXT NOT NULL,
       recalled_in_project_id TEXT NOT NULL,
@@ -3356,7 +3777,8 @@ function recoverMissingObjects(database: Database) {
       table_name TEXT NOT NULL,
       row_id     TEXT NOT NULL,
       op         TEXT NOT NULL,
-      changed_at INTEGER NOT NULL
+      changed_at INTEGER NOT NULL,
+      tenant_id  TEXT DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_sync_outbox_table_row
       ON sync_outbox (table_name, row_id, seq);
@@ -3368,6 +3790,7 @@ function recoverMissingObjects(database: Database) {
       content_hash      TEXT,
       revision          INTEGER NOT NULL DEFAULT 0,
       remote_updated_at TEXT,
+      tenant_id         TEXT DEFAULT '',
       PRIMARY KEY (table_name, row_id)
     );
     CREATE TABLE IF NOT EXISTS sync_conflicts (
@@ -3719,6 +4142,13 @@ function recoverMissingObjects(database: Database) {
       database.exec("ALTER TABLE sync_state ADD COLUMN scope_id TEXT;");
     }
   }
+  // Version 81: restore missing sync tenant-provenance columns. If either
+  // column was lost, applySyncTenantIsolation quarantines that table's existing
+  // rows rather than assigning an unverifiable local owner.
+  applySyncTenantIsolation(database);
+  // Version 82: restore temporal source identity/index and the ownership-scoped
+  // tool-call primary key after partial migration or manual object loss.
+  applyTemporalIdentity(database);
 }
 
 /**
@@ -3743,16 +4173,19 @@ function recoverMissingObjects(database: Database) {
  * merge in a larger atomic write unit.
  */
 export function convergeProjectsByRemote(): void {
+  const tenantId = currentTenantId();
   const dupes = db()
     .query(
-      "SELECT git_remote FROM projects WHERE git_remote IS NOT NULL GROUP BY git_remote HAVING COUNT(*) > 1",
+      "SELECT git_remote FROM projects WHERE tenant_id = ? AND git_remote IS NOT NULL GROUP BY git_remote HAVING COUNT(*) > 1",
     )
-    .all() as { git_remote: string }[];
+    .all(tenantId) as { git_remote: string }[];
   for (const { git_remote } of dupes) {
     const ids = (
       db()
-        .query("SELECT id FROM projects WHERE git_remote = ? ORDER BY id")
-        .all(git_remote) as { id: string }[]
+        .query(
+          "SELECT id FROM projects WHERE tenant_id = ? AND git_remote = ? ORDER BY id",
+        )
+        .all(tenantId, git_remote) as { id: string }[]
     ).map((r) => r.id);
     const winner = ids[0]; // lexicographically smallest — identical on every device
     for (const loser of ids.slice(1)) mergeProjectInternal(loser, winner);
@@ -3907,10 +4340,20 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
   let merged = false;
   withSavepoint("merge_project", () => {
     const sourceRow = d
-      .query("SELECT path FROM projects WHERE id = ?")
-      .get(sourceId) as { path: string } | null;
+      .query("SELECT path, tenant_id FROM projects WHERE id = ?")
+      .get(sourceId) as { path: string; tenant_id: string } | null;
     if (!sourceRow) return;
     sourcePath = sourceRow.path;
+    const targetRow = d
+      .query("SELECT tenant_id FROM projects WHERE id = ?")
+      .get(targetId) as { tenant_id: string } | null;
+    if (
+      !targetRow ||
+      sourceRow.tenant_id !== targetRow.tenant_id ||
+      sourceRow.tenant_id !== currentTenantId()
+    ) {
+      throw new Error("cannot merge projects across tenant boundaries");
+    }
     assertProjectMergeCountersSafe(d, sourceId, targetId);
     d.query("UPDATE knowledge SET project_id = ? WHERE project_id = ?").run(
       targetId,
@@ -4168,9 +4611,10 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     ).run(targetId, sourceId);
     // Register source's path as alias of target
     d.query(
-      `INSERT INTO project_path_aliases (path, project_id) VALUES (?, ?)
-       ON CONFLICT(path) DO UPDATE SET project_id = excluded.project_id`,
-    ).run(sourceRow.path, targetId);
+      `INSERT INTO project_path_aliases (tenant_id, path, project_id)
+       VALUES (?, ?, ?)
+       ON CONFLICT(tenant_id, path) DO UPDATE SET project_id = excluded.project_id`,
+    ).run(sourceRow.tenant_id, sourceRow.path, targetId);
     d.query("DELETE FROM projects WHERE id = ?").run(sourceId);
     merged = true;
   });
@@ -4594,13 +5038,17 @@ export function ensureProject(
   // request (see projectIdByPathCache docs / LOREAI-GATEWAY-3K).
   const connection = db();
   const dataVersion = projectDataVersion(connection);
-  const cached = cachedProjectId(connection, path, dataVersion);
+  const tenantId = currentTenantId();
+  const cacheKey = tenantPathKey(path);
+  const cached = cachedProjectId(connection, cacheKey, dataVersion);
   if (cached !== undefined) return cached;
 
   // 1. Exact path match (fast path)
   const existing = db()
-    .query("SELECT id, git_remote FROM projects WHERE path = ?")
-    .get(path) as { id: string; git_remote: string | null } | null;
+    .query(
+      "SELECT id, git_remote FROM projects WHERE tenant_id = ? AND path = ?",
+    )
+    .get(tenantId, path) as { id: string; git_remote: string | null } | null;
   if (existing) {
     // Lazy backfill: populate git_remote on pre-v14 rows. NOTE: this branch is
     // intentionally left UNCACHED — git_remote is still NULL, so backfill must
@@ -4613,9 +5061,9 @@ export function ensureProject(
         // If so, merge the conflicting project into this one (one-time).
         const conflict = db()
           .query(
-            "SELECT id FROM projects WHERE git_remote = ? AND id != ? LIMIT 1",
+            "SELECT id FROM projects WHERE tenant_id = ? AND git_remote = ? AND id != ? LIMIT 1",
           )
-          .get(resolvedRemote, existing.id) as { id: string } | null;
+          .get(tenantId, resolvedRemote, existing.id) as { id: string } | null;
         if (conflict) {
           mergeProjectInternal(conflict.id, existing.id);
         }
@@ -4629,7 +5077,7 @@ export function ensureProject(
         // above (it is the merge TARGET) — memoize so the next call for this
         // path skips the exact-path lookup. fireProjectRemoteBackfilled cleared
         // the map, so this set must come AFTER it.
-        memoizeProjectId(connection, path, existing.id, dataVersion);
+        memoizeProjectId(connection, cacheKey, existing.id, dataVersion);
         return existing.id;
       }
       // Still remote-less (no remote resolved) — leave uncached so a later call
@@ -4637,16 +5085,18 @@ export function ensureProject(
       return existing.id;
     }
     // Settled remote-backed row — stable mapping, safe to memoize.
-    memoizeProjectId(connection, path, existing.id, dataVersion);
+    memoizeProjectId(connection, cacheKey, existing.id, dataVersion);
     return existing.id;
   }
 
   // 2. Check path aliases (worktree/clone re-visits) — the hot 3K path.
   const alias = db()
-    .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
-    .get(path) as { project_id: string } | null;
+    .query(
+      "SELECT project_id FROM project_path_aliases WHERE tenant_id = ? AND path = ?",
+    )
+    .get(tenantId, path) as { project_id: string } | null;
   if (alias) {
-    memoizeProjectId(connection, path, alias.project_id, dataVersion);
+    memoizeProjectId(connection, cacheKey, alias.project_id, dataVersion);
     return alias.project_id;
   }
 
@@ -4654,16 +5104,18 @@ export function ensureProject(
   const gitRemote = resolveTrustedRemote(path, suppliedGitRemote);
   if (gitRemote) {
     const byRemote = db()
-      .query("SELECT id FROM projects WHERE git_remote = ? LIMIT 1")
-      .get(gitRemote) as { id: string } | null;
+      .query(
+        "SELECT id FROM projects WHERE tenant_id = ? AND git_remote = ? LIMIT 1",
+      )
+      .get(tenantId, gitRemote) as { id: string } | null;
     if (byRemote) {
       // Register this path as an alias for O(1) future lookups
       db()
         .query(
-          "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+          "INSERT OR IGNORE INTO project_path_aliases (tenant_id, path, project_id) VALUES (?, ?, ?)",
         )
-        .run(path, byRemote.id);
-      memoizeProjectId(connection, path, byRemote.id, dataVersion);
+        .run(tenantId, path, byRemote.id);
+      memoizeProjectId(connection, cacheKey, byRemote.id, dataVersion);
       return byRemote.id;
     }
   }
@@ -4680,16 +5132,16 @@ export function ensureProject(
       "unknown");
   db()
     .query(
-      "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO projects (id, path, name, git_remote, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .run(id, path, derivedName, gitRemote, Date.now());
+    .run(id, path, derivedName, gitRemote, Date.now(), tenantId);
   // fireProjectMutation() clears the memo (same map ref); populate AFTER it so
   // the just-created mapping survives. Only memoize when the new project is
   // already settled (has a remote): a remote-less project can still be
   // git_remote-backfilled by a later ensureProject(path, suppliedGitRemote)
   // call, so leave it uncached (mirrors the NULL-git_remote existing branch).
   fireProjectMutation({ type: "create", projectId: id });
-  if (gitRemote) memoizeProjectId(connection, path, id, dataVersion);
+  if (gitRemote) memoizeProjectId(connection, cacheKey, id, dataVersion);
   return id;
 }
 
@@ -4697,14 +5149,18 @@ function canonicalProjectIdFrom(
   connection: Database,
   id: string,
 ): string | undefined {
+  const tenantId = currentTenantId();
   const row = connection
     .query(
-      `SELECT project_id AS id FROM project_id_aliases WHERE retired_id = ?
+      `SELECT alias.project_id AS id
+         FROM project_id_aliases AS alias
+         JOIN projects AS target ON target.id = alias.project_id
+        WHERE alias.retired_id = ? AND target.tenant_id = ?
        UNION ALL
-       SELECT id FROM projects WHERE id = ?
+       SELECT id FROM projects WHERE id = ? AND tenant_id = ?
        LIMIT 1`,
     )
-    .get(id, id) as { id: string } | null;
+    .get(id, tenantId, id, tenantId) as { id: string } | null;
   return row?.id;
 }
 
@@ -4743,21 +5199,25 @@ export function canonicalProjectId(
 }
 
 export function projectId(path: string): string | undefined {
+  const tenantId = currentTenantId();
+  const cacheKey = tenantPathKey(path);
   // Shares ensureProject's per-connection memo (LOREAI-GATEWAY-3K).
   const connection = db();
   const dataVersion = projectDataVersion(connection);
-  const cached = cachedProjectId(connection, path, dataVersion);
+  const cached = cachedProjectId(connection, cacheKey, dataVersion);
   if (cached !== undefined) return cached;
 
   const row = db()
-    .query("SELECT id, git_remote FROM projects WHERE path = ?")
-    .get(path) as { id: string; git_remote: string | null } | null;
+    .query(
+      "SELECT id, git_remote FROM projects WHERE tenant_id = ? AND path = ?",
+    )
+    .get(tenantId, path) as { id: string; git_remote: string | null } | null;
   if (row) {
     // Mirror ensureProject: only memoize a settled (remote-backed) exact-path
     // row so a NULL-git_remote project still gets its lazy backfill retried
     // there. An unsettled row is returned but left uncached.
     if (row.git_remote) {
-      memoizeProjectId(connection, path, row.id, dataVersion);
+      memoizeProjectId(connection, cacheKey, row.id, dataVersion);
     }
     return row.id;
   }
@@ -4765,10 +5225,12 @@ export function projectId(path: string): string | undefined {
   // Check path aliases (worktree/clone paths registered by ensureProject). An
   // alias only exists for an already-resolved project — safe to memoize.
   const alias = db()
-    .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
-    .get(path) as { project_id: string } | null;
+    .query(
+      "SELECT project_id FROM project_path_aliases WHERE tenant_id = ? AND path = ?",
+    )
+    .get(tenantId, path) as { project_id: string } | null;
   if (alias) {
-    memoizeProjectId(connection, path, alias.project_id, dataVersion);
+    memoizeProjectId(connection, cacheKey, alias.project_id, dataVersion);
     return alias.project_id;
   }
   return undefined;
@@ -4785,8 +5247,10 @@ export function resolveProjectByRemoteOrPath(
 ): string | null {
   if (gitRemote) {
     const row = db()
-      .query("SELECT id FROM projects WHERE git_remote = ? LIMIT 1")
-      .get(gitRemote) as { id: string } | null;
+      .query(
+        "SELECT id FROM projects WHERE tenant_id = ? AND git_remote = ? LIMIT 1",
+      )
+      .get(currentTenantId(), gitRemote) as { id: string } | null;
     if (row) return row.id;
   }
   if (path) {
@@ -4823,8 +5287,8 @@ export function projectKnownPaths(path: string): string[] {
   const paths: string[] = [];
   try {
     const row = db()
-      .query("SELECT path FROM projects WHERE id = ?")
-      .get(projId) as { path: string } | null;
+      .query("SELECT path FROM projects WHERE id = ? AND tenant_id = ?")
+      .get(projId, currentTenantId()) as { path: string } | null;
     if (row?.path) paths.push(row.path);
 
     const aliasRows = db()
@@ -4843,18 +5307,27 @@ export function projectKnownPaths(path: string): string[] {
  * that require a path argument.
  */
 export function projectPath(id: string): string | null {
-  const row = db().query("SELECT path FROM projects WHERE id = ?").get(id) as {
-    path: string;
-  } | null;
+  const row = db()
+    .query("SELECT path FROM projects WHERE id = ? AND tenant_id = ?")
+    .get(id, currentTenantId()) as { path: string } | null;
   return row?.path ?? null;
 }
 
 /** Look up a project's normalized git remote by its internal ID, or null. */
 export function projectGitRemote(id: string): string | null {
   const row = db()
-    .query("SELECT git_remote FROM projects WHERE id = ?")
-    .get(id) as { git_remote: string | null } | null;
+    .query("SELECT git_remote FROM projects WHERE id = ? AND tenant_id = ?")
+    .get(id, currentTenantId()) as { git_remote: string | null } | null;
   return row?.git_remote ?? null;
+}
+
+/** Durable opaque owner for a project ID, visible only inside that owner scope. */
+export function projectTenantId(id: string): string | null {
+  const tenantId = currentTenantId();
+  const row = db()
+    .query("SELECT tenant_id FROM projects WHERE id = ? AND tenant_id = ?")
+    .get(id, tenantId) as { tenant_id: string } | null;
+  return row?.tenant_id ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -4867,14 +5340,16 @@ export function projectGitRemote(id: string): string | null {
  */
 export function projectScope(id: string): string | null {
   const row = db()
-    .query("SELECT scope_id FROM projects WHERE id = ?")
-    .get(id) as { scope_id: string | null } | null;
+    .query("SELECT scope_id FROM projects WHERE tenant_id = ? AND id = ?")
+    .get(currentTenantId(), id) as { scope_id: string | null } | null;
   return row?.scope_id ?? null;
 }
 
 /** Bind (scopeId) or unbind (null) a project to a team scope. */
 export function setProjectScope(id: string, scopeId: string | null): void {
-  db().query("UPDATE projects SET scope_id = ? WHERE id = ?").run(scopeId, id);
+  db()
+    .query("UPDATE projects SET scope_id = ? WHERE tenant_id = ? AND id = ?")
+    .run(scopeId, currentTenantId(), id);
 }
 
 /**
@@ -4886,8 +5361,10 @@ export function setProjectPromotionPolicy(
   policy: "manual" | "auto" | null,
 ): void {
   db()
-    .query("UPDATE projects SET promotion_policy = ? WHERE id = ?")
-    .run(policy, id);
+    .query(
+      "UPDATE projects SET promotion_policy = ? WHERE tenant_id = ? AND id = ?",
+    )
+    .run(policy, currentTenantId(), id);
 }
 
 /**
@@ -4897,8 +5374,10 @@ export function setProjectPromotionPolicy(
  */
 export function effectivePromotionPolicy(id: string): "manual" | "auto" {
   const p = db()
-    .query("SELECT scope_id, promotion_policy FROM projects WHERE id = ?")
-    .get(id) as {
+    .query(
+      "SELECT scope_id, promotion_policy FROM projects WHERE tenant_id = ? AND id = ?",
+    )
+    .get(currentTenantId(), id) as {
     scope_id: string | null;
     promotion_policy: string | null;
   } | null;
@@ -4961,9 +5440,9 @@ export function scopeMemberRole(
 
 /** Look up a project's display name by its internal ID. */
 export function projectName(id: string): string | null {
-  const row = db().query("SELECT name FROM projects WHERE id = ?").get(id) as {
-    name: string;
-  } | null;
+  const row = db()
+    .query("SELECT name FROM projects WHERE id = ? AND tenant_id = ?")
+    .get(id, currentTenantId()) as { name: string } | null;
   return row?.name ?? null;
 }
 
@@ -4972,9 +5451,9 @@ export function projectName(id: string): string | null {
  * Must be called before ensureProject() to get an accurate result.
  */
 export function isFirstRun(): boolean {
-  const row = db().query("SELECT COUNT(*) as count FROM projects").get() as {
-    count: number;
-  };
+  const row = db()
+    .query("SELECT COUNT(*) as count FROM projects WHERE tenant_id = ?")
+    .get(currentTenantId()) as { count: number };
   return row.count === 0;
 }
 

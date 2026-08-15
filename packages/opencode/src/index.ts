@@ -12,7 +12,9 @@ import {
 // (`undefined is not an object (evaluating 'A.event')`). See ./internal.ts.
 import {
   applyLoreProviderConfig,
+  gatewayAccessHeadersForRemote,
   probeGateway,
+  shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
 } from "./internal";
 
@@ -375,6 +377,10 @@ export const LorePlugin: Plugin = async (ctx) => {
       // Project path, git remote, and upstream URL are injected by the
       // fetch interceptor (installed once per process).
       "chat.headers": async (input, output) => {
+        Object.assign(
+          output.headers,
+          gatewayAccessHeadersForRemote(gatewayBase),
+        );
         // Inject stable session ID — OpenCode's DB session ID survives restarts,
         // unlike x-session-affinity (nanoid regenerated per process).
         output.headers["x-lore-session-id"] = input.sessionID;
@@ -441,12 +447,7 @@ export const LorePlugin: Plugin = async (ctx) => {
             const value = line.slice(colonIdx + 1).trim();
             if (name) {
               // Don't clobber headers the gateway already manages.
-              const lower = name.toLowerCase();
-              if (
-                !lower.startsWith("x-lore-") &&
-                lower !== "x-api-key" &&
-                lower !== "authorization"
-              ) {
+              if (shouldForwardUpstreamExtraHeader(name)) {
                 output.headers[name] = value;
               }
             }
@@ -469,7 +470,9 @@ export const LorePlugin: Plugin = async (ctx) => {
         installFetchInterceptor({
           gatewayBase,
           getHeaders: () => {
-            const headers: Record<string, string> = {};
+            const headers: Record<string, string> = {
+              ...gatewayAccessHeadersForRemote(gatewayBase),
+            };
             const cur = currentProject;
             if (cur?.path) {
               headers["x-lore-project"] = cur.path;

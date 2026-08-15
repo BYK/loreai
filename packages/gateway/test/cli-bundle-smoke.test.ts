@@ -25,21 +25,26 @@ const TEST_TIMEOUT_MS = 45_000;
 
 async function runBundle(
   args: string[],
-  env: Record<string, string> = {},
+  env: NodeJS.ProcessEnv = {},
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
   if (!existsSync(BUNDLE)) {
     throw new Error(
       `Bundle not found at ${BUNDLE} — run \`pnpm --filter @loreai/gateway run bundle\` first.`,
     );
   }
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    // Suppress any background update check noise.
+    LORE_NO_UPDATE_CHECK: "1",
+  };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete childEnv[key];
+    else childEnv[key] = value;
+  }
+
   return new Promise((resolveRun, reject) => {
     const child = spawn(process.execPath, [BUNDLE, ...args], {
-      env: {
-        ...process.env,
-        // Suppress any background update check noise.
-        LORE_NO_UPDATE_CHECK: "1",
-        ...env,
-      },
+      env: childEnv,
       timeout: BUNDLE_TIMEOUT_MS,
     });
     const stdoutChunks: Buffer[] = [];
@@ -107,6 +112,29 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
       expect(code).toBe(0);
       // The version is a semver string from build-injected VERSION.
       expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "`lore --version` starts the production bundle with Sentry enabled by default",
+    async () => {
+      const { stdout, stderr, code } = await runBundle(["--version"], {
+        NODE_ENV: "production",
+        // Vitest sets SENTRY_ENABLED=0 globally. Remove it so this subprocess
+        // exercises the production bundle's default-enabled initialization.
+        SENTRY_ENABLED: undefined,
+        // If initialization ever emits an envelope, fail it quickly through a
+        // loopback-only proxy instead of making this regression depend on DNS
+        // or external network availability.
+        http_proxy: "http://127.0.0.1:1",
+        https_proxy: "http://127.0.0.1:1",
+        no_proxy: "",
+      });
+
+      expect(code).toBe(0);
+      expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+      expect(stderr).toBe("");
     },
     TEST_TIMEOUT_MS,
   );

@@ -928,6 +928,7 @@ export async function executeRecall(
   llm?: LLMClient,
   alreadyInLtmIds?: ReadonlySet<string>,
   signal?: AbortSignal,
+  deferTransferRecording?: (record: () => void) => void,
 ): Promise<{
   result: string;
   input: { query: string; scope?: RecallScope; id?: string };
@@ -952,6 +953,7 @@ export async function executeRecall(
       searchConfig: cfg.search,
       // Genuine agent recall — record cross-project transfer metrics (#506).
       recordTransfers: true,
+      deferTransferRecording,
       ...(alreadyInLtmIds ? { alreadyInLtmIds } : {}),
     });
     signal?.throwIfAborted();

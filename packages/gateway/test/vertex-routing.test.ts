@@ -34,10 +34,10 @@ function vertexJSONResponse(): Response {
   );
 }
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -75,11 +75,13 @@ describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
     });
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
       _setTestVertexTokenProvider(null);

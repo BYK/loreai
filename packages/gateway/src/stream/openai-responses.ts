@@ -261,7 +261,7 @@ function recordExtends(
 }
 
 function terminalValueExtends(actual: unknown, streamed: unknown): boolean {
-  if (streamed === undefined || streamed === null) return true;
+  if (streamed === undefined) return true;
   if (Array.isArray(streamed)) {
     if (!Array.isArray(actual) || actual.length !== streamed.length) {
       return false;

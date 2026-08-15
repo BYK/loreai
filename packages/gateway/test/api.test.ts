@@ -18,7 +18,7 @@ import {
 
 let baseURL: string;
 let dbPath: string;
-let server: { stop: () => void; port: number; hosts: string[] };
+let server: { stop: () => Promise<void>; port: number; hosts: string[] };
 let closeDB: () => void;
 let resetPipelineState: () => Promise<void>;
 
@@ -43,12 +43,14 @@ beforeAll(async () => {
   await resetPipelineState();
 
   const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
   server = await startServer(config);
   baseURL = `http://127.0.0.1:${server.port}`;
 });
 
 afterAll(async () => {
-  if (server) server.stop();
+  if (server) await server.stop();
   if (closeDB) closeDB();
   if (resetPipelineState) await resetPipelineState();
 

@@ -363,13 +363,19 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       clearTimeout(timeout);
 
       if (!response.ok) {
-        log.warn(
-          `models.dev API failed: ${response.status} ${response.statusText}`,
-        );
+        log.warn(`models.dev API failed: ${response.status}`);
         return cachedModelData ?? new Map();
       }
 
-      const data = (await response.json()) as ModelsDevResponse;
+      let data: ModelsDevResponse;
+      try {
+        data = (await response.json()) as ModelsDevResponse;
+      } catch {
+        log.warn(
+          `models.dev API returned malformed JSON with status ${response.status}`,
+        );
+        return cachedModelData ?? new Map();
+      }
       const modelData = new Map<string, ModelsDevEntry>();
       const modelDataByProvider = new Map<string, ModelsDevEntry>();
       const providerModelsIndex = new Map<string, string[]>();
@@ -430,7 +436,7 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       // Warn if core providers are missing (likely API change)
       for (const required of SUPPORTED_PROVIDERS) {
         if (!loadedProviders.includes(required)) {
-          log.warn(`models.dev API: no ${required} provider found`);
+          log.warn("models.dev API: required provider data missing");
         }
       }
 
@@ -445,8 +451,10 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
         `models.dev: loaded data for ${modelData.size} models across ${loadedProviders.length} providers`,
       );
       return modelData;
-    } catch (e) {
-      log.warn("models.dev API error:", e);
+    } catch {
+      // Fetch errors can embed credential-bearing request URLs. The endpoint is
+      // fixed, so a categorical diagnostic is sufficient and safe.
+      log.warn("models.dev API request failed");
       return cachedModelData ?? new Map();
     } finally {
       if (inflightFetch === request) inflightFetch = null;
@@ -481,17 +489,20 @@ function npmToProtocol(
  * stale cache, triggers a background refresh and returns stale data (or
  * null) — never blocks the hot request path on a network call.
  */
-export function lookupProviderRoute(providerID: string): ProviderRoute | null {
+export function lookupProviderRoute(
+  providerID: string,
+  refreshOnMiss = true,
+): ProviderRoute | null {
   // Return from cache (fresh or stale) — never block the request.
   if (cachedProviderRoutes) {
     // If stale, trigger a background refresh (fire-and-forget).
-    if (Date.now() - cachedModelDataAt >= CACHE_TTL_MS) {
+    if (refreshOnMiss && Date.now() - cachedModelDataAt >= CACHE_TTL_MS) {
       fetchModelData().catch(() => {});
     }
     return cachedProviderRoutes.get(providerID) ?? null;
   }
   // No cache at all — trigger a background fetch for next request.
-  fetchModelData().catch(() => {});
+  if (refreshOnMiss) fetchModelData().catch(() => {});
   return null;
 }
 
@@ -809,11 +820,6 @@ function findCheaperSameProviderModel(
       // narrows the type without a non-null assertion.
       if (best) {
         const resolvedId = best.newestId;
-        log.info(
-          `dynamic worker model: ${providerID}/${resolvedId} ($${best.tierCost}/M, ` +
-            `lineage ${sessionLineage}, family ${best.family}, closest cheaper tier) ` +
-            `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
-        );
         memo.set(memoKey, resolvedId);
         return resolvedId;
       }
@@ -876,13 +882,6 @@ function findCheaperSameProviderModel(
       }
     }
   }
-
-  const resolvedCost = cachedModelData.get(resolvedId)?.cost?.input;
-  log.info(
-    `dynamic worker model: ${providerID}/${resolvedId} ($${resolvedCost}/M` +
-      `${cheapestFamily ? `, family ${cheapestFamily}` : ""}) ` +
-      `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
-  );
 
   memo.set(memoKey, resolvedId);
   return resolvedId;
@@ -958,11 +957,6 @@ function resolveNewestInFamily(
     }
   }
 
-  if (bestId) {
-    log.info(
-      `worker model: newest in family ${providerID}/${family} → ${bestId}`,
-    );
-  }
   memo.set(memoKey, bestId);
   return bestId;
 }

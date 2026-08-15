@@ -816,6 +816,23 @@ describe("circuit breaker", () => {
     expect(warmupBucketKey(switched)).not.toBe(key);
   });
 
+  test("warmupBucketKey strips URL userinfo, query, and fragment", () => {
+    const state = makeSessionState({
+      lastUpstream: {
+        url: "https://user:PRIVATE_BUCKET_USERINFO@example.com/custom?token=PRIVATE_BUCKET_QUERY#PRIVATE_BUCKET_FRAGMENT",
+        protocol: "anthropic",
+        model: "claude-test",
+        headers: {},
+      },
+    });
+
+    const key = warmupBucketKey(state);
+    expect(key).toContain("https://example.com/custom");
+    expect(key).not.toContain("PRIVATE_BUCKET_USERINFO");
+    expect(key).not.toContain("PRIVATE_BUCKET_QUERY");
+    expect(key).not.toContain("PRIVATE_BUCKET_FRAGMENT");
+  });
+
   test("getCircuitBreakerSummary lists tripped buckets", () => {
     const bad = makeWarmupResult({
       cacheReadTokens: 0,
@@ -2967,7 +2984,7 @@ describe("global histogram persistence", () => {
     expect(getGlobalHistogram(targetId).total).toBe(11);
 
     const messageId = crypto.randomUUID();
-    temporal.store({
+    const storedMessageId = temporal.store({
       projectPath: aliasPath,
       info: {
         id: messageId,
@@ -2987,11 +3004,14 @@ describe("global histogram persistence", () => {
         },
       ],
     });
+    expect(storedMessageId).toBeDefined();
     expect(
       d
-        .query("SELECT project_id FROM temporal_messages WHERE id = ?")
-        .get(messageId),
-    ).toEqual({ project_id: targetId });
+        .query(
+          "SELECT source_id, project_id FROM temporal_messages WHERE id = ?",
+        )
+        .get(storedMessageId),
+    ).toEqual({ source_id: messageId, project_id: targetId });
     expect(
       blendedHistogramForSession(
         makeSessionState({

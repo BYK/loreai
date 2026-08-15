@@ -147,6 +147,154 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
+  test("v81 quarantines sync bookkeeping that predates tenant provenance", () => {
+    const database = db();
+    database.exec("DELETE FROM sync_outbox; DELETE FROM sync_state;");
+    database
+      .query(
+        "INSERT INTO sync_outbox (table_name, row_id, op, changed_at) VALUES ('knowledge', 'legacy-outbox', 'delete', 1)",
+      )
+      .run();
+    database
+      .query(
+        `INSERT INTO sync_state
+           (table_name, row_id, content_hash, revision, remote_updated_at)
+         VALUES ('knowledge', 'legacy-state', NULL, 0, NULL)`,
+      )
+      .run();
+
+    // Reproduce an on-disk v80 database: the rows exist, but neither table can
+    // attribute them to a storage tenant. Re-open through the real migration.
+    database.exec("ALTER TABLE sync_outbox DROP COLUMN tenant_id");
+    database.exec("ALTER TABLE sync_state DROP COLUMN tenant_id");
+    database.exec("UPDATE schema_version SET version = 80");
+    close();
+
+    const migrated = db();
+    expect(
+      migrated.query("SELECT row_id, tenant_id FROM sync_outbox").all(),
+    ).toEqual([{ row_id: "legacy-outbox", tenant_id: null }]);
+    expect(
+      migrated.query("SELECT row_id, tenant_id FROM sync_state").all(),
+    ).toEqual([{ row_id: "legacy-state", tenant_id: null }]);
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    expect(
+      migrated
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get("sync.tenantIsolationReconcile"),
+    ).toEqual({ value: "1" });
+
+    migrated.exec(
+      "DELETE FROM sync_outbox; DELETE FROM sync_state; UPDATE kv_meta SET value = '0' WHERE key = 'sync.tenantIsolationReconcile';",
+    );
+  });
+
+  test("v82 preserves existing temporal/tool data while adding owned identities", () => {
+    const database = db();
+    const projectID = ensureProject(
+      `/tmp/v82-existing-data-${crypto.randomUUID()}`,
+    );
+    const messageID = `legacy-message-${crypto.randomUUID()}`;
+    const callID = `legacy-call-${crypto.randomUUID()}`;
+    database
+      .query(
+        `INSERT INTO temporal_messages
+           (id, source_id, project_id, session_id, role, content, tokens,
+            distilled, created_at, metadata)
+         VALUES (?, ?, ?, 'legacy-session', 'user', 'legacy zircon content',
+                 3, 0, 1000, '{}')`,
+      )
+      .run(messageID, messageID, projectID);
+    database.exec("DELETE FROM tool_calls;");
+    database
+      .query(
+        `INSERT INTO tool_calls
+           (call_id, message_id, project_id, session_id, tool, status,
+            created_at, verifier, input_paths_json)
+         VALUES (?, ?, ?, 'legacy-session', 'read', 'completed', 1000, 0,
+                 '["legacy.ts"]')`,
+      )
+      .run(callID, messageID, projectID);
+
+    // Reproduce the v81 layouts exactly: no temporal source_id and a globally
+    // primary-keyed tool call. Existing IDs and payloads must survive v82.
+    database.exec(`
+      DROP INDEX idx_temporal_source_identity;
+      ALTER TABLE temporal_messages DROP COLUMN source_id;
+      CREATE TABLE tool_calls_v81 (
+        call_id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error_type TEXT,
+        error_message TEXT,
+        duration_ms INTEGER,
+        created_at INTEGER NOT NULL,
+        verifier INTEGER,
+        input_paths_json TEXT
+      );
+      INSERT INTO tool_calls_v81 SELECT * FROM tool_calls;
+      DROP TABLE tool_calls;
+      ALTER TABLE tool_calls_v81 RENAME TO tool_calls;
+      CREATE INDEX idx_tool_calls_project_tool_status
+        ON tool_calls (project_id, tool, status);
+      CREATE INDEX idx_tool_calls_project_session
+        ON tool_calls (project_id, session_id);
+      UPDATE schema_version SET version = 81;
+    `);
+    close();
+
+    const migrated = db();
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    expect(
+      migrated
+        .query(
+          "SELECT id, source_id, content FROM temporal_messages WHERE id = ?",
+        )
+        .get(messageID),
+    ).toEqual({
+      id: messageID,
+      source_id: messageID,
+      content: "legacy zircon content",
+    });
+    expect(
+      migrated
+        .query(
+          `SELECT m.id FROM temporal_fts f
+             JOIN temporal_messages m ON m.rowid = f.rowid
+            WHERE temporal_fts MATCH 'zircon' AND m.id = ?`,
+        )
+        .get(messageID),
+    ).toEqual({ id: messageID });
+    expect(
+      migrated
+        .query(
+          "SELECT call_id, status, input_paths_json FROM tool_calls WHERE call_id = ?",
+        )
+        .get(callID),
+    ).toEqual({
+      call_id: callID,
+      status: "completed",
+      input_paths_json: '["legacy.ts"]',
+    });
+    const pk = (
+      migrated.query("PRAGMA table_info(tool_calls)").all() as Array<{
+        name: string;
+        pk: number;
+      }>
+    )
+      .filter((column) => column.pk > 0)
+      .sort((a, b) => a.pk - b.pk)
+      .map((column) => column.name);
+    expect(pk).toEqual(["project_id", "session_id", "call_id"]);
+  });
+
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
     // The columns are GONE from the base knowledge table...
     const kcols = (
@@ -201,7 +349,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(81);
+    expect(ver.version).toBe(MIGRATIONS.length);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -238,7 +386,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(81);
+    expect(ver.version).toBe(MIGRATIONS.length);
   });
 
   test("v56: knowledge_ref_validity table + projects.last_refcheck_at exist after recovery", () => {
@@ -808,7 +956,8 @@ describe("db", () => {
           const result = fn();
           if (
             !reassigned &&
-            sql.includes("SELECT id, git_remote FROM projects WHERE path = ?")
+            sql.includes("SELECT id, git_remote FROM projects") &&
+            sql.includes("path = ?")
           ) {
             reassigned = true;
             external.exec("BEGIN IMMEDIATE");
@@ -2922,14 +3071,14 @@ describe("db", () => {
       expect(names).toContain("idx_tool_calls_project_session");
     });
 
-    test("call_id PK upserts in place", () => {
+    test("owned call_id PK upserts in place", () => {
       const pid = ensureProject("/tmp/tool-calls-pk-test");
       const insert = () =>
         db().query(
           `INSERT INTO tool_calls
                (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
              VALUES ('c1', 'm1', ?, 's1', 'bash', ?, ?, ?, ?, 1000)
-             ON CONFLICT(call_id) DO UPDATE SET
+              ON CONFLICT(project_id, session_id, call_id) DO UPDATE SET
                status = excluded.status,
                error_type = excluded.error_type,
                error_message = excluded.error_message,
@@ -3165,10 +3314,10 @@ describe("db", () => {
         db()
           .query(
             `INSERT INTO temporal_messages
-               (id, project_id, session_id, role, content, tokens, distilled, created_at)
-             VALUES (?, ?, ?, 'user', 'x', 1, 0, 1000)`,
+                (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at)
+              VALUES (?, ?, ?, ?, 'user', 'x', 1, 0, 1000)`,
           )
-          .run(id, pid, sid);
+          .run(id, id, pid, sid);
       ins(pidA, sess, "m1");
       ins(pidA, sess, "m2");
       ins(pidA, sess, "m3");
@@ -3197,10 +3346,10 @@ describe("db", () => {
         db()
           .query(
             `INSERT INTO temporal_messages
-               (id, project_id, session_id, role, content, tokens, distilled, created_at)
-             VALUES (?, ?, ?, 'user', 'x', 1, 0, 1000)`,
+                (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at)
+              VALUES (?, ?, ?, ?, 'user', 'x', 1, 0, 1000)`,
           )
-          .run(id, pid, sess);
+          .run(id, id, pid, sess);
       }
       // 1200 ids (>999 SQLite bound-variable limit) — must not throw and must
       // count only the 5 that exist.

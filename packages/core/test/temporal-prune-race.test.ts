@@ -171,7 +171,7 @@ describe("temporal.prune resilience to a db()-swap missing-table race (#1001)", 
     // no-such-table *before* any pass runs. The whole tick must no-op, not abort.
     registerSink(
       throwingSink(
-        /FROM projects WHERE path/,
+        /FROM projects WHERE .*path/,
         new Error("no such table: projects"),
       ),
     );

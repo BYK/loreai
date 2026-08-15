@@ -58,6 +58,17 @@ The URL should be the **server root** — do not include `/v1` (the gateway appe
 
 Cloud providers (Anthropic, OpenAI, etc.) are routed automatically by model name and don't need this.
 
+## Remote gateway access
+
+Remote/hosted gateways require a separate access token in addition to the model provider's API key or bearer token:
+
+```bash
+export LORE_REMOTE_URL=https://lore.example.com
+export LORE_GATEWAY_AUTH_TOKEN='<token configured on the gateway>'
+```
+
+The extension injects the token as `x-lore-gateway-token` on provider calls and `/v1/compact`. It is never used as provider authentication or put in the URL.
+
 ## Companion packages
 
 Lore ships as three packages sharing the same SQLite database at `~/.local/share/lore/lore.db`:

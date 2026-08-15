@@ -10,6 +10,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   distillation,
+  db,
   getDailyCostForDay,
   ltm,
   loadSessionTracking,
@@ -63,6 +64,7 @@ import {
   setPipelineResetPauseForTest,
   setBeforeUpstreamCaptureForTest,
   setPostResponseStartObserverForTest,
+  setRecallPersistenceCommitObserverForTest,
   setProvisionalFinalizerPauseForTest,
   setStreamingPostResponseLimitsForTest,
   setStreamingPostResponseWaitObserverForTest,
@@ -70,7 +72,7 @@ import {
   streamingPostResponsePendingForTest,
   validatedMetaStream,
 } from "../src/pipeline";
-import { loadConfig } from "../src/config";
+import { loadConfig as loadBaseConfig } from "../src/config";
 import { authFingerprint } from "../src/auth";
 import { getDegradationWarning } from "../src/worker-health";
 import {
@@ -89,6 +91,13 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
+
+function loadLocalConfig() {
+  const config = loadBaseConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
+  return config;
+}
 
 function makeStreamBody(userMessage: string): Record<string, unknown> {
   return {
@@ -361,7 +370,7 @@ describe("non-stream recall usage aggregation", () => {
         });
         request.stream = false;
         request.signal = caller.signal;
-        const pending = handleRequest(request, loadConfig());
+        const pending = handleRequest(request, loadLocalConfig());
         await started;
         if (abortSource === "caller") {
           caller.abort(new DOMException("client disconnected", "AbortError"));
@@ -442,7 +451,7 @@ describe("non-stream recall usage aggregation", () => {
       });
       request.stream = false;
       request.rawHeaders["x-lore-no-store"] = "true";
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       expect(response.status).toBe(200);
       await response.text();
 
@@ -515,7 +524,7 @@ describe("non-stream recall usage aggregation", () => {
       });
       request.stream = false;
       request.rawHeaders["x-lore-no-store"] = "true";
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       expect(response.status).toBe(200);
       await response.text();
       const state = [...getActiveSessions().values()].find(
@@ -934,7 +943,7 @@ describe("Pipeline — streaming responses", () => {
     try {
       const response = await handleRequest(
         request({ "x-session-affinity": "legacy-affinity-session" }),
-        loadConfig(),
+        loadLocalConfig(),
       );
 
       const body = await response.text();
@@ -944,7 +953,7 @@ describe("Pipeline — streaming responses", () => {
           "x-lore-session-id": "stable-lore-session",
           "x-session-affinity": "legacy-affinity-session",
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(order).toEqual(["eof1"]);
       const secondBody = await secondResponse.text();
@@ -956,7 +965,7 @@ describe("Pipeline — streaming responses", () => {
         request({
           "x-lore-session-id": "responses-post-response-per-session",
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const perSessionSaturatedBody = await perSessionSaturated.text();
       order.push("eof3");
@@ -966,7 +975,7 @@ describe("Pipeline — streaming responses", () => {
       setStreamingPostResponseLimitsForTest(0, 2);
       const globallySaturated = await handleRequest(
         request({ "x-lore-session-id": "responses-post-response-global" }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const globallySaturatedBody = await globallySaturated.text();
       order.push("eof4");
@@ -1020,7 +1029,7 @@ describe("Pipeline — streaming responses", () => {
             "x-lore-session-id": "terminal-before-eof-session",
           },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       reader = response.body?.getReader();
       expect(reader).toBeDefined();
@@ -1068,7 +1077,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "warning-path-session" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const body = await response.text();
       order.push("eof");
@@ -1106,7 +1115,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": alias },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -1126,7 +1135,7 @@ describe("Pipeline — streaming responses", () => {
             "x-session-affinity": alias,
           },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const body = await response.text();
       expect(body).toContain("event: response.incomplete");
@@ -1152,7 +1161,7 @@ describe("Pipeline — streaming responses", () => {
           },
           body: JSON.stringify({ project_path: process.cwd() }),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(compact.status).toBe(404);
       expect(loadSessionTracking(state?.sessionID ?? "")).toMatchObject({
@@ -1192,7 +1201,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "dropped-span-session" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await response.text();
       await vi.waitFor(() => expect(postResponses).toBe(1));
@@ -1217,7 +1226,7 @@ describe("Pipeline — streaming responses", () => {
     admissionRequest.rawHeaders["x-lore-agent"] = "title";
 
     try {
-      await (await handleRequest(admissionRequest, loadConfig())).text();
+      await (await handleRequest(admissionRequest, loadLocalConfig())).text();
       const perSessionOrder: number[] = [];
       let releasePerSession: (() => void) | undefined;
       const perSessionGate = new Promise<void>((resolve) => {
@@ -1329,7 +1338,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "cancelled-span-session" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
@@ -1371,7 +1380,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "incomplete-span-session" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(await response.text()).toContain("event: response.incomplete");
       await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
@@ -1423,7 +1432,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": sessionHeader },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         );
         expect(await response.text()).toContain(`event: response.${terminal}`);
         const state = [...getActiveSessions().values()].find(
@@ -1545,7 +1554,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": sessionHeader },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(await response.text()).toContain("event: response.failed");
       const state = [...getActiveSessions().values()].find(
@@ -1604,7 +1613,7 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       request.stream = false;
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       expect(end).not.toHaveBeenCalled();
       expect(response.status).toBe(200);
       const body = (await response.json()) as Record<string, unknown>;
@@ -1660,7 +1669,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": sessionHeader },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -1670,7 +1679,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-lore-session-id": sessionHeader },
       });
       request.stream = false;
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       expect(response.status).toBe(502);
       expect(await response.text()).toContain("Gateway request failed");
     } finally {
@@ -1702,7 +1711,7 @@ describe("Pipeline — streaming responses", () => {
           sessionHeaders: { "x-lore-session-id": sessionHeader },
         });
         setup.codex = codex;
-        await (await handleRequest(setup, loadConfig())).text();
+        await (await handleRequest(setup, loadLocalConfig())).text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
         const state = [...getActiveSessions().values()].find(
@@ -1717,7 +1726,7 @@ describe("Pipeline — streaming responses", () => {
         });
         request.stream = false;
         request.codex = codex;
-        const response = await handleRequest(request, loadConfig());
+        const response = await handleRequest(request, loadLocalConfig());
         expect(response.status).toBe(502);
         expect(await response.text()).toContain("Gateway request failed");
         expect(store).not.toHaveBeenCalled();
@@ -1754,7 +1763,7 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       request.stream = false;
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       expect(response.status).toBe(502);
       expect(await response.text()).toContain("Gateway request failed");
     } finally {
@@ -1800,7 +1809,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": sessionHeader },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -1810,7 +1819,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-lore-session-id": sessionHeader },
       });
       request.stream = false;
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       expect(response.status).toBe(502);
       const body = await response.text();
       expect(body).toContain("Gateway request failed");
@@ -1857,11 +1866,11 @@ describe("Pipeline — streaming responses", () => {
       });
 
     try {
-      const first = await handleRequest(request(), loadConfig());
+      const first = await handleRequest(request(), loadLocalConfig());
       const firstBody = first.text();
       await started[0];
 
-      const second = await handleRequest(request(), loadConfig());
+      const second = await handleRequest(request(), loadLocalConfig());
       const secondBody = second.text();
       await new Promise((resolve) => setImmediate(resolve));
       expect(upstreamCall).toBe(1);
@@ -1875,7 +1884,7 @@ describe("Pipeline — streaming responses", () => {
       await started[1];
       expect(order).toEqual(["eof1", "post1"]);
 
-      const third = await handleRequest(request(), loadConfig());
+      const third = await handleRequest(request(), loadLocalConfig());
       const thirdBody = third.text();
       await new Promise((resolve) => setImmediate(resolve));
       expect(upstreamCall).toBe(2);
@@ -1947,14 +1956,14 @@ describe("Pipeline — streaming responses", () => {
     try {
       const owner = await handleRequest(
         makeResponsesRequest({ sessionHeaders: ownerHeaders }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const ownerBody = owner.text();
       await ownerStarted;
 
       const waiting = await handleRequest(
         makeResponsesRequest({ sessionHeaders: ownerHeaders }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const waitingBody = waiting.text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -1962,7 +1971,7 @@ describe("Pipeline — streaming responses", () => {
 
       const overflow = await handleRequest(
         makeResponsesRequest({ sessionHeaders: ownerHeaders }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(await overflow.text()).toContain("event: response.failed");
 
@@ -1970,7 +1979,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "fair-unrelated-session" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(await unrelated.text()).toContain("event: response.completed");
       expect(upstreamCalls).toBe(2);
@@ -2005,7 +2014,7 @@ describe("Pipeline — streaming responses", () => {
             "x-lore-session-id": "responses-post-response-reset",
           },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await resetPipelineState();
       setPostResponseStartObserverForTest(() => postResponses++);
@@ -2016,7 +2025,7 @@ describe("Pipeline — streaming responses", () => {
       });
       reopenedRequest.stream = false;
       reopenedRequest.rawHeaders["x-lore-agent"] = "title";
-      await (await handleRequest(reopenedRequest, loadConfig())).text();
+      await (await handleRequest(reopenedRequest, loadLocalConfig())).text();
 
       let staleUpstreamCalls = 0;
       setUpstreamInterceptor(async () => {
@@ -2059,7 +2068,7 @@ describe("Pipeline — streaming responses", () => {
     try {
       const response = await handleRequest(
         makeResponsesRequest({ sessionHeaders }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
@@ -2086,7 +2095,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "capacity-rejected-session" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(saturated.status).toBe(503);
       expect(await saturated.text()).toContain("Gateway is busy");
@@ -2132,7 +2141,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "stale-producer-session" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const body = response.text();
       await producerWaiting;
@@ -2192,7 +2201,7 @@ describe("Pipeline — streaming responses", () => {
       });
       staleRequest.rawHeaders["x-lore-project"] = staleProjectPath;
       staleRequest.rawHeaders["x-lore-upstream-url"] = staleUpstream;
-      const response = await handleRequest(staleRequest, loadConfig());
+      const response = await handleRequest(staleRequest, loadLocalConfig());
       const body = response.text();
       await producerWaiting;
       await resetPipelineState();
@@ -2206,7 +2215,7 @@ describe("Pipeline — streaming responses", () => {
             "x-lore-session-id": "quarantine-saturation-session",
           },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(quarantineFull.status).toBe(503);
       expect(await quarantineFull.text()).toContain("Gateway is busy");
@@ -2225,7 +2234,7 @@ describe("Pipeline — streaming responses", () => {
       });
       freshRequest.rawHeaders["x-lore-project"] = freshProjectPath;
       freshRequest.rawHeaders["x-lore-upstream-url"] = freshUpstream;
-      const reopened = await handleRequest(freshRequest, loadConfig());
+      const reopened = await handleRequest(freshRequest, loadLocalConfig());
       expect(await reopened.text()).toContain("event: response.completed");
       expect(upstreamCalls).toBe(1);
       const freshState = [...getActiveSessions().values()].find(
@@ -2293,7 +2302,7 @@ describe("Pipeline — streaming responses", () => {
             "x-lore-session-id": "started-response-before-reset",
           },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const bodyResult = response.text();
       await upstreamStarted;
@@ -2307,7 +2316,7 @@ describe("Pipeline — streaming responses", () => {
       });
       reopenedRequest.stream = false;
       reopenedRequest.rawHeaders["x-lore-agent"] = "title";
-      await (await handleRequest(reopenedRequest, loadConfig())).text();
+      await (await handleRequest(reopenedRequest, loadLocalConfig())).text();
       const body = await bodyResult;
 
       expect(body).toContain("event: response.failed");
@@ -2344,7 +2353,7 @@ describe("Pipeline — streaming responses", () => {
             content: [{ type: "text" as const, text: `turn ${index}` }],
           })),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await established.text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -2367,7 +2376,7 @@ describe("Pipeline — streaming responses", () => {
           ],
           tools: [],
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await resetPipelineState();
 
@@ -2438,7 +2447,7 @@ describe("Pipeline — streaming responses", () => {
             content: [{ type: "text" as const, text: `turn ${index}` }],
           })),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await established.text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -2469,7 +2478,7 @@ describe("Pipeline — streaming responses", () => {
       compactRequest.rawHeaders["x-lore-provider"] = "anthropic";
       compactRequest.rawHeaders["x-lore-upstream-url"] =
         "https://api.anthropic.com";
-      const compacted = await handleRequest(compactRequest, loadConfig());
+      const compacted = await handleRequest(compactRequest, loadLocalConfig());
       await started;
       expect(distillationSignal).toBeDefined();
       expect(activePipelineRequestCountForTest()).toBe(1);
@@ -2539,7 +2548,7 @@ describe("Pipeline — streaming responses", () => {
             content: [{ type: "text" as const, text: `turn ${index}` }],
           })),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await established.text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -2578,7 +2587,7 @@ describe("Pipeline — streaming responses", () => {
       compactRequest.rawHeaders["x-lore-provider"] = "anthropic";
       compactRequest.rawHeaders["x-lore-upstream-url"] =
         "https://api.anthropic.com";
-      const compacted = await handleRequest(compactRequest, loadConfig());
+      const compacted = await handleRequest(compactRequest, loadLocalConfig());
       await started;
 
       await compacted.body?.cancel(
@@ -2629,7 +2638,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "request-during-reset" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
 
       expect(response.status).toBe(503);
@@ -2702,7 +2711,7 @@ describe("Pipeline — streaming responses", () => {
 
     try {
       await (
-        await handleResponsesCompactEndpoint(compact, loadConfig())
+        await handleResponsesCompactEndpoint(compact, loadLocalConfig())
       ).text();
       let postResponses = 0;
       setPostResponseStartObserverForTest(() => postResponses++);
@@ -2716,7 +2725,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "post-direct-route" },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await streamed.text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -2754,23 +2763,29 @@ describe("Pipeline — streaming responses", () => {
       await (
         await handleRequest(
           makeResponsesRequest({ sessionHeaders }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
-      const off = await handleRequest(command("/lore:warm:off"), loadConfig());
+      const off = await handleRequest(
+        command("/lore:warm:off"),
+        loadLocalConfig(),
+      );
       expect(await off.text()).toContain("Cache warming disabled globally");
       expect(isWarmingEnabled()).toBe(false);
 
-      const on = await handleRequest(command("/lore:warm:on"), loadConfig());
+      const on = await handleRequest(
+        command("/lore:warm:on"),
+        loadLocalConfig(),
+      );
       expect(await on.text()).toContain("Cache warming enabled globally");
       expect(isWarmingEnabled()).toBe(true);
 
       const reset = await handleRequest(
         command("/lore:warm:reset"),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(await reset.text()).toContain(
         "Cache warming circuit breaker reset",
@@ -2795,7 +2810,7 @@ describe("Pipeline — streaming responses", () => {
     try {
       const provisional = makeResponsesRequest({ sessionHeaders });
       delete provisional.rawHeaders["x-lore-project"];
-      await (await handleRequest(provisional, loadConfig())).text();
+      await (await handleRequest(provisional, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -2810,7 +2825,7 @@ describe("Pipeline — streaming responses", () => {
       });
       curate.stream = false;
       curate.rawHeaders["x-lore-project"] = "/tmp";
-      const response = await handleRequest(curate, loadConfig());
+      const response = await handleRequest(curate, loadLocalConfig());
       expect(response.status).toBe(200);
       await response.text();
 
@@ -2843,7 +2858,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": "tier2-seed-session" },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await resetPipelineState();
@@ -2859,13 +2874,13 @@ describe("Pipeline — streaming responses", () => {
           scheme: "bearer",
           value: "test-key",
         }),
-        headerName: "x-custom-session-key",
+        headerName: "x-custom-session-affinity",
         headerSessionId: "tier2-custom-value",
         projectPath: process.cwd(),
         projectPathProvisional: false,
       });
       const curate = makeResponsesRequest({
-        sessionHeaders: { "x-custom-session-key": "tier2-custom-value" },
+        sessionHeaders: { "x-custom-session-affinity": "tier2-custom-value" },
         messages: [
           {
             role: "user",
@@ -2874,7 +2889,7 @@ describe("Pipeline — streaming responses", () => {
         ],
       });
       curate.stream = false;
-      const response = await handleRequest(curate, loadConfig());
+      const response = await handleRequest(curate, loadLocalConfig());
       expect(response.status).toBe(200);
       expect(await response.text()).toContain("Curation complete");
       expect(getActiveSessions().has("persisted-tier2-session")).toBe(true);
@@ -2897,7 +2912,7 @@ describe("Pipeline — streaming responses", () => {
     try {
       const established = await handleRequest(
         makeResponsesRequest({ sessionHeaders: legacyHeader }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await established.text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -2918,13 +2933,13 @@ describe("Pipeline — streaming responses", () => {
       };
       const curate = await handleRequest(
         slashRequest("/lore:curate"),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(await curate.text()).toContain(
         "No active session found for curation",
       );
       await (
-        await handleRequest(slashRequest("/lore:amnesia:on"), loadConfig())
+        await handleRequest(slashRequest("/lore:amnesia:on"), loadLocalConfig())
       ).text();
 
       const order: string[] = [];
@@ -2940,13 +2955,16 @@ describe("Pipeline — streaming responses", () => {
             },
           ],
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await sensitive.text();
       order.push("eof");
 
       await (
-        await handleRequest(slashRequest("/lore:amnesia:off"), loadConfig())
+        await handleRequest(
+          slashRequest("/lore:amnesia:off"),
+          loadLocalConfig(),
+        )
       ).text();
       order.push("slash");
 
@@ -2988,7 +3006,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": alias },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3007,7 +3025,7 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       migration.signal = caller.signal;
-      const failed = await handleRequest(migration, loadConfig());
+      const failed = await handleRequest(migration, loadLocalConfig());
       const failedBody = failed.text();
       await waiting;
       caller.abort(new DOMException("caller disconnected", "AbortError"));
@@ -3025,7 +3043,7 @@ describe("Pipeline — streaming responses", () => {
           },
           body: JSON.stringify({ project_path: process.cwd() }),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(compact.status).toBe(404);
       expect(loadSessionTracking(state?.sessionID ?? "")).toMatchObject({
@@ -3039,7 +3057,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": canonical },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3076,13 +3094,13 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": canonical },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const second = handleRequest(
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": canonical },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const responses = await Promise.all([first, second]);
       await Promise.all(responses.map((response) => response.text()));
@@ -3133,7 +3151,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": alias },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3162,7 +3180,7 @@ describe("Pipeline — streaming responses", () => {
             },
           ],
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(response.status).toBe(200);
       await response.text();
@@ -3210,7 +3228,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": alias },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3229,7 +3247,7 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       request.signal = caller.signal;
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
       const decoder = new TextDecoder();
@@ -3259,7 +3277,7 @@ describe("Pipeline — streaming responses", () => {
           },
           body: JSON.stringify({ project_path: process.cwd() }),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(compact.status).toBe(404);
     } finally {
@@ -3355,7 +3373,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": canonical },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3371,7 +3389,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-lore-session-id": canonical },
       });
       request.signal = caller.signal;
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
       const decoder = new TextDecoder();
@@ -3404,7 +3422,7 @@ describe("Pipeline — streaming responses", () => {
           },
           body: JSON.stringify({ project_path: process.cwd() }),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(compact.status).toBe(200);
     } finally {
@@ -3441,7 +3459,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-session-affinity": alias },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(await response.text()).toContain("event: response.completed");
       await vi.waitFor(() => expect(store).toHaveBeenCalled());
@@ -3461,8 +3479,109 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("rolls back all DB effects when recall commit fails", async () => {
+    const alias = "failed-recall-commit-atomicity-alias";
+    const knowledgeId = ltm.create({
+      projectPath: "/test/responses-recall-atomicity/failure-origin",
+      category: "gotcha",
+      title: "Failed recall commit terms",
+      content:
+        "one two three four five six seven eight nine atomic failure terms",
+      scope: "project",
+      crossProject: true,
+    });
+    let commitAttempts = 0;
+    setRecallPersistenceCommitObserverForTest(() => {
+      commitAttempts++;
+      throw new Error("injected recall commit failure");
+    });
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(
+        upstreamCall === 1
+          ? recallResponsesSSE(
+              "resp_failed_recall_commit_atomicity",
+              "one two three four five six seven eight nine atomic failure terms",
+            )
+          : validResponsesSSE(
+              "resp_failed_recall_commit_atomicity_final",
+              "final answer",
+            ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": alias },
+        }),
+        loadLocalConfig(),
+      );
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      const trackingBeforeEof = loadSessionTracking(state?.sessionID ?? "");
+      const temporalBeforeEof = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+
+      for (;;) {
+        const chunk = await reader?.read();
+        if (chunk?.done) break;
+      }
+      await vi.waitFor(() => expect(commitAttempts).toBe(1));
+
+      const temporalAfterFailure = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+      const trackingAfterFailure = loadSessionTracking(state?.sessionID ?? "");
+      expect(temporalAfterFailure.count).toBe(temporalBeforeEof.count);
+      expect(trackingAfterFailure?.messageCount).toBe(
+        trackingBeforeEof?.messageCount,
+      );
+      expect(trackingAfterFailure?.turnsSinceCuration).toBe(
+        trackingBeforeEof?.turnsSinceCuration,
+      );
+      expect(trackingAfterFailure?.recallStore).toBe(
+        trackingBeforeEof?.recallStore ?? null,
+      );
+      expect(state?.recallStore.size).toBe(0);
+      expect(ltm.transferCount(knowledgeId)).toBe(0);
+    } finally {
+      setRecallPersistenceCommitObserverForTest(undefined);
+      ltm.remove(knowledgeId);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it("commits recall persistence only after successful downstream EOF", async () => {
     const alias = "successful-recall-persistence-alias";
+    const knowledgeId = ltm.create({
+      projectPath: "/test/responses-recall-atomicity/success-origin",
+      category: "gotcha",
+      title: "Successful recall persistence terms",
+      content: "one two three four five six seven eight nine success terms",
+      scope: "project",
+      crossProject: true,
+    });
     let upstreamCall = 0;
     setUpstreamInterceptor(async () => {
       upstreamCall++;
@@ -3485,7 +3604,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-session-affinity": alias },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
@@ -3505,6 +3624,13 @@ describe("Pipeline — streaming responses", () => {
       expect(
         loadSessionTracking(state?.sessionID ?? "")?.recallStore,
       ).toBeNull();
+      const temporalBeforeEof = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+      expect(temporalBeforeEof.count).toBe(0);
+      expect(ltm.transferCount(knowledgeId)).toBe(0);
 
       for (;;) {
         const chunk = await reader?.read();
@@ -3516,7 +3642,18 @@ describe("Pipeline — streaming responses", () => {
       expect(
         loadSessionTracking(state?.sessionID ?? "")?.recallStore,
       ).not.toBeNull();
+      const temporalCount = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+      expect(temporalCount.count).toBeGreaterThan(0);
+      expect(
+        loadSessionTracking(state?.sessionID ?? "")?.messageCount,
+      ).toBeGreaterThan(0);
+      expect(ltm.transferCount(knowledgeId)).toBeGreaterThan(0);
     } finally {
+      ltm.remove(knowledgeId);
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
@@ -3543,7 +3680,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": alias },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3563,7 +3700,7 @@ describe("Pipeline — streaming responses", () => {
             "x-session-affinity": alias,
           },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
@@ -3608,7 +3745,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": sessionHeader },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3624,7 +3761,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": sessionHeader },
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
@@ -3682,7 +3819,7 @@ describe("Pipeline — streaming responses", () => {
             makeResponsesRequest({
               sessionHeaders: { "x-session-affinity": alias },
             }),
-            loadConfig(),
+            loadLocalConfig(),
           )
         ).text();
         await new Promise((resolve) => setImmediate(resolve));
@@ -3705,7 +3842,7 @@ describe("Pipeline — streaming responses", () => {
               "x-session-affinity": alias,
             },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         );
         expect(response.status).toBe(200);
         const body = await response.text();
@@ -3755,7 +3892,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": alias },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -3779,7 +3916,7 @@ describe("Pipeline — streaming responses", () => {
             },
           ],
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await response.text();
       expect(forwardedBodies.at(-1)).not.toContain("lore:session-id");
@@ -3846,7 +3983,7 @@ describe("Pipeline — streaming responses", () => {
             makeResponsesRequest({
               sessionHeaders: { "x-session-affinity": alias },
             }),
-            loadConfig(),
+            loadLocalConfig(),
           )
         ).text();
         await new Promise((resolve) => setImmediate(resolve));
@@ -3866,7 +4003,7 @@ describe("Pipeline — streaming responses", () => {
         });
         migration.rawHeaders["x-lore-project"] =
           "/tmp/untrusted-provisional-project";
-        const failed = await handleRequest(migration, loadConfig());
+        const failed = await handleRequest(migration, loadLocalConfig());
         expect(await failed.text()).toContain("event: response.failed");
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
@@ -3881,7 +4018,7 @@ describe("Pipeline — streaming responses", () => {
             },
             body: JSON.stringify({ project_path: process.cwd() }),
           }),
-          loadConfig(),
+          loadLocalConfig(),
         );
         expect(compact.status).toBe(404);
         expect(store).not.toHaveBeenCalled();
@@ -3948,7 +4085,7 @@ describe("Pipeline — streaming responses", () => {
             makeResponsesRequest({
               sessionHeaders: { "x-session-affinity": alias },
             }),
-            loadConfig(),
+            loadLocalConfig(),
           )
         ).text();
         await new Promise((resolve) => setImmediate(resolve));
@@ -3977,7 +4114,7 @@ describe("Pipeline — streaming responses", () => {
           },
         });
         failed.stream = false;
-        const response = await handleRequest(failed, loadConfig());
+        const response = await handleRequest(failed, loadLocalConfig());
         if (status === "incomplete") {
           expect(response.status).toBe(200);
           const body = (await response.json()) as Record<string, unknown>;
@@ -4025,7 +4162,7 @@ describe("Pipeline — streaming responses", () => {
             },
             body: JSON.stringify({ project_path: process.cwd() }),
           }),
-          loadConfig(),
+          loadLocalConfig(),
         );
         expect(compact.status).toBe(404);
         expect(loadSessionTracking(state?.sessionID ?? "")).toMatchObject({
@@ -4103,7 +4240,7 @@ describe("Pipeline — streaming responses", () => {
             makeResponsesRequest({
               sessionHeaders: { "x-session-affinity": alias },
             }),
-            loadConfig(),
+            loadLocalConfig(),
           )
         ).text();
         await new Promise((resolve) => setImmediate(resolve));
@@ -4125,7 +4262,7 @@ describe("Pipeline — streaming responses", () => {
         migration.stream = false;
         migration.rawHeaders["x-lore-provider"] = provider;
         migration.rawHeaders["x-lore-upstream-url"] = upstream;
-        const response = await handleRequest(migration, loadConfig());
+        const response = await handleRequest(migration, loadLocalConfig());
         expect(response.status).toBe(502);
         expect(await response.text()).toContain("Gateway request failed");
         await new Promise((resolve) => setImmediate(resolve));
@@ -4144,7 +4281,7 @@ describe("Pipeline — streaming responses", () => {
             },
             body: JSON.stringify({ project_path: process.cwd() }),
           }),
-          loadConfig(),
+          loadLocalConfig(),
         );
         expect(compact.status).toBe(404);
       } finally {
@@ -4173,7 +4310,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-session-affinity": alias },
       });
       established.rawHeaders["x-lore-project"] = projectA;
-      await (await handleRequest(established, loadConfig())).text();
+      await (await handleRequest(established, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       const original = [...getActiveSessions().values()].find(
@@ -4192,7 +4329,7 @@ describe("Pipeline — streaming responses", () => {
       });
       migration.rawHeaders["x-lore-project"] = projectB;
       expect(
-        await (await handleRequest(migration, loadConfig())).text(),
+        await (await handleRequest(migration, loadLocalConfig())).text(),
       ).toContain("event: response.completed");
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -4257,7 +4394,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-session-affinity": alias },
       });
       first.rawHeaders["x-lore-project"] = projectA;
-      const firstResponse = await handleRequest(first, loadConfig());
+      const firstResponse = await handleRequest(first, loadLocalConfig());
       const firstBody = firstResponse.text();
       await firstWaiting;
 
@@ -4268,7 +4405,10 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       migration.rawHeaders["x-lore-project"] = projectB;
-      const migrationResponse = await handleRequest(migration, loadConfig());
+      const migrationResponse = await handleRequest(
+        migration,
+        loadLocalConfig(),
+      );
       const migrationBody = migrationResponse.text();
       await vi.waitFor(() =>
         expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
@@ -4294,9 +4434,9 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       retry.rawHeaders["x-lore-project"] = projectB;
-      expect(await (await handleRequest(retry, loadConfig())).text()).toContain(
-        "event: response.completed",
-      );
+      expect(
+        await (await handleRequest(retry, loadLocalConfig())).text(),
+      ).toContain("event: response.completed");
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -4342,7 +4482,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-session-affinity": alias },
       });
       established.rawHeaders["x-lore-project"] = projectA;
-      await (await handleRequest(established, loadConfig())).text();
+      await (await handleRequest(established, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       const original = [...getActiveSessions().values()].find(
@@ -4357,7 +4497,7 @@ describe("Pipeline — streaming responses", () => {
       });
       delete migration.rawHeaders["x-lore-project"];
       migration.system = `You are a coding agent.\nWorking directory: ${projectB}`;
-      await (await handleRequest(migration, loadConfig())).text();
+      await (await handleRequest(migration, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -4422,7 +4562,7 @@ describe("Pipeline — streaming responses", () => {
             makeResponsesRequest({
               sessionHeaders: { "x-session-affinity": alias },
             }),
-            loadConfig(),
+            loadLocalConfig(),
           )
         ).text();
         await new Promise((resolve) => setImmediate(resolve));
@@ -4444,7 +4584,7 @@ describe("Pipeline — streaming responses", () => {
         migration.rawHeaders["x-lore-provider"] = "google";
         migration.rawHeaders["x-lore-upstream-url"] =
           "https://generativelanguage.googleapis.com";
-        await (await handleRequest(migration, loadConfig())).text();
+        await (await handleRequest(migration, loadLocalConfig())).text();
         await new Promise((resolve) => setImmediate(resolve));
 
         expect(store).not.toHaveBeenCalled();
@@ -4479,7 +4619,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-session-affinity": alias },
       });
       request.rawHeaders["x-lore-project"] = project;
-      await (await handleRequest(request, loadConfig())).text();
+      await (await handleRequest(request, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
     };
@@ -4511,7 +4651,7 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       first.rawHeaders["x-lore-project"] = projectA;
-      const firstResponse = await handleRequest(first, loadConfig());
+      const firstResponse = await handleRequest(first, loadLocalConfig());
       const firstBody = firstResponse.text();
       await waiting;
       setPipelinePreUpstreamPauseForTest(undefined);
@@ -4525,7 +4665,7 @@ describe("Pipeline — streaming responses", () => {
       conflicting.rawHeaders["x-lore-project"] = projectB;
       const conflictingResponse = await handleRequest(
         conflicting,
-        loadConfig(),
+        loadLocalConfig(),
       );
       const conflictingBody = conflictingResponse.text();
       release();
@@ -4578,7 +4718,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-session-affinity": alias },
       });
       request.rawHeaders["x-lore-project"] = project;
-      await (await handleRequest(request, loadConfig())).text();
+      await (await handleRequest(request, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
     };
@@ -4612,7 +4752,7 @@ describe("Pipeline — streaming responses", () => {
       };
 
       await (
-        await handleRequest(request(aliasA, projectA), loadConfig())
+        await handleRequest(request(aliasA, projectA), loadLocalConfig())
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -4622,7 +4762,7 @@ describe("Pipeline — streaming responses", () => {
       setPipelinePreUpstreamPauseForTest(paused, waitingResolve);
       const retryA = await handleRequest(
         request(aliasA, projectA),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const retryABody = retryA.text();
       await waiting;
@@ -4630,7 +4770,7 @@ describe("Pipeline — streaming responses", () => {
       expireProvisionalHeaderMappingsForTest();
 
       await (
-        await handleRequest(request(aliasB, projectB), loadConfig())
+        await handleRequest(request(aliasB, projectB), loadLocalConfig())
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -4706,7 +4846,7 @@ describe("Pipeline — streaming responses", () => {
           sessionHeaders,
           messages: messages(seed, number),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const body = await response.text();
       expect(body).toContain(
@@ -4838,7 +4978,7 @@ describe("Pipeline — streaming responses", () => {
           sessionHeaders: { [headerName]: headerValue },
           messages: messages(seed, number),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const body = await response.text();
       expect(body).toContain(
@@ -4889,7 +5029,7 @@ describe("Pipeline — streaming responses", () => {
           },
         ],
       });
-      const slashResponse = await handleRequest(slash, loadConfig());
+      const slashResponse = await handleRequest(slash, loadLocalConfig());
       expect(await slashResponse.text()).toContain(
         "Amnesia mode was not changed",
       );
@@ -4902,7 +5042,7 @@ describe("Pipeline — streaming responses", () => {
           sessionHeaders: { [headerName]: targetValue },
           messages: messages("target session", 3),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(target?.headerSessionId).toBeUndefined();
       expect(await validation.text()).toContain("event: response.completed");
@@ -4952,7 +5092,7 @@ describe("Pipeline — streaming responses", () => {
             sessionHeaders: { [headerName]: headerValue },
             messages: messages(seed, number),
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -4997,7 +5137,7 @@ describe("Pipeline — streaming responses", () => {
         ],
       });
       ambiguous.stream = false;
-      const response = await handleRequest(ambiguous, loadConfig());
+      const response = await handleRequest(ambiguous, loadLocalConfig());
       expect(await response.text()).toContain("Amnesia mode was not changed");
       expect(alpha?.amnesia).toBe(false);
       expect(beta?.amnesia).toBe(false);
@@ -5010,7 +5150,7 @@ describe("Pipeline — streaming responses", () => {
         },
         messages: messages("alpha seed", 4),
       });
-      const normal = await handleRequest(normalAmbiguous, loadConfig());
+      const normal = await handleRequest(normalAmbiguous, loadLocalConfig());
       expect(await normal.text()).toContain("event: response.failed");
       expect(upstreamCall).toBe(8);
       expect(alpha?.messageCount).toBe(messages("alpha seed", 3).length);
@@ -5038,7 +5178,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": victimAlias },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -5049,7 +5189,7 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       delete provisional.rawHeaders["x-lore-project"];
-      await (await handleRequest(provisional, loadConfig())).text();
+      await (await handleRequest(provisional, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       undistilled.mockClear();
@@ -5078,7 +5218,7 @@ describe("Pipeline — streaming responses", () => {
         request.rawHeaders["x-lore-project"] = projectPath;
         if (credential) request.rawHeaders.authorization = credential;
         else delete request.rawHeaders.authorization;
-        return handleRequest(request, loadConfig());
+        return handleRequest(request, loadLocalConfig());
       };
 
       const fresh = await attack(
@@ -5102,7 +5242,7 @@ describe("Pipeline — streaming responses", () => {
         { "x-session-affinity": victimAlias },
         null,
       );
-      expect(missingCredential.status).toBe(401);
+      expect(missingCredential.status).toBe(400);
 
       const wrongCredential = await attack(
         { "x-session-affinity": victimAlias },
@@ -5149,13 +5289,13 @@ describe("Pipeline — streaming responses", () => {
     const store = vi.spyOn(temporal, "store");
 
     try {
-      await (await handleRequest(canonicalRequest, loadConfig())).text();
+      await (await handleRequest(canonicalRequest, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       await (
         await handleRequest(
           makeResponsesRequest({ sessionHeaders: fallbackHeaders }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -5172,7 +5312,7 @@ describe("Pipeline — streaming responses", () => {
         ],
       });
       slash.stream = false;
-      await (await handleRequest(slash, loadConfig())).text();
+      await (await handleRequest(slash, loadLocalConfig())).text();
 
       store.mockClear();
       await (
@@ -5186,7 +5326,7 @@ describe("Pipeline — streaming responses", () => {
               },
             ],
           }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -5197,7 +5337,7 @@ describe("Pipeline — streaming responses", () => {
       await (
         await handleRequest(
           makeResponsesRequest({ sessionHeaders: fallbackHeaders }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -5235,7 +5375,7 @@ describe("Pipeline — streaming responses", () => {
       await (
         await handleRequest(
           makeResponsesRequest({ sessionHeaders }),
-          loadConfig(),
+          loadLocalConfig(),
         )
       ).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -5262,7 +5402,7 @@ describe("Pipeline — streaming responses", () => {
       });
       slash.stream = false;
       slash.signal = caller.signal;
-      pending = handleRequest(slash, loadConfig());
+      pending = handleRequest(slash, loadLocalConfig());
       caller.abort(new DOMException("caller disconnected", "AbortError"));
 
       const outcome = await Promise.race([
@@ -5306,7 +5446,7 @@ describe("Pipeline — streaming responses", () => {
         await (
           await handleRequest(
             makeResponsesRequest({ sessionHeaders }),
-            loadConfig(),
+            loadLocalConfig(),
           )
         ).text();
         await new Promise((resolve) => setImmediate(resolve));
@@ -5343,7 +5483,7 @@ describe("Pipeline — streaming responses", () => {
             ],
           });
           curate.stream = false;
-          pending = handleRequest(curate, loadConfig());
+          pending = handleRequest(curate, loadLocalConfig());
         } else {
           pending =
             endpoint === "compact"
@@ -5356,7 +5496,7 @@ describe("Pipeline — streaming responses", () => {
                       tokens_before: 1,
                     }),
                   }),
-                  loadConfig(),
+                  loadLocalConfig(),
                 )
               : handleResponsesCompactEndpoint(
                   new Request("http://gateway.test/v1/responses/compact", {
@@ -5374,7 +5514,7 @@ describe("Pipeline — streaming responses", () => {
                       tools: [],
                     }),
                   }),
-                  loadConfig(),
+                  loadLocalConfig(),
                 );
         }
 
@@ -5438,7 +5578,7 @@ describe("Pipeline — streaming responses", () => {
       try {
         const setup = makeResponsesRequest({ sessionHeaders });
         setup.rawHeaders["x-lore-project"] = projectA;
-        await (await handleRequest(setup, loadConfig())).text();
+        await (await handleRequest(setup, loadLocalConfig())).text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
         undistilled.mockClear();
@@ -5446,7 +5586,7 @@ describe("Pipeline — streaming responses", () => {
         setPipelinePreUpstreamPauseForTest(rebindPause, rebindWaitingResolve);
         const rebind = makeResponsesRequest({ sessionHeaders });
         rebind.rawHeaders["x-lore-project"] = projectB;
-        const rebindResponse = await handleRequest(rebind, loadConfig());
+        const rebindResponse = await handleRequest(rebind, loadLocalConfig());
         const rebindBody = rebindResponse.text();
         await rebindWaiting;
         setPipelinePreUpstreamPauseForTest(undefined);
@@ -5478,7 +5618,7 @@ describe("Pipeline — streaming responses", () => {
           });
           structural.stream = false;
           structural.rawHeaders["x-lore-project"] = projectA;
-          pending = handleRequest(structural, loadConfig());
+          pending = handleRequest(structural, loadLocalConfig());
         } else if (endpoint === "compact") {
           pending = handleCompactEndpoint(
             new Request("http://gateway.test/v1/compact", {
@@ -5486,7 +5626,7 @@ describe("Pipeline — streaming responses", () => {
               headers,
               body: JSON.stringify({ project_path: projectA }),
             }),
-            loadConfig(),
+            loadLocalConfig(),
           );
         } else {
           pending = handleResponsesCompactEndpoint(
@@ -5505,7 +5645,7 @@ describe("Pipeline — streaming responses", () => {
                 tools: [],
               }),
             }),
-            loadConfig(),
+            loadLocalConfig(),
           );
         }
         await vi.waitFor(() =>
@@ -5588,7 +5728,7 @@ describe("Pipeline — streaming responses", () => {
           sessionHeaders: { "x-session-affinity": oldAffinity },
           messages: [history[0]],
         });
-        await (await handleRequest(seed, loadConfig())).text();
+        await (await handleRequest(seed, loadLocalConfig())).text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
 
@@ -5596,7 +5736,7 @@ describe("Pipeline — streaming responses", () => {
           sessionHeaders: { "x-session-affinity": oldAffinity },
           messages: history,
         });
-        await (await handleRequest(setup, loadConfig())).text();
+        await (await handleRequest(setup, loadLocalConfig())).text();
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
 
@@ -5614,7 +5754,10 @@ describe("Pipeline — streaming responses", () => {
             },
           ],
         });
-        const rotationResponse = await handleRequest(rotation, loadConfig());
+        const rotationResponse = await handleRequest(
+          rotation,
+          loadLocalConfig(),
+        );
         rotationBody = rotationResponse.text();
         await rotationWaiting;
         const oldState = [...getActiveSessions().values()].find(
@@ -5638,7 +5781,7 @@ describe("Pipeline — streaming responses", () => {
             sessionHeaders: { "x-session-affinity": oldAffinity },
           });
           request.stream = false;
-          queued = handleRequest(request, loadConfig());
+          queued = handleRequest(request, loadLocalConfig());
         } else if (route === "structural") {
           const request = makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": oldAffinity },
@@ -5656,7 +5799,7 @@ describe("Pipeline — streaming responses", () => {
             tools: [],
           });
           request.stream = false;
-          queued = handleRequest(request, loadConfig());
+          queued = handleRequest(request, loadLocalConfig());
         } else if (route === "slash") {
           const request = makeResponsesRequest({
             sessionHeaders: { "x-session-affinity": oldAffinity },
@@ -5668,7 +5811,7 @@ describe("Pipeline — streaming responses", () => {
             ],
           });
           request.stream = false;
-          queued = handleRequest(request, loadConfig());
+          queued = handleRequest(request, loadLocalConfig());
         } else if (route === "compact") {
           queued = handleCompactEndpoint(
             new Request("http://gateway.test/v1/compact", {
@@ -5676,7 +5819,7 @@ describe("Pipeline — streaming responses", () => {
               headers,
               body: JSON.stringify({ project_path: process.cwd() }),
             }),
-            loadConfig(),
+            loadLocalConfig(),
           );
         } else {
           queued = handleResponsesCompactEndpoint(
@@ -5695,7 +5838,7 @@ describe("Pipeline — streaming responses", () => {
                 tools: [],
               }),
             }),
-            loadConfig(),
+            loadLocalConfig(),
           );
         }
         await vi.waitFor(() =>
@@ -5749,7 +5892,7 @@ describe("Pipeline — streaming responses", () => {
     );
 
     try {
-      const response = await handleRequest(request, loadConfig());
+      const response = await handleRequest(request, loadLocalConfig());
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
       const decoder = new TextDecoder();
@@ -5823,13 +5966,13 @@ describe("Pipeline — streaming responses", () => {
     try {
       const established = await handleRequest(
         makeResponsesRequest({ sessionHeaders: legacyHeader }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await established.text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       await (
-        await handleRequest(slashRequest("/lore:amnesia:on"), loadConfig())
+        await handleRequest(slashRequest("/lore:amnesia:on"), loadLocalConfig())
       ).text();
       store.mockClear();
 
@@ -5845,14 +5988,14 @@ describe("Pipeline — streaming responses", () => {
             },
           ],
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const sensitiveBody = sensitive.text();
       await sensitiveStarted;
 
       const disableAmnesia = handleRequest(
         slashRequest("/lore:amnesia:off"),
-        loadConfig(),
+        loadLocalConfig(),
       );
       const beforeTerminal = await Promise.race([
         disableAmnesia.then(() => "settled" as const),
@@ -5916,7 +6059,7 @@ describe("Pipeline — streaming responses", () => {
             ],
           })),
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       await first.text();
 
@@ -5933,7 +6076,7 @@ describe("Pipeline — streaming responses", () => {
           ],
           tools: [],
         }),
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(order).not.toContain("stored");
       const compactedBody = await compacted.text();
@@ -5975,7 +6118,7 @@ describe("Pipeline — streaming responses", () => {
           makeResponsesRequest({
             sessionHeaders: { "x-lore-session-id": sessionID },
           }),
-          loadConfig(),
+          loadLocalConfig(),
         );
         await streamed.text();
         order.push("eof");
@@ -5999,7 +6142,7 @@ describe("Pipeline — streaming responses", () => {
                     tokens_before: 1,
                   }),
                 }),
-                loadConfig(),
+                loadLocalConfig(),
               )
             : await handleResponsesCompactEndpoint(
                 new Request("http://gateway.test/v1/responses/compact", {
@@ -6017,7 +6160,7 @@ describe("Pipeline — streaming responses", () => {
                     tools: [],
                   }),
                 }),
-                loadConfig(),
+                loadLocalConfig(),
               );
         await response.text();
         order.push("endpoint");
@@ -6186,7 +6329,7 @@ describe("Pipeline — streaming responses", () => {
           rawHeaders: { "x-lore-agent": "title" },
           signal: controller.signal,
         },
-        loadConfig(),
+        loadLocalConfig(),
       );
       await Promise.resolve();
       controller.abort(new DOMException("client disconnected", "AbortError"));
@@ -6218,7 +6361,7 @@ describe("Pipeline — streaming responses", () => {
           metadata: {},
           rawHeaders: { "x-lore-agent": "title" },
         },
-        loadConfig(),
+        loadLocalConfig(),
       );
       await vi.advanceTimersByTimeAsync(300_000);
       const response = await pending;
@@ -6255,14 +6398,13 @@ describe("Pipeline — streaming responses", () => {
               metadata: {},
               rawHeaders: {
                 "x-api-key": "test-key",
-                authorization: "Bearer test-key",
                 "x-lore-agent": "title",
                 "x-lore-provider": provider,
                 "x-lore-upstream-url": upstream,
               },
               signal: caller.signal,
             },
-            loadConfig(),
+            loadLocalConfig(),
           ),
           new Promise<never>((_resolve, reject) => {
             responseTimer = setTimeout(
@@ -6318,13 +6460,12 @@ describe("Pipeline — streaming responses", () => {
             metadata: {},
             rawHeaders: {
               "x-api-key": "test-key",
-              authorization: "Bearer test-key",
               "x-lore-agent": "title",
               "x-lore-provider": provider,
               "x-lore-upstream-url": upstream,
             },
           },
-          loadConfig(),
+          loadLocalConfig(),
         );
         await Promise.resolve();
         await vi.advanceTimersByTimeAsync(300_000);
@@ -6456,7 +6597,7 @@ describe("Pipeline — streaming responses", () => {
               "x-lore-provider": "openai",
             },
           },
-          loadConfig(),
+          loadLocalConfig(),
         );
         expect(response.status).toBe(200);
         const body = await response.text();
@@ -6503,7 +6644,7 @@ describe("Pipeline — streaming responses", () => {
             "x-lore-provider": "openai",
           },
         },
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(response.status).toBe(502);
       expect(await response.text()).toContain("Gateway request failed");
@@ -6553,7 +6694,7 @@ describe("Pipeline — streaming responses", () => {
             "x-lore-provider": "openai",
           },
         },
-        loadConfig(),
+        loadLocalConfig(),
       );
       expect(response.status).toBe(502);
       expect(await response.text()).toContain("Gateway request failed");
@@ -6610,7 +6751,7 @@ describe("Pipeline — streaming responses", () => {
               "x-lore-upstream-url": "https://api.anthropic.com",
             },
           },
-          loadConfig(),
+          loadLocalConfig(),
         );
         await new Promise((resolve) => setImmediate(resolve));
         expect(pulls).toBeLessThan(chunks.length);
@@ -6696,7 +6837,7 @@ describe("Pipeline — streaming responses", () => {
               "x-lore-upstream-url": "https://api.anthropic.com",
             },
           },
-          loadConfig(),
+          loadLocalConfig(),
         );
         await expect(
           response.text(),

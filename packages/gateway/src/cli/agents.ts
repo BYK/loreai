@@ -6,7 +6,8 @@
  *  - How to detect it (binary name on PATH)
  *  - What env vars to set so it talks through the gateway
  */
-import { getGitRemote } from "@loreai/core";
+import { GATEWAY_AUTH_HEADER, getGitRemote } from "@loreai/core";
+import { PROVIDER_AUTH_HEADER_NAMES } from "../auth";
 import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
 import { whichSync } from "./lib/which";
 
@@ -289,6 +290,27 @@ export function appendCustomHeader(
   env[envKey] = existing ? `${existing}\n${header}` : header;
 }
 
+/** Set exactly one custom-header line, replacing case-insensitive duplicates. */
+export function setCustomHeader(
+  env: Record<string, string>,
+  envKey: string,
+  name: string,
+  value: string,
+): void {
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
+  const clean = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, "");
+  const cleanName = clean(name);
+  const target = cleanName.toLowerCase();
+  const existing = env[envKey] ?? process.env[envKey] ?? "";
+  const retained = existing.split(/\r?\n/).filter((line) => {
+    const colonIndex = line.indexOf(":");
+    if (colonIndex < 0) return line.trim() !== "";
+    return line.slice(0, colonIndex).trim().toLowerCase() !== target;
+  });
+  retained.push(`${cleanName}: ${clean(value)}`);
+  env[envKey] = retained.join("\n");
+}
+
 /**
  * Partial opencode config injected via `OPENCODE_CONFIG_CONTENT` when
  * launching opencode through `lore run`. Ensures the @loreai/opencode
@@ -433,6 +455,13 @@ export const AGENTS: AgentDef[] = [
           if (colonIdx <= 0) continue;
           const name = line.slice(0, colonIdx).trim();
           const value = line.slice(colonIdx + 1).trim();
+          const lower = name.toLowerCase();
+          if (
+            lower === GATEWAY_AUTH_HEADER ||
+            PROVIDER_AUTH_HEADER_NAMES.some((candidate) => candidate === lower)
+          ) {
+            continue;
+          }
           if (name) pairs.push(`${name} = ${tomlQuote(value)}`);
         }
         if (pairs.length) {

@@ -1,12 +1,17 @@
 /**
  * Coverage for the explicit compaction endpoints (`POST /v1/compact`, used by
- * the Pi plugin). Focuses on the request-validation + no-session branches of
- * handleCompactEndpoint, which return deterministic responses without any
- * upstream call.
+ * the Pi plugin). Focuses on strict session preflight and request validation
+ * after a session has been authenticated.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
+import {
+  DEFAULT_MODEL,
+  DEFAULT_SYSTEM,
+  makeFixtureEntry,
+  STANDARD_TOOLS,
+} from "./helpers/fixtures";
 import {
   generateCompactionSummary,
   handleCompactEndpoint,
@@ -14,15 +19,39 @@ import {
 } from "../src/pipeline";
 import { loadConfig } from "../src/config";
 
-async function postCompact(harness: Harness, body: string): Promise<Response> {
+async function postCompact(
+  harness: Harness,
+  body: string,
+  sessionID?: string,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-api-key": "test-key",
+  };
+  if (sessionID) headers["x-lore-session-id"] = sessionID;
   return harness.request("/v1/compact", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": "test-key",
-    },
+    headers,
     body,
   });
+}
+
+async function establishSession(
+  harness: Harness,
+  sessionID: string,
+): Promise<Response> {
+  return harness.chat(
+    {
+      model: DEFAULT_MODEL,
+      max_tokens: 1024,
+      stream: false,
+      system: DEFAULT_SYSTEM,
+      messages: [{ role: "user", content: "Establish this session." }],
+      tools: STANDARD_TOOLS,
+    },
+    "test-key",
+    { "x-lore-session-id": sessionID },
+  );
 }
 
 describe("POST /v1/compact", () => {
@@ -36,6 +65,30 @@ describe("POST /v1/compact", () => {
     expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
     expect(body.error).toBe("session_not_found");
+  });
+
+  it("rejects invalid JSON after authenticating a valid session", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [
+            { role: "user", content: "Establish this session." },
+          ],
+          responseText: "Session established.",
+          model: DEFAULT_MODEL,
+        }),
+      ],
+    });
+    const sessionID = "compact-invalid-json-session";
+    expect((await establishSession(harness, sessionID)).status).toBe(200);
+
+    const resp = await postCompact(harness, "{ not json", sessionID);
+    expect(resp.status).toBe(400);
+    expect(await resp.json()).toEqual({
+      error: "invalid_request",
+      message: "Invalid JSON body",
+    });
   });
 
   it("rejects missing authentication without reading an indefinite body", async () => {
@@ -84,6 +137,30 @@ describe("POST /v1/compact", () => {
     expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
     expect(body.error).toBe("session_not_found");
+  });
+
+  it("rejects missing project_path after authenticating a valid session", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [
+            { role: "user", content: "Establish this session." },
+          ],
+          responseText: "Session established.",
+          model: DEFAULT_MODEL,
+        }),
+      ],
+    });
+    const sessionID = "compact-missing-project-session";
+    expect((await establishSession(harness, sessionID)).status).toBe(200);
+
+    const resp = await postCompact(harness, JSON.stringify({}), sessionID);
+    expect(resp.status).toBe(400);
+    expect(await resp.json()).toEqual({
+      error: "invalid_request",
+      message: "project_path is required",
+    });
   });
 
   it("returns 404 when no active session exists for the project", async () => {

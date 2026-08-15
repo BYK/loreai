@@ -236,11 +236,20 @@ export async function fetchOAuthQuotaSnapshot(
       return null;
     }
 
-    const body = (await response.json()) as unknown;
+    let body: unknown;
+    try {
+      body = (await response.json()) as unknown;
+    } catch {
+      log.warn(
+        `quota: endpoint returned malformed JSON with status ${response.status}`,
+      );
+      return null;
+    }
     return parseSnapshot(body);
-  } catch (err) {
-    // Timeout / network / JSON parse — expected, non-fatal. Warn only.
-    log.warn("quota: fetch error", err);
+  } catch {
+    // Timeout / network failure — expected, non-fatal. Fetch error messages can
+    // contain credential-bearing request URLs, so omit them.
+    log.warn("quota: fetch failed before receiving a usable response");
     return null;
   } finally {
     // Space out the next call by the serial gap, then release the gate.
@@ -339,8 +348,8 @@ export function maybeFetchQuota(sessionID: string, cred: AuthCredential): void {
       // background limiter; leave the short retry window in place.)
       if (snap) quotaFetchCooldown.set(fp, Date.now());
     })
-    .catch((err) => {
-      log.warn("quota: background fetch failed", err);
+    .catch(() => {
+      log.warn("quota: background fetch failed");
     });
 }
 

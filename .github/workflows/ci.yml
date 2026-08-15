@@ -274,7 +274,7 @@ jobs:
           node packages/gateway/dist/bin.cjs help
 
           # Start gateway, hit health endpoint, shut down
-          node packages/gateway/dist/bin.cjs start -p 7990 &
+          node packages/gateway/dist/bin.cjs start --local -p 7990 &
           SERVER_PID=$!
           sleep 2
           curl -sf http://127.0.0.1:7990/health | jq .
@@ -359,7 +359,7 @@ jobs:
             || (echo "::error::read-worker offload seam broken in linux-x64 binary: $ro"; exit 1)
 
           # Start gateway, hit health endpoint, shut down
-          ./packages/gateway/dist-bin/lore-linux-x64 start -p 7991 &
+          ./packages/gateway/dist-bin/lore-linux-x64 start --local -p 7991 &
           SERVER_PID=$!
           sleep 2
           curl -sf http://127.0.0.1:7991/health | jq .
@@ -485,6 +485,16 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           FOSSILIZE_CACHE_DIR: ${{ github.workspace }}/.node-cache
 
+      - name: Generate deterministic release checksums
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: |
+          node scripts/generate-release-checksums.mjs \
+            packages/gateway/dist-bin \
+            packages/gateway/dist-bin \
+            packages/gateway/dist-bin/lore-checksums.txt
+          echo "--- Release checksums: ---"
+          cat packages/gateway/dist-bin/lore-checksums.txt
+
       - name: Upload tarballs
         if: startsWith(github.ref, 'refs/heads/release/')
         uses: actions/upload-artifact@v7
@@ -497,7 +507,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-binaries
-          path: packages/gateway/dist-bin/*.gz
+          path: |
+            packages/gateway/dist-bin/*.gz
+            packages/gateway/dist-bin/lore-checksums.txt
 
       # Also upload uncompressed release binaries (needed for patch generation)
       - name: Upload uncompressed release binaries
@@ -508,6 +520,7 @@ jobs:
           path: |
             packages/gateway/dist-bin/lore-*
             !packages/gateway/dist-bin/*.gz
+            !packages/gateway/dist-bin/lore-checksums.txt
 
   # ---------------------------------------------------------------------------
   # Doc-generation drift check.
@@ -1073,6 +1086,15 @@ jobs:
         with:
           name: nightly-patches
           path: .delta-patches
+
+      - name: Generate deterministic nightly checksums
+        run: |
+          node scripts/generate-release-checksums.mjs \
+            binaries \
+            artifacts \
+            artifacts/lore-checksums.txt
+          echo "--- Nightly checksums: ---"
+          cat artifacts/lore-checksums.txt
 
       - name: Publish nightly + patches to GHCR
         uses: ./packages/binpatch/action

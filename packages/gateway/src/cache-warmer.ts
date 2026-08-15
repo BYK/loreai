@@ -46,11 +46,12 @@ import {
   mergeWarmupHistogramCounts,
   normalizeWarmupHistogram,
 } from "@loreai/core";
-import type {
-  InterTurnHistogram,
-  WarmupResult,
-  SessionState,
-  WarmupState,
+import {
+  applyUpstreamExtraHeaders,
+  type InterTurnHistogram,
+  type WarmupResult,
+  type SessionState,
+  type WarmupState,
 } from "./translate/types";
 import {
   cacheSegmentDigest,
@@ -61,7 +62,12 @@ import {
 import { resolveAuth, authHeaders, markAuthStale } from "./auth";
 import { recordWorkerFailure, recordWorkerSuccess } from "./worker-health";
 import { resignBody } from "./cch";
-import { loadConfig, resolveUpstreamRoute } from "./config";
+import {
+  extraHeadersForUpstream,
+  loadConfig,
+  resolveUpstreamRoute,
+  type GatewayConfig,
+} from "./config";
 import { isBedrockMantleHost } from "./translate/bedrock";
 import {
   isVertexHost,
@@ -303,8 +309,21 @@ const CB_KV_KEY = "warmup_circuit_breaker";
  */
 export function warmupBucketKey(state: SessionState): string {
   const model = state.lastUpstream?.model ?? "unknown";
-  const url = state.lastUpstream?.url ?? "unknown";
+  const url = state.lastUpstream?.url
+    ? warmupUrlForLog(state.lastUpstream.url)
+    : "unknown";
   return `${state.sessionID}\x1f${model}\x1f${url}`;
+}
+
+/** Strip credential-bearing URL components while retaining endpoint routing. */
+function warmupUrlForLog(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "invalid";
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return "invalid";
+  }
 }
 
 /** Load tripped buckets from DB on first access (only tripped buckets persist). */
@@ -2057,6 +2076,13 @@ function extractFirstUserText(bodyJson: string): string {
   return "";
 }
 
+/** Accept only real token counts from an upstream usage object. */
+function responseTokenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
 /**
  * Execute a cache warmup for a session.
  *
@@ -2069,7 +2095,7 @@ function extractFirstUserText(bodyJson: string): string {
 export async function executeWarmup(
   state: SessionState,
   profile: CacheWarmingProfile,
-  upstreamExtraHeaders: Record<string, string> = {},
+  config: GatewayConfig = loadConfig(),
 ): Promise<WarmupResult> {
   const noResult: WarmupResult = {
     ok: false,
@@ -2138,21 +2164,17 @@ export async function executeWarmup(
         toVertexModelId(model),
         false,
       );
-    } catch (err) {
+    } catch {
       // ADC unavailable / token mint failed — skip this tick rather than
       // crashing the warmer loop. Telemetry must never break the idle loop.
       log.warn(
-        `cache-warmer: vertex auth failed for session=${state.sessionID.slice(0, 16)}: ${(err as Error).message}`,
+        `cache-warmer: vertex auth failed for session=${state.sessionID.slice(0, 16)}`,
       );
       recordWorkerFailure(state.sessionID, "cache-warmer", "no-auth");
       return noResult;
     }
     // No cch re-sign for Vertex (no billing header) — send the warmup as-is.
     signedBody = warmupBody;
-    // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay.
-    for (const [key, value] of Object.entries(upstreamExtraHeaders)) {
-      headers[key] = value;
-    }
   } else {
     // Resolve auth for this session — use the provider from lastUpstream
     // to avoid cross-contamination when the session uses multiple providers.
@@ -2174,13 +2196,6 @@ export async function executeWarmup(
       headers["anthropic-beta"] = betaHeader;
     }
 
-    // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
-    // corporate-proxy / LiteLLM / Cloudflare AI Gateway / service-account
-    // scenarios work for cache-warming calls too.
-    for (const [key, value] of Object.entries(upstreamExtraHeaders)) {
-      headers[key] = value;
-    }
-
     // Re-sign the cch billing header. The cch hash covers the entire
     // serialized body, and we changed max_tokens/stream. The cch is
     // billing verification only — NOT part of the cache key.
@@ -2188,6 +2203,14 @@ export async function executeWarmup(
     signedBody = resignBody(warmupBody, firstUserText);
     requestUrl = profile.upstreamUrl;
   }
+
+  // Apply gateway-admin headers only after the final warmup URL is known. This
+  // keeps cache warming under the same exact configured-base policy as normal
+  // foreground and compact dispatches.
+  applyUpstreamExtraHeaders(
+    headers,
+    extraHeadersForUpstream(config, requestUrl),
+  );
 
   log.info(
     `cache-warmer: sending warmup for session=${state.sessionID.slice(0, 16)} ` +
@@ -2202,10 +2225,9 @@ export async function executeWarmup(
     });
 
     if (!response.ok) {
-      const errorBody = await response.text().catch(() => "");
       log.error(
         `cache-warmer: upstream error ${response.status} for ` +
-          `session=${state.sessionID.slice(0, 16)}: ${errorBody.slice(0, 300)}`,
+          `session=${state.sessionID.slice(0, 16)}`,
       );
       // On auth error, disable future warmups for this session until
       // a fresh credential arrives. Prevents unbounded 401 spam every 30s.
@@ -2222,18 +2244,31 @@ export async function executeWarmup(
     }
 
     // Parse the response to extract usage
-    const resp = (await response.json()) as {
+    let resp: {
       usage?: {
-        cache_read_input_tokens?: number;
-        cache_creation_input_tokens?: number;
-        input_tokens?: number;
+        cache_read_input_tokens?: unknown;
+        cache_creation_input_tokens?: unknown;
+        input_tokens?: unknown;
       };
       stop_reason?: string;
     };
+    try {
+      resp = (await response.json()) as typeof resp;
+    } catch {
+      log.error(
+        `cache-warmer: upstream returned malformed JSON with status ${response.status} for ` +
+          `session=${state.sessionID.slice(0, 16)}`,
+      );
+      return noResult;
+    }
 
-    const inputTokens = resp.usage?.input_tokens ?? 0;
-    const cacheReadTokens = resp.usage?.cache_read_input_tokens ?? 0;
-    const cacheCreationTokens = resp.usage?.cache_creation_input_tokens ?? 0;
+    const inputTokens = responseTokenCount(resp.usage?.input_tokens);
+    const cacheReadTokens = responseTokenCount(
+      resp.usage?.cache_read_input_tokens,
+    );
+    const cacheCreationTokens = responseTokenCount(
+      resp.usage?.cache_creation_input_tokens,
+    );
     const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
 
     const result: WarmupResult = {
@@ -2414,10 +2449,11 @@ export async function executeWarmup(
     recordWorkerSuccess(state.sessionID);
 
     return result;
-  } catch (e) {
+  } catch {
+    // Network errors can include credential-bearing request URLs. Keep the
+    // session diagnostic, but never the thrown details.
     log.error(
-      `cache-warmer: fetch error for session=${state.sessionID.slice(0, 16)}:`,
-      e,
+      `cache-warmer: fetch failed for session=${state.sessionID.slice(0, 16)}`,
     );
     return noResult;
   }

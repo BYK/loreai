@@ -1404,7 +1404,7 @@ describe("accumulateResponsesSSEStream", () => {
   );
 
   test.each(["public", "codex"] as const)(
-    "%s persists recursive null enrichment from the terminal snapshot",
+    "%s rejects recursive explicit null replacement in the terminal snapshot",
     async (validation) => {
       const item = {
         type: "image_generation_call",
@@ -1418,33 +1418,33 @@ describe("accumulateResponsesSSEStream", () => {
         result: "base64-result",
         details: { revised_prompt: "cat" },
       };
-      const result = await accumulateResponsesSSEStream(
-        buildSSEResponse([
-          {
-            event: "response.output_item.added",
-            data: {
-              ...(validation === "public" ? { output_index: 0 } : {}),
-              item: { ...item, status: "generating" },
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "generating" },
+              },
             },
-          },
-          {
-            event: "response.output_item.done",
-            data: {
-              ...(validation === "public" ? { output_index: 0 } : {}),
-              item,
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
             },
-          },
-          {
-            event: "response.completed",
-            data: {
-              response: { status: "completed", output: [terminalItem] },
+            {
+              event: "response.completed",
+              data: {
+                response: { status: "completed", output: [terminalItem] },
+              },
             },
-          },
-        ]),
-        { validation, stopAtTerminal: true },
-      );
-
-      expect(result.rawOutputItems).toEqual([terminalItem]);
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
     },
   );
 
@@ -1667,7 +1667,7 @@ describe("accumulateResponsesSSEStream", () => {
     }
   });
 
-  test("permits recursive null enrichment only at the terminal snapshot", () => {
+  test("rejects terminal null replacement but permits sparse enrichment", () => {
     expect(
       responsesTerminalItemMatches(
         {
@@ -1683,6 +1683,24 @@ describe("accumulateResponsesSSEStream", () => {
           status: "completed",
           result: null,
           details: { revised_prompt: null },
+        },
+      ),
+    ).toBe(false);
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: "base64-result",
+          details: { revised_prompt: "cat" },
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: undefined,
+          details: {},
         },
       ),
     ).toBe(true);

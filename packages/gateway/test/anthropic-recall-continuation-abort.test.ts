@@ -15,6 +15,13 @@ import type { GatewayRequest, SessionState } from "../src/translate/types";
 
 const mockedRecall = vi.mocked(executeRecall);
 
+function loadLocalConfig() {
+  const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
+  return config;
+}
+
 function event(type: string, data: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 }
@@ -180,7 +187,7 @@ describe("Anthropic recall continuation abort", () => {
         {
           clientMessages: req.messages,
           modifiedReq: req,
-          config: loadConfig(),
+          config: loadLocalConfig(),
           sessionState: state,
           cacheOptions: { cacheConversation: false },
           clientSpeaksAnthropic: true,

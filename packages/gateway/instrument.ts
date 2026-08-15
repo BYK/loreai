@@ -45,10 +45,13 @@ setMaxListeners(15);
 import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
 import { VERSION } from "./src/cli/version";
+import { eventHasTransientError } from "./src/transient-errors";
 import {
-  eventHasTransientError,
-  isTransientErrorMessage,
-} from "./src/transient-errors";
+  SENTRY_DATA_COLLECTION,
+  scrubTelemetryEvent,
+  scrubTelemetryValue,
+  wrapTelemetryTransport,
+} from "./src/telemetry-privacy";
 
 /**
  * Build-time debug ID for sourcemap resolution, injected by esbuild.
@@ -118,20 +121,27 @@ const sentryEnabled = isTestRunner
         : !isDev
     : false;
 
-if (sentryEnabled && !Sentry.isInitialized()) {
-  Sentry.init({
+/** Build the complete Sentry configuration. Exported for privacy regressions. */
+export function buildSentryOptions(
+  makeTransport: typeof Sentry.makeNodeTransport = Sentry.makeNodeTransport,
+): Sentry.BunOptions {
+  return {
     dsn: "https://0282201d6a3df3bc46423e61012ae62b@o275100.ingest.us.sentry.io/4511355222622208",
 
     release: VERSION,
     environment: isDev ? "development" : "production",
 
-    // Adds request headers and IP for users, for more info visit:
-    // https://docs.sentry.io/platforms/javascript/guides/bun/configuration/options/#sendDefaultPii
-    sendDefaultPii: true,
+    // Lore proxies private prompts and provider credentials. Collection is
+    // default-deny, and the hooks/transport below provide defense in depth for
+    // SDK integrations that construct telemetry outside these defaults.
+    sendDefaultPii: false,
+    dataCollection: SENTRY_DATA_COLLECTION,
 
-    // Capture 100% of transactions and logs
+    // Capture transactions, but never export the application's free-form logs.
+    // Explicit metrics and fixed-message error telemetry are emitted at their
+    // designed call sites instead.
     tracesSampleRate: 1.0,
-    enableLogs: true,
+    enableLogs: false,
 
     // Disable the NodeFetch integration. In the esbuild CJS bundle, the
     // vendored undici code inside @sentry/node has 100+ `let` declarations
@@ -144,36 +154,59 @@ if (sentryEnabled && !Sentry.isInitialized()) {
     // The gateway does its own upstream fetch tracing, so no functionality is lost.
     integrations: (defaults) => defaults.filter((i) => i.name !== "NodeFetch"),
 
+    beforeBreadcrumb() {
+      return null;
+    },
+
+    // Defense in depth if a future integration creates logs despite enableLogs.
+    beforeSendLog() {
+      return null;
+    },
+
+    beforeSendSpan(span) {
+      return scrubTelemetryValue(span);
+    },
+
+    beforeSendTransaction(event) {
+      return scrubTelemetryEvent(event);
+    },
+
     // Drop transient network errors that are not actionable bugs.
     // Each exception in the chain is tested independently so a real bug
     // wrapping a transient cause isn't accidentally silenced.
     beforeSend(event) {
-      return eventHasTransientError(event) ? null : event;
+      return eventHasTransientError(event) ? null : scrubTelemetryEvent(event);
     },
-  });
 
-  // Bridge core's log.* calls → Sentry structured logs + error capture.
-  // Error-level logs are filtered against the same TRANSIENT_ERROR_PATTERNS
-  // used by beforeSend — structured logs bypass beforeSend entirely, so
-  // without this gate transient worker errors flood the Sentry Logs product.
-  log.registerSink({
-    info: (message, attrs) => Sentry.logger.info(message, attrs),
-    warn: (message, attrs) => Sentry.logger.warn(message, attrs),
-    error: (message, attrs) => {
-      if (!isTransientErrorMessage(message)) {
-        Sentry.logger.error(message, attrs);
-      }
+    // Final boundary: sanitize every envelope item, including payload types
+    // added by future SDK integrations that do not pass through hooks above.
+    transport(options) {
+      return wrapTelemetryTransport(makeTransport(options));
     },
-    captureException: (err) => Sentry.captureException(err),
+  };
+}
+
+if (sentryEnabled && !Sentry.isInitialized()) {
+  Sentry.init(buildSentryOptions());
+
+  // Keep only the DB tracing seam. Core log messages and Error objects are
+  // intentionally NOT bridged: they can contain prompts, paths, entity names,
+  // commands, or provider response bodies. Sentry receives only the explicit
+  // metrics/fixed-message error telemetry defined at reviewed call sites.
+  log.registerSink({
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    captureException: () => {},
     // Per-query DB tracing. `onlyIfParent: true` means a span is only created
     // when there is an active parent (e.g. an in-flight request transaction),
     // so background/idle DB churn adds no orphan transactions or cost.
-    withDbSpan: (sql, fn) =>
+    withDbSpan: (_sql, fn) =>
       Sentry.startSpan(
         {
-          name: sql,
+          name: "sqlite query",
           op: "db",
-          attributes: { "db.system": "sqlite", "db.statement": sql },
+          attributes: { "db.system": "sqlite" },
           onlyIfParent: true,
         },
         fn,

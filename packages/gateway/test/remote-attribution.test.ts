@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
-import { createHarness } from "./helpers/harness";
+import { createHarness, TEST_GATEWAY_AUTH_TOKEN } from "./helpers/harness";
 import {
   makeConversationFixtures,
   STANDARD_TOOLS,
@@ -62,22 +62,18 @@ function pathlessBodyWithoutTools(
 
 describe("remote gateway: path-less session attribution", () => {
   let harness: Harness;
-  let prevRemote: string | undefined;
-
-  beforeEach(() => {
-    prevRemote = process.env.LORE_REMOTE_GATEWAY;
-    process.env.LORE_REMOTE_GATEWAY = "1";
-  });
 
   afterEach(async () => {
     if (harness) await harness.teardown();
-    if (prevRemote === undefined) delete process.env.LORE_REMOTE_GATEWAY;
-    else process.env.LORE_REMOTE_GATEWAY = prevRemote;
   });
 
   it("routes two unrelated path-less sessions to DISTINCT buckets (never merged)", async () => {
     // Two unrelated conversations → two fingerprints → two sessions.
     harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
       fixtures: [
         ...makeConversationFixtures([
           { userMessage: "alpha project question one", assistantText: "A1." },
@@ -93,7 +89,10 @@ describe("remote gateway: path-less session attribution", () => {
 
     // Suppress the harness default x-lore-project header — this test
     // intentionally sends path-less requests.
-    const noProject = { "x-lore-project": "" };
+    const noProject = {
+      "x-lore-project": "",
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+    };
     const r1 = await harness.chat(
       pathlessBody("alpha project question one"),
       "test-key",
@@ -139,6 +138,10 @@ describe("remote gateway: path-less session attribution", () => {
         { userMessage: second, assistantText: "Second response." },
         { userMessage: third, assistantText: "Third response." },
       ]),
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
     });
 
     let response = await harness.chat(
@@ -147,6 +150,7 @@ describe("remote gateway: path-less session attribution", () => {
       {
         "x-lore-project": "",
         "x-session-affinity": "remote-affinity-before-restart",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
     expect(response.status).toBe(200);
@@ -164,6 +168,7 @@ describe("remote gateway: path-less session attribution", () => {
       {
         "x-lore-project": "",
         "x-session-affinity": "remote-affinity-before-restart",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
     expect(response.status).toBe(200);
@@ -205,6 +210,7 @@ describe("remote gateway: path-less session attribution", () => {
       {
         "x-lore-project": realPath,
         "x-session-affinity": "remote-affinity-after-restart",
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
     expect(response.status).toBe(200);
@@ -268,6 +274,14 @@ describe("remote gateway: path-less session attribution", () => {
         { userMessage: third, assistantText: "Failed project merge." },
         { userMessage: third, assistantText: "Successful retry." },
       ]),
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+        callerUpstreamAllowlist: [
+          new URL(oldRoute).origin,
+          new URL(newRoute).origin,
+        ],
+      },
     });
 
     let response = await harness.chat(
@@ -278,6 +292,7 @@ describe("remote gateway: path-less session attribution", () => {
         "x-session-affinity": oldAffinity,
         "x-lore-provider": "anthropic",
         "x-lore-upstream-url": oldRoute,
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
     expect(response.status).toBe(200);
@@ -297,6 +312,7 @@ describe("remote gateway: path-less session attribution", () => {
         "x-session-affinity": oldAffinity,
         "x-lore-provider": "anthropic",
         "x-lore-upstream-url": oldRoute,
+        "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
       },
     );
     expect(response.status).toBe(200);
@@ -344,6 +360,7 @@ describe("remote gateway: path-less session attribution", () => {
       "x-session-affinity": newAffinity,
       "x-lore-provider": "anthropic",
       "x-lore-upstream-url": newRoute,
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     });
     expect(response.status).toBe(200);
     await response.text();
@@ -419,6 +436,7 @@ describe("remote gateway: path-less session attribution", () => {
       "x-session-affinity": newAffinity,
       "x-lore-provider": "anthropic",
       "x-lore-upstream-url": newRoute,
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     });
     expect(response.status).toBe(200);
     await response.text();
@@ -447,6 +465,7 @@ describe("remote gateway: path-less session attribution", () => {
       "x-session-affinity": newAffinity,
       "x-lore-provider": "anthropic",
       "x-lore-upstream-url": newRoute,
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
     });
     expect(response.status).toBe(200);
     await response.text();

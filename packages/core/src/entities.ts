@@ -19,6 +19,7 @@ import { config } from "./config";
 import { getGitUser } from "./git";
 import * as log from "./log";
 import * as embedding from "./embedding";
+import { currentTenantId } from "./tenant";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,6 +56,7 @@ export type AliasType =
 
 export type Entity = {
   id: string;
+  tenant_id: string;
   project_id: string | null;
   entity_type: EntityType;
   canonical_name: string;
@@ -152,11 +154,11 @@ const IDENTITY_ALIAS_TYPES: ReadonlySet<AliasType> = new Set([
 
 /** Columns to SELECT for Entity — avoids pulling unnecessary data. */
 const ENTITY_COLS =
-  "id, project_id, entity_type, canonical_name, metadata, cross_project, created_at, updated_at";
+  "id, tenant_id, project_id, entity_type, canonical_name, metadata, cross_project, created_at, updated_at";
 
 /** Same columns with table alias prefix for use in JOIN queries. */
 const ENTITY_COLS_E =
-  "e.id, e.project_id, e.entity_type, e.canonical_name, e.metadata, e.cross_project, e.created_at, e.updated_at";
+  "e.id, e.tenant_id, e.project_id, e.entity_type, e.canonical_name, e.metadata, e.cross_project, e.created_at, e.updated_at";
 
 // ---------------------------------------------------------------------------
 // CRUD — Entities
@@ -182,6 +184,7 @@ export function create(input: {
   crossProject?: boolean;
   id?: string;
 }): CreateResult {
+  const tenantId = currentTenantId();
   // Runtime validation — TypeScript types are erased, curator may pass garbage
   if (!ENTITY_TYPES.includes(input.entityType)) {
     throw new Error(`invalid entity type: ${input.entityType}`);
@@ -202,17 +205,17 @@ export function create(input: {
     const existing = pid
       ? (d
           .query(
-            `SELECT id, metadata FROM entities WHERE canonical_name = ? COLLATE NOCASE AND (project_id = ? OR project_id IS NULL)`,
+            `SELECT id, metadata FROM entities WHERE tenant_id = ? AND canonical_name = ? COLLATE NOCASE AND (project_id = ? OR project_id IS NULL)`,
           )
-          .get(input.canonicalName, pid) as {
+          .get(tenantId, input.canonicalName, pid) as {
           id: string;
           metadata: string | null;
         } | null)
       : (d
           .query(
-            `SELECT id, metadata FROM entities WHERE canonical_name = ? COLLATE NOCASE AND project_id IS NULL`,
+            `SELECT id, metadata FROM entities WHERE tenant_id = ? AND canonical_name = ? COLLATE NOCASE AND project_id IS NULL`,
           )
-          .get(input.canonicalName) as {
+          .get(tenantId, input.canonicalName) as {
           id: string;
           metadata: string | null;
         } | null);
@@ -244,10 +247,11 @@ export function create(input: {
     const now = Date.now();
 
     d.query(
-      `INSERT INTO entities (id, project_id, entity_type, canonical_name, metadata, cross_project, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO entities (id, tenant_id, project_id, entity_type, canonical_name, metadata, cross_project, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
+      tenantId,
       pid,
       input.entityType,
       input.canonicalName,
@@ -290,8 +294,8 @@ export function create(input: {
  */
 export function reembedEntity(id: string): void {
   const row = db()
-    .query("SELECT canonical_name FROM entities WHERE id = ?")
-    .get(id) as { canonical_name: string } | null;
+    .query("SELECT canonical_name FROM entities WHERE tenant_id = ? AND id = ?")
+    .get(currentTenantId(), id) as { canonical_name: string } | null;
   if (!row) return;
   embedding.embedEntity(id, row.canonical_name, aliasValues(id));
 }
@@ -305,6 +309,7 @@ export function update(
     crossProject?: boolean;
   },
 ): void {
+  if (!get(id)) return;
   const sets: string[] = [];
   const params: (string | number | null)[] = [];
 
@@ -328,8 +333,10 @@ export function update(
   params.push(id);
 
   db()
-    .query(`UPDATE entities SET ${sets.join(", ")} WHERE id = ?`)
-    .run(...params);
+    .query(
+      `UPDATE entities SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
+    )
+    .run(...params.slice(0, -1), currentTenantId(), id);
 
   // When canonical name changes, update the auto-generated "name" alias
   if (input.canonicalName !== undefined) {
@@ -349,6 +356,7 @@ export function update(
 
 /** Delete an entity, its aliases, relations, and knowledge refs. */
 export function remove(id: string): void {
+  if (!get(id)) return;
   db().query("DELETE FROM knowledge_entity_refs WHERE entity_id = ?").run(id);
   db()
     .query("DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?")
@@ -370,9 +378,9 @@ export function remove(id: string): void {
 export function getSelfEntity(): EntityWithAliases | null {
   const row = db()
     .query(
-      `SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'self' LIMIT 1`,
+      `SELECT ${ENTITY_COLS} FROM entities WHERE tenant_id = ? AND entity_type = 'self' LIMIT 1`,
     )
-    .get() as Entity | null;
+    .get(currentTenantId()) as Entity | null;
   if (!row) return null;
   const aliases = db()
     .query(
@@ -521,8 +529,10 @@ export function mergeSelfPersonDuplicates(
 
   // Find all "person" entities
   const persons = db()
-    .query(`SELECT ${ENTITY_COLS} FROM entities WHERE entity_type = 'person'`)
-    .all() as Entity[];
+    .query(
+      `SELECT ${ENTITY_COLS} FROM entities WHERE tenant_id = ? AND entity_type = 'person'`,
+    )
+    .all(currentTenantId()) as Entity[];
 
   // Batch-load every person's aliases in a single query instead of one query
   // per person. Behaviorally equivalent to per-iteration reads: a person's own
@@ -580,8 +590,10 @@ export function mergeSelfPersonDuplicates(
 export function get(id: string): Entity | null {
   return (
     (db()
-      .query(`SELECT ${ENTITY_COLS} FROM entities WHERE id = ?`)
-      .get(id) as Entity | null) ?? null
+      .query(
+        `SELECT ${ENTITY_COLS} FROM entities WHERE tenant_id = ? AND id = ?`,
+      )
+      .get(currentTenantId(), id) as Entity | null) ?? null
   );
 }
 
@@ -666,14 +678,23 @@ export function addAlias(
   aliasValue: string,
   source?: string,
 ): string | null {
+  if (!get(entityId)) return null;
   const id = uuidv7();
   try {
     db()
       .query(
-        `INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at, tenant_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, entityId, aliasType, aliasValue, source ?? null, Date.now());
+      .run(
+        id,
+        entityId,
+        aliasType,
+        aliasValue,
+        source ?? null,
+        Date.now(),
+        currentTenantId(),
+      );
     return id;
   } catch (e: unknown) {
     // UNIQUE constraint violation — alias already exists (possibly on another entity)
@@ -687,11 +708,14 @@ export function addAlias(
 
 /** Remove a specific alias by its ID. */
 export function removeAlias(aliasId: string): void {
-  db().query("DELETE FROM entity_aliases WHERE id = ?").run(aliasId);
+  db()
+    .query("DELETE FROM entity_aliases WHERE tenant_id = ? AND id = ?")
+    .run(currentTenantId(), aliasId);
 }
 
 /** Get all aliases for an entity. */
 export function getAliases(entityId: string): EntityAlias[] {
+  if (!get(entityId)) return [];
   return db()
     .query(
       "SELECT * FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias_value",
@@ -715,10 +739,10 @@ export function resolve(mention: string): Entity | null {
       `SELECT ${ENTITY_COLS_E}
        FROM entities e
        JOIN entity_aliases a ON a.entity_id = e.id
-       WHERE a.alias_value = ? COLLATE NOCASE
+       WHERE e.tenant_id = ? AND a.alias_value = ? COLLATE NOCASE
        LIMIT 1`,
     )
-    .get(mention) as Entity | null;
+    .get(currentTenantId(), mention) as Entity | null;
 
   if (aliasMatch) return aliasMatch;
 
@@ -726,10 +750,10 @@ export function resolve(mention: string): Entity | null {
   const nameMatch = db()
     .query(
       `SELECT ${ENTITY_COLS} FROM entities
-       WHERE canonical_name = ? COLLATE NOCASE
+       WHERE tenant_id = ? AND canonical_name = ? COLLATE NOCASE
        LIMIT 1`,
     )
-    .get(mention) as Entity | null;
+    .get(currentTenantId(), mention) as Entity | null;
 
   if (nameMatch) return nameMatch;
 
@@ -742,11 +766,11 @@ export function resolve(mention: string): Entity | null {
       `SELECT ${ENTITY_COLS_E}
        FROM entities e
        JOIN entities_fts f ON f.rowid = e.rowid
-       WHERE entities_fts MATCH ?
+       WHERE entities_fts MATCH ? AND e.tenant_id = ?
        ORDER BY rank
        LIMIT 1`,
     )
-    .get(fts) as Entity | null;
+    .get(fts, currentTenantId()) as Entity | null;
 
   return ftsMatch ?? null;
 }
@@ -767,8 +791,12 @@ export function resolveWithAliases(mention: string): EntityWithAliases | null {
  */
 export function aliasValues(entityId: string): string[] {
   const rows = db()
-    .query("SELECT alias_value FROM entity_aliases WHERE entity_id = ?")
-    .all(entityId) as Array<{ alias_value: string }>;
+    .query(
+      `SELECT a.alias_value
+       FROM entity_aliases a JOIN entities e ON e.id = a.entity_id
+       WHERE e.tenant_id = ? AND a.entity_id = ?`,
+    )
+    .all(currentTenantId(), entityId) as Array<{ alias_value: string }>;
   return rows.map((r) => r.alias_value);
 }
 
@@ -873,6 +901,8 @@ function withAliases(rows: Entity[]): EntityWithAliases[] {
  * `entity_aliases`, this MUST switch to an explicit non-BLOB column list, or the
  * BLOB will be copied across the boundary on every recall.
  */
+const MAX_OFFLOAD_BOUND_PARAMS = 900;
+
 async function batchLoadAliasesOffloaded(
   entityIds: string[],
 ): Promise<Map<string, EntityAlias[]>> {
@@ -884,7 +914,7 @@ async function batchLoadAliasesOffloaded(
   // sync batchLoadAliases). Chunks partition entityIds, so every alias of a given
   // entity lands in exactly one chunk — per-entity ordering from the per-chunk
   // ORDER BY is preserved. One offloadAll round-trip per chunk.
-  const CHUNK = 900;
+  const CHUNK = MAX_OFFLOAD_BOUND_PARAMS;
   const chunks: Promise<unknown[]>[] = [];
   for (let i = 0; i < entityIds.length; i += CHUNK) {
     const chunk = entityIds.slice(i, i + CHUNK);
@@ -925,19 +955,19 @@ export async function getManyWithAliasesOffloaded(
 ): Promise<Map<string, EntityWithAliases>> {
   const map = new Map<string, EntityWithAliases>();
   if (!ids.length) return map;
-  // Chunk the IN list at 900 (mirrors batchLoadAliasesOffloaded). Chunks
+  // Reserve one bind slot for tenant_id. Chunks
   // partition ids, so each entity row comes back from exactly one chunk; the
   // unioned set is order-independent here (callers key by id). One offloadAll
   // round-trip per chunk.
-  const CHUNK = 900;
+  const CHUNK = MAX_OFFLOAD_BOUND_PARAMS - 1;
   const chunks: Promise<unknown[]>[] = [];
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
     const placeholders = chunk.map(() => "?").join(",");
     chunks.push(
       offloadAll(
-        `SELECT ${ENTITY_COLS} FROM entities WHERE id IN (${placeholders})`,
-        chunk,
+        `SELECT ${ENTITY_COLS} FROM entities WHERE tenant_id = ? AND id IN (${placeholders})`,
+        [currentTenantId(), ...chunk],
       ),
     );
   }
@@ -959,12 +989,12 @@ function forProjectEntityQuery(
 ): { sql: string; params: ReadParam[] } {
   const sql = includeCross
     ? `SELECT ${ENTITY_COLS} FROM entities
-         WHERE project_id = ? OR project_id IS NULL OR cross_project = 1
+         WHERE tenant_id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1)
          ORDER BY entity_type, canonical_name`
     : `SELECT ${ENTITY_COLS} FROM entities
-         WHERE project_id = ?
+         WHERE tenant_id = ? AND project_id = ?
          ORDER BY entity_type, canonical_name`;
-  return { sql, params: [pid] };
+  return { sql, params: [currentTenantId(), pid] };
 }
 
 /** List entities for a project, optionally including cross-project entities. */
@@ -1024,9 +1054,9 @@ export async function forProjectOffloaded(
 export function listAll(): EntityWithAliases[] {
   const rows = db()
     .query(
-      `SELECT ${ENTITY_COLS} FROM entities ORDER BY entity_type, canonical_name`,
+      `SELECT ${ENTITY_COLS} FROM entities WHERE tenant_id = ? ORDER BY entity_type, canonical_name`,
     )
-    .all() as Entity[];
+    .all(currentTenantId()) as Entity[];
 
   return withAliases(rows);
 }
@@ -1053,11 +1083,11 @@ export function search(input: {
         `SELECT ${ENTITY_COLS_E}
          FROM entities e
          JOIN entities_fts f ON f.rowid = e.rowid
-         WHERE entities_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
+         WHERE entities_fts MATCH ? AND e.tenant_id = ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(fts, pid, limit) as Entity[];
+      .all(fts, currentTenantId(), pid, limit) as Entity[];
 
     aliasMatches = db()
       .query(
@@ -1065,22 +1095,22 @@ export function search(input: {
          FROM entities e
          JOIN entity_aliases a ON a.entity_id = e.id
          JOIN entity_aliases_fts af ON af.rowid = a.rowid
-         WHERE entity_aliases_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
+         WHERE entity_aliases_fts MATCH ? AND e.tenant_id = ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(fts, pid, limit) as Entity[];
+      .all(fts, currentTenantId(), pid, limit) as Entity[];
   } else {
     nameMatches = db()
       .query(
         `SELECT ${ENTITY_COLS_E}
          FROM entities e
          JOIN entities_fts f ON f.rowid = e.rowid
-         WHERE entities_fts MATCH ?
+         WHERE entities_fts MATCH ? AND e.tenant_id = ?
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(fts, limit) as Entity[];
+      .all(fts, currentTenantId(), limit) as Entity[];
 
     aliasMatches = db()
       .query(
@@ -1088,11 +1118,11 @@ export function search(input: {
          FROM entities e
          JOIN entity_aliases a ON a.entity_id = e.id
          JOIN entity_aliases_fts af ON af.rowid = a.rowid
-         WHERE entity_aliases_fts MATCH ?
+         WHERE entity_aliases_fts MATCH ? AND e.tenant_id = ?
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(fts, limit) as Entity[];
+      .all(fts, currentTenantId(), limit) as Entity[];
   }
 
   // Merge and dedupe
@@ -1129,13 +1159,13 @@ export async function searchAsync(input: {
     ? `SELECT ${ENTITY_COLS_E}
          FROM entities e
          JOIN entities_fts f ON f.rowid = e.rowid
-         WHERE entities_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
+         WHERE entities_fts MATCH ? AND e.tenant_id = ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
          ORDER BY rank
          LIMIT ?`
     : `SELECT ${ENTITY_COLS_E}
          FROM entities e
          JOIN entities_fts f ON f.rowid = e.rowid
-         WHERE entities_fts MATCH ?
+         WHERE entities_fts MATCH ? AND e.tenant_id = ?
          ORDER BY rank
          LIMIT ?`;
   const aliasSQL = pid
@@ -1143,18 +1173,22 @@ export async function searchAsync(input: {
          FROM entities e
          JOIN entity_aliases a ON a.entity_id = e.id
          JOIN entity_aliases_fts af ON af.rowid = a.rowid
-         WHERE entity_aliases_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
+         WHERE entity_aliases_fts MATCH ? AND e.tenant_id = ? AND (e.project_id = ? OR e.project_id IS NULL OR e.cross_project = 1)
          ORDER BY rank
          LIMIT ?`
     : `SELECT DISTINCT ${ENTITY_COLS_E}
          FROM entities e
          JOIN entity_aliases a ON a.entity_id = e.id
          JOIN entity_aliases_fts af ON af.rowid = a.rowid
-         WHERE entity_aliases_fts MATCH ?
+         WHERE entity_aliases_fts MATCH ? AND e.tenant_id = ?
          ORDER BY rank
          LIMIT ?`;
-  const nameParams = pid ? [fts, pid, limit] : [fts, limit];
-  const aliasParams = pid ? [fts, pid, limit] : [fts, limit];
+  const nameParams = pid
+    ? [fts, currentTenantId(), pid, limit]
+    : [fts, currentTenantId(), limit];
+  const aliasParams = pid
+    ? [fts, currentTenantId(), pid, limit]
+    : [fts, currentTenantId(), limit];
 
   // Independent degrade (each scan → [] on pool timeout) is deliberate here,
   // unlike forSession's shared-fate offloadAllOrTimeout (#966 B). Entity FTS is
@@ -1214,14 +1248,15 @@ export function searchCrossProjectRepos(input: {
        FROM entities e
        JOIN entities_fts f ON f.rowid = e.rowid
        WHERE entities_fts MATCH ?
-         AND e.entity_type = 'repo'
+          AND e.tenant_id = ?
+          AND e.entity_type = 'repo'
          AND e.cross_project = 0
          AND e.project_id IS NOT NULL
          AND e.project_id != ?
        ORDER BY rank
        LIMIT ?`,
     )
-    .all(fts, pid, limit) as Entity[];
+    .all(fts, currentTenantId(), pid, limit) as Entity[];
 
   const aliasMatches = db()
     .query(
@@ -1230,14 +1265,15 @@ export function searchCrossProjectRepos(input: {
        JOIN entity_aliases a ON a.entity_id = e.id
        JOIN entity_aliases_fts af ON af.rowid = a.rowid
        WHERE entity_aliases_fts MATCH ?
-         AND e.entity_type = 'repo'
+          AND e.tenant_id = ?
+          AND e.entity_type = 'repo'
          AND e.cross_project = 0
          AND e.project_id IS NOT NULL
          AND e.project_id != ?
        ORDER BY rank
        LIMIT ?`,
     )
-    .all(fts, pid, limit) as Entity[];
+    .all(fts, currentTenantId(), pid, limit) as Entity[];
 
   // Merge and dedupe (preserve name-match ordering first)
   const seen = new Set<string>();
@@ -1271,7 +1307,8 @@ export async function searchCrossProjectReposAsync(input: {
        FROM entities e
        JOIN entities_fts f ON f.rowid = e.rowid
        WHERE entities_fts MATCH ?
-         AND e.entity_type = 'repo'
+          AND e.tenant_id = ?
+          AND e.entity_type = 'repo'
          AND e.cross_project = 0
          AND e.project_id IS NOT NULL
          AND e.project_id != ?
@@ -1282,7 +1319,8 @@ export async function searchCrossProjectReposAsync(input: {
        JOIN entity_aliases a ON a.entity_id = e.id
        JOIN entity_aliases_fts af ON af.rowid = a.rowid
        WHERE entity_aliases_fts MATCH ?
-         AND e.entity_type = 'repo'
+          AND e.tenant_id = ?
+          AND e.entity_type = 'repo'
          AND e.cross_project = 0
          AND e.project_id IS NOT NULL
          AND e.project_id != ?
@@ -1291,8 +1329,8 @@ export async function searchCrossProjectReposAsync(input: {
 
   // Independent degrade (see searchAsync) — best-effort supplemental RRF list.
   const [nameMatches, aliasMatches] = (await Promise.all([
-    offloadAll(nameSQL, [fts, pid, limit]),
-    offloadAll(aliasSQL, [fts, pid, limit]),
+    offloadAll(nameSQL, [fts, currentTenantId(), pid, limit]),
+    offloadAll(aliasSQL, [fts, currentTenantId(), pid, limit]),
   ])) as [Entity[], Entity[]];
 
   const seen = new Set<string>();
@@ -1315,6 +1353,9 @@ export async function searchCrossProjectReposAsync(input: {
  * from `sourceId`, then delete `sourceId`.
  */
 export function merge(targetId: string, sourceId: string): void {
+  if (!get(targetId) || !get(sourceId)) {
+    throw new Error("cannot merge entities across tenant boundaries");
+  }
   const d = db();
   d.exec("BEGIN IMMEDIATE");
   try {
@@ -1392,6 +1433,9 @@ export function addRelation(
   relation: RelationType,
   opts?: { metadata?: Record<string, unknown>; source?: string },
 ): string | null {
+  if (!get(entityA) || !get(entityB)) {
+    throw new Error("cannot relate entities across tenant boundaries");
+  }
   if (entityA === entityB) {
     log.info(`skipping self-referential relation: ${entityA} (${relation})`);
     return null;
@@ -1431,7 +1475,12 @@ export function addRelation(
 
 /** Remove a relation by its ID. */
 export function removeRelation(id: string): void {
-  db().query("DELETE FROM entity_relations WHERE id = ?").run(id);
+  db()
+    .query(
+      `DELETE FROM entity_relations
+       WHERE id = ? AND entity_a IN (SELECT id FROM entities WHERE tenant_id = ?)`,
+    )
+    .run(id, currentTenantId());
 }
 
 /**
@@ -1448,13 +1497,15 @@ export function relationsFor(entityId: string): EntityRelationResolved[] {
        FROM entity_relations r
        JOIN entities ea ON ea.id = r.entity_a
        JOIN entities eb ON eb.id = r.entity_b
-       WHERE r.entity_a = ? OR r.entity_b = ?
+       WHERE ea.tenant_id = ? AND eb.tenant_id = ? AND (r.entity_a = ? OR r.entity_b = ?)
        ORDER BY r.relation, other_name`,
     )
     .all(
       entityId,
       entityId,
       entityId,
+      currentTenantId(),
+      currentTenantId(),
       entityId,
       entityId,
     ) as EntityRelationResolved[];
@@ -1470,6 +1521,7 @@ export function getRelation(
   entityB: string,
   relation?: RelationType,
 ): EntityRelation[] {
+  if (!get(entityA) || !get(entityB)) return [];
   if (relation) {
     const row = db()
       .query(
@@ -1513,11 +1565,17 @@ export function formatRelationsForPrompt(entityId: string): string {
 /** Resolve a knowledge id (current or, post-2b, a superseded version) to its
  *  stable logical_id — the key all knowledge_entity_refs rows use (A2, #823).
  *  No-op today: a v1 row has id == logical_id. */
-function logicalIdOf(knowledgeId: string): string {
+function logicalIdOf(knowledgeId: string): string | null {
   const r = db()
-    .query("SELECT logical_id FROM knowledge WHERE id = ?")
-    .get(knowledgeId) as { logical_id: string } | null;
-  return r?.logical_id ?? knowledgeId;
+    .query(
+      `SELECT logical_id FROM knowledge
+       WHERE tenant_id = ? AND (id = ? OR logical_id = ?)
+       ORDER BY is_current DESC LIMIT 1`,
+    )
+    .get(currentTenantId(), knowledgeId, knowledgeId) as {
+    logical_id: string;
+  } | null;
+  return r?.logical_id ?? null;
 }
 
 /**
@@ -1534,10 +1592,10 @@ export function recomputeEntityRank(entityId: string): void {
   db()
     .query(
       `UPDATE entities SET sync_rank =
-         (SELECT COUNT(*) FROM knowledge_entity_refs WHERE entity_id = ?)
-       WHERE id = ?`,
+          (SELECT COUNT(*) FROM knowledge_entity_refs WHERE entity_id = ?)
+       WHERE tenant_id = ? AND id = ?`,
     )
-    .run(entityId, entityId);
+    .run(entityId, currentTenantId(), entityId);
 }
 
 /**
@@ -1549,23 +1607,27 @@ export function recomputeEntityRank(entityId: string): void {
  * entity delete uses the precise {@link recomputeEntityRank} instead.
  */
 export function resyncStaleEntityRanks(): void {
-  db().exec(
-    `UPDATE entities SET sync_rank =
+  db()
+    .query(
+      `UPDATE entities SET sync_rank =
        (SELECT COUNT(*) FROM knowledge_entity_refs r WHERE r.entity_id = entities.id)
-     WHERE sync_rank <>
+     WHERE tenant_id = ? AND sync_rank <>
        (SELECT COUNT(*) FROM knowledge_entity_refs r WHERE r.entity_id = entities.id)`,
-  );
+    )
+    .run(currentTenantId());
 }
 
 /** Link a knowledge entry to an entity. */
 export function linkKnowledge(knowledgeId: string, entityId: string): void {
+  const logicalId = logicalIdOf(knowledgeId);
+  if (!logicalId || !get(entityId)) return;
   try {
     db()
       .query(
         `INSERT OR IGNORE INTO knowledge_entity_refs (knowledge_id, entity_id)
          VALUES (?, ?)`,
       )
-      .run(logicalIdOf(knowledgeId), entityId);
+      .run(logicalId, entityId);
     recomputeEntityRank(entityId);
   } catch (e: unknown) {
     // FK violation (entity or knowledge entry doesn't exist) — ignore
@@ -1581,29 +1643,34 @@ export function linkKnowledge(knowledgeId: string, entityId: string): void {
 
 /** Unlink a knowledge entry from an entity. */
 export function unlinkKnowledge(knowledgeId: string, entityId: string): void {
+  const logicalId = logicalIdOf(knowledgeId);
+  if (!logicalId || !get(entityId)) return;
   db()
     .query(
       "DELETE FROM knowledge_entity_refs WHERE knowledge_id = ? AND entity_id = ?",
     )
-    .run(logicalIdOf(knowledgeId), entityId);
+    .run(logicalId, entityId);
   recomputeEntityRank(entityId);
 }
 
 /** Get all entities referenced by a knowledge entry. */
 export function entitiesForKnowledge(knowledgeId: string): Entity[] {
+  const logicalId = logicalIdOf(knowledgeId);
+  if (!logicalId) return [];
   return db()
     .query(
       `SELECT ${ENTITY_COLS_E}
        FROM entities e
        JOIN knowledge_entity_refs r ON r.entity_id = e.id
-       WHERE r.knowledge_id = ?`,
+       WHERE e.tenant_id = ? AND r.knowledge_id = ?`,
     )
-    .all(logicalIdOf(knowledgeId)) as Entity[];
+    .all(currentTenantId(), logicalId) as Entity[];
 }
 
 /** Get all knowledge logical_ids referencing an entity (A2: callers resolve the
  *  current entry via ltm.getByLogical, not ltm.get). */
 export function knowledgeForEntity(entityId: string): string[] {
+  if (!get(entityId)) return [];
   const rows = db()
     .query("SELECT knowledge_id FROM knowledge_entity_refs WHERE entity_id = ?")
     .all(entityId) as Array<{ knowledge_id: string }>;
@@ -2034,11 +2101,16 @@ export interface EntityMatchRegistry {
 /** Load the entity + alias registry (two full-table scans). */
 function loadEntityMatchRegistry(): EntityMatchRegistry {
   const entities = db()
-    .query("SELECT id, canonical_name FROM entities")
-    .all() as Array<{ id: string; canonical_name: string }>;
+    .query("SELECT id, canonical_name FROM entities WHERE tenant_id = ?")
+    .all(currentTenantId()) as Array<{ id: string; canonical_name: string }>;
   const aliases = db()
-    .query("SELECT entity_id, alias_value FROM entity_aliases")
-    .all() as Array<{ entity_id: string; alias_value: string }>;
+    .query(
+      "SELECT entity_id, alias_value FROM entity_aliases WHERE tenant_id = ?",
+    )
+    .all(currentTenantId()) as Array<{
+    entity_id: string;
+    alias_value: string;
+  }>;
   return { entities, aliases };
 }
 
@@ -2051,6 +2123,7 @@ export function syncEntityRefs(
   // appends. The FK to knowledge(id) stays satisfied because logical_id equals
   // the never-physically-deleted first version's id.
   const logicalId = logicalIdOf(knowledgeId);
+  if (!logicalId) return 0;
 
   // Capture the entities that WILL lose a ref so their sync_rank is recomputed after the
   // rebuild (union with the newly-linked set below) — #1191b PR2b.
@@ -2605,9 +2678,12 @@ export function getDismissedEntityPairs(): Set<string> {
     .query(
       `SELECT entry_a_title, entry_b_title FROM dedup_feedback
        WHERE kind = 'entity' AND accepted = 0 AND source = 'dashboard'
-         AND project_id IS NULL`,
+          AND tenant_id = ? AND project_id IS NULL`,
     )
-    .all() as Array<{ entry_a_title: string; entry_b_title: string }>;
+    .all(currentTenantId()) as Array<{
+    entry_a_title: string;
+    entry_b_title: string;
+  }>;
   const dismissed = new Set<string>();
   for (const r of rows) {
     dismissed.add(`${r.entry_a_title}\x1f${r.entry_b_title}`);
@@ -2633,10 +2709,11 @@ export function recordEntityDedupFeedback(input: {
   db()
     .query(
       `INSERT INTO dedup_feedback
-         (project_id, entry_a_title, entry_b_title, similarity, accepted, source, created_at, kind)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'entity')`,
+          (tenant_id, project_id, entry_a_title, entry_b_title, similarity, accepted, source, created_at, kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'entity')`,
     )
     .run(
+      currentTenantId(),
       input.projectId,
       input.entryATitle,
       input.entryBTitle,
@@ -2719,14 +2796,14 @@ export function getEntityDedupFeedback(
     projectId !== null
       ? db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id = ? ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE tenant_id = ? AND kind = 'entity' AND source != 'self_merge' AND project_id = ? ORDER BY similarity",
           )
-          .all(projectId)
+          .all(currentTenantId(), projectId)
       : db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id IS NULL ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE tenant_id = ? AND kind = 'entity' AND source != 'self_merge' AND project_id IS NULL ORDER BY similarity",
           )
-          .all()
+          .all(currentTenantId())
   ) as Array<{ similarity: number; accepted: number; source: string }>;
   return rows.map((r) => ({
     similarity: r.similarity,
@@ -2741,14 +2818,14 @@ export function getEntityDedupFeedbackCount(projectId: string | null): number {
     projectId !== null
       ? db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id = ?",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE tenant_id = ? AND kind = 'entity' AND source != 'self_merge' AND project_id = ?",
           )
-          .get(projectId)
+          .get(currentTenantId(), projectId)
       : db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id IS NULL",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE tenant_id = ? AND kind = 'entity' AND source != 'self_merge' AND project_id IS NULL",
           )
-          .get()
+          .get(currentTenantId())
   ) as { cnt: number } | null;
   return row?.cnt ?? 0;
 }
@@ -2764,20 +2841,20 @@ export function pruneEntityDedupFeedback(projectId: string | null): void {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id = ?
-           ORDER BY created_at ASC LIMIT ?
-         )`,
+            SELECT id FROM dedup_feedback WHERE tenant_id = ? AND kind = 'entity' AND source != 'self_merge' AND project_id = ?
+            ORDER BY created_at ASC LIMIT ?
+          )`,
       )
-      .run(projectId, excess);
+      .run(currentTenantId(), projectId, excess);
   } else {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE kind = 'entity' AND source != 'self_merge' AND project_id IS NULL
-           ORDER BY created_at ASC LIMIT ?
-         )`,
+            SELECT id FROM dedup_feedback WHERE tenant_id = ? AND kind = 'entity' AND source != 'self_merge' AND project_id IS NULL
+            ORDER BY created_at ASC LIMIT ?
+          )`,
       )
-      .run(excess);
+      .run(currentTenantId(), excess);
   }
 }
 

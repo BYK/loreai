@@ -110,6 +110,13 @@ function terminalResponsesSSE(id: string): string {
   );
 }
 
+function loadLocalConfig() {
+  const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
+  return config;
+}
+
 describe("node:http ingress lifecycle branches", () => {
   test.each(["aborted", "incomplete-close", "request-error"] as const)(
     "%s aborts pending handler work and removes listeners",
@@ -357,7 +364,7 @@ describe("node:http ingress lifecycle branches", () => {
       const handling = handleNodeRequest(
         asRequest(req),
         asResponse(res),
-        () => handleRequest(gatewayRequest, loadConfig()),
+        () => handleRequest(gatewayRequest, loadLocalConfig()),
         "127.0.0.1",
         3207,
       );

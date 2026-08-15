@@ -4,7 +4,13 @@ import {
   setPath,
   deletePath,
   captureJsonBackup,
+  refreshJsonBackup,
+  parseJsonBackup,
+  parseJsonSetupJournal,
+  prepareJsonSetupJournal,
+  selectJsonSetupJournalState,
   applyJsonBackup,
+  retainSkippedJsonBackup,
   readLegacyJsonBackup,
   LORE_BACKUP_KEY,
   getTomlTopLevelValue,
@@ -16,6 +22,7 @@ import {
   setEnvValueRaw,
   deleteEnvKey,
   buildEnvBackupBlock,
+  refreshEnvBackupBlock,
   prependEnvBackupBlock,
   restoreEnvBackup,
 } from "../src/cli/setup-backup";
@@ -82,6 +89,105 @@ describe("captureJsonBackup", () => {
       hadPrior: false,
     });
   });
+
+  it("retains pre-setup provenance while advancing the managed value", () => {
+    const first = captureJsonBackup(
+      { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+      CLAUDE_LORE_VALUES,
+    );
+    const second = refreshJsonBackup(
+      {
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:3207",
+          DISABLE_AUTO_COMPACT: "1",
+        },
+      },
+      {
+        ...CLAUDE_LORE_VALUES,
+        "env.ANTHROPIC_BASE_URL": "http://127.0.0.1:3399",
+      },
+      first,
+    );
+    expect(
+      second.entries.find((entry) => entry.path === "env.ANTHROPIC_BASE_URL"),
+    ).toMatchObject({
+      priorValue: "https://api.anthropic.com",
+      loreValue: "http://127.0.0.1:3399",
+    });
+  });
+
+  it("strictly rejects arbitrary and prototype-polluting paths", () => {
+    const base = {
+      version: 1,
+      savedAt: "2026-06-21T00:00:00.000Z",
+      entries: [
+        {
+          path: "env.__proto__.polluted",
+          loreValue: "x",
+          hadPrior: false,
+        },
+      ],
+    };
+    expect(() => parseJsonBackup(base)).toThrow("Invalid JSON backup path");
+    expect(() =>
+      parseJsonBackup({
+        ...base,
+        entries: [
+          {
+            path: "arbitrary.user.value",
+            loreValue: "x",
+            hadPrior: false,
+          },
+        ],
+      }),
+    ).toThrow("Invalid JSON setup backup entry");
+  });
+});
+
+describe("JSON setup journal recovery", () => {
+  const beforeText =
+    '{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com"}}\n';
+  const afterText =
+    '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:3207","DISABLE_AUTO_COMPACT":"1"}}\n';
+  const beforeConfig = JSON.parse(beforeText) as Record<string, unknown>;
+  const afterConfig = JSON.parse(afterText) as Record<string, unknown>;
+  const journal = prepareJsonSetupJournal({
+    oldBackup: null,
+    newBackup: captureJsonBackup(beforeConfig, CLAUDE_LORE_VALUES),
+    beforeText,
+    beforeConfig,
+    afterText,
+    afterConfig,
+  });
+
+  it("selects exact old and new states", () => {
+    expect(selectJsonSetupJournalState(journal, beforeText, beforeConfig)).toBe(
+      "old",
+    );
+    expect(selectJsonSetupJournalState(journal, afterText, afterConfig)).toBe(
+      "new",
+    );
+  });
+
+  it("fails closed for an unknown managed projection", () => {
+    const unknown = structuredClone(afterConfig) as {
+      env: Record<string, unknown>;
+    };
+    unknown.env.ANTHROPIC_BASE_URL = "https://user.example";
+    expect(() =>
+      selectJsonSetupJournalState(
+        journal,
+        `${JSON.stringify(unknown)}\n`,
+        unknown,
+      ),
+    ).toThrow("Unknown Lore setup journal config state");
+  });
+
+  it("rejects extra journal metadata", () => {
+    expect(() =>
+      parseJsonSetupJournal({ ...journal, unexpected: true }),
+    ).toThrow("Invalid JSON setup journal metadata");
+  });
 });
 
 describe("applyJsonBackup", () => {
@@ -146,6 +252,19 @@ describe("applyJsonBackup", () => {
     };
     applyJsonBackup(cfg, captureJsonBackup({}, {}, { pluginAdded: false }));
     expect(cfg.plugin).toEqual(["@loreai/opencode"]);
+  });
+
+  it("retains only skipped provenance after a partial restore", () => {
+    const backup = captureJsonBackup({}, CLAUDE_LORE_VALUES, {
+      pluginAdded: true,
+    });
+    const remaining = retainSkippedJsonBackup(backup, [
+      "env.ANTHROPIC_BASE_URL",
+    ]);
+    expect(remaining?.entries.map((entry) => entry.path)).toEqual([
+      "env.ANTHROPIC_BASE_URL",
+    ]);
+    expect(remaining?.pluginAdded).toBeUndefined();
   });
 });
 
@@ -268,7 +387,7 @@ describe("TOML backup block round-trip", () => {
     expect(restoreTomlBackup('model = "gpt"\n').summary.hadBackup).toBe(false);
   });
 
-  it("leaves the file untouched when the footer is missing (no data loss)", () => {
+  it("rejects a missing footer without mutating the input", () => {
     // A hand-edited/corrupted block with a header but no footer must NOT cause
     // the rest of the file to be truncated (Seer #876 HIGH).
     const block = buildTomlBackupBlock(
@@ -277,9 +396,10 @@ describe("TOML backup block round-trip", () => {
     ) as string;
     const headerOnly = block.split("\n").slice(0, -1).join("\n"); // drop footer
     const content = `${headerOnly}\nmodel = "gpt-5"\nopenai_base_url = "http://127.0.0.1:3299/v1"\n`;
-    const { content: result, summary } = restoreTomlBackup(content);
-    expect(summary.hadBackup).toBe(false);
-    expect(result).toBe(content); // byte-identical — nothing deleted
+    expect(() => restoreTomlBackup(content)).toThrow(
+      "Invalid Codex Lore backup block",
+    );
+    expect(content).toContain('model = "gpt-5"');
   });
 });
 
@@ -421,11 +541,47 @@ describe("dotenv backup block round-trip", () => {
     expect(buildEnvBackupBlock(withBlock, lore)).toBeNull();
   });
 
-  it("refuses to restore a corrupted block (missing footer)", () => {
+  it("rejects a corrupted block (missing footer)", () => {
     const content =
       "# lore setup backup — original values (run `lore setup undo hermes` to restore):\n#   FOO (was unset) # lore-set x\nOPENAI_BASE_URL=x\n";
-    const { content: result, summary } = restoreEnvBackup(content);
-    expect(summary.hadBackup).toBe(false);
-    expect(result).toBe(content); // byte-identical — nothing touched
+    expect(() => restoreEnvBackup(content)).toThrow(
+      "Invalid Lore env backup block",
+    );
+    expect(content).toContain("OPENAI_BASE_URL=x");
+  });
+
+  it("round-trips an explicitly empty prior value across refresh", () => {
+    const original = "OPENAI_BASE_URL=\n";
+    const block = buildEnvBackupBlock(original, lore) as string;
+    let content = setEnvValueRaw(
+      original,
+      "OPENAI_BASE_URL",
+      lore.OPENAI_BASE_URL,
+    );
+    content = setEnvValueRaw(
+      content,
+      "HERMES_INFERENCE_PROVIDER",
+      lore.HERMES_INFERENCE_PROVIDER,
+    );
+    content = prependEnvBackupBlock(content, block);
+    const refreshed = refreshEnvBackupBlock(content, {
+      ...lore,
+      OPENAI_BASE_URL: "http://127.0.0.1:3399/v1",
+    });
+    let configured = refreshed.content;
+    configured = setEnvValueRaw(
+      configured,
+      "OPENAI_BASE_URL",
+      "http://127.0.0.1:3399/v1",
+    );
+    configured = setEnvValueRaw(
+      configured,
+      "HERMES_INFERENCE_PROVIDER",
+      lore.HERMES_INFERENCE_PROVIDER,
+    );
+    configured = prependEnvBackupBlock(configured, refreshed.block);
+    expect(
+      getEnvValue(restoreEnvBackup(configured).content, "OPENAI_BASE_URL"),
+    ).toBe("");
   });
 });

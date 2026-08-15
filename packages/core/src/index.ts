@@ -100,6 +100,7 @@ export {
 } from "./warmup-histogram";
 
 export { dataDir } from "./data-dir";
+export { currentTenantId, withTenant, LOCAL_TENANT_ID } from "./tenant";
 export { isVecAvailable } from "./db/vec";
 export {
   checkVecWorker,
@@ -124,6 +125,7 @@ export {
   projectPath,
   projectKnownPaths,
   projectGitRemote,
+  projectTenantId,
   projectScope,
   setProjectScope,
   setProjectPromotionPolicy,
@@ -200,6 +202,12 @@ export {
   getGitUser,
   clearGitUserCache,
 } from "./git";
+export {
+  GATEWAY_AUTH_HEADER,
+  KNOWN_SESSION_HEADERS,
+  isCredentialHeaderName,
+  redactCredentialHeaderAssignments,
+} from "./credential-headers";
 export {
   enableHostedMode,
   isHostedMode,

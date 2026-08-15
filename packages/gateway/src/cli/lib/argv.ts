@@ -42,6 +42,7 @@ export const STRICLI_ROUTES: ReadonlySet<string> = new Set([
   "entity",
   "data",
   "recall",
+  "uninstall",
 ]);
 
 export interface PreprocessResult {
@@ -96,6 +97,7 @@ export const KNOWN_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   "import",
   "entity",
   "upgrade",
+  "uninstall",
   "help",
   "version",
 ]);

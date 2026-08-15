@@ -27,7 +27,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loopbackRequest } from "./helpers/loopback-request";
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
 
 function sseChunk(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`;
@@ -95,10 +96,58 @@ function openAICopilotStream(): Response {
   });
 }
 
-let teardownFn: (() => void) | undefined;
+async function postJson(
+  baseURL: string,
+  projectDir: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const url = new URL("/v1/messages", baseURL);
+  const serialized = JSON.stringify(body);
+  return new Promise<Response>((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(Buffer.byteLength(serialized)),
+          "x-api-key": "test-key",
+          "anthropic-version": "2023-06-01",
+          "x-lore-agent": "coder",
+          "x-lore-project": projectDir,
+        },
+      },
+      (incoming) => {
+        const responseHeaders = new Headers();
+        for (let i = 0; i < incoming.rawHeaders.length; i += 2) {
+          responseHeaders.append(
+            incoming.rawHeaders[i],
+            incoming.rawHeaders[i + 1],
+          );
+        }
+        resolve(
+          new Response(
+            Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>,
+            {
+              status: incoming.statusCode ?? 500,
+              statusText: incoming.statusMessage,
+              headers: responseHeaders,
+            },
+          ),
+        );
+      },
+    );
+    request.once("error", reject);
+    request.end(serialized);
+  });
+}
 
-afterEach(() => {
-  teardownFn?.();
+let teardownFn: (() => Promise<void>) | undefined;
+
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -139,14 +188,16 @@ describe("Anthropic client + OpenAI upstream (streaming re-emission, #1052)", ()
     // race window server.port could surface as 0 → "bad port" fetch (#1429).
     config.port = 0;
     config.portExplicit = false;
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     // Fail loudly at the source if the bind didn't resolve a real port, instead
     // of leaking an invalid port into a downstream "bad port" fetch error.
     expect(server.port).toBeGreaterThan(0);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
       for (const suffix of ["", "-shm", "-wal"]) {
@@ -164,30 +215,20 @@ describe("Anthropic client + OpenAI upstream (streaming re-emission, #1052)", ()
       }
     };
 
-    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": "test-key",
-        "anthropic-version": "2023-06-01",
-        // Force a primary (conversation) turn — otherwise the small request is
-        // treated as a meta request and takes the passthrough path.
-        "x-lore-agent": "coder",
-        "x-lore-project": projectDir,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 1024,
-        stream: true,
-        tools: [
-          {
-            name: "read",
-            description: "read a file",
-            input_schema: { type: "object", properties: {} },
-          },
-        ],
-        messages: [{ role: "user", content: "read a.txt please" }],
-      }),
+    const resp = await postJson(baseURL, projectDir, {
+      // Force a primary (conversation) turn — otherwise the small request is
+      // treated as a meta request and takes the passthrough path.
+      model: "gpt-4o",
+      max_tokens: 1024,
+      stream: true,
+      tools: [
+        {
+          name: "read",
+          description: "read a file",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      messages: [{ role: "user", content: "read a.txt please" }],
     });
 
     expect(resp.ok).toBe(true);

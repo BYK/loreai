@@ -251,6 +251,30 @@ describe("Codex agent cliArgs", () => {
       );
       expect(hasProviderHeaders).toBe(false);
     });
+
+    test("never places gateway access in Codex CLI arguments", () => {
+      const codex = AGENTS.find((a) => a.name === "codex");
+      if (!codex) throw new Error("codex agent not registered");
+      process.env.LORE_UPSTREAM_EXTRA_HEADERS =
+        "X-Lore-Gateway-Token: must-not-enter-argv\nX-Team: acme";
+      const args = codex.cliArgs?.("https://lore.example", "/tmp/test") ?? [];
+      expect(args.join(" ")).not.toContain("must-not-enter-argv");
+      expect(args.join(" ")).toContain("X-Team");
+    });
+
+    test("does not duplicate configured provider auth onto the Codex-to-gateway hop", () => {
+      const codex = AGENTS.find((a) => a.name === "codex");
+      if (!codex) throw new Error("codex agent not registered");
+      process.env.LORE_UPSTREAM_EXTRA_HEADERS =
+        "Authorization: Bearer admin\nX-Api-Key: admin-api\nX-Goog-Api-Key: admin-google\nX-Team: acme";
+      const args = codex.cliArgs?.("http://127.0.0.1:3207", "/tmp/test") ?? [];
+      const serialized = args.join(" ").toLowerCase();
+
+      expect(serialized).not.toContain("authorization");
+      expect(serialized).not.toContain("x-api-key");
+      expect(serialized).not.toContain("x-goog-api-key");
+      expect(serialized).toContain("x-team");
+    });
   });
 });
 
