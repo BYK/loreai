@@ -92,8 +92,11 @@ function isLoopbackHost(hostname: string): boolean {
  * Returns the first defined `upstreamEnvVars` value that points somewhere
  * OTHER than a loopback host, so we never "adopt" the gateway pointing at
  * itself and re-launches through `lore run` stay idempotent even if the
- * gateway restarts on a different port. Returns undefined when the agent has
+ * gateway restarts on a different port. Returns null when the agent has
  * no adoptable base-URL var, none is set, or the only value is loopback.
+ * Throws when a non-empty configured value cannot be routed safely; callers
+ * must not mistake an invalid override for an absent one and launch with the
+ * override's credential against Lore's default upstream.
  */
 export function captureUserUpstream(
   agent: AgentDef,
@@ -104,6 +107,11 @@ export function captureUserUpstream(
   for (const key of agent.upstreamEnvVars) {
     const raw = env[key];
     if (!raw) continue;
+    const invalid = () => {
+      throw new Error(
+        `${agent.displayName} has an unsafe or invalid upstream URL in ${key}`,
+      );
+    };
     // Strip control chars (CR/LF/etc.) up front — a newline in a base-URL env
     // var would otherwise ride through into an injected header (CRLF header
     // smuggling). `new URL()` tolerates an embedded newline, so we cannot rely
@@ -111,20 +119,25 @@ export function captureUserUpstream(
     // normalize at the source so every consumer sees a clean value.
     // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
     const trimmed = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
-    if (!trimmed) continue;
+    if (!trimmed) invalid();
     // A real base URL has no internal whitespace. Reject anything with an
     // interior space/tab — after control-char stripping, a CRLF-smuggling
     // payload like "https://host/\nX-Api-Key: stolen" collapses to a value
     // with an interior space, which must not be adopted.
-    if (/\s/.test(trimmed)) continue;
+    if (/\s/.test(trimmed)) invalid();
     let parsed: URL;
     try {
       parsed = new URL(trimmed);
     } catch {
+      invalid();
       continue;
     }
-    // Only adopt a real http(s) URL that isn't the gateway itself.
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+    // Only adopt a real http(s) URL that isn't the gateway itself. Credentials
+    // belong in the agent's auth env, never in a base URL that may be forwarded
+    // in a routing header or surfaced in diagnostics.
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") invalid();
+    if (parsed.username || parsed.password || parsed.search || parsed.hash)
+      invalid();
     // Reject ANY loopback host, not just the exact gateway origin: the gateway
     // may restart on a different port (contention), so a stale
     // ANTHROPIC_BASE_URL=http://127.0.0.1:<old-port> must not be adopted (would
@@ -140,7 +153,9 @@ export function captureUserUpstream(
 /**
  * Sanitize + validate a base-URL env value. Returns a clean http(s) URL string
  * (control chars stripped, interior whitespace rejected — see the CRLF note in
- * captureUserUpstream) or null if unusable. Loopback is NOT rejected here:
+ * captureUserUpstream) or null if unusable. Userinfo, queries, and fragments
+ * are rejected because gateway route normalization cannot preserve them.
+ * Loopback is NOT rejected here:
  * unlike `lore run`, `lore import` starts no long-lived gateway to point at, so
  * a loopback base URL (a running gateway the user already has) is a legitimate
  * extraction upstream.
@@ -153,6 +168,8 @@ function cleanBaseUrl(raw: string | undefined): string | null {
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      return null;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash)
       return null;
   } catch {
     return null;
@@ -205,11 +222,12 @@ export function captureUserEnvCredential(
   // Capture the paired base URL (first defined + valid), if any.
   let upstreamUrl: string | null = null;
   for (const key of agent.upstreamEnvVars ?? []) {
-    const clean = cleanBaseUrl(env[key]);
-    if (clean) {
-      upstreamUrl = clean;
-      break;
-    }
+    const raw = env[key];
+    if (!raw) continue;
+    const clean = cleanBaseUrl(raw);
+    if (!clean) return null;
+    upstreamUrl = clean;
+    break;
   }
   return { ...picked, upstreamUrl, envVarName };
 }

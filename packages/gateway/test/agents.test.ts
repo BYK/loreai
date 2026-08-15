@@ -3,7 +3,11 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AGENTS, captureUserUpstream } from "../src/cli/agents";
+import {
+  AGENTS,
+  captureUserEnvCredential,
+  captureUserUpstream,
+} from "../src/cli/agents";
 
 // ---------------------------------------------------------------------------
 // Claude Code agent
@@ -389,19 +393,20 @@ describe("captureUserUpstream", () => {
     }
   });
 
-  test("ignores a non-URL / unparseable value", () => {
-    const captured = captureUserUpstream(claude, GATEWAY, {
-      ANTHROPIC_BASE_URL: "not a url",
-    });
-    expect(captured).toBe(null);
+  test("rejects a non-URL / unparseable value", () => {
+    expect(() =>
+      captureUserUpstream(claude, GATEWAY, {
+        ANTHROPIC_BASE_URL: "not a url",
+      }),
+    ).toThrow(/unsafe or invalid upstream URL/);
   });
 
-  test("ignores an empty / whitespace value", () => {
-    expect(
+  test("rejects an explicitly configured whitespace value", () => {
+    expect(() =>
       captureUserUpstream(claude, GATEWAY, {
         ANTHROPIC_BASE_URL: "   ",
       }),
-    ).toBe(null);
+    ).toThrow(/unsafe or invalid upstream URL/);
   });
 
   test("returns null for an agent with no adoptable base-URL var (opencode)", () => {
@@ -420,5 +425,14 @@ describe("captureUserUpstream", () => {
       url: "https://my-proxy.example.com",
       wireProtocol: "gemini",
     });
+  });
+
+  test("does not detach an env credential from an unsafe configured upstream", () => {
+    expect(
+      captureUserEnvCredential(claude, {
+        ANTHROPIC_AUTH_TOKEN: "private-proxy-token",
+        ANTHROPIC_BASE_URL: "https://proxy.example/v1?api_key=secret",
+      }),
+    ).toBeNull();
   });
 });
