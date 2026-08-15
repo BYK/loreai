@@ -130,12 +130,14 @@ describe("remote gateway: path-less session attribution", () => {
 
   it("re-attributes a provisional bucket before publishing a rotated session header", async () => {
     const first = "bucket turn that must follow the session";
-    const second = "confident turn after client restart";
+    const second = "second stable bucket turn";
+    const third = "confident turn after client restart";
     const realPath = "/client/projects/remote-self-heal";
     harness = await createHarness({
       fixtures: makeConversationFixtures([
         { userMessage: first, assistantText: "First response." },
         { userMessage: second, assistantText: "Second response." },
+        { userMessage: third, assistantText: "Third response." },
       ]),
     });
 
@@ -149,8 +151,25 @@ describe("remote gateway: path-less session attribution", () => {
     );
     expect(response.status).toBe(200);
     await response.text();
+    response = await harness.chat(
+      {
+        ...pathlessBodyWithoutTools(second),
+        messages: [
+          { role: "user", content: first },
+          { role: "assistant", content: "First response." },
+          { role: "user", content: second },
+        ],
+      },
+      "test-key",
+      {
+        "x-lore-project": "",
+        "x-session-affinity": "remote-affinity-before-restart",
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
     // A real client restart may coincide with a gateway restart. This also
-    // deterministically drains the first turn's deferred finalizer before the
+    // deterministically drains the old affinity's deferred finalizer before the
     // persisted binding is inspected and the affinity value rotates.
     await harness.restartPipeline();
 
@@ -167,11 +186,21 @@ describe("remote gateway: path-less session attribution", () => {
     expect(before[0].project_path).toMatch(/^\/__lore_unattributed__\//);
     expect(before[0].project_path_provisional).toBe(1);
 
-    // OpenCode restarted and rotated its affinity value. Tier 1b provisionally
-    // adopts the old Lore session; the successful turn must self-heal the old
-    // bucket before publishing the new header and confident path.
+    // OpenCode restarted and rotated its affinity value. Fingerprint adoption
+    // proves continuity with both leading user messages in the provisional
+    // bucket; the successful turn must self-heal that bucket before publishing
+    // the new header and confident path.
     response = await harness.chat(
-      pathlessBodyWithoutTools(second),
+      {
+        ...pathlessBodyWithoutTools(third),
+        messages: [
+          { role: "user", content: first },
+          { role: "assistant", content: "First response." },
+          { role: "user", content: second },
+          { role: "assistant", content: "Second response." },
+          { role: "user", content: third },
+        ],
+      },
       "test-key",
       {
         "x-lore-project": realPath,
@@ -211,12 +240,12 @@ describe("remote gateway: path-less session attribution", () => {
       `SELECT tm.content, p.path AS project_path
          FROM temporal_messages tm
          JOIN projects p ON p.id = tm.project_id
-        WHERE tm.session_id = ?
-          AND (tm.content LIKE ? OR tm.content LIKE ?)`,
-      [before[0].session_id, `%${first}%`, `%${second}%`],
+        WHERE tm.session_id = ?`,
+      [before[0].session_id],
     );
     expect(attribution.some((row) => row.content.includes(first))).toBe(true);
     expect(attribution.some((row) => row.content.includes(second))).toBe(true);
+    expect(attribution.some((row) => row.content.includes(third))).toBe(true);
     expect(new Set(attribution.map((row) => row.project_path))).toEqual(
       new Set([realPath]),
     );
@@ -224,7 +253,8 @@ describe("remote gateway: path-less session attribution", () => {
 
   it("rolls back project re-attribution when the provisional turn commit fails", async () => {
     const first = "atomic bucket turn";
-    const second = "atomic confident retry";
+    const second = "atomic stable bucket turn";
+    const third = "atomic confident retry";
     const realPath = "/client/projects/atomic-self-heal";
     const oldRoute = "https://old-anthropic-route.invalid";
     const newRoute = "https://new-anthropic-route.invalid";
@@ -233,14 +263,34 @@ describe("remote gateway: path-less session attribution", () => {
     harness = await createHarness({
       fixtures: makeConversationFixtures([
         { userMessage: first, assistantText: "First response." },
-        { userMessage: second, assistantText: "Failed local commit." },
-        { userMessage: second, assistantText: "Failed project merge." },
-        { userMessage: second, assistantText: "Successful retry." },
+        { userMessage: second, assistantText: "Second response." },
+        { userMessage: third, assistantText: "Failed local commit." },
+        { userMessage: third, assistantText: "Failed project merge." },
+        { userMessage: third, assistantText: "Successful retry." },
       ]),
     });
 
     let response = await harness.chat(
       pathlessBodyWithoutTools(first),
+      "test-key",
+      {
+        "x-lore-project": "",
+        "x-session-affinity": oldAffinity,
+        "x-lore-provider": "anthropic",
+        "x-lore-upstream-url": oldRoute,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    response = await harness.chat(
+      {
+        ...pathlessBodyWithoutTools(second),
+        messages: [
+          { role: "user", content: first },
+          { role: "assistant", content: "First response." },
+          { role: "user", content: second },
+        ],
+      },
       "test-key",
       {
         "x-lore-project": "",
@@ -272,15 +322,22 @@ describe("remote gateway: path-less session attribution", () => {
     db().exec(`
       CREATE TEMP TRIGGER fail_atomic_provisional_turn
       BEFORE INSERT ON temporal_messages
-      WHEN NEW.content LIKE '%${second}%'
+       WHEN NEW.content LIKE '%${third}%'
       BEGIN
         SELECT RAISE(ABORT, 'forced provisional temporal failure');
       END;
     `);
 
     const migratedBody = {
-      ...pathlessBodyWithoutTools(second),
+      ...pathlessBodyWithoutTools(third),
       model: "claude-opus-4-1",
+      messages: [
+        { role: "user", content: first },
+        { role: "assistant", content: "First response." },
+        { role: "user", content: second },
+        { role: "assistant", content: "Second response." },
+        { role: "user", content: third },
+      ],
     };
     response = await harness.chat(migratedBody, "test-key", {
       "x-lore-project": realPath,
@@ -339,6 +396,9 @@ describe("remote gateway: path-less session attribution", () => {
       true,
     );
     expect(failedAttribution.some((row) => row.content.includes(second))).toBe(
+      true,
+    );
+    expect(failedAttribution.some((row) => row.content.includes(third))).toBe(
       false,
     );
     expect(new Set(failedAttribution.map((row) => row.project_path))).toEqual(
@@ -434,6 +494,7 @@ describe("remote gateway: path-less session attribution", () => {
     );
     expect(attribution.some((row) => row.content.includes(first))).toBe(true);
     expect(attribution.some((row) => row.content.includes(second))).toBe(true);
+    expect(attribution.some((row) => row.content.includes(third))).toBe(true);
     expect(new Set(attribution.map((row) => row.project_path))).toEqual(
       new Set([realPath]),
     );

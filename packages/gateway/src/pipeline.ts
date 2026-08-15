@@ -118,7 +118,6 @@ import type { GatewayConfig } from "./config";
 import {
   getProjectPath,
   extractGitRemoteHeader,
-  extractProjectHeader,
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
   extractUpstreamPathHeader,
@@ -138,7 +137,6 @@ import {
   extractKnownSessionHeader,
   learnHeaders,
   observeHeaderValues,
-  findRotationPredecessor,
 } from "./session";
 import {
   detectCompactionRequest,
@@ -1480,6 +1478,23 @@ function resolveIndexedSession(
 function findIndexedSessionID(req: GatewayRequest): string | undefined {
   const resolution = resolveIndexedSession(req);
   return resolution.kind === "match" ? resolution.sessionID : undefined;
+}
+
+/**
+ * Revalidate an authenticated index lookup after an async wait. Affinity
+ * rotation can revoke the request's alias while it is queued for the session;
+ * callers must fail closed instead of continuing with the stale session ID.
+ */
+function confirmedIndexedIdentityResolvesTo(
+  req: GatewayRequest,
+  expectedSessionID: string,
+): boolean {
+  const resolution = resolveIndexedSession(req);
+  return (
+    resolution.kind === "match" &&
+    resolution.sessionID === expectedSessionID &&
+    resolution.provisional !== true
+  );
 }
 
 function findLiveSessionState(
@@ -5183,10 +5198,12 @@ const ADOPT_MIN_OVERLAP = 2;
  * Confirmation uses user messages only: temporal storage persists user messages
  * with position-stable deterministic IDs, while assistant responses are stored
  * under a synthetic index-0 ID — so only user messages are a reliable
- * cross-restart match signal. The project_id scope of the overlap query also
- * enforces same-project (a cross-project fingerprint twin yields zero overlap).
- * Subagent status must match, and a fork guard rejects a count that dropped far
- * below the candidate's stored count.
+ * cross-restart match signal. Confidently bound candidates require overlap in
+ * the incoming project. A provisionally bound candidate instead checks its
+ * existing bucket, allowing a later confident path to self-heal that bucket
+ * without weakening the cross-project guard for confident bindings. Subagent
+ * status must match, and a fork guard rejects a count that dropped far below the
+ * candidate's stored count.
  *
  * Called from BOTH mint paths: the Tier-1 path (known header present but its
  * value is new — the opencode restart case; `known` is rebound to the adopted
@@ -5243,11 +5260,13 @@ async function adoptByFingerprint(input: {
   }
 
   const reqIsSubagent = !!headers["x-parent-session-id"];
-  const candidates = findSessionStatesByFingerprint(fingerprint);
+  const candidates = findSessionStatesByFingerprint(fingerprint).map(
+    (candidate) => ({ ...candidate, credentialBound: true }),
+  );
   if (cred) {
     // v78 added the credential suffix to conversation fingerprints. Legacy
     // candidates have the old unsuffixed fingerprint and no persisted owner;
-    // they still require the same project-scoped multi-message overlap below.
+    // they still require the same multi-message overlap policy below.
     const legacyFingerprint = await fingerprintMessages(fingerprintInput);
     if (requestGeneration !== undefined) {
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -5255,7 +5274,7 @@ async function adoptByFingerprint(input: {
     candidates.push(
       ...findSessionStatesByFingerprint(legacyFingerprint, {
         legacyUnownedOnly: true,
-      }),
+      }).map((candidate) => ({ ...candidate, credentialBound: false })),
     );
   }
   const eligibleCandidates = candidates.filter(
@@ -5282,8 +5301,10 @@ async function adoptByFingerprint(input: {
   }
   if (probeIDs.length < ADOPT_MIN_OVERLAP) return null;
 
-  const pid = resolveProjectByRemoteOrPath(gitRemote, projectPath);
-  if (!pid) return null;
+  const incomingProjectId = resolveProjectByRemoteOrPath(
+    gitRemote,
+    projectPath,
+  );
   const minOverlap = Math.max(ADOPT_MIN_OVERLAP, Math.ceil(probedUsers * 0.5));
   let best: { sid: string; overlap: number; countDiff: number } | null = null;
   // temporal_messages.id is globally unique, so valid rows cannot give two
@@ -5296,7 +5317,19 @@ async function adoptByFingerprint(input: {
     if (msgCount - c.message_count < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) {
       continue;
     }
-    const overlap = countMatchingTemporalIds(pid, c.session_id, probeIDs);
+    // A confident or legacy-unowned candidate remains scoped to the incoming
+    // project. Only a credential-bound provisional binding may prove continuity
+    // against its current bucket before the incoming project has been created.
+    const overlapProjectId =
+      c.credentialBound && c.project_path_provisional === 1 && c.project_path
+        ? resolveProjectByRemoteOrPath(undefined, c.project_path)
+        : incomingProjectId;
+    if (!overlapProjectId) continue;
+    const overlap = countMatchingTemporalIds(
+      overlapProjectId,
+      c.session_id,
+      probeIDs,
+    );
     if (overlap < minOverlap) continue;
     const countDiff = Math.abs(msgCount - c.message_count);
     if (
@@ -5465,99 +5498,12 @@ async function identifySession(
       );
     }
 
-    // --- Tier 1b: Header value rotation detection ---
-    // Only for headers whose values may change on a client restart while the
-    // logical session continues (e.g. OpenCode's x-session-affinity nanoid).
-    // Headers like x-claude-code-session-id mint a fresh value per
-    // *conversation* — a new value is always a genuinely new session, and
-    // merging would collapse distinct conversations (and their projects) into
-    // one, causing cross-project contamination on remote/multi-client gateways.
-    const predecessor = !isRotationEligible(known.headerName)
-      ? null
-      : findRotationPredecessor(
-          credentialFingerprint,
-          known.headerName,
-          known.sessionId,
-          headerSessionIndex,
-          (sid) => {
-            // Session may be in memory or only in DB (after gateway restart).
-            const inMemory = sessions.get(sid);
-            if (inMemory) {
-              return {
-                sid,
-                isSubagent: !!inMemory.isSubagent,
-                lastActiveAt: inMemory.lastRequestTime,
-              };
-            }
-            // Lightweight DB check for recency and subagent status.
-            const persisted = loadSessionTracking(sid);
-            if (!persisted) return null; // orphaned index entry
-            return {
-              sid,
-              isSubagent: persisted.isSubagent,
-              // lastTurnAt=0 means gradient never ran yet — session is new,
-              // treat as recently active (not infinitely stale).
-              lastActiveAt:
-                persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
-            };
-          },
-        );
-
-    // Fix 2 (defense in depth): even for a rotation-eligible header, never
-    // re-home a session onto a DIFFERENT confident project. If the incoming
-    // request carries an explicit X-Lore-Project that disagrees with the
-    // predecessor's bound project, this is not a benign restart — treat it as
-    // a genuinely new session to avoid cross-project contamination.
-    if (predecessor) {
-      const incomingProject = extractProjectHeader(headers);
-      if (incomingProject) {
-        const predTracking = loadSessionTracking(predecessor.sid);
-        const predProject = predTracking?.projectPath;
-        const predConfident =
-          !!predProject && predTracking?.projectPathProvisional === false;
-        if (predConfident && predProject !== incomingProject) {
-          log.warn(
-            `session rotation refused (${known.headerName}): incoming project ` +
-              `${incomingProject} differs from predecessor ${predecessor.sid.slice(0, 16)} ` +
-              `project ${predProject} — creating a new session instead of merging.`,
-          );
-          const sessionID = generateSessionID();
-          headerSessionIndex.set(indexKey, sessionID);
-          saveSessionTracking(sessionID, {
-            headerSessionId: known.sessionId,
-            headerName: known.headerName,
-            credentialFingerprint,
-          });
-          // The old predecessor's index entry is intentionally preserved — the
-          // old session is still valid and may receive requests with its nanoid.
-          // It will age out via ROTATION_MAX_AGE_MS naturally. If another new
-          // nanoid arrives later, the old entry creates an ambiguity (multiple
-          // predecessors) → findRotationPredecessor returns null → new session.
-          return { sessionID, isNew: true, tier: 1 };
-        }
-      }
-    }
-
-    if (predecessor) {
-      setProvisionalHeaderMapping(indexKey, predecessor.sid, true);
-      log.info(
-        `session ${predecessor.sid.slice(0, 16)}: provisional ${known.headerName} value rotation`,
-      );
-      return {
-        sessionID: predecessor.sid,
-        isNew: false,
-        tier: 1,
-        provisionalIdentity: true,
-        provisionalKey: indexKey,
-        guardProject: true,
-      };
-    }
-
-    // --- Tier 1 → 3b: restart-proof adoption ---
-    // The known header value is new and rotation found no predecessor. Before
-    // minting a fresh session, try to adopt a prior session for this same
-    // conversation (resumed after a restart under a new x-lore-session-id) via
-    // its persisted fingerprint + content-hash overlap. (issue #796)
+    // --- Tier 1 → 3b: overlap-proven restart adoption ---
+    // A new known-header value is never continuity proof by itself. Before
+    // minting a fresh session, adopt only when the persisted fingerprint and
+    // project-scoped leading-user-message overlap prove that this is the same
+    // conversation. Successful publication below still revokes an old value
+    // for rotation-eligible headers such as x-session-affinity. (issue #796)
     const adopted = await adoptByFingerprint({
       req,
       headers,
@@ -11583,8 +11529,14 @@ async function handleCompactionInner(
   const sessionID = sessionState.sessionID;
   const authorizedProjectPath = sessionState.projectPath;
   await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(req, sessionID)) {
+    return errorResponse(404, "No authenticated session found");
+  }
   await awaitStreamingPostResponse(sessionID, req.signal);
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(req, sessionID)) {
+    return errorResponse(404, "No authenticated session found");
+  }
   if (!isConfidentlyBoundToProject(sessionState, authorizedProjectPath)) {
     return errorResponse(
       403,
@@ -12035,8 +11987,26 @@ async function handleCompactEndpointInner(
   }
   const sessionID = state.sessionID;
   await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
   await awaitStreamingPostResponse(sessionID, signal);
   assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
   if (
     state.projectPathProvisional === true ||
     state.projectPath !== projectPath
@@ -12295,8 +12265,26 @@ async function handleResponsesCompactEndpointInner(
   }
   const sessionID = state.sessionID;
   await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
   await awaitStreamingPostResponse(sessionID, signal);
   assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
   if (
     state.projectPathProvisional === true ||
     state.projectPath !== pathResult.path
@@ -13596,12 +13584,20 @@ async function handleConversationTurn(
     );
     const claimed = result.isNew || result.provisionalIdentity === true;
     if (claimed) await claimSession(result.sessionID);
-    return { identified: result, claimed };
+    const revalidateConfirmedIdentity =
+      !result.isNew && result.provisionalIdentity !== true && result.tier !== 3;
+    return { identified: result, claimed, revalidateConfirmedIdentity };
   });
   const { identified } = admitted;
   const { sessionID, isNew, tier } = identified;
   await beforeUpstreamCaptureForTest?.(req);
   if (!admitted.claimed) await claimSession(sessionID);
+  if (
+    admitted.revalidateConfirmedIdentity &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID)
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
   if (
     identified.guardProject &&
     conflictsWithConfidentSessionProject(sessionID, pathResult)
@@ -13611,6 +13607,12 @@ async function handleConversationTurn(
   }
   await awaitStreamingPostResponse(sessionID, req.signal);
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  if (
+    admitted.revalidateConfirmedIdentity &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID)
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
   // Marker-derived project/session data has already been copied into headers;
   // strip it before either the provisional verifier or full pipeline forwards.
   stripContextMarkers(req.messages);
@@ -16552,7 +16554,7 @@ async function handleLoreSlashCommand(
   if (!text.toLowerCase().startsWith("/lore:")) return null;
 
   let state = findLiveSessionState(req, allSessions);
-  const indexedSessionID = findIndexedKnownSessionID(req);
+  const indexedSessionID = findIndexedSessionID(req);
   if (!state && indexedSessionID) {
     const pathResult = getProjectPath(req.system, req.rawHeaders);
     state = getOrCreateSession(
@@ -16565,8 +16567,28 @@ async function handleLoreSlashCommand(
   const sessionID = indexedSessionID ?? state?.sessionID;
   if (sessionID) {
     await claimSession(sessionID);
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
     await awaitStreamingPostResponse(sessionID, req.signal);
     req.signal?.throwIfAborted();
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
   }
 
   // Route to specific handlers
@@ -16800,8 +16822,22 @@ async function handleCurateSlashCommand(
   }
 
   await claimSession(sessionID);
+  if (indexedSessionID && !confirmedIndexedIdentityResolvesTo(req, sessionID)) {
+    return slashResponse(
+      req,
+      "No active session found for curation.",
+      "msg_lore_curate_none",
+    );
+  }
   await awaitStreamingPostResponse(sessionID, req.signal);
   req.signal?.throwIfAborted();
+  if (indexedSessionID && !confirmedIndexedIdentityResolvesTo(req, sessionID)) {
+    return slashResponse(
+      req,
+      "No active session found for curation.",
+      "msg_lore_curate_none",
+    );
+  }
 
   const projectPath = resolveSessionProjectPath(pathResult, state, config);
   saveSessionTracking(sessionID, {

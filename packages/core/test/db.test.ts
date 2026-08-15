@@ -3093,7 +3093,12 @@ describe("db", () => {
       const sidOther = `adopt-other-${crypto.randomUUID()}`;
       const sidEmpty = `adopt-empty-${crypto.randomUUID()}`;
       const fp = `fp-${crypto.randomUUID().slice(0, 8)}`;
-      saveSessionTracking(sidA, { fingerprint: fp, messageCount: 100 });
+      saveSessionTracking(sidA, {
+        fingerprint: fp,
+        messageCount: 100,
+        projectPath: "/tmp/adopt-provisional",
+        projectPathProvisional: true,
+      });
       saveSessionTracking(sidB, {
         fingerprint: fp,
         messageCount: 200,
@@ -3115,6 +3120,8 @@ describe("db", () => {
       expect(bySid.get(sidA)?.message_count).toBe(100);
       expect(bySid.get(sidB)?.is_subagent).toBe(1);
       expect(bySid.get(sidA)?.is_subagent).toBe(0);
+      expect(bySid.get(sidA)?.project_path).toBe("/tmp/adopt-provisional");
+      expect(bySid.get(sidA)?.project_path_provisional).toBe(1);
 
       // Empty query never matches the empty-fingerprint rows.
       expect(findSessionStatesByFingerprint("")).toEqual([]);

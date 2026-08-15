@@ -4898,6 +4898,176 @@ describe("Pipeline — streaming responses", () => {
     },
   );
 
+  it.each(["regular", "structural", "compact", "responses-compact"] as const)(
+    "rejects a queued %s request after affinity rotation revokes its identity",
+    async (route) => {
+      const oldAffinity = `queued-revoked-${route}-old`;
+      const newAffinity = `queued-revoked-${route}-new`;
+      const history: GatewayRequest["messages"] = Array.from(
+        { length: 12 },
+        (_, index) => ({
+          role:
+            index === 0 || index === 10
+              ? ("user" as const)
+              : ("assistant" as const),
+          content: [
+            {
+              type: "text" as const,
+              text: `${route} rotation history ${index}`,
+            },
+          ],
+        }),
+      );
+      let upstreamCalls = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCalls++;
+        return new Response(
+          validResponsesSSE(`resp_queued_revoked_${upstreamCalls}`),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+      let releaseRotation!: () => void;
+      const rotationPause = new Promise<void>((resolve) => {
+        releaseRotation = resolve;
+      });
+      let rotationWaitingResolve!: () => void;
+      const rotationWaiting = new Promise<void>((resolve) => {
+        rotationWaitingResolve = resolve;
+      });
+      let queued: Promise<Response> | undefined;
+      let rotationBody: Promise<string> | undefined;
+      const summaryRead = vi.spyOn(distillation, "loadForSession");
+
+      try {
+        const seed = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": oldAffinity },
+          messages: [history[0]],
+        });
+        await (await handleRequest(seed, loadConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        const setup = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": oldAffinity },
+          messages: history,
+        });
+        await (await handleRequest(setup, loadConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        setPipelinePreUpstreamPauseForTest(
+          rotationPause,
+          rotationWaitingResolve,
+        );
+        const rotation = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": newAffinity },
+          messages: [
+            ...history,
+            {
+              role: "user",
+              content: [{ type: "text", text: "continue after restart" }],
+            },
+          ],
+        });
+        const rotationResponse = await handleRequest(rotation, loadConfig());
+        rotationBody = rotationResponse.text();
+        await rotationWaiting;
+        const oldState = [...getActiveSessions().values()].find(
+          (state) => state.headerSessionId === oldAffinity,
+        );
+        expect(oldState).toBeDefined();
+        expect(isPipelineSessionActiveForTest(oldState?.sessionID ?? "")).toBe(
+          true,
+        );
+
+        const headers = {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": process.cwd(),
+          "x-lore-provider": "openai",
+          "x-lore-upstream-url": "https://api.openai.com/v1",
+          "x-session-affinity": oldAffinity,
+        };
+        if (route === "regular") {
+          const request = makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": oldAffinity },
+          });
+          request.stream = false;
+          queued = handleRequest(request, loadConfig());
+        } else if (route === "structural") {
+          const request = makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": oldAffinity },
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: "Create an anchored summary from the conversation history above.",
+                  },
+                ],
+              },
+            ],
+            tools: [],
+          });
+          request.stream = false;
+          queued = handleRequest(request, loadConfig());
+        } else if (route === "compact") {
+          queued = handleCompactEndpoint(
+            new Request("http://gateway.test/v1/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ project_path: process.cwd() }),
+            }),
+            loadConfig(),
+          );
+        } else {
+          queued = handleResponsesCompactEndpoint(
+            new Request("http://gateway.test/v1/responses/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                model: "gpt-5.6-sol",
+                instructions: "You are a coding agent.",
+                input: [
+                  {
+                    role: "user",
+                    content: [{ type: "input_text", text: "compact" }],
+                  },
+                ],
+                tools: [],
+              }),
+            }),
+            loadConfig(),
+          );
+        }
+        await vi.waitFor(() =>
+          expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+        );
+        summaryRead.mockClear();
+
+        releaseRotation();
+        expect(await rotationBody).toContain("event: response.completed");
+        const response = await queued;
+        expect(response.status).toBe(404);
+        expect(await response.text()).toMatch(/authenticated session/i);
+        expect(upstreamCalls).toBe(3);
+        expect(summaryRead).not.toHaveBeenCalled();
+      } finally {
+        releaseRotation();
+        if (rotationBody) await rotationBody.catch(() => "");
+        if (queued) {
+          const response = await queued.catch(() => undefined);
+          if (response && !response.bodyUsed) await response.text();
+        }
+        summaryRead.mockRestore();
+        setPipelinePreUpstreamPauseForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
   it("drops a captured post-response finalizer after session eviction", async () => {
     const sessionHeaders = {
       "x-lore-session-id": "evicted-finalizer-session",
