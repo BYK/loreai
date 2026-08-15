@@ -3000,13 +3000,7 @@ describe("Pipeline — streaming responses", () => {
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(
-        getSessionCosts(state?.sessionID ?? "")?.conversation,
-      ).toMatchObject({
-        inputTokens: 1,
-        outputTokens: 0,
-        turns: 1,
-      });
+      expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
       expect(store).not.toHaveBeenCalled();
       expect(loadSessionTracking(state?.sessionID ?? "")).toEqual(original);
       const compact = await handleCompactEndpoint(
@@ -3983,6 +3977,11 @@ describe("Pipeline — streaming responses", () => {
       await (
         await handleRequest(request(aliasA, projectA), loadConfig())
       ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const costsBeforeExpiredRetry = structuredClone(
+        getSessionCosts(stateA?.sessionID ?? "")?.conversation,
+      );
       setPipelinePreUpstreamPauseForTest(paused, waitingResolve);
       const retryA = await handleRequest(
         request(aliasA, projectA),
@@ -4018,6 +4017,9 @@ describe("Pipeline — streaming responses", () => {
           (state) => state.headerSessionId === canonical,
         ),
       ).toHaveLength(1);
+      expect(getSessionCosts(stateA?.sessionID ?? "")?.conversation).toEqual(
+        costsBeforeExpiredRetry,
+      );
     } finally {
       release();
       setPipelinePreUpstreamPauseForTest(undefined);

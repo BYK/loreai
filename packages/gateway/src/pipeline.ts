@@ -13314,19 +13314,19 @@ async function handleProvisionalConversationTurn(
     requestEnablesLongContext(req),
   );
 
-  const commit = async (): Promise<void> => {
+  const commit = async (): Promise<boolean> => {
     if (
       requestGeneration !== streamingPostResponseGeneration ||
       req.signal?.aborted ||
       downstreamWasCancelled()
     ) {
-      return;
+      return false;
     }
     if (
       identified.provisionalKey &&
       !provisionalKeyOwned(identified.provisionalKey, identified.sessionID)
     ) {
-      return;
+      return false;
     }
     const credential = extractAuth(req.rawHeaders);
     const persisted = loadSessionTracking(identified.sessionID);
@@ -13495,6 +13495,7 @@ async function handleProvisionalConversationTurn(
     }
     captureBillingPrefix(state.sessionID, req.system);
     captureSessionHeaders(state.sessionID, req.rawHeaders);
+    return true;
   };
   scheduleStreamingPostResponse(
     identified.sessionID,
@@ -13518,7 +13519,7 @@ async function handleProvisionalConversationTurn(
         );
         return;
       }
-      await commit();
+      if (!(await commit())) return;
       accountConversationUsage(
         accumulated.usage ?? ZERO_USAGE,
         accumulated.model,
