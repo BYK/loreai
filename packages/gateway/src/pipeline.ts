@@ -10102,6 +10102,17 @@ function assertValidNonStreamCompletion(
       ) {
         throw new Error("upstream Responses request did not complete");
       }
+      const reason =
+        details && typeof details === "object" && !Array.isArray(details)
+          ? (details as Record<string, unknown>).reason
+          : undefined;
+      if (
+        reason !== undefined &&
+        reason !== "max_output_tokens" &&
+        reason !== "content_filter"
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
     }
     return;
   }

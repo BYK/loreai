@@ -1583,7 +1583,7 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it("rejects malformed incomplete JSON on an established conversation", async () => {
+  it("rejects an unknown public incomplete reason on an established conversation", async () => {
     const sessionHeader = "malformed-incomplete-established";
     let upstreamCall = 0;
     setUpstreamInterceptor(async () => {
@@ -1598,7 +1598,7 @@ describe("Pipeline — streaming responses", () => {
           id: "resp_malformed_incomplete",
           model: "gpt-5.6-sol",
           status: "incomplete",
-          incomplete_details: { reason: 7 },
+          incomplete_details: { reason: "provider_specific" },
           output: [],
           usage: { input_tokens: 10, output_tokens: 2 },
         }),
@@ -1620,6 +1620,38 @@ describe("Pipeline — streaming responses", () => {
 
       const request = makeResponsesRequest({
         sessionHeaders: { "x-lore-session-id": sessionHeader },
+      });
+      request.stream = false;
+      const response = await handleRequest(request, loadConfig());
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("Gateway request failed");
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rejects an unknown public incomplete reason on a provisional conversation", async () => {
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "resp_provisional_unknown_incomplete",
+            model: "gpt-5.6-sol",
+            status: "incomplete",
+            incomplete_details: { reason: "provider_specific" },
+            output: [],
+            usage: { input_tokens: 10, output_tokens: 2 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": "provisional-unknown-incomplete",
+        },
       });
       request.stream = false;
       const response = await handleRequest(request, loadConfig());
@@ -5952,7 +5984,7 @@ describe("Pipeline — streaming responses", () => {
     },
   );
 
-  it("rejects malformed incomplete JSON on cross-protocol meta passthrough", async () => {
+  it("rejects an unknown public incomplete reason on cross-protocol meta passthrough", async () => {
     setUpstreamInterceptor(
       async () =>
         new Response(
@@ -5960,7 +5992,7 @@ describe("Pipeline — streaming responses", () => {
             id: "resp_meta_malformed",
             model: "gpt-5.6-sol",
             status: "incomplete",
-            incomplete_details: { reason: 7 },
+            incomplete_details: { reason: "provider_specific" },
             output: [],
             usage: { input_tokens: 10, output_tokens: 2 },
           }),

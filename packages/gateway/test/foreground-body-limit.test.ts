@@ -211,4 +211,28 @@ describe("foreground response body limits", () => {
       ),
     ).rejects.toThrow("upstream Responses request did not complete");
   });
+
+  test("rejects provider-specific non-stream incomplete reasons for Codex", async () => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_codex_incomplete",
+        model: "gpt-test",
+        status: "incomplete",
+        incomplete_details: { reason: "provider_specific" },
+        output: [],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(
+        response,
+        "openai-responses",
+        true,
+        undefined,
+        true,
+      ),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
 });
