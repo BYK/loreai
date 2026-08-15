@@ -7092,6 +7092,7 @@ export function streamResponsesRecallAware(
     maxRetainedStateBytes?: number;
     maxStreamBytes?: number;
     maxSSEFrames?: number;
+    validation?: "public" | "codex";
     /** Caller abort combined with the stream's client-disconnect controller. */
     signal?: AbortSignal;
     /**
@@ -8313,7 +8314,12 @@ export function streamResponsesRecallAware(
     if (acc.id && response.id !== acc.id) {
       throw new Error("Responses terminal event changed response identity");
     }
-    if (response.output === undefined) return;
+    if (response.output === undefined) {
+      if (opts.validation === "public" && response.status === "completed") {
+        throw new Error("Responses terminal output must be an array");
+      }
+      return;
+    }
     if (!Array.isArray(response.output)) {
       throw new Error("Responses terminal output must be an array");
     }
@@ -8327,6 +8333,12 @@ export function streamResponsesRecallAware(
       return item as Record<string, unknown>;
     });
     const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
+    if (
+      opts.validation === "public" &&
+      actualOutput.length !== expected.length
+    ) {
+      throw new Error("Responses terminal output changed streamed item");
+    }
     let expectedIndex = 0;
     for (const actual of actualOutput) {
       const isReference = actual.type === "item_reference";
@@ -8347,6 +8359,9 @@ export function streamResponsesRecallAware(
               actual.call_id === streamed.call_id)),
       );
       if (matchIndex < 0) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      if (opts.validation === "public" && matchIndex !== expectedIndex) {
         throw new Error("Responses terminal output changed streamed item");
       }
       const [outputIndex, streamed] = expected[matchIndex];
@@ -10116,6 +10131,65 @@ function assertValidNonStreamCompletion(
       Array.isArray(json.usage)
     ) {
       throw new Error("upstream Responses request did not complete");
+    }
+    const seenItemIDs = new Set<string>();
+    for (const rawItem of json.output) {
+      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const item = rawItem as Record<string, unknown>;
+      if (
+        typeof item.type !== "string" ||
+        !item.type ||
+        typeof item.id !== "string" ||
+        !item.id ||
+        seenItemIDs.has(item.id)
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      seenItemIDs.add(item.id);
+      if (item.type === "message") {
+        if (
+          item.role !== "assistant" ||
+          !["completed", "incomplete", "in_progress"].includes(
+            String(item.status),
+          ) ||
+          !Array.isArray(item.content)
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const rawPart of item.content) {
+          if (
+            !rawPart ||
+            typeof rawPart !== "object" ||
+            Array.isArray(rawPart)
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          const part = rawPart as Record<string, unknown>;
+          if (
+            (part.type === "output_text" && typeof part.text !== "string") ||
+            (part.type === "refusal" && typeof part.refusal !== "string") ||
+            (part.type !== "output_text" && part.type !== "refusal")
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+        }
+      } else if (item.type === "function_call") {
+        if (
+          typeof item.call_id !== "string" ||
+          !item.call_id ||
+          typeof item.name !== "string" ||
+          !item.name ||
+          typeof item.arguments !== "string" ||
+          (item.status !== undefined &&
+            !["completed", "incomplete", "in_progress"].includes(
+              String(item.status),
+            ))
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      }
     }
     if (status === "incomplete") {
       const details = json.incomplete_details;
@@ -13354,12 +13428,7 @@ async function handleProvisionalConversationTurn(
           pause.onWait();
           await pause.pause;
         }
-        if (
-          requestGeneration !== streamingPostResponseGeneration ||
-          req.signal?.aborted ||
-          downstreamWasCancelled()
-        )
-          return;
+        if (requestGeneration !== streamingPostResponseGeneration) return;
         if (
           identified.guardProject &&
           conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
@@ -13607,6 +13676,16 @@ async function handleProvisionalConversationTurn(
         await pause.pause;
       }
       if (requestGeneration !== streamingPostResponseGeneration) return;
+      if (downstreamWasCancelled()) {
+        accountUnsuccessfulResponse(
+          accumulated,
+          identified.sessionID,
+          conversationTTLForAccounting(identified.sessionID),
+          undefined,
+          () => {},
+        );
+        return;
+      }
       if (
         identified.guardProject &&
         conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
@@ -16050,15 +16129,25 @@ async function handleConversationTurn(
       async () => {
         await downstreamSettled;
         await new Promise<void>((resolve) => setImmediate(resolve));
-        if (
-          requestGeneration !== streamingPostResponseGeneration ||
-          downstreamWasCancelled()
-        ) {
+        if (requestGeneration !== streamingPostResponseGeneration) {
           dropStreamingFinalizer();
           return;
         }
         if (sessionSignal.aborted) {
           dropStreamingFinalizer();
+          return;
+        }
+        if (downstreamWasCancelled()) {
+          accountUnsuccessfulResponse(
+            resp,
+            sessionState.sessionID,
+            sessionState.resolvedConversationTTL,
+            genAiSpan,
+            endGenAiSpan,
+            () => {
+              sessionState._dirty = true;
+            },
+          );
           return;
         }
         postResponse(
@@ -16088,8 +16177,7 @@ async function handleConversationTurn(
         await new Promise<void>((resolve) => setImmediate(resolve));
         if (
           requestGeneration !== streamingPostResponseGeneration ||
-          sessionSignal.aborted ||
-          downstreamWasCancelled()
+          sessionSignal.aborted
         ) {
           dropStreamingFinalizer();
           return;
@@ -16154,6 +16242,7 @@ async function handleConversationTurn(
           const responsesVisibleContent: GatewayContentBlock[] = [];
           return finishForeground(
             streamResponsesRecallAware(upstreamResponse, {
+              validation: req.codex ? "codex" : "public",
               onComplete: (response, successful) => {
                 if (successful) finishStreaming(response);
                 else finishUnsuccessfulStreaming(response);

@@ -819,6 +819,31 @@ describe("streamResponsesRecallAware", () => {
     expect(output).not.toContain("provider_specific");
   });
 
+  test("public validation rejects a terminal without an output snapshot", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_missing_terminal_output", "gpt-5.6-terra"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_missing_terminal_output",
+            model: "gpt-5.6-terra",
+            status: "completed",
+          },
+        }),
+      ]),
+      {
+        validation: "public",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
   test("rejects terminal function calls changing the streamed tool name", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([

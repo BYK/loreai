@@ -1463,6 +1463,16 @@ describe("Pipeline — streaming responses", () => {
                 id: "resp_recall_accounting",
                 model: "gpt-5.6-sol",
                 status: "completed",
+                output: [
+                  {
+                    type: "function_call",
+                    id: "fc_recall_accounting",
+                    call_id: "call_recall_accounting",
+                    name: "recall",
+                    arguments: args,
+                    status: "completed",
+                  },
+                ],
                 usage: { input_tokens: 10, output_tokens: 1 },
               },
             }),
@@ -3196,7 +3206,9 @@ describe("Pipeline — streaming responses", () => {
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
+      expect(
+        getSessionCosts(state?.sessionID ?? "")?.conversation,
+      ).toMatchObject({ inputTokens: 1, outputTokens: 0, turns: 1 });
       expect(store).not.toHaveBeenCalled();
       expect(loadSessionTracking(state?.sessionID ?? "")).toEqual(original);
       const compact = await handleCompactEndpoint(
@@ -3220,7 +3232,7 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it("does not account a provisional incomplete response cancelled after its terminal", async () => {
+  it("accounts but does not persist a provisional incomplete response cancelled after its terminal", async () => {
     const alias = "cancelled-incomplete-alias";
     const canonical = "cancelled-incomplete-canonical";
     let upstreamCall = 0;
@@ -3277,7 +3289,9 @@ describe("Pipeline — streaming responses", () => {
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
+      expect(
+        getSessionCosts(state?.sessionID ?? "")?.conversation,
+      ).toMatchObject({ inputTokens: 1, outputTokens: 0, turns: 1 });
       expect(store).not.toHaveBeenCalled();
       expect(loadSessionTracking(state?.sessionID ?? "")).toEqual(original);
     } finally {
@@ -3336,7 +3350,9 @@ describe("Pipeline — streaming responses", () => {
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
-      expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
+      expect(
+        getSessionCosts(state?.sessionID ?? "")?.conversation,
+      ).toMatchObject({ inputTokens: 1, outputTokens: 0, turns: 1 });
       expect(store).not.toHaveBeenCalled();
     } finally {
       store.mockRestore();
@@ -6209,9 +6225,23 @@ describe("Pipeline — streaming responses", () => {
   it("rejects malformed completed JSON on same-protocol Responses meta passthrough", async () => {
     setUpstreamInterceptor(
       async () =>
-        new Response(JSON.stringify({ status: "completed" }), {
-          headers: { "content-type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({
+            id: "resp_meta_malformed_function",
+            model: "gpt-5.6-sol",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_meta_malformed",
+                call_id: "call_meta_malformed",
+                arguments: "{}",
+              },
+            ],
+            usage: { input_tokens: 10, output_tokens: 2 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
     );
 
     try {
