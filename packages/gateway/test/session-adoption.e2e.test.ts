@@ -31,10 +31,12 @@ import {
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
 import {
+  getActiveSessions,
   pendingPipelineSessionClaimCountForTest,
+  setProvisionalFinalizerPauseForTest,
   setUpstreamInterceptor,
 } from "../src/pipeline";
-import { getLastSeenAuth, resolveAuth } from "../src/auth";
+import { authFingerprint, getLastSeenAuth, resolveAuth } from "../src/auth";
 import { enableHostedMode, _resetHostedModeForTest } from "@loreai/core";
 
 const U0 = "alpha first task: please implement the parser module";
@@ -225,6 +227,53 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     ).not.toBe(original.session_id);
   });
 
+  it("fails closed for duplicate persisted header identities", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    const credentialFingerprint = authFingerprint({
+      scheme: "api-key",
+      value: "duplicate-key",
+    });
+    const database = new DatabaseSync(harness.dbPath);
+    try {
+      const insert = database.prepare(
+        `INSERT INTO session_state
+           (session_id, force_min_layer, updated_at, header_name,
+            header_session_id, credential_fingerprint, project_path,
+            project_path_provisional)
+         VALUES (?, 0, ?, 'x-lore-session-id', 'duplicate-header', ?, ?, 0)`,
+      );
+      insert.run(
+        `duplicate-a-${crypto.randomUUID()}`,
+        Date.now(),
+        credentialFingerprint,
+        "/tmp/duplicate-project-a",
+      );
+      insert.run(
+        `duplicate-b-${crypto.randomUUID()}`,
+        Date.now(),
+        credentialFingerprint,
+        "/tmp/duplicate-project-b",
+      );
+    } finally {
+      database.close();
+    }
+    await harness.restartPipeline();
+
+    const response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "duplicate-key",
+      { "x-lore-session-id": "duplicate-header" },
+    );
+    expect(response.status).not.toBe(200);
+    await response.text();
+    expect(harness.upstreamBodies()).toHaveLength(0);
+    expect(
+      harness.queryDB(
+        "SELECT session_id FROM session_state WHERE header_session_id = 'duplicate-header'",
+      ),
+    ).toHaveLength(2);
+  });
+
   it("does not persist fingerprint adoption after a failed resumed turn", async () => {
     harness = await createHarness({ fixtures: fixtures() });
     let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
@@ -320,6 +369,100 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     expect(afterSecondRestart).toHaveLength(1);
     expect(afterSecondRestart[0].session_id).toBe(original.session_id);
     expect(afterSecondRestart[0].header_session_id).toBe("V3");
+  });
+
+  it("rechecks legacy ownership inside the provisional commit savepoint", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "key-A",
+      { "x-lore-session-id": "savepoint-owner-old" },
+    );
+    await response.text();
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "savepoint-owner-old" },
+    );
+    await response.text();
+    const [original] = loreSessionRows(harness);
+    await makeSessionLegacy(harness, original.session_id);
+    const [legacy] = harness.queryDB<{ fingerprint: string }>(
+      "SELECT fingerprint FROM session_state WHERE session_id = ?",
+      [original.session_id],
+    );
+    await harness.restartPipeline();
+
+    let releaseFinalizer!: () => void;
+    const finalizerPause = new Promise<void>((resolve) => {
+      releaseFinalizer = resolve;
+    });
+    let finalizerWaitingResolve!: () => void;
+    const finalizerWaiting = new Promise<void>((resolve) => {
+      finalizerWaitingResolve = resolve;
+    });
+    setProvisionalFinalizerPauseForTest(
+      finalizerPause,
+      finalizerWaitingResolve,
+    );
+
+    try {
+      response = await harness.chat(
+        body([
+          { role: "user", content: U0 },
+          { role: "assistant", content: "A0 done." },
+          { role: "user", content: U1 },
+          { role: "assistant", content: "A1 done." },
+          { role: "user", content: U2 },
+        ]),
+        "key-A",
+        { "x-lore-session-id": "savepoint-owner-new" },
+      );
+      expect(response.status).toBe(200);
+      await response.text();
+      await finalizerWaiting;
+
+      const database = new DatabaseSync(harness.dbPath);
+      try {
+        database
+          .prepare(
+            "UPDATE session_state SET credential_fingerprint = ? WHERE session_id = ?",
+          )
+          .run("external-owner", original.session_id);
+      } finally {
+        database.close();
+      }
+      releaseFinalizer();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const [after] = harness.queryDB<{
+        header_session_id: string;
+        credential_fingerprint: string;
+        fingerprint: string;
+      }>(
+        `SELECT header_session_id, credential_fingerprint, fingerprint
+           FROM session_state
+          WHERE session_id = ?`,
+        [original.session_id],
+      );
+      expect(after.header_session_id).toBe("savepoint-owner-old");
+      expect(after.credential_fingerprint).toBe("external-owner");
+      expect(after.fingerprint).toBe(legacy.fingerprint);
+      expect(
+        harness.queryDB(
+          "SELECT id FROM temporal_messages WHERE session_id = ? AND content LIKE ?",
+          [original.session_id, `%${U2}%`],
+        ),
+      ).toHaveLength(0);
+    } finally {
+      releaseFinalizer();
+      setProvisionalFinalizerPauseForTest(undefined);
+    }
   });
 
   it("persists the resumed turn when fingerprint adoption has no session header", async () => {
@@ -652,6 +795,20 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     expect(after[0].header_session_id).toBe(migratedHeader);
     expect(after[0].credential_fingerprint).toMatch(/^[0-9a-f]{16}$/);
 
+    const staleAlias = await harness.chat(
+      body([{ role: "user", content: "/lore:amnesia:on" }]),
+      "",
+      { "x-lore-session-id": legacyHeader },
+    );
+    expect(staleAlias.status).toBe(200);
+    expect(await staleAlias.text()).toMatch(/no active session/i);
+    expect(
+      harness.queryDB<{ amnesia: number }>(
+        "SELECT amnesia FROM session_state WHERE session_id = ?",
+        [before[0].session_id],
+      )[0]?.amnesia,
+    ).toBe(0);
+
     await harness.restartPipeline();
     const secondMigratedHeader = "legacy-after-second-restart";
     r = await harness.chat(
@@ -758,6 +915,109 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     );
     expect(rows).toHaveLength(2);
     expect(new Set(rows.map((row) => row.session_id)).size).toBe(2);
+  });
+
+  it("requires the live fingerprint candidate to have the same credential owner", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "key-A",
+      { "x-lore-project": "/tmp/live-owner-project" },
+    );
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    const [state] = getActiveSessions().values();
+    state.fingerprint = await fingerprintMessages(
+      [{ role: "user", content: U0 }],
+      {
+        authSuffix: authFingerprint({
+          scheme: "api-key",
+          value: "key-B",
+        }),
+      },
+    );
+
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-B",
+      { "x-lore-project": "/tmp/live-owner-project" },
+    );
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = harness.queryDB<{ session_id: string }>(
+      "SELECT session_id FROM session_state WHERE project_path = ?",
+      ["/tmp/live-owner-project"],
+    );
+    expect(new Set(rows.map((row) => row.session_id)).size).toBe(2);
+  });
+
+  it("does not live-match an authenticated fingerprint across confident projects", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "key-A",
+      { "x-lore-project": "/tmp/live-project-a" },
+    );
+    await response.text();
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-project": "/tmp/live-project-b" },
+    );
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = harness.queryDB<{ session_id: string; project_path: string }>(
+      `SELECT session_id, project_path
+         FROM session_state
+        WHERE project_path IN (?, ?)`,
+      ["/tmp/live-project-a", "/tmp/live-project-b"],
+    );
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.session_id)).size).toBe(2);
+  });
+
+  it("fails closed for equally close live fingerprint candidates", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "key-A",
+      { "x-lore-project": "/tmp/live-ambiguous-project" },
+    );
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    const active = getActiveSessions();
+    const [state] = active.values();
+    const duplicateSessionID = `live-duplicate-${crypto.randomUUID()}`;
+    (active as Map<string, typeof state>).set(duplicateSessionID, {
+      ...state,
+      sessionID: duplicateSessionID,
+    });
+
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-project": "/tmp/live-ambiguous-project" },
+    );
+    await response.text();
+    expect(getActiveSessions().size).toBe(3);
   });
 
   it("allows only the first concurrent credential to claim a legacy session", async () => {

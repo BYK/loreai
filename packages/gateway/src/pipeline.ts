@@ -906,6 +906,7 @@ async function resetPipelineStateInner(opts?: {
   staleHeaderWarned.clear();
   subagentParentPendingLogged.clear();
   headerSessionIndex.clear();
+  ambiguousHeaderSessionKeys.clear();
   provisionalHeaderSessionIndex.clear();
   identityAdmissionTails.clear();
   headerSessionIndexHydrated = false;
@@ -1203,6 +1204,7 @@ export function rebindActiveSession(
  * Populated for both Tier 1 (known headers) and Tier 2 (learned headers).
  */
 const headerSessionIndex = new Map<string, string>();
+const ambiguousHeaderSessionKeys = new Set<string>();
 type ProvisionalHeaderMapping = {
   sessionID: string;
   createdAt: number;
@@ -1378,14 +1380,19 @@ function isConfidentlyBoundToProject(
 function hydrateHeaderSessionIndex(): void {
   if (headerSessionIndexHydrated) return;
   for (const entry of loadHeaderSessionIndex()) {
-    headerSessionIndex.set(
-      sessionIndexKey(
-        entry.credentialFingerprint,
-        entry.headerName,
-        entry.headerSessionId,
-      ),
-      entry.sessionId,
+    const key = sessionIndexKey(
+      entry.credentialFingerprint,
+      entry.headerName,
+      entry.headerSessionId,
     );
+    if (ambiguousHeaderSessionKeys.has(key)) continue;
+    const existing = headerSessionIndex.get(key);
+    if (existing && existing !== entry.sessionId) {
+      headerSessionIndex.delete(key);
+      ambiguousHeaderSessionKeys.add(key);
+      continue;
+    }
+    headerSessionIndex.set(key, entry.sessionId);
   }
   headerSessionIndexHydrated = true;
 }
@@ -1588,6 +1595,15 @@ function publishKnownSessionHeader(
     known.headerName,
     known.sessionId,
   );
+  if (credentialFingerprint) {
+    for (const [key, sessionID] of headerSessionIndex) {
+      if (sessionID !== state.sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (parsed?.credentialFingerprint === "") {
+        headerSessionIndex.delete(key);
+      }
+    }
+  }
   if (isRotationEligible(known.headerName)) {
     for (const [key, sessionID] of headerSessionIndex) {
       if (key === confirmedKey || sessionID !== state.sessionID) continue;
@@ -5453,15 +5469,15 @@ async function identifySession(
       known.headerName,
       known.sessionId,
     );
+    hydrateHeaderSessionIndex();
+    if (ambiguousHeaderSessionKeys.has(indexKey)) {
+      throw new Error("ambiguous persisted session header");
+    }
     let existingSid = headerSessionIndex.get(indexKey);
     let provisionalIdentity = false;
     let guardProject = false;
     let adoptionFingerprint: string | undefined;
     let expectedUnowned = false;
-    if (!existingSid) {
-      hydrateHeaderSessionIndex();
-      existingSid = headerSessionIndex.get(indexKey);
-    }
     if (!existingSid) {
       const provisional = getProvisionalHeaderEntry(indexKey);
       existingSid = provisional?.sessionID;
@@ -13502,6 +13518,7 @@ async function handleProvisionalConversationTurn(
         );
         return;
       }
+      await commit();
       accountConversationUsage(
         accumulated.usage ?? ZERO_USAGE,
         accumulated.model,
@@ -13510,7 +13527,6 @@ async function handleProvisionalConversationTurn(
       );
       const state = sessions.get(identified.sessionID);
       if (state) state._dirty = true;
-      await commit();
     },
     () => {},
     true,
