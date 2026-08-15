@@ -1203,9 +1203,16 @@ export function rebindActiveSession(
  * Populated for both Tier 1 (known headers) and Tier 2 (learned headers).
  */
 const headerSessionIndex = new Map<string, string>();
+type ProvisionalHeaderMapping = {
+  sessionID: string;
+  createdAt: number;
+  guardProject: boolean;
+  adoptionFingerprint?: string;
+  expectedUnowned: boolean;
+};
 const provisionalHeaderSessionIndex = new Map<
   string,
-  { sessionID: string; createdAt: number; guardProject: boolean }
+  ProvisionalHeaderMapping
 >();
 const identityAdmissionTails = new Map<string, Promise<void>>();
 const MAX_PROVISIONAL_HEADER_MAPPINGS = 1024;
@@ -1261,6 +1268,8 @@ function setProvisionalHeaderMapping(
   key: string,
   sessionID: string,
   guardProject = false,
+  adoptionFingerprint?: string,
+  expectedUnowned = false,
 ): void {
   const now = Date.now();
   for (const [candidate, entry] of provisionalHeaderSessionIndex) {
@@ -1284,17 +1293,25 @@ function setProvisionalHeaderMapping(
     sessionID,
     createdAt: now,
     guardProject,
+    adoptionFingerprint,
+    expectedUnowned,
   });
 }
 
-function getProvisionalHeaderMapping(key: string): string | undefined {
+function getProvisionalHeaderEntry(
+  key: string,
+): ProvisionalHeaderMapping | null {
   const entry = provisionalHeaderSessionIndex.get(key);
-  if (!entry) return undefined;
+  if (!entry) return null;
   if (Date.now() - entry.createdAt > PROVISIONAL_HEADER_MAPPING_TTL_MS) {
     provisionalHeaderSessionIndex.delete(key);
-    return undefined;
+    return null;
   }
-  return entry.sessionID;
+  return entry;
+}
+
+function getProvisionalHeaderMapping(key: string): string | undefined {
+  return getProvisionalHeaderEntry(key)?.sessionID;
 }
 
 function provisionalMappingGuardsProject(
@@ -1343,6 +1360,10 @@ function conflictsWithConfidentSessionProject(
     persisted.projectPathProvisional === false &&
     persisted.projectPath !== pathResult.path
   );
+}
+
+function legacyAdoptionTargetIsUnowned(sessionID: string): boolean {
+  return loadSessionTracking(sessionID)?.credentialFingerprint === "";
 }
 
 function isConfidentlyBoundToProject(
@@ -5235,6 +5256,7 @@ async function adoptByFingerprint(input: {
   provisionalIdentity: true;
   provisionalKey?: string;
   adoptionFingerprint: string;
+  expectedUnowned: boolean;
 } | null> {
   const {
     req,
@@ -5308,7 +5330,12 @@ async function adoptByFingerprint(input: {
     projectPath,
   );
   const minOverlap = Math.max(ADOPT_MIN_OVERLAP, Math.ceil(probedUsers * 0.5));
-  let best: { sid: string; overlap: number; countDiff: number } | null = null;
+  let best: {
+    sid: string;
+    overlap: number;
+    countDiff: number;
+    credentialBound: boolean;
+  } | null = null;
   // temporal_messages.id is globally unique, so valid rows cannot give two
   // sessions the same positive overlap set. Keep the tie guard as defense in
   // depth for a corrupt/imported database rather than selecting by row order.
@@ -5339,7 +5366,12 @@ async function adoptByFingerprint(input: {
       overlap > best.overlap ||
       (overlap === best.overlap && countDiff < best.countDiff)
     ) {
-      best = { sid: c.session_id, overlap, countDiff };
+      best = {
+        sid: c.session_id,
+        overlap,
+        countDiff,
+        credentialBound: c.credentialBound,
+      };
       ambiguousBest = false;
     } else if (overlap === best.overlap && countDiff === best.countDiff) {
       ambiguousBest = true;
@@ -5361,7 +5393,13 @@ async function adoptByFingerprint(input: {
       known.headerName,
       known.sessionId,
     );
-    setProvisionalHeaderMapping(provisionalKey, best.sid);
+    setProvisionalHeaderMapping(
+      provisionalKey,
+      best.sid,
+      false,
+      fingerprint,
+      !best.credentialBound,
+    );
     return {
       sessionID: best.sid,
       isNew: false,
@@ -5369,6 +5407,7 @@ async function adoptByFingerprint(input: {
       provisionalIdentity: true,
       provisionalKey,
       adoptionFingerprint: fingerprint,
+      expectedUnowned: !best.credentialBound,
     };
   }
   return {
@@ -5377,6 +5416,7 @@ async function adoptByFingerprint(input: {
     tier: 3,
     provisionalIdentity: true,
     adoptionFingerprint: fingerprint,
+    expectedUnowned: !best.credentialBound,
   };
 }
 
@@ -5388,6 +5428,7 @@ type IdentifiedSession = {
   provisionalKey?: string;
   guardProject?: boolean;
   adoptionFingerprint?: string;
+  expectedUnowned?: boolean;
 };
 
 async function identifySession(
@@ -5415,16 +5456,21 @@ async function identifySession(
     let existingSid = headerSessionIndex.get(indexKey);
     let provisionalIdentity = false;
     let guardProject = false;
+    let adoptionFingerprint: string | undefined;
+    let expectedUnowned = false;
     if (!existingSid) {
       hydrateHeaderSessionIndex();
       existingSid = headerSessionIndex.get(indexKey);
     }
     if (!existingSid) {
-      existingSid = getProvisionalHeaderMapping(indexKey);
-      provisionalIdentity = existingSid !== undefined;
+      const provisional = getProvisionalHeaderEntry(indexKey);
+      existingSid = provisional?.sessionID;
+      provisionalIdentity = provisional !== null;
       guardProject =
         existingSid !== undefined &&
         provisionalMappingGuardsProject(indexKey, existingSid);
+      adoptionFingerprint = provisional?.adoptionFingerprint;
+      expectedUnowned = provisional?.expectedUnowned === true;
     }
     if (existingSid) {
       if (
@@ -5434,7 +5480,13 @@ async function identifySession(
         throw new Error("ambiguous session headers");
       }
       if (provisionalIdentity) {
-        setProvisionalHeaderMapping(indexKey, existingSid, guardProject);
+        setProvisionalHeaderMapping(
+          indexKey,
+          existingSid,
+          guardProject,
+          adoptionFingerprint,
+          expectedUnowned,
+        );
       }
       // Session may only exist in DB (after gateway restart) — that's fine,
       // getOrCreateSession() will hydrate it from the session_state table.
@@ -5445,6 +5497,8 @@ async function identifySession(
         provisionalIdentity,
         ...(provisionalIdentity ? { provisionalKey: indexKey } : {}),
         ...(guardProject ? { guardProject: true } : {}),
+        ...(adoptionFingerprint ? { adoptionFingerprint } : {}),
+        ...(expectedUnowned ? { expectedUnowned: true } : {}),
       };
     }
 
@@ -5585,22 +5639,37 @@ async function identifySession(
 
   // Find the best matching session: same fingerprint + closest message count
   let bestMatch: { sid: string; countDiff: number } | null = null;
+  let ambiguousBestMatch = false;
 
-  for (const [sid, state] of sessions) {
-    if (state.fingerprint !== fingerprint) continue;
+  if (cred) {
+    for (const [sid, state] of sessions) {
+      if (state.fingerprint !== fingerprint) continue;
+      if (state.credentialFingerprint !== credentialFingerprint) continue;
+      if (
+        (projectPathSource === "header" || projectPathSource === "inferred") &&
+        state.projectPathProvisional === false &&
+        state.projectPath !== projectPath
+      ) {
+        continue;
+      }
 
-    const diff = msgCount - state.messageCount;
+      const diff = msgCount - state.messageCount;
 
-    // Normal session: count grows by 2–6 per turn.
-    // Fork: count drops significantly (parent at 600, fork at 300).
-    // Reject if the count dropped too far (likely a fork).
-    if (diff < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) continue;
+      // Normal session: count grows by 2–6 per turn.
+      // Fork: count drops significantly (parent at 600, fork at 300).
+      // Reject if the count dropped too far (likely a fork).
+      if (diff < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) continue;
 
-    const absDiff = Math.abs(diff);
-    if (!bestMatch || absDiff < bestMatch.countDiff) {
-      bestMatch = { sid, countDiff: absDiff };
+      const absDiff = Math.abs(diff);
+      if (!bestMatch || absDiff < bestMatch.countDiff) {
+        bestMatch = { sid, countDiff: absDiff };
+        ambiguousBestMatch = false;
+      } else if (absDiff === bestMatch.countDiff) {
+        ambiguousBestMatch = true;
+      }
     }
   }
+  if (ambiguousBestMatch) bestMatch = null;
 
   if (bestMatch) {
     // Run header learning on the matched session (Tier 2 bootstrap).
@@ -13292,6 +13361,16 @@ async function handleProvisionalConversationTurn(
     let projectPathProvisional = pathResult.source === "cwd";
     withSavepoint("commit_provisional_turn", () => {
       if (
+        identified.expectedUnowned &&
+        !legacyAdoptionTargetIsUnowned(identified.sessionID)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("legacy session owner changed during adoption");
+      }
+      if (
         identified.guardProject &&
         conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
       ) {
@@ -13603,6 +13682,10 @@ async function handleConversationTurn(
   const { sessionID, isNew, tier } = identified;
   await beforeUpstreamCaptureForTest?.(req);
   if (!admitted.claimed) await claimSession(sessionID);
+  if (identified.expectedUnowned && !legacyAdoptionTargetIsUnowned(sessionID)) {
+    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
+    return errorResponse(404, "No authenticated session found");
+  }
   if (
     admitted.revalidateConfirmedIdentity &&
     !confirmedIndexedIdentityResolvesTo(req, sessionID)

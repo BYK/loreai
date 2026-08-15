@@ -17,10 +17,11 @@
  * the real HTTP server, simulate a restart via `harness.restartPipeline()`
  * (clears in-memory maps, keeps the DB), and assert on session_state rows.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
+import { makeReplayInterceptor } from "./helpers/replay";
 import { fingerprintMessages } from "../src/session";
 import { deterministicID } from "../src/temporal-adapter";
 import {
@@ -29,7 +30,10 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
-import { setUpstreamInterceptor } from "../src/pipeline";
+import {
+  pendingPipelineSessionClaimCountForTest,
+  setUpstreamInterceptor,
+} from "../src/pipeline";
 import { getLastSeenAuth, resolveAuth } from "../src/auth";
 import { enableHostedMode, _resetHostedModeForTest } from "@loreai/core";
 
@@ -238,6 +242,7 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     );
     await r.text();
     const original = loreSessionRows(harness)[0];
+    await makeSessionLegacy(harness, original.session_id);
     await harness.restartPipeline();
     const globalAuthBefore = getLastSeenAuth("anthropic")?.value;
 
@@ -267,6 +272,54 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     expect(rows).toEqual([original]);
     expect(resolveAuth(original.session_id)?.value).toBe("key-A");
     expect(getLastSeenAuth("anthropic")?.value).toBe(globalAuthBefore);
+
+    const retryReplay = makeReplayInterceptor([
+      makeFixtureEntry({
+        seq: 0,
+        requestMessages: [],
+        responseText: "Retry succeeded.",
+      }),
+    ]);
+    setUpstreamInterceptor(retryReplay);
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "V2" },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await harness.restartPipeline();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+        { role: "assistant", content: "Retry succeeded." },
+        { role: "user", content: U3 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "V3" },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const afterSecondRestart = loreSessionRows(harness);
+    expect(afterSecondRestart).toHaveLength(1);
+    expect(afterSecondRestart[0].session_id).toBe(original.session_id);
+    expect(afterSecondRestart[0].header_session_id).toBe("V3");
   });
 
   it("persists the resumed turn when fingerprint adoption has no session header", async () => {
@@ -672,6 +725,121 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     );
     expect(independent).toBeDefined();
     expect(independent?.session_id).not.toBe(original.session_id);
+  });
+
+  it("does not fingerprint-match credentialless headerless sessions", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "",
+      { "x-lore-project": "/tmp/credentialless-project-a" },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "",
+      { "x-lore-project": "/tmp/credentialless-project-b" },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = harness.queryDB<{ session_id: string; project_path: string }>(
+      `SELECT session_id, project_path
+         FROM session_state
+        WHERE project_path IN (?, ?)`,
+      ["/tmp/credentialless-project-a", "/tmp/credentialless-project-b"],
+    );
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.session_id)).size).toBe(2);
+  });
+
+  it("allows only the first concurrent credential to claim a legacy session", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "seed-key",
+      { "x-lore-session-id": "legacy-race-seed" },
+    );
+    await response.text();
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "seed-key",
+      { "x-lore-session-id": "legacy-race-seed" },
+    );
+    await response.text();
+    const [original] = loreSessionRows(harness);
+    await makeSessionLegacy(harness, original.session_id);
+    await harness.restartPipeline();
+
+    let releaseFirst!: () => void;
+    const firstPause = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstWaitingResolve!: () => void;
+    const firstWaiting = new Promise<void>((resolve) => {
+      firstWaitingResolve = resolve;
+    });
+    const replay = makeReplayInterceptor([
+      makeFixtureEntry({
+        seq: 0,
+        requestMessages: [],
+        responseText: "First claimant succeeded.",
+      }),
+    ]);
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async (...args) => {
+      upstreamCalls++;
+      firstWaitingResolve();
+      await firstPause;
+      return replay(...args);
+    });
+
+    const resumed = body([
+      { role: "user", content: U0 },
+      { role: "assistant", content: "A0 done." },
+      { role: "user", content: U1 },
+      { role: "assistant", content: "A1 done." },
+      { role: "user", content: U2 },
+    ]);
+    try {
+      const first = harness.chat(resumed, "key-A", {
+        "x-lore-session-id": "legacy-race-a",
+      });
+      await firstWaiting;
+      const second = harness.chat(resumed, "key-B", {
+        "x-lore-session-id": "legacy-race-b",
+      });
+      await vi.waitFor(() =>
+        expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+      );
+
+      releaseFirst();
+      response = await first;
+      expect(response.status).toBe(200);
+      await response.text();
+      const rejected = await second;
+      expect(rejected.status).toBe(404);
+      expect(await rejected.text()).toMatch(/authenticated session/i);
+      expect(upstreamCalls).toBe(1);
+
+      const rows = loreSessionRows(harness);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].session_id).toBe(original.session_id);
+      expect(rows[0].header_session_id).toBe("legacy-race-a");
+    } finally {
+      releaseFirst();
+    }
   });
 
   it("does NOT let another transcript claim an exact legacy header", async () => {
