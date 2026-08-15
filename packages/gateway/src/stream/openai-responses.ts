@@ -1642,6 +1642,16 @@ export async function accumulateResponsesSSEStream(
               throw new Error("malformed Responses terminal event");
             }
             snapshotIndices.add(outputIndex);
+            if (snapshot.type === "item_reference") {
+              if (
+                Object.keys(snapshot).some(
+                  (key) => key !== "type" && key !== "id",
+                )
+              ) {
+                throw new Error("malformed Responses terminal event");
+              }
+              continue;
+            }
             for (const field of [
               "call_id",
               "name",
@@ -1649,9 +1659,8 @@ export async function accumulateResponsesSSEStream(
               "content",
             ] as const) {
               if (
-                snapshot[field] !== undefined &&
                 JSON.stringify(snapshot[field]) !==
-                  JSON.stringify(accumulated[field])
+                JSON.stringify(accumulated[field])
               ) {
                 throw new Error("malformed Responses terminal event");
               }

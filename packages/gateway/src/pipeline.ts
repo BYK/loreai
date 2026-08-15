@@ -8068,7 +8068,11 @@ export function streamResponsesRecallAware(
       if (!response || typeof response.id !== "string" || !response.id) {
         throw new Error("response.created missing response identity");
       }
-      if (response.status !== undefined && response.status !== "in_progress") {
+      if (
+        response.status !== undefined &&
+        response.status !== "in_progress" &&
+        !(opts.validation === "codex" && response.status === "queued")
+      ) {
         throw new Error("response.created has invalid status");
       }
       if (
@@ -8121,7 +8125,9 @@ export function streamResponsesRecallAware(
         throw new Error("Responses terminal event has nonterminal status");
       }
       if (
-        (event === "response.completed" && status !== "completed") ||
+        (event === "response.completed" &&
+          status !== "completed" &&
+          !(opts.validation === "codex" && status === "incomplete")) ||
         (event === "response.incomplete" && status !== "incomplete") ||
         (event === "response.failed" &&
           status !== "failed" &&
@@ -10149,11 +10155,12 @@ function assertValidNonStreamCompletion(
       }
       seenItemIDs.add(item.id);
       if (item.type === "message") {
+        const validItemStatus =
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
         if (
           item.role !== "assistant" ||
-          !["completed", "incomplete", "in_progress"].includes(
-            String(item.status),
-          ) ||
+          !validItemStatus ||
           !Array.isArray(item.content)
         ) {
           throw new Error("upstream Responses request did not complete");
@@ -10176,16 +10183,16 @@ function assertValidNonStreamCompletion(
           }
         }
       } else if (item.type === "function_call") {
+        const validItemStatus =
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
         if (
           typeof item.call_id !== "string" ||
           !item.call_id ||
           typeof item.name !== "string" ||
           !item.name ||
           typeof item.arguments !== "string" ||
-          (item.status !== undefined &&
-            !["completed", "incomplete", "in_progress"].includes(
-              String(item.status),
-            ))
+          !validItemStatus
         ) {
           throw new Error("upstream Responses request did not complete");
         }

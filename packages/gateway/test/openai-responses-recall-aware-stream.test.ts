@@ -844,6 +844,42 @@ describe("streamResponsesRecallAware", () => {
     expect(await drain(client)).toContain("response.failed");
   });
 
+  test("Codex validation accepts queued creation and completed event with incomplete status", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        sseEvent("response.created", {
+          response: {
+            id: "resp_codex_lifecycle",
+            model: "gpt-5.6-terra",
+            status: "queued",
+            output: [],
+          },
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_codex_lifecycle",
+            model: "gpt-5.6-terra",
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("event: response.completed");
+    expect(output).toContain('"status":"incomplete"');
+    expect(output).not.toContain("event: response.failed");
+  });
+
   test("rejects terminal function calls changing the streamed tool name", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([

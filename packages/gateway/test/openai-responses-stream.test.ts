@@ -1256,6 +1256,8 @@ describe("accumulateResponsesSSEStream", () => {
         [],
         [{ type: "message", id: "", content: [] }],
         [{ type: "item_reference", id: "unknown-item" }],
+        [{ type: "item_reference", id: itemId, content: [] }],
+        [{ type: "message", id: itemId }],
         [
           { type: "item_reference", id: itemId },
           { type: "item_reference", id: itemId },

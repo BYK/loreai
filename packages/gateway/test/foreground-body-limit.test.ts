@@ -236,6 +236,31 @@ describe("foreground response body limits", () => {
     ).rejects.toThrow("upstream Responses request did not complete");
   });
 
+  test("rejects in-progress items in a completed non-stream response", async () => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_in_progress_item",
+        model: "gpt-test",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg_in_progress_item",
+            role: "assistant",
+            status: "in_progress",
+            content: [{ type: "output_text", text: "partial" }],
+          },
+        ],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(response, "openai-responses"),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
+
   test("rejects provider-specific incomplete reasons in sniffed Codex SSE", async () => {
     const wire =
       'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"id":"resp_codex_sse_incomplete","status":"incomplete","incomplete_details":{"reason":"provider_specific"}}}\n\n';
