@@ -13,17 +13,21 @@
 
 import {
   existsSync,
+  linkSync,
+  lstatSync,
   readFileSync,
   renameSync,
+  rmSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
 import { chmod, copyFile, mkdir, unlink } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import { compare as semverCompare } from "semver";
 import { makeCache, type PatchCache } from "binpatch";
 import { VERSION } from "../version";
 import { stringifyUnknown, UpgradeError } from "./errors";
+import type { LifecycleLock } from "../../lifecycle-lock";
 
 /** GitHub owner/repo for Lore releases */
 const GITHUB_OWNER = "BYK";
@@ -103,13 +107,11 @@ export function getBinaryPaths(installPath: string): {
   installPath: string;
   tempPath: string;
   oldPath: string;
-  lockPath: string;
 } {
   return {
     installPath,
     tempPath: `${installPath}.download`,
     oldPath: `${installPath}.old`,
-    lockPath: `${installPath}.lock`,
   };
 }
 
@@ -192,25 +194,52 @@ export async function fetchWithUpgradeError(
  * Intentionally synchronous: the multi-step rename sequence must be
  * uninterruptible to avoid leaving the install path in a broken state.
  *
- * - Unix: Atomic rename overwrites the target
- * - Windows: Rename old binary to .old first, then rename temp into place
+ * All platforms quarantine the current path, verify the displaced generation,
+ * then hard-link the staged binary into the empty canonical path. link(2) is
+ * deliberately no-clobber if an external successor appears in that window.
  */
-export function replaceBinarySync(tempPath: string, installPath: string): void {
-  if (process.platform === "win32") {
-    const oldPath = `${installPath}.old`;
-    try {
-      renameSync(installPath, oldPath);
-    } catch {
+export function replaceBinarySync(
+  tempPath: string,
+  installPath: string,
+  hooks: {
+    beforeQuarantine?: () => void;
+    beforePublish?: () => void;
+    expectedInstallIdentity?: BinaryIdentity;
+  } = {},
+): void {
+  const displaced = `${installPath}.upgrade-displaced-${process.pid}-${randomBytes(8).toString("hex")}`;
+  let hadInstall = false;
+  try {
+    hooks.beforeQuarantine?.();
+    renameSync(installPath, displaced);
+    hadInstall = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    if (
+      hooks.expectedInstallIdentity &&
+      !binaryIdentityMatches(displaced, hooks.expectedInstallIdentity)
+    ) {
+      throw new Error(
+        `Install binary changed during publication quarantine: ${installPath}`,
+      );
+    }
+    hooks.beforePublish?.();
+    linkSync(tempPath, installPath);
+    unlinkSync(tempPath);
+    if (hadInstall && process.platform !== "win32") {
+      rmSync(displaced, { force: true });
+    }
+  } catch (error) {
+    if (hadInstall) {
       try {
-        unlinkSync(oldPath);
-        renameSync(installPath, oldPath);
+        if (!existsSync(installPath)) linkSync(displaced, installPath);
       } catch {
-        // Current binary might not exist — that's fine
+        // Keep displaced as a recovery artifact.
       }
     }
-    renameSync(tempPath, installPath);
-  } else {
-    renameSync(tempPath, installPath);
+    throw error;
   }
 }
 
@@ -224,128 +253,71 @@ export function cleanupOldBinary(oldPath: string): void {
   });
 }
 
-// Lock Management
-
-/**
- * Check if a process with the given PID is still running.
- */
-export function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EPERM") {
-      return true;
-    }
-    return false;
-  }
-}
-
-/**
- * Acquire an exclusive lock for binary installation/upgrade.
- * Uses atomic file creation with 'wx' flag to prevent race conditions.
- */
-export function acquireLock(lockPath: string): void {
-  try {
-    writeFileSync(lockPath, String(process.pid), { flag: "wx" });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-      throw error;
-    }
-    handleExistingLock(lockPath);
-  }
-}
-
-function handleExistingLock(lockPath: string): void {
-  let content: string;
-  try {
-    content = readFileSync(lockPath, "utf-8").trim();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      acquireLock(lockPath);
-      return;
-    }
-    throw error;
-  }
-
-  const existingPid = Number.parseInt(content, 10);
-
-  if (!Number.isNaN(existingPid) && isProcessRunning(existingPid)) {
-    // Allow re-entry from the same process (e.g. downloadBinaryToTemp
-    // acquires the lock, then installBinary tries to acquire the same lock
-    // when source and target directories are identical).
-    if (existingPid === process.pid) {
-      return;
-    }
-    // Allow child process to take over parent's lock (exec-based restart).
-    if (existingPid === process.ppid) {
-      writeFileSync(lockPath, String(process.pid));
-      return;
-    }
-    throw new UpgradeError(
-      "execution_failed",
-      "Another upgrade is already in progress",
-    );
-  }
-
-  // Stale lock from dead process — remove and retry
-  try {
-    unlinkSync(lockPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  acquireLock(lockPath);
-}
-
-/**
- * Release the binary lock.
- */
-export function releaseLock(lockPath: string): void {
-  try {
-    unlinkSync(lockPath);
-  } catch {
-    // Ignore — file might already be gone
-  }
-}
-
 /**
  * Install a binary to the target directory.
  */
 export async function installBinary(
   sourcePath: string,
   installDir: string,
+  lifecycleLock: LifecycleLock,
+  hooks: Parameters<typeof replaceBinarySync>[2] = {},
 ): Promise<string> {
+  lifecycleLock.assertOwned();
   await mkdir(installDir, { recursive: true, mode: 0o755 });
 
   const installPath = join(installDir, getBinaryFilename());
-  const { tempPath, lockPath } = getBinaryPaths(installPath);
+  const { tempPath } = getBinaryPaths(installPath);
 
-  acquireLock(lockPath);
-
-  try {
-    if (resolve(sourcePath) !== resolve(tempPath)) {
-      try {
-        await unlink(tempPath);
-      } catch {
-        // Ignore if doesn't exist
-      }
-
-      await copyFile(sourcePath, tempPath);
-
-      if (process.platform !== "win32") {
-        await chmod(tempPath, 0o755);
-      }
+  if (resolve(sourcePath) !== resolve(tempPath)) {
+    lifecycleLock.assertOwned();
+    try {
+      await unlink(tempPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
 
-    replaceBinarySync(tempPath, installPath);
-  } finally {
-    releaseLock(lockPath);
+    lifecycleLock.assertOwned();
+    await copyFile(sourcePath, tempPath);
+
+    if (process.platform !== "win32") {
+      lifecycleLock.assertOwned();
+      await chmod(tempPath, 0o755);
+    }
   }
 
+  lifecycleLock.assertOwned();
+  replaceBinarySync(tempPath, installPath, hooks);
+
   return installPath;
+}
+
+interface BinaryIdentity {
+  device: bigint;
+  inode: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  sha256: string;
+}
+
+function binaryIdentityMatches(
+  path: string,
+  expected: BinaryIdentity,
+): boolean {
+  try {
+    const info = lstatSync(path, { bigint: true });
+    return (
+      info.isFile() &&
+      !info.isSymbolicLink() &&
+      info.dev === expected.device &&
+      info.ino === expected.inode &&
+      info.size === expected.size &&
+      info.mtimeNs === expected.mtimeNs &&
+      createHash("sha256").update(readFileSync(path)).digest("hex") ===
+        expected.sha256
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

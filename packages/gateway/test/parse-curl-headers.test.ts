@@ -14,6 +14,7 @@
  */
 import { describe, test, expect } from "vitest";
 import { parseCurlHeaders } from "../src/config";
+import { applyUpstreamExtraHeaders } from "../src/translate/types";
 
 describe("parseCurlHeaders", () => {
   test("returns empty object for undefined / empty input", () => {
@@ -76,6 +77,26 @@ describe("parseCurlHeaders", () => {
       );
       expect(result).toEqual({ "x-good": "1", "x-also-good": "2" });
       expect(errors.length).toBe(1);
+      expect(JSON.stringify(errors)).toContain("line 2");
+      expect(JSON.stringify(errors)).not.toContain("no-colon-here");
+    } finally {
+      console.error = origError;
+    }
+  });
+
+  test("never includes malformed header contents in diagnostics", () => {
+    const secret = "arbitrary-secret-value";
+    const origError = console.error;
+    const errors: unknown[] = [];
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      expect(
+        parseCurlHeaders(`X-Api-Key ${secret}\nBad ${secret}: value`),
+      ).toEqual({});
+      const output = JSON.stringify(errors);
+      expect(output).toContain("line 1");
+      expect(output).toContain("line 2");
+      expect(output).not.toContain(secret);
     } finally {
       console.error = origError;
     }
@@ -127,5 +148,51 @@ describe("parseCurlHeaders", () => {
   test("Cloudflare AI Gateway style: cf-aig-authorization", () => {
     const result = parseCurlHeaders("cf-aig-authorization: Bearer my-token");
     expect(result).toEqual({ "cf-aig-authorization": "Bearer my-token" });
+  });
+
+  test("configured provider auth atomically replaces every client variant", () => {
+    const headers = {
+      authorization: "Bearer client",
+      "x-api-key": "client-api-key",
+      "x-goog-api-key": "client-google-key",
+      "x-safe": "preserved",
+    };
+    applyUpstreamExtraHeaders(headers, {
+      authorization: "Bearer administrator",
+    });
+    expect(headers).toEqual({
+      authorization: "Bearer administrator",
+      "x-safe": "preserved",
+    });
+  });
+
+  test("configured mixed provider auth fails instead of forwarding competitors", () => {
+    expect(() =>
+      applyUpstreamExtraHeaders(
+        { "x-api-key": "client" },
+        {
+          authorization: "Bearer administrator",
+          "x-api-key": "administrator-key",
+        },
+      ),
+    ).toThrow("conflicting authentication mechanisms");
+  });
+
+  test("gateway access can never be configured for upstream forwarding", () => {
+    expect(() =>
+      applyUpstreamExtraHeaders(
+        { "x-safe": "preserved" },
+        { "x-lore-gateway-token": "must-not-forward" },
+      ),
+    ).toThrow("gateway access header");
+  });
+
+  test("case-variant gateway access extras cannot bypass the forwarding guard", () => {
+    expect(() =>
+      applyUpstreamExtraHeaders(
+        { "x-safe": "preserved" },
+        { "X-Lore-Gateway-Token": "must-not-forward" },
+      ),
+    ).toThrow("gateway access header");
   });
 });

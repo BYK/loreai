@@ -132,30 +132,32 @@ describe("temporal", () => {
     // Use a DEDICATED project so this seeded row never perturbs the cumulative
     // count/order-sensitive tests that share PROJECT.
     const LEAN_PROJECT = "/test/temporal/lean-cols";
-    temporal.store({
+    const storedId = temporal.store({
       projectPath: LEAN_PROJECT,
       info: makeMessage("msg-lean", "user", "sess-lean"),
       parts: makeParts("msg-lean", "lean offload columns probe"),
     });
+    if (!storedId) throw new Error("expected stored message id");
     // Give the row a non-null embedding BLOB. `SELECT m.*` would marshal this
     // BLOB across the read-worker boundary (forbidden by the read-job contract)
     // and waste bytes even in-process; the lean column list must drop it.
     db()
       .query("UPDATE temporal_messages SET embedding = ? WHERE id = ?")
-      .run(new Uint8Array([1, 2, 3, 4]), "msg-lean");
+      .run(new Uint8Array([1, 2, 3, 4]), storedId);
 
     const results = await temporal.searchScored({
       projectPath: LEAN_PROJECT,
       query: "offload columns probe",
     });
-    const hit = results.find((r) => r.id === "msg-lean");
+    const hit = results.find((r) => r.source_id === "msg-lean");
     expect(hit).toBeDefined();
+    if (!hit) throw new Error("expected lean temporal search hit");
     // The fix: the SELECT enumerates lean columns and omits `embedding`.
     // Reverting to `SELECT m.*` re-introduces the key and fails this.
-    expect("embedding" in hit!).toBe(false);
+    expect("embedding" in hit).toBe(false);
     // The columns recall actually consumes survive.
-    expect(hit!.content).toContain("offload");
-    expect(typeof hit!.rank).toBe("number");
+    expect(hit.content).toContain("offload");
+    expect(typeof hit.rank).toBe("number");
   });
 
   test("search respects session scope", () => {
@@ -186,11 +188,17 @@ describe("temporal", () => {
     const pending = temporal.undistilled(PROJECT, "sess-1");
     expect(pending.length).toBe(3);
 
-    temporal.markDistilled(["msg-1", "msg-2"]);
+    temporal.markDistilled(
+      pending
+        .filter((message) =>
+          ["msg-1", "msg-2"].includes(message.source_id ?? ""),
+        )
+        .map((message) => message.id),
+    );
 
     const after = temporal.undistilled(PROJECT, "sess-1");
     expect(after.length).toBe(1);
-    expect(after[0].id).toBe("msg-3");
+    expect(after[0].source_id).toBe("msg-3");
   });
 
   test("search finds distilled messages", () => {
@@ -201,7 +209,7 @@ describe("temporal", () => {
     });
     expect(results.length).toBeGreaterThan(0);
     // msg-2 contains "OAuth2" and is distilled — must still appear
-    expect(results.some((r) => r.id === "msg-2")).toBe(true);
+    expect(results.some((r) => r.source_id === "msg-2")).toBe(true);
   });
 
   test("count and undistilledCount", () => {
@@ -505,7 +513,7 @@ describe("temporal", () => {
       expect(errored.duration_ms).toBe(60);
     });
 
-    test("is idempotent on re-store (UPSERT on call_id)", () => {
+    test("is idempotent on re-store (UPSERT on owned call_id)", () => {
       const pid = ensureProject(TOOL_PROJECT);
       const info = makeMessage("tm-2", "assistant", "sess-tool");
       const parts: LorePart[] = [
@@ -699,7 +707,7 @@ describe("temporal", () => {
       expect(r.find((x) => x.call_id === "v0")?.verifier).toBe(1);
       expect(r.find((x) => x.call_id === "v1")?.verifier).toBe(0);
       // message_id seeded from the assistant message on every batched row.
-      expect(r.every((x) => x.message_id === "tm-vf")).toBe(true);
+      expect(r.every((x) => x.message_id.startsWith("lore_tm_v1_"))).toBe(true);
     });
 
     test("result update preserves the batched seed's message_id", () => {
@@ -730,7 +738,13 @@ describe("temporal", () => {
       });
       const r = rows(pid);
       expect(r.length).toBe(1);
-      expect(r[0].message_id).toBe("tm-mid-asst"); // seed's id, not the result's
+      expect(r[0].message_id).toBe(
+        temporal.storedMessageId({
+          projectPath: TOOL_PROJECT,
+          sessionID: "sess-tool",
+          sourceID: "tm-mid-asst",
+        }),
+      ); // seed's storage id, not the result's
       expect(r[0].status).toBe("completed");
     });
 

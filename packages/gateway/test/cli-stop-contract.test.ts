@@ -35,6 +35,54 @@ const state = vi.hoisted(() => ({
 
 vi.mock("../src/pidfile", () => ({
   readPidFile: () => state.pid,
+  inspectPidFile: () => {
+    if (state.pid === null) return { state: "absent" };
+    if (state.pidAlive) {
+      return {
+        state: "process",
+        record: {
+          version: 2,
+          pid: state.pid,
+          port: state.port ?? 3207,
+          hosts: ["127.0.0.1"],
+          token: "contract-token".repeat(3),
+          processIdentity: "contract-process-generation",
+        },
+      };
+    }
+    return {
+      state: "legacy",
+      record: {
+        pid: state.pid,
+        identity: {
+          device: 1n,
+          inode: 2n,
+          size: 3n,
+          mtimeNs: 4n,
+          ctimeNs: 5n,
+          birthtimeNs: 6n,
+        },
+      },
+    };
+  },
+  readGatewayProcessFile: () => {
+    if (state.pid === null || !state.pidAlive) return null;
+    return {
+      version: 2,
+      pid: state.pid,
+      port: state.port ?? 3207,
+      hosts: ["127.0.0.1"],
+      token: "contract-token".repeat(3),
+      processIdentity: "contract-process-generation",
+    };
+  },
+  removeGatewayProcessFile: (record: { pid: number }) => {
+    state.removed.push(record.pid);
+  },
+  removeLegacyPidFile: (record: { pid: number }) => {
+    state.removed.push(record.pid);
+    return "removed";
+  },
   removePidFile: (pid: number) => {
     state.removed.push(pid);
   },
@@ -50,6 +98,21 @@ vi.mock("../src/cli/start", () => ({
     if (!state.port) return false;
     return state.portAlive && url.endsWith(`:${state.port}`);
   },
+  probeGatewayProcess: async (record: { pid: number }) =>
+    state.pidAlive && record.pid === state.pid,
+  requestGatewayShutdown: async () => "unsupported",
+  probeUrlFor: (host: string, port: number) => `http://${host}:${port}`,
+}));
+
+vi.mock("../src/lifecycle-lock", () => ({
+  inspectProcessGeneration: (pid: number) =>
+    pid === state.pid && state.pidAlive
+      ? { state: "alive", identity: "contract-process-generation" }
+      : { state: "dead" },
+  withLifecycleLock: async (
+    _operation: string,
+    action: (lock: { assertOwned: () => void }) => unknown,
+  ) => action({ assertOwned: () => {} }),
 }));
 
 import { runCli } from "../src/cli/cli";

@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
-import { createHarness } from "./helpers/harness";
+import { createHarness, TEST_GATEWAY_AUTH_TOKEN } from "./helpers/harness";
 import {
   makeConversationFixtures,
   STANDARD_TOOLS,
@@ -35,22 +35,18 @@ function pathlessBody(userMessage: string): Record<string, unknown> {
 
 describe("remote gateway: path-less session attribution", () => {
   let harness: Harness;
-  let prevRemote: string | undefined;
-
-  beforeEach(() => {
-    prevRemote = process.env.LORE_REMOTE_GATEWAY;
-    process.env.LORE_REMOTE_GATEWAY = "1";
-  });
 
   afterEach(async () => {
     if (harness) await harness.teardown();
-    if (prevRemote === undefined) delete process.env.LORE_REMOTE_GATEWAY;
-    else process.env.LORE_REMOTE_GATEWAY = prevRemote;
   });
 
   it("routes two unrelated path-less sessions to DISTINCT buckets (never merged)", async () => {
     // Two unrelated conversations → two fingerprints → two sessions.
     harness = await createHarness({
+      configOverrides: {
+        remoteGateway: true,
+        gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
+      },
       fixtures: [
         ...makeConversationFixtures([
           { userMessage: "alpha project question one", assistantText: "A1." },
@@ -66,7 +62,10 @@ describe("remote gateway: path-less session attribution", () => {
 
     // Suppress the harness default x-lore-project header — this test
     // intentionally sends path-less requests.
-    const noProject = { "x-lore-project": "" };
+    const noProject = {
+      "x-lore-project": "",
+      "x-lore-gateway-token": TEST_GATEWAY_AUTH_TOKEN,
+    };
     const r1 = await harness.chat(
       pathlessBody("alpha project question one"),
       "test-key",

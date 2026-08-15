@@ -4,13 +4,24 @@
  * Extracted from the old top-level index.ts boot logic.
  */
 import { spawn } from "node:child_process";
-import { openSync, mkdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, DEFAULT_PORTS, type GatewayConfig } from "../config";
+import {
+  assertGatewayAccessConfigured,
+  loadConfig,
+  DEFAULT_PORTS,
+  type GatewayConfig,
+} from "../config";
 import { startServer, bracketHost } from "../server";
 import { resetPipelineState } from "../pipeline";
-import { writePortFile, removePortFile, readPortFile } from "../portfile";
-import { writePidFile, removePidFile } from "../pidfile";
+import { writePortFile, removePortFile } from "../portfile";
+import {
+  writeGatewayProcessFile,
+  readGatewayProcessFile,
+  removeGatewayProcessFile,
+  type GatewayProcessRecord,
+} from "../pidfile";
 import {
   dataDir,
   embedding,
@@ -20,7 +31,22 @@ import {
   DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
 } from "@loreai/core";
 import { safeExit } from "./exit";
-import { installSignalShutdown, SHUTDOWN_DEADLINE_MS } from "./shutdown";
+import {
+  installSignalShutdown,
+  makeProcessShutdownController,
+  SHUTDOWN_DEADLINE_MS,
+  type ProcessShutdownController,
+} from "./shutdown";
+import { openRuntimeFileForAppend } from "../runtime-files";
+import { nodeHttpFetch } from "../fetch";
+import {
+  currentProcessIdentity,
+  inspectProcessGeneration,
+  withoutLifecycleLock,
+  withLifecycleLock,
+  type LifecycleLock,
+  type ProcessInspection,
+} from "../lifecycle-lock";
 
 /**
  * Bound for the in-flight document-embed drain on graceful shutdown (#1331).
@@ -72,6 +98,8 @@ export interface StartOptions {
    * CLI: `--bg` / `--daemon`.
    */
   bg?: boolean;
+  /** @internal CLI-owned process boundary; never set by in-process plugins. */
+  processBoundary?: boolean;
 }
 
 export interface GatewayHandle {
@@ -79,29 +107,212 @@ export interface GatewayHandle {
   port: number;
   /** Whether this process owns the server (started it). False when reusing an existing instance. */
   owned: boolean;
+  /** Owner-only token used to authenticate the gateway control endpoint. */
+  managementToken: string;
   /** Shut down the gateway. No-op when `owned` is false. */
   shutdown: () => Promise<void>;
+  /** @internal One-shot CLI process shutdown shared by signals and control. */
+  processShutdown?: ProcessShutdownController;
+}
+
+export interface GatewayHealthIdentity {
+  pid: number;
+}
+
+export type GatewayIdentityProbe =
+  | { kind: "authenticated"; identity: GatewayHealthIdentity }
+  | { kind: "rejected" }
+  | { kind: "unavailable" }
+  | { kind: "timeout" };
+
+export type GatewayShutdownRequestResult =
+  | "accepted"
+  | "unsupported"
+  | "failed";
+
+export interface StartGatewayIO {
+  readProcess: () => GatewayProcessRecord | null;
+  authenticate: (record: GatewayProcessRecord) => Promise<string | null>;
+  writePort: (port: number, token: string) => void;
+  removePort: (port: number, token: string) => void;
+  writeProcess: (record: GatewayProcessRecord) => void;
+  removeProcess: (pid: number, record?: GatewayProcessRecord) => void;
+  startServer: typeof startServer;
+  resetPipelineState: typeof resetPipelineState;
+  createProcessShutdownController: typeof makeProcessShutdownController;
+}
+
+const realStartGatewayIO: StartGatewayIO = {
+  readProcess: readGatewayProcessFile,
+  authenticate: probeGatewayProcessHost,
+  writePort: writePortFile,
+  removePort: removePortFile,
+  writeProcess: writeGatewayProcessFile,
+  removeProcess: (pid, record) => {
+    if (record) removeGatewayProcessFile(record);
+    else {
+      const current = readGatewayProcessFile();
+      if (current?.pid === pid) removeGatewayProcessFile(current);
+    }
+  },
+  startServer,
+  resetPipelineState,
+  createProcessShutdownController: makeProcessShutdownController,
+};
+
+function isLoopbackProbeUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname
+      .replace(/^\[/, "")
+      .replace(/\]$/, "")
+      .toLowerCase();
+    return (
+      hostname === "localhost" ||
+      hostname === "localhost." ||
+      hostname === "::1" ||
+      /^127(?:\.\d{1,3}){3}$/.test(hostname)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Probe a running gateway at the given URL via its `/health` endpoint.
- * Returns `true` if the response is 2xx, `false` on any error or timeout.
+ * Fetch an internal gateway endpoint without WHATWG's browser forbidden-port
+ * list breaking valid loopback listeners. Non-loopback URLs retain the normal
+ * Fetch transport and semantics used for remote/LAN gateways.
  */
+export function internalProbeFetch(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  return isLoopbackProbeUrl(url)
+    ? nodeHttpFetch(url, init)
+    : Promise.resolve(fetch(url, init));
+}
+
+/** Probe the owner-only control endpoint and return its process identity. */
+export async function probeGatewayIdentity(
+  baseURL: string,
+  token: string,
+  timeoutMs = 1500,
+): Promise<GatewayHealthIdentity | null> {
+  const result = await probeGatewayIdentityDetailed(baseURL, token, timeoutMs);
+  return result.kind === "authenticated" ? result.identity : null;
+}
+
+export async function probeGatewayIdentityDetailed(
+  baseURL: string,
+  token: string,
+  timeoutMs = 1500,
+): Promise<GatewayIdentityProbe> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await internalProbeFetch(`${baseURL}/_lore/control`, {
+      signal: controller.signal,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return { kind: "rejected" };
+    const body = (await res.json()) as {
+      status?: unknown;
+      service?: unknown;
+      pid?: unknown;
+    };
+    return body.status === "ok" &&
+      body.service === "lore" &&
+      typeof body.pid === "number" &&
+      Number.isSafeInteger(body.pid) &&
+      body.pid > 0
+      ? { kind: "authenticated", identity: { pid: body.pid } }
+      : { kind: "rejected" };
+  } catch (error) {
+    return controller.signal.aborted || (error as Error).name === "AbortError"
+      ? { kind: "timeout" }
+      : { kind: "unavailable" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function probeGatewayProcessStatus(
+  record: GatewayProcessRecord,
+  timeoutMs = 1500,
+): Promise<"authenticated" | "rejected" | "unavailable" | "timeout"> {
+  const results = await Promise.all(
+    record.hosts.map((host) =>
+      probeGatewayIdentityDetailed(
+        probeUrlFor(host, record.port),
+        record.token,
+        timeoutMs,
+      ),
+    ),
+  );
+  if (
+    results.some(
+      (result) =>
+        result.kind === "authenticated" && result.identity.pid === record.pid,
+    )
+  ) {
+    return "authenticated";
+  }
+  if (results.some((result) => result.kind === "timeout")) return "timeout";
+  if (results.some((result) => result.kind === "rejected")) return "rejected";
+  return "unavailable";
+}
+
+export type GatewayHealthStatus =
+  | "healthy"
+  | "not-running"
+  | "error"
+  | "timeout";
+
+function errorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : null;
+}
+
+function isConnectionRefused(error: unknown): boolean {
+  if (error instanceof AggregateError) {
+    return (
+      error.errors.length > 0 &&
+      error.errors.every((candidate) => isConnectionRefused(candidate))
+    );
+  }
+  if (errorCode(error) === "ECONNREFUSED") return true;
+  if (typeof error !== "object" || error === null) return false;
+  return isConnectionRefused((error as { cause?: unknown }).cause);
+}
+
+/** Probe public health while preserving ambiguous failure states. */
+export async function probeGatewayStatus(
+  baseURL: string,
+  timeoutMs = 1500,
+): Promise<GatewayHealthStatus> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await internalProbeFetch(`${baseURL}/health`, {
+      signal: controller.signal,
+    });
+    return res.ok ? "healthy" : "error";
+  } catch (error) {
+    if (controller.signal.aborted || (error as Error).name === "AbortError") {
+      return "timeout";
+    }
+    return isConnectionRefused(error) ? "not-running" : "error";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Boolean compatibility wrapper for non-destructive health checks. */
 export async function probeGateway(
   baseURL: string,
   timeoutMs = 1500,
 ): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`${baseURL}/health`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    return res.ok;
-  } catch {
-    return false;
-  }
+  return (await probeGatewayStatus(baseURL, timeoutMs)) === "healthy";
 }
 
 /**
@@ -110,8 +321,82 @@ export async function probeGateway(
  * A bare `:` in the host marks it as an IPv6 address (hostnames/IPv4 never
  * contain one); an already-bracketed value is left untouched.
  */
-function probeUrlFor(host: string, port: number): string {
-  return `http://${bracketHost(host)}:${port}`;
+export function probeUrlFor(host: string, port: number): string {
+  const connectHost =
+    host === "0.0.0.0" ? "127.0.0.1" : host === "::" ? "::1" : host;
+  return `http://${bracketHost(connectHost)}:${port}`;
+}
+
+/** Authenticate a persisted process record against every host it bound. */
+export async function probeGatewayProcessHost(
+  record: GatewayProcessRecord,
+  timeoutMs = 1500,
+): Promise<string | null> {
+  const identities = await Promise.all(
+    record.hosts.map((host) =>
+      probeGatewayIdentity(
+        probeUrlFor(host, record.port),
+        record.token,
+        timeoutMs,
+      ),
+    ),
+  );
+  const index = identities.findIndex(
+    (identity) => identity?.pid === record.pid,
+  );
+  return index === -1 ? null : record.hosts[index];
+}
+
+/** Authenticate a persisted process record against every host it bound. */
+export async function probeGatewayProcess(
+  record: GatewayProcessRecord,
+  timeoutMs = 1500,
+): Promise<boolean> {
+  return (await probeGatewayProcessHost(record, timeoutMs)) !== null;
+}
+
+/** Request graceful shutdown from the exact token-authenticated gateway. */
+export async function requestGatewayShutdown(
+  record: GatewayProcessRecord,
+  timeoutMs = 1500,
+): Promise<GatewayShutdownRequestResult> {
+  const results = await Promise.all(
+    record.hosts.map(async (host): Promise<GatewayShutdownRequestResult> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await internalProbeFetch(
+          `${probeUrlFor(host, record.port)}/_lore/control`,
+          {
+            method: "POST",
+            signal: controller.signal,
+            headers: { authorization: `Bearer ${record.token}` },
+          },
+        );
+        if (response.status === 404) return "unsupported";
+        if (!response.ok) return "failed";
+        const body = (await response.json()) as {
+          status?: unknown;
+          service?: unknown;
+          pid?: unknown;
+          shutdown?: unknown;
+        };
+        return body.status === "ok" &&
+          body.service === "lore" &&
+          body.pid === record.pid &&
+          body.shutdown === "requested"
+          ? "accepted"
+          : "failed";
+      } catch {
+        return "failed";
+      } finally {
+        clearTimeout(timer);
+      }
+    }),
+  );
+  if (results.some((result) => result === "accepted")) return "accepted";
+  if (results.some((result) => result === "failed")) return "failed";
+  return "unsupported";
 }
 
 /**
@@ -136,6 +421,11 @@ async function firstReachableHost(
 /** Path to the daemon's combined stdout/stderr log. */
 export function daemonLogPath(): string {
   return join(dataDir(), "gateway.log");
+}
+
+/** Open the daemon log for safe owner-only append. Caller must close it. */
+export function openDaemonLogFile(): number {
+  return openRuntimeFileForAppend("gateway.log");
 }
 
 /**
@@ -199,10 +489,15 @@ export function daemonProbeHost(opts: StartOptions): string {
 
 /** Injectable IO for the daemon orchestration, so `runDaemon` is testable. */
 export interface DaemonIO {
-  readPort: () => number | null;
-  probe: (url: string) => Promise<boolean>;
+  readProcess: () => GatewayProcessRecord | null;
+  authenticate: (record: GatewayProcessRecord) => Promise<string | null>;
+  probeHealth: (url: string) => Promise<boolean>;
   /** Spawn the detached child gateway; returns its pid (or undefined). */
   spawnDaemon: () => number | undefined;
+  inspectProcess: (pid: number) => ProcessInspection;
+  terminate: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+  removeProcess: (record: GatewayProcessRecord) => void;
+  removePort: (port: number, token: string) => void;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
   logInfo: (msg: string) => void;
@@ -211,45 +506,202 @@ export interface DaemonIO {
   timeoutMs?: number;
   /** Poll interval in ms (default 250). */
   intervalMs?: number;
+  /** Per-signal child-exit wait budget in ms. */
+  cleanupTimeoutMs?: number;
+}
+
+async function waitForDaemonExit(
+  pid: number,
+  expectedProcessIdentity: string,
+  io: DaemonIO,
+  intervalMs: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = io.now() + timeoutMs;
+  while (
+    !daemonGenerationExited(pid, expectedProcessIdentity, io) &&
+    io.now() < deadline
+  ) {
+    await io.sleep(intervalMs);
+  }
+  return daemonGenerationExited(pid, expectedProcessIdentity, io);
+}
+
+function inspectDaemonProcess(pid: number, io: DaemonIO): ProcessInspection {
+  try {
+    return io.inspectProcess(pid);
+  } catch {
+    return { state: "unknown" };
+  }
+}
+
+function verifiedProcessIdentity(inspection: ProcessInspection): string | null {
+  return inspection.state === "alive" &&
+    inspection.identity !== null &&
+    !inspection.identity.startsWith("unverified:")
+    ? inspection.identity
+    : null;
+}
+
+function daemonGenerationExited(
+  pid: number,
+  expectedProcessIdentity: string,
+  io: DaemonIO,
+): boolean {
+  const inspection = inspectDaemonProcess(pid, io);
+  return (
+    inspection.state === "dead" ||
+    (inspection.state === "alive" &&
+      inspection.identity !== null &&
+      inspection.identity !== expectedProcessIdentity)
+  );
+}
+
+async function signalDaemonGeneration(
+  pid: number,
+  expectedProcessIdentity: string,
+  signal: "SIGTERM" | "SIGKILL",
+  io: DaemonIO,
+): Promise<"signalled" | "exited" | "uncertain"> {
+  try {
+    return await withLifecycleLock("gateway-shutdown", (lock) => {
+      lock.assertOwned();
+      const inspection = inspectDaemonProcess(pid, io);
+      if (
+        inspection.state === "dead" ||
+        (inspection.state === "alive" &&
+          inspection.identity !== null &&
+          inspection.identity !== expectedProcessIdentity)
+      ) {
+        return "exited";
+      }
+      if (
+        inspection.state !== "alive" ||
+        inspection.identity === null ||
+        inspection.identity !== expectedProcessIdentity
+      ) {
+        return "uncertain";
+      }
+      lock.assertOwned();
+      try {
+        io.terminate(pid, signal);
+      } catch (error) {
+        const afterSignalFailure = inspectDaemonProcess(pid, io);
+        if (
+          afterSignalFailure.state === "dead" ||
+          (afterSignalFailure.state === "alive" &&
+            afterSignalFailure.identity !== null &&
+            afterSignalFailure.identity !== expectedProcessIdentity)
+        ) {
+          return "exited";
+        }
+        throw error;
+      }
+      return "signalled";
+    });
+  } catch {
+    // Lock loss, failed inspection, and signal errors are all ambiguous. Never
+    // guess that the numeric PID still names the detached child.
+    return "uncertain";
+  }
+}
+
+async function terminateTimedOutDaemon(
+  pid: number,
+  expectedProcessIdentity: string | null,
+  io: DaemonIO,
+  intervalMs: number,
+  expectedRecord: GatewayProcessRecord | null,
+): Promise<{ stopped: boolean; signalled: boolean }> {
+  if (expectedProcessIdentity === null) {
+    // A live child without a verifiable start identity cannot be signalled.
+    // A definitively dead PID is safe to classify as stopped, but a live or
+    // unknown PID remains ambiguous even if its number matches the spawn result.
+    return {
+      stopped: inspectDaemonProcess(pid, io).state === "dead",
+      signalled: false,
+    };
+  }
+
+  const cleanupTimeout = io.cleanupTimeoutMs ?? SHUTDOWN_DEADLINE_MS;
+  let signalled = false;
+  const termResult = await signalDaemonGeneration(
+    pid,
+    expectedProcessIdentity,
+    "SIGTERM",
+    io,
+  );
+  if (termResult === "uncertain") {
+    return { stopped: false, signalled };
+  }
+  signalled = termResult === "signalled";
+
+  let exited =
+    termResult === "exited" ||
+    (await waitForDaemonExit(
+      pid,
+      expectedProcessIdentity,
+      io,
+      intervalMs,
+      cleanupTimeout,
+    ));
+  if (!exited) {
+    const killResult = await signalDaemonGeneration(
+      pid,
+      expectedProcessIdentity,
+      "SIGKILL",
+      io,
+    );
+    if (killResult === "uncertain") {
+      return { stopped: false, signalled };
+    }
+    signalled ||= killResult === "signalled";
+    exited =
+      killResult === "exited" ||
+      (await waitForDaemonExit(
+        pid,
+        expectedProcessIdentity,
+        io,
+        intervalMs,
+        cleanupTimeout,
+      ));
+  }
+
+  if (exited) {
+    await withLifecycleLock("gateway-start", async (lifecycleLock) => {
+      lifecycleLock.assertOwned();
+      const record = io.readProcess();
+      lifecycleLock.assertOwned();
+      if (
+        expectedRecord &&
+        record?.pid === expectedRecord.pid &&
+        record.token === expectedRecord.token &&
+        record.processIdentity === expectedRecord.processIdentity
+      ) {
+        io.removeProcess(expectedRecord);
+        lifecycleLock.assertOwned();
+        io.removePort(expectedRecord.port, expectedRecord.token);
+      }
+    });
+  }
+  return { stopped: exited, signalled };
 }
 
 /**
- * Daemon orchestration: reuse an already-running gateway, else spawn the
- * detached child and poll until it's serving. Returns the process exit code
- * (0 = healthy/reused, 1 = timed out). Pure of `process.exit` so it is
- * unit-testable; `startDaemon` is the thin shell that wires real IO + exit.
+ * Daemon orchestration: reuse an authenticated gateway, else spawn a detached
+ * child and poll until its process record authenticates.
  */
 export async function runDaemon(
   opts: StartOptions,
   io: DaemonIO,
 ): Promise<number> {
-  const host = daemonProbeHost(opts);
-
-  // If a gateway is already up on the recorded port, don't start a second one.
-  //
-  // The running gateway may be bound to an interface that does NOT overlap with
-  // ours (issue #908) — e.g. it's on 127.0.0.1 while we asked for a LAN/Tailscale
-  // IP only. Probe every configured host plus 127.0.0.1 and adopt the first that
-  // answers; otherwise we'd spawn a child that itself reuses-and-exits (its own
-  // pre-bind probe finds the loopback gateway), leaving us polling an interface
-  // nothing ever bound until the health-poll deadline. Configured hosts are
-  // probed first so the reported address is the one the user asked for (#875),
-  // falling back to loopback.
-  const existingPort = io.readPort();
-  if (existingPort) {
-    const probeHosts = [
-      ...new Set([
-        ...(opts.hosts ?? []).filter((h) => h && h.length > 0),
-        "127.0.0.1",
-      ]),
-    ];
-    const reusedHost = await firstReachableHost(
-      probeHosts,
-      existingPort,
-      io.probe,
-    );
+  // Public health proves availability, not ownership. Reuse only a process
+  // record whose owner-only challenge authenticates against the recorded PID.
+  const existingRecord = io.readProcess();
+  if (existingRecord) {
+    const reusedHost = await io.authenticate(existingRecord);
     if (reusedHost) {
-      const url = probeUrlFor(reusedHost, existingPort);
+      const url = probeUrlFor(reusedHost, existingRecord.port);
       io.logInfo(`Gateway already running on ${url}`);
       io.logInfo(`Dashboard: ${url}/ui`);
       io.logInfo(`Stop it with: lore stop`);
@@ -257,18 +709,69 @@ export async function runDaemon(
     }
   }
 
-  const pid = io.spawnDaemon();
+  // Generic health classifies a preferred-port occupant, but never authorizes
+  // reuse. An explicit occupied port is an error; default ports may fall back.
+  const configuredHosts = (
+    opts.hosts?.length ? opts.hosts : ["127.0.0.1"]
+  ).filter((host) => host.length > 0);
+  const preferredPorts = opts.port === undefined ? DEFAULT_PORTS : [opts.port];
+  for (const preferredPort of preferredPorts) {
+    const foreignHost = await firstReachableHost(
+      configuredHosts,
+      preferredPort,
+      io.probeHealth,
+    );
+    if (!foreignHost) continue;
+    if (opts.port !== undefined) {
+      io.logError(
+        `Port ${opts.port} is already in use by another process (not an authenticated lore gateway).`,
+      );
+      return 1;
+    }
+    io.logInfo(
+      `Preferred port ${preferredPort} is occupied by a foreign service; the background gateway will use its fallback chain.`,
+    );
+    break;
+  }
+
+  const spawned = await withLifecycleLock("gateway-start", (lifecycleLock) => {
+    lifecycleLock.assertOwned();
+    const pid = io.spawnDaemon();
+    if (pid === undefined) return undefined;
+    // Capture the process-start identity immediately while spawn ownership is
+    // serialized. The numeric PID alone is never sufficient for later cleanup.
+    const inspection = inspectDaemonProcess(pid, io);
+    return {
+      pid,
+      processIdentity: verifiedProcessIdentity(inspection),
+    };
+  });
+  if (spawned === undefined) {
+    io.logError("Failed to spawn the background gateway.");
+    return 1;
+  }
+  const { pid, processIdentity: spawnedProcessIdentity } = spawned;
   const timeout = io.timeoutMs ?? 10_000;
   const interval = io.intervalMs ?? 250;
   const deadline = io.now() + timeout;
+  let spawnedRecord: GatewayProcessRecord | null = null;
   while (io.now() < deadline) {
     await io.sleep(interval);
-    const port = io.readPort();
-    // probeUrlFor brackets IPv6 literals (e.g. http://[::1]:3207); a raw
-    // template would yield the malformed http://::1:3207 and never connect.
-    const url = port ? probeUrlFor(host, port) : "";
-    if (port && (await io.probe(url))) {
-      io.logInfo(`Gateway started in the background (pid ${pid})`);
+    const record = io.readProcess();
+    const isSpawnedGeneration =
+      spawnedProcessIdentity !== null &&
+      record?.version === 2 &&
+      record.pid === pid &&
+      record.processIdentity === spawnedProcessIdentity;
+    if (isSpawnedGeneration) spawnedRecord = record;
+    const authenticatedHost = record ? await io.authenticate(record) : null;
+    if (record && authenticatedHost) {
+      const url = probeUrlFor(authenticatedHost, record.port);
+      io.logInfo(
+        isSpawnedGeneration
+          ? `Gateway started in the background (pid ${pid})`
+          : `Gateway already running in the background (pid ${record.pid})`,
+      );
       io.logInfo(`Listening on ${url}`);
       io.logInfo(`Dashboard: ${url}/ui`);
       io.logInfo(`Logs: ${daemonLogPath()}`);
@@ -277,23 +780,43 @@ export async function runDaemon(
     }
   }
 
-  io.logError(
-    `Gateway did not become healthy within ${timeout}ms. Check the log: ${daemonLogPath()}`,
+  const cleanup = await terminateTimedOutDaemon(
+    pid,
+    spawnedProcessIdentity,
+    io,
+    interval,
+    spawnedRecord,
   );
+  if (cleanup.stopped && cleanup.signalled) {
+    io.logError(
+      `Gateway did not establish authenticated ownership within ${timeout}ms; terminated background pid ${pid}. Check the log: ${daemonLogPath()}`,
+    );
+  } else if (cleanup.stopped) {
+    io.logError(
+      `Gateway did not establish authenticated ownership within ${timeout}ms; background pid ${pid}'s spawned process generation is no longer running. Check the log: ${daemonLogPath()}`,
+    );
+  } else {
+    io.logError(
+      `Gateway startup failed with unknown child state: background pid ${pid} did not establish authenticated ownership and could not be confirmed stopped. Check the log and process before retrying: ${daemonLogPath()}`,
+    );
+  }
   return 1;
 }
 
 /** Spawn the detached child gateway with stdio redirected to the log file. */
 function spawnDetachedGateway(opts: StartOptions): number | undefined {
-  const logPath = daemonLogPath();
-  mkdirSync(dataDir(), { recursive: true });
-  const logFd = openSync(logPath, "a");
+  const logFd = openDaemonLogFile();
   const { command, args } = daemonSpawnSpec(opts);
-  const child = spawn(command, args, {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: process.env,
-  });
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(command, args, {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: process.env,
+    });
+  } finally {
+    closeSync(logFd);
+  }
   child.unref();
   return child.pid;
 }
@@ -301,9 +824,14 @@ function spawnDetachedGateway(opts: StartOptions): number | undefined {
 /** Build the real (production) IO for {@link runDaemon}. */
 export function realDaemonIO(opts: StartOptions): DaemonIO {
   return {
-    readPort: readPortFile,
-    probe: probeGateway,
+    readProcess: readGatewayProcessFile,
+    authenticate: probeGatewayProcessHost,
+    probeHealth: probeGateway,
     spawnDaemon: () => spawnDetachedGateway(opts),
+    inspectProcess: inspectProcessGeneration,
+    terminate: (pid, signal) => process.kill(pid, signal),
+    removeProcess: removeGatewayProcessFile,
+    removePort: removePortFile,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: Date.now,
     logInfo: (msg) => console.log(`[lore] ${msg}`),
@@ -329,12 +857,25 @@ async function startDaemon(opts: StartOptions): Promise<never> {
  * When the port is not explicitly set (no `--port` / `LORE_LISTEN_PORT`),
  * the server tries a fallback chain: 3207 → 5673 → OS-assigned random port.
  * At each step, if the port is occupied by an existing lore gateway
- * (verified via `/health` probe), returns a handle with `owned: false`
+ * (verified via its process record and owner-only control token), returns a
+ * handle with `owned: false`
  * so the caller can reuse the existing instance.
  */
 export async function startGateway(
   opts: StartOptions = {},
+  ioOverrides: Partial<StartGatewayIO> = {},
 ): Promise<GatewayHandle> {
+  return withLifecycleLock("gateway-start", (lifecycleLock) =>
+    startGatewayLocked(opts, ioOverrides, lifecycleLock),
+  );
+}
+
+async function startGatewayLocked(
+  opts: StartOptions,
+  ioOverrides: Partial<StartGatewayIO>,
+  lifecycleLock: LifecycleLock,
+): Promise<GatewayHandle> {
+  const io: StartGatewayIO = { ...realStartGatewayIO, ...ioOverrides };
   const config = loadConfig();
 
   // In-process callers (OpenCode plugin, Pi extension) pass `quiet: true`.
@@ -402,55 +943,117 @@ export async function startGateway(
     }
   }
 
+  // Validate after CLI/env/default mode precedence is fully applied. In
+  // particular, `--local` must be able to opt out before this invariant runs.
+  assertGatewayAccessConfigured(config);
+
   // Build the list of ports to try.
   // Explicit port: single attempt, fail hard on conflict.
   // Default: 3207 → 5673 → 0 (OS-assigned random).
   const portsToTry: number[] = config.portExplicit
     ? [config.port]
     : [...DEFAULT_PORTS, 0];
+  const controlToken = randomBytes(32).toString("base64url");
+  // Windows has no race-free creation-time query in Node. Publish an explicit
+  // unverified identity so discovery works, while destructive stop fails closed.
+  const processIdentity =
+    currentProcessIdentity() ?? `unverified:${controlToken}`;
+
+  // With no explicit port, reuse an authenticated gateway wherever it actually
+  // bound (including a fallback/random port). The process record is the source
+  // of identity; public health and the port file are not.
+  if (!config.portExplicit) {
+    const record = io.readProcess();
+    if (record) {
+      const authenticatedHost = await io.authenticate(record);
+      if (authenticatedHost) {
+        config.port = record.port;
+        config.hosts = [authenticatedHost];
+        return {
+          config,
+          port: record.port,
+          owned: false,
+          managementToken: record.token,
+          shutdown: async () => {},
+        };
+      }
+    }
+  }
 
   for (const candidatePort of portsToTry) {
     config.port = candidatePort;
 
-    // Pre-bind reuse probe (issue #908): an existing gateway may be bound to an
-    // interface that does NOT overlap with ours (e.g. it's on 127.0.0.1 while
-    // we're configured for a LAN/Tailscale IP only). Binding our interface would
-    // then SUCCEED — no EADDRINUSE — and we'd silently start a SECOND redundant
-    // gateway sharing this port's port file, pid file, and SQLite DB. Probe
-    // first; if a live lore gateway answers on 127.0.0.1 or any configured host,
-    // reuse it instead of binding. The post-bind catch below stays as a backstop
-    // for the race where a gateway binds between this probe and our bind.
+    // Pre-bind identity/occupancy probe (issue #908). Only an authenticated
+    // owner record establishes Lore identity; public /health merely classifies
+    // an unauthenticated occupant as foreign.
     //
     // Skip port 0 (OS-assigned random): nothing can already be listening there,
     // and port 0 is not a probeable address. Default config.hosts is
     // ["127.0.0.1"], so the common cold-start cost here is a single fast,
     // connection-refused loopback probe.
     if (candidatePort !== 0) {
-      const probeHosts = [...new Set(["127.0.0.1", ...config.hosts])];
-      const reachableHost = await firstReachableHost(probeHosts, candidatePort);
-      if (reachableHost) {
-        // Report the interface the existing gateway actually answered on — not
-        // the (possibly non-overlapping) hosts we were configured to bind.
-        // Callers derive the agent's gateway URL from config.hosts[0]
-        // (run.ts), so this MUST be a reachable address or the agent would be
-        // pointed at a dead interface.
-        config.hosts = [reachableHost];
+      const record = io.readProcess();
+      const authenticatedHost =
+        record?.port === candidatePort ? await io.authenticate(record) : null;
+      if (record && authenticatedHost) {
+        config.hosts = [authenticatedHost];
         return {
           config,
           port: candidatePort,
           owned: false,
+          managementToken: record.token,
           shutdown: async () => {},
         };
+      }
+
+      const probeHosts = [
+        ...new Set([
+          "127.0.0.1",
+          ...config.hosts,
+          ...(record?.port === candidatePort ? record.hosts : []),
+        ]),
+      ];
+      const foreignHost = await firstReachableHost(probeHosts, candidatePort);
+      if (foreignHost) {
+        if (config.portExplicit) {
+          throw new Error(
+            `Port ${candidatePort} is already in use by another process (not an authenticated lore gateway). ` +
+              `Use --port / LORE_LISTEN_PORT to pick a different port.`,
+          );
+        }
+        const nextIdx = portsToTry.indexOf(candidatePort) + 1;
+        const nextPort = portsToTry[nextIdx];
+        const nextLabel = nextPort === 0 ? "random port" : String(nextPort);
+        notify(
+          `Port ${candidatePort} in use (not an authenticated lore gateway), trying ${nextLabel}…`,
+        );
+        continue;
       }
     }
 
     let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    let remoteShutdown: (() => void) | undefined;
     try {
       // startServer() binds each host and awaits the OS bind internally, so an
       // EADDRINUSE rejection surfaces from THIS await (not from `server.ready`).
       // It MUST be inside the try so the catch below can probe for and reuse an
       // existing lore gateway instead of crashing.
-      server = await startServer(config);
+      lifecycleLock.assertOwned();
+      server = await withoutLifecycleLock(() =>
+        io.startServer(config, {
+          controlToken,
+          onShutdown: () => {
+            if (!remoteShutdown) {
+              notify(
+                "Remote shutdown was requested before gateway publication; refusing.",
+              );
+              process.exitCode = 1;
+              return;
+            }
+            remoteShutdown();
+          },
+        }),
+      );
       await server.ready; // already resolved by startServer; kept for clarity
       const actualPort = server.port;
       // startServer() may drop hosts that aren't currently bindable (e.g. a
@@ -459,70 +1062,153 @@ export async function startGateway(
       // an interface that's down.
       if (server.hosts.length) config.hosts = server.hosts;
 
-      // Write port file so plugins can discover us (even on random port).
-      writePortFile(actualPort);
-      // Write pid file so `lore stop` can find and signal this process.
-      writePidFile();
-
-      const boundServer = server;
-      let shutdownStarted = false;
-      const shutdown = async () => {
-        if (shutdownStarted) return;
-        shutdownStarted = true;
-        notify("Shutting down…");
-        boundServer.stop();
-        removePortFile(actualPort);
-        removePidFile();
-        // `fast`: skip the synchronous batch-queue LLM drain on process exit —
-        // replaying queued background prompts through retries is what made
-        // Ctrl+C hang for minutes. They resume next session.
-        await resetPipelineState({ fast: true });
-        // Drain any document embed ALREADY in flight (esp. a distillation
-        // embed created this session that would otherwise never write its
-        // `distillation_vec` row before the worker is torn down — #1331).
-        // BOUNDED so a slow/stuck embed can't reintroduce the Ctrl+C hang
-        // `fast: true` exists to avoid; must run while the worker is still alive
-        // (resetProvider below kills it) and after resetPipelineState so no new
-        // background work is scheduled mid-drain. NOTE: this covers embeds that
-        // have already been dispatched — it does NOT wait on a distillation
-        // whose LLM call is still in flight (fast-path shutdown deliberately
-        // skips that background drain), so that embed is never enqueued here.
-        // Both the mid-distillation case and anything still pending at the
-        // deadline are re-indexed by runStartupBackfill on the next boot.
-        await embedding.settleDocumentEmbeds(EMBED_DRAIN_DEADLINE_MS);
-        // Shut down the embedding worker thread gracefully. Done after
-        // resetPipelineState (which clears sessions/timers) but before
-        // safeExit — gives the worker time to exit cleanly via its
-        // "shutdown" message handler rather than being killed by _exit().
-        await embedding.resetProvider();
-        // Tear down the vector/read worker pool and WAIT for every worker to
-        // close its own SQLite reader (#1599). Done after the embedding worker
-        // is gone (it had its own short-lived budget) and before the writer
-        // close below: SQLite WAL TRUNCATE requires ZERO concurrent
-        // readers on the connection — each worker's `reader.db` holds a WAL
-        // read-mark, so leaving readers alive means the writer's checkpoint
-        // either busy-returns or hangs on `busy_timeout`, both of which leak
-        // the `-wal` to next-boot recovery. The bounded helper force-terminates
-        // any worker that hasn't exited by its deadline, so a stuck reader
-        // can't reintroduce the Ctrl+C hang the embedding budget above
-        // prevents.
-        await shutdownVectorPoolAsync(VECTOR_POOL_SHUTDOWN_DEADLINE_MS);
-        // Close the main SQLite writer. The core `close()` is itself best-
-        // effort (busy_timeout=0 around TRUNCATE so a slow reader can't hang
-        // it; the `-wal` is just recovered on next open) and idempotent (no-op
-        // if the DB was never opened), so calling it unconditionally on the
-        // graceful path is safe. Done AFTER vector-pool shutdown so the writer
-        // can finally grab an exclusive checkpoint lock. Done BEFORE safeExit so
-        // the lazy singleton's atexit isn't the only thing closing it.
+      try {
+        // Publish a shared generation token in both discovery records. The PID
+        // record additionally binds the token to this process-start identity.
+        lifecycleLock.assertOwned();
+        io.writePort(actualPort, controlToken);
+        lifecycleLock.assertOwned();
+        const processRecord: GatewayProcessRecord = {
+          version: 2,
+          pid: process.pid,
+          port: actualPort,
+          hosts: server.hosts,
+          token: controlToken,
+          processIdentity,
+        };
+        io.writeProcess(processRecord);
+      } catch (publicationError) {
+        let closeError: unknown;
         try {
-          closeDb();
-        } catch (e) {
-          // A checkpoint or close failure must NEVER block process exit —
-          // SQLite WAL recovery handles an unclean shutdown on next boot.
-          notify(
-            `Database close warning: ${e instanceof Error ? e.message : String(e)}`,
+          await server.stop();
+        } catch (error) {
+          closeError = error;
+        }
+        if (closeError === undefined) {
+          // Remove discovery only after listener closure is confirmed. If close
+          // fails, retain evidence for the possibly-live listener.
+          const published = io.readProcess();
+          try {
+            lifecycleLock.assertOwned();
+            io.removePort(actualPort, controlToken);
+          } finally {
+            if (
+              published?.pid === process.pid &&
+              published.token === controlToken &&
+              published.processIdentity === processIdentity
+            ) {
+              lifecycleLock.assertOwned();
+              io.removeProcess(process.pid, published);
+            }
+          }
+        } else {
+          server = undefined;
+          throw new AggregateError(
+            [publicationError, closeError],
+            "Gateway publication failed and the live listener could not be closed; discovery evidence was retained.",
           );
         }
+        throw publicationError;
+      }
+
+      const boundServer = server;
+      let shutdownPromise: Promise<void> | undefined;
+      const shutdown = (): Promise<void> => {
+        shutdownPromise ??= withLifecycleLock(
+          "gateway-shutdown",
+          async (shutdownLock) => {
+            notify("Shutting down…");
+            let shutdownError: unknown;
+            let listenerClose: Promise<void> | undefined;
+            let listenerCloseError: unknown;
+            try {
+              shutdownLock.assertOwned();
+              // server.close() synchronously stops accepting new work, but its
+              // promise waits for active streams. Start closure first, then
+              // cancel/reset pipeline work so those streams can settle.
+              listenerClose = boundServer.stop().catch((error: unknown) => {
+                listenerCloseError = error;
+              });
+            } catch (error) {
+              listenerCloseError = error;
+            }
+            try {
+              shutdownLock.assertOwned();
+              await io.resetPipelineState({ fast: true });
+            } catch (error) {
+              shutdownError ??= error;
+            }
+            if (listenerClose) {
+              await listenerClose;
+            }
+            shutdownError ??= listenerCloseError;
+            // Preserve current-main embed/vector/DB ordering while the
+            // lifecycle lock excludes a successor start.
+            try {
+              shutdownLock.assertOwned();
+              await embedding.settleDocumentEmbeds(EMBED_DRAIN_DEADLINE_MS);
+            } catch (error) {
+              shutdownError ??= error;
+            }
+            try {
+              shutdownLock.assertOwned();
+              await embedding.resetProvider();
+            } catch (error) {
+              shutdownError ??= error;
+            }
+            try {
+              shutdownLock.assertOwned();
+              await shutdownVectorPoolAsync(VECTOR_POOL_SHUTDOWN_DEADLINE_MS);
+            } catch (error) {
+              shutdownError ??= error;
+            }
+            try {
+              shutdownLock.assertOwned();
+              closeDb();
+            } catch (error) {
+              // SQLite recovery handles a failed best-effort checkpoint. Keep
+              // the established current-main behavior: warn but do not wedge
+              // shutdown or retain an otherwise-stale process record for it.
+              notify(
+                `Database close warning: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+
+            if (shutdownError) throw shutdownError;
+
+            // Discovery is removed only after listener and worker teardown.
+            shutdownLock.assertOwned();
+            io.removePort(actualPort, controlToken);
+            const current = io.readProcess();
+            if (
+              current?.pid === process.pid &&
+              current.token === controlToken &&
+              current.processIdentity === processIdentity
+            ) {
+              shutdownLock.assertOwned();
+              io.removeProcess(current.pid, current);
+            }
+          },
+          {
+            timeoutMs: Math.max(1, Math.floor(SHUTDOWN_DEADLINE_MS / 2)),
+          },
+        );
+        return shutdownPromise;
+      };
+      const processShutdown = opts.processBoundary
+        ? io.createProcessShutdownController(shutdown)
+        : undefined;
+      remoteShutdown = () => {
+        if (processShutdown) {
+          void processShutdown(0);
+          return;
+        }
+        void shutdown().catch((error: unknown) => {
+          notify(
+            `Remote shutdown failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          process.exitCode = 1;
+        });
       };
 
       if (candidatePort === 0) {
@@ -531,46 +1217,40 @@ export async function startGateway(
         );
       }
 
-      return { config, port: actualPort, owned: true, shutdown };
+      return {
+        config,
+        port: actualPort,
+        owned: true,
+        managementToken: controlToken,
+        shutdown,
+        processShutdown,
+      };
     } catch (e) {
       // Clean up any successfully-bound servers before retrying.
       // In multi-host configs, some hosts may have bound before another
       // failed with EADDRINUSE — stop them to avoid leaking FDs.
       // `server` is undefined when startServer() itself rejected (the common
       // EADDRINUSE case), in which case there is nothing to stop here.
-      server?.stop();
+      if (server) await server.stop();
 
       const msg = e instanceof Error ? e.message : String(e);
       if (!(/port\b.*\bin use/i.test(msg) || /EADDRINUSE/i.test(msg))) {
         throw e; // Not a port conflict — don't retry
       }
 
-      // Port is occupied — check if it's a lore gateway we can reuse.
-      // (Skip probe for port 0 — it can't EADDRINUSE.)
-      //
-      // The running gateway may be bound to an interface other than
-      // config.hosts[0] (e.g. it's on 127.0.0.1 while we're configured for a
-      // LAN/Tailscale IP, or vice versa). Probe 127.0.0.1 (always reachable for
-      // a local gateway) plus every configured host before declaring the port
-      // foreign-owned — otherwise a healthy lore gateway gets misreported as
-      // "port in use".
-      //
-      // Probe in parallel and adopt the first interface that answers: probes
-      // are independent, and a hanging/unreachable host (e.g. a stale Tailscale
-      // address) must not serialize 1.5s timeouts onto the others.
+      // Port is occupied — re-read and authenticate the exact persisted owner.
+      // Public health never establishes identity.
       if (candidatePort !== 0) {
-        const probeHosts = [...new Set(["127.0.0.1", ...config.hosts])];
-        const reachableHost = await firstReachableHost(
-          probeHosts,
-          candidatePort,
-        );
-        if (reachableHost) {
-          // Pin to the interface that actually answered (see pre-bind probe).
-          config.hosts = [reachableHost];
+        const record = io.readProcess();
+        const authenticatedHost =
+          record?.port === candidatePort ? await io.authenticate(record) : null;
+        if (record && authenticatedHost) {
+          config.hosts = [authenticatedHost];
           return {
             config,
             port: candidatePort,
             owned: false,
+            managementToken: record.token,
             shutdown: async () => {},
           };
         }
@@ -579,7 +1259,7 @@ export async function startGateway(
       // Port is taken by something else — try next candidate if available.
       if (config.portExplicit) {
         throw new Error(
-          `Port ${candidatePort} is already in use by another process (not a lore gateway). ` +
+          `Port ${candidatePort} is already in use by another process (not an authenticated lore gateway). ` +
             `Use --port / LORE_LISTEN_PORT to pick a different port.`,
         );
       }
@@ -590,7 +1270,7 @@ export async function startGateway(
         const nextPort = portsToTry[nextIdx];
         const nextLabel = nextPort === 0 ? "random port" : String(nextPort);
         notify(
-          `Port ${candidatePort} in use (not a lore gateway), trying ${nextLabel}…`,
+          `Port ${candidatePort} in use (not an authenticated lore gateway), trying ${nextLabel}…`,
         );
       }
     }
@@ -610,9 +1290,14 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     return startDaemon(opts);
   }
 
-  const { config, port, owned, shutdown } = await startGateway(opts);
+  const { config, port, owned, shutdown, processShutdown } = await startGateway(
+    {
+      ...opts,
+      processBoundary: true,
+    },
+  );
 
-  const addrs = config.hosts.map((h) => `http://${bracketHost(h)}:${port}`);
+  const addrs = config.hosts.map((host) => probeUrlFor(host, port));
 
   if (!owned) {
     // Another lore gateway is already running — nothing to do.
@@ -698,6 +1383,9 @@ export async function commandStart(opts: StartOptions): Promise<never> {
       `  LORE_REMOTE_URL         Remote gateway URL for \`lore run\` (delegates instead of starting local)`,
     );
     console.log(
+      `  LORE_GATEWAY_AUTH_TOKEN Access token required by remote/hosted data-plane routes (value is never printed)`,
+    );
+    console.log(
       `  LORE_HOSTED_MODE        Hosted mode — disable FS ops on client-controlled paths (current: ${config.hostedMode}, default for \`lore start\`: true)`,
     );
     console.log(
@@ -705,7 +1393,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     );
   }
   // Block until signal — bounded shutdown + force-exit on a second interrupt.
-  installSignalShutdown(shutdown);
+  installSignalShutdown(shutdown, processShutdown);
 
   // Keep the process alive (the HTTP server already does this, but be explicit)
   return new Promise(() => {});

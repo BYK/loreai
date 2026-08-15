@@ -62,6 +62,8 @@ lore run
 
 `lore run` starts the gateway and auto-detects your AI agent (Claude Code, OpenCode, Pi, Codex, Hermes), configuring everything automatically. Per-harness setup, manual configs, and remote-gateway instructions live at [withlore.ai/docs/install](https://withlore.ai/docs/install/) and the [guides section](https://withlore.ai/docs/guides/).
 
+To remove Lore, run `lore uninstall` (preserves your memory database) or inspect a full data removal with `lore uninstall --purge --dry-run`. See the [uninstall documentation](https://withlore.ai/docs/install/#uninstall) for every installed/runtime path and package-manager cleanup.
+
 ## How it works
 
 Lore is a transparent HTTP proxy that sits between an AI harness and its upstream LLM provider. Every supported harness already speaks a standard LLM HTTP API (Anthropic's `/v1/messages`, OpenAI's `/v1/chat/completions`, Codex's `/v1/codex/responses`); Lore redirects those requests to its own gateway, where the conversation is parsed, persisted, and transformed before being forwarded to the real upstream.
@@ -126,6 +128,15 @@ All destructive commands prompt for confirmation. Use `--yes` to skip (for scrip
 ### Web dashboard
 
 When the gateway is running, visit **http://localhost:3207/ui** for a web-based dashboard that lets you browse all projects, knowledge entries, sessions, and distillations; view full detail for any entry; search across all data sources (using the same recall engine); and delete entries or clear project data. Server-rendered HTML — no external dependencies.
+
+The dashboard and `/api/*` management endpoints accept only loopback clients, even when the data-plane listener is exposed on `0.0.0.0`, a LAN address, or Tailscale. To manage a gateway on another machine, tunnel its loopback listener and open the local URL:
+
+```bash
+ssh -N -L 3207:127.0.0.1:3207 user@gateway-host
+# Then open http://localhost:3207/ui
+```
+
+Keep `127.0.0.1` in `LORE_LISTEN_HOST` on the gateway (multiple hosts are comma-separated) so the tunnel has a loopback listener to reach. Remote agent/data-plane routes such as `/v1/messages` remain available on the configured non-loopback listeners.
 
 ## lat.md compatibility
 

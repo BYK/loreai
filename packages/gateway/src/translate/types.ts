@@ -12,6 +12,14 @@
  */
 
 import { asString } from "@loreai/core";
+import {
+  GATEWAY_AUTH_HEADER,
+  isCredentialHeaderName,
+  KNOWN_SESSION_HEADERS,
+} from "../credential-headers";
+import { hasConflictingAuthHeaders, PROVIDER_AUTH_HEADER_NAMES } from "../auth";
+
+export { isCredentialHeaderName } from "../credential-headers";
 
 // ---------------------------------------------------------------------------
 // Content blocks — discriminated union on `type`
@@ -466,6 +474,8 @@ export type CacheAnalytics = {
 export interface UpstreamSnapshot {
   /** Resolved upstream base URL (e.g., "https://api.minimax.io/anthropic"). */
   url: string;
+  /** Whether X-Lore-Upstream-URL, rather than administrator routing, selected it. */
+  callerSelected?: boolean;
   /** Wire protocol used for the request. */
   protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
   /** Provider ID from X-Lore-Provider header (for worker model selection). */
@@ -597,8 +607,12 @@ export type SessionState = {
   headerSessionId?: string;
   /** Name of the header that provided `headerSessionId`. */
   headerName?: string;
-  /** Privacy-safe credential scope for header/marker session identity. */
+  /** Privacy-safe credential scope for header/marker session identity. Remote
+   *  gateways must use the full domain-separated tenant fingerprint; local
+   *  gateways retain the historical short diagnostic fingerprint. */
   credentialFingerprint?: string;
+  /** Opaque server-derived owner used to re-enter tenant scope in delayed work. */
+  storageTenantId?: string;
   /** Candidate headers being tracked during the Tier 2 learning phase.
    *  Key: header name. Value: last seen value + consecutive stable turn count. */
   candidateHeaders?: Map<string, { value: string; seenCount: number }>;
@@ -763,6 +777,10 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   // upstream request to match the bytes it actually sends. Forwarding the
   // client's raw value would mislabel the re-serialized body (issue #1032).
   "content-encoding",
+  // Origin-bound browser credentials, including Lore's management cookie.
+  // Never forward these to a model-provider origin.
+  "cookie",
+  "proxy-authorization",
   // Lore-specific (injected by fetch interceptor / plugin hooks)
   "x-lore-provider",
   "x-lore-upstream-url",
@@ -772,15 +790,16 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "x-lore-git-remote",
   "x-lore-agent",
   "x-lore-no-store",
+  GATEWAY_AUTH_HEADER,
   "x-lore-recall-invoked",
   // Protocol version — set explicitly by each builder
   "anthropic-version",
   // Session identification — consumed by gateway, not meaningful to upstream
   "x-parent-session-id",
-  "x-session-affinity",
-  "x-claude-code-session-id",
+  ...KNOWN_SESSION_HEADERS,
   // Auth — handled separately by each builder (extractAuth + authHeaders)
   "x-api-key",
+  "x-goog-api-key",
   "authorization",
 ]);
 
@@ -790,7 +809,8 @@ const GATEWAY_MANAGED_HEADERS = new Set([
  * The fetch interceptor preserves all original headers (including provider-
  * specific ones like `anthropic-beta`, `OpenAI-Organization`, etc.) on the
  * request to the gateway. This function extracts them for forwarding to the
- * upstream, filtering out headers the gateway sets itself.
+ * upstream, filtering out headers the gateway sets itself and any credentials
+ * whose destination cannot be safely inferred here.
  *
  * User-supplied `extraHeaders` (from `LORE_UPSTREAM_EXTRA_HEADERS`) are
  * applied separately at the end of each request builder so they overlay
@@ -805,7 +825,11 @@ export function forwardClientHeaders(
   const forwarded: Record<string, string> = {};
   for (const [key, value] of Object.entries(rawHeaders)) {
     const lower = key.toLowerCase();
-    if (!lower.startsWith("x-lore-") && !GATEWAY_MANAGED_HEADERS.has(lower)) {
+    if (
+      !lower.startsWith("x-lore-") &&
+      !GATEWAY_MANAGED_HEADERS.has(lower) &&
+      !isCredentialHeaderName(lower)
+    ) {
       forwarded[lower] = value;
     }
   }
@@ -817,10 +841,8 @@ export function forwardClientHeaders(
  * built upstream `headers` object. Keys are already lowercased by
  * `parseCurlHeaders`. Empty input is a no-op.
  *
- * Used by every upstream-headers construction site (anthropic/openai/openai-
- * responses builders, the upstream snapshot in `pipeline.ts`, and the
- * passthrough endpoints in `server.ts` / `cache-warmer.ts` /
- * `passthroughResponsesCompact`) to keep precedence consistent:
+ * Used by upstream dispatch sites (anthropic/openai/openai-responses builders
+ * and passthrough/cache-warmer paths) to keep precedence consistent:
  * client-forwarded headers → gateway-managed overlay → user extras.
  */
 export function applyUpstreamExtraHeaders(
@@ -828,7 +850,38 @@ export function applyUpstreamExtraHeaders(
   extras?: Record<string, string>,
 ): void {
   if (!extras) return;
-  for (const [key, value] of Object.entries(extras)) {
+  const normalized = new Map(
+    Object.entries(extras).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  if (normalized.has(GATEWAY_AUTH_HEADER)) {
+    throw new Error(
+      "Configured upstream headers cannot contain the gateway access header",
+    );
+  }
+  if (hasConflictingAuthHeaders(extras)) {
+    throw new Error(
+      "Configured upstream headers contain conflicting authentication mechanisms",
+    );
+  }
+  const authHeaders = new Set<string>(PROVIDER_AUTH_HEADER_NAMES);
+  const replacesAuth = [...normalized.keys()].some((key) =>
+    authHeaders.has(key),
+  );
+
+  for (const key of Object.keys(headers)) {
+    const lower = key.toLowerCase();
+    if (normalized.has(lower) || (replacesAuth && authHeaders.has(lower))) {
+      delete headers[key];
+    }
+  }
+  for (const [key, value] of normalized) {
     headers[key] = value;
   }
+}
+
+/** Build the credential-safe client-header snapshot reused by workers/warmers. */
+export function buildUpstreamSnapshotHeaders(
+  rawHeaders: Record<string, string>,
+): Record<string, string> {
+  return forwardClientHeaders(rawHeaders);
 }

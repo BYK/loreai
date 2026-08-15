@@ -4,13 +4,15 @@ import {
   passthroughResponsesCompact,
   resetPipelineState,
 } from "../src/pipeline";
-import { handleModelsPassthrough } from "../src/server";
+import { handleModelsPassthrough, startServer } from "../src/server";
 import { upstreamFetch } from "../src/fetch";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
 const mockedFetch = vi.mocked(upstreamFetch);
 const config = loadConfig();
+config.remoteGateway = false;
+config.hostedMode = false;
 
 function fetchUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
@@ -49,6 +51,79 @@ afterEach(async () => {
 });
 
 describe("foreground passthrough route aborts", () => {
+  test("pipeline reset aborts an actual Bedrock streaming route and unblocks listener close", async () => {
+    let upstreamSignal: AbortSignal | undefined;
+    let markUpstreamStarted!: () => void;
+    const upstreamStarted = new Promise<void>((resolve) => {
+      markUpstreamStarted = resolve;
+    });
+    let upstreamCancelled = false;
+    mockedFetch.mockImplementation(async (_url, init) => {
+      upstreamSignal = init?.signal ?? undefined;
+      markUpstreamStarted();
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("partial"));
+          },
+          pull() {
+            return new Promise(() => {});
+          },
+          cancel() {
+            upstreamCancelled = true;
+          },
+        }),
+        {
+          headers: {
+            "content-type": "application/vnd.amazon.eventstream",
+          },
+        },
+      );
+    });
+
+    const server = await startServer({
+      ...config,
+      port: 0,
+      hosts: ["127.0.0.1"],
+      remoteGateway: false,
+      hostedMode: false,
+      bedrockRegion: "us-east-1",
+    });
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${server.port}/v1/model/test/converse-stream`,
+        { method: "POST", body: "{}" },
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe(
+        "application/vnd.amazon.eventstream",
+      );
+      await upstreamStarted;
+
+      const responseBody = response.body;
+      if (!responseBody) throw new Error("expected a streaming response body");
+      const reader = responseBody.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+        "partial",
+      );
+      const stalledRead = reader.read();
+
+      // Match production shutdown ordering: stop accepting requests first,
+      // then abort registered foreground work so server.close() can settle.
+      const listenerClose = server.stop();
+      await resetPipelineState({ fast: true });
+
+      // The Web-stream AbortError crosses node:http as a terminated socket;
+      // either transport surface is acceptable, but the read must settle.
+      await expect(stalledRead).rejects.toBeDefined();
+      await expect(listenerClose).resolves.toBeUndefined();
+      expect(upstreamSignal?.aborted).toBe(true);
+      expect(upstreamCancelled).toBe(true);
+    } finally {
+      await server.stop();
+    }
+  });
+
   test.each(ROUTES)(
     "caller abort settles $name when fetch ignores signal",
     async ({ invoke, target }) => {

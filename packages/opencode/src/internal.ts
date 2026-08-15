@@ -15,7 +15,66 @@
  */
 
 import type { PluginInput } from "@opencode-ai/plugin";
-import { log } from "@loreai/core";
+import { GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import * as http from "node:http";
+import * as https from "node:https";
+
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname
+      .replace(/^\[/, "")
+      .replace(/\]$/, "")
+      .toLowerCase();
+    return (
+      hostname === "localhost" ||
+      hostname === "localhost." ||
+      hostname === "::1" ||
+      /^127(?:\.\d{1,3}){3}$/.test(hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Access headers are injected only for the URL selected by LORE_REMOTE_URL. */
+export function gatewayAccessHeadersForRemote(
+  gatewayBase: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const remoteUrl = env.LORE_REMOTE_URL?.replace(/\/+$/, "");
+  const token = env.LORE_GATEWAY_AUTH_TOKEN;
+  return remoteUrl === gatewayBase.replace(/\/+$/, "") && token
+    ? { [GATEWAY_AUTH_HEADER]: token }
+    : {};
+}
+
+/** Provider and Lore credentials are applied by the gateway, never this hop. */
+export function shouldForwardUpstreamExtraHeader(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    !lower.startsWith("x-lore-") &&
+    lower !== "x-api-key" &&
+    lower !== "x-goog-api-key" &&
+    lower !== "authorization"
+  );
+}
+
+function probeLoopback(url: string, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const request = (parsed.protocol === "https:" ? https : http).request(
+      parsed,
+      { method: "GET", signal },
+      (response) => {
+        response.resume();
+        const status = response.statusCode ?? 0;
+        resolve(status >= 200 && status < 300);
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
 
 /**
  * Pin every opencode provider's `options.baseURL` to the Lore gateway.
@@ -70,14 +129,16 @@ export async function probeGateway(
   baseURL: string,
   timeoutMs = 1500,
 ): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`${baseURL}/health`, { signal: controller.signal });
-    clearTimeout(timer);
-    return res.ok;
+    const url = `${baseURL}/health`;
+    if (isLoopbackUrl(url)) return await probeLoopback(url, controller.signal);
+    return (await fetch(url, { signal: controller.signal })).ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

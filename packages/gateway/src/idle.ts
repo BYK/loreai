@@ -768,7 +768,7 @@ export function startIdleScheduler(
         continue;
 
       warmupInProgress.add(sessionID);
-      executeWarmup(state, profile, config.upstreamExtraHeaders)
+      executeWarmup(state, profile, config)
         .then((result) => {
           // executeWarmup mutates state.warmup (lastWarmupAt, totalWarmups,
           // lastWarmupRefreshTokens). The periodic flush below skips

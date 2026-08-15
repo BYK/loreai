@@ -16,7 +16,14 @@
  * detection, setup spawning, and Sentry SDK telemetry.
  */
 
-import { chmodSync, createWriteStream, statSync, unlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  createWriteStream,
+  readFileSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -26,7 +33,6 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { getMeta, setMeta } from "@loreai/core";
 
 import {
-  acquireLock,
   cleanupOldBinary,
   fetchWithUpgradeError,
   getBinaryFilename,
@@ -39,11 +45,15 @@ import {
   getBinaryDownloadUrl,
   isNightlyVersion,
   KNOWN_CURL_DIRS,
-  releaseLock,
 } from "./binary";
+import type { LifecycleLock } from "../../lifecycle-lock";
 import { attemptDeltaUpgrade } from "./delta-upgrade";
 import { UpgradeError } from "./errors";
 import { makeByteProgress } from "./progress";
+import {
+  fetchStableBinaryChecksum,
+  stableReleaseRequiresChecksums,
+} from "./release-integrity";
 import {
   downloadNightlyBlob,
   fetchManifest,
@@ -158,7 +168,6 @@ export function getCurlInstallPaths(): {
   installPath: string;
   tempPath: string;
   oldPath: string;
-  lockPath: string;
 } {
   // Check if we're running from a known curl install location
   for (const dir of KNOWN_CURL_PATHS) {
@@ -282,7 +291,6 @@ export async function versionExists(
 
 export type DownloadResult = {
   tempBinaryPath: string;
-  lockPath: string;
   patchBytes?: number;
 };
 
@@ -333,6 +341,7 @@ function getNightlyGzFilename(): string {
  */
 async function downloadNightlyToPath(
   destPath: string,
+  lifecycleLock: LifecycleLock,
   version?: string,
 ): Promise<void> {
   const token = await getAnonymousToken();
@@ -349,6 +358,7 @@ async function downloadNightlyToPath(
       "GHCR blob response had no body",
     );
   }
+  lifecycleLock.assertOwned();
   await streamDecompressToFile(response.body, destPath);
 }
 
@@ -359,6 +369,7 @@ async function downloadNightlyToPath(
 async function downloadStableToPath(
   version: string,
   destPath: string,
+  lifecycleLock: LifecycleLock,
 ): Promise<void> {
   const url = getBinaryDownloadUrl(version);
   const headers = getGitHubHeaders();
@@ -371,6 +382,7 @@ async function downloadStableToPath(
       "GitHub",
     );
     if (gzResponse.ok && gzResponse.body) {
+      lifecycleLock.assertOwned();
       await streamDecompressToFile(gzResponse.body, destPath);
       return;
     }
@@ -388,6 +400,7 @@ async function downloadStableToPath(
   }
 
   const body = await response.arrayBuffer();
+  lifecycleLock.assertOwned();
   await writeFile(destPath, Buffer.from(body));
 }
 
@@ -430,92 +443,142 @@ function formatBytes(bytes: number): string {
  * Download the new binary to a temporary path and return its location.
  *
  * Tries delta upgrade first, falls back to full download.
- * The lock is held on success so concurrent upgrades are blocked.
+ * The caller holds the per-user lifecycle lock for the complete upgrade.
  */
 export async function downloadBinaryToTemp(
   version: string,
+  lifecycleLock: LifecycleLock,
   downloadTag?: string,
   offline?: OfflineMode,
+  currentExecutable: string = process.execPath,
 ): Promise<DownloadResult> {
-  const { tempPath, lockPath } = getCurlInstallPaths();
+  const tempPath = getBinaryPaths(currentExecutable).tempPath;
+  const nightly = isNightlyVersion(version);
+  let expectedStableSha256: string | null = null;
 
-  acquireLock(lockPath);
-
-  try {
-    // Clean up leftover temp file
-    try {
-      unlinkSync(tempPath);
-    } catch {
-      // Ignore
-    }
-
-    // Try delta upgrade first
-    const deltaStart = Date.now();
-    const deltaResult = await attemptDeltaUpgrade(
-      version,
-      process.execPath,
-      tempPath,
-      !!offline,
-    );
-
-    let patchBytes: number | undefined;
-    if (deltaResult) {
-      patchBytes = deltaResult.patchBytes;
-      const elapsed = ((Date.now() - deltaStart) / 1000).toFixed(1);
-      console.error(
-        `[lore] Applied delta patch (${formatBytes(patchBytes)} downloaded, ${deltaResult.chainLength} link(s)) in ${elapsed}s`,
-      );
-    } else if (offline) {
-      throw new UpgradeError(
-        "offline_cache_miss",
-        offline === "explicit"
-          ? `Cannot upgrade to ${version} in offline mode — no pre-downloaded update is available. ` +
-              "Run `lore upgrade` without `--offline` to download the update directly."
-          : `Cannot upgrade to ${version} — the network is unavailable and no pre-downloaded update was found. ` +
-              "Check your internet connection and try again.",
-      );
-    } else {
-      // Full download
-      const fullStart = Date.now();
-      if (isNightlyVersion(version)) {
-        await downloadNightlyToPath(tempPath, version);
-      } else {
-        await downloadStableToPath(downloadTag ?? version, tempPath);
+  // Authenticate stable publisher metadata before downloading, patching, or
+  // exposing a candidate binary. Historical releases remain installable, but
+  // every release after the checksum rollout fails closed when metadata is
+  // unavailable. Offline upgrades to those releases cannot establish this
+  // GitHub-backed trust boundary and are therefore rejected.
+  if (!nightly) {
+    if (offline) {
+      if (stableReleaseRequiresChecksums(version)) {
+        throw new UpgradeError(
+          "offline_cache_miss",
+          `Cannot authenticate stable release ${version} in offline mode because its publisher checksum metadata is unavailable`,
+        );
       }
-      const elapsed = ((Date.now() - fullStart) / 1000).toFixed(1);
-      console.error(`[lore] Downloaded full binary in ${elapsed}s`);
+    } else {
+      expectedStableSha256 = await fetchStableBinaryChecksum(version);
     }
-
-    const verifiedSize = await waitForBinaryVisible(tempPath);
-    console.error(`[lore] Binary verified (${formatBytes(verifiedSize)})`);
-
-    // Clear consumed patch cache
-    getPatchCache()
-      .clear()
-      .catch(() => {});
-
-    // Set executable permission (Unix only)
-    if (process.platform !== "win32") {
-      chmodSync(tempPath, 0o755);
-    }
-
-    return { tempBinaryPath: tempPath, lockPath, patchBytes };
-  } catch (error) {
-    releaseLock(lockPath);
-    throw error;
   }
+
+  // Clean up leftover temp file
+  lifecycleLock.assertOwned();
+  try {
+    unlinkSync(tempPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  // Try delta upgrade first
+  lifecycleLock.assertOwned();
+  const deltaStart = Date.now();
+  const deltaResult = await attemptDeltaUpgrade(
+    version,
+    currentExecutable,
+    tempPath,
+    !!offline,
+  );
+
+  let patchBytes: number | undefined;
+  if (deltaResult) {
+    patchBytes = deltaResult.patchBytes;
+    const elapsed = ((Date.now() - deltaStart) / 1000).toFixed(1);
+    console.error(
+      `[lore] Applied delta patch (${formatBytes(patchBytes)} downloaded, ${deltaResult.chainLength} link(s)) in ${elapsed}s`,
+    );
+  } else if (offline) {
+    throw new UpgradeError(
+      "offline_cache_miss",
+      offline === "explicit"
+        ? `Cannot upgrade to ${version} in offline mode — no pre-downloaded update is available. ` +
+            "Run `lore upgrade` without `--offline` to download the update directly."
+        : `Cannot upgrade to ${version} — the network is unavailable and no pre-downloaded update was found. ` +
+            "Check your internet connection and try again.",
+    );
+  } else {
+    // Full download
+    const fullStart = Date.now();
+    if (nightly) {
+      await downloadNightlyToPath(tempPath, lifecycleLock, version);
+    } else {
+      await downloadStableToPath(
+        downloadTag ?? version,
+        tempPath,
+        lifecycleLock,
+      );
+    }
+    const elapsed = ((Date.now() - fullStart) / 1000).toFixed(1);
+    console.error(`[lore] Downloaded full binary in ${elapsed}s`);
+  }
+
+  const verifiedSize = await waitForBinaryVisible(tempPath);
+  if (expectedStableSha256) {
+    const actualSha256 = createHash("sha256")
+      .update(readFileSync(tempPath))
+      .digest("hex");
+    if (actualSha256 !== expectedStableSha256) {
+      lifecycleLock.assertOwned();
+      try {
+        unlinkSync(tempPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      throw new UpgradeError(
+        "execution_failed",
+        `Downloaded binary checksum mismatch: got ${actualSha256}, expected ${expectedStableSha256}`,
+      );
+    }
+    console.error(
+      `[lore] Binary verified (SHA-256, ${formatBytes(verifiedSize)})`,
+    );
+  } else {
+    console.error(`[lore] Binary verified (${formatBytes(verifiedSize)})`);
+  }
+
+  // This mutation belongs to the upgrade transition too; wait for it instead
+  // of allowing it to escape beyond lifecycle-lock release.
+  lifecycleLock.assertOwned();
+  await getPatchCache().clear();
+
+  // Set executable permission (Unix only)
+  if (process.platform !== "win32") {
+    lifecycleLock.assertOwned();
+    chmodSync(tempPath, 0o755);
+  }
+
+  return { tempBinaryPath: tempPath, patchBytes };
 }
 
 /**
  * Execute the full upgrade: download binary, replace self.
  *
- * Returns the download result with paths for the caller to
- * handle lock release.
+ * The caller retains lifecycle-lock ownership through binary installation.
  */
 export async function executeUpgrade(
   version: string,
+  lifecycleLock: LifecycleLock,
   downloadTag?: string,
   offline?: OfflineMode,
+  currentExecutable?: string,
 ): Promise<DownloadResult> {
-  return downloadBinaryToTemp(version, downloadTag, offline);
+  return downloadBinaryToTemp(
+    version,
+    lifecycleLock,
+    downloadTag,
+    offline,
+    currentExecutable,
+  );
 }

@@ -457,11 +457,11 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
 // via undici MockAgent. Fully hermetic: no real network, DNS, or TLS.
 // ---------------------------------------------------------------------------
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 let mock: MockAgent | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
   if (mock) {
     void mock.close();
@@ -533,11 +533,13 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
     await resetPipelineState();
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       for (const suffix of ["", "-shm", "-wal"]) {
         const f = `${dbPath}${suffix}`;
@@ -653,11 +655,13 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
     await resetPipelineState();
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       for (const suffix of ["", "-shm", "-wal"]) {
         const f = `${dbPath}${suffix}`;
@@ -725,11 +729,13 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
     await resetPipelineState();
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       for (const suffix of ["", "-shm", "-wal"]) {
         const f = `${dbPath}${suffix}`;
@@ -777,11 +783,13 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
     closeDB();
     await resetPipelineState();
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       for (const suffix of ["", "-shm", "-wal"]) {
         const f = `${dbPath}${suffix}`;

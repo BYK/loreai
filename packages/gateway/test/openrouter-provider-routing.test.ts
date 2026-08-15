@@ -4,6 +4,7 @@
  */
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import {
   close as closeDB,
   loadSessionTracking,
@@ -26,11 +27,46 @@ type Started = {
   baseURL: string;
   config: GatewayConfig;
   dbPath: string;
-  server: { stop(): void };
+  server: { stop(): Promise<void> };
   previousEnv: Map<string, string | undefined>;
 };
 
 let started: Started | undefined;
+
+function postLoopback(
+  baseURL: string,
+  path: string,
+  headers: Record<string, string>,
+  body: string,
+): Promise<Response> {
+  const url = new URL(path, baseURL);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      url,
+      {
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-length": String(Buffer.byteLength(body)),
+        },
+      },
+      (incoming) => {
+        const chunks: Buffer[] = [];
+        incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+        incoming.once("error", reject);
+        incoming.once("end", () => {
+          resolve(
+            new Response(Buffer.concat(chunks), {
+              status: incoming.statusCode ?? 500,
+            }),
+          );
+        });
+      },
+    );
+    request.once("error", reject);
+    request.end(body);
+  });
+}
 
 function openAIResponse(content = "hello"): Response {
   return new Response(
@@ -162,6 +198,10 @@ async function start(
     LORE_DB_PATH: `/tmp/lore-openrouter-routing-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
     LORE_LISTEN_PORT: "0",
     LORE_DEBUG: "false",
+    // This suite exercises local caller-selected provider routing. Keep it
+    // hermetic when the developer shell binds Lore on a non-loopback host.
+    LORE_REMOTE_GATEWAY: "0",
+    LORE_HOSTED_MODE: "0",
     LORE_BATCH_DISABLED: options.batchDisabled === false ? undefined : "1",
     LORE_WORKER_MODEL: options.workerModel,
     LORE_WORKER_API_KEY: options.dedicatedKey ? DEDICATED_KEY : undefined,
@@ -203,7 +243,7 @@ async function stop(): Promise<void> {
   if (!started) return;
   const current = started;
   started = undefined;
-  current.server.stop();
+  await current.server.stop();
   const { resetPipelineState, setUpstreamInterceptor } =
     await import("../src/pipeline");
   const { _setTestVertexTokenProvider } = await import("../src/vertex-auth");
@@ -761,7 +801,10 @@ describe("OpenRouter provider routing", () => {
         protocol: "openai",
         providerID: "openrouter",
         model: "anthropic/claude-sonnet-4-6",
-        headers: {},
+        headers: {
+          authorization: "Bearer persisted-secret",
+          "anthropic-beta": "safe-beta",
+        },
         providerOptions: legacyPolicy,
       }),
     });
@@ -780,6 +823,9 @@ describe("OpenRouter provider routing", () => {
       })
     ).text();
     expect(workerBodies(legacyStart)[0].provider).toEqual(legacyPolicy);
+    expect(
+      (await activeSession()).upstreamByProvider.get("openrouter")?.headers,
+    ).toEqual({ "anthropic-beta": "safe-beta" });
 
     saveSessionTracking(sid, {
       lastUpstream: JSON.stringify({
@@ -935,13 +981,11 @@ describe("OpenRouter provider routing", () => {
       return responsesResponse();
     });
 
-    const response = await fetch(`${run.baseURL}/v1/codex/responses`, {
-      method: "POST",
-      headers: requestHeaders(
-        "openai-codex",
-        "https://chatgpt.com/backend-api",
-      ),
-      body: JSON.stringify({
+    const response = await postLoopback(
+      run.baseURL,
+      "/v1/codex/responses",
+      requestHeaders("openai-codex", "https://chatgpt.com/backend-api"),
+      JSON.stringify({
         model: "gpt-5.1-codex-mini",
         input: "Hello",
         stream: false,
@@ -955,7 +999,7 @@ describe("OpenRouter provider routing", () => {
           },
         ],
       }),
-    });
+    );
     expect(response.ok).toBe(true);
     await response.text();
     if (!forwarded) throw new Error("Codex request was not forwarded");

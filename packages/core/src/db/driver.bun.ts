@@ -12,6 +12,15 @@ import { createHash } from "node:crypto";
 
 export { Database };
 
+/** Register a connection-local scalar function used by TEMP trigger guards. */
+export function registerScalarFunction(
+  database: Database,
+  name: string,
+  fn: () => string,
+): void {
+  database.function(name, fn);
+}
+
 /** Stable SHA-256 hex digest — replaces the Bun-only `Bun.CryptoHasher`. */
 export function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");

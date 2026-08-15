@@ -32,34 +32,22 @@ describe("normalizeBaseUrl", () => {
     expect(normalizeBaseUrl(undefined, 8080)).toBe("http://127.0.0.1:8080/v1");
   });
 
-  test("remote URL without trailing slash", () => {
-    expect(normalizeBaseUrl("http://remote:3207", undefined)).toBe(
-      "http://remote:3207/v1",
-    );
-  });
-
-  test("remote URL with trailing slash", () => {
-    expect(normalizeBaseUrl("http://remote:3207/", undefined)).toBe(
-      "http://remote:3207/v1",
-    );
-  });
-
-  test("remote URL with multiple trailing slashes", () => {
-    expect(normalizeBaseUrl("http://remote:3207///", undefined)).toBe(
-      "http://remote:3207/v1",
-    );
-  });
-
-  test("remote URL already ending in /v1", () => {
-    expect(normalizeBaseUrl("http://remote:3207/v1", undefined)).toBe(
-      "http://remote:3207/v1",
-    );
-  });
-
-  test("remote URL ending in /v1/", () => {
-    expect(normalizeBaseUrl("http://remote:3207/v1/", undefined)).toBe(
-      "http://remote:3207/v1",
-    );
+  test.each([
+    ["http://remote:3207", "http://remote:3207/v1"],
+    ["http://remote:3207/", "http://remote:3207/v1"],
+    ["http://remote:3207///", "http://remote:3207/v1"],
+    ["http://remote:3207/v1", "http://remote:3207/v1"],
+    ["http://remote:3207/v1/", "http://remote:3207/v1"],
+    ["https://gateway.example/lore", "https://gateway.example/lore/v1"],
+    [
+      "https://gateway.example/team/lore/",
+      "https://gateway.example/team/lore/v1",
+    ],
+    ["http://localhost:8080/lore", "http://localhost:8080/lore/v1"],
+    ["http://[::1]:8080/v1", "http://[::1]:8080/v1"],
+    [" HTTPS://GATEWAY.EXAMPLE:443/lore/ ", "https://gateway.example/lore/v1"],
+  ])("normalizes supported remote URL %s", (input, expected) => {
+    expect(normalizeBaseUrl(input, undefined)).toBe(expected);
   });
 
   test("remote URL takes precedence over port", () => {
@@ -68,22 +56,33 @@ describe("normalizeBaseUrl", () => {
     );
   });
 
-  test("rejects URL with double-quotes", () => {
-    expect(() =>
-      normalizeBaseUrl('http://evil.com/v1"inject', undefined),
-    ).toThrow("Invalid characters");
-  });
-
-  test("rejects URL with control characters", () => {
-    expect(() =>
-      normalizeBaseUrl("http://evil.com/v1\nmalicious", undefined),
-    ).toThrow("Invalid characters");
-  });
-
-  test("rejects URL with backslash", () => {
-    expect(() => normalizeBaseUrl("http://evil.com\\v1", undefined)).toThrow(
-      "Invalid characters",
-    );
+  test.each([
+    ["malformed", "not a URL"],
+    ["missing host", "https://"],
+    ["empty authority", "https:///gateway.example"],
+    ["file protocol", "file:///tmp/lore.sock"],
+    ["javascript protocol", "javascript:super-secret"],
+    ["username", "https://alice@gateway.example"],
+    ["password", "https://alice:super-secret@gateway.example"],
+    ["empty userinfo", "https://@gateway.example"],
+    ["query", "https://gateway.example/lore?token=super-secret"],
+    ["empty query", "https://gateway.example/lore?"],
+    ["fragment", "https://gateway.example/lore#super-secret"],
+    ["empty fragment", "https://gateway.example/lore#"],
+    ["double quote", 'http://evil.com/v1"inject'],
+    ["control character", "http://evil.com/v1\nmalicious"],
+    ["backslash", "http://evil.com\\v1"],
+  ])("rejects a remote URL with %s without echoing it", (_case, input) => {
+    let error: unknown;
+    try {
+      normalizeBaseUrl(input, undefined);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("Invalid remote URL");
+    expect((error as Error).message).not.toContain(input);
+    expect((error as Error).message).not.toContain("super-secret");
   });
 
   test("rejects whitespace-only remote URL", () => {
@@ -745,6 +744,17 @@ describe("updateHermesEnv", () => {
     expect(second).toBe(first);
     // Exactly one backup block (the footer appears once per block).
     expect(second.match(/# end lore setup backup/g)?.length).toBe(1);
+  });
+
+  test("canonicalizes duplicate live assignments so the final value routes through Lore", () => {
+    const result = updateHermesEnv(
+      "OPENAI_BASE_URL=https://first/v1\nOPENAI_BASE_URL=https://shadowing/v1\n",
+      BASE,
+    );
+    const live = result
+      .split("\n")
+      .filter((line) => line.startsWith("OPENAI_BASE_URL="));
+    expect(live).toEqual([`OPENAI_BASE_URL=${BASE}`]);
   });
 });
 

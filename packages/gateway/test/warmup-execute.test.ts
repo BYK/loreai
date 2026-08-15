@@ -14,6 +14,7 @@
  * vi.fn() can intercept the warmup request.
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { log } from "@loreai/core";
 
 vi.mock("../src/fetch", () => ({
   upstreamFetch: (...args: Parameters<typeof fetch>) =>
@@ -30,6 +31,7 @@ import {
 import { setSessionAuth, _resetAuthForTest } from "../src/auth";
 import { clearAllCosts } from "../src/cost-tracker";
 import { compressBody } from "../src/cache-analytics";
+import { loadConfig } from "../src/config";
 import type { SessionState, CacheAnalytics } from "../src/translate/types";
 
 const SESSION_ID = "warmup-exec-session-1";
@@ -96,6 +98,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
 });
 
 describe("executeWarmup → lastWarmupRefreshTokens (Bug B producer)", () => {
@@ -150,6 +153,197 @@ describe("executeWarmup → lastWarmupRefreshTokens (Bug B producer)", () => {
     // refresh credit must be 0 so creditWarmupHit later denies a bogus hit.
     expect(state.warmup?.lastWarmupRefreshTokens).toBe(0);
     expect(state.warmup?.totalWarmups).toBe(1);
+  });
+
+  test("a rejected warmup logs status but never response text or statusText", async () => {
+    const bodyMarker = "PRIVATE_WARMUP_RESPONSE_BODY_MARKER";
+    const reasonMarker = "PRIVATE_WARMUP_REASON_MARKER";
+    const messages: string[] = [];
+    vi.spyOn(log, "error").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(bodyMarker, { status: 422, statusText: reasonMarker }),
+      ),
+    ) as unknown as typeof fetch;
+
+    const result = await executeWarmup(
+      makeState(),
+      buildAnthropicProfile(MODEL, "5m"),
+    );
+
+    expect(result.ok).toBe(false);
+    const output = messages.join("\n");
+    expect(output).toContain("422");
+    expect(output).not.toContain(bodyMarker);
+    expect(output).not.toContain(reasonMarker);
+  });
+
+  test("malformed warmup JSON never reaches diagnostics", async () => {
+    const bodyMarker = "PRIVATE_WARMUP_MALFORMED_PREFIX";
+    const messages: string[] = [];
+    vi.spyOn(log, "error").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(new Response(`${bodyMarker} not-json`, { status: 200 })),
+    ) as unknown as typeof fetch;
+
+    const result = await executeWarmup(
+      makeState(),
+      buildAnthropicProfile(MODEL, "5m"),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(messages.join("\n")).not.toContain(bodyMarker);
+  });
+
+  test("body-controlled usage fields never reach warmup logs", async () => {
+    const bodyMarker = "PRIVATE_WARMUP_USAGE_FIELD_MARKER";
+    const messages: string[] = [];
+    vi.spyOn(log, "info").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    vi.spyOn(log, "warn").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            usage: {
+              input_tokens: bodyMarker,
+              cache_read_input_tokens: bodyMarker,
+              cache_creation_input_tokens: bodyMarker,
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const result = await executeWarmup(
+      makeState(),
+      buildAnthropicProfile(MODEL, "5m"),
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+    expect(messages.join("\n")).not.toContain(bodyMarker);
+  });
+
+  test("thrown warmup errors do not log URL secrets", async () => {
+    const userinfoMarker = "PRIVATE_WARMUP_THROWN_USERINFO";
+    const queryMarker = "PRIVATE_WARMUP_THROWN_QUERY";
+    const fragmentMarker = "PRIVATE_WARMUP_THROWN_FRAGMENT";
+    const messages: string[] = [];
+    vi.spyOn(log, "error").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    globalThis.fetch = vi.fn(() =>
+      Promise.reject(
+        new Error(
+          `fetch https://user:${userinfoMarker}@example.com/warm?token=${queryMarker}#${fragmentMarker} failed`,
+        ),
+      ),
+    ) as unknown as typeof fetch;
+
+    const result = await executeWarmup(
+      makeState(),
+      buildAnthropicProfile(MODEL, "5m"),
+    );
+
+    expect(result.ok).toBe(false);
+    const output = messages.join("\n");
+    expect(output).not.toContain(userinfoMarker);
+    expect(output).not.toContain(queryMarker);
+    expect(output).not.toContain(fragmentMarker);
+  });
+
+  test("does not attach admin extras to an untrusted warmup URL", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    globalThis.fetch = vi.fn((_input, init) => {
+      capturedHeaders = init?.headers as Record<string, string>;
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            usage: {
+              input_tokens: 5,
+              cache_read_input_tokens: 168_000,
+              cache_creation_input_tokens: 0,
+            },
+            stop_reason: "end_turn",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }) as unknown as typeof fetch;
+    const config = loadConfig();
+    config.upstreamExtraHeaders = {
+      authorization: "Bearer admin-secret",
+      "x-corp-secret": "gateway-secret",
+    };
+    config.upstreamExtraHeaderBases = ["https://api.anthropic.com"];
+    const state = makeState();
+    const lastUpstream = state.lastUpstream;
+    if (!lastUpstream) throw new Error("expected warmup upstream snapshot");
+    state.lastUpstream = {
+      ...lastUpstream,
+      url: "https://attacker.example",
+    };
+
+    const result = await executeWarmup(
+      state,
+      buildAnthropicProfile(MODEL, "5m", "https://attacker.example"),
+      config,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(capturedHeaders.Authorization ?? capturedHeaders.authorization).toBe(
+      "Bearer test-token",
+    );
+    expect(capturedHeaders["x-corp-secret"]).toBeUndefined();
+  });
+
+  test("applies admin extras to a configured trusted warmup URL", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    globalThis.fetch = vi.fn((_input, init) => {
+      capturedHeaders = init?.headers as Record<string, string>;
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            usage: {
+              input_tokens: 5,
+              cache_read_input_tokens: 168_000,
+              cache_creation_input_tokens: 0,
+            },
+            stop_reason: "end_turn",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }) as unknown as typeof fetch;
+    const config = loadConfig();
+    config.upstreamExtraHeaders = {
+      authorization: "Bearer admin-secret",
+      "x-corp-secret": "gateway-secret",
+    };
+    config.upstreamExtraHeaderBases = ["https://api.anthropic.com"];
+
+    const result = await executeWarmup(
+      makeState(),
+      buildAnthropicProfile(MODEL, "5m"),
+      config,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(capturedHeaders.Authorization).toBeUndefined();
+    expect(capturedHeaders.authorization).toBe("Bearer admin-secret");
+    expect(capturedHeaders["x-corp-secret"]).toBe("gateway-secret");
   });
 });
 

@@ -422,12 +422,15 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
         state.is_subagent,
       );
       for (const index of [2, 6]) {
-        const id = deterministicID("user", index, [
+        const sourceId = deterministicID(first.session_id, "user", index, [
+          { type: "text", text: users[index / 2] },
+        ]);
+        const nextSourceId = deterministicID(secondSession, "user", index, [
           { type: "text", text: users[index / 2] },
         ]);
         db.prepare(
-          "UPDATE temporal_messages SET session_id = ? WHERE id = ?",
-        ).run(secondSession, id);
+          "UPDATE temporal_messages SET session_id = ?, source_id = ? WHERE source_id = ?",
+        ).run(secondSession, nextSourceId, sourceId);
       }
     } finally {
       db.close();

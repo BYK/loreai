@@ -223,7 +223,7 @@ describe("buildGeminiUpstreamRequest", () => {
     expect(url).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
     );
-    // x-goog-api-key forwarded (not a managed header).
+    // Credential filtering strips raw auth; the Gemini builder reconstructs it.
     expect(headers["x-goog-api-key"]).toBe("key123");
     const b = body as Record<string, unknown>;
     expect(b.systemInstruction).toEqual({ parts: [{ text: "sys prompt" }] });

@@ -1,4 +1,4 @@
-import { afterEach, describe, test, expect, beforeEach } from "vitest";
+import { afterEach, describe, test, expect, beforeEach, vi } from "vitest";
 import { existsSync } from "node:fs";
 import { db, ensureProject } from "../src/db";
 import { LOCAL_MODEL_PATH_ENV } from "../src/embedding-vendor";
@@ -425,10 +425,12 @@ describe("local provider unavailable — no auto-fallback (remote is opt-in)", (
 describe("pickRemoteFallback", () => {
   let savedVoyage: string | undefined;
   let savedOpenAI: string | undefined;
+  let savedFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     savedVoyage = process.env.VOYAGE_API_KEY;
     savedOpenAI = process.env.OPENAI_API_KEY;
+    savedFetch = globalThis.fetch;
     delete process.env.VOYAGE_API_KEY;
     delete process.env.OPENAI_API_KEY;
   });
@@ -438,6 +440,7 @@ describe("pickRemoteFallback", () => {
     else delete process.env.VOYAGE_API_KEY;
     if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
     else delete process.env.OPENAI_API_KEY;
+    globalThis.fetch = savedFetch;
   });
 
   test("returns null when neither key is set", () => {
@@ -466,6 +469,67 @@ describe("pickRemoteFallback", () => {
   test("rejects placeholder API keys (e.g. 'nokey')", () => {
     process.env.OPENAI_API_KEY = "nokey";
     expect(pickRemoteFallback()).toBeNull();
+  });
+
+  test("Voyage failures expose status but never the response body or statusText", async () => {
+    const bodyMarker = "PRIVATE_VOYAGE_RESPONSE_BODY_MARKER";
+    const reasonMarker = "PRIVATE_VOYAGE_REASON_MARKER";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(bodyMarker, {
+          status: 503,
+          statusText: reasonMarker,
+        }),
+    );
+    const fallback = pickRemoteFallback();
+    expect(fallback?.name).toBe("voyage");
+    if (!fallback) throw new Error("expected Voyage fallback");
+
+    const promise = fallback.provider.embed(["query"], "query");
+    await expect(promise).rejects.toThrow("503");
+    await expect(promise).rejects.not.toThrow(bodyMarker);
+    await expect(promise).rejects.not.toThrow(reasonMarker);
+  });
+
+  test("Voyage malformed JSON errors do not retain the response prefix", async () => {
+    const bodyMarker = "PRIVATE_VOYAGE_MALFORMED_PREFIX";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(`${bodyMarker} not-json`, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const fallback = pickRemoteFallback();
+    if (!fallback) throw new Error("expected Voyage fallback");
+
+    const promise = fallback.provider.embed(["query"], "query");
+    await expect(promise).rejects.toThrow("malformed JSON");
+    await expect(promise).rejects.not.toThrow(bodyMarker);
+  });
+
+  test("Voyage request failures do not retain thrown URL secrets", async () => {
+    const userinfoMarker = "PRIVATE_VOYAGE_THROWN_USERINFO";
+    const queryMarker = "PRIVATE_VOYAGE_THROWN_QUERY";
+    const fragmentMarker = "PRIVATE_VOYAGE_THROWN_FRAGMENT";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error(
+        `fetch https://user:${userinfoMarker}@example.com/embed?token=${queryMarker}#${fragmentMarker} failed`,
+      );
+    });
+    const fallback = pickRemoteFallback();
+    if (!fallback) throw new Error("expected Voyage fallback");
+
+    const promise = fallback.provider.embed(["query"], "query");
+    await expect(promise).rejects.toThrow(
+      "Voyage embeddings API request failed",
+    );
+    await expect(promise).rejects.not.toThrow(userinfoMarker);
+    await expect(promise).rejects.not.toThrow(queryMarker);
+    await expect(promise).rejects.not.toThrow(fragmentMarker);
   });
 });
 

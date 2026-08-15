@@ -58,6 +58,7 @@ The URL is the server root — do not include `/v1` (the gateway appends API pat
 - **Compaction is disabled.** OpenCode's built-in compaction would defeat Lore's gradient context manager. The plugin sets `cfg.compaction = { auto: false, prune: false }` in the OpenCode config.
 - **Project identity is automatic.** The plugin detects your project root (`ctx.worktree` / `ctx.directory`), walks up to find the workspace root, and injects the path + git remote as `x-lore-project` / `x-lore-git-remote` headers on every request.
 - **The gateway auto-starts.** If no Lore gateway is running, the plugin starts one in-process. The gateway listens on a deterministic port (`3207` by default, falling back to `5673`) and the plugin probes for it before assuming it needs to spawn.
+- **Remote access is separate from provider auth.** For a remote/hosted gateway, set both `LORE_REMOTE_URL` and `LORE_GATEWAY_AUTH_TOKEN`. The plugin injects `x-lore-gateway-token` only for that remote URL; API keys and bearer tokens remain provider credentials.
 
 ## Next steps
 

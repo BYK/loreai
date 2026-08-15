@@ -14,20 +14,22 @@ import {
   detectAgents,
   AGENTS,
   appendCustomHeader,
+  setCustomHeader,
   captureUserUpstream,
   type AgentDef,
   type DetectedAgent,
 } from "./agents";
 import { providerForUpstreamOrigin } from "../config";
-import { safeExit, forcedExit } from "./exit";
+import { safeExit } from "./exit";
 import {
   installSignalShutdown,
   installChildSignalForwarding,
-  runShutdownWithDeadline,
+  makeProcessShutdownController,
   signalExitCode,
+  type ProcessShutdownController,
 } from "./shutdown";
 import { maybeAutoImport } from "./import-auto";
-import { discoverWorkspaceRoot, log } from "@loreai/core";
+import { discoverWorkspaceRoot, GATEWAY_AUTH_HEADER, log } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Interactive agent picker (TTY only)
@@ -200,6 +202,26 @@ export function injectAdoptionHeaders(
 }
 
 /**
+ * Gateway access credential required for remote/hosted data-plane requests.
+ * It is sent as `x-lore-gateway-token` and remains separate from provider API
+ * keys/bearer tokens. Remote/hosted startup fails closed unless it is 32-256
+ * visible ASCII characters without commas. OpenCode/Pi consume
+ * LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code
+ * supports a per-request custom header directly. Never place it in a URL or
+ * CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN.
+ */
+export function injectRemoteGatewayAccess(
+  agent: AgentDef | null,
+  env: Record<string, string>,
+  gatewayUrl: string,
+): void {
+  env.LORE_REMOTE_URL = gatewayUrl;
+  const token = process.env.LORE_GATEWAY_AUTH_TOKEN;
+  if (!token || agent?.name !== "claude-code") return;
+  setCustomHeader(env, "ANTHROPIC_CUSTOM_HEADERS", GATEWAY_AUTH_HEADER, token);
+}
+
+/**
  * The agent that `lore run` will actually launch, resolved BEFORE the gateway
  * starts so we can adopt the user's upstream (which requires setting gateway
  * env before `loadConfig`). `command` is the binary/command to exec; `def` is
@@ -265,6 +287,7 @@ export function resolveLaunchTarget(
   cmdArgs: string[],
   extraArgs: string[],
   adopted: AdoptedUpstream | null,
+  remoteGateway = false,
 ): LaunchTarget {
   // Resolve workspace root once — walks up from cwd looking for monorepo
   // markers (.lore.json with workspaces, .git, pnpm-workspace.yaml, etc.)
@@ -290,6 +313,9 @@ export function resolveLaunchTarget(
     if (selection.def && adopted) {
       injectAdoptionHeaders(selection.def, env, adopted);
     }
+    if (remoteGateway) {
+      injectRemoteGatewayAccess(selection.def, env, gatewayUrl);
+    }
     return {
       command: cmdArgs[0],
       args: [...prependArgs, ...cmdArgs.slice(1), ...extraArgs],
@@ -312,6 +338,7 @@ export function resolveLaunchTarget(
   const agentCliArgs = def.cliArgs?.(gatewayUrl, projectDir) ?? [];
   const env = def.envVars(gatewayUrl, projectDir);
   if (adopted) injectAdoptionHeaders(def, env, adopted);
+  if (remoteGateway) injectRemoteGatewayAccess(def, env, gatewayUrl);
   return {
     command: def.binary,
     args: [...agentCliArgs, ...extraArgs],
@@ -353,6 +380,7 @@ export async function commandRun(
   let gatewayUrl: string;
   let owned: boolean;
   let shutdown: () => Promise<void>;
+  let processShutdown: ProcessShutdownController | undefined;
   // The config actually in effect for the running gateway. In local mode
   // startGateway() re-runs loadConfig() AFTER upstream adoption has set
   // LORE_UPSTREAM_*, so handle.config reflects the adopted upstream while the
@@ -360,6 +388,7 @@ export async function commandRun(
   // the effective config or its worker calls route to the pre-adoption default
   // upstream (e.g. api.anthropic.com) and fail auth against the adopted key.
   let effectiveConfig = config;
+  let remoteGateway = false;
 
   // 2. Adopt the user's existing upstream (local mode only — a remote gateway
   //    owns its own config; header injection below still routes it there).
@@ -398,8 +427,10 @@ export async function commandRun(
       return safeExit(1);
     }
     gatewayUrl = remoteUrl;
+    remoteGateway = true;
     owned = false;
     shutdown = async () => {};
+    processShutdown = undefined;
     console.log(`[lore] Using remote gateway at ${gatewayUrl}`);
     // In remote mode, adopt via header injection only (no local gateway env).
     if (selection?.def) {
@@ -408,10 +439,15 @@ export async function commandRun(
   } else {
     // Local mode: start (or reuse) a local gateway.
     // `lore run` always runs locally — agent is on the same machine.
-    const handle = await startGateway({ ...opts, local: true });
+    const handle = await startGateway({
+      ...opts,
+      local: true,
+      processBoundary: true,
+    });
     gatewayUrl = `http://${bracketHost(handle.config.hosts[0])}:${handle.port}`;
     owned = handle.owned;
     shutdown = handle.shutdown;
+    processShutdown = handle.processShutdown;
     // Post-adoption config (LORE_UPSTREAM_* now reflected). Used for autoImport.
     effectiveConfig = handle.config;
 
@@ -430,7 +466,14 @@ export async function commandRun(
 
   // 4. Build the launch target (env + args) now that we have the URL.
   const target = selection
-    ? resolveLaunchTarget(selection, gatewayUrl, cmdArgs, extraArgs, adopted)
+    ? resolveLaunchTarget(
+        selection,
+        gatewayUrl,
+        cmdArgs,
+        extraArgs,
+        adopted,
+        remoteGateway,
+      )
     : null;
 
   if (!target) {
@@ -441,7 +484,7 @@ export async function commandRun(
     console.log(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
     if (owned) {
-      installSignalShutdown(shutdown);
+      installSignalShutdown(shutdown, processShutdown);
     }
 
     // Block forever
@@ -465,27 +508,31 @@ export async function commandRun(
     log.silenceStderr();
   }
 
+  const childProcessShutdown =
+    processShutdown ?? makeProcessShutdownController(shutdown);
+
+  // Authenticated shutdown may have started while auto-import was awaited.
+  // This check, spawn, and attachment are deliberately one synchronous section:
+  // no timer, signal, or HTTP callback can interleave on the JS event loop.
+  if (childProcessShutdown.isShutdownStarted()) {
+    return childProcessShutdown(0);
+  }
   const child = launchChild(target);
 
-  // Forward the first signal to the child (its `exit` handler then drives
-  // gateway teardown); a second interrupt forces an immediate exit so the user
-  // is never stuck waiting on a hung child or shutdown.
-  installChildSignalForwarding(child);
+  // The first signal starts the one shared child + gateway teardown deadline
+  // immediately. Attachment is synchronous with spawn, before callbacks run.
+  installChildSignalForwarding(child, childProcessShutdown);
 
-  // Wait for child to exit, then tear down gateway (only if we own it)
+  // Child completion joins (or starts) the same coordinated teardown.
   return new Promise<void>((_resolve) => {
     child.on("exit", (code, signal) => {
       void (async () => {
-        // Deadline-bounded so a slow shutdown step can't hang the process.
-        // Use forcedExit on this path: the bounded shutdown may have timed out
-        // (4000ms) and the embedding worker may still be mid-inference in a
-        // native call — safeExit → process.exit() would walk NAPI destructors
-        // under it and SIGABRT (the "💣 Program crashed" report).
-        if (owned) await runShutdownWithDeadline(shutdown);
-        if (signal) {
-          forcedExit(signalExitCode(signal));
-        }
-        forcedExit(code ?? 0);
+        // Use the same one-shot whole-teardown controller as authenticated
+        // process control. It exits normally after safe closure and force-exits
+        // if teardown rejects or exceeds SHUTDOWN_DEADLINE_MS.
+        await childProcessShutdown.childExited(
+          signal ? signalExitCode(signal) : (code ?? 0),
+        );
       })();
     });
 
@@ -494,8 +541,12 @@ export async function commandRun(
         console.error(
           `[lore] Failed to launch ${target.command}: ${err.message}`,
         );
-        if (owned) await runShutdownWithDeadline(shutdown);
-        forcedExit(1);
+        // A spawn failure has no child to reap. Other ChildProcess `error`
+        // events (including signal-delivery failures) do not prove a spawned
+        // child exited, so preserve the failure outcome but keep waiting for
+        // its exit event within the shared deadline.
+        if (child.pid === undefined) await childProcessShutdown.childExited(1);
+        else await childProcessShutdown(1);
       })();
     });
   });

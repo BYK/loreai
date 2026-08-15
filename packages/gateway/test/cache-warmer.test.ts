@@ -807,6 +807,23 @@ describe("circuit breaker", () => {
     expect(warmupBucketKey(switched)).not.toBe(key);
   });
 
+  test("warmupBucketKey strips URL userinfo, query, and fragment", () => {
+    const state = makeSessionState({
+      lastUpstream: {
+        url: "https://user:PRIVATE_BUCKET_USERINFO@example.com/custom?token=PRIVATE_BUCKET_QUERY#PRIVATE_BUCKET_FRAGMENT",
+        protocol: "anthropic",
+        model: "claude-test",
+        headers: {},
+      },
+    });
+
+    const key = warmupBucketKey(state);
+    expect(key).toContain("https://example.com/custom");
+    expect(key).not.toContain("PRIVATE_BUCKET_USERINFO");
+    expect(key).not.toContain("PRIVATE_BUCKET_QUERY");
+    expect(key).not.toContain("PRIVATE_BUCKET_FRAGMENT");
+  });
+
   test("getCircuitBreakerSummary lists tripped buckets", () => {
     const bad = makeWarmupResult({
       cacheReadTokens: 0,

@@ -1,7 +1,53 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PluginInput } from "@opencode-ai/plugin";
 import { log } from "@loreai/core";
-import { surfaceGatewayUnavailable } from "../src/internal";
+import {
+  gatewayAccessHeadersForRemote,
+  shouldForwardUpstreamExtraHeader,
+  surfaceGatewayUnavailable,
+} from "../src/internal";
+
+describe("remote gateway access headers", () => {
+  const token = "opencode-remote-gateway-token-at-least-32";
+
+  test("injects the access token only for the matching LORE_REMOTE_URL", () => {
+    expect(
+      gatewayAccessHeadersForRemote("https://lore.example", {
+        LORE_REMOTE_URL: "https://lore.example/",
+        LORE_GATEWAY_AUTH_TOKEN: token,
+      }),
+    ).toEqual({ "x-lore-gateway-token": token });
+
+    expect(
+      gatewayAccessHeadersForRemote("http://127.0.0.1:3207", {
+        LORE_REMOTE_URL: "https://lore.example",
+        LORE_GATEWAY_AUTH_TOKEN: token,
+      }),
+    ).toEqual({});
+  });
+
+  test("does not confuse provider credentials with gateway access", () => {
+    expect(
+      gatewayAccessHeadersForRemote("https://lore.example", {
+        LORE_REMOTE_URL: "https://lore.example",
+        ANTHROPIC_API_KEY: "provider-key",
+      }),
+    ).toEqual({});
+  });
+
+  test.each([
+    "x-api-key",
+    "X-Goog-Api-Key",
+    "Authorization",
+    "X-Lore-Gateway-Token",
+  ])("does not forward managed credential header %s from extras", (name) => {
+    expect(shouldForwardUpstreamExtraHeader(name)).toBe(false);
+  });
+
+  test("still forwards non-credential upstream extras", () => {
+    expect(shouldForwardUpstreamExtraHeader("CF-Access-Client-Id")).toBe(true);
+  });
+});
 
 /**
  * `surfaceGatewayUnavailable` is the one user-visible signal left when the

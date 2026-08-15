@@ -11,6 +11,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   createBatchLLMClient,
+  createAnthropicBatchProvider,
   extractAnthropicError,
 } from "../src/batch-queue";
 
@@ -21,6 +22,7 @@ vi.mock("../src/fetch", () => ({
     globalThis.fetch(...args),
 }));
 import type { LLMClient } from "@loreai/core";
+import { log } from "@loreai/core";
 import type { AuthCredential } from "../src/auth";
 import {
   _resetTemperatureUnsupportedModels,
@@ -978,7 +980,7 @@ describe("BatchLLMClient", () => {
   // -------------------------------------------------------------------------
 
   describe("extractAnthropicError", () => {
-    test("reads the nested ErrorResponse envelope (real Anthropic shape)", () => {
+    test("does not retain the nested ErrorResponse message", () => {
       // Anthropic wraps the cause in `{ type: "error", request_id, error: { type, message } }`.
       expect(
         extractAnthropicError(
@@ -992,16 +994,16 @@ describe("BatchLLMClient", () => {
           },
           "errored",
         ),
-      ).toBe("invalid_request_error: max_tokens: too large");
+      ).toBe("errored");
     });
 
-    test("tolerates a flattened envelope ({ type, message } at top level)", () => {
+    test("does not retain a flattened envelope message", () => {
       expect(
         extractAnthropicError(
           { type: "overloaded_error", message: "Overloaded" },
           "errored",
         ),
-      ).toBe("overloaded_error: Overloaded");
+      ).toBe("errored");
     });
 
     test("falls back to the outcome string, never yields 'error: undefined'", () => {
@@ -1017,7 +1019,7 @@ describe("BatchLLMClient", () => {
     });
   });
 
-  test("anthropic errored result surfaces the real message, not 'error: undefined'", async () => {
+  test("anthropic errored result excludes the upstream error body from logs", async () => {
     const inner = createMockLLMClient();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -1120,7 +1122,8 @@ describe("BatchLLMClient", () => {
     const logged = errorSpy.mock.calls
       .map((c) => c.map((a) => String(a)).join(" "))
       .join("\n");
-    expect(logged).toContain("invalid_request_error: max_tokens: too large");
+    expect(logged).toContain("batch item");
+    expect(logged).not.toContain("max_tokens: too large");
     expect(logged).not.toContain("errored: error: undefined");
 
     const s = client.stats();
@@ -1131,7 +1134,7 @@ describe("BatchLLMClient", () => {
     await client.shutdown();
   });
 
-  test("openai errored result includes the response body error message", async () => {
+  test("openai errored result logs status but excludes the response body", async () => {
     const inner = createMockLLMClient();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -1246,11 +1249,171 @@ describe("BatchLLMClient", () => {
       .map((c) => c.map((a) => String(a)).join(" "))
       .join("\n");
     expect(logged).toContain("HTTP 400");
-    expect(logged).toContain("context_length_exceeded");
+    expect(logged).not.toContain("context_length_exceeded");
 
     errorSpy.mockRestore();
     globalThis.fetch = prevFetch;
     await client.shutdown();
+  });
+
+  test("malformed batch JSON logs a body-independent diagnostic", async () => {
+    const bodyMarker = "PRIVATE_BATCH_MALFORMED_PREFIX";
+    const reasonMarker = "PRIVATE_BATCH_REASON_MARKER";
+    const messages: string[] = [];
+    const errorSpy = vi.spyOn(log, "error").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(`${bodyMarker} not-json`, {
+          status: 200,
+          statusText: reasonMarker,
+        }),
+    ) as unknown as typeof fetch;
+    try {
+      const provider = createAnthropicBatchProvider(UPSTREAMS.anthropic);
+      const result = await provider.submit(TEST_AUTH, [
+        {
+          customId: "safe-id",
+          providerID: "anthropic",
+          params: {
+            model: "claude-test",
+            max_tokens: 8,
+            system: "sys",
+            messages: [{ role: "user", content: "user" }],
+          },
+        },
+      ]);
+
+      expect(result).toBeNull();
+      const output = messages.join("\n");
+      expect(output).toContain("malformed JSON");
+      expect(output).not.toContain(bodyMarker);
+      expect(output).not.toContain(reasonMarker);
+    } finally {
+      errorSpy.mockRestore();
+      globalThis.fetch = prevFetch;
+    }
+  });
+
+  test("provider batch IDs from response bodies never reach logs", async () => {
+    const batchIdMarker = "PRIVATE_PROVIDER_BATCH_ID_MARKER";
+    const messages: string[] = [];
+    const infoSpy = vi.spyOn(log, "info").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ id: batchIdMarker }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    const client = createBatchLLMClient(
+      createMockLLMClient(),
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      { flushIntervalMs: 60_000, maxQueueSize: 1, pollIntervalMs: 60_000 },
+    );
+    try {
+      void client.prompt("sys", "user msg", { workerID: "lore-distill" });
+      await vi.waitFor(() => expect(client.stats().inflightBatches).toBe(1));
+      expect(messages.join("\n")).toContain("batch created");
+      expect(messages.join("\n")).not.toContain(batchIdMarker);
+    } finally {
+      infoSpy.mockRestore();
+      globalThis.fetch = prevFetch;
+      await client.shutdown({ drainQueue: false });
+    }
+  });
+
+  test("batch create catches never log thrown URL secrets", async () => {
+    const userinfoMarker = "PRIVATE_BATCH_THROWN_USERINFO";
+    const queryMarker = "PRIVATE_BATCH_THROWN_QUERY";
+    const fragmentMarker = "PRIVATE_BATCH_THROWN_FRAGMENT";
+    const messages: string[] = [];
+    const errorSpy = vi.spyOn(log, "error").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error(
+        `fetch https://user:${userinfoMarker}@example.com/batch?token=${queryMarker}#${fragmentMarker} failed`,
+      );
+    }) as unknown as typeof fetch;
+    const client = createBatchLLMClient(
+      createMockLLMClient(),
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      { flushIntervalMs: 60_000, maxQueueSize: 1, pollIntervalMs: 50 },
+    );
+    try {
+      await client.prompt("sys", "user msg", { workerID: "lore-distill" });
+      const output = messages.join("\n");
+      expect(output).toContain("batch create error");
+      expect(output).not.toContain(userinfoMarker);
+      expect(output).not.toContain(queryMarker);
+      expect(output).not.toContain(fragmentMarker);
+    } finally {
+      errorSpy.mockRestore();
+      globalThis.fetch = prevFetch;
+      await client.shutdown();
+    }
+  });
+
+  test("body-controlled batch outcome and status fields never reach logs", async () => {
+    const bodyMarker = "PRIVATE_BATCH_STATUS_FIELD_MARKER";
+    const messages: string[] = [];
+    const errorSpy = vi.spyOn(log, "error").mockImplementation((...args) => {
+      messages.push(args.join(" "));
+    });
+    let capturedCustomId = "";
+    let callIndex = 0;
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      const index = callIndex++;
+      if (index === 0) {
+        const body = JSON.parse(String(init?.body)) as {
+          requests: Array<{ custom_id: string }>;
+        };
+        capturedCustomId = body.requests[0]?.custom_id ?? "";
+        return new Response(JSON.stringify({ id: "safe-batch-id" }), {
+          status: 200,
+        });
+      }
+      if (index === 1) {
+        return new Response(
+          JSON.stringify({ processing_status: "ended", results_url: null }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          custom_id: capturedCustomId,
+          result: { type: bodyMarker },
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const client = createBatchLLMClient(
+      createMockLLMClient(),
+      UPSTREAMS,
+      getTestAuth,
+      DEFAULT_MODEL,
+      { flushIntervalMs: 60_000, maxQueueSize: 1, pollIntervalMs: 10 },
+    );
+    try {
+      await expect(
+        client.prompt("sys", "user msg", { workerID: "lore-distill" }),
+      ).resolves.toBeNull();
+      expect(messages.join("\n")).toContain("batch item failed");
+      expect(messages.join("\n")).not.toContain(bodyMarker);
+    } finally {
+      errorSpy.mockRestore();
+      globalThis.fetch = prevFetch;
+      await client.shutdown();
+    }
   });
 });
 

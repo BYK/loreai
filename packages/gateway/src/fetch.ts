@@ -59,6 +59,23 @@ let undiciHandles: UndiciHandles | null = null;
  */
 let dispatcherOverride: Dispatcher | null = null;
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+async function rejectRedirect(response: Response): Promise<Response> {
+  if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+  let cancellationError: unknown;
+  try {
+    await response.body?.cancel();
+  } catch (error) {
+    cancellationError = error;
+  }
+  throw new Error(
+    `Upstream redirect blocked (status ${response.status})`,
+    cancellationError === undefined ? undefined : { cause: cancellationError },
+  );
+}
+
 /**
  * Byte-based queue for the Bun Node-HTTP bridge. Once this queue is full the
  * IncomingMessage is paused, which in turn bounds Node/socket buffering by its
@@ -204,12 +221,13 @@ export function nodeReadableToWebStream(
  * return a standard Web API `Response` with a streaming `ReadableStream` body.
  *
  * Used under Bun where native `fetch` has a hardcoded ~5-min inactivity timeout
- * (oven-sh/bun#16682) that kills long LLM generations mid-stream. Bun's Node
- * compat layer for `node:https` does NOT have this timeout cap (verified on
- * Bun 1.3.14: survives 310s of total silence; native fetch TimeoutErrors at
- * 300s). Also bypasses the fetch interceptor (no `globalThis.fetch` involved).
+ * and by internal loopback probes, where WHATWG Fetch rejects valid listeners
+ * on its browser-defined forbidden-port list. Bun's Node compat layer for
+ * `node:https` does NOT have this timeout cap (verified on Bun 1.3.14: survives
+ * 310s of total silence; native fetch TimeoutErrors at 300s). Also bypasses the
+ * fetch interceptor (no `globalThis.fetch` involved).
  */
-function nodeHttpFetch(
+export function nodeHttpFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
@@ -306,22 +324,26 @@ export async function upstreamFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
+  const safeInit = { ...init, redirect: "manual" as const };
+
   if (isBun) {
     // Bun: use node:https which has no hardcoded timeout cap under Bun's Node
     // compat layer (verified: survives 310s silence; native fetch dies at 300s).
     // Also bypasses the fetch interceptor (no globalThis.fetch involved).
-    return nodeHttpFetch(input, init);
+    const response = await nodeHttpFetch(input, safeInit);
+    return rejectRedirect(response);
   }
 
   // Node: undici with disabled body/header timeouts. undici's fetch types
   // diverge from the global Web API types but are runtime-compatible — cast
   // through unknown to bridge the compile-time gap.
   const { fetch: undiciFetch, dispatcher } = await getUndici();
-  return undiciFetch(
+  const response = (await undiciFetch(
     input as Parameters<UndiciModule["fetch"]>[0],
     {
-      ...init,
+      ...safeInit,
       dispatcher: dispatcherOverride ?? dispatcher,
     } as Parameters<UndiciModule["fetch"]>[1],
-  ) as unknown as Promise<Response>;
+  )) as unknown as Response;
+  return rejectRedirect(response);
 }

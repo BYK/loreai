@@ -72,6 +72,7 @@ import {
   type VectorQuerySpec,
 } from "./vector-query";
 import { tryPoolVectorSearch, VECTOR_SEARCH_TIMED_OUT } from "./vector-pool";
+import { currentTenantId } from "./tenant";
 
 // The cosine/BLOB helpers moved to ./vector-query (a leaf module the read
 // worker can import without pulling in the provider chain). Re-exported here so
@@ -517,27 +518,36 @@ class VoyageProvider implements EmbeddingProvider {
     texts: string[],
     inputType: "document" | "query",
   ): Promise<Float32Array[]> {
-    const res = await fetch(VOYAGE_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        input: texts,
-        model: this.model,
-        input_type: inputType,
-        output_dimension: this.dimensions,
-      }),
-      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
-    });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Voyage API ${res.status}: ${body}`);
+    let res: Response;
+    try {
+      res = await fetch(VOYAGE_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          input: texts,
+          model: this.model,
+          input_type: inputType,
+          output_dimension: this.dimensions,
+        }),
+        signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+      });
+    } catch {
+      throw new Error("Voyage embeddings API request failed");
     }
 
-    const json = (await res.json()) as VoyageResponse;
+    if (!res.ok) {
+      throw new Error(`Voyage embeddings API failed with HTTP ${res.status}`);
+    }
+
+    let json: VoyageResponse;
+    try {
+      json = (await res.json()) as VoyageResponse;
+    } catch {
+      throw new Error("Voyage embeddings API returned malformed JSON");
+    }
     const sorted = [...json.data].sort((a, b) => a.index - b.index);
     return sorted.map((d) => new Float32Array(d.embedding));
   }
@@ -591,8 +601,7 @@ class OpenAIProvider implements EmbeddingProvider {
     });
 
     if (!res.ok) {
-      const responseBody = await res.text().catch(() => "");
-      throw new Error(`OpenAI API ${res.status}: ${responseBody}`);
+      throw new Error(`OpenAI embeddings API failed with HTTP ${res.status}`);
     }
 
     const json = (await res.json()) as OpenAIResponse;
@@ -2620,7 +2629,12 @@ export async function vectorSearch(
   excludeCategories?: string[],
 ): Promise<VectorHit[]> {
   return await poolOrInProcess(
-    { kind: "knowledge", limit, excludeCategories },
+    {
+      kind: "knowledge",
+      tenantId: currentTenantId(),
+      limit,
+      excludeCategories,
+    },
     queryEmbedding,
   );
 }
@@ -2633,7 +2647,10 @@ export async function vectorSearchEntities(
   queryEmbedding: Float32Array,
   limit = 10,
 ): Promise<VectorHit[]> {
-  return await poolOrInProcess({ kind: "entities", limit }, queryEmbedding);
+  return await poolOrInProcess(
+    { kind: "entities", tenantId: currentTenantId(), limit },
+    queryEmbedding,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2649,7 +2666,7 @@ export async function vectorSearchDistillations(
   limit = 10,
 ): Promise<VectorHit[]> {
   return await poolOrInProcess(
-    { kind: "distillations", limit },
+    { kind: "distillations", tenantId: currentTenantId(), limit },
     queryEmbedding,
   );
 }

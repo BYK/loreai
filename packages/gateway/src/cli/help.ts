@@ -45,6 +45,9 @@ Commands:
   entity <subcommand> Manage the entity registry (list, show, add, merge)
   upgrade [version]   Update lore to the latest (or specified) version
                        Flags: --check, --force, --offline, --channel <ch>
+  uninstall           Undo persistent setup and remove standalone Lore
+                       Preserves local data by default; --purge deletes default
+                       data, logs, credentials, and runtime state after confirmation
   help                Show this help text
 
 Options:
@@ -162,6 +165,9 @@ Examples:
   lore upgrade stable           # Switch back to stable channel
   lore upgrade 0.14.0           # Install a specific version
   lore upgrade --offline        # Upgrade from cached patches (no network)
+  lore uninstall                # Undo setup and remove standalone install artifacts
+  lore uninstall --dry-run      # Preview cleanup without changing anything
+  lore uninstall --purge        # Also delete default local data after confirmation
   lore data list projects       # List all tracked projects
   lore data list knowledge      # List knowledge entries for current project
   lore data clear --project .   # Clear all data for the current project
@@ -193,6 +199,7 @@ Environment variables:
   LORE_UPSTREAM_ANTHROPIC       Upstream Anthropic API URL
   LORE_UPSTREAM_OPENAI          Upstream OpenAI API URL
   LORE_REMOTE_URL               Remote gateway URL for \`lore run\` (overridden by --remote)
+  LORE_GATEWAY_AUTH_TOKEN       Access token required by remote/hosted data-plane routes
   LORE_HOSTED_MODE              Hosted mode — disables FS ops on client-controlled paths
                                 ON by default for \`lore start\`; set to 0 to disable
   LORE_REMOTE_GATEWAY           Remote-gateway mode — bucket path-less sessions per-session

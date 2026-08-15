@@ -20,7 +20,7 @@ import {
 import { getPath, readLegacyJsonBackup } from "./setup-backup";
 import { getEnvValue, getTomlTopLevelValue } from "./setup-backup";
 import { readPortFile } from "../portfile";
-import { probeGateway } from "./start";
+import { internalProbeFetch, probeGateway } from "./start";
 import { VERSION } from "./version";
 
 // ---------------------------------------------------------------------------
@@ -640,7 +640,7 @@ export async function fetchMemoryHealth(base: string): Promise<{
   worker?: { ok: boolean; detail: string };
 } | null> {
   try {
-    const res = await fetch(`${base}/health`, {
+    const res = await internalProbeFetch(`${base}/health`, {
       signal: AbortSignal.timeout(2000),
     });
     if (!res.ok) return null;

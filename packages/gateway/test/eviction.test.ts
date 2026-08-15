@@ -39,6 +39,7 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
     hosts: ["127.0.0.1"],
     upstreamAnthropic: "https://api.anthropic.com",
     upstreamOpenAI: "https://api.openai.com",
+    callerUpstreamAllowlist: [],
     bedrockRegion: "us-east-1",
     vertexProject: "",
     vertexRegion: "us-central1",

@@ -9,7 +9,8 @@ const OTHER_PROJECT = "/tmp/lore-curator-ensureproject-hoist/other-project";
 
 // ensureProject()'s fast-path lookup. Counting this exact statement isolates
 // project-resolution calls from any other `projects` access.
-const ENSURE_PROJECT_SQL = "SELECT id, git_remote FROM projects WHERE path = ?";
+const ENSURE_PROJECT_SQL =
+  "SELECT id, git_remote FROM projects WHERE tenant_id = ? AND path = ?";
 
 function countingSink(counts: Record<string, number>): LogSink {
   return {

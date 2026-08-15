@@ -15,7 +15,7 @@ This guide is for the advanced counterpart to the per-harness setup: pointing Lo
 
 Lore's gateway resolves the upstream URL in this order, highest priority first:
 
-1. `X-Lore-Upstream-URL` request header (explicit user override).
+1. `X-Lore-Upstream-URL` request header (explicit user override; restricted by the administrator allowlist in remote/hosted mode).
 2. `X-Lore-Provider` request header → static `PROVIDER_ROUTES` table.
 3. Model-prefix route (e.g. `claude-` → Anthropic, `gpt-` → OpenAI).
 4. Config defaults: `LORE_UPSTREAM_ANTHROPIC`, `LORE_UPSTREAM_OPENAI`.
@@ -61,7 +61,17 @@ curl -X POST http://127.0.0.1:3207/v1/messages \
   -d '{"model": "claude-3-5-sonnet", "max_tokens": 1024, "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-The header is sanitized (control characters stripped, length-capped at 2048, must be http/https, no embedded credentials) before use.
+The header is sanitized (control characters stripped, length-capped at 2048, must be http/https, no embedded credentials) before use. A local, non-remote gateway continues to allow loopback, private-network, and custom inference endpoints.
+
+Remote and hosted gateways deny every caller-selected upstream origin by default. The gateway administrator must explicitly allow HTTPS origins before clients can use them:
+
+```bash
+export LORE_CALLER_UPSTREAM_ALLOWLIST="https://internal-llm.corp.example.com,https://litellm.corp.example.com:8443"
+```
+
+Entries are comma-separated **origins**, not endpoint URLs: paths, credentials, queries, fragments, wildcards, HTTP origins, malformed values, and duplicates after normalization are rejected at startup. Matching is by exact normalized origin, including the port; allowing `https://example.com` does not allow a subdomain, `http://example.com`, or `https://example.com:8443`. Request paths under an allowed origin remain usable.
+
+This allowlist applies only to client-provided `X-Lore-Upstream-URL` values. Administrator-configured defaults such as `LORE_UPSTREAM_ANTHROPIC` and `LORE_UPSTREAM_OPENAI`, plus built-in provider routes, remain available without an allowlist entry.
 
 ## Custom auth headers
 
@@ -143,10 +153,14 @@ Two caveats:
 Hosted mode is for running the Lore gateway as a central service that multiple clients connect to from different machines. In hosted mode, the gateway is always a **remote gateway** — it has no shared filesystem with its clients.
 
 ```bash
+# Generate and configure a high-entropy access credential. Remote/hosted
+# startup fails closed when this is absent or malformed.
+export LORE_GATEWAY_AUTH_TOKEN="$(openssl rand -hex 32)"
+
 # Enable hosted mode
 export LORE_HOSTED_MODE=1
 
-# Or equivalently (implies hosted mode)
+# Or enable remote-gateway tenant/routing policy without hosted filesystem restrictions
 export LORE_REMOTE_GATEWAY=1
 ```
 
@@ -157,6 +171,10 @@ In hosted mode, the gateway disables filesystem operations that depend on client
 - No `lat.md/` directory scan.
 - No file watchers.
 
+Hosted and remote gateways also reject caller-provided `X-Lore-Upstream-URL` destinations unless their exact HTTPS origin appears in `LORE_CALLER_UPSTREAM_ALLOWLIST`. Leave the variable unset for the secure deny-all default.
+
+Every remote/hosted **data-plane** request must carry the configured token in `x-lore-gateway-token`. This credential authorizes access to Lore; `x-api-key`, `x-goog-api-key`, and bearer tokens authorize an upstream provider and never substitute for it. The gateway compares the access token exactly, strips it before request parsing, and never forwards or stores it. Health remains public, while the dashboard and management API remain socket-loopback-only.
+
 Requests that cannot resolve a confident project path are routed to a per-session synthetic "unattributed" bucket so unrelated sessions are never merged. The bucket self-heals when a confident path arrives in a later turn.
 
 ### Connecting clients to a remote gateway
@@ -166,18 +184,45 @@ Clients find the remote gateway via the same discovery chain as the local one:
 ```bash
 # Explicit override (highest priority)
 export LORE_REMOTE_URL=https://lore.corp.example.com
-
-# Or set the same env var the local-discovery uses
-export LORE_GATEWAY_URL=https://lore.corp.example.com
+export LORE_GATEWAY_AUTH_TOKEN='<the server-configured token>'
 ```
 
-Both the OpenCode and Pi plugins probe the URL on startup.
+Both the OpenCode and Pi plugins probe `LORE_REMOTE_URL` on startup and inject the token as a request header. Keep the token in the environment or a secret manager; do not put it in the remote URL or command-line arguments. `LORE_GATEWAY_URL` remains a local/custom discovery override and does not opt an adapter into remote-token injection.
+
+Direct clients that support custom headers must set the same header explicitly:
+
+```bash
+curl https://lore.corp.example.com/v1/models \
+  -H "x-lore-gateway-token: $LORE_GATEWAY_AUTH_TOKEN" \
+  -H "x-api-key: $ANTHROPIC_API_KEY"
+```
+
+Clients that can change only a base URL, but cannot attach a custom header, cannot securely use a remote/hosted gateway directly. Use the OpenCode or Pi adapter, `lore run` with a supported header-capable client, or a trusted edge proxy that injects the header from server-side secret storage.
+
+### Accessing remote management safely
+
+Non-loopback clients can use the LLM data-plane routes, but the dashboard and `/api/*` management endpoints are loopback-only. This remains true when the gateway listens on `0.0.0.0`, a LAN address, or Tailscale; proxy forwarding headers do not grant management access.
+
+Use an SSH tunnel when you need the dashboard or management CLI from another machine:
+
+```bash
+# Run on your workstation
+ssh -N -L 3207:127.0.0.1:3207 user@gateway-host
+
+# Dashboard: http://localhost:3207/ui
+# For management CLI commands through the tunnel:
+export LORE_REMOTE_URL=http://localhost:3207
+```
+
+The gateway must listen on `127.0.0.1` (or `0.0.0.0`) for that tunnel target. If you configure individual interfaces, include loopback, for example `LORE_LISTEN_HOST=127.0.0.1,100.100.100.100`.
 
 ## Gotchas
 
 | Problem | Cause | Fix |
 |---|---|---|
 | Upstream URL ignored | A request-level `X-Lore-Upstream-URL` header is overriding the config | Remove the header, or rely on `LORE_UPSTREAM_<PROVIDER>` for provider-scoped URLs |
+| Remote custom upstream rejected | Remote/hosted mode denies caller-selected origins by default | Add the exact HTTPS origin to the gateway administrator's `LORE_CALLER_UPSTREAM_ALLOWLIST`, or configure the protocol default on the gateway |
+| Remote request returns 401 | The gateway access token is missing, wrong, malformed, or duplicated | Set matching `LORE_GATEWAY_AUTH_TOKEN` values on the gateway and adapter, or send one exact `x-lore-gateway-token` header from a direct client |
 | Custom header not arriving | The header is in the gateway-managed blocklist (`x-lore-*`, `x-api-key`, `authorization`, framing headers) | Use a different header name, or remove the conflicting client-side header |
 | Worker calls hitting public Anthropic | `LORE_WORKER_UPSTREAM` is unset and the session uses a non-default upstream | Set `LORE_WORKER_UPSTREAM` to the worker's URL |
 | Multiple clients sharing memory unexpectedly | Hosted mode is off but sessions come from different machines | Set `LORE_HOSTED_MODE=1` on the gateway so it stops attributing to its own cwd |

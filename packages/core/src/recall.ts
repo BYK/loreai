@@ -15,6 +15,7 @@ import * as temporal from "./temporal";
 import * as embedding from "./embedding";
 import { ReadPathTimer } from "./read-telemetry";
 import * as entities from "./entities";
+import { currentTenantId } from "./tenant";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
 import { db, ensureProject, projectName } from "./db";
@@ -1659,9 +1660,12 @@ export function recallById(id: string): string {
     case "d": {
       const row = db()
         .query(
-          "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id = ?",
+          `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id,
+                  d.c_norm, d.r_compression
+             FROM distillations d JOIN projects p ON p.id = d.project_id
+            WHERE p.tenant_id = ? AND d.id = ?`,
         )
-        .get(rawId) as Distillation | null;
+        .get(currentTenantId(), rawId) as Distillation | null;
       if (!row) return `No entry found for id: ${id}`;
       return [
         `## Recall Detail: ${id}`,
@@ -1673,9 +1677,12 @@ export function recallById(id: string): string {
     case "t": {
       const row = db()
         .query(
-          "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id = ?",
+          `SELECT t.id, t.project_id, t.session_id, t.role, t.content, t.tokens,
+                  t.distilled, t.created_at, t.metadata
+             FROM temporal_messages t JOIN projects p ON p.id = t.project_id
+            WHERE p.tenant_id = ? AND t.id = ?`,
         )
-        .get(rawId) as temporal.TemporalMessage | null;
+        .get(currentTenantId(), rawId) as temporal.TemporalMessage | null;
       if (!row) return `No entry found for id: ${id}`;
       return [
         `## Recall Detail: ${id}`,
@@ -1689,9 +1696,12 @@ export function recallById(id: string): string {
     case "lat": {
       const row = db()
         .query(
-          "SELECT id, project_id, file, heading, depth, content, content_hash, first_paragraph, updated_at FROM lat_sections WHERE id = ?",
+          `SELECT l.id, l.project_id, l.file, l.heading, l.depth, l.content,
+                  l.content_hash, l.first_paragraph, l.updated_at
+             FROM lat_sections l JOIN projects p ON p.id = l.project_id
+            WHERE p.tenant_id = ? AND l.id = ?`,
         )
-        .get(rawId) as latReader.LatSection | null;
+        .get(currentTenantId(), rawId) as latReader.LatSection | null;
       if (!row) return `No entry found for id: ${id}`;
       return [
         `## Recall Detail: ${id}`,

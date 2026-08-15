@@ -22,12 +22,15 @@ const GATEWAY = "http://127.0.0.1:3207";
 // Env keys the adoption logic reads/writes — save + restore around each test.
 const TOUCHED_ENV = [
   "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_CUSTOM_HEADERS",
   "OPENAI_BASE_URL",
   "GOOGLE_GEMINI_BASE_URL",
   "COPILOT_API_URL",
   "LORE_UPSTREAM_ANTHROPIC",
   "LORE_UPSTREAM_OPENAI",
   "LORE_UPSTREAM_OPENROUTER",
+  "LORE_GATEWAY_AUTH_TOKEN",
+  "LORE_REMOTE_URL",
 ];
 
 describe("lore run upstream adoption", () => {
@@ -213,6 +216,77 @@ describe("resolveLaunchTarget", () => {
     // Env merged from all agents includes Claude Code's base URL too (harmless).
     expect(target.env.ANTHROPIC_BASE_URL).toBe(GATEWAY);
   });
+
+  test("remote Claude launch uses an env/header, never a URL or CLI argument, for gateway access", () => {
+    const token = "remote-launch-gateway-access-token-at-least-32";
+    process.env.LORE_GATEWAY_AUTH_TOKEN = token;
+    const target = resolveLaunchTarget(
+      { command: "claude", def: claude },
+      "https://lore.example",
+      ["claude"],
+      [],
+      null,
+      true,
+    );
+
+    expect(target.env.LORE_REMOTE_URL).toBe("https://lore.example");
+    expect(target.env.ANTHROPIC_CUSTOM_HEADERS).toContain(
+      `x-lore-gateway-token: ${token}`,
+    );
+    expect(target.args.join(" ")).not.toContain(token);
+    expect(target.env.LORE_REMOTE_URL).not.toContain(token);
+  });
+
+  test("remote Claude launch replaces an inherited gateway token header", () => {
+    const token = "replacement-gateway-access-token-at-least-32";
+    process.env.LORE_GATEWAY_AUTH_TOKEN = token;
+    process.env.ANTHROPIC_CUSTOM_HEADERS =
+      "X-Lore-Gateway-Token: stale-token\nX-Custom: retain-me";
+
+    const target = resolveLaunchTarget(
+      { command: "claude", def: claude },
+      "https://lore.example",
+      ["claude"],
+      [],
+      null,
+      true,
+    );
+
+    const headers = target.env.ANTHROPIC_CUSTOM_HEADERS.split("\n");
+    expect(
+      headers.filter((line) => {
+        const colonIndex = line.indexOf(":");
+        return (
+          colonIndex >= 0 &&
+          line.slice(0, colonIndex).trim().toLowerCase() ===
+            "x-lore-gateway-token"
+        );
+      }),
+    ).toEqual([`x-lore-gateway-token: ${token}`]);
+    expect(headers).toContain("X-Custom: retain-me");
+    expect(target.args.join(" ")).not.toContain(token);
+  });
+
+  test.each(["pi", "opencode"])(
+    "remote %s launch exposes LORE_REMOTE_URL for its adapter without putting the token in args",
+    (binary) => {
+      const token = "remote-adapter-gateway-token-at-least-32";
+      process.env.LORE_GATEWAY_AUTH_TOKEN = token;
+      const def = AGENTS.find((agent) => agent.binary === binary);
+      if (!def) throw new Error(`missing ${binary} agent definition`);
+      const target = resolveLaunchTarget(
+        { command: binary, def },
+        "https://lore.example",
+        [binary],
+        [],
+        null,
+        true,
+      );
+
+      expect(target.env.LORE_REMOTE_URL).toBe("https://lore.example");
+      expect(target.args.join(" ")).not.toContain(token);
+    },
+  );
 
   test("explicit command: injects adoption headers only for the matching agent", () => {
     const selection = { command: "claude", def: claude };
