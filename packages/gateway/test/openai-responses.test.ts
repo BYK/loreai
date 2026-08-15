@@ -1092,6 +1092,9 @@ describe("buildOpenAIResponsesResponse", () => {
     const response = buildOpenAIResponsesResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.status).toBe("incomplete");
+    expect(body.incomplete_details).toEqual({
+      reason: "max_output_tokens",
+    });
   });
 
   test("non-streaming: id gets resp_ prefix if missing", async () => {
@@ -1122,6 +1125,19 @@ describe("buildOpenAIResponsesResponse", () => {
 
     // Should contain the actual text
     expect(text).toContain("Hello! How can I help?");
+  });
+
+  test("streaming: max_tokens emits an incomplete terminal", async () => {
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, stopReason: "max_tokens" },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.incomplete");
+    expect(text).toContain('"status":"incomplete"');
+    expect(text).toContain('"reason":"max_output_tokens"');
+    expect(text).not.toContain("event: response.completed");
   });
 
   test("streaming: tool_use produces function_call events", async () => {

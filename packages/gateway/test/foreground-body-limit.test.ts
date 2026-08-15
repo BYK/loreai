@@ -187,4 +187,28 @@ describe("foreground response body limits", () => {
     const result = await accumulateNonStreamResponse(response, "openai");
     expect(result.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
   });
+
+  test("rejects malformed validated non-stream Responses incomplete details", async () => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_incomplete",
+        model: "gpt-test",
+        status: "incomplete",
+        incomplete_details: { reason: 7 },
+        output: [],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(
+        response,
+        "openai-responses",
+        false,
+        undefined,
+        true,
+      ),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
 });

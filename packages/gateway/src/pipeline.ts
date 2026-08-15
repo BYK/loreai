@@ -10013,11 +10013,14 @@ export async function accumulateNonStreamResponse(
   if (protocol === "openai-responses") {
     const response = accumulateResponsesNonStreamJSON(json);
     const status = typeof json.status === "string" ? json.status : "unknown";
+    if (
+      requireValidCompletion &&
+      (status === "completed" || status === "incomplete")
+    ) {
+      assertValidNonStreamCompletion(json, protocol);
+    }
     if (status !== "completed") {
       throw new ResponsesTerminalError(response, status);
-    }
-    if (requireValidCompletion) {
-      assertValidNonStreamCompletion(json, protocol);
     }
     return response;
   }
@@ -10033,6 +10036,22 @@ export async function accumulateNonStreamResponse(
       // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
       // Anthropic non-streaming JSON shape).
       return accumulateAnthropicNonStreamJSON(json);
+  }
+}
+
+async function preserveIncompleteResponsesTerminal(
+  operation: Promise<GatewayResponse>,
+): Promise<GatewayResponse> {
+  try {
+    return await operation;
+  } catch (error) {
+    if (
+      error instanceof ResponsesTerminalError &&
+      error.status === "incomplete"
+    ) {
+      return error.response;
+    }
+    throw error;
   }
 }
 
@@ -10060,8 +10079,9 @@ function assertValidNonStreamCompletion(
   }
 
   if (protocol === "openai-responses") {
+    const status = json.status;
     if (
-      json.status !== "completed" ||
+      (status !== "completed" && status !== "incomplete") ||
       typeof json.id !== "string" ||
       typeof json.model !== "string" ||
       !Array.isArray(json.output) ||
@@ -10070,6 +10090,18 @@ function assertValidNonStreamCompletion(
       Array.isArray(json.usage)
     ) {
       throw new Error("upstream Responses request did not complete");
+    }
+    if (status === "incomplete") {
+      const details = json.incomplete_details;
+      if (
+        details !== undefined &&
+        details !== null &&
+        (typeof details !== "object" ||
+          Array.isArray(details) ||
+          typeof (details as Record<string, unknown>).reason !== "string")
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
     }
     return;
   }
@@ -13127,32 +13159,33 @@ async function handlePassthrough(
       }
     }
     // Other cross-protocol streaming combos: accumulate + re-emit
-    const resp =
+    const resp = await preserveIncompleteResponsesTerminal(
       wireProtocol === "openai"
-        ? await accumulateOpenAISSEStream(upstreamResponse, {
+        ? accumulateOpenAISSEStream(upstreamResponse, {
             signal: abortScope.signal,
             strict: true,
             stopAtTerminal: true,
             consumeUntilDone: true,
           })
         : wireProtocol === "openai-responses"
-          ? await accumulateResponsesSSEStream(upstreamResponse, {
+          ? accumulateResponsesSSEStream(upstreamResponse, {
               signal: abortScope.signal,
               validation: req.codex === true ? "codex" : "public",
               stopAtTerminal: true,
               requireCompletedTerminal: true,
             })
           : wireProtocol === "gemini"
-            ? await accumulateGeminiSSEStream(upstreamResponse, {
+            ? accumulateGeminiSSEStream(upstreamResponse, {
                 signal: abortScope.signal,
                 strict: true,
                 stopAtTerminal: true,
               })
-            : await accumulateSSEResponse(upstreamResponse, {
+            : accumulateSSEResponse(upstreamResponse, {
                 signal: abortScope.signal,
                 strict: true,
                 stopAtTerminal: true,
-              });
+              }),
+    );
     return nonStreamHttpResponse(
       resp,
       req.protocol,
@@ -13163,11 +13196,13 @@ async function handlePassthrough(
   }
 
   // Non-streaming cross-protocol: accumulate + re-emit
-  const resp = await accumulateNonStreamResponse(
-    upstreamResponse,
-    wireProtocol,
-    req.codex === true,
-    abortScope.signal,
+  const resp = await preserveIncompleteResponsesTerminal(
+    accumulateNonStreamResponse(
+      upstreamResponse,
+      wireProtocol,
+      req.codex === true,
+      abortScope.signal,
+    ),
   );
   return nonStreamHttpResponse(
     resp,
@@ -13297,6 +13332,15 @@ async function handleProvisionalConversationTurn(
       true,
       requestCredentialFingerprint(req.rawHeaders),
     );
+    if (error.status === "incomplete") {
+      return nonStreamHttpResponse(
+        error.response,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      );
+    }
     return errorResponse(502, "Gateway request failed");
   }
   if (
@@ -16010,13 +16054,15 @@ async function handleConversationTurn(
   }
   async function captureUnsuccessfulResponses(
     operation: Promise<GatewayResponse>,
-  ): Promise<GatewayResponse | undefined> {
+  ): Promise<{ response: GatewayResponse; successful: boolean } | undefined> {
     try {
-      return await operation;
+      return { response: await operation, successful: true };
     } catch (error) {
       if (!(error instanceof ResponsesTerminalError)) throw error;
       finishUnsuccessfulStreaming(error.response);
-      return undefined;
+      return error.status === "incomplete"
+        ? { response: error.response, successful: false }
+        : undefined;
     }
   }
 
@@ -16233,7 +16279,7 @@ async function handleConversationTurn(
       }
       // Warning to inject, or a non-Responses client: buffer the full
       // upstream, run recall interception, then re-emit.
-      const resp = await awaitForeground(
+      const captured = await awaitForeground(
         captureUnsuccessfulResponses(
           accumulateResponsesSSEStream(upstreamResponse, {
             signal: foregroundAbort.signal,
@@ -16243,10 +16289,21 @@ async function handleConversationTurn(
           }),
         ),
       );
-      if (!resp) {
+      if (!captured) {
         return finishForeground(errorResponse(502, "Gateway request failed"));
       }
-      return finishWithRecall(resp);
+      if (!captured.successful) {
+        return finishForeground(
+          nonStreamHttpResponse(
+            captured.response,
+            req.protocol,
+            req.stream,
+            undefined,
+            requestEnablesLongContext(req),
+          ),
+        );
+      }
+      return finishWithRecall(captured.response);
     }
 
     if (effectiveProtocol === "openai") {
@@ -16334,7 +16391,7 @@ async function handleConversationTurn(
   }
 
   // Non-streaming: dispatch to correct accumulator based on upstream protocol.
-  const resp = await awaitForeground(
+  const captured = await awaitForeground(
     captureUnsuccessfulResponses(
       accumulateNonStreamResponse(
         upstreamResponse,
@@ -16344,10 +16401,21 @@ async function handleConversationTurn(
       ),
     ),
   );
-  if (!resp) {
+  if (!captured) {
     return finishForeground(errorResponse(502, "Gateway request failed"));
   }
-  return finishWithRecall(resp);
+  if (!captured.successful) {
+    return finishForeground(
+      nonStreamHttpResponse(
+        captured.response,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      ),
+    );
+  }
+  return finishWithRecall(captured.response);
 }
 
 // ---------------------------------------------------------------------------

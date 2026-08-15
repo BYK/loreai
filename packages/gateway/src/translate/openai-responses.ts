@@ -762,12 +762,16 @@ function buildOpenAIResponsesNonStreamResponse(
 
   output.push(...functionCalls);
 
+  const status = mapStopReasonToStatus(resp.stopReason);
   const response = {
     id: resp.id.startsWith("resp_") ? resp.id : `resp_${resp.id}`,
     object: "response",
     created_at: Math.floor(Date.now() / 1000),
     model: resp.model,
-    status: mapStopReasonToStatus(resp.stopReason),
+    status,
+    ...(status === "incomplete"
+      ? { incomplete_details: { reason: "max_output_tokens" } }
+      : {}),
     output,
     usage: responsesUsage(usage),
   };
@@ -978,15 +982,20 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
         }
       }
 
-      // response.completed
-      emit("response.completed", {
-        type: "response.completed",
+      const status = mapStopReasonToStatus(resp.stopReason);
+      const terminalEvent =
+        status === "incomplete" ? "response.incomplete" : "response.completed";
+      emit(terminalEvent, {
+        type: terminalEvent,
         response: {
           id: respId,
           object: "response",
           created_at: created,
           model: resp.model,
-          status: mapStopReasonToStatus(resp.stopReason),
+          status,
+          ...(status === "incomplete"
+            ? { incomplete_details: { reason: "max_output_tokens" } }
+            : {}),
           output: resp.content
             .map((block, i) => {
               if (block.type === "text") {

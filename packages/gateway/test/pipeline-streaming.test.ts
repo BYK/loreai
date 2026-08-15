@@ -1090,7 +1090,9 @@ describe("Pipeline — streaming responses", () => {
         }),
         loadConfig(),
       );
-      expect(await response.text()).toContain("event: response.failed");
+      const body = await response.text();
+      expect(body).toContain("event: response.incomplete");
+      expect(body).not.toContain("event: response.completed");
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       expect(store).not.toHaveBeenCalled();
@@ -1556,8 +1558,12 @@ describe("Pipeline — streaming responses", () => {
       request.stream = false;
       const response = await handleRequest(request, loadConfig());
       expect(end).not.toHaveBeenCalled();
-      expect(response.status).toBe(502);
-      await response.text();
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.status).toBe("incomplete");
+      expect(body.incomplete_details).toEqual({
+        reason: "max_output_tokens",
+      });
       await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
       const state = [...getActiveSessions().values()].find(
         (candidate) =>
@@ -3084,7 +3090,7 @@ describe("Pipeline — streaming responses", () => {
         expect(body).toContain(
           status === "completed"
             ? "event: response.completed"
-            : "event: response.failed",
+            : "event: response.incomplete",
         );
         await finalizerWaiting;
         await resetPipelineState();
@@ -3350,8 +3356,17 @@ describe("Pipeline — streaming responses", () => {
         });
         failed.stream = false;
         const response = await handleRequest(failed, loadConfig());
-        expect(response.status).toBe(502);
-        expect(await response.text()).toContain("Gateway request failed");
+        if (status === "incomplete") {
+          expect(response.status).toBe(200);
+          const body = (await response.json()) as Record<string, unknown>;
+          expect(body.status).toBe("incomplete");
+          expect(body.incomplete_details).toEqual({
+            reason: "max_output_tokens",
+          });
+        } else {
+          expect(response.status).toBe(502);
+          expect(await response.text()).toContain("Gateway request failed");
+        }
         await vi.waitFor(() => {
           expect(
             getSessionCosts(state?.sessionID ?? "")?.conversation,
@@ -5779,6 +5794,57 @@ describe("Pipeline — streaming responses", () => {
       });
     }
   });
+
+  it.each([true, false])(
+    "preserves a valid incomplete Responses terminal for cross-protocol meta stream=%s",
+    async (stream) => {
+      setUpstreamInterceptor(async () =>
+        stream
+          ? new Response(incompleteResponsesSSE("resp_meta_incomplete"), {
+              headers: { "content-type": "text/event-stream" },
+            })
+          : new Response(
+              JSON.stringify({
+                id: "resp_meta_incomplete",
+                model: "gpt-5.6-sol",
+                status: "incomplete",
+                output: [],
+                usage: { input_tokens: 10, output_tokens: 2 },
+              }),
+              { headers: { "content-type": "application/json" } },
+            ),
+      );
+
+      try {
+        const response = await handleRequest(
+          {
+            protocol: "anthropic",
+            model: "gpt-5.6-sol",
+            system: "title this",
+            messages: [
+              { role: "user", content: [{ type: "text", text: "title" }] },
+            ],
+            tools: [],
+            stream,
+            maxTokens: 32,
+            metadata: {},
+            rawHeaders: {
+              authorization: "Bearer test-key",
+              "x-lore-agent": "title",
+              "x-lore-provider": "openai",
+            },
+          },
+          loadConfig(),
+        );
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body).toContain('"stop_reason":"max_tokens"');
+        expect(body).not.toContain("Gateway request failed");
+      } finally {
+        setUpstreamInterceptor(undefined);
+      }
+    },
+  );
 
   it.each(["openai-responses", "gemini"] as const)(
     "strictly translates an open-tail Anthropic meta stream to %s",
