@@ -2524,6 +2524,10 @@ export function translateAnthropicStreamToResponses(
                 }
 
                 const finalStatus = mapStatusFromStopReason(resp.stopReason);
+                const terminalEvent =
+                  finalStatus === "incomplete"
+                    ? "response.incomplete"
+                    : "response.completed";
 
                 const ru = resp.usage ?? ZERO_USAGE;
                 const inclusiveInputTokens = safeTokenSum(
@@ -2554,14 +2558,24 @@ export function translateAnthropicStreamToResponses(
 
                 await safeEnqueue(
                   encoder.encode(
-                    emit("response.completed", {
-                      type: "response.completed",
+                    emit(terminalEvent, {
+                      type: terminalEvent,
                       response: {
                         id: respId,
                         object: "response",
                         created_at: created,
                         model: resp.model,
                         status: finalStatus,
+                        ...(finalStatus === "incomplete"
+                          ? {
+                              incomplete_details: {
+                                reason:
+                                  resp.stopReason === "content_filter"
+                                    ? "content_filter"
+                                    : "max_output_tokens",
+                              },
+                            }
+                          : {}),
                         output: finalOutput,
                         usage: usageData,
                       },

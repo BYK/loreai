@@ -13354,7 +13354,12 @@ async function handleProvisionalConversationTurn(
           pause.onWait();
           await pause.pause;
         }
-        if (requestGeneration !== streamingPostResponseGeneration) return;
+        if (
+          requestGeneration !== streamingPostResponseGeneration ||
+          req.signal?.aborted ||
+          downstreamWasCancelled()
+        )
+          return;
         if (
           identified.guardProject &&
           conflictsWithConfidentSessionProject(identified.sessionID, pathResult)

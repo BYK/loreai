@@ -2292,6 +2292,38 @@ test("Anthropic translator emits inclusive Responses cache usage", async () => {
   ).not.toThrow();
 });
 
+test("Anthropic translator emits content_filter as response.incomplete", async () => {
+  const event = (type: string, data: Record<string, unknown>) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  const upstream = new Response(
+    event("message_start", {
+      message: {
+        id: "msg_filtered",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    }) +
+      event("message_delta", {
+        delta: { stop_reason: "refusal", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      }) +
+      event("message_stop", {}),
+  );
+
+  const output = await translateAnthropicStreamToResponses(upstream, {
+    strict: true,
+  }).text();
+  expect(output).toContain("event: response.incomplete");
+  expect(output).toContain('"status":"incomplete"');
+  expect(output).toContain('"reason":"content_filter"');
+  expect(output).not.toContain("event: response.completed");
+});
+
 // ---------------------------------------------------------------------------
 // streamResponsesPassthrough — true streaming (Responses → Responses client)
 // ---------------------------------------------------------------------------

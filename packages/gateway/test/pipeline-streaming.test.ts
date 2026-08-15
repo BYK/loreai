@@ -3220,6 +3220,74 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("does not account a provisional incomplete response cancelled after its terminal", async () => {
+    const alias = "cancelled-incomplete-alias";
+    const canonical = "cancelled-incomplete-canonical";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(
+        upstreamCall === 1
+          ? validResponsesSSE("resp_cancelled_incomplete_setup")
+          : incompleteResponsesSSE("resp_cancelled_incomplete"),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": alias },
+          }),
+          loadConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      const original = loadSessionTracking(state?.sessionID ?? "");
+      clearAllCosts();
+      store.mockClear();
+
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": canonical,
+            "x-session-affinity": alias,
+          },
+        }),
+        loadConfig(),
+      );
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.incomplete")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      await reader?.cancel("client disconnected after incomplete terminal");
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
+      expect(store).not.toHaveBeenCalled();
+      expect(loadSessionTracking(state?.sessionID ?? "")).toEqual(original);
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearAllCosts();
+    }
+  });
+
   it("does not persist an established streaming turn cancelled after its terminal", async () => {
     const sessionHeader = "cancelled-established-terminal";
     const store = vi.spyOn(temporal, "store");
