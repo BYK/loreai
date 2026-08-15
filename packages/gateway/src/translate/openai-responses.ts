@@ -770,7 +770,7 @@ function buildOpenAIResponsesNonStreamResponse(
     model: resp.model,
     status,
     ...(status === "incomplete"
-      ? { incomplete_details: { reason: "max_output_tokens" } }
+      ? { incomplete_details: incompleteDetails(resp.stopReason) }
       : {}),
     output,
     usage: responsesUsage(usage),
@@ -790,12 +790,20 @@ function mapStopReasonToStatus(reason: string): string {
       return "completed";
     case "max_tokens":
     case "length":
+    case "content_filter":
       return "incomplete";
     case "tool_use":
       return "completed";
     default:
       return "completed";
   }
+}
+
+function incompleteDetails(stopReason: string): { reason: string } {
+  return {
+    reason:
+      stopReason === "content_filter" ? "content_filter" : "max_output_tokens",
+  };
 }
 
 function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
@@ -994,7 +1002,7 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
           model: resp.model,
           status,
           ...(status === "incomplete"
-            ? { incomplete_details: { reason: "max_output_tokens" } }
+            ? { incomplete_details: incompleteDetails(resp.stopReason) }
             : {}),
           output: resp.content
             .map((block, i) => {

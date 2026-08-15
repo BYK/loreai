@@ -1140,6 +1140,24 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(text).not.toContain("event: response.completed");
   });
 
+  test.each([false, true])(
+    "stream=%s: content_filter remains an incomplete terminal",
+    async (streaming) => {
+      const response = buildOpenAIResponsesResponse(
+        { ...baseResponse, stopReason: "content_filter" },
+        streaming,
+      );
+      const text = await response.text();
+
+      expect(text).toContain('"status":"incomplete"');
+      expect(text).toContain('"reason":"content_filter"');
+      if (streaming) {
+        expect(text).toContain("event: response.incomplete");
+        expect(text).not.toContain("event: response.completed");
+      }
+    },
+  );
+
   test("streaming: tool_use produces function_call events", async () => {
     const resp: GatewayResponse = {
       id: "test",

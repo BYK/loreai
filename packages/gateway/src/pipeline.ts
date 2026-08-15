@@ -10014,8 +10014,8 @@ export async function accumulateNonStreamResponse(
     const response = accumulateResponsesNonStreamJSON(json);
     const status = typeof json.status === "string" ? json.status : "unknown";
     if (
-      requireValidCompletion &&
-      (status === "completed" || status === "incomplete")
+      status === "incomplete" ||
+      (requireValidCompletion && status === "completed")
     ) {
       assertValidNonStreamCompletion(json, protocol);
     }
@@ -10360,7 +10360,14 @@ export function accumulateResponsesNonStreamJSON(
   // Map Responses API status to gateway stop reason
   const status = json.status as string | undefined;
   let stopReason = "end_turn";
-  if (status === "incomplete") stopReason = "max_tokens";
+  if (status === "incomplete") {
+    const details = json.incomplete_details;
+    const reason =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? (details as Record<string, unknown>).reason
+        : undefined;
+    stopReason = reason === "content_filter" ? "content_filter" : "max_tokens";
+  }
   if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
     stopReason = "tool_use";
   }
@@ -13332,7 +13339,7 @@ async function handleProvisionalConversationTurn(
       true,
       requestCredentialFingerprint(req.rawHeaders),
     );
-    if (error.status === "incomplete") {
+    if (error.status === "incomplete" && !hasRecallToolUse(error.response)) {
       return nonStreamHttpResponse(
         error.response,
         req.protocol,
@@ -16293,6 +16300,9 @@ async function handleConversationTurn(
         return finishForeground(errorResponse(502, "Gateway request failed"));
       }
       if (!captured.successful) {
+        if (hasRecallToolUse(captured.response)) {
+          return finishForeground(errorResponse(502, "Gateway request failed"));
+        }
         return finishForeground(
           nonStreamHttpResponse(
             captured.response,
@@ -16405,6 +16415,9 @@ async function handleConversationTurn(
     return finishForeground(errorResponse(502, "Gateway request failed"));
   }
   if (!captured.successful) {
+    if (hasRecallToolUse(captured.response)) {
+      return finishForeground(errorResponse(502, "Gateway request failed"));
+    }
     return finishForeground(
       nonStreamHttpResponse(
         captured.response,

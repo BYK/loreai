@@ -1583,6 +1583,112 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("rejects malformed incomplete JSON on an established conversation", async () => {
+    const sessionHeader = "malformed-incomplete-established";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 1) {
+        return new Response(validResponsesSSE("resp_malformed_setup"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          id: "resp_malformed_incomplete",
+          model: "gpt-5.6-sol",
+          status: "incomplete",
+          incomplete_details: { reason: 7 },
+          output: [],
+          usage: { input_tokens: 10, output_tokens: 2 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-lore-session-id": sessionHeader },
+          }),
+          loadConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": sessionHeader },
+      });
+      request.stream = false;
+      const response = await handleRequest(request, loadConfig());
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("Gateway request failed");
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not expose recall from an incomplete buffered response", async () => {
+    const sessionHeader = "incomplete-private-recall";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 1) {
+        return new Response(validResponsesSSE("resp_recall_setup"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          id: "resp_incomplete_recall",
+          model: "gpt-5.6-sol",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [
+            {
+              type: "function_call",
+              id: "fc_private_recall",
+              call_id: "call_private_recall",
+              name: "recall",
+              arguments: '{"query":"private context"}',
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 2 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-lore-session-id": sessionHeader },
+          }),
+          loadConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": sessionHeader },
+      });
+      request.stream = false;
+      const response = await handleRequest(request, loadConfig());
+      expect(response.status).toBe(502);
+      const body = await response.text();
+      expect(body).toContain("Gateway request failed");
+      expect(body).not.toContain("private context");
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it("preserves finalizer order for overlapping requests in one session", async () => {
     const order: string[] = [];
     const sources: Array<
@@ -5845,6 +5951,50 @@ describe("Pipeline — streaming responses", () => {
       }
     },
   );
+
+  it("rejects malformed incomplete JSON on cross-protocol meta passthrough", async () => {
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "resp_meta_malformed",
+            model: "gpt-5.6-sol",
+            status: "incomplete",
+            incomplete_details: { reason: 7 },
+            output: [],
+            usage: { input_tokens: 10, output_tokens: 2 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+
+    try {
+      const response = await handleRequest(
+        {
+          protocol: "anthropic",
+          model: "gpt-5.6-sol",
+          system: "title this",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "title" }] },
+          ],
+          tools: [],
+          stream: false,
+          maxTokens: 32,
+          metadata: {},
+          rawHeaders: {
+            authorization: "Bearer test-key",
+            "x-lore-agent": "title",
+            "x-lore-provider": "openai",
+          },
+        },
+        loadConfig(),
+      );
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("Gateway request failed");
+    } finally {
+      setUpstreamInterceptor(undefined);
+    }
+  });
 
   it.each(["openai-responses", "gemini"] as const)(
     "strictly translates an open-tail Anthropic meta stream to %s",
