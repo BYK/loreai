@@ -791,6 +791,34 @@ describe("streamResponsesRecallAware", () => {
     expect(await drain(client)).toContain("response.failed");
   });
 
+  test("rejects an unknown public incomplete reason", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_unknown_incomplete", "gpt-5.6-terra"),
+        sseEvent("response.incomplete", {
+          response: {
+            id: "resp_unknown_incomplete",
+            model: "gpt-5.6-terra",
+            status: "incomplete",
+            incomplete_details: { reason: "provider_specific" },
+            output: [],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("response.failed");
+    expect(output).not.toContain("provider_specific");
+  });
+
   test("rejects terminal function calls changing the streamed tool name", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([

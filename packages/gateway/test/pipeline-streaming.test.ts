@@ -1631,6 +1631,58 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it.each([false, true])(
+    "rejects malformed completed JSON on an established conversation codex=%s",
+    async (codex) => {
+      const sessionHeader = `malformed-completed-${codex}`;
+      let upstreamCall = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCall++;
+        if (upstreamCall === 1) {
+          return new Response(validResponsesSSE("resp_completed_setup"), {
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response(JSON.stringify({ status: "completed" }), {
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const store = vi.spyOn(temporal, "store");
+
+      try {
+        const setup = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": sessionHeader },
+        });
+        setup.codex = codex;
+        await (await handleRequest(setup, loadConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === sessionHeader,
+        );
+        expect(state).toBeDefined();
+        clearAllCosts();
+        store.mockClear();
+
+        const request = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": sessionHeader },
+        });
+        request.stream = false;
+        request.codex = codex;
+        const response = await handleRequest(request, loadConfig());
+        expect(response.status).toBe(502);
+        expect(await response.text()).toContain("Gateway request failed");
+        expect(store).not.toHaveBeenCalled();
+        expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
+      } finally {
+        store.mockRestore();
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearAllCosts();
+      }
+    },
+  );
+
   it("rejects an unknown public incomplete reason on a provisional conversation", async () => {
     setUpstreamInterceptor(
       async () =>

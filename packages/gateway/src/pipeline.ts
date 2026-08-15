@@ -8128,6 +8128,27 @@ export function streamResponsesRecallAware(
       ) {
         throw new Error("Responses terminal event contradicts response status");
       }
+      if (status === "incomplete") {
+        const details = response?.incomplete_details;
+        if (
+          details !== undefined &&
+          details !== null &&
+          (typeof details !== "object" || Array.isArray(details))
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+        const reason =
+          details && typeof details === "object" && !Array.isArray(details)
+            ? (details as Record<string, unknown>).reason
+            : undefined;
+        if (
+          reason !== undefined &&
+          reason !== "max_output_tokens" &&
+          reason !== "content_filter"
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+      }
       lifecycle.terminal = true;
     }
   };
@@ -10013,10 +10034,7 @@ export async function accumulateNonStreamResponse(
   if (protocol === "openai-responses") {
     const response = accumulateResponsesNonStreamJSON(json);
     const status = typeof json.status === "string" ? json.status : "unknown";
-    if (
-      status === "incomplete" ||
-      (requireValidCompletion && status === "completed")
-    ) {
+    if (status === "completed" || status === "incomplete") {
       assertValidNonStreamCompletion(json, protocol);
     }
     if (status !== "completed") {

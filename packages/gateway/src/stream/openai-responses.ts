@@ -1217,6 +1217,7 @@ function validatedTerminalStatus(
   event: "response.completed" | "response.done" | "response.incomplete",
   parsed: Record<string, unknown>,
   validation: ResponsesValidationMode,
+  requireKnownIncompleteReason = false,
 ): string {
   const terminal = parsed.response as Record<string, unknown> | undefined;
   if (!terminal || typeof terminal !== "object" || Array.isArray(terminal)) {
@@ -1261,7 +1262,7 @@ function validatedTerminalStatus(
           : status === "completed" || status === "incomplete";
   if (!valid) throw new Error("Responses terminal event/status mismatch");
   if (status === "incomplete") {
-    if (validation === "public") {
+    if (validation === "public" || requireKnownIncompleteReason) {
       if (
         details?.reason !== undefined &&
         details.reason !== "max_output_tokens" &&
@@ -1666,7 +1667,12 @@ export async function accumulateResponsesSSEStream(
         terminalStatus = opts.validation
           ? event === "response.failed"
             ? "failed"
-            : validatedTerminalStatus(event, parsed, opts.validation)
+            : validatedTerminalStatus(
+                event,
+                parsed,
+                opts.validation,
+                opts.requireCompletedTerminal,
+              )
           : typeof terminal?.status === "string"
             ? terminal.status
             : null;
