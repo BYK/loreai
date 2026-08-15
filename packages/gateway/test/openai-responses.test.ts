@@ -1083,6 +1083,24 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(output[1].arguments).toBe('{"query":"cats"}');
   });
 
+  test("non-streaming: preserves validated native output items", async () => {
+    const rawOutputItems = [
+      {
+        type: "web_search_call",
+        id: "ws_abc",
+        status: "completed",
+        action: { type: "search", query: "cats" },
+      },
+    ];
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, rawOutputItems },
+      false,
+    );
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body.output).toEqual(rawOutputItems);
+  });
+
   test("non-streaming: max_tokens maps to incomplete status", async () => {
     const resp: GatewayResponse = {
       ...baseResponse,

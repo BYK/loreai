@@ -264,6 +264,57 @@ describe("foreground response body limits", () => {
   test.each([
     {
       type: "reasoning",
+      id: "rs_without_status",
+      summary: [],
+    },
+    {
+      type: "web_search_call",
+      id: "ws_completed",
+      status: "completed",
+      action: { type: "search", query: "lore" },
+    },
+    {
+      type: "function_call_output",
+      id: "fc_output",
+      call_id: "call_output",
+      output: "result",
+      status: "completed",
+    },
+    {
+      type: "function_call",
+      id: "fc_failed",
+      call_id: "call_failed",
+      name: "lookup",
+      arguments: "{}",
+      status: "failed",
+    },
+    {
+      type: "image_generation_call",
+      id: "image_failed",
+      status: "failed",
+      result: null,
+    },
+  ])("accepts standard non-stream output item $type", async (item) => {
+    const result = await accumulateNonStreamResponse(
+      new Response(
+        JSON.stringify({
+          id: "resp_standard_item",
+          model: "gpt-test",
+          status: "completed",
+          output: [item],
+          usage: { input_tokens: 7, output_tokens: 2 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+      "openai-responses",
+    );
+
+    expect(result.rawOutputItems).toEqual([item]);
+  });
+
+  test.each([
+    {
+      type: "reasoning",
       id: "rs_in_progress",
       status: "in_progress",
       summary: [],

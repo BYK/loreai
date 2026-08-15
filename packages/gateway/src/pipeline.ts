@@ -12,7 +12,6 @@
  *  3. Normal conversation turns → full pipeline.
  */
 import { createHash } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
 import { asString, estimateTokens as coreEstimateTokens } from "@loreai/core";
 import {
@@ -184,6 +183,10 @@ import {
   formatResponsesEvent,
   makeResponsesAccState,
   mapStatusFromStopReason,
+  isSupportedResponsesOutputItemType,
+  isValidResponsesOutputItemStatus,
+  responsesDoneItemMatchesAdded,
+  responsesTerminalItemMatches,
   ResponsesTerminalError,
   type ResponsesAccState,
 } from "./stream/openai-responses";
@@ -7085,6 +7088,10 @@ export function streamResponsesRecallAware(
   upstreamResponse: Response,
   opts: {
     onComplete: (response: GatewayResponse, successful: boolean) => void;
+    onTransactionReady?: (transaction: {
+      commit: () => void;
+      rollback: () => void;
+    }) => void;
     sessionID?: string;
     maxRecallDepth?: number;
     maxDeferredBytes?: number;
@@ -7235,6 +7242,9 @@ export function streamResponsesRecallAware(
   let transactionBaseline: ResponsesAccState | undefined;
   let transactionProviderUsage: GatewayUsage = { ...ZERO_USAGE };
   const transactionRollbacks: Array<() => void> = [];
+  let deferredTransaction:
+    | { commit: () => void; rollback: () => void }
+    | undefined;
   const restoreTransactionBaseline = (): void => {
     if (!transactionBaseline) return;
     state.id = transactionBaseline.id;
@@ -7434,6 +7444,8 @@ export function streamResponsesRecallAware(
       if (
         !item ||
         typeof item.type !== "string" ||
+        !isSupportedResponsesOutputItemType(item.type) ||
+        !isValidResponsesOutputItemStatus(item.type, item.status, "added") ||
         typeof item.id !== "string" ||
         item.id.length === 0 ||
         (item.type === "function_call" &&
@@ -7551,12 +7563,7 @@ export function streamResponsesRecallAware(
       const item = parsed.item as Record<string, unknown> | undefined;
       if (
         event === "response.output_item.done" &&
-        (!item ||
-          item.type !== declared?.type ||
-          item.id !== declared?.id ||
-          item.call_id !== declared?.call_id ||
-          item.name !== declared?.name ||
-          (declared?.type === "message" && item.role !== declared.role))
+        (!item || !declared || !responsesDoneItemMatchesAdded(item, declared))
       ) {
         throw new Error(
           `Responses output_item.done changed item identity for index ${outputIndex}`,
@@ -8192,90 +8199,6 @@ export function streamResponsesRecallAware(
     }
     if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
   };
-  const terminalTextPartsMatch = (
-    actual: unknown,
-    streamed: unknown,
-  ): boolean => {
-    if (!Array.isArray(actual) || !Array.isArray(streamed)) return false;
-    if (actual.length !== streamed.length) return false;
-    return streamed.every((streamedPart, index) => {
-      const actualPart = actual[index];
-      if (
-        !streamedPart ||
-        typeof streamedPart !== "object" ||
-        Array.isArray(streamedPart) ||
-        !actualPart ||
-        typeof actualPart !== "object" ||
-        Array.isArray(actualPart)
-      ) {
-        return false;
-      }
-      const streamedRecord = streamedPart as Record<string, unknown>;
-      const actualRecord = actualPart as Record<string, unknown>;
-      if (actualRecord.type !== streamedRecord.type) return false;
-      if (
-        typeof streamedRecord.type === "string" &&
-        ["output_text", "reasoning_text", "summary_text", "refusal"].includes(
-          streamedRecord.type,
-        )
-      ) {
-        return (
-          partValue(streamedRecord.type, actualRecord, "terminal content") ===
-          partValue(streamedRecord.type, streamedRecord, "streamed content")
-        );
-      }
-      return isDeepStrictEqual(actualRecord, streamedRecord);
-    });
-  };
-  const terminalItemMatches = (
-    actual: Record<string, unknown>,
-    streamed: Record<string, unknown>,
-  ): boolean => {
-    if (actual.type !== streamed.type || actual.id !== streamed.id)
-      return false;
-    if (actual.status !== undefined && typeof actual.status !== "string") {
-      return false;
-    }
-    if (
-      streamed.status !== undefined &&
-      actual.status !== undefined &&
-      actual.status !== streamed.status
-    ) {
-      return false;
-    }
-    if (actual.type === "function_call") {
-      return (
-        actual.call_id === streamed.call_id &&
-        actual.name === streamed.name &&
-        actual.arguments === streamed.arguments
-      );
-    }
-    if (actual.type === "message") {
-      return (
-        actual.role === streamed.role &&
-        terminalTextPartsMatch(actual.content, streamed.content)
-      );
-    }
-    if (actual.type === "reasoning") {
-      for (const field of ["summary", "content"]) {
-        if (streamed[field] !== undefined) {
-          if (!terminalTextPartsMatch(actual[field], streamed[field])) {
-            return false;
-          }
-        }
-      }
-      if (
-        streamed.encrypted_content !== undefined &&
-        !isDeepStrictEqual(actual.encrypted_content, streamed.encrypted_content)
-      ) {
-        return false;
-      }
-      return true;
-    }
-    const { status: _actualStatus, ...actualSemantic } = actual;
-    const { status: _streamedStatus, ...streamedSemantic } = streamed;
-    return isDeepStrictEqual(actualSemantic, streamedSemantic);
-  };
   const assertTerminalReasoningMatchesLifecycle = (
     lifecycle: OutputLifecycle,
     actual: Record<string, unknown>,
@@ -8371,7 +8294,7 @@ export function streamResponsesRecallAware(
         throw new Error("Responses terminal output changed streamed item");
       }
       const [outputIndex, streamed] = expected[matchIndex];
-      if (!isReference && !terminalItemMatches(actual, streamed)) {
+      if (!isReference && !responsesTerminalItemMatches(actual, streamed)) {
         throw new Error("Responses terminal output changed streamed item");
       }
       if (!isReference && actual.type === "reasoning") {
@@ -9720,18 +9643,41 @@ export function streamResponsesRecallAware(
                     terminalDelivered = true;
                     const successful =
                       state.terminalEvent === "response.completed";
+                    let transactionSettled = false;
+                    const transaction = {
+                      commit: () => {
+                        if (transactionSettled) return;
+                        try {
+                          for (const commit of pendingCommits) commit();
+                          transactionSettled = true;
+                          pendingCommits.length = 0;
+                          transactionRollbacks.length = 0;
+                          transactionBaseline = undefined;
+                        } catch (error) {
+                          pendingCommits.length = 0;
+                          transaction.rollback();
+                          throw error;
+                        }
+                      },
+                      rollback: () => {
+                        if (transactionSettled) return;
+                        transactionSettled = true;
+                        pendingCommits.length = 0;
+                        rollbackTransaction();
+                      },
+                    };
+                    deferredTransaction = transaction;
+                    if (successful) opts.onTransactionReady?.(transaction);
                     if (!finish(visibleResp, successful)) {
+                      transaction.rollback();
                       throw new Error(
                         "recall onComplete failed after delivery",
                       );
                     }
                     if (successful) {
-                      for (const commit of pendingCommits.splice(0)) commit();
-                      transactionRollbacks.length = 0;
-                      transactionBaseline = undefined;
+                      if (!opts.onTransactionReady) transaction.commit();
                     } else {
-                      pendingCommits.length = 0;
-                      rollbackTransaction();
+                      transaction.rollback();
                     }
                   },
                 ))
@@ -9870,7 +9816,8 @@ export function streamResponsesRecallAware(
       resumeDemand = undefined;
       cancelled = true;
       cleanupAbort();
-      rollbackTransaction();
+      if (deferredTransaction) deferredTransaction.rollback();
+      else rollbackTransaction();
       abortController.abort(
         new DOMException("Responses client disconnected", "AbortError"),
       );
@@ -10147,6 +10094,7 @@ function assertValidNonStreamCompletion(
       if (
         typeof item.type !== "string" ||
         !item.type ||
+        !isSupportedResponsesOutputItemType(item.type) ||
         typeof item.id !== "string" ||
         !item.id ||
         seenItemIDs.has(item.id)
@@ -10185,6 +10133,7 @@ function assertValidNonStreamCompletion(
       } else if (item.type === "function_call") {
         const validItemStatus =
           item.status === "completed" ||
+          item.status === "failed" ||
           (status === "incomplete" && item.status === "incomplete");
         if (
           typeof item.call_id !== "string" ||
@@ -10198,6 +10147,7 @@ function assertValidNonStreamCompletion(
         }
       } else if (item.type === "reasoning") {
         const validItemStatus =
+          item.status === undefined ||
           item.status === "completed" ||
           (status === "incomplete" && item.status === "incomplete");
         if (!validItemStatus) {
@@ -10232,11 +10182,16 @@ function assertValidNonStreamCompletion(
           throw new Error("upstream Responses request did not complete");
         }
       } else if (item.type === "item_reference") {
-        if (Object.keys(item).some((key) => key !== "type" && key !== "id")) {
+        // A standalone non-stream response has no streamed item lifecycle to
+        // resolve this reference against; accepting it would silently erase
+        // provider output during normalization.
+        throw new Error("upstream Responses request did not complete");
+      } else {
+        if (
+          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
+        ) {
           throw new Error("upstream Responses request did not complete");
         }
-      } else {
-        throw new Error("upstream Responses request did not complete");
       }
     }
     if (status === "incomplete") {
@@ -11062,7 +11017,7 @@ function postResponse(
   /** Storage policy captured when this turn resolved its session. */
   suppressTemporalStorage = false,
   endSpan?: () => void,
-): void {
+): boolean {
   postResponseStartObserver?.();
   const { sessionID, projectPath } = sessionState;
 
@@ -11336,8 +11291,10 @@ function postResponse(
     if (!noStore) {
       scheduleBackgroundWork(sessionState, config);
     }
+    return true;
   } catch (e) {
     log.error("post-response processing failed:", e);
+    return false;
   } finally {
     endSpan?.();
   }
@@ -13015,8 +12972,17 @@ async function runActivePipelineRequest(
   let finished = false;
   let bodySettled = false;
   let responseReturned = false;
+  let responseCancelled = false;
+  const markResponseCancelled = (): void => {
+    if (responseCancelled) return;
+    responseCancelled = true;
+    onResponseBodyCancelled?.();
+  };
   function onAbort(): void {
-    if (responseReturned) settleResponse();
+    if (responseReturned) {
+      if (callerSignal?.aborted) markResponseCancelled();
+      settleResponse();
+    }
   }
   const trackOperation = (operation: Promise<unknown>): void => {
     const tracked = operation.then(
@@ -13061,9 +13027,12 @@ async function runActivePipelineRequest(
       claimPipelineSession(active, sessionID, signal),
     );
     responseReturned = true;
-    if (signal.aborted) settleResponse();
+    if (signal.aborted) {
+      if (callerSignal?.aborted) markResponseCancelled();
+      settleResponse();
+    }
     return wrapBodyWithCleanup(response, settleResponse, undefined, () => {
-      onResponseBodyCancelled?.();
+      markResponseCancelled();
       settleResponse();
     });
   } catch (error) {
@@ -15666,12 +15635,20 @@ async function handleConversationTurn(
   });
   let streamingFinalizerRegistered = false;
   let genAiSpanEnded = false;
+  let recallPersistenceTransaction:
+    | { commit: () => void; rollback: () => void }
+    | undefined;
+  const rollbackRecallPersistence = (): void => {
+    recallPersistenceTransaction?.rollback();
+    recallPersistenceTransaction = undefined;
+  };
   const endGenAiSpan = (): void => {
     if (genAiSpanEnded) return;
     genAiSpanEnded = true;
     genAiSpan?.end();
   };
   const dropStreamingFinalizer = (): void => {
+    rollbackRecallPersistence();
     streamingFinalizerRegistered = true;
     genAiSpan?.setStatus({
       code: 2,
@@ -16186,6 +16163,7 @@ async function handleConversationTurn(
           return;
         }
         if (downstreamWasCancelled()) {
+          rollbackRecallPersistence();
           accountUnsuccessfulResponse(
             resp,
             sessionState.sessionID,
@@ -16198,16 +16176,27 @@ async function handleConversationTurn(
           );
           return;
         }
-        postResponse(
-          req,
-          resp,
-          sessionState,
-          config,
-          requestBody,
-          genAiSpan,
-          suppressTemporalStorage,
-          endGenAiSpan,
-        );
+        try {
+          const persisted = postResponse(
+            req,
+            resp,
+            sessionState,
+            config,
+            requestBody,
+            genAiSpan,
+            suppressTemporalStorage,
+            endGenAiSpan,
+          );
+          if (persisted) {
+            recallPersistenceTransaction?.commit();
+            recallPersistenceTransaction = undefined;
+          } else {
+            rollbackRecallPersistence();
+          }
+        } catch (error) {
+          rollbackRecallPersistence();
+          throw error;
+        }
       },
       dropStreamingFinalizer,
       true,
@@ -16223,6 +16212,7 @@ async function handleConversationTurn(
       async () => {
         await downstreamSettled;
         await new Promise<void>((resolve) => setImmediate(resolve));
+        rollbackRecallPersistence();
         if (
           requestGeneration !== streamingPostResponseGeneration ||
           sessionSignal.aborted
@@ -16294,6 +16284,10 @@ async function handleConversationTurn(
               onComplete: (response, successful) => {
                 if (successful) finishStreaming(response);
                 else finishUnsuccessfulStreaming(response);
+              },
+              onTransactionReady: (transaction) => {
+                rollbackRecallPersistence();
+                recallPersistenceTransaction = transaction;
               },
               sessionID: sessionState.sessionID,
               maxRecallDepth: MAX_RECALL_DEPTH,

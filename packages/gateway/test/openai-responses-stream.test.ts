@@ -11,6 +11,11 @@
 import { describe, test, expect, vi } from "vitest";
 import {
   accumulateResponsesSSEStream,
+  isSupportedResponsesOutputItemType,
+  isValidResponsesOutputItemStatus,
+  responsesDoneItemMatchesAdded,
+  responsesTerminalItemMatches,
+  SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES,
   streamResponsesPassthrough,
   translateAnthropicStreamToResponses,
 } from "../src/stream/openai-responses";
@@ -1231,6 +1236,564 @@ describe("accumulateResponsesSSEStream", () => {
       ).rejects.toThrow("malformed Responses terminal event");
     },
   );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects a terminal snapshot changing hosted-tool semantics",
+    async (validation) => {
+      const itemId = `ws-snapshot-${validation}`;
+      const reference = validation === "public" ? { output_index: 0 } : {};
+      const item = {
+        type: "web_search_call",
+        id: itemId,
+        status: "completed",
+        action: { type: "search", query: "good" },
+      };
+      const addedItem = { ...item, status: "in_progress" };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: { ...reference, item: addedItem },
+            },
+            {
+              event: "response.output_item.done",
+              data: { ...reference, item },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [
+                    {
+                      ...item,
+                      action: { type: "search", query: "EVIL" },
+                    },
+                  ],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects output_item.done changing hosted-tool semantics",
+    async (validation) => {
+      const item = {
+        type: "web_search_call",
+        id: `ws-done-${validation}`,
+        action: { type: "search", query: "good" },
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: {
+                  ...item,
+                  action: { type: "search", query: "EVIL" },
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects terminal mutation of an established extension field",
+    async (validation) => {
+      const item = {
+        type: "function_call",
+        id: `fc-extension-${validation}`,
+        call_id: `call-extension-${validation}`,
+        name: "lookup",
+        arguments: "{}",
+        caller: "trusted",
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [{ ...item, caller: "attacker" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts terminal status enrichment for a hosted-tool item",
+    async (validation) => {
+      const item = {
+        type: "web_search_call",
+        id: `ws-enriched-${validation}`,
+        action: { type: "search", query: "lore" },
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [{ ...item, status: "completed" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).resolves.toMatchObject({
+        rawOutputItems: [{ ...item, status: "completed" }],
+      });
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s persists recursive null enrichment from the terminal snapshot",
+    async (validation) => {
+      const item = {
+        type: "image_generation_call",
+        id: `image-null-${validation}`,
+        status: "completed",
+        result: null,
+        details: { revised_prompt: null },
+      };
+      const terminalItem = {
+        ...item,
+        result: "base64-result",
+        details: { revised_prompt: "cat" },
+      };
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: { ...item, status: "generating" },
+            },
+          },
+          {
+            event: "response.output_item.done",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item,
+            },
+          },
+          {
+            event: "response.completed",
+            data: {
+              response: { status: "completed", output: [terminalItem] },
+            },
+          },
+        ]),
+        { validation, stopAtTerminal: true },
+      );
+
+      expect(result.rawOutputItems).toEqual([terminalItem]);
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts hosted-tool status transitions",
+    async (validation) => {
+      const item = {
+        type: "image_generation_call",
+        id: `image-status-${validation}`,
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "generating" },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "failed" },
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [{ ...item, status: "failed" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).resolves.toMatchObject({
+        rawOutputItems: [{ ...item, status: "failed" }],
+      });
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts a failed function-call companion",
+    async (validation) => {
+      const item = {
+        type: "function_call",
+        id: `fc-failed-${validation}`,
+        call_id: `call-failed-${validation}`,
+        name: "lookup",
+        arguments: "{}",
+      };
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: { ...item, status: "in_progress" },
+            },
+          },
+          {
+            event: "response.output_item.done",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: { ...item, status: "failed" },
+            },
+          },
+          {
+            event: "response.completed",
+            data: {
+              response: {
+                status: "completed",
+                output: [{ ...item, status: "failed" }],
+              },
+            },
+          },
+        ]),
+        { validation, stopAtTerminal: true },
+      );
+
+      expect(result.rawOutputItems).toEqual([{ ...item, status: "failed" }]);
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects unknown output item types",
+    async (validation) => {
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { type: "provider_specific_output", id: "unknown" },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
+  test("keeps the standard output-item allowlist exhaustive", () => {
+    const expected = [
+      "message",
+      "function_call",
+      "function_call_output",
+      "reasoning",
+      "item_reference",
+      "web_search_call",
+      "file_search_call",
+      "computer_call",
+      "computer_call_output",
+      "computer_tool_call",
+      "computer_tool_call_output",
+      "code_interpreter_call",
+      "image_generation_call",
+      "local_shell_call",
+      "local_shell_call_output",
+      "shell_call",
+      "shell_call_output",
+      "mcp_call",
+      "mcp_list_tools",
+      "mcp_approval_request",
+      "mcp_approval_response",
+      "custom_tool_call",
+      "custom_tool_call_output",
+      "apply_patch_call",
+      "apply_patch_call_output",
+      "program",
+      "program_output",
+      "tool_search_call",
+      "tool_search_output",
+      "additional_tools",
+      "compaction",
+    ];
+
+    expect(SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES).toEqual(expected);
+    expect(expected.every(isSupportedResponsesOutputItemType)).toBe(true);
+    expect(isSupportedResponsesOutputItemType("provider_specific_output")).toBe(
+      false,
+    );
+  });
+
+  test("only permits sparse added fields to be extended by output_item.done", () => {
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "function_call",
+          id: "fc_sparse",
+          call_id: "call_sparse",
+          name: "lookup",
+          arguments: '{"value":1}',
+        },
+        {
+          type: "function_call",
+          id: "fc_sparse",
+          call_id: "call_sparse",
+          name: "lookup",
+          arguments: "",
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "image_generation_call",
+          id: "image_sparse",
+          result: "base64-result",
+        },
+        {
+          type: "image_generation_call",
+          id: "image_sparse",
+          result: null,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "function_call",
+          id: "fc_changed",
+          call_id: "call_changed",
+          name: "lookup",
+          arguments: "evil",
+        },
+        {
+          type: "function_call",
+          id: "fc_changed",
+          call_id: "call_changed",
+          name: "lookup",
+          arguments: "good",
+        },
+      ),
+    ).toBe(false);
+    for (const [type, field, partType] of [
+      ["message", "content", "output_text"],
+      ["reasoning", "summary", "summary_text"],
+    ] as const) {
+      expect(
+        responsesDoneItemMatchesAdded(
+          {
+            type,
+            id: `${type}_changed`,
+            [field]: [{ type: partType, text: "evil" }],
+          },
+          {
+            type,
+            id: `${type}_changed`,
+            [field]: [{ type: partType, text: "good" }],
+          },
+        ),
+      ).toBe(false);
+    }
+  });
+
+  test("permits recursive null enrichment only at the terminal snapshot", () => {
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: "base64-result",
+          details: { revised_prompt: "cat" },
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: null,
+          details: { revised_prompt: null },
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_changed",
+          status: "completed",
+          result: "evil",
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_changed",
+          status: "completed",
+          result: "good",
+        },
+      ),
+    ).toBe(false);
+  });
+
+  test("validates type-specific hosted-tool statuses", () => {
+    expect(
+      isValidResponsesOutputItemStatus("web_search_call", "searching", "added"),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "code_interpreter_call",
+        "interpreting",
+        "added",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "image_generation_call",
+        "generating",
+        "added",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus("web_search_call", "banana", "added"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "image_generation_call",
+        "searching",
+        "added",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "tool_search_call",
+        "searching",
+        "added",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "function_call_output",
+        "failed",
+        "terminal",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "function_call_output",
+        "completed",
+        "terminal",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus("program", "failed", "terminal"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "image_generation_call",
+        "generating",
+        "done",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus("mcp_list_tools", "completed", "done"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "file_search_call",
+        "incomplete",
+        "done",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "code_interpreter_call",
+        "incomplete",
+        "done",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "tool_search_call",
+        "incomplete",
+        "done",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus("tool_search_call", "failed", "done"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus("custom_tool_call", "failed", "done"),
+    ).toBe(false);
+  });
 
   test.each([
     ["role", "user"],

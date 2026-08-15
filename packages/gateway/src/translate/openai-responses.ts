@@ -725,42 +725,46 @@ function buildOpenAIResponsesNonStreamResponse(
   resp: GatewayResponse,
 ): Response {
   const usage = resp.usage ?? ZERO_USAGE;
-  const output: Array<Record<string, unknown>> = [];
+  const output: Array<Record<string, unknown>> = resp.rawOutputItems
+    ? [...resp.rawOutputItems]
+    : [];
   let textContent = "";
   const functionCalls: Array<Record<string, unknown>> = [];
 
-  for (const block of resp.content) {
-    if (block.type === "text") {
-      textContent += block.text;
-    } else if (block.type === "tool_use") {
-      functionCalls.push({
-        type: "function_call",
-        id: `fc_${block.id}`,
-        call_id: block.id,
-        name: block.name,
-        arguments: JSON.stringify(block.input),
+  if (!resp.rawOutputItems) {
+    for (const block of resp.content) {
+      if (block.type === "text") {
+        textContent += block.text;
+      } else if (block.type === "tool_use") {
+        functionCalls.push({
+          type: "function_call",
+          id: `fc_${block.id}`,
+          call_id: block.id,
+          name: block.name,
+          arguments: JSON.stringify(block.input),
+          status: "completed",
+        });
+      }
+    }
+
+    if (textContent) {
+      output.push({
+        type: "message",
+        id: `msg_${resp.id}`,
+        role: "assistant",
         status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: textContent,
+            annotations: [],
+          },
+        ],
       });
     }
-  }
 
-  if (textContent) {
-    output.push({
-      type: "message",
-      id: `msg_${resp.id}`,
-      role: "assistant",
-      status: "completed",
-      content: [
-        {
-          type: "output_text",
-          text: textContent,
-          annotations: [],
-        },
-      ],
-    });
+    output.push(...functionCalls);
   }
-
-  output.push(...functionCalls);
 
   const status = mapStopReasonToStatus(resp.stopReason);
   const response = {

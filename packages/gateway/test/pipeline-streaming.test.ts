@@ -208,6 +208,44 @@ function validResponsesSSE(
   );
 }
 
+function recallResponsesSSE(id: string, query: string): string {
+  const item = {
+    type: "function_call",
+    id: `fc_${id}`,
+    call_id: `call_${id}`,
+    name: "recall",
+    arguments: JSON.stringify({ query }),
+    status: "completed",
+  };
+  return (
+    responsesEvent("response.created", {
+      response: { id, model: "gpt-5.6-sol", status: "in_progress" },
+    }) +
+    responsesEvent("response.output_item.added", {
+      output_index: 0,
+      item: { ...item, arguments: "", status: "in_progress" },
+    }) +
+    responsesEvent("response.function_call_arguments.done", {
+      output_index: 0,
+      item_id: item.id,
+      arguments: item.arguments,
+    }) +
+    responsesEvent("response.output_item.done", {
+      output_index: 0,
+      item,
+    }) +
+    responsesEvent("response.completed", {
+      response: {
+        id,
+        model: "gpt-5.6-sol",
+        status: "completed",
+        output: [item],
+        usage: { input_tokens: 10, output_tokens: 1 },
+      },
+    })
+  );
+}
+
 function incompleteResponsesSSE(id: string): string {
   return (
     responsesEvent("response.created", {
@@ -3154,9 +3192,10 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it("does not confirm canonical migration when the completed response is cancelled", async () => {
+  it("does not confirm canonical migration when the caller aborts after response.completed", async () => {
     const alias = "cancelled-complete-alias";
     const canonical = "cancelled-complete-canonical";
+    const caller = new AbortController();
     const store = vi.spyOn(temporal, "store");
     setUpstreamInterceptor(
       async () =>
@@ -3183,15 +3222,14 @@ describe("Pipeline — streaming responses", () => {
       clearAllCosts();
       store.mockClear();
 
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": canonical,
-            "x-session-affinity": alias,
-          },
-        }),
-        loadConfig(),
-      );
+      const request = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": canonical,
+          "x-session-affinity": alias,
+        },
+      });
+      request.signal = caller.signal;
+      const response = await handleRequest(request, loadConfig());
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
       const decoder = new TextDecoder();
@@ -3202,7 +3240,7 @@ describe("Pipeline — streaming responses", () => {
         if (chunk?.value)
           output += decoder.decode(chunk.value, { stream: true });
       }
-      await reader?.cancel("client disconnected after terminal event");
+      caller.abort(new DOMException("client disconnected", "AbortError"));
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -3229,6 +3267,258 @@ describe("Pipeline — streaming responses", () => {
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
       clearAllCosts();
+    }
+  });
+
+  it("rolls back recall persistence when the caller aborts after the continuation terminal", async () => {
+    const canonical = "cancelled-recall-canonical";
+    const caller = new AbortController();
+    const store = vi.spyOn(temporal, "store");
+    let upstreamCall = 0;
+    const args = JSON.stringify({
+      query: "one two three four five six seven eight nine recall terms",
+    });
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 1) {
+        return new Response(validResponsesSSE("resp_recall_abort_setup"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      if (upstreamCall === 2) {
+        return new Response(
+          responsesEvent("response.created", {
+            response: {
+              id: "resp_recall_abort",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+            },
+          }) +
+            responsesEvent("response.output_item.added", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_recall_abort",
+                call_id: "call_recall_abort",
+                name: "recall",
+                arguments: "",
+              },
+            }) +
+            responsesEvent("response.function_call_arguments.done", {
+              output_index: 0,
+              item_id: "fc_recall_abort",
+              arguments: args,
+            }) +
+            responsesEvent("response.output_item.done", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_recall_abort",
+                call_id: "call_recall_abort",
+                name: "recall",
+                arguments: args,
+                status: "completed",
+              },
+            }) +
+            responsesEvent("response.completed", {
+              response: {
+                id: "resp_recall_abort",
+                model: "gpt-5.6-sol",
+                status: "completed",
+                output: [
+                  {
+                    type: "function_call",
+                    id: "fc_recall_abort",
+                    call_id: "call_recall_abort",
+                    name: "recall",
+                    arguments: args,
+                    status: "completed",
+                  },
+                ],
+                usage: { input_tokens: 10, output_tokens: 1 },
+              },
+            }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        validResponsesSSE("resp_recall_abort_final", "final answer"),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-lore-session-id": canonical },
+          }),
+          loadConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === canonical,
+      );
+      expect(state).toBeDefined();
+      const originalTracking = loadSessionTracking(state?.sessionID ?? "");
+      store.mockClear();
+
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": canonical },
+      });
+      request.signal = caller.signal;
+      const response = await handleRequest(request, loadConfig());
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      caller.abort(new DOMException("caller disconnected", "AbortError"));
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(upstreamCall).toBe(3);
+      expect(store).not.toHaveBeenCalled();
+      expect(state?.recallStore.size).toBe(0);
+      expect(loadSessionTracking(state?.sessionID ?? "")).toMatchObject({
+        headerName: originalTracking?.headerName,
+        headerSessionId: originalTracking?.headerSessionId,
+        recallStore: originalTracking?.recallStore,
+      });
+      const compact = await handleCompactEndpoint(
+        new Request("http://gateway.test/v1/compact", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-key",
+            "content-type": "application/json",
+            "x-lore-session-id": canonical,
+          },
+          body: JSON.stringify({ project_path: process.cwd() }),
+        }),
+        loadConfig(),
+      );
+      expect(compact.status).toBe(200);
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rolls back recall persistence when post-response storage fails", async () => {
+    const alias = "failed-recall-storage-alias";
+    const store = vi.spyOn(temporal, "store").mockImplementation(() => {
+      throw new Error("temporal storage failed");
+    });
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(
+        upstreamCall === 1
+          ? recallResponsesSSE(
+              "resp_failed_recall_storage",
+              "one two three four five six seven eight nine storage terms",
+            )
+          : validResponsesSSE(
+              "resp_failed_recall_storage_final",
+              "final answer",
+            ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": alias },
+        }),
+        loadConfig(),
+      );
+      expect(await response.text()).toContain("event: response.completed");
+      await vi.waitFor(() => expect(store).toHaveBeenCalled());
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+
+      expect(upstreamCall).toBe(2);
+      expect(state?.recallStore.size).toBe(0);
+      expect(
+        loadSessionTracking(state?.sessionID ?? "")?.recallStore,
+      ).toBeNull();
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("commits recall persistence only after successful downstream EOF", async () => {
+    const alias = "successful-recall-persistence-alias";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(
+        upstreamCall === 1
+          ? recallResponsesSSE(
+              "resp_successful_recall_persistence",
+              "one two three four five six seven eight nine success terms",
+            )
+          : validResponsesSSE(
+              "resp_successful_recall_persistence_final",
+              "final answer",
+            ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": alias },
+        }),
+        loadConfig(),
+      );
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      expect(state?.recallStore.size).toBe(0);
+      expect(
+        loadSessionTracking(state?.sessionID ?? "")?.recallStore,
+      ).toBeNull();
+
+      for (;;) {
+        const chunk = await reader?.read();
+        if (chunk?.done) break;
+      }
+      await vi.waitFor(() => expect(state?.recallStore.size).toBe(1));
+
+      expect(upstreamCall).toBe(2);
+      expect(
+        loadSessionTracking(state?.sessionID ?? "")?.recallStore,
+      ).not.toBeNull();
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
     }
   });
 
