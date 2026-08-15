@@ -92,6 +92,7 @@ fi
 tmpdir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
 tmp_workdir=""
 tmp_binary=""
+tmp_archive=""
 install_tmp=""
 installed_dest=""
 receipt_tmp=""
@@ -111,6 +112,7 @@ previous_channel=""
 previous_channel_sha256=""
 previous_channel_identity=""
 executable_sha256=""
+expected_download_sha256=""
 installed_identity=""
 receipt_sha256=""
 receipt_identity=""
@@ -162,6 +164,40 @@ hash_file() {
     shasum -a 256 "$1" | awk '{print $1}'
   else
     die "Could not hash installed files (sha256sum or shasum is required)"
+  fi
+}
+
+# Releases through 0.40.0 predate publisher checksum assets. Keep those
+# concrete historical versions installable; unknown/non-semver versions and
+# every later release use the fail-closed policy.
+stable_release_requires_checksums() {
+  local value=$1 major minor patch
+  if [[ ! "$value" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)([-+][A-Za-z0-9.-]+)?$ ]]; then
+    return 0
+  fi
+  major=${BASH_REMATCH[1]}
+  minor=${BASH_REMATCH[2]}
+  patch=${BASH_REMATCH[3]}
+  (( 10#$major > 0 || 10#$minor > 40 || (10#$minor == 40 && 10#$patch > 0) ))
+}
+
+checksum_entry=""
+read_checksum_entry() {
+  local path=$1 target=$2 line digest name count=0
+  checksum_entry=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ ! "$line" =~ ^([a-f0-9]{64})[[:space:]][[:space:]]([A-Za-z0-9][A-Za-z0-9._-]*)$ ]]; then
+      die "Stable release checksum metadata is malformed"
+    fi
+    digest=${BASH_REMATCH[1]}
+    name=${BASH_REMATCH[2]}
+    if [[ "$name" == "$target" ]]; then
+      checksum_entry=$digest
+      count=$((count + 1))
+    fi
+  done < "$path"
+  if (( count != 1 )); then
+    die "Stable release checksum metadata must contain exactly one entry for ${target}"
   fi
 }
 
@@ -615,16 +651,24 @@ inspect_lifecycle_lock_generation() {
 }
 
 lifecycle_owner_is_definitively_dead() {
-  local pid=$1 process_identity=$2 stat_line stat_suffix boot_id live_identity process_start
+  local pid=$1 process_identity=$2 stat_line stat_suffix boot_id live_identity process_start ps_status kill_error
   local -a stat_fields
   lifecycle_pid_is_valid "$pid" || return 1
   if ! kill -0 "$pid" 2>/dev/null; then
     # Portable fallback used on macOS/MSYS and when procfs is unavailable.
-    # Do not mistake a permission-denied signal probe for death when ps can
-    # still see the PID.
-    process_start=$(ps -o pid= -p "$pid" 2>/dev/null || true)
-    [[ "$process_start" =~ ^[[:space:]]*${pid}[[:space:]]*$ ]] && return 1
-    return 0
+    # In the C locale, require kill itself to identify ESRCH before consulting
+    # ps. EPERM or an unknown diagnostic is unverifiable and remains busy.
+    kill_error=$(LC_ALL=C kill -0 "$pid" 2>&1 || true)
+    [[ "$kill_error" == *"No such process"* ]] || return 1
+    # Reclaim only when ps independently reports its specific "PID absent"
+    # result. Unavailable/unexpected ps results remain conservatively busy.
+    if process_start=$(ps -o pid= -p "$pid" 2>/dev/null); then
+      return 1
+    else
+      ps_status=$?
+    fi
+    [[ "$ps_status" == "1" && -z "$process_start" ]]
+    return
   fi
   if [[ "$process_identity" == linux:* &&
         -r "/proc/${pid}/stat" && -r /proc/sys/kernel/random/boot_id ]]; then
@@ -640,14 +684,10 @@ lifecycle_owner_is_definitively_dead() {
     [[ "$live_identity" != "$process_identity" ]]
     return
   fi
-  if [[ "$process_identity" == unix:* ]]; then
-    process_start=$(ps -o lstart= -p "$pid" 2>/dev/null || true)
-    [[ -n "$process_start" ]] || return 1
-    live_identity="unix:${process_start}"
-    [[ "$live_identity" != "$process_identity" ]]
-    return
-  fi
-  # A live PID without a comparable start identity remains conservatively busy.
+  # unix: identities contain timezone-rendered, one-second ps lstart output.
+  # They are useful diagnostics but are not stable generation identifiers: the
+  # same live process renders differently under another TZ. A live PID without
+  # Linux boot/start ticks therefore remains conservatively busy.
   return 1
 }
 
@@ -1417,21 +1457,33 @@ if [[ "$requested_version" == "nightly" ]]; then
           if($i=="org.opencontainers.image.title"&&$(i+2)==target){print d;exit}
         }
       }')
-  if [[ -z "$digest" ]]; then
+  if [[ ! "$digest" =~ ^sha256:([a-f0-9]{64})$ ]]; then
     die "No nightly build found for ${gz_filename}"
   fi
+  expected_blob_sha256=${BASH_REMATCH[1]}
 
   # Step 5: Get the redirect URL (don't follow — auth must not reach Azure)
   redir_url=$(curl -s -w '\n%{redirect_url}' -o /dev/null \
     -H "Authorization: Bearer $GHCR_TOKEN" \
     "https://ghcr.io/v2/byk/loreai/blobs/${digest}" | tail -1)
-  if [[ -z "$redir_url" ]]; then
+  if [[ "$redir_url" != https://* ]]; then
     die "Failed to get blob redirect URL from GHCR"
   fi
 
-  # Step 6: Download the .gz blob and decompress (without auth header)
-  if ! curl -sf "$redir_url" | gunzip > "$tmp_binary"; then
-    die "Failed to download or decompress nightly binary for ${gz_filename}"
+  # Step 6: Download without the registry Authorization header, then verify the
+  # exact compressed bytes against the OCI layer digest before decompression.
+  # OCI content addressing is the nightly integrity boundary; GHCR package
+  # write access remains the publisher-identity boundary.
+  tmp_archive="${tmp_workdir}/${gz_filename}"
+  if ! curl -sf "$redir_url" > "$tmp_archive"; then
+    die "Failed to download nightly binary for ${gz_filename}"
+  fi
+  actual_blob_sha256=$(hash_file "$tmp_archive")
+  if [[ "$actual_blob_sha256" != "$expected_blob_sha256" ]]; then
+    die "Nightly OCI blob digest mismatch for ${gz_filename}"
+  fi
+  if ! gunzip -c "$tmp_archive" > "$tmp_binary"; then
+    die "Failed to decompress nightly binary for ${gz_filename}"
   fi
 
 else
@@ -1451,17 +1503,97 @@ else
   # Strip leading 'v' if present
   version="${version#v}"
 
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]; then
+    die "Invalid stable release version: ${version}"
+  fi
+
   echo -e "${MUTED}Installing lore v${version} (${os}-${arch})...${NC}"
 
   filename="lore-${os}-${arch}${suffix}"
-  url="https://github.com/BYK/loreai/releases/download/${version}/${filename}"
+  release_metadata="${tmp_workdir}/release.json"
+  checksums_file="${tmp_workdir}/lore-checksums.txt"
+  checksum_asset_record=""
+  download_tag="$version"
+
+  # GitHub's HTTPS Releases API authenticates repository release metadata and
+  # exposes a server-computed digest for each uploaded asset. Authenticate the
+  # deterministic checksum asset with that digest, then use its platform entry
+  # to authenticate the decompressed binary. This does not replace an offline
+  # publisher signature: GitHub/release-credential compromise remains trusted.
+  if curl -fsSL \
+      -H "Accept: application/vnd.github.v3+json" \
+      "https://api.github.com/repos/BYK/loreai/releases/tags/${version}" \
+      > "$release_metadata"; then
+    release_tag=$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$release_metadata")
+    if [[ "$release_tag" != "$version" && "$release_tag" != "v${version}" ]]; then
+      die "Stable release metadata tag does not match requested version ${version}"
+    fi
+    download_tag="$release_tag"
+    compact_release=$(tr -d '\n\r\t ' < "$release_metadata")
+    checksum_asset_record=$(printf '%s' "$compact_release" \
+      | sed 's/},{/}\n{/g' \
+      | sed -n '/"name":"lore-checksums.txt"/p')
+  elif stable_release_requires_checksums "$version"; then
+    die "Could not fetch checksum metadata for stable release ${version}"
+  fi
+
+  if [[ -n "$checksum_asset_record" ]]; then
+    if [[ "$checksum_asset_record" == *$'\n'* ]]; then
+      die "Stable release contains ambiguous checksum metadata assets"
+    fi
+    checksum_asset_sha256=$(printf '%s' "$checksum_asset_record" \
+      | sed -n 's/.*"digest":"sha256:\([a-f0-9]\{64\}\)".*/\1/p')
+    if [[ ! "$checksum_asset_sha256" =~ ^[a-f0-9]{64}$ ]]; then
+      die "Stable release checksum metadata has no authenticated SHA-256 asset digest"
+    fi
+    checksum_asset_url=$(printf '%s' "$checksum_asset_record" \
+      | sed -n 's/.*"browser_download_url":"\([^"]*\)".*/\1/p')
+    case "$checksum_asset_url" in
+      "https://github.com/BYK/loreai/releases/download/${download_tag}/lore-checksums.txt") ;;
+      *) die "Stable release checksum metadata has an invalid download URL" ;;
+    esac
+    if ! curl -fsSL "$checksum_asset_url" > "$checksums_file"; then
+      die "Failed to download stable release checksum metadata"
+    fi
+    checksum_metadata_size=$(wc -c < "$checksums_file")
+    if [[ ! "$checksum_metadata_size" =~ ^[0-9]+$ ]] || (( checksum_metadata_size > 65536 )); then
+      die "Stable release checksum metadata is too large"
+    fi
+    actual_checksum_asset_sha256=$(hash_file "$checksums_file")
+    if [[ "$actual_checksum_asset_sha256" != "$checksum_asset_sha256" ]]; then
+      die "Stable release checksum metadata digest mismatch"
+    fi
+    read_checksum_entry "$checksums_file" "$filename"
+    expected_download_sha256=$checksum_entry
+  elif stable_release_requires_checksums "$version"; then
+    die "Stable release ${version} is missing required checksum metadata"
+  fi
 
   # Try gzip-compressed first (~60% smaller), fall back to raw binary
-  if curl -fsSL "${url}.gz" 2>/dev/null | gunzip > "$tmp_binary" 2>/dev/null; then
-    : # Compressed download succeeded
+  url="https://github.com/BYK/loreai/releases/download/${download_tag}/${filename}"
+  tmp_archive="${tmp_workdir}/${filename}.gz"
+  if curl -fsSL "${url}.gz" > "$tmp_archive" 2>/dev/null; then
+    if [[ -n "$expected_download_sha256" ]]; then
+      read_checksum_entry "$checksums_file" "${filename}.gz"
+      actual_archive_sha256=$(hash_file "$tmp_archive")
+      if [[ "$actual_archive_sha256" != "$checksum_entry" ]]; then
+        die "Stable release archive checksum mismatch for ${filename}.gz"
+      fi
+    fi
+    if ! gunzip -c "$tmp_archive" > "$tmp_binary" 2>/dev/null; then
+      die "Failed to decompress stable binary for ${filename}"
+    fi
   else
-    curl -fsSL --progress-bar "$url" -o "$tmp_binary"
+    curl -fsSL --progress-bar "$url" > "$tmp_binary"
   fi
+fi
+
+executable_sha256=$(hash_file "$tmp_binary")
+if [[ ! "$executable_sha256" =~ ^[a-f0-9]{64}$ ]]; then
+  die "Could not verify the downloaded executable digest"
+fi
+if [[ -n "$expected_download_sha256" && "$executable_sha256" != "$expected_download_sha256" ]]; then
+  die "Downloaded binary checksum mismatch for lore-${os}-${arch}${suffix}"
 fi
 
 chmod +x "$tmp_binary"
@@ -1475,10 +1607,6 @@ fi
 # Quick sanity check
 if ! "$tmp_binary" --version >/dev/null 2>&1; then
   die "Downloaded binary failed sanity check. Platform: ${os}-${arch}"
-fi
-executable_sha256=$(hash_file "$tmp_binary")
-if [[ ! "$executable_sha256" =~ ^[a-f0-9]{64}$ ]]; then
-  die "Could not verify the downloaded executable digest"
 fi
 # ---------------------------------------------------------------------------
 # Install to destination
