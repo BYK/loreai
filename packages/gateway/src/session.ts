@@ -412,6 +412,7 @@ export function collectCandidateHeaders(
 export function learnHeaders(
   candidates: Map<string, HeaderCandidate> | undefined,
   rawHeaders: Record<string, string>,
+  options: { commitGlobal?: boolean } = {},
 ): {
   updatedCandidates: Map<string, HeaderCandidate>;
   promoted: { name: string; value: string } | null;
@@ -435,12 +436,14 @@ export function learnHeaders(
     }
 
     // Update global cross-session tracking
-    let globalSet = globalHeaderValues.get(name);
-    if (!globalSet) {
-      globalSet = new Set();
-      globalHeaderValues.set(name, globalSet);
+    if (options.commitGlobal !== false) {
+      let globalSet = globalHeaderValues.get(name);
+      if (!globalSet) {
+        globalSet = new Set();
+        globalHeaderValues.set(name, globalSet);
+      }
+      globalSet.add(value);
     }
-    globalSet.add(value);
   }
 
   // Remove candidates that disappeared from this request
@@ -460,7 +463,9 @@ export function learnHeaders(
     if (!isSessionHeaderName(name)) continue;
 
     const globalSet = globalHeaderValues.get(name);
-    if (globalSet && globalSet.size > 1) {
+    const distinctValues = new Set(globalSet);
+    distinctValues.add(candidate.value);
+    if (distinctValues.size > 1) {
       promoted = { name, value: candidate.value };
       break;
     }
@@ -472,7 +477,9 @@ export function learnHeaders(
       if (candidate.seenCount < LEARNING_THRESHOLD) continue;
 
       const globalSet = globalHeaderValues.get(name);
-      if (globalSet && globalSet.size > 1) {
+      const distinctValues = new Set(globalSet);
+      distinctValues.add(candidate.value);
+      if (distinctValues.size > 1) {
         promoted = { name, value: candidate.value };
         break;
       }
@@ -480,6 +487,19 @@ export function learnHeaders(
   }
 
   return { updatedCandidates: currentCandidates, promoted };
+}
+
+/** Commit candidate-header observations after a provisional turn succeeds. */
+export function observeHeaderValues(rawHeaders: Record<string, string>): void {
+  const incoming = collectCandidateHeaders(rawHeaders);
+  for (const [name, value] of incoming) {
+    let globalSet = globalHeaderValues.get(name);
+    if (!globalSet) {
+      globalSet = new Set();
+      globalHeaderValues.set(name, globalSet);
+    }
+    globalSet.add(value);
+  }
 }
 
 // ---------------------------------------------------------------------------

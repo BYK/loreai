@@ -1083,6 +1083,24 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(output[1].arguments).toBe('{"query":"cats"}');
   });
 
+  test("non-streaming: preserves validated native output items", async () => {
+    const rawOutputItems = [
+      {
+        type: "web_search_call",
+        id: "ws_abc",
+        status: "completed",
+        action: { type: "search", query: "cats" },
+      },
+    ];
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, rawOutputItems },
+      false,
+    );
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body.output).toEqual(rawOutputItems);
+  });
+
   test("non-streaming: max_tokens maps to incomplete status", async () => {
     const resp: GatewayResponse = {
       ...baseResponse,
@@ -1092,6 +1110,9 @@ describe("buildOpenAIResponsesResponse", () => {
     const response = buildOpenAIResponsesResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.status).toBe("incomplete");
+    expect(body.incomplete_details).toEqual({
+      reason: "max_output_tokens",
+    });
   });
 
   test("non-streaming: id gets resp_ prefix if missing", async () => {
@@ -1123,6 +1144,37 @@ describe("buildOpenAIResponsesResponse", () => {
     // Should contain the actual text
     expect(text).toContain("Hello! How can I help?");
   });
+
+  test("streaming: max_tokens emits an incomplete terminal", async () => {
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, stopReason: "max_tokens" },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.incomplete");
+    expect(text).toContain('"status":"incomplete"');
+    expect(text).toContain('"reason":"max_output_tokens"');
+    expect(text).not.toContain("event: response.completed");
+  });
+
+  test.each([false, true])(
+    "stream=%s: content_filter remains an incomplete terminal",
+    async (streaming) => {
+      const response = buildOpenAIResponsesResponse(
+        { ...baseResponse, stopReason: "content_filter" },
+        streaming,
+      );
+      const text = await response.text();
+
+      expect(text).toContain('"status":"incomplete"');
+      expect(text).toContain('"reason":"content_filter"');
+      if (streaming) {
+        expect(text).toContain("event: response.incomplete");
+        expect(text).not.toContain("event: response.completed");
+      }
+    },
+  );
 
   test("streaming: tool_use produces function_call events", async () => {
     const resp: GatewayResponse = {

@@ -37,16 +37,16 @@ describe("Pipeline — /lore:* slash commands", () => {
 
   afterEach(() => harness?.teardown());
 
-  it("intercepts /lore:amnesia:on and :off without forwarding upstream", async () => {
+  it("fails closed for session-less /lore:amnesia toggles", async () => {
     harness = await createHarness({ fixtures: [] });
 
     const on = await harness.chat(slashBody("/lore:amnesia:on"));
     expect(on.status).toBe(200);
-    expect(await textOf(on)).toContain("Amnesia mode on");
+    expect(await textOf(on)).toContain("Amnesia mode was not changed");
 
     const off = await harness.chat(slashBody("/lore:amnesia:off"));
     expect(off.status).toBe(200);
-    expect(await textOf(off)).toContain("Amnesia mode off");
+    expect(await textOf(off)).toContain("Amnesia mode was not changed");
   });
 
   it("handles /lore:warm:stop|keep|auto", async () => {
@@ -63,19 +63,23 @@ describe("Pipeline — /lore:* slash commands", () => {
     ).toContain("Cache warming set to auto");
   });
 
-  it("handles global /lore:warm:off and /lore:warm:on (persisted toggle)", async () => {
+  it("rejects unauthenticated global warming controls", async () => {
     const { isWarmingEnabled } = await import("../src/cache-warmer");
     harness = await createHarness({ fixtures: [] });
+    const initial = isWarmingEnabled();
 
-    const off = await harness.chat(slashBody("/lore:warm:off"));
-    expect(off.status).toBe(200);
-    expect(await textOf(off)).toContain("Cache warming disabled globally");
-    expect(isWarmingEnabled()).toBe(false);
-
-    const on = await harness.chat(slashBody("/lore:warm:on"));
-    expect(on.status).toBe(200);
-    expect(await textOf(on)).toContain("Cache warming enabled globally");
-    expect(isWarmingEnabled()).toBe(true);
+    for (const command of [
+      "/lore:warm:off",
+      "/lore:warm:on",
+      "/lore:warm:reset",
+    ]) {
+      const response = await harness.chat(slashBody(command));
+      expect(response.status).toBe(200);
+      expect(await textOf(response)).toContain(
+        "Global cache warming was not changed",
+      );
+      expect(isWarmingEnabled()).toBe(initial);
+    }
   });
 
   it("returns a helpful error for an unknown /lore:* command", async () => {

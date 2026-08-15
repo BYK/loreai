@@ -1307,18 +1307,22 @@ async function distillSegment(input: {
       sessionID: input.sessionID,
       llm: input.llm,
       model: input.model,
+      signal: input.signal,
       // #627 Phase 1: propagate gitHead so echo-extracted preferences also
       // get stamped.
       metadata: input.metadata,
     });
-    if (input.urgent) await echoPromise;
-    else trackBackground(echoPromise);
+    if (input.urgent) {
+      await echoPromise;
+      input.signal?.throwIfAborted();
+    } else trackBackground(echoPromise);
   } else if (embedding.isAvailable()) {
     embedding.embedDistillation(distillId, result.observations);
   }
 
   // Fire-and-forget: extract decision/preference patterns → knowledge entries
   if (config().knowledge.enabled) {
+    input.signal?.throwIfAborted();
     const patterns = extractPatterns(result.observations);
     for (const pat of patterns) {
       try {

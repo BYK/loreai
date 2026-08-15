@@ -30,7 +30,7 @@ async function runWithUpstream(
         headers: { "content-type": contentType },
       }),
   );
-  await fetch(`${harness.baseURL}/v1/chat/completions`, {
+  await harness.request("/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",

@@ -23,6 +23,10 @@ import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import type { GatewayConfig } from "../src/config";
 import { MAX_HTTP_REQUEST_DECOMPRESSED_BYTES } from "../src/http-body";
+import {
+  loopbackRequest,
+  type LoopbackRequestInit,
+} from "./helpers/loopback-request";
 
 type ServerHandle = Awaited<ReturnType<typeof startServer>>;
 
@@ -114,11 +118,19 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
 }
 
 let server: ServerHandle;
-let baseURL: string;
+
+function localRequest(
+  port: number,
+  path: string,
+  init: LoopbackRequestInit = {},
+  hostname = "127.0.0.1",
+): Promise<Response> {
+  const host = hostname.includes(":") ? `[${hostname}]` : hostname;
+  return loopbackRequest(`http://${host}:${port}${path}`, init);
+}
 
 beforeAll(async () => {
   server = await startServer(makeConfig());
-  baseURL = `http://127.0.0.1:${server.port}`;
 });
 
 afterAll(async () => {
@@ -127,7 +139,7 @@ afterAll(async () => {
 
 describe("server routing", () => {
   test("owner control identity is unavailable without a configured token", async () => {
-    const res = await fetch(`${baseURL}/_lore/control`, {
+    const res = await localRequest(server.port, "/_lore/control", {
       headers: { authorization: "Bearer attacker" },
     });
     expect(res.status).toBe(404);
@@ -315,7 +327,9 @@ describe("server routing", () => {
   });
 
   test("no-Origin OPTIONS remains a 204 without enabling browser CORS", async () => {
-    const res = await fetch(`${baseURL}/v1/messages`, { method: "OPTIONS" });
+    const res = await localRequest(server.port, "/v1/messages", {
+      method: "OPTIONS",
+    });
     expect(res.status).toBe(204);
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
     expect(res.headers.get("access-control-allow-methods")).toBeNull();
@@ -323,7 +337,7 @@ describe("server routing", () => {
   });
 
   test("GET /health remains public without making it browser-readable cross-origin", async () => {
-    const res = await fetch(`${baseURL}/health`);
+    const res = await localRequest(server.port, "/health");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string; version: string };
     expect(body.status).toBe("ok");
@@ -332,7 +346,7 @@ describe("server routing", () => {
   });
 
   test("unknown route returns a 404 error envelope", async () => {
-    const res = await fetch(`${baseURL}/definitely-not-a-route`);
+    const res = await localRequest(server.port, "/definitely-not-a-route");
     expect(res.status).toBe(404);
     const body = (await res.json()) as {
       type: string;
@@ -348,7 +362,7 @@ describe("server routing", () => {
     "/v1/responses",
     "/v1/codex/responses",
   ])("POST %s with invalid JSON returns 400", async (path) => {
-    const res = await fetch(`${baseURL}${path}`, {
+    const res = await localRequest(server.port, path, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{ this is not valid json",
@@ -372,7 +386,7 @@ describe("server routing", () => {
     "/v1/codex/responses",
   ])("POST %s with a zstd body of invalid JSON returns 400", async (path) => {
     const compressed = zstdCompressSync(Buffer.from("{ not json after all"));
-    const res = await fetch(`${baseURL}${path}`, {
+    const res = await localRequest(server.port, path, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -389,35 +403,37 @@ describe("server routing", () => {
   });
 
   test("GET /v1/models returns 502 when the upstream is unreachable", async () => {
-    const res = await fetch(`${baseURL}/v1/models`);
+    const res = await localRequest(server.port, "/v1/models");
     expect(res.status).toBe(502);
     const body = (await res.json()) as { error: { type: string } };
     expect(body.error.type).toBe("api_error");
   });
 
-  test("POST /v1/responses/compact rejects invalid JSON on the exact route", async () => {
-    const res = await fetch(`${baseURL}/v1/responses/compact`, {
+  test("POST /v1/responses/compact rejects invalid JSON before routing", async () => {
+    const res = await localRequest(server.port, "/v1/responses/compact", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
       body: "{ not json",
     });
     expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toEqual({
+    await expect(res.json()).resolves.toMatchObject({
       error: "invalid_request",
-      message: "Invalid JSON body",
     });
   });
 
   test.each([
-    ["/v1/messages", "gzip"],
-    ["/v1/chat/completions", "br"],
-    ["/v1/responses", "zstd"],
-    ["/v1beta/models/gemini-test:generateContent", "gzip"],
-    ["/v1/compact", "br"],
-    ["/v1/responses/compact", "zstd"],
+    ["/v1/messages", "gzip", 400],
+    ["/v1/chat/completions", "br", 400],
+    ["/v1/responses", "zstd", 400],
+    ["/v1beta/models/gemini-test:generateContent", "gzip", 400],
+    ["/v1/compact", "br", 404],
+    ["/v1/responses/compact", "zstd", 400],
   ] as const)(
     "POST %s rejects a %s decompression bomb",
-    async (path, encoding) => {
+    async (path, encoding, expectedStatus) => {
       const expanded = Buffer.alloc(
         MAX_HTTP_REQUEST_DECOMPRESSED_BYTES + 1,
         0x61,
@@ -428,7 +444,7 @@ describe("server routing", () => {
           : encoding === "br"
             ? brotliCompressSync(expanded)
             : zstdCompressSync(expanded);
-      const res = await fetch(`${baseURL}${path}`, {
+      const res = await localRequest(server.port, path, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -437,7 +453,7 @@ describe("server routing", () => {
         },
         body: compressed,
       });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(expectedStatus);
     },
   );
 
@@ -474,13 +490,11 @@ describe("server routing", () => {
   });
 
   test("GET / redirects toward the dashboard (not a 500)", async () => {
-    const res = await fetch(`${baseURL}/`, { redirect: "manual" });
-    // undici surfaces a manual redirect as an opaqueredirect (status 0); a
-    // real 3xx is also acceptable. Regression guard: Response.redirect()'s
-    // headers are immutable, so the old CORS wrapper used to throw and the
-    // root path 500'd instead of redirecting.
+    const res = await localRequest(server.port, "/");
+    // Regression guard: Response.redirect()'s headers are immutable, so
+    // the old CORS wrapper used to throw and the root path returned 500.
     expect(res.status).not.toBe(500);
-    expect([0, 301, 302, 307, 308]).toContain(res.status);
+    expect([301, 302, 307, 308]).toContain(res.status);
   });
 });
 
@@ -489,7 +503,7 @@ describe("startServer configuration", () => {
     const s = await startServer(makeConfig({ hosts: [] }));
     try {
       expect(s.hosts).toEqual(["127.0.0.1"]);
-      const res = await fetch(`http://127.0.0.1:${s.port}/health`);
+      const res = await localRequest(s.port, "/health");
       expect(res.status).toBe(200);
     } finally {
       await s.stop();
@@ -499,7 +513,7 @@ describe("startServer configuration", () => {
   test("debug mode serves requests (covers debug logging branch)", async () => {
     const s = await startServer(makeConfig({ debug: true }));
     try {
-      const res = await fetch(`http://127.0.0.1:${s.port}/health`);
+      const res = await localRequest(s.port, "/health");
       expect(res.status).toBe(200);
     } finally {
       await s.stop();
@@ -521,7 +535,7 @@ describe("startServer configuration", () => {
     try {
       // The unavailable host is dropped; only the bound host remains.
       expect(s.hosts).toEqual(["127.0.0.1"]);
-      const res = await fetch(`http://127.0.0.1:${s.port}/health`);
+      const res = await localRequest(s.port, "/health");
       expect(res.status).toBe(200);
     } finally {
       await s.stop();
@@ -538,7 +552,7 @@ describe("startServer configuration", () => {
     try {
       expect(s.hosts).toEqual(["127.0.0.1"]);
       expect(s.port).toBeGreaterThan(0);
-      const res = await fetch(`http://127.0.0.1:${s.port}/health`);
+      const res = await localRequest(s.port, "/health");
       expect(res.status).toBe(200);
     } finally {
       await s.stop();
@@ -575,7 +589,7 @@ describe("startServer configuration", () => {
     }
     try {
       expect(s.hosts).toContain("::1");
-      const res = await fetch(`http://[::1]:${s.port}/health`);
+      const res = await localRequest(s.port, "/health", {}, "::1");
       expect(res.status).toBe(200);
       const body = (await res.json()) as { status: string };
       expect(body.status).toBe("ok");

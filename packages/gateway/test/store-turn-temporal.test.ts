@@ -287,7 +287,7 @@ describe("storeTurnTemporal (#1084)", () => {
 
       // Reproduce the real v81 layouts, then restart through migrate(). This
       // keeps IDs/FTS rows/tool data intact while v82 backfills source_id=id and
-      // rebuilds the owned tool-call primary key.
+      // rebuilds the owned tool-call primary key; later migrations also run.
       db().exec(`
         DROP INDEX idx_temporal_source_identity;
         ALTER TABLE temporal_messages DROP COLUMN source_id;
@@ -324,7 +324,7 @@ describe("storeTurnTemporal (#1084)", () => {
       `);
       close();
       expect(db().query("SELECT version FROM schema_version").get()).toEqual({
-        version: 82,
+        version: 84,
       });
 
       const noStoreLore = gatewayMessagesToLore(conversation, sessionID);

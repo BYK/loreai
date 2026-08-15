@@ -1,4 +1,5 @@
 import { describe, test, expect } from "vitest";
+import { DatabaseSync } from "node:sqlite";
 import {
   inferProjectPath,
   inferProjectPathDetailed,
@@ -18,6 +19,7 @@ import type { SessionState } from "../src/translate/types";
 import type { ResolveProjectResult } from "../src/synthetic-tools";
 import {
   ensureProject,
+  db,
   projectId,
   ltm,
   saveSessionTracking,
@@ -759,6 +761,43 @@ describe("resolveSessionProjectPath", () => {
     expect(moved.some((e) => e.title === `bucket-finding-${sid}`)).toBe(true);
   });
 
+  test("keeps the old provisional binding when re-attribution is transiently busy", () => {
+    const sid = `busyMerge-${crypto.randomUUID()}`;
+    const bucket = unattributedBucketPath(sid);
+    const realPath = `/test/merge/busy-${crypto.randomUUID()}`;
+    ensureProject(bucket);
+    const blocker = new DatabaseSync(process.env.LORE_DB_PATH as string);
+    db().exec("PRAGMA busy_timeout = 0");
+    try {
+      blocker.exec("BEGIN IMMEDIATE");
+      const state = provisionalState(sid, bucket);
+      const result = resolveSessionProjectPath(
+        { path: realPath, source: "header" },
+        state,
+        localCfg,
+      );
+
+      expect(result).toBe(bucket);
+      expect(state.projectPath).toBe(bucket);
+      expect(state.projectPathProvisional).toBe(true);
+    } finally {
+      if (blocker.isTransaction) blocker.exec("ROLLBACK");
+      blocker.close();
+      db().exec("PRAGMA busy_timeout = 5000");
+    }
+
+    // The next confident turn retries after contention clears and heals.
+    const state = provisionalState(sid, bucket);
+    expect(
+      resolveSessionProjectPath(
+        { path: realPath, source: "header" },
+        state,
+        localCfg,
+      ),
+    ).toBe(realPath);
+    expect(state.projectPathProvisional).toBe(false);
+  });
+
   // --- confidentlyWrong: re-bind an already-confident session bound to a
   // stale header path, WITHOUT merging (cross-project safety) ---
 
@@ -1098,5 +1137,36 @@ describe("applySyntheticResolution gitHead binding (#627 Phase 1)", () => {
     const path = applySyntheticResolution(state, resolved, "/tmp/provisional");
     expect(path).toBe("/tmp/provisional");
     expect(state.gitHead).toBeUndefined();
+  });
+
+  test("keeps the old provisional binding when synthetic re-attribution is busy", () => {
+    const sid = `synthetic-busy-${crypto.randomUUID()}`;
+    const bucket = unattributedBucketPath(sid);
+    const realPath = `/test/synthetic/busy-${crypto.randomUUID()}`;
+    ensureProject(bucket);
+    const state = {
+      ...freshState(sid),
+      projectPath: bucket,
+    };
+    const blocker = new DatabaseSync(process.env.LORE_DB_PATH as string);
+    db().exec("PRAGMA busy_timeout = 0");
+    try {
+      blocker.exec("BEGIN IMMEDIATE");
+      expect(applySyntheticResolution(state, { root: realPath }, bucket)).toBe(
+        bucket,
+      );
+      expect(state.projectPath).toBe(bucket);
+      expect(state.projectPathProvisional).toBe(true);
+    } finally {
+      if (blocker.isTransaction) blocker.exec("ROLLBACK");
+      blocker.close();
+      db().exec("PRAGMA busy_timeout = 5000");
+    }
+
+    expect(applySyntheticResolution(state, { root: realPath }, bucket)).toBe(
+      realPath,
+    );
+    expect(state.projectPath).toBe(realPath);
+    expect(state.projectPathProvisional).toBe(false);
   });
 });

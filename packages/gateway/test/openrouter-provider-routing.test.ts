@@ -14,6 +14,7 @@ import { upstreamFetch } from "../src/fetch";
 import { setSessionAuth } from "../src/auth";
 import type { GatewayConfig } from "../src/config";
 import { fetchArgUrl } from "./helpers/fetch-url";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -264,6 +265,19 @@ async function stop(): Promise<void> {
 
 afterEach(stop);
 
+function localRequest(
+  run: Started,
+  path: string,
+  headers: Record<string, string>,
+  body: string,
+): Promise<Response> {
+  return loopbackRequest(`${run.baseURL}${path}`, {
+    method: "POST",
+    headers,
+    body,
+  });
+}
+
 function requestHeaders(
   providerID: string,
   upstreamUrl = SESSION_UPSTREAM,
@@ -309,19 +323,17 @@ async function foreground(
     upstreamUrl?: string;
   } = {},
 ): Promise<Response> {
-  return fetch(`${run.baseURL}/v1/chat/completions`, {
-    method: "POST",
-    headers: requestHeaders(
-      options.providerID ?? "openrouter",
-      options.upstreamUrl,
-    ),
-    body: JSON.stringify(
+  return localRequest(
+    run,
+    "/v1/chat/completions",
+    requestHeaders(options.providerID ?? "openrouter", options.upstreamUrl),
+    JSON.stringify(
       chatBody(options.provider, {
         includeProvider: options.includeProvider,
         message: options.message,
       }),
     ),
-  });
+  );
 }
 
 function workerCalls() {
@@ -353,15 +365,20 @@ async function useRecallForegroundInterceptor(): Promise<void> {
   );
 }
 
-function activeSession() {
-  // Fixed x-lore-session-id makes this deterministic; no polling or fuzzy match.
+function sessionByHeader(headerSessionId: string) {
   return import("../src/pipeline").then(({ getActiveSessions }) => {
     const state = [...getActiveSessions().values()].find(
-      (candidate) => candidate.headerSessionId === SESSION_ID,
+      (candidate) => candidate.headerSessionId === headerSessionId,
     );
-    if (!state) throw new Error("fixed test session was not identified");
+    if (!state)
+      throw new Error(`test session ${headerSessionId} was not identified`);
     return state;
   });
+}
+
+function activeSession() {
+  // Fixed x-lore-session-id makes this deterministic; no polling or fuzzy match.
+  return sessionByHeader(SESSION_ID);
 }
 
 describe("OpenRouter provider routing", () => {
@@ -394,14 +411,15 @@ describe("OpenRouter provider routing", () => {
     await useNormalForegroundInterceptor();
     const minimaxHeaders = requestHeaders("minimax");
     delete minimaxHeaders["x-lore-upstream-url"];
-    const responses = await fetch(`${run.baseURL}/v1/responses`, {
-      method: "POST",
-      headers: minimaxHeaders,
-      body: JSON.stringify({
+    const responses = await localRequest(
+      run,
+      "/v1/responses",
+      minimaxHeaders,
+      JSON.stringify({
         model: "anthropic/claude-sonnet-4-6",
         input: "Responses ingress to Anthropic route",
       }),
-    });
+    );
     expect(responses.ok).toBe(true);
     await responses.text();
     expect((await activeSession()).lastUpstream).toMatchObject({
@@ -414,11 +432,12 @@ describe("OpenRouter provider routing", () => {
     delete copilotHeaders["x-lore-provider"];
     delete copilotHeaders["x-lore-upstream-url"];
     copilotHeaders["copilot-integration-id"] = "copilot-cli";
-    const copilot = await fetch(`${run.baseURL}/v1/chat/completions`, {
-      method: "POST",
-      headers: copilotHeaders,
-      body: JSON.stringify(chatBody(undefined, { includeProvider: false })),
-    });
+    const copilot = await localRequest(
+      run,
+      "/v1/chat/completions",
+      copilotHeaders,
+      JSON.stringify(chatBody(undefined, { includeProvider: false })),
+    );
     expect(copilot.ok).toBe(true);
     await copilot.text();
     expect((await activeSession()).lastUpstream).toMatchObject({
@@ -639,7 +658,7 @@ describe("OpenRouter provider routing", () => {
   test("protocol-distinct Vertex aliases coexist, persist, and select compatibly", async () => {
     const run = await start();
     await useNormalForegroundInterceptor();
-    const gemini = await fetch(
+    const gemini = await loopbackRequest(
       `${run.baseURL}/v1beta/models/gemini-2.5-flash:generateContent`,
       {
         method: "POST",
@@ -904,7 +923,7 @@ describe("OpenRouter provider routing", () => {
     }
   });
 
-  test("captures failed tightening and rejects an older request that resumes before capture", async () => {
+  test("captures failed tightening and preserves newer policy after an older request resumes", async () => {
     const run = await start();
     const { setBeforeUpstreamCaptureForTest, setUpstreamInterceptor } =
       await import("../src/pipeline");
@@ -949,11 +968,13 @@ describe("OpenRouter provider routing", () => {
       message: "old slow turn",
     });
     await oldStarted;
-    await (
-      await foreground(run, { provider: newPolicy, message: "new fast turn" })
-    ).text();
+    const newRequest = foreground(run, {
+      provider: newPolicy,
+      message: "new queued turn",
+    });
     releaseOld();
     await (await oldRequest).text();
+    await (await newRequest).text();
 
     const state = await activeSession();
     expect(state.lastUpstream?.providerOptions).toEqual(newPolicy);
@@ -969,6 +990,77 @@ describe("OpenRouter provider routing", () => {
     expect(envelope.lastUpstream.providerOptions).toEqual(newPolicy);
     expect(envelope.upstreamByProvider.openrouter.providerOptions).toEqual(
       newPolicy,
+    );
+  });
+
+  test("publishes a successful provisional migration's exact route and policy", async () => {
+    const run = await start();
+    await useNormalForegroundInterceptor();
+    const alias = "provider-routing-migration-alias";
+    const oldRoute = "https://old-route.invalid/openrouter";
+    const newRoute = "https://new-route.invalid/openrouter";
+    const oldPolicy = { only: ["old-provider"] };
+    const newPolicy = {
+      only: ["new-provider"],
+      allow_fallbacks: false,
+    };
+    const oldHeaders = requestHeaders("openrouter", oldRoute);
+    delete oldHeaders["x-lore-session-id"];
+    oldHeaders["x-session-affinity"] = alias;
+
+    const established = await localRequest(
+      run,
+      "/v1/chat/completions",
+      oldHeaders,
+      JSON.stringify(chatBody(oldPolicy)),
+    );
+    expect(established.ok).toBe(true);
+    await established.text();
+    const original = await sessionByHeader(alias);
+
+    const migrated = await localRequest(
+      run,
+      "/v1/chat/completions",
+      {
+        ...requestHeaders("openrouter", newRoute),
+        "x-session-affinity": alias,
+      },
+      JSON.stringify({
+        ...chatBody(newPolicy),
+        model: "openai/gpt-5.6",
+      }),
+    );
+    expect(migrated.ok).toBe(true);
+    await migrated.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const state = await activeSession();
+    expect(state.sessionID).toBe(original.sessionID);
+    expect(state.lastUpstream).toMatchObject({
+      url: newRoute,
+      protocol: "openai",
+      providerID: "openrouter",
+      model: "openai/gpt-5.6",
+      providerOptions: newPolicy,
+    });
+    expect(state.upstreamByProvider.get("openrouter")).toBe(state.lastUpstream);
+    const persisted = loadSessionTracking(state.sessionID)?.lastUpstream;
+    if (!persisted)
+      throw new Error("migrated upstream state was not persisted");
+    const envelope = JSON.parse(persisted) as {
+      lastUpstream: Record<string, unknown>;
+      upstreamByProvider: Record<string, Record<string, unknown>>;
+    };
+    expect(envelope.lastUpstream).toMatchObject({
+      url: newRoute,
+      protocol: "openai",
+      providerID: "openrouter",
+      model: "openai/gpt-5.6",
+      providerOptions: newPolicy,
+    });
+    expect(envelope.upstreamByProvider.openrouter).toEqual(
+      envelope.lastUpstream,
     );
   });
 
@@ -1014,6 +1106,7 @@ describe("OpenRouter provider routing", () => {
   test("bounds persisted provider history and rejects oversized policies", async () => {
     const run = await start();
     await useNormalForegroundInterceptor();
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
 
     for (let index = 0; index < 20; index++) {
       const response = await foreground(run, {
@@ -1035,13 +1128,17 @@ describe("OpenRouter provider routing", () => {
     };
     expect(Object.keys(envelope.upstreamByProvider)).toHaveLength(16);
 
+    let oversizedForwarded = false;
+    setUpstreamInterceptor(async () => {
+      oversizedForwarded = true;
+      return openAIResponse();
+    });
     const oversized = await foreground(run, {
       provider: { only: ["x".repeat(65 * 1024)] },
       message: "oversized policy",
     });
     expect(oversized.status).toBe(502);
-    expect(await oversized.text()).toContain(
-      "OpenRouter provider routing options exceed 65536 bytes",
-    );
+    expect(await oversized.text()).toContain("Gateway request failed");
+    expect(oversizedForwarded).toBe(false);
   });
 });

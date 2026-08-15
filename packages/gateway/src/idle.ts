@@ -433,6 +433,8 @@ export function startIdleScheduler(
   doIdleWork: (sessionID: string, state: SessionState) => Promise<void>,
   /** Optional callback to clean up pipeline-level satellite Maps when a session is evicted. */
   onEvict?: (sessionID: string) => void,
+  /** Optional lifecycle gate for active work owned outside the idle module. */
+  isExternallyActive?: (sessionID: string) => boolean,
 ): () => void {
   const inProgress = new Set<string>();
   const warmupInProgress = new Set<string>();
@@ -614,6 +616,7 @@ export function startIdleScheduler(
 
     // --- Idle work (distillation, curation, etc.) ---
     for (const [sessionID, state] of sessions) {
+      if (state.amnesia) continue;
       if (inProgress.has(sessionID)) continue;
       if (now - state.lastRequestTime < timeoutMs) continue;
 
@@ -715,6 +718,7 @@ export function startIdleScheduler(
       warmupInProgress,
       now,
       onEvict,
+      isExternallyActive,
     );
 
     // --- Cache warming (separate from idle work — fires before TTL expiry) ---
@@ -732,6 +736,7 @@ export function startIdleScheduler(
 
     for (const [sessionID, state] of sessions) {
       if (!warmingGloballyEnabled) break;
+      if (state.amnesia) continue;
       if (warmupInProgress.has(sessionID)) continue;
 
       // Skip sessions with stale auth credentials — warmup would just 401
@@ -848,6 +853,7 @@ export function evictIdleSessions(
   warmupInProgress: ReadonlySet<string>,
   now: number,
   onEvict?: (sessionID: string) => void,
+  isExternallyActive?: (sessionID: string) => boolean,
 ): number {
   const evictionTimeoutMs = config.sessionEvictionTimeoutSeconds * 1000;
   let evicted = 0;
@@ -856,6 +862,7 @@ export function evictIdleSessions(
     if (evictionTimeoutMs <= 0) break; // eviction disabled
     if (inProgress.has(sessionID)) continue; // don't evict during active idle work
     if (warmupInProgress.has(sessionID)) continue;
+    if (isExternallyActive?.(sessionID)) continue;
     // Sub-agent sessions are ephemeral — evict faster
     const timeout = state.isSubagent
       ? Math.min(evictionTimeoutMs, SUBAGENT_EVICTION_MS)

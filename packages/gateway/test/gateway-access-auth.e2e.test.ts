@@ -124,7 +124,7 @@ const DATA_PLANE_ROUTES: DataPlaneRoute[] = [
     path: "/v1/responses/compact",
     method: "POST",
     headers: {
-      ...projectHeaders,
+      "x-lore-project": PROJECT,
       authorization: "Bearer client-openai-token",
       "content-type": "application/json",
       "x-lore-provider": "openai",

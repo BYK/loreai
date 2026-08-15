@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { db } from "../src/db";
+import { db, MIGRATIONS } from "../src/db";
 import * as ltm from "../src/ltm";
 
 const PROJECT = "/test/a2/versioning";
@@ -39,11 +39,11 @@ function ftsHits(token: string): number {
 }
 
 describe("A2 sub-PR 1: append-only knowledge scaffolding", () => {
-  test("schema version is 81", () => {
+  test("schema is at the latest version", () => {
     const v = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(v.version).toBe(82);
+    expect(v.version).toBe(MIGRATIONS.length);
   });
 
   test("create() defaults logical_id = id, version 1, current, not deleted", () => {

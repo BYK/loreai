@@ -156,6 +156,8 @@ describe("Tier 2 credential exclusion", () => {
       ],
       headersA,
     );
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     const learned = harness.queryDB<{
       header_name: string;

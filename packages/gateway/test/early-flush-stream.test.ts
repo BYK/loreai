@@ -109,7 +109,8 @@ describe("earlyFlushStreamingResponse", () => {
     // the `response:{}` envelope or splits the data field will fail.
     const match = out.match(FAILED_EVENT_RE);
     expect(match).not.toBeNull();
-    expect(match?.[1]).toBe("boom");
+    expect(match?.[1]).toBe("Gateway request failed");
+    expect(out).not.toContain("boom");
   });
 
   test("emits a canonical response.failed envelope when the inner response is a non-SSE error body", async () => {
@@ -120,9 +121,8 @@ describe("earlyFlushStreamingResponse", () => {
     const out = await drain(resp);
     const match = out.match(FAILED_EVENT_RE);
     expect(match).not.toBeNull();
-    // The HTTP status and the truncated upstream body surface in the message.
-    expect(match?.[1]).toContain("429");
-    expect(match?.[1]).toContain("upstream 429");
+    expect(match?.[1]).toBe("Gateway request failed");
+    expect(out).not.toContain("upstream 429");
   });
 
   test("the pipeline runs once when downstream starts reading", async () => {

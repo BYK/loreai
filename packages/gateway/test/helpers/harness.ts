@@ -16,11 +16,10 @@
  */
 import { unlinkSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { request as httpRequest } from "node:http";
-import { Readable } from "node:stream";
 import type { FixtureEntry } from "../../src/recorder";
 import type { GatewayConfig } from "../../src/config";
 import type { SimulatedCacheTurn } from "./simulated-cache";
+import { loopbackRequest } from "./loopback-request";
 
 export const TEST_GATEWAY_AUTH_TOKEN =
   "test-gateway-access-token-32-bytes-minimum";
@@ -63,6 +62,15 @@ export interface Harness {
   baseURL: string;
   /** Path to the isolated temp DB */
   dbPath: string;
+  /** Send a loopback request without WHATWG fetch's browser-only port blocklist. */
+  request(
+    path: string,
+    init?: {
+      method?: string;
+      headers?: HeadersInit;
+      body?: string | Uint8Array;
+    },
+  ): Promise<Response>;
   /** Send a POST /v1/messages request, return the raw Response */
   chat(
     requestBody: unknown,
@@ -219,16 +227,30 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     }
   }
 
-  // --- 7. chat() helper ---
+  // --- 7. Loopback request helpers ---
+  async function request(
+    path: string,
+    init: {
+      method?: string;
+      headers?: HeadersInit;
+      body?: string | Uint8Array;
+    } = {},
+  ): Promise<Response> {
+    // WHATWG fetch rejects a browser-defined list of "bad ports". Port 0 can
+    // legitimately assign one of those ports to the local test server, making
+    // an otherwise valid harness request fail nondeterministically. Use Node's
+    // HTTP transport for all loopback endpoints while retaining a web
+    // Response and streaming body for callers.
+    return loopbackRequest(`${baseURL}${path}`, init);
+  }
+
   async function chat(
     requestBody: unknown,
     apiKey: string | null = "test-key",
     extraHeaders?: Record<string, string>,
   ): Promise<Response> {
-    const body = JSON.stringify(requestBody);
     const headers: Record<string, string> = {
       "content-type": "application/json",
-      "content-length": String(Buffer.byteLength(body)),
       "anthropic-version": "2023-06-01",
       // Provide a confident project binding by default so the synthetic
       // project-resolution probe is never triggered in harness-based tests.
@@ -238,42 +260,10 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     };
     if (apiKey !== null) headers["x-api-key"] = apiKey;
     Object.assign(headers, extraHeaders);
-    // WHATWG fetch rejects a browser-defined list of "bad ports". Port 0 can
-    // legitimately assign one of those ports to the local test server, making
-    // an otherwise valid harness request fail nondeterministically. Use Node's
-    // HTTP transport for this loopback-only helper while retaining a web
-    // Response and streaming body for callers.
-    return new Promise<Response>((resolve, reject) => {
-      const request = httpRequest(
-        {
-          hostname: "127.0.0.1",
-          port: server.port,
-          path: "/v1/messages",
-          method: "POST",
-          headers,
-        },
-        (incoming) => {
-          const responseHeaders = new Headers();
-          for (let i = 0; i < incoming.rawHeaders.length; i += 2) {
-            responseHeaders.append(
-              incoming.rawHeaders[i],
-              incoming.rawHeaders[i + 1],
-            );
-          }
-          resolve(
-            new Response(
-              Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>,
-              {
-                status: incoming.statusCode ?? 500,
-                statusText: incoming.statusMessage,
-                headers: responseHeaders,
-              },
-            ),
-          );
-        },
-      );
-      request.once("error", reject);
-      request.end(body);
+    return request("/v1/messages", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
     });
   }
 
@@ -318,6 +308,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   return {
     baseURL,
     dbPath,
+    request,
     chat,
     queryDB,
     upstreamBodies,

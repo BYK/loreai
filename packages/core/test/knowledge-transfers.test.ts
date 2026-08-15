@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach } from "vitest";
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject } from "../src/db";
+import { db, ensureProject, withSavepoint } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as data from "../src/data";
 import { runRecall } from "../src/recall";
@@ -222,6 +222,40 @@ describe("runRecall transfer gating", () => {
     expect(ltm.transferCount(id)).toBeGreaterThanOrEqual(1);
     const breakdown = ltm.transfersFor(id);
     expect(breakdown[0]?.recalled_in_project_id).toBe(fpid);
+  });
+
+  test("deferred transfer recording participates in the caller savepoint", async () => {
+    const id = createPromoted(
+      "Deferred zigzag indexing trick",
+      "Deferred zigzag indexing trick for sparse matrix traversal",
+    );
+    const recordings: Array<() => void> = [];
+
+    await runRecall({
+      query: "deferred zigzag indexing sparse matrix",
+      scope: "all",
+      projectPath: FOREIGN,
+      sessionID: FOREIGN_SESSION,
+      knowledgeEnabled: true,
+      recordTransfers: true,
+      deferTransferRecording: (record) => recordings.push(record),
+    });
+
+    expect(recordings).toHaveLength(1);
+    expect(ltm.transferCount(id)).toBe(0);
+    expect(() =>
+      withSavepoint("deferred_transfer_failure", () => {
+        for (const record of recordings) record();
+        expect(ltm.transferCount(id)).toBe(1);
+        throw new Error("later persistence failed");
+      }),
+    ).toThrow("later persistence failed");
+    expect(ltm.transferCount(id)).toBe(0);
+
+    withSavepoint("deferred_transfer_success", () => {
+      for (const record of recordings) record();
+    });
+    expect(ltm.transferCount(id)).toBe(1);
   });
 
   test("recallById never records", async () => {

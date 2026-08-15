@@ -55,7 +55,7 @@ async function captureUpstreamUrl(
   mockFetch.mockReset();
   mockFetch.mockResolvedValue(openAIResponse());
 
-  const res = await fetch(`${harness.baseURL}/v1/chat/completions`, {
+  const res = await harness.request("/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",

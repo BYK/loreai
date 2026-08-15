@@ -65,7 +65,7 @@ export const PATTERN_COOLDOWN_MS = 10 * 60 * 1000;
 // Rate limit state
 // ---------------------------------------------------------------------------
 
-const lastExtraction = new Map<string, number>();
+const lastExtraction = new Map<string, { timestamp: number; owner: symbol }>();
 
 /** Test seam: clear the per-session cooldown state so suites don't leak the
  *  module-global map across cases. Never called in production. */
@@ -95,10 +95,18 @@ export function detectPatternEchoes(input: {
   sessionID: string;
   llm: LLMClient;
   model?: { providerID: string; modelID: string };
+  signal?: AbortSignal;
   /** Per-entry metadata stamped on every echo entry minted (#627 Phase 1). */
   metadata?: KnowledgeMetadata;
 }): Promise<void> {
-  const p = _detect(input).catch((err) => {
+  const cooldownOwner = Symbol(input.sessionID);
+  const p = _detect({ ...input, cooldownOwner }).catch((err) => {
+    if (input.signal?.aborted) {
+      if (lastExtraction.get(input.sessionID)?.owner === cooldownOwner) {
+        lastExtraction.delete(input.sessionID);
+      }
+      return;
+    }
     log.error("pattern echo detection failed:", err);
   });
   return p;
@@ -115,7 +123,9 @@ async function _detect(input: {
   sessionID: string;
   llm: LLMClient;
   model?: { providerID: string; modelID: string };
+  signal?: AbortSignal;
   metadata?: KnowledgeMetadata;
+  cooldownOwner: symbol;
 }): Promise<void> {
   // Step 1: Embed the new distillation and store it. This is the
   // embedDistillation() replacement at the gen-0 hook (see distillation.ts), so
@@ -124,6 +134,7 @@ async function _detect(input: {
   // rate-limit check sat above this, so a segment arriving within the cooldown
   // got no embedding stored at all: a latent recall gap.)
   const [vec] = await embedding.embed([input.observations], "document");
+  input.signal?.throwIfAborted();
   storeEmbedding(db(), "distillations", input.distillId, vec);
 
   // Rate limit the EXPENSIVE pattern detection that follows (project-wide vector
@@ -133,17 +144,22 @@ async function _detect(input: {
   // ltm.create() (below), so the common "no pattern this time" outcome never
   // armed it and the full search + cluster ran on every gen-0 distillation.
   const now = Date.now();
-  const lastTime = lastExtraction.get(input.sessionID) ?? 0;
+  const lastTime = lastExtraction.get(input.sessionID)?.timestamp ?? 0;
   if (now - lastTime < PATTERN_COOLDOWN_MS) return;
   // Arm the cooldown, and opportunistically evict entries that have already aged
   // out of the window. A stale entry is a no-op for the check above, so eviction
   // is behavior-neutral — it just keeps this per-session map from growing without
   // bound now that we write one entry per distilling session (not only per
   // pattern created). This runs at most once per session per cooldown.
-  for (const [sid, ts] of lastExtraction) {
-    if (now - ts >= PATTERN_COOLDOWN_MS) lastExtraction.delete(sid);
+  for (const [sid, state] of lastExtraction) {
+    if (now - state.timestamp >= PATTERN_COOLDOWN_MS) {
+      lastExtraction.delete(sid);
+    }
   }
-  lastExtraction.set(input.sessionID, now);
+  lastExtraction.set(input.sessionID, {
+    timestamp: now,
+    owner: input.cooldownOwner,
+  });
 
   // Step 2: Search for similar distillations across the project (wide net)
   const pid = ensureProject(input.projectPath);
@@ -152,6 +168,7 @@ async function _detect(input: {
     pid,
     MAX_CANDIDATES,
   );
+  input.signal?.throwIfAborted();
 
   // Step 3: Filter candidates — above lower threshold, exclude self
   const candidates = hits.filter(
@@ -209,8 +226,10 @@ async function _detect(input: {
       sessionID: input.sessionID,
       maxTokens: 512,
       temperature: 0,
+      signal: input.signal,
     },
   );
+  input.signal?.throwIfAborted();
 
   if (!responseText) return;
 
@@ -243,6 +262,7 @@ async function _detect(input: {
     content: pattern.content,
     projectId: pid,
   });
+  input.signal?.throwIfAborted();
   if (semanticDup) {
     log.info(
       `pattern echo: skipping near-duplicate (sim=${semanticDup.similarity.toFixed(3)}): "${pattern.title}"`,

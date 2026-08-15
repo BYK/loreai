@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client, type ClientConfig } from "pg";
+import { loopbackRequest } from "./loopback-request";
 
 const exec = promisify(execFile);
 // Test-only HS256 secret: signs tokens for the throwaway local Postgres only.
@@ -109,7 +110,7 @@ async function waitForRest(url: string, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
-      const r = await fetch(`${url}/`, { method: "GET" });
+      const r = await loopbackRequest(`${url}/`, { method: "GET" });
       // PostgREST answers the root with the OpenAPI spec once schema is loaded.
       if (r.status < 500) return;
     } catch {

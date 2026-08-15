@@ -7,6 +7,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { unlinkSync, existsSync } from "node:fs";
 import { zstdCompressSync } from "node:zlib";
+import {
+  loopbackRequest,
+  type LoopbackRequestInit,
+} from "./helpers/loopback-request";
 
 // ---------------------------------------------------------------------------
 // Test-scoped server setup
@@ -64,13 +68,13 @@ afterAll(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function api(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${baseURL}${path}`, init);
+function api(path: string, init?: LoopbackRequestInit): Promise<Response> {
+  return loopbackRequest(`${baseURL}${path}`, init);
 }
 
 async function apiJSON<T = unknown>(
   path: string,
-  init?: RequestInit,
+  init?: LoopbackRequestInit,
 ): Promise<T> {
   const res = await api(path, init);
   return res.json() as Promise<T>;

@@ -22,7 +22,9 @@ import {
   recordCacheBustObservation,
   findSessionStatesByFingerprint,
   countMatchingTemporalIds,
+  getGitRemote,
   projectId,
+  resolveProjectByRemoteOrPath,
   projectGitRemote,
   mergeProjectInternal,
   isUnattributedProjectPath,
@@ -118,7 +120,6 @@ import type { GatewayConfig } from "./config";
 import {
   getProjectPath,
   extractGitRemoteHeader,
-  extractProjectHeader,
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
   extractUpstreamPathHeader,
@@ -141,7 +142,7 @@ import {
   KNOWN_SESSION_HEADERS,
   extractKnownSessionHeader,
   learnHeaders,
-  findRotationPredecessor,
+  observeHeaderValues,
   isCredentialHeaderName,
 } from "./session";
 import {
@@ -190,6 +191,11 @@ import {
   formatResponsesEvent,
   makeResponsesAccState,
   mapStatusFromStopReason,
+  isSupportedResponsesOutputItemType,
+  isValidResponsesOutputItemStatus,
+  responsesDoneItemMatchesAdded,
+  responsesTerminalItemMatches,
+  ResponsesTerminalError,
   type ResponsesAccState,
 } from "./stream/openai-responses";
 import {
@@ -631,6 +637,147 @@ export function setBeforeUpstreamCaptureForTest(
   beforeUpstreamCaptureForTest = hook;
 }
 
+/** Test-only observer for pinning post-response lifecycle ordering. */
+let postResponseStartObserver: (() => void) | undefined;
+let recallPersistenceCommitObserver: (() => void) | undefined;
+let pipelineResetPauseForTest: Promise<void> | undefined;
+let pipelinePreUpstreamPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let provisionalFinalizerPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let pipelineResetSettleTimeoutMs = 5000;
+let pipelineResetInProgress = false;
+let pipelineResetPromise: Promise<void> | undefined;
+
+interface ActivePipelineRequest {
+  admissionKey: string;
+  abort: (reason: unknown) => void;
+  settled: Promise<void>;
+  sessionIDs: Set<string>;
+}
+
+const activePipelineRequests = new Set<ActivePipelineRequest>();
+const detachedPipelineRequests = new Set<ActivePipelineRequest>();
+const DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS = 64;
+const MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY = 16;
+const MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION = 1;
+const MAX_PENDING_SESSION_CLAIMS = 64;
+const MAX_DETACHED_PIPELINE_REQUESTS = 64;
+let maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
+let maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
+
+interface PendingSessionClaim {
+  active: ActivePipelineRequest;
+  sessionID: string;
+  signal: AbortSignal;
+  resolve: () => void;
+  reject: (reason: unknown) => void;
+  onAbort: () => void;
+}
+
+const pendingSessionClaims = new Map<string, PendingSessionClaim>();
+
+class PipelineCapacityError extends Error {}
+
+function activePipelineRequestsForSession(sessionID: string): number {
+  let count = 0;
+  for (const request of activePipelineRequests) {
+    if (request.sessionIDs.has(sessionID)) count++;
+  }
+  return count;
+}
+
+function activePipelineRequestsForAdmissionKey(admissionKey: string): number {
+  let count = 0;
+  for (const request of activePipelineRequests) {
+    if (request.admissionKey === admissionKey) count++;
+  }
+  return count;
+}
+
+function pendingSessionClaimsForAdmissionKey(admissionKey: string): number {
+  let count = 0;
+  for (const claim of pendingSessionClaims.values()) {
+    if (claim.active.admissionKey === admissionKey) count++;
+  }
+  return count;
+}
+
+function pipelineSessionHasCapacity(sessionID: string): boolean {
+  return (
+    activePipelineRequestsForSession(sessionID) +
+      (streamingPostResponseFinalizers.get(sessionID)?.pending ?? 0) <
+    MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION
+  );
+}
+
+function pumpPendingSessionClaims(): void {
+  for (const [sessionID, claim] of pendingSessionClaims) {
+    if (
+      activePipelineRequests.size + streamingPostResponsePending >=
+      maxActivePipelineRequests
+    ) {
+      return;
+    }
+    if (
+      activePipelineRequestsForAdmissionKey(claim.active.admissionKey) +
+        (streamingPostResponsePendingByAdmissionKey.get(
+          claim.active.admissionKey,
+        ) ?? 0) >=
+      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
+    ) {
+      continue;
+    }
+    if (!pipelineSessionHasCapacity(sessionID)) continue;
+    pendingSessionClaims.delete(sessionID);
+    claim.signal.removeEventListener("abort", claim.onAbort);
+    if (claim.signal.aborted) {
+      claim.reject(claim.signal.reason);
+      continue;
+    }
+    claim.active.sessionIDs.add(sessionID);
+    activePipelineRequests.add(claim.active);
+    claim.resolve();
+  }
+}
+
+function isPipelineSessionActive(sessionID: string): boolean {
+  return (
+    activePipelineRequestsForSession(sessionID) > 0 ||
+    streamingPostResponseFinalizers.has(sessionID)
+  );
+}
+
+export function activePipelineRequestCountForTest(): number {
+  return activePipelineRequests.size;
+}
+
+export function detachedPipelineRequestCountForTest(): number {
+  return detachedPipelineRequests.size;
+}
+
+export function pendingPipelineSessionClaimCountForTest(): number {
+  return pendingSessionClaims.size;
+}
+
+export function setMaxActivePipelineRequestsForTest(
+  limit = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS,
+): void {
+  maxActivePipelineRequests = limit;
+}
+
+export function setMaxDetachedPipelineRequestsForTest(
+  limit = MAX_DETACHED_PIPELINE_REQUESTS,
+): void {
+  maxDetachedPipelineRequests = limit;
+}
+
+export function isPipelineSessionActiveForTest(sessionID: string): boolean {
+  return isPipelineSessionActive(sessionID);
+}
+
 /**
  * Set (or clear) the module-level upstream interceptor.
  *
@@ -645,6 +792,42 @@ export function setUpstreamInterceptor(
   activeInterceptor = interceptor;
 }
 
+export function setPostResponseStartObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  postResponseStartObserver = observer;
+}
+
+export function setRecallPersistenceCommitObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  recallPersistenceCommitObserver = observer;
+}
+
+export function setPipelineResetPauseForTest(
+  pause: Promise<void> | undefined,
+): void {
+  pipelineResetPauseForTest = pause;
+}
+
+export function setPipelinePreUpstreamPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setProvisionalFinalizerPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  provisionalFinalizerPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setPipelineResetSettleTimeoutForTest(timeoutMs = 5000): void {
+  pipelineResetSettleTimeoutMs = timeoutMs;
+}
+
 /**
  * Reset all module-level singleton state.
  *
@@ -655,16 +838,73 @@ export function setUpstreamInterceptor(
 export async function resetPipelineState(opts?: {
   fast?: boolean;
 }): Promise<void> {
-  // Cancel client-facing request/stream work before clearing singleton state.
-  // Gateway shutdown starts listener closure first, then reaches this abort;
-  // active streams settle and allow node:http's server.close() to complete.
+  if (pipelineResetPromise) return pipelineResetPromise;
+  pipelineResetInProgress = true;
+  const reset = (async () => {
+    try {
+      await resetPipelineStateInner(opts);
+    } finally {
+      pipelineResetInProgress = false;
+      pipelineResetPromise = undefined;
+    }
+  })();
+  pipelineResetPromise = reset;
+  return reset;
+}
+
+async function resetPipelineStateInner(opts?: {
+  fast?: boolean;
+}): Promise<void> {
+  streamingPostResponsesAccepting = false;
+  await pipelineResetPauseForTest;
+  const resetReason = new DOMException("gateway pipeline reset", "AbortError");
+  pipelineGenerationAbort.abort(resetReason);
   const foregroundControllers = [...activeForegroundAbortControllers];
   activeForegroundAbortControllers.clear();
-  const resetReason = new DOMException("gateway pipeline reset", "AbortError");
   for (const controller of foregroundControllers) {
     if (!controller.signal.aborted) controller.abort(resetReason);
   }
-
+  const activeRequests = [
+    ...new Set([
+      ...activePipelineRequests,
+      ...[...pendingSessionClaims.values()].map((claim) => claim.active),
+    ]),
+  ];
+  for (const request of activeRequests) request.abort(resetReason);
+  await boundedSettle(
+    activeRequests.map((request) => request.settled),
+    pipelineResetSettleTimeoutMs,
+  );
+  for (const request of activeRequests) {
+    if (!activePipelineRequests.has(request)) continue;
+    activePipelineRequests.delete(request);
+    request.sessionIDs.clear();
+    if (detachedPipelineRequests.size < maxDetachedPipelineRequests) {
+      detachedPipelineRequests.add(request);
+    } else {
+      log.error(
+        "pipeline quarantine full; dropping stale lifecycle reservation",
+      );
+    }
+  }
+  // Streaming responses register post-response finalizers before closing their
+  // bodies. Drain them before sessions or the DB-facing pipeline state are
+  // cleared; a finalizer may also schedule ordinary background work, which the
+  // non-fast drain below will then observe.
+  await boundedSettle(
+    [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
+    pipelineResetSettleTimeoutMs,
+  );
+  streamingPostResponseGeneration++;
+  pipelineGenerationAbort = new AbortController();
+  streamingPostResponseFinalizers.clear();
+  streamingPostResponsePendingByAdmissionKey.clear();
+  streamingPostResponsePending = 0;
+  maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
+  maxStreamingPostResponsesPerSession =
+    DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+  lastStreamingPostResponseOverflowLog = 0;
+  lastStreamingPostResponseResetLog = 0;
   // Quiesce background work before tearing anything down. Only the non-fast
   // path drains — today that's test/eval teardown (the fast process-exit path,
   // the sole production caller, skips this to keep Ctrl+C snappy). Stop the
@@ -689,16 +929,24 @@ export async function resetPipelineState(opts?: {
     inFlightBackground.clear();
   }
   initialized = false;
+  maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
+  maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
   sessions.clear();
   cwdWarned.clear();
   staleHeaderWarned.clear();
   subagentParentPendingLogged.clear();
   headerSessionIndex.clear();
+  ambiguousHeaderSessionKeys.clear();
+  provisionalHeaderSessionIndex.clear();
+  identityAdmissionTails.clear();
+  headerSessionIndexHydrated = false;
   ltmSessionCache.clear();
   ltmPinnedText.clear();
   lastSavedDedupDecisions.clear();
   stableLtmCache.clear();
   stableLtmInFlight.clear();
+  sessionLifecycleAborts.clear();
+  streamingPostResponseWaiters.clear();
   // Shut down the batch queue before clearing the client. On process exit
   // (`fast`), skip the synchronous LLM drain — replaying queued background
   // prompts through retries/backoff is what made Ctrl+C hang for minutes; they
@@ -713,6 +961,9 @@ export async function resetPipelineState(opts?: {
   llmClient = null;
   activeInterceptor = undefined;
   beforeUpstreamCaptureForTest = undefined;
+  postResponseStartObserver = undefined;
+  recallPersistenceCommitObserver = undefined;
+  provisionalFinalizerPauseForTest = undefined;
   if (stopFileWatcher) {
     stopFileWatcher();
     stopFileWatcher = null;
@@ -734,6 +985,192 @@ export async function resetPipelineState(opts?: {
 
 /** Per-session state tracked across requests. */
 const sessions = new Map<string, SessionState>();
+
+const DEFAULT_MAX_STREAMING_POST_RESPONSES = 64;
+// Production requests reserve capacity before upstream work. The limits remain
+// as defense-in-depth for unreserved/test-only scheduling.
+const DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION = 2;
+
+/**
+ * Deferred streaming finalizers keyed by session. The streamer invokes its
+ * callback before closing so registration is atomic with terminal delivery,
+ * but the expensive synchronous accounting itself runs on the next event-loop
+ * turn, allowing the body reader (and Node bridge) to observe EOF first. The
+ * bounded registry preserves in-process ordering; a process crash in that one
+ * event-loop-turn window can still lose final accounting, which is the explicit
+ * availability trade-off required to avoid holding client EOF behind SQLite.
+ */
+const streamingPostResponseFinalizers = new Map<
+  string,
+  { tail: Promise<void>; pending: number }
+>();
+const streamingPostResponsePendingByAdmissionKey = new Map<string, number>();
+let streamingPostResponsePending = 0;
+let streamingPostResponseGeneration = 0;
+let pipelineGenerationAbort = new AbortController();
+let streamingPostResponsesAccepting = true;
+let maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
+let maxStreamingPostResponsesPerSession =
+  DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+let lastStreamingPostResponseOverflowLog = 0;
+let lastStreamingPostResponseResetLog = 0;
+let streamingPostResponseWaitObserverForTest: (() => void) | undefined;
+
+export function setStreamingPostResponseLimitsForTest(
+  globalLimit?: number,
+  perSessionLimit?: number,
+): void {
+  maxStreamingPostResponses =
+    globalLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES;
+  maxStreamingPostResponsesPerSession =
+    perSessionLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+}
+
+export function streamingPostResponsePendingForTest(): number {
+  return streamingPostResponsePending;
+}
+
+export function setStreamingPostResponseWaitObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  streamingPostResponseWaitObserverForTest = observer;
+}
+
+export function scheduleStreamingPostResponseForTest(
+  sessionID: string,
+  operation: () => void | Promise<void>,
+  onDrop: () => void = () => {},
+): void {
+  scheduleStreamingPostResponse(
+    sessionID,
+    streamingPostResponseGeneration,
+    operation,
+    onDrop,
+  );
+}
+
+function scheduleStreamingPostResponse(
+  sessionID: string,
+  generation: number,
+  operation: () => void | Promise<void>,
+  onDrop: () => void,
+  // Conversation requests reserve global + session capacity before upstream.
+  // Unreserved callers still use the defensive queue limits below.
+  capacityReserved = false,
+  admissionKey?: string,
+): void {
+  const drop = (): void => {
+    try {
+      onDrop();
+    } catch (error) {
+      log.error("streaming post-response drop cleanup failed:", error);
+    }
+  };
+  if (
+    !streamingPostResponsesAccepting ||
+    generation !== streamingPostResponseGeneration
+  ) {
+    const now = Date.now();
+    if (now - lastStreamingPostResponseResetLog >= 30_000) {
+      lastStreamingPostResponseResetLog = now;
+      log.info("streaming post-response skipped during pipeline reset");
+    }
+    drop();
+    return;
+  }
+  const existing = streamingPostResponseFinalizers.get(sessionID);
+  if (
+    (!capacityReserved &&
+      streamingPostResponsePending >= maxStreamingPostResponses) ||
+    (!capacityReserved &&
+      (existing?.pending ?? 0) >= maxStreamingPostResponsesPerSession)
+  ) {
+    const now = Date.now();
+    if (now - lastStreamingPostResponseOverflowLog >= 30_000) {
+      lastStreamingPostResponseOverflowLog = now;
+      log.warn("streaming post-response queue full; dropping finalizer");
+    }
+    drop();
+    return;
+  }
+  const state = existing ?? { tail: Promise.resolve(), pending: 0 };
+  const previous = state.tail;
+  state.pending++;
+  streamingPostResponsePending++;
+  if (admissionKey !== undefined) {
+    streamingPostResponsePendingByAdmissionKey.set(
+      admissionKey,
+      (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) + 1,
+    );
+  }
+  const current = (async () => {
+    await previous;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (generation !== streamingPostResponseGeneration) {
+      drop();
+      return;
+    }
+    try {
+      await operation();
+    } catch (error) {
+      log.error("streaming post-response processing failed:", error);
+    }
+  })();
+  state.tail = current;
+  streamingPostResponseFinalizers.set(sessionID, state);
+  void current.finally(() => {
+    if (streamingPostResponseFinalizers.get(sessionID) !== state) return;
+    state.pending--;
+    streamingPostResponsePending--;
+    if (admissionKey !== undefined) {
+      const remaining =
+        (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 1) - 1;
+      if (remaining > 0) {
+        streamingPostResponsePendingByAdmissionKey.set(admissionKey, remaining);
+      } else {
+        streamingPostResponsePendingByAdmissionKey.delete(admissionKey);
+      }
+    }
+    if (state.tail === current && state.pending === 0) {
+      streamingPostResponseFinalizers.delete(sessionID);
+    }
+    pumpPendingSessionClaims();
+  });
+}
+
+const MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION = 16;
+const streamingPostResponseWaiters = new Map<string, number>();
+
+class StreamingPostResponseWaitCapacityError extends Error {}
+
+async function awaitStreamingPostResponse(
+  sessionID: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!streamingPostResponseFinalizers.has(sessionID)) return;
+  const waiters = streamingPostResponseWaiters.get(sessionID) ?? 0;
+  if (waiters >= MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION) {
+    throw new StreamingPostResponseWaitCapacityError(
+      "streaming post-response wait queue full",
+    );
+  }
+  streamingPostResponseWaiters.set(sessionID, waiters + 1);
+  try {
+    for (;;) {
+      const state = streamingPostResponseFinalizers.get(sessionID);
+      if (!state) return;
+      const tail = state.tail;
+      streamingPostResponseWaitObserverForTest?.();
+      await promiseAgainstAbort(() => tail, signal);
+      const latest = streamingPostResponseFinalizers.get(sessionID);
+      if (latest !== state || state.tail === tail) return;
+    }
+  } finally {
+    const remaining = (streamingPostResponseWaiters.get(sessionID) ?? 1) - 1;
+    if (remaining > 0) streamingPostResponseWaiters.set(sessionID, remaining);
+    else streamingPostResponseWaiters.delete(sessionID);
+  }
+}
 
 /** Sessions that have already logged the cwd-fallback warning (dedup). */
 const cwdWarned = new Set<string>();
@@ -795,6 +1232,22 @@ export function rebindActiveSession(
  * Key: `credentialFingerprint\x1fheaderName\x1fheaderValue`.
  */
 const headerSessionIndex = new Map<string, string>();
+const ambiguousHeaderSessionKeys = new Set<string>();
+type ProvisionalHeaderMapping = {
+  sessionID: string;
+  createdAt: number;
+  guardProject: boolean;
+  adoptionFingerprint?: string;
+  expectedUnowned: boolean;
+};
+const provisionalHeaderSessionIndex = new Map<
+  string,
+  ProvisionalHeaderMapping
+>();
+const identityAdmissionTails = new Map<string, Promise<void>>();
+const MAX_PROVISIONAL_HEADER_MAPPINGS = 1024;
+const PROVISIONAL_HEADER_MAPPING_TTL_MS = 5 * 60_000;
+let headerSessionIndexHydrated = false;
 const SESSION_INDEX_SEPARATOR = "\x1f";
 const TENANT_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
 
@@ -857,6 +1310,464 @@ function sessionIndexKey(
   );
 }
 
+async function withIdentityAdmission<T>(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) return operation();
+  const key = sessionIndexKey(
+    requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+    known.headerName,
+    known.sessionId,
+  );
+  const previous = identityAdmissionTails.get(key);
+  let release!: () => void;
+  const ownCompletion = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous ? previous.then(() => ownCompletion) : ownCompletion;
+  identityAdmissionTails.set(key, tail);
+  try {
+    if (previous) await promiseAgainstAbort(() => previous, req.signal);
+    return await operation();
+  } finally {
+    release();
+    if (identityAdmissionTails.get(key) === tail) {
+      identityAdmissionTails.delete(key);
+    }
+  }
+}
+
+function setProvisionalHeaderMapping(
+  key: string,
+  sessionID: string,
+  guardProject = false,
+  adoptionFingerprint?: string,
+  expectedUnowned = false,
+): void {
+  const now = Date.now();
+  for (const [candidate, entry] of provisionalHeaderSessionIndex) {
+    if (now - entry.createdAt > PROVISIONAL_HEADER_MAPPING_TTL_MS) {
+      provisionalHeaderSessionIndex.delete(candidate);
+    }
+  }
+  const existing = getProvisionalHeaderMapping(key);
+  if (existing && existing !== sessionID) {
+    throw new Error("ambiguous session headers");
+  }
+  provisionalHeaderSessionIndex.delete(key);
+  while (
+    provisionalHeaderSessionIndex.size >= MAX_PROVISIONAL_HEADER_MAPPINGS
+  ) {
+    const oldest = provisionalHeaderSessionIndex.keys().next().value;
+    if (oldest === undefined) break;
+    provisionalHeaderSessionIndex.delete(oldest);
+  }
+  provisionalHeaderSessionIndex.set(key, {
+    sessionID,
+    createdAt: now,
+    guardProject,
+    adoptionFingerprint,
+    expectedUnowned,
+  });
+}
+
+function getProvisionalHeaderEntry(
+  key: string,
+): ProvisionalHeaderMapping | null {
+  const entry = provisionalHeaderSessionIndex.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > PROVISIONAL_HEADER_MAPPING_TTL_MS) {
+    provisionalHeaderSessionIndex.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function getProvisionalHeaderMapping(key: string): string | undefined {
+  return getProvisionalHeaderEntry(key)?.sessionID;
+}
+
+function provisionalMappingGuardsProject(
+  key: string,
+  sessionID: string,
+): boolean {
+  if (getProvisionalHeaderMapping(key) !== sessionID) return false;
+  return provisionalHeaderSessionIndex.get(key)?.guardProject === true;
+}
+
+/** @internal Test seam for exercising ownership expiry during an in-flight turn. */
+export function expireProvisionalHeaderMappingsForTest(): void {
+  provisionalHeaderSessionIndex.clear();
+}
+
+function provisionalKeyOwned(key: string, sessionID: string): boolean {
+  return (
+    headerSessionIndex.get(key) === sessionID ||
+    getProvisionalHeaderMapping(key) === sessionID
+  );
+}
+
+function dropOwnedProvisionalKey(
+  key: string | undefined,
+  sessionID: string,
+): void {
+  if (key && getProvisionalHeaderMapping(key) === sessionID) {
+    provisionalHeaderSessionIndex.delete(key);
+  }
+}
+
+function conflictsWithConfidentSessionProject(
+  sessionID: string,
+  pathResult: ProjectPathResult,
+): boolean {
+  if (pathResult.source !== "header" && pathResult.source !== "inferred") {
+    return false;
+  }
+  const live = sessions.get(sessionID);
+  if (live?.projectPath && live.projectPathProvisional === false) {
+    return live.projectPath !== pathResult.path;
+  }
+  const persisted = loadSessionTracking(sessionID);
+  return (
+    !!persisted?.projectPath &&
+    persisted.projectPathProvisional === false &&
+    persisted.projectPath !== pathResult.path
+  );
+}
+
+function legacyAdoptionTargetIsUnowned(sessionID: string): boolean {
+  return loadSessionTracking(sessionID)?.credentialFingerprint === "";
+}
+
+function isConfidentlyBoundToProject(
+  state: SessionState,
+  projectPath: string,
+): boolean {
+  return (
+    state.projectPathProvisional !== true && state.projectPath === projectPath
+  );
+}
+
+function hydrateHeaderSessionIndex(config: GatewayConfig): void {
+  if (headerSessionIndexHydrated) return;
+  restoreHeaderSessionMappings(config);
+  headerSessionIndexHydrated = true;
+}
+
+function findIndexedKnownSessionID(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): string | undefined {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return undefined;
+  hydrateHeaderSessionIndex(config);
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) return undefined;
+  return headerSessionIndex.get(
+    sessionIndexKey(credentialFingerprint, known.headerName, known.sessionId),
+  );
+}
+
+function hasConflictingConfirmedHeader(
+  req: GatewayRequest,
+  expectedSessionID: string,
+  excludedKey: string,
+  config: GatewayConfig,
+): boolean {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return true;
+  hydrateHeaderSessionIndex(config);
+  for (const [key, sessionID] of headerSessionIndex) {
+    if (key === excludedKey || sessionID === expectedSessionID) continue;
+    const parsed = parseSessionIndexKey(key);
+    if (!parsed || parsed.headerName === "context-marker") continue;
+    if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+    if (req.rawHeaders[parsed.headerName] === parsed.headerValue) return true;
+  }
+  return false;
+}
+
+type IndexedSessionResolution =
+  | {
+      kind: "match";
+      sessionID: string;
+      provisional?: boolean;
+      provisionalKey?: string;
+    }
+  | { kind: "ambiguous" }
+  | { kind: "none" };
+
+function resolveIndexedSession(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  includeProvisional = false,
+): IndexedSessionResolution {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (known) {
+    if (includeProvisional) {
+      const credentialFingerprint = requestCredentialFingerprint(
+        req.rawHeaders,
+        config,
+      );
+      if (credentialFingerprint === null) return { kind: "none" };
+      const key = sessionIndexKey(
+        credentialFingerprint,
+        known.headerName,
+        known.sessionId,
+      );
+      const confirmedSessionID = findIndexedKnownSessionID(req, config);
+      const sessionID = confirmedSessionID ?? getProvisionalHeaderMapping(key);
+      return sessionID
+        ? {
+            kind: "match",
+            sessionID,
+            provisional: !confirmedSessionID,
+            ...(!confirmedSessionID ? { provisionalKey: key } : {}),
+          }
+        : { kind: "none" };
+    }
+    const sessionID = findIndexedKnownSessionID(req, config);
+    return sessionID ? { kind: "match", sessionID } : { kind: "none" };
+  }
+
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return { kind: "none" };
+  hydrateHeaderSessionIndex(config);
+  let match: string | undefined;
+  let provisional = false;
+  let provisionalKey: string | undefined;
+  for (const [key, sessionID] of headerSessionIndex) {
+    const parsed = parseSessionIndexKey(key);
+    if (!parsed || parsed.headerName === "context-marker") continue;
+    if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+    if (req.rawHeaders[parsed.headerName] !== parsed.headerValue) continue;
+    if (match && match !== sessionID) return { kind: "ambiguous" };
+    match = sessionID;
+  }
+  if (includeProvisional) {
+    for (const [key, entry] of provisionalHeaderSessionIndex) {
+      const sessionID = getProvisionalHeaderMapping(key);
+      if (!sessionID || sessionID !== entry.sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (!parsed || parsed.headerName === "context-marker") continue;
+      if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+      if (req.rawHeaders[parsed.headerName] !== parsed.headerValue) continue;
+      if (match && match !== sessionID) return { kind: "ambiguous" };
+      match = sessionID;
+      provisional = true;
+      provisionalKey ??= key;
+    }
+  }
+  if (match) {
+    return { kind: "match", sessionID: match, provisional, provisionalKey };
+  }
+
+  const markerSid = extractSessionMarker(req.messages);
+  if (!markerSid) return { kind: "none" };
+  const sessionID = headerSessionIndex.get(
+    sessionIndexKey(credentialFingerprint, "context-marker", markerSid),
+  );
+  return sessionID ? { kind: "match", sessionID } : { kind: "none" };
+}
+
+function findIndexedSessionID(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): string | undefined {
+  const resolution = resolveIndexedSession(req, config);
+  return resolution.kind === "match" ? resolution.sessionID : undefined;
+}
+
+/**
+ * Revalidate an authenticated index lookup after an async wait. Affinity
+ * rotation can revoke the request's alias while it is queued for the session;
+ * callers must fail closed instead of continuing with the stale session ID.
+ */
+function confirmedIndexedIdentityResolvesTo(
+  req: GatewayRequest,
+  expectedSessionID: string,
+  config: GatewayConfig,
+): boolean {
+  const resolution = resolveIndexedSession(req, config);
+  return (
+    resolution.kind === "match" &&
+    resolution.sessionID === expectedSessionID &&
+    resolution.provisional !== true
+  );
+}
+
+function findLiveSessionState(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  allSessions: ReadonlyMap<string, SessionState> = sessions,
+): SessionState | undefined {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (known) {
+    // An indexed higher-priority header is authoritative even when its session
+    // is not currently hydrated; never fall through to a conflicting alias.
+    const indexedSid = findIndexedKnownSessionID(req, config);
+    return indexedSid ? allSessions.get(indexedSid) : undefined;
+  }
+  const indexedSid = findIndexedSessionID(req, config);
+  return indexedSid ? allSessions.get(indexedSid) : undefined;
+}
+
+function resolveAuthenticatedDirectSession(
+  req: GatewayRequest,
+  projectPath: string,
+  config: GatewayConfig,
+  knownHeaderOnly = true,
+): SessionState | undefined {
+  if (knownHeaderOnly && !extractKnownSessionHeader(req.rawHeaders))
+    return undefined;
+  const sessionID = knownHeaderOnly
+    ? findIndexedKnownSessionID(req, config)
+    : findIndexedSessionID(req, config);
+  if (!sessionID) return undefined;
+  try {
+    return getOrCreateSession(
+      sessionID,
+      projectPath,
+      "header",
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+      config,
+    );
+  } catch (error) {
+    if (error instanceof SessionTenantMismatchError) return undefined;
+    throw error;
+  }
+}
+
+function knownSessionHeaderForRequest(
+  req: GatewayRequest,
+  sessionID: string,
+  config: GatewayConfig,
+): { headerName: string; sessionId: string } | null {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return null;
+  let known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) {
+    for (const [key, entry] of provisionalHeaderSessionIndex) {
+      if (entry.sessionID !== sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (!parsed || parsed.headerName === "context-marker") continue;
+      if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+      if (req.rawHeaders[parsed.headerName] !== parsed.headerValue) continue;
+      known = {
+        headerName: parsed.headerName,
+        sessionId: parsed.headerValue,
+      };
+      break;
+    }
+  }
+  return known;
+}
+
+function publishKnownSessionHeader(
+  known: { headerName: string; sessionId: string },
+  state: SessionState,
+  credentialFingerprint: string,
+): void {
+  const confirmedKey = sessionIndexKey(
+    credentialFingerprint,
+    known.headerName,
+    known.sessionId,
+  );
+  if (credentialFingerprint) {
+    for (const [key, sessionID] of headerSessionIndex) {
+      if (sessionID !== state.sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (parsed?.credentialFingerprint === "") {
+        headerSessionIndex.delete(key);
+      }
+    }
+  }
+  if (isRotationEligible(known.headerName)) {
+    for (const [key, sessionID] of headerSessionIndex) {
+      if (key === confirmedKey || sessionID !== state.sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (
+        parsed?.credentialFingerprint === credentialFingerprint &&
+        parsed.headerName === known.headerName
+      ) {
+        headerSessionIndex.delete(key);
+      }
+    }
+  }
+  provisionalHeaderSessionIndex.delete(confirmedKey);
+  headerSessionIndex.set(confirmedKey, state.sessionID);
+  state.headerSessionId = known.sessionId;
+  state.headerName = known.headerName;
+  state.credentialFingerprint = credentialFingerprint;
+}
+
+function confirmKnownSessionHeader(
+  req: GatewayRequest,
+  state: SessionState,
+  config: GatewayConfig,
+  tracking: Parameters<typeof saveSessionTracking>[1] = {},
+  persistTurn?: () => void,
+): void {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return;
+  const known = knownSessionHeaderForRequest(req, state.sessionID, config);
+  if (!known) return;
+  withSavepoint("confirm_session_header", () => {
+    persistTurn?.();
+    saveSessionTracking(state.sessionID, {
+      ...tracking,
+      headerSessionId: known.sessionId,
+      headerName: known.headerName,
+      credentialFingerprint,
+    });
+  });
+  publishKnownSessionHeader(known, state, credentialFingerprint);
+}
+
+export function evictLiveSessionForTest(
+  req: GatewayRequest,
+  config?: GatewayConfig,
+): boolean {
+  const credential = extractAuth(req.rawHeaders);
+  const credentialFingerprint = config
+    ? requestCredentialFingerprint(req.rawHeaders, config)
+    : credential
+      ? authFingerprint(credential)
+      : "";
+  if (credentialFingerprint === null) return false;
+  for (const headerName of KNOWN_SESSION_HEADERS) {
+    const headerValue = req.rawHeaders[headerName];
+    if (!headerValue) continue;
+    const sid = headerSessionIndex.get(
+      sessionIndexKey(credentialFingerprint, headerName, headerValue),
+    );
+    if (sid) {
+      const removed = sessions.delete(sid);
+      if (removed) evictPipelineSessionState(sid);
+      return removed;
+    }
+  }
+  return false;
+}
+
 function parseSessionIndexKey(key: string): {
   credentialFingerprint: string;
   headerName: string;
@@ -901,14 +1812,19 @@ function restoreHeaderSessionMappings(config: GatewayConfig): {
     ) {
       continue;
     }
-    headerSessionIndex.set(
-      sessionIndexKey(
-        entry.credentialFingerprint,
-        entry.headerName,
-        entry.headerSessionId,
-      ),
-      entry.sessionId,
+    const key = sessionIndexKey(
+      entry.credentialFingerprint,
+      entry.headerName,
+      entry.headerSessionId,
     );
+    if (ambiguousHeaderSessionKeys.has(key)) continue;
+    const existing = headerSessionIndex.get(key);
+    if (existing && existing !== entry.sessionId) {
+      headerSessionIndex.delete(key);
+      ambiguousHeaderSessionKeys.add(key);
+      continue;
+    }
+    headerSessionIndex.set(key, entry.sessionId);
     restored++;
   }
   return { restored, cleared };
@@ -2531,6 +3447,54 @@ const stableLtmCache = new Map<
  * into stableLtmCache), so a LATER miss after a restart recomputes fresh.
  */
 const stableLtmInFlight = new Map<string, Promise<void>>();
+const sessionLifecycleAborts = new Map<string, AbortController>();
+
+function sessionLifecycleSignal(sessionID: string): AbortSignal {
+  let controller = sessionLifecycleAborts.get(sessionID);
+  if (!controller) {
+    controller = new AbortController();
+    sessionLifecycleAborts.set(sessionID, controller);
+  }
+  return controller.signal;
+}
+
+function stableLtmComputeSignal(sessionID: string): AbortSignal {
+  return AbortSignal.any([
+    pipelineGenerationAbort.signal,
+    sessionLifecycleSignal(sessionID),
+  ]);
+}
+
+function evictStableLtmSession(sessionID: string): void {
+  sessionLifecycleAborts
+    .get(sessionID)
+    ?.abort(new DOMException("stable LTM session was evicted", "AbortError"));
+  sessionLifecycleAborts.delete(sessionID);
+  stableLtmCache.delete(sessionID);
+  stableLtmInFlight.delete(sessionID);
+}
+
+function evictPipelineSessionState(sessionID: string): void {
+  // Keep the persisted header→session mapping warm. Eviction removes only the
+  // heavy live state; dropping this index would force an unbounded DB reload on
+  // the next request and would make state-changing slash commands unable to
+  // rehydrate the authoritative canonical session safely.
+  ltmSessionCache.delete(sessionID);
+  ltmPinnedText.delete(sessionID);
+  lastSavedDedupDecisions.delete(sessionID);
+  evictStableLtmSession(sessionID);
+  cwdWarned.delete(sessionID);
+  staleHeaderWarned.delete(sessionID);
+  for (const key of subagentParentPendingLogged) {
+    if (key.startsWith(`${sessionID}:`))
+      subagentParentPendingLogged.delete(key);
+  }
+}
+
+/** Test seam for exercising the same cleanup used by idle session eviction. */
+export function evictStableLtmSessionForTest(sessionID: string): void {
+  evictStableLtmSession(sessionID);
+}
 
 /**
  * Run a stable-LTM compute under single-flight dedup for a session. If a
@@ -2541,7 +3505,10 @@ const stableLtmInFlight = new Map<string, Promise<void>>();
  */
 export async function singleFlightStableLtm(
   sessionID: string,
-  compute: () => Promise<{ formatted: string; tokenCount: number } | undefined>,
+  compute: (
+    signal: AbortSignal,
+  ) => Promise<{ formatted: string; tokenCount: number } | undefined>,
+  callerSignal?: AbortSignal,
 ): Promise<{ formatted: string; tokenCount: number } | undefined> {
   // Cache hit — fast path. Reading the cache FIRST is essential: a previous
   // caller may have already settled and deleted its in-flight entry, so a
@@ -2550,19 +3517,24 @@ export async function singleFlightStableLtm(
   if (cached) return cached;
   const inFlight = stableLtmInFlight.get(sessionID);
   if (inFlight) {
-    await inFlight;
+    await promiseAgainstAbort(() => inFlight, callerSignal);
     return stableLtmCache.get(sessionID);
   }
-  const promise = (async () => {
+  const signal = stableLtmComputeSignal(sessionID);
+  let promise!: Promise<void>;
+  promise = (async () => {
     try {
-      const result = await compute();
+      const result = await promiseAgainstAbort(() => compute(signal), signal);
+      signal.throwIfAborted();
       if (result) stableLtmCache.set(sessionID, result);
     } finally {
-      stableLtmInFlight.delete(sessionID);
+      if (stableLtmInFlight.get(sessionID) === promise) {
+        stableLtmInFlight.delete(sessionID);
+      }
     }
   })();
   stableLtmInFlight.set(sessionID, promise);
-  await promise;
+  await promiseAgainstAbort(() => promise, callerSignal);
   return stableLtmCache.get(sessionID);
 }
 
@@ -2578,8 +3550,11 @@ async function computeStableLtm(
   cfg: ReturnType<typeof loreConfig>,
   contextHint: string | undefined,
   prefBudget: number,
+  signal?: AbortSignal,
+  requestGeneration?: number,
 ): Promise<{ formatted: string; tokenCount: number } | undefined> {
   const prefEntries = await ltm.forSession(projectPath, sessionID, prefBudget, {
+    signal,
     categories: ["preference"],
     ...(contextHint ? { contextHint } : {}),
   });
@@ -2639,6 +3614,11 @@ async function computeStableLtm(
   ]
     .filter(Boolean)
     .join("\n\n");
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+  } else {
+    signal?.throwIfAborted();
+  }
   const tokenCount = formatted ? coreEstimateTokens(formatted) : 0;
   const stable = { formatted, tokenCount };
   stableLtmCache.set(sessionID, stable);
@@ -2675,6 +3655,7 @@ async function precomputeStableLtmForIdleSession(
   sessionID: string,
   state: SessionState,
 ): Promise<void> {
+  const requestGeneration = streamingPostResponseGeneration;
   try {
     if (stableLtmCache.has(sessionID)) return;
     const cfg = loreConfig();
@@ -2690,8 +3671,16 @@ async function precomputeStableLtmForIdleSession(
     log.info(
       `idle precompute: warming stable LTM for session ${sessionID.slice(0, 16)} (pref=${prefBudget})`,
     );
-    await singleFlightStableLtm(sessionID, () =>
-      computeStableLtm(sessionID, projectPath, cfg, undefined, prefBudget),
+    await singleFlightStableLtm(sessionID, (signal) =>
+      computeStableLtm(
+        sessionID,
+        projectPath,
+        cfg,
+        undefined,
+        prefBudget,
+        signal,
+        requestGeneration,
+      ),
     );
   } catch (err) {
     log.warn(
@@ -3119,7 +4108,13 @@ async function initIfNeeded(
   projectPath: string,
   config: GatewayConfig,
   gitRemote?: string,
+  signal?: AbortSignal,
+  requestGeneration?: number,
 ): Promise<void> {
+  if (!pipelineResetInProgress) streamingPostResponsesAccepting = true;
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+  }
   if (initialized) return;
 
   // Enable hosted mode before any FS operations — once set, all core
@@ -3129,6 +4124,9 @@ async function initIfNeeded(
   }
 
   await load(projectPath);
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+  }
   ensureProject(projectPath, undefined, gitRemote);
   initialized = true;
 
@@ -3248,35 +4246,18 @@ async function initIfNeeded(
       config,
       sessions,
       idleHandler,
-      (sessionID) => {
-        // Clean up pipeline-level satellite Maps on session eviction.
-        // The headerSessionIndex entries are keyed by header values pointing
-        // TO this sessionID — remove them too.
-        for (const [key, sid] of headerSessionIndex) {
-          if (sid === sessionID) headerSessionIndex.delete(key);
-        }
-        ltmSessionCache.delete(sessionID);
-        ltmPinnedText.delete(sessionID);
-        lastSavedDedupDecisions.delete(sessionID);
-        stableLtmCache.delete(sessionID);
-        stableLtmInFlight.delete(sessionID);
-        cwdWarned.delete(sessionID);
-        staleHeaderWarned.delete(sessionID);
-        // Clear subagent parent-pending dedup entries for this session —
-        // keys are `${sessionID}:${parentClientId}`, so filter by prefix.
-        for (const key of subagentParentPendingLogged) {
-          if (key.startsWith(`${sessionID}:`)) {
-            subagentParentPendingLogged.delete(key);
-          }
-        }
-      },
+      evictPipelineSessionState,
+      isPipelineSessionActive,
     );
   }
 
   // Start background cloud sync (no-op until the user runs `lore sync enable`).
   if (!stopSyncScheduler) {
     const { startSyncScheduler } = await import("./sync");
-    stopSyncScheduler = startSyncScheduler(config);
+    if (requestGeneration !== undefined) {
+      assertCurrentPipelineGeneration(signal, requestGeneration);
+    }
+    if (!stopSyncScheduler) stopSyncScheduler = startSyncScheduler(config);
   }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);
@@ -3533,8 +4514,18 @@ export function resolveSessionProjectPath(
       );
     }
 
+    if (!healed && previous) {
+      // Keep writing to the original bucket until re-attribution succeeds.
+      // Moving the binding to projectPath here would lose `previous`, so the
+      // next confident turn could never retry and the old rows would remain
+      // permanently split from the session.
+      sessionState.projectPath = previous;
+      sessionState.projectPathProvisional = true;
+      return previous;
+    }
+
     sessionState.projectPath = projectPath;
-    sessionState.projectPathProvisional = !healed;
+    sessionState.projectPathProvisional = false;
 
     // Backfill git_remote on the (now confident) project row — idempotent.
     if (effectiveRemote) {
@@ -3678,7 +4669,9 @@ export function applySyntheticResolution(
     const wasProvisional = sessionState.projectPathProvisional === true;
 
     if (wasProvisional && previous && previous !== newPath) {
-      reattributeProvisionalProject(previous, newPath, gitRemote);
+      if (!reattributeProvisionalProject(previous, newPath, gitRemote)) {
+        return currentProjectPath;
+      }
     }
 
     sessionState.projectPath = newPath;
@@ -3902,7 +4895,15 @@ export function matchingProviderSnapshotForTest(
   return matchingProviderSnapshot(state, providerID);
 }
 
-function serializeUpstreamState(state: SessionState): string {
+type MutableUpstreamState = Pick<
+  SessionState,
+  | "lastUpstream"
+  | "upstreamByProvider"
+  | "_upstreamRequestOrder"
+  | "_upstreamRequestOrderByProvider"
+>;
+
+function serializeUpstreamState(state: MutableUpstreamState): string {
   const stripHeaders = (snapshot: UpstreamSnapshot) => ({
     ...snapshot,
     headers: {},
@@ -4063,20 +5064,26 @@ function buildRequestUpstreamSnapshot(
   return freezeUpstreamSnapshot(snapshot);
 }
 
-/**
- * Capture request routing before awaiting the upstream. Failed tightening
- * requests remain authoritative, while request-start order prevents an older
- * concurrent turn from rolling back a newer policy when it resumes later.
- */
-function captureRequestUpstream(
+function prepareRequestUpstream(
   req: GatewayRequest,
-  state: SessionState,
   config: GatewayConfig,
-  requestOrder: number,
-): ResolvedRequestUpstreamRoute {
+): {
+  route: ResolvedRequestUpstreamRoute;
+  snapshot: UpstreamSnapshot;
+} {
   const route = resolveRequestUpstreamRoute(req, config);
   const snapshot = buildRequestUpstreamSnapshot(req, route);
+  return { route, snapshot };
+}
+
+function applyRequestUpstream(
+  state: MutableUpstreamState,
+  snapshot: UpstreamSnapshot,
+  requestOrder: number,
+  config: GatewayConfig,
+): { changed: boolean; resetCache: boolean } {
   let changed = false;
+  let resetCache = false;
 
   if (requestOrder >= (state._upstreamRequestOrder ?? 0)) {
     const previous = state.lastUpstream;
@@ -4097,7 +5104,7 @@ function captureRequestUpstream(
       // transcript. Clear it synchronously with route capture so a failed or
       // in-flight policy-tightening request cannot let the idle warmer replay
       // that body (or admin extras) to the newly selected destination.
-      state.cacheAnalytics.lastRequestBody = null;
+      resetCache = true;
     }
     state.lastUpstream = snapshot;
     state._upstreamRequestOrder = requestOrder;
@@ -4128,12 +5135,30 @@ function captureRequestUpstream(
     }
   }
 
+  return { changed, resetCache };
+}
+
+function captureRequestUpstream(
+  req: GatewayRequest,
+  state: SessionState,
+  config: GatewayConfig,
+  requestOrder: number,
+): ResolvedRequestUpstreamRoute {
+  const prepared = prepareRequestUpstream(req, config);
+  const { changed, resetCache } = applyRequestUpstream(
+    state,
+    prepared.snapshot,
+    requestOrder,
+    config,
+  );
+  if (resetCache) state.cacheAnalytics.lastRequestBody = null;
+
   if (changed) {
     saveSessionTracking(state.sessionID, {
       lastUpstream: serializeUpstreamState(state),
     });
   }
-  return route;
+  return prepared.route;
 }
 
 class SessionTenantMismatchError extends Error {
@@ -4225,6 +5250,7 @@ function getOrCreateSession(
       messageCount: persisted?.messageCount ?? 0,
       turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
       consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
+      amnesia: persisted?.amnesia ?? false,
       recallStore: new Map(),
       upstreamByProvider: new Map(),
       cacheAnalytics: {
@@ -4505,36 +5531,68 @@ const ADOPT_MIN_OVERLAP = 2;
  * Confirmation uses user messages only: temporal storage persists user messages
  * with position-stable deterministic IDs, while assistant responses are stored
  * under a synthetic index-0 ID — so only user messages are a reliable
- * cross-restart match signal. The project_id scope of the overlap query also
- * enforces same-project (a cross-project fingerprint twin yields zero overlap).
- * Subagent status must match, and a fork guard rejects a count that dropped far
- * below the candidate's stored count.
+ * cross-restart match signal. Confidently bound candidates require overlap in
+ * the incoming project. A provisionally bound candidate instead checks its
+ * existing bucket, allowing a later confident path to self-heal that bucket
+ * without weakening the cross-project guard for confident bindings. Subagent
+ * status must match, and a fork guard rejects a count that dropped far below the
+ * candidate's stored count.
  *
  * Called from BOTH mint paths: the Tier-1 path (known header present but its
  * value is new — the opencode restart case; `known` is rebound to the adopted
  * sid for a future Tier-1 fast path) and the Tier-3 path (no known header).
  */
+function trustedAdoptionRemote(
+  projectPath: string,
+  headers: Record<string, string>,
+): string | undefined {
+  const supplied = extractGitRemoteHeader(headers);
+  // Adoption is read-only, so it cannot call ensureProject's trusted-remote
+  // resolver. Match the current path's on-disk remote locally; only a hosted
+  // gateway, which cannot inspect client disk, may trust the normalized header.
+  return isHostedMode() ? supplied : (getGitRemote(projectPath) ?? undefined);
+}
+
 async function adoptByFingerprint(input: {
   req: GatewayRequest;
   headers: Record<string, string>;
   projectPath: string;
+  gitRemote?: string;
   known: { headerName: string; sessionId: string } | null;
   msgCount: number;
+  requestGeneration?: number;
   config: GatewayConfig;
   credentialFingerprint: string;
-}): Promise<{ sessionID: string; isNew: false; tier: 3 } | null> {
+}): Promise<{
+  sessionID: string;
+  isNew: false;
+  tier: 3;
+  provisionalIdentity: true;
+  provisionalKey?: string;
+  adoptionFingerprint: string;
+  expectedUnowned: boolean;
+} | null> {
   const {
     req,
     headers,
     projectPath,
+    gitRemote,
     known,
     msgCount,
+    requestGeneration,
     config,
     credentialFingerprint,
   } = input;
   if (!projectPath) return null;
 
   const cred = extractAuth(req.rawHeaders);
+  // Restart adoption grants access to an existing session, so an upstream URL
+  // alone is not sufficient proof of ownership.
+  if (!cred) return null;
+  const authenticatedFingerprint = usesRemoteSessionBinding(config)
+    ? credentialTenantFingerprint(cred)
+    : authFingerprint(cred);
+  if (credentialFingerprint !== authenticatedFingerprint) return null;
   const fingerprintInput = req.messages.map((m) => ({
     role: m.role,
     content: m.content,
@@ -4546,23 +5604,26 @@ async function adoptByFingerprint(input: {
       ? { tenantFingerprint: credentialFingerprint }
       : { authSuffix: cred ? authFingerprint(cred) : "" },
   );
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
 
   const reqIsSubagent = !!headers["x-parent-session-id"];
-  const candidates = findSessionStatesByFingerprint(fingerprint).filter(
-    (candidate) =>
-      !remoteBinding ||
-      loadSessionTracking(candidate.session_id)?.credentialFingerprint ===
-        credentialFingerprint,
-  );
-  if (cred && !remoteBinding) {
-    // v78 added the credential suffix to conversation fingerprints. Legacy
-    // candidates have the old unsuffixed fingerprint and no persisted owner;
-    // they still require the same project-scoped multi-message overlap below.
-    const legacyFingerprint = await fingerprintMessages(fingerprintInput);
+  const candidates = findSessionStatesByFingerprint(fingerprint, {
+    credentialFingerprint,
+  }).map((candidate) => ({ ...candidate, credentialBound: true }));
+  // v78 added the credential suffix to conversation fingerprints. Legacy
+  // candidates have the old unsuffixed fingerprint and no persisted owner;
+  // they still require the same multi-message overlap policy below.
+  const legacyFingerprint = await fingerprintMessages(fingerprintInput);
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
+  if (!remoteBinding) {
     candidates.push(
       ...findSessionStatesByFingerprint(legacyFingerprint, {
         legacyUnownedOnly: true,
-      }),
+      }).map((candidate) => ({ ...candidate, credentialBound: false })),
     );
   }
   const eligibleCandidates = candidates.filter(
@@ -4589,9 +5650,17 @@ async function adoptByFingerprint(input: {
   }
   if (probeMessages.length < ADOPT_MIN_OVERLAP) return null;
 
-  const pid = ensureProject(projectPath);
+  const incomingProjectId = resolveProjectByRemoteOrPath(
+    gitRemote,
+    projectPath,
+  );
   const minOverlap = Math.max(ADOPT_MIN_OVERLAP, Math.ceil(probedUsers * 0.5));
-  let best: { sid: string; overlap: number; countDiff: number } | null = null;
+  let best: {
+    sid: string;
+    overlap: number;
+    countDiff: number;
+    credentialBound: boolean;
+  } | null = null;
   // Source IDs include the candidate session, so valid rows cannot give two
   // sessions the same positive overlap set. Keep the tie guard as defense in
   // depth for a corrupt/imported database rather than selecting by row order.
@@ -4602,6 +5671,32 @@ async function adoptByFingerprint(input: {
     if (msgCount - c.message_count < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) {
       continue;
     }
+    // A confident or legacy-unowned candidate remains scoped to the incoming
+    // project. Only a credential-bound provisional binding may prove continuity
+    // against its current bucket before the incoming project has been created.
+    const usesPersistedProvisionalProject =
+      c.credentialBound && c.project_path_provisional === 1 && !!c.project_path;
+    const candidateProjectId = c.project_path
+      ? resolveProjectByRemoteOrPath(undefined, c.project_path)
+      : null;
+    if (
+      !usesPersistedProvisionalProject &&
+      (!incomingProjectId || candidateProjectId !== incomingProjectId)
+    ) {
+      continue;
+    }
+    // Derive message IDs from the persisted canonical path. A new clone path
+    // can resolve to the same project by git remote without being an alias yet;
+    // deriving IDs from that unregistered path would create a second project
+    // and make genuine transcript overlap impossible to observe.
+    const overlapProjectPath =
+      c.project_path && (usesPersistedProvisionalProject || candidateProjectId)
+        ? c.project_path
+        : projectPath;
+    const overlapProjectId = usesPersistedProvisionalProject
+      ? candidateProjectId
+      : incomingProjectId;
+    if (!overlapProjectId) continue;
     const probeIDs = probeMessages.map(({ index, message }) => {
       const sourceID = deterministicID(
         c.session_id,
@@ -4610,7 +5705,7 @@ async function adoptByFingerprint(input: {
         message.content,
       );
       return temporal.storedMessageId({
-        projectPath,
+        projectPath: overlapProjectPath,
         sessionID: c.session_id,
         sourceID,
         legacySourceID: legacyDeterministicID(
@@ -4620,7 +5715,11 @@ async function adoptByFingerprint(input: {
         ),
       });
     });
-    const overlap = countMatchingTemporalIds(pid, c.session_id, probeIDs);
+    const overlap = countMatchingTemporalIds(
+      overlapProjectId,
+      c.session_id,
+      probeIDs,
+    );
     if (overlap < minOverlap) continue;
     const countDiff = Math.abs(msgCount - c.message_count);
     if (
@@ -4628,7 +5727,12 @@ async function adoptByFingerprint(input: {
       overlap > best.overlap ||
       (overlap === best.overlap && countDiff < best.countDiff)
     ) {
-      best = { sid: c.session_id, overlap, countDiff };
+      best = {
+        sid: c.session_id,
+        overlap,
+        countDiff,
+        credentialBound: c.credentialBound,
+      };
       ambiguousBest = false;
     } else if (overlap === best.overlap && countDiff === best.countDiff) {
       ambiguousBest = true;
@@ -4636,32 +5740,65 @@ async function adoptByFingerprint(input: {
   }
   if (!best || ambiguousBest) return null;
 
-  // When a known header is present, rebind it → adopted sid so future turns
-  // identify via the Tier 1 fast path (and stop re-confirming overlap).
-  if (known) {
-    headerSessionIndex.set(
-      sessionIndexKey(credentialFingerprint, known.headerName, known.sessionId),
-      best.sid,
-    );
-    saveSessionTracking(best.sid, {
-      headerSessionId: known.sessionId,
-      headerName: known.headerName,
-      credentialFingerprint,
-    });
-  }
+  // Keep the adopted header provisional until a successful response confirms
+  // it in postResponse. This preserves retry continuity without authorizing
+  // sensitive routes after a failed/aborted adoption turn.
   log.info(
     `adopted prior session ${best.sid.slice(0, 16)} for resumed conversation ` +
       `(overlap=${best.overlap}/${probedUsers}` +
       `${known ? `, header=${known.headerName}` : ""})`,
   );
-  return { sessionID: best.sid, isNew: false, tier: 3 };
+  if (known) {
+    const provisionalKey = sessionIndexKey(
+      credentialFingerprint,
+      known.headerName,
+      known.sessionId,
+    );
+    setProvisionalHeaderMapping(
+      provisionalKey,
+      best.sid,
+      false,
+      fingerprint,
+      !best.credentialBound,
+    );
+    return {
+      sessionID: best.sid,
+      isNew: false,
+      tier: 3,
+      provisionalIdentity: true,
+      provisionalKey,
+      adoptionFingerprint: fingerprint,
+      expectedUnowned: !best.credentialBound,
+    };
+  }
+  return {
+    sessionID: best.sid,
+    isNew: false,
+    tier: 3,
+    provisionalIdentity: true,
+    adoptionFingerprint: fingerprint,
+    expectedUnowned: !best.credentialBound,
+  };
 }
+
+type IdentifiedSession = {
+  sessionID: string;
+  isNew: boolean;
+  tier: 1 | 2 | 2.5 | 3;
+  provisionalIdentity?: boolean;
+  provisionalKey?: string;
+  guardProject?: boolean;
+  adoptionFingerprint?: string;
+  expectedUnowned?: boolean;
+};
 
 async function identifySession(
   req: GatewayRequest,
   projectPath: string,
+  projectPathSource: ProjectPathResult["source"] | undefined,
+  requestGeneration: number | undefined,
   config: GatewayConfig,
-): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 2.5 | 3 }> {
+): Promise<IdentifiedSession> {
   const headers = req.rawHeaders;
   const credentialFingerprint = requestCredentialFingerprint(headers, config);
 
@@ -4685,15 +5822,53 @@ async function identifySession(
       known.headerName,
       known.sessionId,
     );
+    hydrateHeaderSessionIndex(config);
+    if (ambiguousHeaderSessionKeys.has(indexKey)) {
+      throw new Error("ambiguous persisted session header");
+    }
     let existingSid = headerSessionIndex.get(indexKey);
+    let provisionalIdentity = false;
+    let guardProject = false;
+    let adoptionFingerprint: string | undefined;
+    let expectedUnowned = false;
     if (!existingSid) {
-      restoreHeaderSessionMappings(config);
-      existingSid = headerSessionIndex.get(indexKey);
+      const provisional = getProvisionalHeaderEntry(indexKey);
+      existingSid = provisional?.sessionID;
+      provisionalIdentity = provisional !== null;
+      guardProject =
+        existingSid !== undefined &&
+        provisionalMappingGuardsProject(indexKey, existingSid);
+      adoptionFingerprint = provisional?.adoptionFingerprint;
+      expectedUnowned = provisional?.expectedUnowned === true;
     }
     if (existingSid) {
+      if (
+        provisionalIdentity &&
+        hasConflictingConfirmedHeader(req, existingSid, indexKey, config)
+      ) {
+        throw new Error("ambiguous session headers");
+      }
+      if (provisionalIdentity) {
+        setProvisionalHeaderMapping(
+          indexKey,
+          existingSid,
+          guardProject,
+          adoptionFingerprint,
+          expectedUnowned,
+        );
+      }
       // Session may only exist in DB (after gateway restart) — that's fine,
       // getOrCreateSession() will hydrate it from the session_state table.
-      return { sessionID: existingSid, isNew: false, tier: 1 };
+      return {
+        sessionID: existingSid,
+        isNew: false,
+        tier: 1,
+        provisionalIdentity,
+        ...(provisionalIdentity ? { provisionalKey: indexKey } : {}),
+        ...(guardProject ? { guardProject: true } : {}),
+        ...(adoptionFingerprint ? { adoptionFingerprint } : {}),
+        ...(expectedUnowned ? { expectedUnowned: true } : {}),
+      };
     }
 
     // --- Tier 1a: Cross-header migration ---
@@ -4701,6 +5876,7 @@ async function identifySession(
     // x-lore-session-id), but the request also contains a lower-priority
     // known header that IS already indexed (e.g. x-session-affinity from
     // before the upgrade). Re-index under the new header and resume.
+    let fallbackMatch: { sessionID: string; headerName: string } | undefined;
     for (const fallbackName of KNOWN_SESSION_HEADERS) {
       if (fallbackName === known.headerName) continue; // skip the primary
       const fallbackValue = headers[fallbackName];
@@ -4712,149 +5888,77 @@ async function identifySession(
       );
       const fallbackSid = headerSessionIndex.get(fallbackKey);
       if (fallbackSid) {
-        // Migrate: index under the new (higher-priority) header.
-        headerSessionIndex.set(indexKey, fallbackSid);
-        saveSessionTracking(fallbackSid, {
-          headerSessionId: known.sessionId,
-          headerName: known.headerName,
-          credentialFingerprint,
-        });
-        // Update in-memory state if present.
-        const inMemory = sessions.get(fallbackSid);
-        if (inMemory) {
-          inMemory.headerSessionId = known.sessionId;
-          inMemory.headerName = known.headerName;
-          inMemory.credentialFingerprint = credentialFingerprint;
+        if (fallbackMatch && fallbackMatch.sessionID !== fallbackSid) {
+          throw new Error("ambiguous session headers");
         }
+        fallbackMatch = { sessionID: fallbackSid, headerName: fallbackName };
+      }
+    }
+    if (fallbackMatch) {
+      const incomingProject =
+        projectPathSource === "header" || projectPathSource === "inferred"
+          ? projectPath
+          : undefined;
+      const existing = loadSessionTracking(fallbackMatch.sessionID);
+      const conflictsWithConfidentProject =
+        !!incomingProject &&
+        !!existing?.projectPath &&
+        existing.projectPathProvisional === false &&
+        existing.projectPath !== incomingProject;
+      if (!conflictsWithConfidentProject) {
+        setProvisionalHeaderMapping(indexKey, fallbackMatch.sessionID, true);
         log.info(
-          `session ${fallbackSid.slice(0, 16)}: migrated from ${fallbackName} to ${known.headerName}`,
+          `session ${fallbackMatch.sessionID.slice(0, 16)}: provisional migration from ${fallbackMatch.headerName} to ${known.headerName}`,
         );
-        return { sessionID: fallbackSid, isNew: false, tier: 1 };
+        return {
+          sessionID: fallbackMatch.sessionID,
+          isNew: false,
+          tier: 1,
+          provisionalIdentity: true,
+          provisionalKey: indexKey,
+          guardProject: true,
+        };
       }
-    }
-
-    // --- Tier 1b: Header value rotation detection ---
-    // Only for headers whose values may change on a client restart while the
-    // logical session continues (e.g. OpenCode's x-session-affinity nanoid).
-    // Headers like x-claude-code-session-id mint a fresh value per
-    // *conversation* — a new value is always a genuinely new session, and
-    // merging would collapse distinct conversations (and their projects) into
-    // one, causing cross-project contamination on remote/multi-client gateways.
-    const predecessor = !isRotationEligible(known.headerName)
-      ? null
-      : findRotationPredecessor(
-          credentialFingerprint,
-          known.headerName,
-          known.sessionId,
-          headerSessionIndex,
-          (sid) => {
-            // Session may be in memory or only in DB (after gateway restart).
-            const inMemory = sessions.get(sid);
-            if (inMemory) {
-              return {
-                sid,
-                isSubagent: !!inMemory.isSubagent,
-                lastActiveAt: inMemory.lastRequestTime,
-              };
-            }
-            // Lightweight DB check for recency and subagent status.
-            const persisted = loadSessionTracking(sid);
-            if (!persisted) return null; // orphaned index entry
-            return {
-              sid,
-              isSubagent: persisted.isSubagent,
-              // lastTurnAt=0 means gradient never ran yet — session is new,
-              // treat as recently active (not infinitely stale).
-              lastActiveAt:
-                persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
-            };
-          },
-        );
-
-    // Fix 2 (defense in depth): even for a rotation-eligible header, never
-    // re-home a session onto a DIFFERENT confident project. If the incoming
-    // request carries an explicit X-Lore-Project that disagrees with the
-    // predecessor's bound project, this is not a benign restart — treat it as
-    // a genuinely new session to avoid cross-project contamination.
-    if (predecessor) {
-      const incomingProject = extractProjectHeader(headers);
-      if (incomingProject) {
-        const predTracking = loadSessionTracking(predecessor.sid);
-        const predProject = predTracking?.projectPath;
-        const predConfident =
-          !!predProject && predTracking?.projectPathProvisional === false;
-        if (predConfident && predProject !== incomingProject) {
-          log.warn(
-            `session rotation refused (${known.headerName}): incoming project ` +
-              `${incomingProject} differs from predecessor ${predecessor.sid.slice(0, 16)} ` +
-              `project ${predProject} — creating a new session instead of merging.`,
-          );
-          const sessionID = generateSessionID();
-          headerSessionIndex.set(indexKey, sessionID);
-          saveSessionTracking(sessionID, {
-            headerSessionId: known.sessionId,
-            headerName: known.headerName,
-            credentialFingerprint,
-          });
-          // The old predecessor's index entry is intentionally preserved — the
-          // old session is still valid and may receive requests with its nanoid.
-          // It will age out via ROTATION_MAX_AGE_MS naturally. If another new
-          // nanoid arrives later, the old entry creates an ambiguity (multiple
-          // predecessors) → findRotationPredecessor returns null → new session.
-          return { sessionID, isNew: true, tier: 1 };
-        }
-      }
-    }
-
-    if (predecessor) {
-      // Resume the old session with the new header value.
-      const oldKey = sessionIndexKey(
-        credentialFingerprint,
-        known.headerName,
-        predecessor.oldHeaderValue,
+      log.warn(
+        `session migration refused (${fallbackMatch.headerName}): incoming project ` +
+          `${incomingProject} differs from session ${fallbackMatch.sessionID.slice(0, 16)} ` +
+          `project ${existing.projectPath} - creating a new session instead of merging.`,
       );
-      headerSessionIndex.delete(oldKey);
-      headerSessionIndex.set(indexKey, predecessor.sid);
-
-      // Update in-memory state if present.
-      const inMemory = sessions.get(predecessor.sid);
-      if (inMemory) {
-        inMemory.headerSessionId = known.sessionId;
-        inMemory.headerName = known.headerName;
-        inMemory.credentialFingerprint = credentialFingerprint;
-      }
-
-      // Persist the new header mapping immediately.
-      saveSessionTracking(predecessor.sid, {
-        headerSessionId: known.sessionId,
-        headerName: known.headerName,
-        credentialFingerprint,
-      });
-
-      log.info(
-        `session ${predecessor.sid.slice(0, 16)}: resumed via ${known.headerName} value rotation`,
-      );
-      return { sessionID: predecessor.sid, isNew: false, tier: 1 };
     }
 
-    // --- Tier 1 → 3b: restart-proof adoption ---
-    // The known header value is new and rotation found no predecessor. Before
-    // minting a fresh session, try to adopt a prior session for this same
-    // conversation (resumed after a restart under a new x-lore-session-id) via
-    // its persisted fingerprint + content-hash overlap. (issue #796)
+    // --- Tier 1 → 3b: overlap-proven restart adoption ---
+    // A new known-header value is never continuity proof by itself. Before
+    // minting a fresh session, adopt only when the persisted fingerprint and
+    // project-scoped leading-user-message overlap prove that this is the same
+    // conversation. Successful publication below still revokes an old value
+    // for rotation-eligible headers such as x-session-affinity. (issue #796)
     const adopted = await adoptByFingerprint({
       req,
       headers,
       projectPath,
+      gitRemote: trustedAdoptionRemote(projectPath, headers),
       known,
       msgCount: req.messages.length,
+      requestGeneration,
       config,
       credentialFingerprint,
     });
     if (adopted) return adopted;
 
-    // Genuinely new session — no predecessor or ambiguous concurrent sessions.
+    // If a lower-priority confirmed identity existed but project validation
+    // rejected the migration, keep this replacement provisional until success.
+    // A completely new header can retain the normal eager session bootstrap.
     const sessionID = generateSessionID();
+    if (fallbackMatch) {
+      setProvisionalHeaderMapping(indexKey, sessionID);
+      return {
+        sessionID,
+        isNew: true,
+        tier: 1,
+        provisionalIdentity: true,
+        provisionalKey: indexKey,
+      };
+    }
     headerSessionIndex.set(indexKey, sessionID);
     saveSessionTracking(sessionID, {
       headerSessionId: known.sessionId,
@@ -4865,15 +5969,20 @@ async function identifySession(
   }
 
   // --- Tier 2: Learned headers ---
-  // Check if any existing session has a promoted header that matches
-  // a header value in the current request.
-  for (const [sid, state] of sessions) {
-    if (!state.headerSessionId || !state.headerName) continue;
-    if ((state.credentialFingerprint ?? "") !== credentialFingerprint) continue;
-    const currentValue = headers[state.headerName];
-    if (currentValue && currentValue === state.headerSessionId) {
-      return { sessionID: sid, isNew: false, tier: 2 };
-    }
+  // Resolve through the shared index so multiple headers identifying different
+  // sessions fail closed instead of selecting insertion order.
+  const indexedResolution = resolveIndexedSession(req, config, true);
+  if (indexedResolution.kind === "ambiguous") {
+    throw new Error("ambiguous session headers");
+  }
+  if (indexedResolution.kind === "match") {
+    return {
+      sessionID: indexedResolution.sessionID,
+      isNew: false,
+      tier: 2,
+      provisionalIdentity: indexedResolution.provisional,
+      provisionalKey: indexedResolution.provisionalKey,
+    };
   }
 
   // --- Tier 2.5: Context markers (injected by Hermes plugin pre_llm_call) ---
@@ -4909,53 +6018,79 @@ async function identifySession(
       ? { tenantFingerprint: credentialFingerprint }
       : { authSuffix: cred ? authFingerprint(cred) : "" },
   );
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
   const msgCount = req.messages.length;
 
   // Find the best matching session: same fingerprint + closest message count
   let bestMatch: { sid: string; countDiff: number } | null = null;
+  let ambiguousBestMatch = false;
 
-  for (const [sid, state] of sessions) {
-    if ((state.credentialFingerprint ?? "") !== credentialFingerprint) continue;
-    if (state.fingerprint !== fingerprint) continue;
+  if (cred) {
+    for (const [sid, state] of sessions) {
+      if (state.credentialFingerprint !== credentialFingerprint) continue;
+      if (state.fingerprint !== fingerprint) continue;
+      if (
+        (projectPathSource === "header" || projectPathSource === "inferred") &&
+        state.projectPathProvisional === false &&
+        state.projectPath !== projectPath
+      ) {
+        continue;
+      }
 
-    const diff = msgCount - state.messageCount;
+      const diff = msgCount - state.messageCount;
 
-    // Normal session: count grows by 2–6 per turn.
-    // Fork: count drops significantly (parent at 600, fork at 300).
-    // Reject if the count dropped too far (likely a fork).
-    if (diff < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) continue;
+      // Normal session: count grows by 2–6 per turn.
+      // Fork: count drops significantly (parent at 600, fork at 300).
+      // Reject if the count dropped too far (likely a fork).
+      if (diff < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) continue;
 
-    const absDiff = Math.abs(diff);
-    if (!bestMatch || absDiff < bestMatch.countDiff) {
-      bestMatch = { sid, countDiff: absDiff };
+      const absDiff = Math.abs(diff);
+      if (!bestMatch || absDiff < bestMatch.countDiff) {
+        bestMatch = { sid, countDiff: absDiff };
+        ambiguousBestMatch = false;
+      } else if (absDiff === bestMatch.countDiff) {
+        ambiguousBestMatch = true;
+      }
     }
   }
+  if (ambiguousBestMatch) bestMatch = null;
 
   if (bestMatch) {
     // Run header learning on the matched session (Tier 2 bootstrap).
     const state = sessions.get(bestMatch.sid);
     if (state && !state.headerSessionId) {
-      const result = learnHeaders(state.candidateHeaders, headers);
-      state.candidateHeaders = result.updatedCandidates;
+      const candidateSnapshot = state.candidateHeaders
+        ? new Map(
+            Array.from(state.candidateHeaders, ([name, candidate]) => [
+              name,
+              { ...candidate },
+            ]),
+          )
+        : undefined;
+      const result = learnHeaders(candidateSnapshot, headers, {
+        commitGlobal: false,
+      });
       if (result.promoted) {
-        state.headerSessionId = result.promoted.value;
-        state.headerName = result.promoted.name;
-        // Index the promoted header for future Tier 2 lookups.
+        // Preserve retry continuity in memory, but do not authorize the learned
+        // header until a successful response confirms it in postResponse.
         const indexKey = sessionIndexKey(
           credentialFingerprint,
           result.promoted.name,
           result.promoted.value,
         );
-        headerSessionIndex.set(indexKey, bestMatch.sid);
-        // Persist immediately — rare event, critical for post-restart correlation
-        saveSessionTracking(bestMatch.sid, {
-          headerSessionId: result.promoted.value,
-          headerName: result.promoted.name,
-          credentialFingerprint,
-        });
+        setProvisionalHeaderMapping(indexKey, bestMatch.sid);
         log.info(
-          `session ${bestMatch.sid.slice(0, 16)}: promoted header ${result.promoted.name} for Tier 2 identification`,
+          `session ${bestMatch.sid.slice(0, 16)}: provisional header promotion ${result.promoted.name}`,
         );
+        return {
+          sessionID: bestMatch.sid,
+          isNew: false,
+          tier: 3,
+          provisionalIdentity: true,
+          provisionalKey: indexKey,
+        };
       }
     }
     return { sessionID: bestMatch.sid, isNew: false, tier: 3 };
@@ -4971,8 +6106,10 @@ async function identifySession(
     req,
     headers,
     projectPath,
+    gitRemote: trustedAdoptionRemote(projectPath, headers),
     known: null,
     msgCount,
+    requestGeneration,
     config,
     credentialFingerprint,
   });
@@ -5578,6 +6715,8 @@ export function buildStreamingResponse(
     sessionState: SessionState;
     cacheOptions: AnthropicCacheOptions;
     upstreamRoute?: ResolvedRequestUpstreamRoute;
+    /** Suppress recall-result retention for amnesia/no-store turns. */
+    noStore?: boolean;
     /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
      *  recall marker is emitted as its own Anthropic SSE message envelope
      *  (split) or as an inline synthetic text content block (which the
@@ -5926,28 +7065,30 @@ export function buildStreamingResponse(
                   ];
                 },
               );
-              addRecallStoreEntry(
-                recallContext.sessionState.recallStore,
-                storeKey,
-                {
-                  toolUseId: recallBlock.id,
-                  anchorId,
-                  anchorContextId,
-                  input,
-                  position,
-                  result,
-                  ...(companionToolUses.length > 0
-                    ? { companionToolUses }
-                    : {}),
-                },
-              );
-              // Persist the store (v46) so the marker still expands byte-identically
-              // after a gateway restart instead of leaking raw marker text upstream.
-              saveSessionTracking(recallContext.sessionState.sessionID, {
-                recallStore: serializeRecallStore(
+              if (!recallContext.noStore) {
+                addRecallStoreEntry(
                   recallContext.sessionState.recallStore,
-                ),
-              });
+                  storeKey,
+                  {
+                    toolUseId: recallBlock.id,
+                    anchorId,
+                    anchorContextId,
+                    input,
+                    position,
+                    result,
+                    ...(companionToolUses.length > 0
+                      ? { companionToolUses }
+                      : {}),
+                  },
+                );
+                // Persist the store (v46) so the marker still expands byte-identically
+                // after a gateway restart instead of leaking raw marker text upstream.
+                saveSessionTracking(recallContext.sessionState.sessionID, {
+                  recallStore: serializeRecallStore(
+                    recallContext.sessionState.recallStore,
+                  ),
+                });
+              }
 
               // Emit marker — split into its own SSE message envelope for Anthropic-native
               // clients (so the marker renders as a DISTINCT assistant message in
@@ -6396,7 +7537,11 @@ export function buildStreamingResponse(
 export function streamResponsesRecallAware(
   upstreamResponse: Response,
   opts: {
-    onComplete: (response: GatewayResponse) => void;
+    onComplete: (response: GatewayResponse, successful: boolean) => void;
+    onTransactionReady?: (transaction: {
+      commit: () => void;
+      rollback: () => void;
+    }) => void;
     sessionID?: string;
     maxRecallDepth?: number;
     maxDeferredBytes?: number;
@@ -6404,6 +7549,7 @@ export function streamResponsesRecallAware(
     maxRetainedStateBytes?: number;
     maxStreamBytes?: number;
     maxSSEFrames?: number;
+    validation?: "public" | "codex";
     /** Caller abort combined with the stream's client-disconnect controller. */
     signal?: AbortSignal;
     /**
@@ -6544,7 +7690,11 @@ export function streamResponsesRecallAware(
     }
   };
   let transactionBaseline: ResponsesAccState | undefined;
+  let transactionProviderUsage: GatewayUsage = { ...ZERO_USAGE };
   const transactionRollbacks: Array<() => void> = [];
+  let deferredTransaction:
+    | { commit: () => void; rollback: () => void }
+    | undefined;
   const restoreTransactionBaseline = (): void => {
     if (!transactionBaseline) return;
     state.id = transactionBaseline.id;
@@ -6744,6 +7894,8 @@ export function streamResponsesRecallAware(
       if (
         !item ||
         typeof item.type !== "string" ||
+        !isSupportedResponsesOutputItemType(item.type) ||
+        !isValidResponsesOutputItemStatus(item.type, item.status, "added") ||
         typeof item.id !== "string" ||
         item.id.length === 0 ||
         (item.type === "function_call" &&
@@ -6861,12 +8013,7 @@ export function streamResponsesRecallAware(
       const item = parsed.item as Record<string, unknown> | undefined;
       if (
         event === "response.output_item.done" &&
-        (!item ||
-          item.type !== declared?.type ||
-          item.id !== declared?.id ||
-          item.call_id !== declared?.call_id ||
-          item.name !== declared?.name ||
-          (declared?.type === "message" && item.role !== declared.role))
+        (!item || !declared || !responsesDoneItemMatchesAdded(item, declared))
       ) {
         throw new Error(
           `Responses output_item.done changed item identity for index ${outputIndex}`,
@@ -7378,7 +8525,11 @@ export function streamResponsesRecallAware(
       if (!response || typeof response.id !== "string" || !response.id) {
         throw new Error("response.created missing response identity");
       }
-      if (response.status !== undefined && response.status !== "in_progress") {
+      if (
+        response.status !== undefined &&
+        response.status !== "in_progress" &&
+        !(opts.validation === "codex" && response.status === "queued")
+      ) {
         throw new Error("response.created has invalid status");
       }
       if (
@@ -7431,13 +8582,36 @@ export function streamResponsesRecallAware(
         throw new Error("Responses terminal event has nonterminal status");
       }
       if (
-        (event === "response.completed" && status !== "completed") ||
+        (event === "response.completed" &&
+          status !== "completed" &&
+          !(opts.validation === "codex" && status === "incomplete")) ||
         (event === "response.incomplete" && status !== "incomplete") ||
         (event === "response.failed" &&
           status !== "failed" &&
           status !== "cancelled")
       ) {
         throw new Error("Responses terminal event contradicts response status");
+      }
+      if (status === "incomplete") {
+        const details = response?.incomplete_details;
+        if (
+          details !== undefined &&
+          details !== null &&
+          (typeof details !== "object" || Array.isArray(details))
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+        const reason =
+          details && typeof details === "object" && !Array.isArray(details)
+            ? (details as Record<string, unknown>).reason
+            : undefined;
+        if (
+          reason !== undefined &&
+          reason !== "max_output_tokens" &&
+          reason !== "content_filter"
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
       }
       lifecycle.terminal = true;
     }
@@ -7474,90 +8648,6 @@ export function streamResponsesRecallAware(
       }
     }
     if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
-  };
-  const terminalTextPartsMatch = (
-    actual: unknown,
-    streamed: unknown,
-  ): boolean => {
-    if (!Array.isArray(actual) || !Array.isArray(streamed)) return false;
-    if (actual.length !== streamed.length) return false;
-    return streamed.every((streamedPart, index) => {
-      const actualPart = actual[index];
-      if (
-        !streamedPart ||
-        typeof streamedPart !== "object" ||
-        Array.isArray(streamedPart) ||
-        !actualPart ||
-        typeof actualPart !== "object" ||
-        Array.isArray(actualPart)
-      ) {
-        return false;
-      }
-      const streamedRecord = streamedPart as Record<string, unknown>;
-      const actualRecord = actualPart as Record<string, unknown>;
-      if (actualRecord.type !== streamedRecord.type) return false;
-      if (
-        typeof streamedRecord.type === "string" &&
-        ["output_text", "reasoning_text", "summary_text", "refusal"].includes(
-          streamedRecord.type,
-        )
-      ) {
-        return (
-          partValue(streamedRecord.type, actualRecord, "terminal content") ===
-          partValue(streamedRecord.type, streamedRecord, "streamed content")
-        );
-      }
-      return isDeepStrictEqual(actualRecord, streamedRecord);
-    });
-  };
-  const terminalItemMatches = (
-    actual: Record<string, unknown>,
-    streamed: Record<string, unknown>,
-  ): boolean => {
-    if (actual.type !== streamed.type || actual.id !== streamed.id)
-      return false;
-    if (actual.status !== undefined && typeof actual.status !== "string") {
-      return false;
-    }
-    if (
-      streamed.status !== undefined &&
-      actual.status !== undefined &&
-      actual.status !== streamed.status
-    ) {
-      return false;
-    }
-    if (actual.type === "function_call") {
-      return (
-        actual.call_id === streamed.call_id &&
-        actual.name === streamed.name &&
-        actual.arguments === streamed.arguments
-      );
-    }
-    if (actual.type === "message") {
-      return (
-        actual.role === streamed.role &&
-        terminalTextPartsMatch(actual.content, streamed.content)
-      );
-    }
-    if (actual.type === "reasoning") {
-      for (const field of ["summary", "content"]) {
-        if (streamed[field] !== undefined) {
-          if (!terminalTextPartsMatch(actual[field], streamed[field])) {
-            return false;
-          }
-        }
-      }
-      if (
-        streamed.encrypted_content !== undefined &&
-        !isDeepStrictEqual(actual.encrypted_content, streamed.encrypted_content)
-      ) {
-        return false;
-      }
-      return true;
-    }
-    const { status: _actualStatus, ...actualSemantic } = actual;
-    const { status: _streamedStatus, ...streamedSemantic } = streamed;
-    return isDeepStrictEqual(actualSemantic, streamedSemantic);
   };
   const assertTerminalReasoningMatchesLifecycle = (
     lifecycle: OutputLifecycle,
@@ -7603,7 +8693,12 @@ export function streamResponsesRecallAware(
     if (acc.id && response.id !== acc.id) {
       throw new Error("Responses terminal event changed response identity");
     }
-    if (response.output === undefined) return;
+    if (response.output === undefined) {
+      if (opts.validation === "public" && response.status === "completed") {
+        throw new Error("Responses terminal output must be an array");
+      }
+      return;
+    }
     if (!Array.isArray(response.output)) {
       throw new Error("Responses terminal output must be an array");
     }
@@ -7617,6 +8712,12 @@ export function streamResponsesRecallAware(
       return item as Record<string, unknown>;
     });
     const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
+    if (
+      opts.validation === "public" &&
+      actualOutput.length !== expected.length
+    ) {
+      throw new Error("Responses terminal output changed streamed item");
+    }
     let expectedIndex = 0;
     for (const actual of actualOutput) {
       const isReference = actual.type === "item_reference";
@@ -7639,8 +8740,11 @@ export function streamResponsesRecallAware(
       if (matchIndex < 0) {
         throw new Error("Responses terminal output changed streamed item");
       }
+      if (opts.validation === "public" && matchIndex !== expectedIndex) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
       const [outputIndex, streamed] = expected[matchIndex];
-      if (!isReference && !terminalItemMatches(actual, streamed)) {
+      if (!isReference && !responsesTerminalItemMatches(actual, streamed)) {
         throw new Error("Responses terminal output changed streamed item");
       }
       if (!isReference && actual.type === "reasoning") {
@@ -7825,11 +8929,11 @@ export function streamResponsesRecallAware(
     return encoder.encode(output);
   };
 
-  const finish = (resp: GatewayResponse): boolean => {
+  const finish = (resp: GatewayResponse, successful: boolean): boolean => {
     if (completionAttempted) return completed;
     completionAttempted = true;
     try {
-      opts.onComplete(resp);
+      opts.onComplete(resp, successful);
       completed = true;
       return true;
     } catch (err) {
@@ -8144,17 +9248,21 @@ export function streamResponsesRecallAware(
           }
           signal.throwIfAborted();
         };
-        const safeEnqueue = async (chunk: Uint8Array): Promise<boolean> => {
+        const safeEnqueue = async (
+          chunk: Uint8Array,
+          afterEnqueue?: () => void,
+        ): Promise<boolean> => {
           if (cancelled) return false;
           await waitForDemand();
           if (cancelled) return false;
           try {
             controller.enqueue(sequenceChunk(chunk));
-            return true;
           } catch {
             cancelled = true;
             return false;
           }
+          afterEnqueue?.();
+          return true;
         };
         const safeClose = (): void => {
           cleanupAbort();
@@ -8375,6 +9483,7 @@ export function streamResponsesRecallAware(
                   );
                 }
                 // No recall — forward the terminal event verbatim.
+                const finalResponse = finalizeResponsesAcc(state);
                 if (
                   !(await safeEnqueue(
                     encoder.encode(
@@ -8385,13 +9494,19 @@ export function streamResponsesRecallAware(
                           : JSON.stringify(terminalParsed),
                       ),
                     ),
+                    () => {
+                      terminalDelivered = true;
+                      finish(
+                        finalResponse,
+                        state.terminalEvent === "response.completed",
+                      );
+                    },
                   ))
                 )
                   break;
                 cancelAndReleaseReader(reader, signal.reason);
                 principalReader = null;
                 clearKeepalive();
-                finish(finalizeResponsesAcc(state));
                 safeClose();
                 return;
               }
@@ -8422,6 +9537,7 @@ export function streamResponsesRecallAware(
                 items: new Map(state.items),
                 rawItems: new Map(state.rawItems),
               };
+              transactionProviderUsage = { ...ZERO_USAGE };
               const pendingCommits: Array<() => void> = [];
               const transactionalEvents: Uint8Array[] = [];
               let transactionalBytes = 0;
@@ -8804,6 +9920,11 @@ export function streamResponsesRecallAware(
                         }
                         mergeUsage(state.usage, contState.usage);
                       };
+                      assertUsageMergeable(
+                        transactionProviderUsage,
+                        contState.usage,
+                      );
+                      mergeUsage(transactionProviderUsage, contState.usage);
                       if (continuationFailed) {
                         throw new Error(
                           "recall follow-up returned response.failed",
@@ -8907,6 +10028,9 @@ export function streamResponsesRecallAware(
                       for (const chunk of heldContinuationEvents) {
                         queueTransactional(chunk);
                       }
+                      for (const index of contRecallIndices) {
+                        recallIndices.add(shiftedOutputIndex(index, contIndex));
+                      }
                       mergeContinuation();
                       if (!nextRecall || !nextExecuted || contOtherTool) {
                         state.stopReason = contState.stopReason;
@@ -8963,20 +10087,56 @@ export function streamResponsesRecallAware(
                 }
               }
               if (
-                !(await safeEnqueue(encoder.encode(buildTerminal(visibleResp))))
+                !(await safeEnqueue(
+                  encoder.encode(buildTerminal(visibleResp)),
+                  () => {
+                    terminalDelivered = true;
+                    const successful =
+                      state.terminalEvent === "response.completed";
+                    let transactionSettled = false;
+                    const transaction = {
+                      commit: () => {
+                        if (transactionSettled) return;
+                        try {
+                          for (const commit of pendingCommits) commit();
+                          transactionSettled = true;
+                          pendingCommits.length = 0;
+                          transactionRollbacks.length = 0;
+                          transactionBaseline = undefined;
+                        } catch (error) {
+                          pendingCommits.length = 0;
+                          transaction.rollback();
+                          throw error;
+                        }
+                      },
+                      rollback: () => {
+                        if (transactionSettled) return;
+                        transactionSettled = true;
+                        pendingCommits.length = 0;
+                        rollbackTransaction();
+                      },
+                    };
+                    deferredTransaction = transaction;
+                    if (successful) opts.onTransactionReady?.(transaction);
+                    if (!finish(visibleResp, successful)) {
+                      transaction.rollback();
+                      throw new Error(
+                        "recall onComplete failed after delivery",
+                      );
+                    }
+                    if (successful) {
+                      if (!opts.onTransactionReady) transaction.commit();
+                    } else {
+                      transaction.rollback();
+                    }
+                  },
+                ))
               ) {
                 throw new Error(
                   "client disconnected while delivering recall terminal",
                 );
               }
-              terminalDelivered = true;
               if (cancelled) throw signal.reason;
-              if (!finish(visibleResp)) {
-                throw new Error("recall onComplete failed after delivery");
-              }
-              for (const commit of pendingCommits.splice(0)) commit();
-              transactionRollbacks.length = 0;
-              transactionBaseline = undefined;
               cancelAndReleaseReader(reader, signal.reason);
               principalReader = null;
               safeClose();
@@ -9034,6 +10194,30 @@ export function streamResponsesRecallAware(
               err,
             );
           }
+          const failedResponse = finalizeResponsesAcc(state);
+          try {
+            assertUsageMergeable(
+              failedResponse.usage ?? ZERO_USAGE,
+              transactionProviderUsage,
+            );
+            failedResponse.usage ??= { ...ZERO_USAGE };
+            mergeUsage(failedResponse.usage, transactionProviderUsage);
+          } catch (usageError) {
+            log.error(
+              "failed to merge recall continuation usage for accounting:",
+              usageError,
+            );
+          }
+          transactionProviderUsage = { ...ZERO_USAGE };
+          failedResponse.content = failedResponse.content.filter(
+            (block) =>
+              (block.type !== "tool_use" || block.name !== RECALL_TOOL_NAME) &&
+              (block.type !== "text" || !parseRecallAnchor(block.text)),
+          );
+          failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
+            (item) =>
+              item.type !== "function_call" || item.name !== RECALL_TOOL_NAME,
+          );
           await safeEnqueue(
             encoder.encode(
               formatResponsesEvent(
@@ -9057,18 +10241,8 @@ export function streamResponsesRecallAware(
                 }),
               ),
             ),
+            () => finish(failedResponse, false),
           );
-          const failedResponse = finalizeResponsesAcc(state);
-          failedResponse.content = failedResponse.content.filter(
-            (block) =>
-              (block.type !== "tool_use" || block.name !== RECALL_TOOL_NAME) &&
-              (block.type !== "text" || !parseRecallAnchor(block.text)),
-          );
-          failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
-            (item) =>
-              item.type !== "function_call" || item.name !== RECALL_TOOL_NAME,
-          );
-          finish(failedResponse);
           safeClose();
         }
       })().catch((error) => {
@@ -9092,7 +10266,8 @@ export function streamResponsesRecallAware(
       resumeDemand = undefined;
       cancelled = true;
       cleanupAbort();
-      rollbackTransaction();
+      if (deferredTransaction) deferredTransaction.rollback();
+      else rollbackTransaction();
       abortController.abort(
         new DOMException("Responses client disconnected", "AbortError"),
       );
@@ -9221,6 +10396,7 @@ export async function accumulateNonStreamResponse(
     | "gemini" = "anthropic",
   codex = false,
   signal?: AbortSignal,
+  requireValidCompletion = false,
 ): Promise<GatewayResponse> {
   // Some providers (the ChatGPT/Copilot/Codex backend, DeepSeek) return an SSE
   // stream even when stream: false was sent — sometimes WITHOUT the
@@ -9254,6 +10430,7 @@ export async function accumulateNonStreamResponse(
           signal,
           validation: codex ? "codex" : "public",
           stopAtTerminal: true,
+          requireCompletedTerminal: true,
         });
       case "gemini":
         return accumulateGeminiSSEStream(sse, {
@@ -9272,17 +10449,261 @@ export async function accumulateNonStreamResponse(
   }
 
   const json = JSON.parse(body) as Record<string, unknown>;
+  if (protocol === "openai-responses") {
+    const { response, status } = parseResponsesNonStreamEnvelope(json);
+    if (status !== "completed") {
+      throw new ResponsesTerminalError(response, status);
+    }
+    return response;
+  }
+  if (requireValidCompletion) {
+    assertValidNonStreamCompletion(json, protocol);
+  }
   switch (protocol) {
     case "openai":
       return accumulateOpenAINonStreamJSON(json);
-    case "openai-responses":
-      return accumulateResponsesNonStreamJSON(json);
     case "gemini":
       return parseGeminiResponseJSON(json);
     default:
       // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
       // Anthropic non-streaming JSON shape).
       return accumulateAnthropicNonStreamJSON(json);
+  }
+}
+
+function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {
+  response: GatewayResponse;
+  status: string;
+} {
+  const response = accumulateResponsesNonStreamJSON(json);
+  const status = typeof json.status === "string" ? json.status : "unknown";
+  if (status === "completed" || status === "incomplete") {
+    assertValidNonStreamCompletion(json, "openai-responses");
+  }
+  return { response, status };
+}
+
+async function preserveIncompleteResponsesTerminal(
+  operation: Promise<GatewayResponse>,
+): Promise<GatewayResponse> {
+  try {
+    return await operation;
+  } catch (error) {
+    if (
+      error instanceof ResponsesTerminalError &&
+      error.status === "incomplete"
+    ) {
+      return error.response;
+    }
+    throw error;
+  }
+}
+
+function assertValidNonStreamCompletion(
+  json: Record<string, unknown>,
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
+): void {
+  if (json.error !== undefined && json.error !== null) {
+    throw new Error("upstream response contained an error");
+  }
+
+  if (protocol === "openai") {
+    const choices = json.choices;
+    const first = Array.isArray(choices) ? choices[0] : undefined;
+    if (
+      !first ||
+      typeof first !== "object" ||
+      Array.isArray(first) ||
+      !(first as Record<string, unknown>).message ||
+      typeof (first as Record<string, unknown>).finish_reason !== "string"
+    ) {
+      throw new Error("upstream OpenAI request did not complete");
+    }
+    return;
+  }
+
+  if (protocol === "openai-responses") {
+    const status = json.status;
+    if (
+      (status !== "completed" && status !== "incomplete") ||
+      typeof json.id !== "string" ||
+      typeof json.model !== "string" ||
+      !Array.isArray(json.output) ||
+      !json.usage ||
+      typeof json.usage !== "object" ||
+      Array.isArray(json.usage)
+    ) {
+      throw new Error("upstream Responses request did not complete");
+    }
+    const seenItemIDs = new Set<string>();
+    for (const rawItem of json.output) {
+      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const item = rawItem as Record<string, unknown>;
+      if (
+        typeof item.type !== "string" ||
+        !item.type ||
+        !isSupportedResponsesOutputItemType(item.type) ||
+        typeof item.id !== "string" ||
+        !item.id ||
+        seenItemIDs.has(item.id)
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      seenItemIDs.add(item.id);
+      if (item.type === "message") {
+        const validItemStatus =
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (
+          item.role !== "assistant" ||
+          !validItemStatus ||
+          !Array.isArray(item.content)
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const rawPart of item.content) {
+          if (
+            !rawPart ||
+            typeof rawPart !== "object" ||
+            Array.isArray(rawPart)
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          const part = rawPart as Record<string, unknown>;
+          if (
+            (part.type === "output_text" && typeof part.text !== "string") ||
+            (part.type === "refusal" && typeof part.refusal !== "string") ||
+            (part.type !== "output_text" && part.type !== "refusal")
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+        }
+      } else if (item.type === "function_call") {
+        const validItemStatus =
+          item.status === "completed" ||
+          item.status === "failed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (
+          typeof item.call_id !== "string" ||
+          !item.call_id ||
+          typeof item.name !== "string" ||
+          !item.name ||
+          typeof item.arguments !== "string" ||
+          !validItemStatus
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      } else if (item.type === "reasoning") {
+        const validItemStatus =
+          item.status === undefined ||
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (!validItemStatus) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const [field, partType] of [
+          ["summary", "summary_text"],
+          ["content", "reasoning_text"],
+        ] as const) {
+          const parts = item[field];
+          if (parts === undefined) continue;
+          if (!Array.isArray(parts)) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          for (const rawPart of parts) {
+            if (
+              !rawPart ||
+              typeof rawPart !== "object" ||
+              Array.isArray(rawPart) ||
+              (rawPart as Record<string, unknown>).type !== partType ||
+              typeof (rawPart as Record<string, unknown>).text !== "string"
+            ) {
+              throw new Error("upstream Responses request did not complete");
+            }
+          }
+        }
+        if (
+          item.encrypted_content !== undefined &&
+          item.encrypted_content !== null &&
+          typeof item.encrypted_content !== "string"
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      } else if (item.type === "item_reference") {
+        // A standalone non-stream response has no streamed item lifecycle to
+        // resolve this reference against; accepting it would silently erase
+        // provider output during normalization.
+        throw new Error("upstream Responses request did not complete");
+      } else {
+        if (
+          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      }
+    }
+    if (status === "incomplete") {
+      const details = json.incomplete_details;
+      if (
+        details !== undefined &&
+        details !== null &&
+        (typeof details !== "object" ||
+          Array.isArray(details) ||
+          typeof (details as Record<string, unknown>).reason !== "string")
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const reason =
+        details && typeof details === "object" && !Array.isArray(details)
+          ? (details as Record<string, unknown>).reason
+          : undefined;
+      if (
+        reason !== undefined &&
+        reason !== "max_output_tokens" &&
+        reason !== "content_filter"
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+    }
+    return;
+  }
+
+  if (protocol === "gemini") {
+    const candidates = json.candidates;
+    const first = Array.isArray(candidates) ? candidates[0] : undefined;
+    const promptFeedback = json.promptFeedback;
+    const blockReason =
+      promptFeedback &&
+      typeof promptFeedback === "object" &&
+      !Array.isArray(promptFeedback)
+        ? (promptFeedback as Record<string, unknown>).blockReason
+        : undefined;
+    if (
+      (!first ||
+        typeof first !== "object" ||
+        Array.isArray(first) ||
+        typeof (first as Record<string, unknown>).finishReason !== "string") &&
+      typeof blockReason !== "string"
+    ) {
+      throw new Error("upstream Gemini request did not complete");
+    }
+    return;
+  }
+
+  if (
+    json.type !== "message" ||
+    json.role !== "assistant" ||
+    typeof json.id !== "string" ||
+    typeof json.model !== "string" ||
+    !Array.isArray(json.content) ||
+    typeof json.stop_reason !== "string" ||
+    !json.usage ||
+    typeof json.usage !== "object" ||
+    Array.isArray(json.usage)
+  ) {
+    throw new Error("upstream Anthropic request did not complete");
   }
 }
 
@@ -9503,7 +10924,14 @@ export function accumulateResponsesNonStreamJSON(
   // Map Responses API status to gateway stop reason
   const status = json.status as string | undefined;
   let stopReason = "end_turn";
-  if (status === "incomplete") stopReason = "max_tokens";
+  if (status === "incomplete") {
+    const details = json.incomplete_details;
+    const reason =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? (details as Record<string, unknown>).reason
+        : undefined;
+    stopReason = reason === "content_filter" ? "content_filter" : "max_tokens";
+  }
   if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
     stopReason = "tool_use";
   }
@@ -9792,6 +11220,7 @@ export function recordCacheTurnUsage(
   requestBody?: string,
   /** Active gen_ai.chat span to enrich with divergence diagnostics. */
   genAiSpan?: Sentry.Span,
+  endSpan?: () => void,
 ): CacheBustCause | undefined {
   // Capture the idle-resume flag up front: it is consumed (set false) inside
   // the block below but is still needed afterwards by recordCacheUsage so a
@@ -9868,7 +11297,8 @@ export function recordCacheTurnUsage(
   // session-state bookkeeping that never touches the span, and ending the span
   // first means a throw in recordCacheUsage can't leak an unfinished span.
   if (genAiSpan) {
-    genAiSpan.end();
+    if (endSpan) endSpan();
+    else genAiSpan.end();
   }
 
   // --- Consecutive bust tracking for tier-based decisions ---
@@ -9937,12 +11367,11 @@ export function storeTurnTemporal(input: {
     return;
   }
 
-  // Resolve (and, if needed, lazily backfill/merge) the project OUTSIDE the
-  // savepoint. `ensureProject` can reach `mergeProjectInternal`'s raw
-  // `BEGIN IMMEDIATE` on the NULL-git_remote backfill-with-conflict path, which
-  // would nest inside the savepoint's transaction and throw "cannot start a
-  // transaction within a transaction". Warming it here makes the `ensureProject`
-  // calls inside temporal.store / recordToolCalls cheap cache hits. (#1084.)
+  // Resolve (and, if needed, lazily backfill/merge) the project before the
+  // temporal savepoint. mergeProjectInternal is nested-savepoint safe, so this
+  // whole operation may itself run inside a larger transaction. Warming here
+  // makes the ensureProject calls inside temporal.store / recordToolCalls cheap
+  // cache hits. (#1084.)
   ensureProject(projectPath);
 
   withSavepoint("post_response_temporal", () => {
@@ -10015,6 +11444,34 @@ export function storeTurnTemporal(input: {
   });
 }
 
+function accountConversationUsage(
+  usage: GatewayUsage,
+  model: string,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+): AnthropicUsage {
+  const usageForSentry: AnthropicUsage = {
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cache_read_input_tokens: usage.cacheReadInputTokens,
+    cache_creation_input_tokens: usage.cacheCreationInputTokens,
+  };
+  setSentryCacheContext(usage);
+  emitCostMetric(
+    model,
+    usageForSentry,
+    "conversation",
+    resolvedConversationTTL,
+  );
+  recordConversationCost(
+    sessionID,
+    model,
+    usageForSentry,
+    resolvedConversationTTL,
+  );
+  return usageForSentry;
+}
+
 /**
  * Run after a successful response: calibrate, store temporal messages,
  * and schedule background work (distillation, curation).
@@ -10028,13 +11485,19 @@ function postResponseForTenant(
   requestBody?: string,
   /** Active gen_ai.chat span to finalize with usage attributes. */
   genAiSpan?: Sentry.Span,
-): void {
+  /** Storage policy captured when this turn resolved its session. */
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  postResponseStartObserver?.();
   const { sessionID, projectPath } = sessionState;
 
   // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
   const usage = resp.usage ?? ZERO_USAGE;
 
   try {
+    confirmKnownSessionHeader(req, sessionState, config);
+
     // --- Calibrate overhead from real token counts ---
     const actualInput =
       (usage.inputTokens ?? 0) +
@@ -10043,23 +11506,10 @@ function postResponseForTenant(
     calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
 
     // --- Sentry cache context + cost metric ---
-    setSentryCacheContext(usage);
-    const usageForSentry: AnthropicUsage = {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cache_read_input_tokens: usage.cacheReadInputTokens,
-      cache_creation_input_tokens: usage.cacheCreationInputTokens,
-    };
-    emitCostMetric(
+    const usageForSentry = accountConversationUsage(
+      usage,
       resp.model,
-      usageForSentry,
-      "conversation",
-      sessionState.resolvedConversationTTL,
-    );
-    recordConversationCost(
       sessionID,
-      resp.model,
-      usageForSentry,
       sessionState.resolvedConversationTTL,
     );
     if (genAiSpan) {
@@ -10073,13 +11523,19 @@ function postResponseForTenant(
     // the whole pipeline. The seam also enriches and ENDS genAiSpan (before its
     // own recordCacheUsage call) so the extraction is ordering-identical to the
     // original inlined block. See issue #928.
+    if (suppressTemporalStorage) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+      sessionState.cacheAnalytics.lastNormalizedBody = null;
+      sessionState.cacheAnalytics.lastRequestBodyLength = 0;
+    }
     recordCacheTurnUsage(
       sessionState,
       usage,
       resp.model,
       projectPath,
-      requestBody,
+      suppressTemporalStorage ? undefined : requestBody,
       genAiSpan,
+      endSpan,
     );
     // Admin credentials are authorized at dispatch time and never retained in
     // session snapshots. The idle warmer still receives gateway-global extras,
@@ -10111,8 +11567,7 @@ function postResponseForTenant(
     // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
     // intentionally dropped — the seed row never exists, so the later
     // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
-    const noStore =
-      sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
+    const noStore = suppressTemporalStorage;
 
     // Persist (and tool-trace) this turn's messages, batched into one savepoint.
     // Extracted seam — see storeTurnTemporal (#1084).
@@ -10300,12 +11755,79 @@ function postResponseForTenant(
     }
 
     // --- Schedule background work (fire-and-forget) ---
+    saveSessionTracking(sessionID, {
+      messageCount: sessionState.messageCount,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+      projectPath: sessionState.projectPath || null,
+      projectPathProvisional: sessionState.projectPathProvisional === true,
+      ...(sessionState.compactionAnomalyPending
+        ? { compactionAnomalyPending: true }
+        : {}),
+    });
+    if (!sessionState.headerSessionId) {
+      const result = learnHeaders(
+        sessionState.candidateHeaders,
+        req.rawHeaders,
+      );
+      sessionState.candidateHeaders = result.updatedCandidates;
+    }
     if (!noStore) {
       scheduleBackgroundWork(sessionState, config);
     }
+    return true;
   } catch (e) {
     log.error("post-response processing failed:", e);
+    return false;
+  } finally {
+    endSpan?.();
   }
+}
+
+/** Record validated provider usage without publishing successful-turn state. */
+function accountUnsuccessfulResponse(
+  resp: GatewayResponse,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+  genAiSpan: Sentry.Span | undefined,
+  endSpan: () => void,
+  markDirty?: () => void,
+): void {
+  const usage = resp.usage ?? ZERO_USAGE;
+  const hasUsage = Object.values(usage).some(
+    (tokens) => typeof tokens === "number" && tokens > 0,
+  );
+  try {
+    if (hasUsage) {
+      markDirty?.();
+      const usageForSentry = accountConversationUsage(
+        usage,
+        resp.model,
+        sessionID,
+        resolvedConversationTTL,
+      );
+      if (genAiSpan) {
+        setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
+      }
+    }
+  } finally {
+    genAiSpan?.setStatus({
+      code: 2,
+      message: "upstream response did not complete",
+    });
+    endSpan();
+  }
+}
+
+function conversationTTLForAccounting(
+  sessionID: string,
+): "5m" | "1h" | undefined {
+  const liveTTL = sessions.get(sessionID)?.resolvedConversationTTL;
+  if (liveTTL === "5m" || liveTTL === "1h") return liveTTL;
+  const persistedTTL = loadSessionTracking(sessionID)?.resolvedConversationTTL;
+  return persistedTTL === "5m" || persistedTTL === "1h"
+    ? persistedTTL
+    : undefined;
 }
 
 function postResponse(
@@ -10315,8 +11837,10 @@ function postResponse(
   config: GatewayConfig,
   requestBody?: string,
   genAiSpan?: Sentry.Span,
-): void {
-  withTenant(sessionState.storageTenantId ?? "", () =>
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  return withTenant(sessionState.storageTenantId ?? "", () =>
     postResponseForTenant(
       req,
       resp,
@@ -10324,6 +11848,8 @@ function postResponse(
       config,
       requestBody,
       genAiSpan,
+      suppressTemporalStorage,
+      endSpan,
     ),
   );
 }
@@ -10348,6 +11874,10 @@ function scheduleBackgroundWorkForTenant(
   config: GatewayConfig,
 ): void {
   const { sessionID, projectPath } = sessionState;
+  const signal = AbortSignal.any([
+    pipelineGenerationAbort.signal,
+    sessionLifecycleSignal(sessionID),
+  ]);
 
   // Skip background work when the session's auth credential is stale and no
   // fresh fallback is available — worker LLM calls would just 401.
@@ -10435,6 +11965,7 @@ function scheduleBackgroundWorkForTenant(
             force: true,
             urgent: true,
             callType: "direct",
+            signal,
             // Never run meta-distillation while the conversation cache is warm.
             // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
             // synthetic distilled prefix at messages[0/1] on the next turn. That
@@ -10480,6 +12011,7 @@ function scheduleBackgroundWorkForTenant(
                 skipMeta: true,
                 callType: batchQueueEnabled ? "batch" : "direct",
                 workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+                signal,
                 // #627 Phase 1: stamp the session's gitHead on every distilled row.
                 metadata: buildSessionMetadata(sessionState.gitHead),
               }),
@@ -10562,6 +12094,7 @@ function scheduleBackgroundWorkForTenant(
                   sessionID,
                   model,
                   workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                  signal,
                   // #627 Phase 1: stamp the session's gitHead on curator entries.
                   metadata: buildSessionMetadata(sessionState.gitHead),
                 }),
@@ -10572,6 +12105,7 @@ function scheduleBackgroundWorkForTenant(
       )
         .then((result) => {
           if (!result) return; // skipped by circuit breaker
+          signal.throwIfAborted();
           sessionState.turnsSinceCuration = 0;
           saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
           if (
@@ -10639,6 +12173,7 @@ export async function generateCompactionSummary(opts: {
   previousSummary?: string;
   sessionUpstream?: { providerID?: string; modelID?: string };
   signal?: AbortSignal;
+  trackOperation?: (operation: Promise<unknown>) => void;
 }): Promise<string | null> {
   const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
     opts;
@@ -10654,35 +12189,39 @@ export async function generateCompactionSummary(opts: {
   if (temporal.undistilledCount(projectPath, sessionID) > 0) {
     const llm = getLLMClient(config);
     const model = getWorkerModel(sessionUpstream);
-    await promiseAgainstAbort(
-      () =>
-        distillation.run({
-          llm,
-          projectPath,
-          sessionID,
-          model,
-          force: true,
-          urgent: true,
-          callType: "direct",
-          signal: opts.signal,
-          workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-          // #627 Phase 1: stamp the session's gitHead on urgent-compaction rows.
-          // Compaction is invoked via HTTP intercept or /v1/compact, so we look up
-          // the session by ID rather than threading state through the call.
-          metadata: buildSessionMetadata(sessions.get(sessionID)?.gitHead),
-        }),
-      opts.signal,
-    );
+    await promiseAgainstAbort(() => {
+      const operation = distillation.run({
+        llm,
+        projectPath,
+        sessionID,
+        model,
+        force: true,
+        urgent: true,
+        callType: "direct",
+        signal: opts.signal,
+        workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+        // #627 Phase 1: stamp the session's gitHead on urgent-compaction rows.
+        // Compaction is invoked via HTTP intercept or /v1/compact, so we look up
+        // the session by ID rather than threading state through the call.
+        metadata: buildSessionMetadata(sessions.get(sessionID)?.gitHead),
+      });
+      opts.trackOperation?.(operation);
+      return operation;
+    }, opts.signal);
   }
 
   // 2. Load distillation summaries + long-term knowledge.
   const distillations = distillation.loadForSession(projectPath, sessionID);
   const cfg = loreConfig();
   const entries = cfg.knowledge.enabled
-    ? await promiseAgainstAbort(
-        () => ltm.forProjectOffloaded(projectPath, cfg.crossProject),
-        opts.signal,
-      )
+    ? await promiseAgainstAbort(() => {
+        const operation = ltm.forProjectOffloaded(
+          projectPath,
+          cfg.crossProject,
+        );
+        opts.trackOperation?.(operation);
+        return operation;
+      }, opts.signal)
     : [];
   opts.signal?.throwIfAborted();
   const knowledge = entries.length
@@ -10720,27 +12259,62 @@ export async function generateCompactionSummary(opts: {
 async function handleCompactionInner(
   req: GatewayRequest,
   config: GatewayConfig,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
   if (!req.rawHeaders["x-lore-project"]) {
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
   const pathResult = getProjectPath(req.system, req.rawHeaders);
-
-  const { sessionID } = await identifySession(req, pathResult.path, config);
-  stripContextMarkers(req.messages);
-  const sessionState = getOrCreateSession(
-    sessionID,
+  const credential = extractAuth(req.rawHeaders);
+  if (!credential) {
+    return errorResponse(401, "A provider credential is required");
+  }
+  const sessionState = resolveAuthenticatedDirectSession(
+    req,
     pathResult.path,
-    pathResult.source,
-    requestCredentialFingerprint(req.rawHeaders, config) ?? "",
     config,
+    false,
   );
-  const projectPath = resolveSessionProjectPath(
-    pathResult,
-    sessionState,
-    config,
-  );
+  if (
+    !sessionState ||
+    (!sessionState.lastUpstream &&
+      !streamingPostResponseFinalizers.has(sessionState.sessionID))
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (
+    sessionState.projectPathProvisional === true ||
+    (pathResult.source !== "cwd" &&
+      sessionState.projectPath !== pathResult.path)
+  ) {
+    return errorResponse(
+      403,
+      "Project path does not match the authenticated session",
+    );
+  }
+  const sessionID = sessionState.sessionID;
+  const authorizedProjectPath = sessionState.projectPath;
+  await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  await awaitStreamingPostResponse(sessionID, req.signal);
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (!isConfidentlyBoundToProject(sessionState, authorizedProjectPath)) {
+    return errorResponse(
+      403,
+      "Project path does not match the authenticated session",
+    );
+  }
+  stripContextMarkers(req.messages);
+  const projectPath = sessionState.projectPath;
+  setSessionAuth(sessionID, credential, sessionState.lastUpstream?.providerID);
   // NOTE: the project binding is NOT persisted here — compaction never changes
   // the binding, and the preceding normal turn already persisted it. A restart
   // between the last normal turn and a compaction-only turn rehydrates the
@@ -10749,7 +12323,14 @@ async function handleCompactionInner(
 
   // Initialize the project AFTER path correction so we never create a row for
   // the gateway's cwd / an unattributed bucket from a path-less probe request.
-  await initIfNeeded(projectPath, config, pathResult.gitRemote);
+  await initIfNeeded(
+    projectPath,
+    config,
+    pathResult.gitRemote,
+    req.signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   setSentryLightContext({ model: req.model, projectPath });
   log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
@@ -10769,7 +12350,9 @@ async function handleCompactionInner(
     previousSummary: extractPreviousSummary(req),
     sessionUpstream: sessionState.lastUpstream,
     signal: req.signal,
+    trackOperation,
   });
+  trackOperation(summaryPromise);
 
   if (req.stream) {
     // Open the SSE stream immediately and emit keep-alive `ping`s while the
@@ -10821,9 +12404,25 @@ async function handleCompactionInner(
   const summary = await summaryPromise;
   if (summary == null) {
     log.warn(
-      `compaction summary empty for session ${sessionID.slice(0, 16)} — falling back to upstream`,
+      `compaction summary empty for session ${sessionID.slice(0, 16)} — using authenticated upstream`,
     );
-    return await handlePassthrough(req, config);
+    const trustedUpstream = extractUpstreamUrlHeader({
+      "x-lore-upstream-url": sessionState.lastUpstream?.url ?? "",
+    });
+    if (!trustedUpstream) {
+      return errorResponse(502, "No trusted upstream destination");
+    }
+    const fallbackHeaders = { ...req.rawHeaders };
+    fallbackHeaders["x-lore-upstream-url"] = trustedUpstream;
+    if (sessionState.lastUpstream?.providerID) {
+      fallbackHeaders["x-lore-provider"] = sessionState.lastUpstream.providerID;
+    } else {
+      delete fallbackHeaders["x-lore-provider"];
+    }
+    return await handlePassthrough(
+      { ...req, rawHeaders: fallbackHeaders },
+      config,
+    );
   }
   const resp = buildCompactionResponse(sessionID, summary, req.model);
   return nonStreamHttpResponse(
@@ -10838,14 +12437,47 @@ async function handleCompactionInner(
 async function handleCompaction(
   req: GatewayRequest,
   config: GatewayConfig,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
   const abortScope = createForegroundAbortScope(req.signal);
   try {
-    const response = await handleCompactionInner(
-      { ...req, signal: abortScope.signal },
-      config,
+    const run = (signal: AbortSignal) => {
+      if (
+        pipelineResetInProgress ||
+        requestGeneration !== streamingPostResponseGeneration
+      ) {
+        return Promise.resolve(
+          errorResponse(503, "Gateway pipeline generation changed"),
+        );
+      }
+      return handleCompactionInner(
+        { ...req, signal },
+        config,
+        requestGeneration,
+        trackOperation,
+        claimSession,
+      );
+    };
+    const response =
+      req.stream && req.protocol === "openai-responses"
+        ? earlyFlushStreamingResponse(
+            run,
+            req.model,
+            abortScope.signal,
+            trackOperation,
+          )
+        : await run(abortScope.signal);
+    return wrapBodyWithCleanup(
+      response,
+      abortScope.dispose,
+      abortScope.signal,
+      (reason) =>
+        abortScope.abort(
+          reason ?? new DOMException("response cancelled", "AbortError"),
+        ),
     );
-    return wrapBodyWithCleanup(response, abortScope.dispose, abortScope.signal);
   } catch (error) {
     abortScope.dispose();
     throw error;
@@ -10855,6 +12487,89 @@ async function handleCompaction(
 // ---------------------------------------------------------------------------
 // Case 1b: Explicit compaction endpoint (POST /v1/compact)
 // ---------------------------------------------------------------------------
+
+function directCompactionFailureResponse(
+  route: string,
+  error: unknown,
+): Response {
+  log.error(`${route} error:`, error);
+  const unavailable =
+    error instanceof StreamingPostResponseWaitCapacityError ||
+    error instanceof PipelineCapacityError;
+  const aborted =
+    error instanceof DOMException &&
+    (error.name === "AbortError" || error.name === "TimeoutError");
+  return new Response(
+    JSON.stringify({
+      error: "compaction_failed",
+      message: unavailable
+        ? "Compaction temporarily unavailable"
+        : "Compaction failed",
+    }),
+    {
+      status: unavailable ? 503 : aborted ? 502 : 500,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+function preflightDirectCompactionSession(
+  req: Request,
+  config: GatewayConfig,
+): Response | null {
+  const rawHeaders: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return errorResponse(
+      400,
+      "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+    );
+  }
+  if (!extractAuth(rawHeaders)) {
+    return new Response(
+      JSON.stringify({
+        error: "unauthorized",
+        message: "A provider credential is required",
+      }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
+  const minimalReq: GatewayRequest = {
+    protocol: "anthropic",
+    system: "",
+    messages: [],
+    tools: [],
+    model: "",
+    maxTokens: 0,
+    stream: false,
+    metadata: {},
+    rawHeaders,
+  };
+  const sessionID = findIndexedKnownSessionID(minimalReq, config);
+  if (!sessionID || (loadSessionTracking(sessionID)?.messageCount ?? 0) === 0) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  return null;
+}
+
+function directRequestCredentialFingerprint(
+  req: Request,
+  config: GatewayConfig,
+): string {
+  const rawHeaders: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+  return requestCredentialFingerprint(rawHeaders, config) ?? "";
+}
 
 /**
  * Cancel-when-fits decision for the explicit `/v1/compact` endpoint.
@@ -10955,6 +12670,9 @@ async function handleCompactEndpointInner(
   req: Request,
   config: GatewayConfig,
   signal: AbortSignal,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
   rawHeaders: Record<string, string>,
 ): Promise<Response> {
   if (hasConflictingAuthHeaders(rawHeaders)) {
@@ -10989,6 +12707,7 @@ async function handleCompactEndpointInner(
     // Decode any Content-Encoding (e.g. zstd) before JSON-parsing.
     body = JSON.parse(await decodeRequestBody(req, signal)) as typeof body;
   } catch {
+    signal.throwIfAborted();
     return new Response(
       JSON.stringify({
         error: "invalid_request",
@@ -11025,18 +12744,15 @@ async function handleCompactEndpointInner(
     stream: false,
     metadata: {},
     rawHeaders,
+    signal,
   };
 
-  const { sessionID, isNew } = await identifySession(
+  const state = resolveAuthenticatedDirectSession(
     minimalReq,
     projectPath,
     config,
   );
-
-  if (isNew) {
-    // No prior session found — the caller's session header didn't match any
-    // existing session. This typically means no conversation turns have gone
-    // through the gateway yet, so there's nothing to compact.
+  if (!state) {
     return new Response(
       JSON.stringify({
         error: "session_not_found",
@@ -11048,26 +12764,36 @@ async function handleCompactEndpointInner(
     );
   }
 
-  let state: SessionState;
-  try {
-    state = getOrCreateSession(
-      sessionID,
-      projectPath,
-      "header",
-      requestCredentialFingerprint(rawHeaders, config) ?? "",
-      config,
+  if (!isConfidentlyBoundToProject(state, projectPath)) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project_path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
     );
-  } catch (error) {
-    if (error instanceof SessionTenantMismatchError) {
-      return new Response(
-        JSON.stringify({
-          error: "session_not_found",
-          message: "No session found for the authenticated storage tenant",
-        }),
-        { status: 404, headers: { "content-type": "application/json" } },
-      );
-    }
-    throw error;
+  }
+  const sessionID = state.sessionID;
+  await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  await awaitStreamingPostResponse(sessionID, signal);
+  assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
   }
   if (
     state.projectPathProvisional === true ||
@@ -11083,7 +12809,14 @@ async function handleCompactEndpointInner(
   }
   setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
 
-  await initIfNeeded(state.projectPath, config, gitRemote);
+  await initIfNeeded(
+    state.projectPath,
+    config,
+    gitRemote,
+    signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(signal, requestGeneration);
 
   // Cancel-when-fits policy. The gateway is the authoritative source for
   // "does this session's raw context fit in the layer-0 budget?" — the plugin
@@ -11135,7 +12868,9 @@ async function handleCompactEndpointInner(
           : undefined,
       sessionUpstream: state?.lastUpstream,
       signal,
+      trackOperation,
     });
+    assertCurrentPipelineGeneration(signal, requestGeneration);
 
     if (summary == null) {
       log.warn(
@@ -11162,10 +12897,12 @@ async function handleCompactEndpointInner(
       headers: { "content-type": "application/json" },
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Compaction failed";
     log.error("compact endpoint error:", err);
     return new Response(
-      JSON.stringify({ error: "compaction_failed", message: msg }),
+      JSON.stringify({
+        error: "compaction_failed",
+        message: "Compaction failed",
+      }),
       { status: 500, headers: { "content-type": "application/json" } },
     );
   }
@@ -11177,13 +12914,30 @@ export async function handleCompactEndpoint(
 ): Promise<Response> {
   const rawHeaders = requestHeaders(req.headers);
   return withRequestStorageTenant(rawHeaders, config, async () => {
+    if (pipelineResetInProgress) {
+      return errorResponse(503, "Gateway pipeline is resetting");
+    }
+    const preflight = preflightDirectCompactionSession(req, config);
+    if (preflight) return preflight;
+    streamingPostResponsesAccepting = true;
+    const requestGeneration = streamingPostResponseGeneration;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
-      const response = await handleCompactEndpointInner(
-        req,
-        config,
+      const response = await runActivePipelineRequest(
         abortScope.signal,
-        rawHeaders,
+        (signal, trackOperation, claimSession) =>
+          handleCompactEndpointInner(
+            req,
+            config,
+            signal,
+            requestGeneration,
+            trackOperation,
+            claimSession,
+            rawHeaders,
+          ),
+        undefined,
+        undefined,
+        directRequestCredentialFingerprint(req, config),
       );
       return wrapBodyWithCleanup(
         response,
@@ -11192,7 +12946,7 @@ export async function handleCompactEndpoint(
       );
     } catch (error) {
       abortScope.dispose();
-      throw error;
+      return directCompactionFailureResponse("compact endpoint", error);
     }
   });
 }
@@ -11218,6 +12972,9 @@ async function handleResponsesCompactEndpointInner(
   req: Request,
   config: GatewayConfig,
   signal: AbortSignal,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
   rawHeaders: Record<string, string>,
 ): Promise<Response> {
   if (hasConflictingAuthHeaders(rawHeaders)) {
@@ -11231,7 +12988,7 @@ async function handleResponsesCompactEndpointInner(
     );
   }
   const credential = extractAuth(rawHeaders);
-  if (usesRemoteSessionBinding(config) && !credential) {
+  if (!credential) {
     return new Response(
       JSON.stringify({
         error: "unauthorized",
@@ -11248,6 +13005,7 @@ async function handleResponsesCompactEndpointInner(
   try {
     bodyText = await decodeRequestBody(req, signal);
   } catch {
+    signal.throwIfAborted();
     return new Response(
       JSON.stringify({
         error: "invalid_request",
@@ -11275,130 +13033,154 @@ async function handleResponsesCompactEndpointInner(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseOpenAIResponsesRequest(body, rawHeaders);
+    gatewayReq.signal = signal;
   } catch {
-    // If parsing fails, still attempt passthrough — the upstream may accept it.
-    log.warn(
-      "responses/compact: failed to parse request body — falling back to upstream",
-    );
-    return await passthroughResponsesCompact(
-      bodyText,
-      rawHeaders,
-      config,
-      signal,
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message: "Invalid Responses compaction body",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
     );
   }
 
   const pathResult = getProjectPath(gatewayReq.system, rawHeaders);
   const gitRemote = extractGitRemoteHeader(rawHeaders);
-
-  const { sessionID, isNew } = await identifySession(
+  const state = resolveAuthenticatedDirectSession(
     gatewayReq,
     pathResult.path,
     config,
   );
-
-  // If no prior session, skip Lore compaction and passthrough to upstream.
-  if (!isNew) {
-    let state: SessionState;
-    try {
-      state = getOrCreateSession(
-        sessionID,
-        pathResult.path,
-        pathResult.source,
-        requestCredentialFingerprint(rawHeaders, config) ?? "",
-        config,
-      );
-    } catch (error) {
-      if (error instanceof SessionTenantMismatchError) {
-        return new Response(
-          JSON.stringify({
-            error: "session_not_found",
-            message: "No session found for the authenticated storage tenant",
-          }),
-          { status: 404, headers: { "content-type": "application/json" } },
-        );
-      }
-      throw error;
-    }
-    if (
-      usesRemoteSessionBinding(config) &&
-      (state.projectPathProvisional === true ||
-        state.projectPath !== pathResult.path)
-    ) {
-      return new Response(
-        JSON.stringify({
-          error: "project_mismatch",
-          message: "project path does not match the authenticated session",
-        }),
-        { status: 403, headers: { "content-type": "application/json" } },
-      );
-    }
-    const compactProjectPath = usesRemoteSessionBinding(config)
-      ? state.projectPath
-      : pathResult.path;
-    await initIfNeeded(compactProjectPath, config, gitRemote);
-
-    log.info(
-      `responses/compact: generating Lore summary for session ${sessionID.slice(0, 16)}`,
-    );
-
-    try {
-      const summary = await generateCompactionSummary({
-        projectPath: compactProjectPath,
-        sessionID,
+  if (!state) {
+    if (!extractKnownSessionHeader(rawHeaders)) {
+      return await passthroughResponsesCompact(
+        bodyText,
+        rawHeaders,
         config,
         signal,
-      });
-
-      if (summary != null) {
-        // Clear cached warmup body — post-compaction messages will differ.
-        const sessionState = sessions.get(sessionID);
-        if (sessionState) {
-          sessionState.cacheAnalytics.lastRequestBody = null;
-        }
-
-        // Return in Codex's expected format: { output: ResponseItem[] }
-        // Must include id, status, and annotations to match the
-        // CompactHistoryResponse { output: Vec<ResponseItem> } struct.
-        return new Response(
-          JSON.stringify({
-            output: [
-              {
-                type: "message",
-                id: `msg_lore_compact_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
-                role: "assistant",
-                status: "completed",
-                content: [
-                  { type: "output_text", text: summary, annotations: [] },
-                ],
-              },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-
-      log.warn(
-        `responses/compact: Lore summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
-      );
-    } catch (err) {
-      log.warn(
-        "responses/compact: Lore compaction error, falling back to upstream:",
-        err,
+        undefined,
+        gatewayReq,
       );
     }
-  } else {
-    log.info(
-      "responses/compact: no prior session found — falling back to upstream",
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (!isConfidentlyBoundToProject(state, pathResult.path)) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  const sessionID = state.sessionID;
+  await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  await awaitStreamingPostResponse(sessionID, signal);
+  assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (
+    state.projectPathProvisional === true ||
+    state.projectPath !== pathResult.path
+  ) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
+
+  await initIfNeeded(
+    state.projectPath,
+    config,
+    gitRemote,
+    signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(signal, requestGeneration);
+
+  log.info(
+    `responses/compact: generating Lore summary for session ${sessionID.slice(0, 16)}`,
+  );
+
+  try {
+    const summary = await generateCompactionSummary({
+      projectPath: state.projectPath,
+      sessionID,
+      config,
+      sessionUpstream: state.lastUpstream,
+      signal,
+      trackOperation,
+    });
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+
+    if (summary != null) {
+      state.cacheAnalytics.lastRequestBody = null;
+
+      // Return in Codex's expected format: { output: ResponseItem[] }
+      // Must include id, status, and annotations to match the
+      // CompactHistoryResponse { output: Vec<ResponseItem> } struct.
+      return new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              id: `msg_lore_compact_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+              role: "assistant",
+              status: "completed",
+              content: [
+                { type: "output_text", text: summary, annotations: [] },
+              ],
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    log.warn(
+      `responses/compact: Lore summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
+    );
+  } catch (err) {
+    signal.throwIfAborted();
+    log.warn(
+      "responses/compact: Lore compaction error, falling back to upstream:",
+      err,
     );
   }
 
-  // Fallback: passthrough to upstream OpenAI /v1/responses/compact
+  // Fallback only to the destination previously authenticated by a normal turn.
   return await passthroughResponsesCompact(
     bodyText,
     rawHeaders,
     config,
     signal,
+    state.lastUpstream?.url || null,
     gatewayReq,
   );
 }
@@ -11409,13 +13191,28 @@ export async function handleResponsesCompactEndpoint(
 ): Promise<Response> {
   const rawHeaders = requestHeaders(req.headers);
   return withRequestStorageTenant(rawHeaders, config, async () => {
+    if (pipelineResetInProgress) {
+      return errorResponse(503, "Gateway pipeline is resetting");
+    }
+    streamingPostResponsesAccepting = true;
+    const requestGeneration = streamingPostResponseGeneration;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
-      const response = await handleResponsesCompactEndpointInner(
-        req,
-        config,
+      const response = await runActivePipelineRequest(
         abortScope.signal,
-        rawHeaders,
+        (signal, trackOperation, claimSession) =>
+          handleResponsesCompactEndpointInner(
+            req,
+            config,
+            signal,
+            requestGeneration,
+            trackOperation,
+            claimSession,
+            rawHeaders,
+          ),
+        undefined,
+        undefined,
+        directRequestCredentialFingerprint(req, config),
       );
       return wrapBodyWithCleanup(
         response,
@@ -11424,7 +13221,10 @@ export async function handleResponsesCompactEndpoint(
       );
     } catch (error) {
       abortScope.dispose();
-      throw error;
+      return directCompactionFailureResponse(
+        "responses/compact endpoint",
+        error,
+      );
     }
   });
 }
@@ -11437,6 +13237,7 @@ export async function passthroughResponsesCompact(
   rawHeaders: Record<string, string>,
   config: GatewayConfig,
   callerSignal?: AbortSignal,
+  trustedUpstreamBase?: string | null,
   parsedRequest?: GatewayRequest,
 ): Promise<Response> {
   const abortScope = createForegroundAbortScope(callerSignal);
@@ -11452,7 +13253,28 @@ export async function passthroughResponsesCompact(
   // Responses request. If parsing failed, an explicit validated URL override is
   // the only safe custom route; an explicit provider without a compatible URL
   // fails closed because model routing is unavailable.
-  const headerUpstream = extractUpstreamUrlHeader(rawHeaders);
+  const trustedUpstream =
+    trustedUpstreamBase === undefined
+      ? undefined
+      : trustedUpstreamBase
+        ? extractUpstreamUrlHeader({
+            "x-lore-upstream-url": trustedUpstreamBase,
+          })
+        : undefined;
+  if (trustedUpstreamBase !== undefined && !trustedUpstream) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_failed",
+        message: "No trusted upstream destination",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const headerUpstream =
+    trustedUpstreamBase === undefined
+      ? extractUpstreamUrlHeader(rawHeaders)
+      : undefined;
   if (headerUpstream && !extractAuth(rawHeaders)) {
     abortScope.dispose();
     return new Response(
@@ -11464,7 +13286,7 @@ export async function passthroughResponsesCompact(
     );
   }
   let route: ResolvedRequestUpstreamRoute | undefined;
-  if (parsedRequest) {
+  if (parsedRequest && trustedUpstreamBase === undefined) {
     try {
       route = resolveRequestUpstreamRoute(parsedRequest, config);
     } catch (error) {
@@ -11482,7 +13304,11 @@ export async function passthroughResponsesCompact(
   const fallbackProviderID = route
     ? route.providerID
     : extractProviderHeader(rawHeaders);
-  if (rawHeaders["x-lore-provider"] && !fallbackProviderID) {
+  if (
+    trustedUpstreamBase === undefined &&
+    rawHeaders["x-lore-provider"] &&
+    !fallbackProviderID
+  ) {
     abortScope.dispose();
     return new Response(
       JSON.stringify({
@@ -11492,7 +13318,11 @@ export async function passthroughResponsesCompact(
       { status: 502, headers: { "content-type": "application/json" } },
     );
   }
-  if (rawHeaders["x-lore-upstream-url"] && !headerUpstream) {
+  if (
+    trustedUpstreamBase === undefined &&
+    rawHeaders["x-lore-upstream-url"] &&
+    !headerUpstream
+  ) {
     abortScope.dispose();
     return new Response(
       JSON.stringify({
@@ -11552,14 +13382,16 @@ export async function passthroughResponsesCompact(
     );
   }
   const effectiveUpstreamBase =
+    trustedUpstream ??
     route?.effectiveUpstreamBase ??
     headerUpstream ??
     fallbackProviderRoute?.url ??
     config.upstreamOpenAI;
-  const effectiveProtocol =
-    route?.effectiveProtocol ??
-    fallbackProviderRoute?.protocol ??
-    "openai-responses";
+  const effectiveProtocol = trustedUpstream
+    ? "openai-responses"
+    : (route?.effectiveProtocol ??
+      fallbackProviderRoute?.protocol ??
+      "openai-responses");
   if (effectiveProtocol !== "openai-responses") {
     abortScope.dispose();
     return new Response(
@@ -11631,9 +13463,9 @@ export async function passthroughResponsesCompact(
       abortScope.signal,
     );
     return wrapBodyWithCleanup(upstream, abortScope.dispose, abortScope.signal);
-  } catch {
+  } catch (err) {
     abortScope.dispose();
-    log.error("responses/compact upstream passthrough failed");
+    log.error("responses/compact upstream passthrough error:", err);
     return new Response(
       JSON.stringify({
         error: "compaction_failed",
@@ -11685,22 +13517,25 @@ export async function completeBudgetThrottleDelay(
 
 export function createForegroundAbortScope(caller?: AbortSignal): {
   signal: AbortSignal;
+  abort: (reason?: unknown) => void;
   dispose: () => void;
 } {
   const controller = new AbortController();
   activeForegroundAbortControllers.add(controller);
-  const onCallerAbort = () => controller.abort(caller?.reason);
+  const abort = (reason?: unknown) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const onCallerAbort = () => abort(caller?.reason);
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
   const timer = setTimeout(
     () =>
-      controller.abort(
-        new DOMException("foreground request timed out", "TimeoutError"),
-      ),
+      abort(new DOMException("foreground request timed out", "TimeoutError")),
     FOREGROUND_REQUEST_TIMEOUT_MS,
   );
   return {
     signal: controller.signal,
+    abort,
     dispose: () => {
       activeForegroundAbortControllers.delete(controller);
       clearTimeout(timer);
@@ -11713,6 +13548,7 @@ export function wrapBodyWithCleanup(
   response: Response,
   cleanup: () => void,
   signal?: AbortSignal,
+  onCancel?: (reason?: unknown) => void,
 ): Response {
   if (!response.body) {
     cleanup();
@@ -11745,7 +13581,9 @@ export function wrapBodyWithCleanup(
       },
       async pull(controller) {
         try {
-          const { done, value } = await readStreamChunk(reader, { signal });
+          const { done, value } = signal
+            ? await readStreamChunk(reader, { signal })
+            : await reader.read();
           if (done) {
             finish();
             try {
@@ -11764,6 +13602,7 @@ export function wrapBodyWithCleanup(
         }
       },
       cancel(reason) {
+        onCancel?.(reason);
         finish();
         cancelAndReleaseReader(reader, reason);
       },
@@ -11780,6 +13619,150 @@ export function wrapBodyWithCleanup(
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+async function claimPipelineSession(
+  active: ActivePipelineRequest,
+  sessionID: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (active.sessionIDs.has(sessionID)) return;
+  signal.throwIfAborted();
+  if (pipelineSessionHasCapacity(sessionID)) {
+    active.sessionIDs.add(sessionID);
+    return;
+  }
+  if (
+    pendingSessionClaims.has(sessionID) ||
+    pendingSessionClaims.size >= MAX_PENDING_SESSION_CLAIMS ||
+    pendingSessionClaimsForAdmissionKey(active.admissionKey) >=
+      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
+  ) {
+    throw new PipelineCapacityError("session request queue full");
+  }
+
+  activePipelineRequests.delete(active);
+  return new Promise<void>((resolve, reject) => {
+    let claim: PendingSessionClaim;
+    const onAbort = () => {
+      if (pendingSessionClaims.get(sessionID) !== claim) return;
+      pendingSessionClaims.delete(sessionID);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason);
+      pumpPendingSessionClaims();
+    };
+    claim = { active, sessionID, signal, resolve, reject, onAbort };
+    pendingSessionClaims.set(sessionID, claim);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    else pumpPendingSessionClaims();
+  });
+}
+
+async function runActivePipelineRequest(
+  callerSignal: AbortSignal | undefined,
+  operation: (
+    signal: AbortSignal,
+    trackOperation: (operation: Promise<unknown>) => void,
+    claimSession: (sessionID: string) => Promise<void>,
+  ) => Promise<Response>,
+  onResponseBodySettled?: () => void,
+  onResponseBodyCancelled?: () => void,
+  admissionKey = "",
+): Promise<Response> {
+  if (
+    detachedPipelineRequests.size +
+      activePipelineRequests.size +
+      pendingSessionClaims.size >=
+      maxDetachedPipelineRequests ||
+    activePipelineRequests.size + streamingPostResponsePending >=
+      maxActivePipelineRequests ||
+    activePipelineRequestsForAdmissionKey(admissionKey) +
+      (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) >=
+      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
+  ) {
+    return errorResponse(503, "Gateway is busy");
+  }
+  const lifecycle = new AbortController();
+  const signal = callerSignal
+    ? AbortSignal.any([callerSignal, lifecycle.signal])
+    : lifecycle.signal;
+  let settle: (() => void) | undefined;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  const pendingOperations = new Set<Promise<void>>();
+  let finished = false;
+  let bodySettled = false;
+  let responseReturned = false;
+  let responseCancelled = false;
+  const markResponseCancelled = (): void => {
+    if (responseCancelled) return;
+    responseCancelled = true;
+    onResponseBodyCancelled?.();
+  };
+  function onAbort(): void {
+    if (responseReturned) {
+      if (callerSignal?.aborted) markResponseCancelled();
+      settleResponse();
+    }
+  }
+  const trackOperation = (operation: Promise<unknown>): void => {
+    const tracked = operation.then(
+      () => {},
+      () => {},
+    );
+    pendingOperations.add(tracked);
+    void tracked.finally(() => pendingOperations.delete(tracked));
+  };
+  async function finish(): Promise<void> {
+    if (finished) return;
+    finished = true;
+    signal.removeEventListener("abort", onAbort);
+    while (pendingOperations.size > 0) {
+      await Promise.all(pendingOperations);
+    }
+    activePipelineRequests.delete(active);
+    detachedPipelineRequests.delete(active);
+    pumpPendingSessionClaims();
+    settle?.();
+  }
+  function settleResponse(): void {
+    if (bodySettled) return;
+    bodySettled = true;
+    onResponseBodySettled?.();
+    void finish();
+  }
+  const active: ActivePipelineRequest = {
+    admissionKey,
+    abort: (reason) => {
+      lifecycle.abort(reason);
+      if (responseReturned) settleResponse();
+    },
+    settled,
+    sessionIDs: new Set(),
+  };
+  activePipelineRequests.add(active);
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const response = await operation(signal, trackOperation, (sessionID) =>
+      claimPipelineSession(active, sessionID, signal),
+    );
+    responseReturned = true;
+    if (signal.aborted) {
+      if (callerSignal?.aborted) markResponseCancelled();
+      settleResponse();
+    }
+    return wrapBodyWithCleanup(response, settleResponse, undefined, () => {
+      markResponseCancelled();
+      settleResponse();
+    });
+  } catch (error) {
+    onResponseBodySettled?.();
+    void finish();
+    throw error;
+  }
 }
 
 export function validatedMetaStream(
@@ -11994,6 +13977,11 @@ async function handlePassthrough(
       undefined,
       abortScope.signal,
     );
+    if (wireProtocol === "openai-responses") {
+      parseResponsesNonStreamEnvelope(
+        JSON.parse(body) as Record<string, unknown>,
+      );
+    }
     return new Response(body, {
       status: upstreamResponse.status,
       headers: { "content-type": "application/json" },
@@ -12034,31 +14022,33 @@ async function handlePassthrough(
       }
     }
     // Other cross-protocol streaming combos: accumulate + re-emit
-    const resp =
+    const resp = await preserveIncompleteResponsesTerminal(
       wireProtocol === "openai"
-        ? await accumulateOpenAISSEStream(upstreamResponse, {
+        ? accumulateOpenAISSEStream(upstreamResponse, {
             signal: abortScope.signal,
             strict: true,
             stopAtTerminal: true,
             consumeUntilDone: true,
           })
         : wireProtocol === "openai-responses"
-          ? await accumulateResponsesSSEStream(upstreamResponse, {
+          ? accumulateResponsesSSEStream(upstreamResponse, {
               signal: abortScope.signal,
               validation: req.codex === true ? "codex" : "public",
               stopAtTerminal: true,
+              requireCompletedTerminal: true,
             })
           : wireProtocol === "gemini"
-            ? await accumulateGeminiSSEStream(upstreamResponse, {
+            ? accumulateGeminiSSEStream(upstreamResponse, {
                 signal: abortScope.signal,
                 strict: true,
                 stopAtTerminal: true,
               })
-            : await accumulateSSEResponse(upstreamResponse, {
+            : accumulateSSEResponse(upstreamResponse, {
                 signal: abortScope.signal,
                 strict: true,
                 stopAtTerminal: true,
-              });
+              }),
+    );
     return nonStreamHttpResponse(
       resp,
       req.protocol,
@@ -12069,11 +14059,13 @@ async function handlePassthrough(
   }
 
   // Non-streaming cross-protocol: accumulate + re-emit
-  const resp = await accumulateNonStreamResponse(
-    upstreamResponse,
-    wireProtocol,
-    req.codex === true,
-    abortScope.signal,
+  const resp = await preserveIncompleteResponsesTerminal(
+    accumulateNonStreamResponse(
+      upstreamResponse,
+      wireProtocol,
+      req.codex === true,
+      abortScope.signal,
+    ),
   );
   return nonStreamHttpResponse(
     resp,
@@ -12082,6 +14074,393 @@ async function handlePassthrough(
     undefined,
     requestEnablesLongContext(req),
   );
+}
+
+/**
+ * Validate a provisional session identity without touching session-owned state.
+ * The full Lore turn runs only on a later retry after this successful response
+ * confirms the presented header. Failed and incomplete attempts leave the
+ * adopted session, project rows, auth registries, and gradient state untouched.
+ */
+async function handleProvisionalConversationTurn(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  identified: IdentifiedSession,
+  pathResult: ProjectPathResult,
+  requestOrder: number,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+): Promise<Response> {
+  // Resolve and validate route intent once, but keep it private until the
+  // provisional identity is confirmed by a complete response and client EOF.
+  const requestUpstream = prepareRequestUpstream(req, config);
+  const abortScope = createForegroundAbortScope(req.signal);
+  let forwarded: UpstreamResult;
+  try {
+    forwarded = await forwardToUpstream(
+      req,
+      config,
+      undefined,
+      undefined,
+      abortScope.signal,
+      requestUpstream.route,
+    );
+  } catch (error) {
+    abortScope.dispose();
+    throw error;
+  }
+  const upstreamResponse = wrapBodyWithCleanup(
+    forwarded.response,
+    abortScope.dispose,
+    abortScope.signal,
+  );
+  if (!upstreamResponse.ok) {
+    return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
+  }
+
+  let accumulated: GatewayResponse;
+  try {
+    accumulated = req.stream
+      ? forwarded.effectiveProtocol === "openai-responses"
+        ? await accumulateResponsesSSEStream(upstreamResponse, {
+            signal: abortScope.signal,
+            validation: req.codex ? "codex" : "public",
+            stopAtTerminal: true,
+            requireCompletedTerminal: true,
+          })
+        : forwarded.effectiveProtocol === "openai"
+          ? await accumulateOpenAISSEStream(upstreamResponse, {
+              signal: abortScope.signal,
+              strict: true,
+              stopAtTerminal: true,
+              consumeUntilDone: true,
+            })
+          : forwarded.effectiveProtocol === "gemini"
+            ? await accumulateGeminiSSEStream(upstreamResponse, {
+                signal: abortScope.signal,
+                strict: true,
+                stopAtTerminal: true,
+              })
+            : await accumulateSSEResponse(upstreamResponse, {
+                signal: abortScope.signal,
+                strict: true,
+                stopAtTerminal: true,
+              })
+      : await accumulateNonStreamResponse(
+          upstreamResponse,
+          forwarded.effectiveProtocol,
+          req.codex === true,
+          abortScope.signal,
+          true,
+        );
+  } catch (error) {
+    abortScope.dispose();
+    if (!(error instanceof ResponsesTerminalError)) throw error;
+    scheduleStreamingPostResponse(
+      identified.sessionID,
+      requestGeneration,
+      async () => {
+        await downstreamSettled;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const pause = provisionalFinalizerPauseForTest;
+        if (pause) {
+          pause.onWait();
+          await pause.pause;
+        }
+        if (requestGeneration !== streamingPostResponseGeneration) return;
+        if (
+          identified.guardProject &&
+          conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+        ) {
+          dropOwnedProvisionalKey(
+            identified.provisionalKey,
+            identified.sessionID,
+          );
+          return;
+        }
+        accountUnsuccessfulResponse(
+          error.response,
+          identified.sessionID,
+          conversationTTLForAccounting(identified.sessionID),
+          undefined,
+          () => {},
+          () => {
+            const state = sessions.get(identified.sessionID);
+            if (state) state._dirty = true;
+          },
+        );
+      },
+      () => {},
+      true,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+    );
+    if (error.status === "incomplete" && !hasRecallToolUse(error.response)) {
+      return nonStreamHttpResponse(
+        error.response,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      );
+    }
+    return errorResponse(502, "Gateway request failed");
+  }
+  if (
+    forwarded.effectiveProtocol === "gemini" &&
+    !["end_turn", "max_tokens", "tool_use"].includes(accumulated.stopReason)
+  ) {
+    throw new Error("upstream Gemini request did not complete");
+  }
+  abortScope.dispose();
+  const response = nonStreamHttpResponse(
+    accumulated,
+    req.protocol,
+    req.stream,
+    undefined,
+    requestEnablesLongContext(req),
+  );
+
+  const commit = async (): Promise<boolean> => {
+    if (
+      requestGeneration !== streamingPostResponseGeneration ||
+      req.signal?.aborted ||
+      downstreamWasCancelled()
+    ) {
+      return false;
+    }
+    if (
+      identified.provisionalKey &&
+      !provisionalKeyOwned(identified.provisionalKey, identified.sessionID)
+    ) {
+      return false;
+    }
+    const credential = extractAuth(req.rawHeaders);
+    const persisted = loadSessionTracking(identified.sessionID);
+    const liveState = sessions.get(identified.sessionID);
+    let restoredUpstream:
+      | ReturnType<typeof deserializeUpstreamState>
+      | undefined;
+    if (!liveState && persisted?.lastUpstream) {
+      try {
+        restoredUpstream = deserializeUpstreamState(
+          persisted.lastUpstream,
+          config,
+        );
+      } catch {
+        log.warn(
+          `corrupt last upstream for session ${identified.sessionID.slice(0, 16)}, ignoring`,
+        );
+      }
+    }
+    const upstreamState: MutableUpstreamState = {
+      lastUpstream: liveState?.lastUpstream ?? restoredUpstream?.lastUpstream,
+      upstreamByProvider: new Map(
+        liveState?.upstreamByProvider ?? restoredUpstream?.upstreamByProvider,
+      ),
+      _upstreamRequestOrder: liveState?._upstreamRequestOrder,
+      _upstreamRequestOrderByProvider:
+        liveState?._upstreamRequestOrderByProvider
+          ? new Map(liveState._upstreamRequestOrderByProvider)
+          : undefined,
+    };
+    const upstreamUpdate = applyRequestUpstream(
+      upstreamState,
+      requestUpstream.snapshot,
+      requestOrder,
+      config,
+    );
+    // Reconstruct the binding exactly as the full pipeline does, but keep it
+    // private until this successful provisional turn is durably committed.
+    // This is what self-heals rows written to a cwd/unattributed bucket before
+    // publishing the newly adopted header and confident path.
+    postResponseStartObserver?.();
+    const noStore =
+      persisted?.amnesia === true ||
+      req.rawHeaders["x-lore-no-store"] === "true";
+    const loreMessages = gatewayMessagesToLore(
+      req.messages,
+      identified.sessionID,
+    );
+    const credentialFingerprint =
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "";
+    const known = knownSessionHeaderForRequest(
+      req,
+      identified.sessionID,
+      config,
+    );
+    let projectPath = pathResult.path;
+    let projectPathProvisional = pathResult.source === "cwd";
+    withSavepoint("commit_provisional_turn", () => {
+      if (
+        identified.expectedUnowned &&
+        !legacyAdoptionTargetIsUnowned(identified.sessionID)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("legacy session owner changed during adoption");
+      }
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("session project changed during provisional migration");
+      }
+      // Project creation/reattribution belongs to the same transaction as the
+      // turn, tracking, route, and header confirmation. A local write failure
+      // must leave the provisional project and identity wholly unchanged.
+      const pathState = {
+        sessionID: identified.sessionID,
+        projectPath: persisted?.projectPath ?? pathResult.path,
+        projectPathProvisional: persisted?.projectPath
+          ? persisted.projectPathProvisional
+          : pathResult.source === "cwd",
+        gitRemote: pathResult.gitRemote,
+      } as Partial<SessionState> as SessionState;
+      projectPath = resolveSessionProjectPath(pathResult, pathState, config);
+      projectPathProvisional = pathState.projectPathProvisional === true;
+      if (
+        projectPathProvisional &&
+        (pathResult.source === "header" || pathResult.source === "inferred")
+      ) {
+        throw new Error("provisional project re-attribution failed");
+      }
+      ensureProject(projectPath, undefined, pathResult.gitRemote);
+      storeTurnTemporal({
+        loreMessages,
+        assistantContentBlocks: accumulated.content,
+        usage: accumulated.usage ?? ZERO_USAGE,
+        model: accumulated.model,
+        projectPath,
+        sessionID: identified.sessionID,
+        noStore,
+      });
+      saveSessionTracking(identified.sessionID, {
+        messageCount: req.messages.length,
+        turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
+        consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
+        projectPath,
+        projectPathProvisional,
+        credentialFingerprint,
+        ...(identified.adoptionFingerprint
+          ? { fingerprint: identified.adoptionFingerprint }
+          : {}),
+        ...(upstreamUpdate.changed
+          ? { lastUpstream: serializeUpstreamState(upstreamState) }
+          : {}),
+        ...(known
+          ? {
+              headerSessionId: known.sessionId,
+              headerName: known.headerName,
+            }
+          : {}),
+      });
+    });
+    const state = getOrCreateSession(
+      identified.sessionID,
+      projectPath,
+      projectPathProvisional ? "cwd" : "header",
+      credentialFingerprint,
+      config,
+    );
+    if (upstreamUpdate.changed) {
+      if (upstreamState.lastUpstream) {
+        state.lastUpstream = upstreamState.lastUpstream;
+      } else {
+        delete state.lastUpstream;
+      }
+      state.upstreamByProvider = upstreamState.upstreamByProvider;
+      if (upstreamState._upstreamRequestOrder !== undefined) {
+        state._upstreamRequestOrder = upstreamState._upstreamRequestOrder;
+      } else {
+        delete state._upstreamRequestOrder;
+      }
+      if (upstreamState._upstreamRequestOrderByProvider) {
+        state._upstreamRequestOrderByProvider =
+          upstreamState._upstreamRequestOrderByProvider;
+      } else {
+        delete state._upstreamRequestOrderByProvider;
+      }
+      if (upstreamUpdate.resetCache) {
+        state.cacheAnalytics.lastRequestBody = null;
+      }
+    }
+    if (known) publishKnownSessionHeader(known, state, credentialFingerprint);
+    else state.credentialFingerprint = credentialFingerprint;
+    if (identified.tier === 3) observeHeaderValues(req.rawHeaders);
+    state.projectPath = projectPath;
+    state.projectPathProvisional = projectPathProvisional;
+    if (identified.adoptionFingerprint) {
+      state.fingerprint = identified.adoptionFingerprint;
+    }
+    if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
+    state.messageCount = req.messages.length;
+    state._dirty = true;
+    if (credential) {
+      captureLegacyGlobalAuth(req, config, credential);
+      setSessionAuth(
+        state.sessionID,
+        credential,
+        extractProviderHeader(req.rawHeaders) || undefined,
+      );
+    }
+    captureBillingPrefix(state.sessionID, req.system);
+    captureSessionHeaders(state.sessionID, req.rawHeaders);
+    return true;
+  };
+  scheduleStreamingPostResponse(
+    identified.sessionID,
+    requestGeneration,
+    async () => {
+      await downstreamSettled;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const pause = provisionalFinalizerPauseForTest;
+      if (pause) {
+        pause.onWait();
+        await pause.pause;
+      }
+      if (requestGeneration !== streamingPostResponseGeneration) return;
+      if (downstreamWasCancelled()) {
+        accountUnsuccessfulResponse(
+          accumulated,
+          identified.sessionID,
+          conversationTTLForAccounting(identified.sessionID),
+          undefined,
+          () => {},
+        );
+        return;
+      }
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        return;
+      }
+      if (!(await commit())) return;
+      accountConversationUsage(
+        accumulated.usage ?? ZERO_USAGE,
+        accumulated.model,
+        identified.sessionID,
+        conversationTTLForAccounting(identified.sessionID),
+      );
+      const state = sessions.get(identified.sessionID);
+      if (state) state._dirty = true;
+    },
+    () => {},
+    true,
+    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+  );
+  return response;
 }
 
 /**
@@ -12188,11 +14567,34 @@ export function mergeRecallUsage(
   return merged;
 }
 
+function assertCurrentPipelineGeneration(
+  signal: AbortSignal | undefined,
+  requestGeneration: number,
+): void {
+  signal?.throwIfAborted();
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    throw new DOMException("gateway pipeline generation changed", "AbortError");
+  }
+}
+
 async function handleConversationTurn(
   req: GatewayRequest,
   config: GatewayConfig,
   requestOrder: number,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
   // --- 1. Project path & init ---
   // Enrich headers with context markers injected by lore-hermes plugin.
   // This lets getProjectPath() pick up [lore:project=...] via the existing
@@ -12205,21 +14607,74 @@ async function handleConversationTurn(
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
+
+  // --- 3. Session identification ---
+  const admitted = await withIdentityAdmission(req, config, async () => {
+    const result = await identifySession(
+      req,
+      pathResult.path,
+      pathResult.source,
+      requestGeneration,
+      config,
+    );
+    const claimed = result.isNew || result.provisionalIdentity === true;
+    if (claimed) await claimSession(result.sessionID);
+    const revalidateConfirmedIdentity =
+      !result.isNew && result.provisionalIdentity !== true && result.tier !== 3;
+    return { identified: result, claimed, revalidateConfirmedIdentity };
+  });
+  const { identified } = admitted;
+  const { sessionID, isNew, tier } = identified;
+  if (!admitted.claimed) await claimSession(sessionID);
+  if (identified.expectedUnowned && !legacyAdoptionTargetIsUnowned(sessionID)) {
+    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (
+    admitted.revalidateConfirmedIdentity &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (
+    identified.guardProject &&
+    conflictsWithConfidentSessionProject(sessionID, pathResult)
+  ) {
+    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
+    throw new Error("session project changed during provisional migration");
+  }
+  await awaitStreamingPostResponse(sessionID, req.signal);
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  if (
+    admitted.revalidateConfirmedIdentity &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  // Marker-derived project/session data has already been copied into headers;
+  // strip it before either the provisional verifier or full pipeline forwards.
+  stripContextMarkers(req.messages);
+  if (identified.provisionalIdentity) {
+    const preUpstreamPause = pipelinePreUpstreamPauseForTest;
+    if (preUpstreamPause) {
+      preUpstreamPause.onWait();
+      await preUpstreamPause.pause;
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
+    }
+    return handleProvisionalConversationTurn(
+      req,
+      config,
+      identified,
+      pathResult,
+      requestOrder,
+      requestGeneration,
+      downstreamSettled,
+      downstreamWasCancelled,
+    );
+  }
   const legacyGlobalProvider = cred
     ? captureLegacyGlobalAuth(req, config, cred)
     : undefined;
-
-  // --- 3. Session identification ---
-  const { sessionID, isNew, tier } = await identifySession(
-    req,
-    pathResult.path,
-    config,
-  );
-
-  // Strip [lore:session-id=...] and [lore:project=...] context markers from
-  // user messages so they are not forwarded to the upstream LLM, stored in
-  // temporal storage, or visible to the model.
-  stripContextMarkers(req.messages);
 
   const sessionState = getOrCreateSession(
     sessionID,
@@ -12228,13 +14683,22 @@ async function handleConversationTurn(
     requestCredentialFingerprint(req.rawHeaders, config) ?? "",
     config,
   );
+  await beforeUpstreamCaptureForTest?.(req, sessionState);
+  const sessionSignal = sessionLifecycleSignal(sessionID);
+  const suppressTemporalStorage =
+    sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
+  const preUpstreamPause = pipelinePreUpstreamPauseForTest;
+  if (preUpstreamPause) {
+    preUpstreamPause.onWait();
+    await preUpstreamPause.pause;
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
   let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
 
   // Routing and policy are request intent, not a property of a successful
   // response. Capture now so a failed policy-tightening request still governs
   // workers, and use the order assigned synchronously in handleRequest so an
   // older concurrent turn can never overwrite a newer one.
-  await beforeUpstreamCaptureForTest?.(req, sessionState);
   const requestUpstreamRoute = captureRequestUpstream(
     req,
     sessionState,
@@ -12290,7 +14754,10 @@ async function handleConversationTurn(
           const refRes = await ltm.validateProjectReferences(
             projectPath,
             resolver,
+            Date.now(),
+            req.signal,
           );
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           if (refRes.penalized > 0) {
             log.info(
               `reference drift (remote): penalized ${refRes.penalized}/${refRes.checked} ` +
@@ -12298,6 +14765,7 @@ async function handleConversationTurn(
             );
           }
         } catch (e) {
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           log.warn("synthetic reference-validation error (non-fatal):", e);
         }
         sessionState.refcheckInProbe = false;
@@ -12331,7 +14799,14 @@ async function handleConversationTurn(
   // Initialize the project AFTER path correction so a path-less probe request
   // never creates a project row for the gateway's cwd or an unattributed
   // bucket (provider-agnostic: applies to every protocol/client).
-  await initIfNeeded(projectPath, config, pathResult.gitRemote);
+  await initIfNeeded(
+    projectPath,
+    config,
+    pathResult.gitRemote,
+    req.signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // Mark sub-agent sessions (x-parent-session-id present).
   // These get their own session but are flagged for cache warming exemption.
@@ -12440,28 +14915,19 @@ async function handleConversationTurn(
 
   // Track fingerprint for future correlation
   if (isNew) {
-    const credentialFingerprint =
-      requestCredentialFingerprint(req.rawHeaders, config) ?? "";
-    const fingerprint = await fingerprintMessages(
-      req.messages.map((m) => ({ role: m.role, content: m.content })),
-      usesRemoteSessionBinding(config)
-        ? { tenantFingerprint: credentialFingerprint }
-        : { authSuffix: cred ? authFingerprint(cred) : "" },
-    );
-    sessionState.fingerprint = fingerprint;
-    // Persist fingerprint immediately — rare event (new session only)
-    saveSessionTracking(sessionID, { fingerprint, credentialFingerprint });
-
-    // Seed header learning for new sessions (Tier 2 bootstrap).
-    // Even Tier 1 sessions don't need this, but it's harmless and
-    // avoids branching. For Tier 3 (fingerprinted) new sessions,
-    // this seeds the first round of candidate collection.
-    if (!sessionState.headerSessionId) {
-      const result = learnHeaders(
-        sessionState.candidateHeaders,
-        req.rawHeaders,
+    if (!suppressTemporalStorage) {
+      const credentialFingerprint =
+        requestCredentialFingerprint(req.rawHeaders, config) ?? "";
+      const fingerprint = await fingerprintMessages(
+        req.messages.map((m) => ({ role: m.role, content: m.content })),
+        usesRemoteSessionBinding(config)
+          ? { tenantFingerprint: credentialFingerprint }
+          : { authSuffix: cred ? authFingerprint(cred) : "" },
       );
-      sessionState.candidateHeaders = result.updatedCandidates;
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
+      sessionState.fingerprint = fingerprint;
+      // Persist fingerprint immediately — rare event (new session only)
+      saveSessionTracking(sessionID, { fingerprint, credentialFingerprint });
     }
 
     // Re-check knowledge files on new session start.  The file watcher
@@ -12622,6 +15088,7 @@ async function handleConversationTurn(
   // getModelEntrySync sites — worker selection, cost metrics — intentionally
   // keep using the sync fallback on the very first turn; they self-correct.)
   await ensureModelDataReady();
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
   // Price the session model from the provider it is actually routed to (the
   // X-Lore-Provider header), not the flat last-write-wins entry — a bare id
   // published by several providers at different cache prices would otherwise
@@ -12919,22 +15386,21 @@ async function handleConversationTurn(
         // catalog scan) independently, compounding the very latency that caused
         // the retries. Share one in-flight compute; the settled value lands in
         // stableLtmCache before the promise resolves, so re-reading is race-free.
-        const pending = stableLtmInFlight.get(sessionID);
-        if (pending) {
-          await pending;
-          stable = stableLtmCache.get(sessionID);
-        }
-        if (!stable) {
-          stable = await singleFlightStableLtm(sessionID, () =>
+        stable = await singleFlightStableLtm(
+          sessionID,
+          (signal) =>
             computeStableLtm(
               sessionID,
               projectPath,
               cfg,
               contextHint,
               prefBudget,
+              signal,
+              requestGeneration,
             ),
-          );
-        }
+          req.signal,
+        );
+        assertCurrentPipelineGeneration(req.signal, requestGeneration);
       }
       stableLtmText = stable?.formatted;
 
@@ -13008,6 +15474,7 @@ async function handleConversationTurn(
             sessionID,
             contextBudget,
             {
+              signal: req.signal,
               excludeCategories: ["preference"],
               ...(contextHint ? { contextHint } : {}),
               ...(stickyIds.size ? { stickyIds } : {}),
@@ -13017,6 +15484,7 @@ async function handleConversationTurn(
               overflowSink,
             },
           );
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           freshContextEntries = contextEntries;
           freshContextOverflow = overflowSink.map((e) => ({
             id: e.id,
@@ -13226,6 +15694,7 @@ async function handleConversationTurn(
       // budget, not the system cache budget), so it adds nothing here.
       setLtmTokens(stable?.tokenCount ?? 0, sessionID);
     } catch (e) {
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       log.error("LTM injection failed:", e);
       setLtmTokens(0, sessionID);
     } finally {
@@ -13269,7 +15738,13 @@ async function handleConversationTurn(
   // snapshot transform() reads, so its loadDistillationsCached hits the cache
   // instead of the DB. On a pool timeout it's a no-op and transform() falls back
   // to the identical in-process load.
-  await prewarmDistillationSnapshot(projectPath, sessionID, loreMessages);
+  await prewarmDistillationSnapshot(
+    projectPath,
+    sessionID,
+    loreMessages,
+    req.signal,
+  );
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
   const result = transform({
     messages: loreMessages,
     projectPath,
@@ -13330,6 +15805,7 @@ async function handleConversationTurn(
         sessionID,
         contextBudget,
         {
+          signal: req.signal,
           excludeCategories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
           ...(stickyIds.size ? { stickyIds } : {}),
@@ -13339,6 +15815,7 @@ async function handleConversationTurn(
           overflowSink,
         },
       );
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       const contextOverflow = overflowSink.map((e) => ({
         id: e.id,
         category: e.category,
@@ -13519,6 +15996,7 @@ async function handleConversationTurn(
         }
       }
     } catch (e) {
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       // On error, leave the step-6 LTM state intact (cache, pin, text)
       // so the turn proceeds with the pre-refresh knowledge rather than
       // an inconsistent state. The next turn will retry via step 6.
@@ -13648,6 +16126,7 @@ async function handleConversationTurn(
           cfg.knowledge.referenceValidation
         ) {
           const peek = await ltm.peekProjectRefsOffloaded(projectPath);
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           if (!peek.gated && peek.refs.length > 0) {
             block = buildCombinedResolveRefcheckBlock(
               target,
@@ -13899,6 +16378,7 @@ async function handleConversationTurn(
       }
     }
   }
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // Start gen_ai.chat span before the upstream call so it captures real
   // wall-clock duration (including network latency and streaming time).
@@ -13916,6 +16396,41 @@ async function handleConversationTurn(
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },
   });
+  let streamingFinalizerRegistered = false;
+  let genAiSpanEnded = false;
+  let recallPersistenceTransaction:
+    | { commit: () => void; rollback: () => void }
+    | undefined;
+  const rollbackRecallPersistence = (): void => {
+    recallPersistenceTransaction?.rollback();
+    recallPersistenceTransaction = undefined;
+  };
+  const endGenAiSpan = (): void => {
+    if (genAiSpanEnded) return;
+    genAiSpanEnded = true;
+    genAiSpan?.end();
+  };
+  const dropStreamingFinalizer = (): void => {
+    rollbackRecallPersistence();
+    streamingFinalizerRegistered = true;
+    genAiSpan?.setStatus({
+      code: 2,
+      message: "post-response finalizer dropped",
+    });
+    endGenAiSpan();
+  };
+  const releaseForeground = (): void => {
+    if (!streamingFinalizerRegistered && !genAiSpanEnded) {
+      genAiSpan?.setStatus({
+        code: 2,
+        message: req.stream
+          ? "stream cancelled before terminal response"
+          : "request ended before terminal response",
+      });
+      endGenAiSpan();
+    }
+    foregroundAbort.dispose();
+  };
 
   let upstreamResult: UpstreamResult;
   try {
@@ -13928,7 +16443,7 @@ async function handleConversationTurn(
       requestUpstreamRoute,
     );
   } catch (error) {
-    foregroundAbort.dispose();
+    releaseForeground();
     throw error;
   }
   const upstreamResponse = wrapBodyWithCleanup(
@@ -13942,7 +16457,7 @@ async function handleConversationTurn(
     foregroundOwnershipTransferred = true;
     return wrapBodyWithCleanup(
       response,
-      foregroundAbort.dispose,
+      releaseForeground,
       foregroundAbort.signal,
     );
   };
@@ -13950,7 +16465,7 @@ async function handleConversationTurn(
     try {
       return await operation;
     } catch (error) {
-      if (!foregroundOwnershipTransferred) foregroundAbort.dispose();
+      if (!foregroundOwnershipTransferred) releaseForeground();
       throw error;
     }
   };
@@ -14009,7 +16524,7 @@ async function handleConversationTurn(
       code: 2,
       message: `HTTP ${upstreamResponse.status}`,
     });
-    genAiSpan.end();
+    endGenAiSpan();
     return finishForeground(
       new Response(errorBody, {
         status: upstreamResponse.status,
@@ -14083,20 +16598,22 @@ async function handleConversationTurn(
         const side: "before" | "after" = index < position ? "before" : "after";
         return [{ id: block.id, name: block.name, input: block.input, side }];
       });
-      addRecallStoreEntry(sessionState.recallStore, storeKey, {
-        toolUseId: recallBlock.id,
-        anchorId,
-        anchorContextId,
-        input,
-        position,
-        result,
-        ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
-      });
-      // Persist the store (v46) so the marker still expands byte-identically
-      // after a gateway restart instead of leaking raw marker text upstream.
-      saveSessionTracking(sessionState.sessionID, {
-        recallStore: serializeRecallStore(sessionState.recallStore),
-      });
+      if (!suppressTemporalStorage) {
+        addRecallStoreEntry(sessionState.recallStore, storeKey, {
+          toolUseId: recallBlock.id,
+          anchorId,
+          anchorContextId,
+          input,
+          position,
+          result,
+          ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
+        });
+        // Persist the store (v46) so the marker still expands byte-identically
+        // after a gateway restart instead of leaking raw marker text upstream.
+        saveSessionTracking(sessionState.sessionID, {
+          recallStore: serializeRecallStore(sessionState.recallStore),
+        });
+      }
 
       const markerText = buildAnchoredRecallMarker(
         input.query,
@@ -14121,14 +16638,20 @@ async function handleConversationTurn(
           `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         markerResp.usage = cumulativeUsage;
-        postResponse(
-          req,
-          markerResp,
-          sessionState,
-          config,
-          requestBody,
-          genAiSpan,
-        );
+        if (req.stream) {
+          finishStreaming(markerResp);
+        } else {
+          postResponse(
+            req,
+            markerResp,
+            sessionState,
+            config,
+            requestBody,
+            genAiSpan,
+            suppressTemporalStorage,
+            endGenAiSpan,
+          );
+        }
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -14177,6 +16700,7 @@ async function handleConversationTurn(
             signal,
             validation: currentModifiedReq.codex ? "codex" : "public",
             stopAtTerminal: true,
+            requireCompletedTerminal: true,
           }),
       };
       let jsonFollowUp: Awaited<ReturnType<typeof runRecallFollowUpJSON>>;
@@ -14198,20 +16722,41 @@ async function handleConversationTurn(
               recallBlock,
               foregroundAbort.signal,
             );
-      } catch {
+      } catch (fetchErr) {
+        if (
+          foregroundAbort.signal.aborted ||
+          (fetchErr instanceof Error && fetchErr.name === "AbortError")
+        ) {
+          throw fetchErr;
+        }
+        if (fetchErr instanceof ResponsesTerminalError) {
+          Object.assign(
+            cumulativeUsage,
+            mergeRecallUsage(
+              cumulativeUsage,
+              fetchErr.response.usage ?? ZERO_USAGE,
+            ),
+          );
+        }
         log.error(
           `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        postResponse(
-          req,
-          markerResp,
-          sessionState,
-          config,
-          requestBody,
-          genAiSpan,
-        );
+        if (req.stream) {
+          finishStreaming(markerResp);
+        } else {
+          postResponse(
+            req,
+            markerResp,
+            sessionState,
+            config,
+            requestBody,
+            genAiSpan,
+            suppressTemporalStorage,
+            endGenAiSpan,
+          );
+        }
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -14240,14 +16785,20 @@ async function handleConversationTurn(
         });
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        postResponse(
-          req,
-          markerResp,
-          sessionState,
-          config,
-          requestBody,
-          genAiSpan,
-        );
+        if (req.stream) {
+          finishStreaming(markerResp);
+        } else {
+          postResponse(
+            req,
+            markerResp,
+            sessionState,
+            config,
+            requestBody,
+            genAiSpan,
+            suppressTemporalStorage,
+            endGenAiSpan,
+          );
+        }
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -14292,14 +16843,20 @@ async function handleConversationTurn(
       };
     }
     currentResp.usage = cumulativeUsage;
-    postResponse(
-      req,
-      currentResp,
-      sessionState,
-      config,
-      requestBody,
-      genAiSpan,
-    );
+    if (req.stream) {
+      finishStreaming(currentResp);
+    } else {
+      postResponse(
+        req,
+        currentResp,
+        sessionState,
+        config,
+        requestBody,
+        genAiSpan,
+        suppressTemporalStorage,
+        endGenAiSpan,
+      );
+    }
     // Telemetry: flag a completion we're about to hand back with NO usable
     // content (no text, no tool_use) — the "no response data" class
     // (github-copilot #1052 follow-up). Checked on the model's response, before
@@ -14336,6 +16893,119 @@ async function handleConversationTurn(
   };
   const finishWithRecall = async (resp: GatewayResponse): Promise<Response> =>
     finishForeground(await awaitForeground(finalizeWithRecall(resp)));
+  function finishStreaming(resp: GatewayResponse): void {
+    if (streamingFinalizerRegistered) return;
+    streamingFinalizerRegistered = true;
+    scheduleStreamingPostResponse(
+      sessionState.sessionID,
+      requestGeneration,
+      async () => {
+        await downstreamSettled;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (requestGeneration !== streamingPostResponseGeneration) {
+          dropStreamingFinalizer();
+          return;
+        }
+        if (sessionSignal.aborted) {
+          dropStreamingFinalizer();
+          return;
+        }
+        if (downstreamWasCancelled()) {
+          rollbackRecallPersistence();
+          accountUnsuccessfulResponse(
+            resp,
+            sessionState.sessionID,
+            sessionState.resolvedConversationTTL,
+            genAiSpan,
+            endGenAiSpan,
+            () => {
+              sessionState._dirty = true;
+            },
+          );
+          return;
+        }
+        try {
+          const postResponseFailed = new Error(
+            "Responses recall post-response persistence failed",
+          );
+          try {
+            withTenant(sessionState.storageTenantId ?? "", () =>
+              withSavepoint("responses_recall_post_response", () => {
+                const persisted = postResponseForTenant(
+                  req,
+                  resp,
+                  sessionState,
+                  config,
+                  requestBody,
+                  genAiSpan,
+                  suppressTemporalStorage,
+                  endGenAiSpan,
+                );
+                if (!persisted) throw postResponseFailed;
+                recallPersistenceTransaction?.commit();
+              }),
+            );
+            recallPersistenceTransaction = undefined;
+          } catch (error) {
+            rollbackRecallPersistence();
+            if (error !== postResponseFailed) throw error;
+          }
+        } catch (error) {
+          rollbackRecallPersistence();
+          throw error;
+        }
+      },
+      dropStreamingFinalizer,
+      true,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+    );
+  }
+  function finishUnsuccessfulStreaming(resp: GatewayResponse): void {
+    if (streamingFinalizerRegistered) return;
+    streamingFinalizerRegistered = true;
+    scheduleStreamingPostResponse(
+      sessionState.sessionID,
+      requestGeneration,
+      async () => {
+        await downstreamSettled;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        rollbackRecallPersistence();
+        if (
+          requestGeneration !== streamingPostResponseGeneration ||
+          sessionSignal.aborted
+        ) {
+          dropStreamingFinalizer();
+          return;
+        }
+        accountUnsuccessfulResponse(
+          resp,
+          sessionState.sessionID,
+          sessionState.resolvedConversationTTL,
+          genAiSpan,
+          endGenAiSpan,
+          () => {
+            sessionState._dirty = true;
+          },
+        );
+      },
+      dropStreamingFinalizer,
+      true,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+    );
+  }
+  async function captureUnsuccessfulResponses(
+    operation: Promise<GatewayResponse>,
+  ): Promise<{ response: GatewayResponse; successful: boolean } | undefined> {
+    try {
+      return { response: await operation, successful: true };
+    } catch (error) {
+      if (!(error instanceof ResponsesTerminalError)) throw error;
+      finishUnsuccessfulStreaming(error.response);
+      return error.status === "incomplete"
+        ? { response: error.response, successful: false }
+        : undefined;
+    }
+  }
 
   if (req.stream && upstreamResponse.body) {
     // Non-Anthropic upstream streaming responses need their own accumulator
@@ -14367,15 +17037,15 @@ async function handleConversationTurn(
           const responsesVisibleContent: GatewayContentBlock[] = [];
           return finishForeground(
             streamResponsesRecallAware(upstreamResponse, {
-              onComplete: (resp) =>
-                postResponse(
-                  req,
-                  resp,
-                  sessionState,
-                  config,
-                  requestBody,
-                  genAiSpan,
-                ),
+              validation: req.codex ? "codex" : "public",
+              onComplete: (response, successful) => {
+                if (successful) finishStreaming(response);
+                else finishUnsuccessfulStreaming(response);
+              },
+              onTransactionReady: (transaction) => {
+                rollbackRecallPersistence();
+                recallPersistenceTransaction = transaction;
+              },
               sessionID: sessionState.sessionID,
               maxRecallDepth: MAX_RECALL_DEPTH,
               signal: foregroundAbort.signal,
@@ -14392,6 +17062,7 @@ async function handleConversationTurn(
                   stableLtmText,
                   pendingKnowledgeDelta,
                 );
+                const deferredTransferRecordings: Array<() => void> = [];
                 const { result, input } = await withTenant(
                   sessionState.storageTenantId ?? "",
                   () =>
@@ -14407,6 +17078,7 @@ async function handleConversationTurn(
                       getLLMClient(config),
                       alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
                       signal,
+                      (record) => deferredTransferRecordings.push(record),
                     ),
                 );
                 const recallBlock = acc.content[contentPosition];
@@ -14472,14 +17144,18 @@ async function handleConversationTurn(
                   anchorText,
                   resultText: result,
                   commit: () => {
+                    for (const record of deferredTransferRecordings) record();
+                    if (suppressTemporalStorage) return;
                     addRecallStoreEntry(
                       sessionState.recallStore,
                       storeKey,
                       storedRecall,
                     );
                     persistStore();
+                    recallPersistenceCommitObserver?.();
                   },
                   rollback: () => {
+                    if (suppressTemporalStorage) return;
                     if (sessionState.recallStore.delete(storeKey))
                       persistStore();
                   },
@@ -14545,15 +17221,10 @@ async function handleConversationTurn(
         return finishForeground(
           streamResponsesPassthrough(
             upstreamResponse,
-            (resp) =>
-              postResponse(
-                req,
-                resp,
-                sessionState,
-                config,
-                requestBody,
-                genAiSpan,
-              ),
+            (response, successful) => {
+              if (successful) finishStreaming(response);
+              else finishUnsuccessfulStreaming(response);
+            },
             sessionState.sessionID,
             req.codex ? "codex" : "public",
             foregroundAbort.signal,
@@ -14562,14 +17233,34 @@ async function handleConversationTurn(
       }
       // Warning to inject, or a non-Responses client: buffer the full
       // upstream, run recall interception, then re-emit.
-      const resp = await awaitForeground(
-        accumulateResponsesSSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
-          validation: req.codex ? "codex" : "public",
-          stopAtTerminal: true,
-        }),
+      const captured = await awaitForeground(
+        captureUnsuccessfulResponses(
+          accumulateResponsesSSEStream(upstreamResponse, {
+            signal: foregroundAbort.signal,
+            validation: req.codex ? "codex" : "public",
+            stopAtTerminal: true,
+            requireCompletedTerminal: true,
+          }),
+        ),
       );
-      return finishWithRecall(resp);
+      if (!captured) {
+        return finishForeground(errorResponse(502, "Gateway request failed"));
+      }
+      if (!captured.successful) {
+        if (hasRecallToolUse(captured.response)) {
+          return finishForeground(errorResponse(502, "Gateway request failed"));
+        }
+        return finishForeground(
+          nonStreamHttpResponse(
+            captured.response,
+            req.protocol,
+            req.stream,
+            undefined,
+            requestEnablesLongContext(req),
+          ),
+        );
+      }
+      return finishWithRecall(captured.response);
     }
 
     if (effectiveProtocol === "openai") {
@@ -14606,8 +17297,7 @@ async function handleConversationTurn(
     );
     const anthropicSSE = buildStreamingResponse(
       upstreamResponse,
-      (resp) =>
-        postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
+      finishStreaming,
       hasRecallTool
         ? {
             clientMessages: recallClientMessages,
@@ -14616,6 +17306,7 @@ async function handleConversationTurn(
             sessionState,
             cacheOptions,
             upstreamRoute: requestUpstreamRoute,
+            noStore: suppressTemporalStorage,
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
@@ -14657,15 +17348,34 @@ async function handleConversationTurn(
   }
 
   // Non-streaming: dispatch to correct accumulator based on upstream protocol.
-  const resp = await awaitForeground(
-    accumulateNonStreamResponse(
-      upstreamResponse,
-      effectiveProtocol,
-      modifiedReq.codex === true,
-      foregroundAbort.signal,
+  const captured = await awaitForeground(
+    captureUnsuccessfulResponses(
+      accumulateNonStreamResponse(
+        upstreamResponse,
+        effectiveProtocol,
+        modifiedReq.codex === true,
+        foregroundAbort.signal,
+      ),
     ),
   );
-  return finishWithRecall(resp);
+  if (!captured) {
+    return finishForeground(errorResponse(502, "Gateway request failed"));
+  }
+  if (!captured.successful) {
+    if (hasRecallToolUse(captured.response)) {
+      return finishForeground(errorResponse(502, "Gateway request failed"));
+    }
+    return finishForeground(
+      nonStreamHttpResponse(
+        captured.response,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      ),
+    );
+  }
+  return finishWithRecall(captured.response);
 }
 
 // ---------------------------------------------------------------------------
@@ -14977,15 +17687,60 @@ async function handleLoreSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
   config: GatewayConfig,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response | null> {
   const text = lastUserTextTrimmed(req);
   if (!text.toLowerCase().startsWith("/lore:")) return null;
+
+  let state = findLiveSessionState(req, config, allSessions);
+  const indexedSessionID = findIndexedSessionID(req, config);
+  if (!state && indexedSessionID) {
+    const pathResult = getProjectPath(req.system, req.rawHeaders);
+    state = getOrCreateSession(
+      indexedSessionID,
+      pathResult.path,
+      pathResult.source,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+      config,
+    );
+  }
+  const sessionID = indexedSessionID ?? state?.sessionID;
+  if (sessionID) {
+    await claimSession(sessionID);
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
+    await awaitStreamingPostResponse(sessionID, req.signal);
+    req.signal?.throwIfAborted();
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
+  }
 
   // Route to specific handlers
   const warmupResult = handleWarmupSlashCommand(req, allSessions, config);
   if (warmupResult) return warmupResult;
 
-  const curateResult = await handleCurateSlashCommand(req, allSessions, config);
+  const curateResult = await handleCurateSlashCommand(
+    req,
+    allSessions,
+    config,
+    claimSession,
+  );
   if (curateResult) return curateResult;
 
   const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions, config);
@@ -15024,32 +17779,22 @@ function handleAmnesiaSlashCommand(
   const isOff = lower === "/lore:amnesia:off";
   if (!isOn && !isOff) return null;
 
-  // Find the session
-  const known = extractKnownSessionHeader(req.rawHeaders);
-  let state: SessionState | undefined;
-  if (known) {
-    const credentialFingerprint = requestCredentialFingerprint(
-      req.rawHeaders,
-      config,
+  const state = findLiveSessionState(req, config, allSessions);
+
+  if (!state) {
+    return slashResponse(
+      req,
+      "No active session found. Amnesia mode was not changed.",
+      `msg_lore_${Date.now()}`,
     );
-    if (credentialFingerprint !== null) {
-      const indexKey = sessionIndexKey(
-        credentialFingerprint,
-        known.headerName,
-        known.sessionId,
-      );
-      const sid = headerSessionIndex.get(indexKey);
-      if (sid) state = allSessions.get(sid);
-    }
   }
 
-  if (state) {
-    state.amnesia = isOn;
-    log.info(
-      `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
-        `storage ${isOn ? "suppressed" : "resumed"}`,
-    );
-  }
+  state.amnesia = isOn;
+  saveSessionTracking(state.sessionID, { amnesia: isOn });
+  log.info(
+    `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
+      `storage ${isOn ? "suppressed" : "resumed"}`,
+  );
 
   const responseText = isOn
     ? "Amnesia mode on — memory storage suppressed. Recall still works."
@@ -15091,6 +17836,8 @@ function handleWarmupSlashCommand(
   const isOn = lower === "/lore:warm:on";
   if (!isStop && !isKeep && !isAuto && !isReset && !isOff && !isOn) return null;
 
+  const state = findLiveSessionState(req, config, allSessions);
+
   if (
     (isReset || isOff || isOn) &&
     (config.remoteGateway || config.hostedMode)
@@ -15101,8 +17848,23 @@ function handleWarmupSlashCommand(
     );
   }
 
-  // Reset is a breaker-wide admin action — clear every tripped bucket and
-  // return immediately (it does not depend on resolving this session).
+  // Global controls require an authenticated, resolved session. Otherwise any
+  // network caller could persistently change warming for every tenant.
+  if (
+    (isReset || isOff || isOn) &&
+    (isHostedMode() ||
+      !state ||
+      !state.lastUpstream ||
+      !extractAuth(req.rawHeaders))
+  ) {
+    return slashResponse(
+      req,
+      "No authenticated active session found. Global cache warming was not changed.",
+      `msg_lore_${Date.now()}`,
+    );
+  }
+
+  // Reset is a breaker-wide admin action.
   if (isReset) {
     resetCircuitBreaker();
     log.info(
@@ -15115,8 +17877,7 @@ function handleWarmupSlashCommand(
     );
   }
 
-  // on/off are GLOBAL admin actions (persisted KV override) — apply and return
-  // immediately, independent of this session.
+  // on/off are GLOBAL admin actions (persisted KV override).
   if (isOff || isOn) {
     setWarmingEnabled(isOn);
     log.info(
@@ -15129,25 +17890,6 @@ function handleWarmupSlashCommand(
         : "Cache warming disabled globally.",
       `msg_lore_${Date.now()}`,
     );
-  }
-
-  // Find the session for this request (use the same header-based lookup)
-  const known = extractKnownSessionHeader(req.rawHeaders);
-  let state: SessionState | undefined;
-  if (known) {
-    const credentialFingerprint = requestCredentialFingerprint(
-      req.rawHeaders,
-      config,
-    );
-    if (credentialFingerprint !== null) {
-      const indexKey = sessionIndexKey(
-        credentialFingerprint,
-        known.headerName,
-        known.sessionId,
-      );
-      const sid = headerSessionIndex.get(indexKey);
-      if (sid) state = allSessions.get(sid);
-    }
   }
 
   // Update session warmup state
@@ -15203,53 +17945,25 @@ async function handleCurateSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
   config: GatewayConfig,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response | null> {
   const text = lastUserTextTrimmed(req);
   if (text.toLowerCase() !== "/lore:curate") return null;
 
-  // Find the session
-  const known = extractKnownSessionHeader(req.rawHeaders);
-  let state: SessionState | undefined;
-  let sessionID: string | undefined;
-  if (known) {
-    const credentialFingerprint = requestCredentialFingerprint(
-      req.rawHeaders,
-      config,
-    );
-    if (credentialFingerprint !== null) {
-      const indexKey = sessionIndexKey(
-        credentialFingerprint,
-        known.headerName,
-        known.sessionId,
-      );
-      const sid = headerSessionIndex.get(indexKey);
-      if (sid) {
-        state = allSessions.get(sid);
-        sessionID = sid;
-      }
-    }
-  }
+  const indexedSessionID = findIndexedSessionID(req, config);
+  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  let state = findLiveSessionState(req, config, allSessions);
+  let sessionID = state?.sessionID;
 
-  // Fall back to finding any recent session for this project
-  if (!sessionID) {
-    // Use the most recently active session
-    let latest: SessionState | undefined;
-    const credentialFingerprint = requestCredentialFingerprint(
-      req.rawHeaders,
+  if (!state && indexedSessionID) {
+    state = getOrCreateSession(
+      indexedSessionID,
+      pathResult.path,
+      pathResult.source,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
       config,
     );
-    if (credentialFingerprint !== null) {
-      for (const s of allSessions.values()) {
-        if ((s.credentialFingerprint ?? "") !== credentialFingerprint) continue;
-        if (!latest || s.lastRequestTime > latest.lastRequestTime) {
-          latest = s;
-        }
-      }
-    }
-    if (latest) {
-      state = latest;
-      sessionID = latest.sessionID;
-    }
+    sessionID = indexedSessionID;
   }
 
   if (!sessionID || !state) {
@@ -15260,8 +17974,37 @@ async function handleCurateSlashCommand(
     );
   }
 
-  const projectPath = state.projectPath;
+  await claimSession(sessionID);
+  if (
+    indexedSessionID &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return slashResponse(
+      req,
+      "No active session found for curation.",
+      "msg_lore_curate_none",
+    );
+  }
+  await awaitStreamingPostResponse(sessionID, req.signal);
+  req.signal?.throwIfAborted();
+  if (
+    indexedSessionID &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return slashResponse(
+      req,
+      "No active session found for curation.",
+      "msg_lore_curate_none",
+    );
+  }
+
+  const projectPath = resolveSessionProjectPath(pathResult, state, config);
+  saveSessionTracking(sessionID, {
+    projectPath: state.projectPath || null,
+    projectPathProvisional: state.projectPathProvisional === true,
+  });
   const { distillation, curator } = await import("@loreai/core");
+  req.signal?.throwIfAborted();
   const llm = getLLMClient(config);
   const model = getWorkerModel(state.lastUpstream);
 
@@ -15279,12 +18022,15 @@ async function handleCurateSlashCommand(
       skipMeta: true,
       urgent: true,
       callType: "direct",
+      signal: req.signal,
       workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
       // #627 Phase 1: stamp the session's gitHead on slash-curate rows.
       metadata: buildSessionMetadata(state.gitHead),
     });
+    req.signal?.throwIfAborted();
     distilled = dResult.distilled;
   } catch (e) {
+    req.signal?.throwIfAborted();
     log.error("/lore:curate distillation error:", e);
   }
 
@@ -15298,14 +18044,17 @@ async function handleCurateSlashCommand(
       projectPath,
       sessionID,
       model,
+      signal: req.signal,
       workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
       // #627 Phase 1: stamp the session's gitHead on slash-curate entries.
       metadata: buildSessionMetadata(state.gitHead),
     });
+    req.signal?.throwIfAborted();
     created = cResult.created;
     updated = cResult.updated;
     deleted = cResult.deleted;
   } catch (e) {
+    req.signal?.throwIfAborted();
     log.error("/lore:curate curation error:", e);
   }
 
@@ -15426,6 +18175,7 @@ export function earlyFlushStreamingResponse(
   run: (signal: AbortSignal) => Promise<Response>,
   modelId: string,
   signal?: AbortSignal,
+  trackOperation?: (operation: Promise<unknown>) => void,
 ): Response {
   const encoder = new TextEncoder();
   const keepalive = encoder.encode(`: lore preparing\n\n`);
@@ -15460,6 +18210,7 @@ export function earlyFlushStreamingResponse(
   }
 
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let responsePromise: Promise<Response> | undefined;
   let cancelled = false;
   let finished = false;
 
@@ -15487,8 +18238,12 @@ export function earlyFlushStreamingResponse(
         if (cancelled || finished) return;
         try {
           if (!reader) {
+            if (!responsePromise) {
+              responsePromise = run(operationSignal);
+              trackOperation?.(responsePromise);
+            }
             const inner = await responseAgainstAbort(
-              () => run(operationSignal),
+              () => responsePromise as Promise<Response>,
               operationSignal,
             );
             if (cancelled) {
@@ -15501,17 +18256,12 @@ export function earlyFlushStreamingResponse(
             ) {
               // The inner response has no streamable SSE body (e.g. an error
               // Response with a plain string body). Surface as response.failed.
-              const status = inner.status;
-              const text = await readForegroundBody(
-                inner,
-                true,
-                undefined,
-                operationSignal,
-              ).catch(() => "");
+              log.error(
+                `early-flush inner response was not SSE (status=${inner.status})`,
+              );
+              void inner.body?.cancel(operationSignal.reason).catch(() => {});
               if (!cancelled) {
-                controller.enqueue(
-                  emitFailed(`${status}: ${text.slice(0, 500)}`),
-                );
+                controller.enqueue(emitFailed("Gateway request failed"));
                 finish(controller);
               }
               return;
@@ -15525,10 +18275,9 @@ export function earlyFlushStreamingResponse(
           if (chunk.done) finish(controller);
           else controller.enqueue(chunk.value);
         } catch (err) {
-          const message =
-            err instanceof Error ? err.message : "unknown gateway error";
+          log.error("early-flush stream failed:", err);
           if (!cancelled) {
-            controller.enqueue(emitFailed(message));
+            controller.enqueue(emitFailed("Gateway request failed"));
             finish(controller);
           }
         }
@@ -15560,6 +18309,48 @@ export function earlyFlushStreamingResponse(
 async function handleRequestForTenant(
   req: GatewayRequest,
   config: GatewayConfig,
+): Promise<Response> {
+  if (!req?.rawHeaders) {
+    return errorResponse(400, "Malformed request: missing headers");
+  }
+  if (pipelineResetInProgress) {
+    return errorResponse(503, "Gateway pipeline is resetting");
+  }
+  streamingPostResponsesAccepting = true;
+  const requestGeneration = streamingPostResponseGeneration;
+  let resolveDownstreamSettled: (() => void) | undefined;
+  let downstreamCancelled = false;
+  const downstreamSettled = new Promise<void>((resolve) => {
+    resolveDownstreamSettled = resolve;
+  });
+  return runActivePipelineRequest(
+    req.signal,
+    (signal, trackOperation, claimSession) =>
+      handleRequestInner(
+        { ...req, signal },
+        config,
+        requestGeneration,
+        downstreamSettled,
+        () => downstreamCancelled,
+        trackOperation,
+        claimSession,
+      ),
+    () => resolveDownstreamSettled?.(),
+    () => {
+      downstreamCancelled = true;
+    },
+    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+  );
+}
+
+async function handleRequestInner(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
   const requestStartMs = Date.now();
   const requestOrder = ++upstreamRequestOrder;
@@ -15604,7 +18395,12 @@ async function handleRequestForTenant(
 
     // --- Case 0: Slash command interception (/lore:*) ---
     // All /lore:* commands are intercepted here and never forwarded upstream.
-    const slashResult = await handleLoreSlashCommand(req, sessions, config);
+    const slashResult = await handleLoreSlashCommand(
+      req,
+      sessions,
+      config,
+      claimSession,
+    );
     if (slashResult) return slashResult;
 
     // --- Case 0.5: Claude Code side-channel → forward upstream untouched ---
@@ -15644,7 +18440,13 @@ async function handleRequestForTenant(
       log.info(
         `compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`,
       );
-      return await handleCompaction(req, config);
+      return await handleCompaction(
+        req,
+        config,
+        requestGeneration,
+        trackOperation,
+        claimSession,
+      );
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
@@ -15666,15 +18468,30 @@ async function handleRequestForTenant(
     if (req.stream && req.protocol === "openai-responses") {
       return earlyFlushStreamingResponse(
         (signal) =>
-          handleConversationTurn({ ...req, signal }, config, requestOrder),
+          handleConversationTurn(
+            { ...req, signal },
+            config,
+            requestOrder,
+            requestGeneration,
+            downstreamSettled,
+            downstreamWasCancelled,
+            claimSession,
+          ),
         req.model,
         req.signal,
+        trackOperation,
       );
     }
-    return await handleConversationTurn(req, config, requestOrder);
+    return await handleConversationTurn(
+      req,
+      config,
+      requestOrder,
+      requestGeneration,
+      downstreamSettled,
+      downstreamWasCancelled,
+      claimSession,
+    );
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Unknown gateway error";
     // Client disconnect / abort is benign — downgrade from error to info.
     const isAbort = err instanceof DOMException && err.name === "AbortError";
     if (isAbort) {
@@ -15687,7 +18504,7 @@ async function handleRequestForTenant(
     } else {
       log.error("pipeline request failed");
     }
-    return errorResponse(502, message);
+    return errorResponse(502, "Gateway request failed");
   }
 }
 

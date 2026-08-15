@@ -187,4 +187,173 @@ describe("foreground response body limits", () => {
     const result = await accumulateNonStreamResponse(response, "openai");
     expect(result.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
   });
+
+  test("rejects malformed validated non-stream Responses incomplete details", async () => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_incomplete",
+        model: "gpt-test",
+        status: "incomplete",
+        incomplete_details: { reason: 7 },
+        output: [],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(
+        response,
+        "openai-responses",
+        false,
+        undefined,
+        true,
+      ),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
+
+  test("rejects provider-specific non-stream incomplete reasons for Codex", async () => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_codex_incomplete",
+        model: "gpt-test",
+        status: "incomplete",
+        incomplete_details: { reason: "provider_specific" },
+        output: [],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(
+        response,
+        "openai-responses",
+        true,
+        undefined,
+        true,
+      ),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
+
+  test("rejects in-progress items in a completed non-stream response", async () => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_in_progress_item",
+        model: "gpt-test",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg_in_progress_item",
+            role: "assistant",
+            status: "in_progress",
+            content: [{ type: "output_text", text: "partial" }],
+          },
+        ],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(response, "openai-responses"),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
+
+  test.each([
+    {
+      type: "reasoning",
+      id: "rs_without_status",
+      summary: [],
+    },
+    {
+      type: "web_search_call",
+      id: "ws_completed",
+      status: "completed",
+      action: { type: "search", query: "lore" },
+    },
+    {
+      type: "function_call_output",
+      id: "fc_output",
+      call_id: "call_output",
+      output: "result",
+      status: "completed",
+    },
+    {
+      type: "function_call",
+      id: "fc_failed",
+      call_id: "call_failed",
+      name: "lookup",
+      arguments: "{}",
+      status: "failed",
+    },
+    {
+      type: "image_generation_call",
+      id: "image_failed",
+      status: "failed",
+      result: null,
+    },
+  ])("accepts standard non-stream output item $type", async (item) => {
+    const result = await accumulateNonStreamResponse(
+      new Response(
+        JSON.stringify({
+          id: "resp_standard_item",
+          model: "gpt-test",
+          status: "completed",
+          output: [item],
+          usage: { input_tokens: 7, output_tokens: 2 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+      "openai-responses",
+    );
+
+    expect(result.rawOutputItems).toEqual([item]);
+  });
+
+  test.each([
+    {
+      type: "reasoning",
+      id: "rs_in_progress",
+      status: "in_progress",
+      summary: [],
+    },
+    {
+      type: "item_reference",
+      id: "ref_extra",
+      content: [],
+    },
+    {
+      type: "provider_specific_output",
+      id: "unknown_output",
+    },
+  ])("rejects malformed non-stream output item $type", async (item) => {
+    const response = new Response(
+      JSON.stringify({
+        id: "resp_malformed_item",
+        model: "gpt-test",
+        status: "completed",
+        output: [item],
+        usage: { input_tokens: 7, output_tokens: 2 },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+
+    await expect(
+      accumulateNonStreamResponse(response, "openai-responses"),
+    ).rejects.toThrow("upstream Responses request did not complete");
+  });
+
+  test("rejects provider-specific incomplete reasons in sniffed Codex SSE", async () => {
+    const wire =
+      'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"id":"resp_codex_sse_incomplete","status":"incomplete","incomplete_details":{"reason":"provider_specific"}}}\n\n';
+    const response = new Response(wire, {
+      headers: { "content-type": "text/event-stream" },
+    });
+
+    await expect(
+      accumulateNonStreamResponse(response, "openai-responses", true),
+    ).rejects.toThrow("malformed Responses terminal event");
+  });
 });

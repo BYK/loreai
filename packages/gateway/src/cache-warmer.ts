@@ -27,6 +27,8 @@ import {
   log,
   config as loreConfig,
   db,
+  databaseInTransaction,
+  canonicalProjectId,
   projectId,
   getKV,
   setKV,
@@ -38,6 +40,11 @@ import {
   estimateMetaDistillCostPerCall,
   getPrefixChurnRate,
   PREFIX_CHURN_WARM_BLOCK,
+  decodeWarmupHistogram,
+  emptyWarmupHistogramCounts,
+  encodeWarmupHistogram,
+  mergeWarmupHistogramCounts,
+  normalizeWarmupHistogram,
 } from "@loreai/core";
 import {
   applyUpstreamExtraHeaders,
@@ -704,6 +711,10 @@ const globalHistograms = new Map<string, InterTurnHistogram>();
  * Creates an empty histogram if none exists for the given pid.
  */
 export function getGlobalHistogram(pid: string): InterTurnHistogram {
+  reconcileProjectMerges();
+  const canonical = canonicalProjectId(pid, { committed: true });
+  if (!canonical) return createHistogram();
+  pid = canonical;
   let hist = globalHistograms.get(pid);
   if (!hist) {
     hist = createHistogram();
@@ -2560,6 +2571,85 @@ export function creditWarmupHit(
 
 /** Tracks which project IDs have been modified since last flush. */
 const dirtyProjects = new Set<string>();
+/** Unflushed observations, tracked separately so project merges can rebase them. */
+const dirtyHistograms = new Map<string, InterTurnHistogram>();
+
+function loadPersistedHistogramCounts(pid: string): bigint[] {
+  let merged = emptyWarmupHistogramCounts();
+  const rows = db()
+    .query(
+      "SELECT counts, CAST(total AS TEXT) AS total FROM warmup_histograms WHERE project_id = ?",
+    )
+    .all(pid) as Array<{ counts: string; total: string }>;
+  for (const row of rows) {
+    const counts = decodeWarmupHistogram(row.counts, row.total);
+    if (counts) merged = mergeWarmupHistogramCounts(merged, counts);
+  }
+  return merged;
+}
+
+function loadPersistedHistogram(pid: string): InterTurnHistogram {
+  const merged = normalizeWarmupHistogram(loadPersistedHistogramCounts(pid));
+  return merged;
+}
+
+function addHistogram(
+  target: InterTurnHistogram,
+  source: InterTurnHistogram,
+): void {
+  const merged = normalizeWarmupHistogram(
+    mergeWarmupHistogramCounts(
+      target.counts.map(BigInt),
+      source.counts.map(BigInt),
+    ),
+  );
+  target.counts = merged.counts;
+  target.total = merged.total;
+}
+
+function reconcileProjectMerges(): void {
+  const database = db();
+  if (databaseInTransaction(database)) return;
+  const pendingByTarget = new Map<string, InterTurnHistogram>();
+  const affectedTargets = new Set<string>();
+  const trackedIds = new Set([
+    ...globalHistograms.keys(),
+    ...dirtyHistograms.keys(),
+  ]);
+  for (const id of trackedIds) {
+    const targetId = canonicalProjectId(id);
+    if (targetId === id) continue;
+    if (!targetId) {
+      // Hide a deleted project's stale aggregate immediately, but retain its
+      // pending delta until flush confirms the deletion under a write lock.
+      globalHistograms.delete(id);
+      continue;
+    }
+    affectedTargets.add(targetId);
+    const dirty = dirtyHistograms.get(id);
+    if (dirty) {
+      const pending = pendingByTarget.get(targetId) ?? createHistogram();
+      addHistogram(pending, dirty);
+      pendingByTarget.set(targetId, pending);
+    }
+    globalHistograms.delete(id);
+    dirtyHistograms.delete(id);
+    dirtyProjects.delete(id);
+  }
+
+  for (const targetId of affectedTargets) {
+    const persisted = loadPersistedHistogram(targetId);
+    const pending = pendingByTarget.get(targetId) ?? createHistogram();
+    const targetDirty = dirtyHistograms.get(targetId);
+    if (targetDirty) addHistogram(pending, targetDirty);
+    addHistogram(persisted, pending);
+    globalHistograms.set(targetId, persisted);
+    if (pending.total > 0) {
+      dirtyHistograms.set(targetId, pending);
+      dirtyProjects.add(targetId);
+    }
+  }
+}
 
 /**
  * Load persisted global histograms for a project from SQLite.
@@ -2577,35 +2667,18 @@ const dirtyProjects = new Set<string>();
  * histogram. New data is written under the "all" time_slot key.
  */
 export function loadGlobalHistograms(projectPath: string): string | undefined {
-  const pid = projectId(projectPath);
-  if (!pid) return undefined; // project not yet in DB — nothing to load
+  reconcileProjectMerges();
+  if (databaseInTransaction(db())) return undefined;
+  const resolvedPid = projectId(projectPath);
+  if (!resolvedPid) return undefined; // project not yet in DB — nothing to load
+  const pid = canonicalProjectId(resolvedPid);
+  if (!pid) return undefined;
 
   if (globalHistograms.has(pid)) return pid; // already loaded
 
-  const merged = createHistogram();
-
+  let merged = createHistogram();
   try {
-    const rows = db()
-      .query(
-        "SELECT time_slot, counts, total FROM warmup_histograms WHERE project_id = ?",
-      )
-      .all(pid) as Array<{ time_slot: string; counts: string; total: number }>;
-
-    for (const row of rows) {
-      try {
-        const counts = JSON.parse(row.counts) as number[];
-        if (Array.isArray(counts) && counts.length === BIN_COUNT) {
-          // Merge this row into the single histogram (handles both old
-          // slot-segmented rows and the new "all" row).
-          for (let i = 0; i < BIN_COUNT; i++) {
-            merged.counts[i] += counts[i];
-          }
-          merged.total += row.total;
-        }
-      } catch {
-        // Corrupt JSON — skip this row
-      }
-    }
+    merged = loadPersistedHistogram(pid);
 
     log.info(
       `cache-warmer: loaded global histogram for project=${projectPath.slice(-30)} ` +
@@ -2631,35 +2704,63 @@ export function loadGlobalHistograms(projectPath: string): string | undefined {
  * on the next load.
  */
 export function flushGlobalHistograms(): void {
+  reconcileProjectMerges();
   if (dirtyProjects.size === 0) return;
 
   const d = db();
   const now = Date.now();
 
-  for (const pid of dirtyProjects) {
-    const hist = globalHistograms.get(pid);
-    if (!hist) continue;
+  const projectsToFlush = Array.from(dirtyProjects);
+  for (const pid of projectsToFlush) {
+    const pending = dirtyHistograms.get(pid);
+    if (!pending) {
+      dirtyHistograms.delete(pid);
+      dirtyProjects.delete(pid);
+      continue;
+    }
 
     try {
       // Atomic: delete old slot rows + upsert the unified "all" row.
       // Without the transaction, a crash between DELETE and INSERT
       // would lose all histogram data for this project.
-      d.exec("BEGIN");
+      d.exec("BEGIN IMMEDIATE");
+      let resolvedPid: string | undefined;
+      let hist: InterTurnHistogram | undefined;
       try {
-        // Delete old slot-segmented rows (backward compat cleanup)
-        d.query(
-          "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot != 'all'",
-        ).run(pid);
+        // Re-read after taking the write lock, then apply only observations
+        // buffered by this process. This prevents stale cache state from
+        // overwriting a merge or another gateway's committed history.
+        resolvedPid = canonicalProjectId(pid);
+        if (resolvedPid) {
+          const exact = mergeWarmupHistogramCounts(
+            loadPersistedHistogramCounts(resolvedPid),
+            pending.counts.map(BigInt),
+          );
+          const encoded = encodeWarmupHistogram(exact);
+          hist = normalizeWarmupHistogram(encoded.weights);
+          // Delete old slot-segmented rows (backward compat cleanup)
+          d.query(
+            "DELETE FROM warmup_histograms WHERE project_id = ? AND time_slot != 'all'",
+          ).run(resolvedPid);
 
-        d.query(
-          `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
-           VALUES (?, 'all', ?, ?, ?)
-           ON CONFLICT(project_id, time_slot) DO UPDATE SET
-             counts = excluded.counts,
-             total = excluded.total,
-             updated_at = excluded.updated_at`,
-        ).run(pid, JSON.stringify(hist.counts), hist.total, now);
+          d.query(
+            `INSERT INTO warmup_histograms (project_id, time_slot, counts, total, updated_at)
+             VALUES (?, 'all', ?, ?, ?)
+             ON CONFLICT(project_id, time_slot) DO UPDATE SET
+               counts = excluded.counts,
+               total = excluded.total,
+               updated_at = excluded.updated_at`,
+          ).run(resolvedPid, encoded.counts, encoded.total, now);
+        }
         d.exec("COMMIT");
+        if (resolvedPid && hist) {
+          if (resolvedPid !== pid) globalHistograms.delete(pid);
+          globalHistograms.set(resolvedPid, hist);
+        } else {
+          globalHistograms.delete(pid);
+        }
+        dirtyHistograms.delete(pid);
+        dirtyProjects.delete(pid);
       } catch (e) {
         d.exec("ROLLBACK");
         throw e;
@@ -2668,8 +2769,6 @@ export function flushGlobalHistograms(): void {
       log.warn(`cache-warmer: failed to flush histogram:`, e);
     }
   }
-
-  dirtyProjects.clear();
 }
 
 /**
@@ -2683,6 +2782,9 @@ export function recordGlobalGap(projectPath: string, gapMs: number): void {
   if (!pid) return; // project not yet in DB — skip
   const hist = getGlobalHistogram(pid);
   recordGap(hist, gapMs);
+  const dirty = dirtyHistograms.get(pid) ?? createHistogram();
+  recordGap(dirty, gapMs);
+  dirtyHistograms.set(pid, dirty);
   dirtyProjects.add(pid);
 }
 
@@ -2695,6 +2797,7 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<
   string,
   InterTurnHistogram
 > {
+  reconcileProjectMerges();
   return globalHistograms;
 }
 
@@ -2723,5 +2826,6 @@ export function _resetForTest(): void {
   }
   globalHistograms.clear();
   dirtyProjects.clear();
+  dirtyHistograms.clear();
   authDisabledSessions.clear();
 }

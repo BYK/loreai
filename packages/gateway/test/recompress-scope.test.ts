@@ -114,7 +114,7 @@ describe("upstream re-compression scoping (#1032 follow-up, wire-level)", () => 
         }),
       ),
     );
-    await fetch(`${harness.baseURL}/v1/chat/completions`, {
+    await harness.request("/v1/chat/completions", {
       method: "POST",
       headers: {
         "content-type": "application/json",

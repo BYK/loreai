@@ -238,6 +238,7 @@ describe("foreground upstream extra-header base-path binding", () => {
 
     const first = await handleRequest(request({}), config);
     expect(first.status).toBe(200);
+    await first.text();
     const state = [...getActiveSessions().values()][0];
     expect(state.cacheAnalytics.lastRequestBody).not.toBeNull();
 
@@ -247,6 +248,7 @@ describe("foreground upstream extra-header base-path binding", () => {
       config,
     );
     expect(failed.status).toBe(502);
+    await failed.text();
     expect(state.lastUpstream?.url).toBe("https://attacker.example");
     expect(state.cacheAnalytics.lastRequestBody).toBeNull();
   });

@@ -637,6 +637,7 @@ export async function run(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
+  signal?: AbortSignal;
   /** Optional gateway worker-health hook — called when the LLM call returns
    *  null. The gateway uses this to escalate to Sentry after sustained failure. */
   workerHealth?: {
@@ -707,7 +708,9 @@ export async function run(input: {
 export async function dedupePreferenceCreates(
   ops: CuratorOp[],
   projectPath: string,
+  signal?: AbortSignal,
 ): Promise<CuratorOp[]> {
+  signal?.throwIfAborted();
   if (!embedding.isAvailable()) return ops;
   const pid = ensureProject(projectPath);
   // Track ids already matched this batch so two paraphrases in the SAME op list
@@ -732,7 +735,9 @@ export async function dedupePreferenceCreates(
         projectId: op.scope === "global" ? null : pid,
         threshold: ltm.PREFERENCE_DEDUP_THRESHOLD,
       });
+      signal?.throwIfAborted();
     } catch (err) {
+      signal?.throwIfAborted();
       log.warn(
         "preference dedup: findSemanticDuplicate failed (non-fatal):",
         err,
@@ -778,6 +783,7 @@ async function runInner(input: {
   projectPath: string;
   sessionID: string;
   model?: { providerID: string; modelID: string };
+  signal?: AbortSignal;
   workerHealth?: {
     recordFailure(reason: string): void;
     recordSuccess(): void;
@@ -792,6 +798,7 @@ async function runInner(input: {
   relationsCreated: number;
   changedEntries: ChangedEntry[];
 }> {
+  input.signal?.throwIfAborted();
   const cfg = config();
 
   // Get recent undistilled messages since last curation.
@@ -887,7 +894,9 @@ async function runInner(input: {
       projectPath: input.projectPath,
       sessionID: input.sessionID,
     });
+    input.signal?.throwIfAborted();
   } catch (err) {
+    input.signal?.throwIfAborted();
     log.warn("instruction-detect failed (non-fatal):", err);
   }
 
@@ -949,7 +958,9 @@ async function runInner(input: {
     sessionID: input.sessionID,
     maxTokens: 2048,
     temperature: 0,
+    signal: input.signal,
   });
+  input.signal?.throwIfAborted();
   if (!responseText) {
     // Transport failure / empty completion already recorded by the LLM
     // adapter (single owner of transport-failure attribution) — avoid
@@ -985,7 +996,12 @@ async function runInner(input: {
   // embedding similarity at a preference-specific (looser) threshold to redirect
   // a near-dup create onto the existing entry. Async embedding work lives here
   // (runInner is async) so applyOps can stay synchronous.
-  const ops = await dedupePreferenceCreates(response.ops, input.projectPath);
+  const ops = await dedupePreferenceCreates(
+    response.ops,
+    input.projectPath,
+    input.signal,
+  );
+  input.signal?.throwIfAborted();
 
   const result = applyOps(ops, {
     projectPath: input.projectPath,
@@ -1003,7 +1019,9 @@ async function runInner(input: {
   // similarity when available, falls back to word-overlap.
   if (result.created > 0) {
     try {
+      input.signal?.throwIfAborted();
       const dupes = await ltm.deduplicate(input.projectPath, { dryRun: false });
+      input.signal?.throwIfAborted();
       if (dupes.totalRemoved > 0) {
         log.info(
           `post-curation dedup: merged ${dupes.totalRemoved} duplicate entries`,
@@ -1023,6 +1041,7 @@ async function runInner(input: {
         }
       }
     } catch (err) {
+      input.signal?.throwIfAborted();
       log.warn("post-curation dedup failed (non-fatal):", err);
     }
 
@@ -1034,6 +1053,7 @@ async function runInner(input: {
     // callers that don't pre-check).
     if (cfg.crossProject && embedding.isAvailable()) {
       try {
+        input.signal?.throwIfAborted();
         const promotion = ltm.promoteCrossProject({ dryRun: false });
         if (promotion.promoted > 0) {
           log.info(
@@ -1041,6 +1061,7 @@ async function runInner(input: {
           );
         }
       } catch (err) {
+        input.signal?.throwIfAborted();
         log.warn("cross-project promotion failed (non-fatal):", err);
       }
     }
@@ -1056,9 +1077,11 @@ async function runInner(input: {
   // alias-overlap signals still fire, and the next run catches the rest.
   if (result.entitiesCreated > 0 && embedding.isAvailable()) {
     try {
+      input.signal?.throwIfAborted();
       const dupes = await entities.deduplicateEntities(input.projectPath, {
         dryRun: false,
       });
+      input.signal?.throwIfAborted();
       const autoMerged = dupes.merged.reduce((n, c) => n + c.merged.length, 0);
       if (autoMerged > 0) {
         log.info(
@@ -1077,12 +1100,16 @@ async function runInner(input: {
         }
       }
     } catch (err) {
+      input.signal?.throwIfAborted();
       log.warn("post-curation entity dedup failed (non-fatal):", err);
     }
   }
 
-  // Soft-cap enforcement: after creates and the dedup sweeps settle the count,
-  // evict the lowest-value project-scoped entries back down to maxEntries.
+  // The maintenance operations below are synchronous even though the dedup
+  // APIs return already-settled promises. Abort checks bracket every await and
+  // write phase so reset cannot resume a stale writer, while foreground runs
+  // still enforce the same duplicate, cap, and cursor invariants as idle runs.
+  input.signal?.throwIfAborted();
   const evictedCount = enforceEntryCap(
     input.projectPath,
     cfg.curator.maxEntries,
@@ -1094,6 +1121,7 @@ async function runInner(input: {
     );
   }
 
+  input.signal?.throwIfAborted();
   const now = Date.now();
   lastCuratedAt.set(input.sessionID, now);
   saveSessionTracking(input.sessionID, { lastCuratedAt: now });

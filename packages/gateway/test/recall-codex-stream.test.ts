@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 /** One Responses-API SSE event (`event:` + `data:` framing). */
 function sseEvent(event: string, data: unknown): string {
@@ -224,7 +225,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/codex/responses`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/codex/responses`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -272,7 +273,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       upstream: Response,
     ): Promise<string> => {
       setUpstreamInterceptor(async () => upstream);
-      const response = await fetch(`${baseURL}${path}`, {
+      const response = await loopbackRequest(`${baseURL}${path}`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -447,7 +448,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/responses`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/responses`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

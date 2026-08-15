@@ -258,8 +258,42 @@ describe("remote authenticated tenant session binding", () => {
   );
 
   test("preserves provider-specific credentials inside one remote tenant session", async () => {
+    const openAIResponse = {
+      ...makeFixtureEntry({
+        seq: 1,
+        requestMessages: [],
+        responseText: "tenant A OpenAI response",
+        model: "gpt-4o-mini",
+      }),
+      response: {
+        id: "resp_tenant_a",
+        object: "response",
+        model: "gpt-4o-mini",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            id: "msg_tenant_a",
+            role: "assistant",
+            status: "completed",
+            content: [
+              {
+                type: "output_text",
+                text: "tenant A OpenAI response",
+                annotations: [],
+              },
+            ],
+          },
+        ],
+        usage: {
+          input_tokens: 100,
+          output_tokens: 10,
+          total_tokens: 110,
+        },
+      },
+    };
     harness = await createHarness({
-      fixtures: fixtures(2),
+      fixtures: [fixtures(1)[0], openAIResponse],
       configOverrides: {
         remoteGateway: true,
         gatewayAuthToken: TEST_GATEWAY_AUTH_TOKEN,
@@ -280,11 +314,14 @@ describe("remote authenticated tenant session binding", () => {
     await response.text();
 
     response = await harness.chat(
-      body([
-        { role: "user", content: PRIVATE_A },
-        { role: "assistant", content: "tenant A response" },
-        { role: "user", content: FOLLOW_UP_A },
-      ]),
+      {
+        ...body([
+          { role: "user", content: PRIVATE_A },
+          { role: "assistant", content: "tenant A response" },
+          { role: "user", content: FOLLOW_UP_A },
+        ]),
+        model: "gpt-4o-mini",
+      },
       AUTH_CASES[0].credentialA,
       {
         "x-lore-session-id": SHARED_SESSION,
@@ -333,6 +370,8 @@ describe("remote authenticated tenant session binding", () => {
       expect(response.status).toBe(200);
       await response.text();
     }
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     const rows = harness.queryDB<{
       content: string;
@@ -456,6 +495,8 @@ describe("remote authenticated tenant session binding", () => {
     );
     expect(response.status).toBe(200);
     await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
     const resumed = harness.queryDB<{
       session_id: string;

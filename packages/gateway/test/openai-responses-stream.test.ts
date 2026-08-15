@@ -11,6 +11,11 @@
 import { describe, test, expect, vi } from "vitest";
 import {
   accumulateResponsesSSEStream,
+  isSupportedResponsesOutputItemType,
+  isValidResponsesOutputItemStatus,
+  responsesDoneItemMatchesAdded,
+  responsesTerminalItemMatches,
+  SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES,
   streamResponsesPassthrough,
   translateAnthropicStreamToResponses,
 } from "../src/stream/openai-responses";
@@ -1233,6 +1238,642 @@ describe("accumulateResponsesSSEStream", () => {
   );
 
   test.each(["public", "codex"] as const)(
+    "%s rejects a terminal snapshot changing hosted-tool semantics",
+    async (validation) => {
+      const itemId = `ws-snapshot-${validation}`;
+      const reference = validation === "public" ? { output_index: 0 } : {};
+      const item = {
+        type: "web_search_call",
+        id: itemId,
+        status: "completed",
+        action: { type: "search", query: "good" },
+      };
+      const addedItem = { ...item, status: "in_progress" };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: { ...reference, item: addedItem },
+            },
+            {
+              event: "response.output_item.done",
+              data: { ...reference, item },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [
+                    {
+                      ...item,
+                      action: { type: "search", query: "EVIL" },
+                    },
+                  ],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects output_item.done changing hosted-tool semantics",
+    async (validation) => {
+      const item = {
+        type: "web_search_call",
+        id: `ws-done-${validation}`,
+        action: { type: "search", query: "good" },
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: {
+                  ...item,
+                  action: { type: "search", query: "EVIL" },
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects terminal mutation of an established extension field",
+    async (validation) => {
+      const item = {
+        type: "function_call",
+        id: `fc-extension-${validation}`,
+        call_id: `call-extension-${validation}`,
+        name: "lookup",
+        arguments: "{}",
+        caller: "trusted",
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [{ ...item, caller: "attacker" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts terminal status enrichment for a hosted-tool item",
+    async (validation) => {
+      const item = {
+        type: "web_search_call",
+        id: `ws-enriched-${validation}`,
+        action: { type: "search", query: "lore" },
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [{ ...item, status: "completed" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).resolves.toMatchObject({
+        rawOutputItems: [{ ...item, status: "completed" }],
+      });
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects recursive explicit null replacement in the terminal snapshot",
+    async (validation) => {
+      const item = {
+        type: "image_generation_call",
+        id: `image-null-${validation}`,
+        status: "completed",
+        result: null,
+        details: { revised_prompt: null },
+      };
+      const terminalItem = {
+        ...item,
+        result: "base64-result",
+        details: { revised_prompt: "cat" },
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "generating" },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: { status: "completed", output: [terminalItem] },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts hosted-tool status transitions",
+    async (validation) => {
+      const item = {
+        type: "image_generation_call",
+        id: `image-status-${validation}`,
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "generating" },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "failed" },
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [{ ...item, status: "failed" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).resolves.toMatchObject({
+        rawOutputItems: [{ ...item, status: "failed" }],
+      });
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts a failed function-call companion",
+    async (validation) => {
+      const item = {
+        type: "function_call",
+        id: `fc-failed-${validation}`,
+        call_id: `call-failed-${validation}`,
+        name: "lookup",
+        arguments: "{}",
+      };
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: { ...item, status: "in_progress" },
+            },
+          },
+          {
+            event: "response.output_item.done",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: { ...item, status: "failed" },
+            },
+          },
+          {
+            event: "response.completed",
+            data: {
+              response: {
+                status: "completed",
+                output: [{ ...item, status: "failed" }],
+              },
+            },
+          },
+        ]),
+        { validation, stopAtTerminal: true },
+      );
+
+      expect(result.rawOutputItems).toEqual([{ ...item, status: "failed" }]);
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects unknown output item types",
+    async (validation) => {
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { type: "provider_specific_output", id: "unknown" },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
+  test("keeps the standard output-item allowlist exhaustive", () => {
+    const expected = [
+      "message",
+      "function_call",
+      "function_call_output",
+      "reasoning",
+      "item_reference",
+      "web_search_call",
+      "file_search_call",
+      "computer_call",
+      "computer_call_output",
+      "computer_tool_call",
+      "computer_tool_call_output",
+      "code_interpreter_call",
+      "image_generation_call",
+      "local_shell_call",
+      "local_shell_call_output",
+      "shell_call",
+      "shell_call_output",
+      "mcp_call",
+      "mcp_list_tools",
+      "mcp_approval_request",
+      "mcp_approval_response",
+      "custom_tool_call",
+      "custom_tool_call_output",
+      "apply_patch_call",
+      "apply_patch_call_output",
+      "program",
+      "program_output",
+      "tool_search_call",
+      "tool_search_output",
+      "additional_tools",
+      "compaction",
+    ];
+
+    expect(SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES).toEqual(expected);
+    expect(expected.every(isSupportedResponsesOutputItemType)).toBe(true);
+    expect(isSupportedResponsesOutputItemType("provider_specific_output")).toBe(
+      false,
+    );
+  });
+
+  test("only permits sparse added fields to be extended by output_item.done", () => {
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "function_call",
+          id: "fc_sparse",
+          call_id: "call_sparse",
+          name: "lookup",
+          arguments: '{"value":1}',
+        },
+        {
+          type: "function_call",
+          id: "fc_sparse",
+          call_id: "call_sparse",
+          name: "lookup",
+          arguments: "",
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "image_generation_call",
+          id: "image_sparse",
+          result: "base64-result",
+        },
+        {
+          type: "image_generation_call",
+          id: "image_sparse",
+          result: null,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "function_call",
+          id: "fc_changed",
+          call_id: "call_changed",
+          name: "lookup",
+          arguments: "evil",
+        },
+        {
+          type: "function_call",
+          id: "fc_changed",
+          call_id: "call_changed",
+          name: "lookup",
+          arguments: "good",
+        },
+      ),
+    ).toBe(false);
+    for (const [type, field, partType] of [
+      ["message", "content", "output_text"],
+      ["reasoning", "summary", "summary_text"],
+    ] as const) {
+      expect(
+        responsesDoneItemMatchesAdded(
+          {
+            type,
+            id: `${type}_changed`,
+            [field]: [{ type: partType, text: "evil" }],
+          },
+          {
+            type,
+            id: `${type}_changed`,
+            [field]: [{ type: partType, text: "good" }],
+          },
+        ),
+      ).toBe(false);
+    }
+  });
+
+  test("rejects terminal null replacement but permits sparse enrichment", () => {
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: "base64-result",
+          details: { revised_prompt: "cat" },
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: null,
+          details: { revised_prompt: null },
+        },
+      ),
+    ).toBe(false);
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: "base64-result",
+          details: { revised_prompt: "cat" },
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: undefined,
+          details: {},
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_changed",
+          status: "completed",
+          result: "evil",
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_changed",
+          status: "completed",
+          result: "good",
+        },
+      ),
+    ).toBe(false);
+  });
+
+  test("validates type-specific hosted-tool statuses", () => {
+    expect(
+      isValidResponsesOutputItemStatus("web_search_call", "searching", "added"),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "code_interpreter_call",
+        "interpreting",
+        "added",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "image_generation_call",
+        "generating",
+        "added",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus("web_search_call", "banana", "added"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "image_generation_call",
+        "searching",
+        "added",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "tool_search_call",
+        "searching",
+        "added",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "function_call_output",
+        "failed",
+        "terminal",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "function_call_output",
+        "completed",
+        "terminal",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus("program", "failed", "terminal"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "image_generation_call",
+        "generating",
+        "done",
+      ),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus("mcp_list_tools", "completed", "done"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "file_search_call",
+        "incomplete",
+        "done",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "code_interpreter_call",
+        "incomplete",
+        "done",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus(
+        "tool_search_call",
+        "incomplete",
+        "done",
+      ),
+    ).toBe(true);
+    expect(
+      isValidResponsesOutputItemStatus("tool_search_call", "failed", "done"),
+    ).toBe(false);
+    expect(
+      isValidResponsesOutputItemStatus("custom_tool_call", "failed", "done"),
+    ).toBe(false);
+  });
+
+  test.each([
+    ["role", "user"],
+    ["status", "in_progress"],
+  ] as const)(
+    "public rejects a terminal message with changed %s",
+    async (field, value) => {
+      const itemId = `msg-changed-${field}`;
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                output_index: 0,
+                item: {
+                  type: "message",
+                  id: itemId,
+                  role: "assistant",
+                  status: "in_progress",
+                },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                output_index: 0,
+                item: {
+                  type: "message",
+                  id: itemId,
+                  role: "assistant",
+                  status: "completed",
+                  content: [],
+                },
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [
+                    {
+                      type: "message",
+                      id: itemId,
+                      role: "assistant",
+                      status: "completed",
+                      content: [],
+                      [field]: value,
+                    },
+                  ],
+                },
+              },
+            },
+          ]),
+          { validation: "public", stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
     "%s requires a present terminal output snapshot to be a one-to-one complete mapping",
     async (validation) => {
       const itemId = `snapshot-complete-${validation}`;
@@ -1256,6 +1897,8 @@ describe("accumulateResponsesSSEStream", () => {
         [],
         [{ type: "message", id: "", content: [] }],
         [{ type: "item_reference", id: "unknown-item" }],
+        [{ type: "item_reference", id: itemId, content: [] }],
+        [{ type: "message", id: itemId }],
         [
           { type: "item_reference", id: itemId },
           { type: "item_reference", id: itemId },
@@ -2292,6 +2935,38 @@ test("Anthropic translator emits inclusive Responses cache usage", async () => {
   ).not.toThrow();
 });
 
+test("Anthropic translator emits content_filter as response.incomplete", async () => {
+  const event = (type: string, data: Record<string, unknown>) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  const upstream = new Response(
+    event("message_start", {
+      message: {
+        id: "msg_filtered",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    }) +
+      event("message_delta", {
+        delta: { stop_reason: "refusal", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      }) +
+      event("message_stop", {}),
+  );
+
+  const output = await translateAnthropicStreamToResponses(upstream, {
+    strict: true,
+  }).text();
+  expect(output).toContain("event: response.incomplete");
+  expect(output).toContain('"status":"incomplete"');
+  expect(output).toContain('"reason":"content_filter"');
+  expect(output).not.toContain("event: response.completed");
+});
+
 // ---------------------------------------------------------------------------
 // streamResponsesPassthrough — true streaming (Responses → Responses client)
 // ---------------------------------------------------------------------------
@@ -2520,14 +3195,16 @@ describe("streamResponsesPassthrough", () => {
   });
 
   test("does not forward malformed JSON", async () => {
+    const outcomes: boolean[] = [];
     const output = await streamResponsesPassthrough(
       new Response("event: response.created\ndata: {bad}\n\n"),
-      () => {},
+      (_response, successful) => outcomes.push(successful),
       undefined,
       "public",
     ).text();
     expect(output).not.toContain("{bad}");
     expect(output).toContain("event: response.failed");
+    expect(outcomes).toEqual([false]);
   });
 
   test("rejects duplicate call_id before forwarding the conflicting event", async () => {
@@ -2595,6 +3272,7 @@ describe("streamResponsesPassthrough", () => {
   });
 
   test("validates and forwards a provider failure terminal", async () => {
+    const outcomes: boolean[] = [];
     const output = await streamResponsesPassthrough(
       buildSSEResponse([
         {
@@ -2608,12 +3286,33 @@ describe("streamResponsesPassthrough", () => {
           },
         },
       ]),
-      () => {},
+      (_response, successful) => outcomes.push(successful),
       undefined,
       "public",
     ).text();
     expect(output.match(/event: response\.failed/g)).toHaveLength(1);
     expect(output).toContain("provider failed");
+    expect(outcomes).toEqual([false]);
+  });
+
+  test("reports a missing terminal as unsuccessful", async () => {
+    const outcomes: boolean[] = [];
+    const output = await streamResponsesPassthrough(
+      buildSSEResponse([
+        {
+          event: "response.created",
+          data: {
+            type: "response.created",
+            response: { id: "missing-terminal", status: "in_progress" },
+          },
+        },
+      ]),
+      (_response, successful) => outcomes.push(successful),
+      undefined,
+      "public",
+    ).text();
+    expect(output).toContain("event: response.failed");
+    expect(outcomes).toEqual([false]);
   });
 
   test("counts comment-only wire bytes toward the aggregate cap", async () => {
@@ -2623,7 +3322,7 @@ describe("streamResponsesPassthrough", () => {
       undefined,
       "public",
     ).text();
-    expect(output).toContain("exceeded aggregate byte limit");
+    expect(output).toContain("Upstream response stream failed");
   });
 
   test("fails the stream when aggregate retained event data exceeds its cap", async () => {
@@ -2636,7 +3335,7 @@ describe("streamResponsesPassthrough", () => {
     const output = await streamResponsesPassthrough(upstream, () => {}).text();
 
     expect(output).toContain("event: response.failed");
-    expect(output).toContain("exceeded aggregate byte limit");
+    expect(output).toContain("Upstream response stream failed");
   });
 
   test("stops pulling upstream while a downstream consumer is not reading", async () => {
@@ -2745,6 +3444,46 @@ describe("streamResponsesPassthrough", () => {
     expect(done.stopReason).toBe("end_turn");
   });
 
+  test("finalizes when the client cancels immediately after the terminal event", async () => {
+    const upstream = controllableSSE();
+    let completeCalls = 0;
+    const client = streamResponsesPassthrough(upstream.response, () => {
+      completeCalls++;
+    });
+    if (!client.body) throw new Error("test response has no body");
+    const reader = client.body.getReader();
+    const decoder = new TextDecoder();
+
+    upstream.push("response.created", {
+      type: "response.created",
+      response: {
+        id: "resp_cancel_after_terminal",
+        model: "gpt-5.6-sol",
+        status: "in_progress",
+      },
+    });
+    upstream.push("response.completed", {
+      type: "response.completed",
+      response: {
+        id: "resp_cancel_after_terminal",
+        model: "gpt-5.6-sol",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    });
+
+    let seen = "";
+    while (!seen.includes("event: response.completed")) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error("stream closed before terminal event");
+      if (value) seen += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+
+    expect(completeCalls).toBe(1);
+  });
+
   test("forwards every upstream event verbatim, preserving non-accumulated fields", async () => {
     const upstream = controllableSSE();
     const clientResp = streamResponsesPassthrough(upstream.response, () => {});
@@ -2848,6 +3587,7 @@ describe("streamResponsesPassthrough", () => {
     const out = await drainToString(clientResp);
     // Client is told the turn failed rather than hanging on a missing terminal.
     expect(out).toContain("response.failed");
+    expect(out).not.toContain("upstream exploded");
     // onComplete still ran (so postResponse/cost tracking is not skipped)…
     expect(completed).not.toBeNull();
     // …and exactly once (the `completed` guard must not double-fire).

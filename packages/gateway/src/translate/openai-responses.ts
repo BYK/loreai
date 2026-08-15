@@ -722,49 +722,57 @@ function buildOpenAIResponsesNonStreamResponse(
   resp: GatewayResponse,
 ): Response {
   const usage = resp.usage ?? ZERO_USAGE;
-  const output: Array<Record<string, unknown>> = [];
+  const output: Array<Record<string, unknown>> = resp.rawOutputItems
+    ? [...resp.rawOutputItems]
+    : [];
   let textContent = "";
   const functionCalls: Array<Record<string, unknown>> = [];
 
-  for (const block of resp.content) {
-    if (block.type === "text") {
-      textContent += block.text;
-    } else if (block.type === "tool_use") {
-      functionCalls.push({
-        type: "function_call",
-        id: `fc_${block.id}`,
-        call_id: block.id,
-        name: block.name,
-        arguments: JSON.stringify(block.input),
+  if (!resp.rawOutputItems) {
+    for (const block of resp.content) {
+      if (block.type === "text") {
+        textContent += block.text;
+      } else if (block.type === "tool_use") {
+        functionCalls.push({
+          type: "function_call",
+          id: `fc_${block.id}`,
+          call_id: block.id,
+          name: block.name,
+          arguments: JSON.stringify(block.input),
+          status: "completed",
+        });
+      }
+    }
+
+    if (textContent) {
+      output.push({
+        type: "message",
+        id: `msg_${resp.id}`,
+        role: "assistant",
         status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: textContent,
+            annotations: [],
+          },
+        ],
       });
     }
+
+    output.push(...functionCalls);
   }
 
-  if (textContent) {
-    output.push({
-      type: "message",
-      id: `msg_${resp.id}`,
-      role: "assistant",
-      status: "completed",
-      content: [
-        {
-          type: "output_text",
-          text: textContent,
-          annotations: [],
-        },
-      ],
-    });
-  }
-
-  output.push(...functionCalls);
-
+  const status = mapStopReasonToStatus(resp.stopReason);
   const response = {
     id: resp.id.startsWith("resp_") ? resp.id : `resp_${resp.id}`,
     object: "response",
     created_at: Math.floor(Date.now() / 1000),
     model: resp.model,
-    status: mapStopReasonToStatus(resp.stopReason),
+    status,
+    ...(status === "incomplete"
+      ? { incomplete_details: incompleteDetails(resp.stopReason) }
+      : {}),
     output,
     usage: responsesUsage(usage),
   };
@@ -783,12 +791,20 @@ function mapStopReasonToStatus(reason: string): string {
       return "completed";
     case "max_tokens":
     case "length":
+    case "content_filter":
       return "incomplete";
     case "tool_use":
       return "completed";
     default:
       return "completed";
   }
+}
+
+function incompleteDetails(stopReason: string): { reason: string } {
+  return {
+    reason:
+      stopReason === "content_filter" ? "content_filter" : "max_output_tokens",
+  };
 }
 
 function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
@@ -975,15 +991,20 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
         }
       }
 
-      // response.completed
-      emit("response.completed", {
-        type: "response.completed",
+      const status = mapStopReasonToStatus(resp.stopReason);
+      const terminalEvent =
+        status === "incomplete" ? "response.incomplete" : "response.completed";
+      emit(terminalEvent, {
+        type: terminalEvent,
         response: {
           id: respId,
           object: "response",
           created_at: created,
           model: resp.model,
-          status: mapStopReasonToStatus(resp.stopReason),
+          status,
+          ...(status === "incomplete"
+            ? { incomplete_details: incompleteDetails(resp.stopReason) }
+            : {}),
           output: resp.content
             .map((block, i) => {
               if (block.type === "text") {

@@ -48,6 +48,7 @@ let cachedProviderModels: Map<string, string[]> | null = null;
 let cachedProviderRoutes: Map<string, ProviderRoute> | null = null;
 let cachedModelDataAt = 0;
 let inflightFetch: Promise<Map<string, ModelsDevEntry>> | null = null;
+let modelDataGeneration = 0;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
@@ -349,7 +350,9 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
   // Deduplicate concurrent calls: return the in-flight promise if one exists
   if (inflightFetch) return inflightFetch;
 
-  inflightFetch = (async () => {
+  const generation = modelDataGeneration;
+  let request!: Promise<Map<string, ModelsDevEntry>>;
+  request = (async () => {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -437,6 +440,7 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
         }
       }
 
+      if (generation !== modelDataGeneration) return modelData;
       cachedProviderRoutes = providerRoutes;
       cachedProviderModels = providerModelsIndex;
       cachedModelData = modelData;
@@ -453,11 +457,12 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       log.warn("models.dev API request failed");
       return cachedModelData ?? new Map();
     } finally {
-      inflightFetch = null;
+      if (inflightFetch === request) inflightFetch = null;
     }
   })();
 
-  return inflightFetch;
+  inflightFetch = request;
+  return request;
 }
 
 /**
@@ -601,6 +606,7 @@ export async function ensureModelDataReady(timeoutMs = 2_000): Promise<void> {
 
 /** Clear cached data (for testing). */
 export function clearModelDataCache(): void {
+  modelDataGeneration++;
   cachedModelData = null;
   cachedModelDataByProvider = null;
   cachedProviderModels = null;
@@ -626,6 +632,7 @@ export function _setModelDataForTest(
   byProvider?: Record<string, ModelsDevEntry>,
   providerModelsIndex?: Record<string, string[]>,
 ): void {
+  modelDataGeneration++;
   cachedModelData = new Map(Object.entries(entries));
   cachedModelDataByProvider = byProvider
     ? new Map(Object.entries(byProvider))

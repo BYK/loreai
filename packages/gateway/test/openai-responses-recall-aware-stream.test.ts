@@ -174,6 +174,53 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
   });
 
+  test("finalizes when the client cancels immediately after a no-recall terminal", async () => {
+    let upstreamCancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_cancel_terminal", "gpt-5.6-terra") +
+                completed("resp_cancel_terminal", {
+                  input_tokens: 1,
+                  output_tokens: 0,
+                }),
+            ),
+          );
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          upstreamCancelled = true;
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    let completeCalls = 0;
+    const client = streamResponsesRecallAware(upstream, {
+      onComplete: () => completeCalls++,
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not be called");
+      },
+    });
+    if (!client.body) throw new Error("test response has no body");
+    const reader = client.body.getReader();
+    const decoder = new TextDecoder();
+    let seen = "";
+    while (!seen.includes("event: response.completed")) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error("stream closed before terminal event");
+      if (value) seen += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+
+    expect(completeCalls).toBe(1);
+    expect(upstreamCancelled).toBe(true);
+  });
+
   test("forwards a principal response.failed exactly once when no recall occurs", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([
@@ -712,6 +759,60 @@ describe("streamResponsesRecallAware", () => {
     expect(await drain(client)).toContain("response.failed");
   });
 
+  test("rejects output_item.done changing hosted-tool semantics", async () => {
+    const item = {
+      type: "web_search_call",
+      id: "ws_done_changed",
+      action: { type: "search", query: "good" },
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_hosted_done_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            ...item,
+            action: { type: "search", query: "EVIL" },
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects unknown output item types", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_unknown_item", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "provider_specific_output", id: "unknown_item" },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
   test("rejects terminal output changing streamed identity", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([
@@ -742,6 +843,95 @@ describe("streamResponsesRecallAware", () => {
       },
     );
     expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("rejects an unknown public incomplete reason", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_unknown_incomplete", "gpt-5.6-terra"),
+        sseEvent("response.incomplete", {
+          response: {
+            id: "resp_unknown_incomplete",
+            model: "gpt-5.6-terra",
+            status: "incomplete",
+            incomplete_details: { reason: "provider_specific" },
+            output: [],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("response.failed");
+    expect(output).not.toContain("provider_specific");
+  });
+
+  test("public validation rejects a terminal without an output snapshot", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_missing_terminal_output", "gpt-5.6-terra"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_missing_terminal_output",
+            model: "gpt-5.6-terra",
+            status: "completed",
+          },
+        }),
+      ]),
+      {
+        validation: "public",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("Codex validation accepts queued creation and completed event with incomplete status", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        sseEvent("response.created", {
+          response: {
+            id: "resp_codex_lifecycle",
+            model: "gpt-5.6-terra",
+            status: "queued",
+            output: [],
+          },
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_codex_lifecycle",
+            model: "gpt-5.6-terra",
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("event: response.completed");
+    expect(output).toContain('"status":"incomplete"');
+    expect(output).not.toContain("event: response.failed");
   });
 
   test("rejects terminal function calls changing the streamed tool name", async () => {
@@ -978,6 +1168,55 @@ describe("streamResponsesRecallAware", () => {
       expect(await drain(client)).not.toContain("response.failed");
     },
   );
+
+  test("rejects recursive explicit null replacement in the terminal snapshot", async () => {
+    let completedResponse: GatewayResponse | undefined;
+    const item = {
+      type: "image_generation_call",
+      id: "image_terminal_null",
+      status: "completed",
+      result: null,
+      details: { revised_prompt: null },
+    };
+    const terminalItem = {
+      ...item,
+      result: "base64-result",
+      details: { revised_prompt: "cat" },
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_null", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { ...item, status: "generating" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_null",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [terminalItem],
+          },
+        }),
+      ]),
+      {
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+    expect(completedResponse?.rawOutputItems).toEqual([item]);
+  });
 
   test("never forwards response-side item_reference lifecycle events", async () => {
     let completedResponse: GatewayResponse | undefined;
@@ -2604,7 +2843,7 @@ describe("streamResponsesRecallAware", () => {
     expect(recalled).toBe(1);
   });
 
-  test("preserves continuation terminal and item metadata", async () => {
+  test("preserves content_filter continuation terminal and item metadata", async () => {
     const citation = {
       type: "url_citation",
       start_index: 0,
@@ -2620,7 +2859,7 @@ describe("streamResponsesRecallAware", () => {
           id: "resp_terminal_metadata_followup",
           model: "gpt-5.6-terra",
           status: "incomplete",
-          incomplete_details: { reason: "max_output_tokens" },
+          incomplete_details: { reason: "content_filter" },
           output: [
             {
               type: "message",
@@ -2656,7 +2895,8 @@ describe("streamResponsesRecallAware", () => {
     );
 
     const output = await drain(client);
-    expect(output).toContain('"reason":"max_output_tokens"');
+    expect(output).toContain('"reason":"content_filter"');
+    expect(output).toContain('"status":"incomplete"');
     expect(output).toContain("https://example.com/lore");
     expect(output).not.toContain(PUBLIC_RECALL_ERROR);
   });
@@ -3776,8 +4016,101 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain("intermediate");
+    expect(out).not.toContain('"name":"recall"');
+    expect(out).not.toContain("detail");
+    expect(out).not.toContain("call_second");
     expect(JSON.stringify(completedResponse)).not.toContain("intermediate");
     expect(JSON.stringify(completedResponse)).not.toContain("lore-recall");
+  });
+
+  test("commits deferred recall persistence after a successful continuation", async () => {
+    let committed = 0;
+    let rolledBack = 0;
+    let transaction: { commit: () => void; rollback: () => void } | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_commit_success", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_commit_success"),
+      ]),
+      {
+        onComplete: () => {},
+        onTransactionReady: (ready) => {
+          transaction = ready;
+        },
+        onRecall: async () => ({
+          anchorText: buildAnchor("architecture"),
+          resultText: "results",
+          commit: () => committed++,
+          rollback: () => rolledBack++,
+        }),
+        runFollowUp: async () => {
+          const body = streamFrom([
+            created("resp_commit_followup", "gpt-5.6-terra"),
+            textItem(0, "answer", "msg_commit_answer"),
+            completed("resp_commit_followup"),
+          ]).body;
+          if (!body) throw new Error("expected continuation body");
+          return { reader: body.getReader() };
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("answer");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(transaction).toBeDefined();
+    expect(committed).toBe(0);
+    expect(rolledBack).toBe(0);
+    transaction?.commit();
+    expect(committed).toBe(1);
+    expect(rolledBack).toBe(0);
+  });
+
+  test("rolls back every recall mutation when a commit callback fails", async () => {
+    let persisted = 0;
+    let rolledBack = 0;
+    let transaction: { commit: () => void; rollback: () => void } | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_commit_failure", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_commit_failure"),
+      ]),
+      {
+        onComplete: () => {},
+        onTransactionReady: (ready) => {
+          transaction = ready;
+        },
+        onRecall: async () => ({
+          anchorText: buildAnchor("architecture"),
+          resultText: "results",
+          commit: () => {
+            persisted++;
+            throw new Error("recall persistence failed");
+          },
+          rollback: () => {
+            persisted--;
+            rolledBack++;
+          },
+        }),
+        runFollowUp: async () => {
+          const body = streamFrom([
+            created("resp_commit_failure_followup", "gpt-5.6-terra"),
+            textItem(0, "answer", "msg_commit_failure_answer"),
+            completed("resp_commit_failure_followup"),
+          ]).body;
+          if (!body) throw new Error("expected continuation body");
+          return { reader: body.getReader() };
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("answer");
+    expect(transaction).toBeDefined();
+    expect(() => transaction?.commit()).toThrow("recall persistence failed");
+    expect(persisted).toBe(0);
+    expect(rolledBack).toBe(1);
   });
 
   test("rolls back deferred persistence when a recall-only continuation fails", async () => {
@@ -4536,11 +4869,13 @@ describe("streamResponsesRecallAware", () => {
         response: {
           id: "resp_followup_failure",
           status: "failed",
+          usage: { input_tokens: 1_000, output_tokens: 100 },
           error: { message: "provider failed" },
         },
       }),
     ]);
-    let completedResponse: unknown;
+    let completedResponse: GatewayResponse | undefined;
+    let successful: boolean | undefined;
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_failure", "gpt-5.6-terra"),
@@ -4548,8 +4883,9 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_failure"),
       ]),
       {
-        onComplete: (response) => {
+        onComplete: (response, didSucceed) => {
           completedResponse = response;
+          successful = didSucceed;
         },
         onRecall: async ({ query }) => ({
           anchorText: buildAnchor(query),
@@ -4568,6 +4904,11 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("lore-recall");
     expect(out).not.toContain("partial answer");
     expect(JSON.stringify(completedResponse)).not.toContain("partial answer");
+    expect(completedResponse?.usage).toMatchObject({
+      inputTokens: 1_000,
+      outputTokens: 100,
+    });
+    expect(successful).toBe(false);
     expect(out).not.toContain("response.completed");
   });
 
@@ -4655,6 +4996,9 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("preserves response.incomplete from the continuation", async () => {
+    const outcomes: boolean[] = [];
+    let commits = 0;
+    let rollbacks = 0;
     const followUp = streamFrom([
       created("resp_followup", "gpt-5.6-terra"),
       textItem(0, "partial"),
@@ -4667,10 +5011,12 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_first"),
       ]),
       {
-        onComplete: () => {},
+        onComplete: (_response, successful) => outcomes.push(successful),
         onRecall: async () => ({
           anchorText: buildAnchor("architecture"),
           resultText: "results",
+          commit: () => commits++,
+          rollback: () => rollbacks++,
         }),
         runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
       },
@@ -4679,6 +5025,9 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out.match(/^event: response\.incomplete$/gm)).toHaveLength(1);
     expect(out.match(/^event: response\.completed$/gm) ?? []).toHaveLength(0);
+    expect(outcomes).toEqual([false]);
+    expect(commits).toBe(0);
+    expect(rollbacks).toBe(1);
   });
 
   test("never executes recall from an incomplete principal", async () => {
@@ -4737,6 +5086,7 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("maps response.done with incomplete status to response.incomplete", async () => {
+    const outcomes: boolean[] = [];
     const followUp = streamFrom([
       created("resp_followup", "gpt-5.6-terra"),
       textItem(0, "partial"),
@@ -4749,7 +5099,7 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_first"),
       ]),
       {
-        onComplete: () => {},
+        onComplete: (_response, successful) => outcomes.push(successful),
         onRecall: async () => ({
           anchorText: buildAnchor("architecture"),
           resultText: "results",
@@ -4761,6 +5111,7 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out.match(/^event: response\.incomplete$/gm)).toHaveLength(1);
     expect(out).not.toContain('"type":"response.completed"');
+    expect(outcomes).toEqual([false]);
   });
 
   test("retains reasoning items in the rebuilt terminal", async () => {

@@ -305,6 +305,7 @@ function runSigkillChild(operation: "setup" | "undo", commit: number): void {
   const child = spawnSync(
     process.execPath,
     [
+      "--conditions=development",
       "--import",
       "tsx",
       join(import.meta.dirname, "setup-sigkill-child.ts"),
@@ -338,6 +339,7 @@ function runExternalEffectSigkillChild(
   const child = spawnSync(
     process.execPath,
     [
+      "--conditions=development",
       "--import",
       "tsx",
       join(import.meta.dirname, "setup-external-sigkill-child.ts"),

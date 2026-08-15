@@ -13,6 +13,7 @@ import { statSync, unlinkSync, existsSync, rmSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import {
   db,
+  databaseInTransaction,
   ensureProject,
   projectId,
   projectPath as getProjectPathById,
@@ -156,10 +157,12 @@ onProjectMutation(() => {
 /** List all projects with summary counts. */
 export function listProjects(): ProjectSummary[] {
   const now = Date.now();
-  if (projectsCache && now - projectsCacheAt < LIST_CACHE_TTL_MS) {
+  const database = db();
+  const cacheable = !databaseInTransaction(database);
+  if (cacheable && projectsCache && now - projectsCacheAt < LIST_CACHE_TTL_MS) {
     return projectsCache;
   }
-  const result = db()
+  const result = database
     .query(
       `SELECT p.id, p.path, p.name, p.git_remote, p.created_at,
         COALESCE(k.cnt, 0) AS knowledge_count,
@@ -187,8 +190,10 @@ export function listProjects(): ProjectSummary[] {
        ORDER BY p.created_at DESC`,
     )
     .all() as ProjectSummary[];
-  projectsCache = result;
-  projectsCacheAt = now;
+  if (cacheable) {
+    projectsCache = result;
+    projectsCacheAt = now;
+  }
   return result;
 }
 
@@ -881,6 +886,11 @@ export function deleteProject(projectId: string): ClearResult | null {
     database
       .query("DELETE FROM project_path_aliases WHERE project_id = ?")
       .run(projectId);
+    database
+      .query(
+        "DELETE FROM project_id_aliases WHERE retired_id = ? OR project_id = ?",
+      )
+      .run(projectId, projectId);
     database
       .query("DELETE FROM warmup_histograms WHERE project_id = ?")
       .run(projectId);
@@ -1604,6 +1614,13 @@ export type MergeResult = {
  * Returns counts of moved rows for reporting.
  */
 export function mergeProjects(sourceId: string, targetId: string): MergeResult {
+  if (sourceId === targetId) {
+    return {
+      knowledge_moved: 0,
+      messages_moved: 0,
+      distillations_moved: 0,
+    };
+  }
   const database = db();
 
   // Count before merging (result.changes is inflated by FTS triggers)

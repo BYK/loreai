@@ -2198,7 +2198,9 @@ export async function prewarmDistillationSnapshot(
   projectPath: string,
   sessionID: string | undefined,
   messages: MessageWithParts[],
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   if (!sessionID) return;
   const sessState = getSessionState(sessionID);
   const lastUserMsgId = lastUserMessageId(messages);
@@ -2209,6 +2211,7 @@ export async function prewarmDistillationSnapshot(
   if (snapshot && snapshot.lastUserMsgId === lastUserMsgId) return;
 
   const rows = await loadDistillationsOffloaded(projectPath, sessionID);
+  signal?.throwIfAborted();
   if (rows === null) return; // worker timeout → let transform() do the sync load
 
   sessState.distillationSnapshot = { rows, lastUserMsgId };

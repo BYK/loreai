@@ -89,6 +89,15 @@ export type {
   LLMClient,
 } from "./types";
 export { isTextPart, isReasoningPart, isToolPart } from "./types";
+export {
+  WARMUP_HISTOGRAM_BIN_COUNT,
+  MAX_WARMUP_HISTOGRAM_TOTAL,
+  emptyWarmupHistogramCounts,
+  mergeWarmupHistogramCounts,
+  normalizeWarmupHistogram,
+  encodeWarmupHistogram,
+  decodeWarmupHistogram,
+} from "./warmup-histogram";
 
 export { dataDir } from "./data-dir";
 export { currentTenantId, withTenant, LOCAL_TENANT_ID } from "./tenant";
@@ -111,6 +120,7 @@ export {
   setLastImportAt,
   isFirstRun,
   projectId,
+  canonicalProjectId,
   projectName,
   projectPath,
   projectKnownPaths,
@@ -123,6 +133,9 @@ export {
   resolveWritableScope,
   scopeMemberRole,
   resolveProjectByRemoteOrPath,
+  onProjectMutation,
+  databaseInTransaction,
+  type ProjectMutation,
   mergeProjectInternal,
   convergeProjectsByRemote,
   UNATTRIBUTED_PROJECT_PREFIX,

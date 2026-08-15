@@ -1,5 +1,13 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { AGENTS, captureUserUpstream } from "../src/cli/agents";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  AGENTS,
+  captureUserEnvCredential,
+  captureUserUpstream,
+} from "../src/cli/agents";
 
 // ---------------------------------------------------------------------------
 // Claude Code agent
@@ -35,15 +43,25 @@ describe("Claude Code agent envVars", () => {
   });
 
   test("both X-Lore-Project and X-Lore-Git-Remote coexist when git remote is available", () => {
-    // Use the actual repo cwd so safeRemote() finds a real git remote.
-    const env = claude.envVars("http://127.0.0.1:3207", process.cwd());
-    const headers = env.ANTHROPIC_CUSTOM_HEADERS ?? "";
-    expect(headers).toContain("X-Lore-Project:");
-    expect(headers).toContain("X-Lore-Git-Remote:");
-    // Project header should appear first (injected before git remote).
-    const projectIdx = headers.indexOf("X-Lore-Project:");
-    const remoteIdx = headers.indexOf("X-Lore-Git-Remote:");
-    expect(projectIdx).toBeLessThan(remoteIdx);
+    const cwd = mkdtempSync(join(tmpdir(), "lore-agent-remote-"));
+    try {
+      execFileSync("git", ["init"], { cwd, stdio: "ignore" });
+      execFileSync(
+        "git",
+        ["remote", "add", "origin", "git@github.com:test/repo.git"],
+        { cwd, stdio: "ignore" },
+      );
+      const env = claude.envVars("http://127.0.0.1:3207", cwd);
+      const headers = env.ANTHROPIC_CUSTOM_HEADERS ?? "";
+      expect(headers).toContain(`X-Lore-Project: ${cwd}`);
+      expect(headers).toContain("X-Lore-Git-Remote: github.com/test/repo");
+      // Project header should appear first (injected before git remote).
+      const projectIdx = headers.indexOf("X-Lore-Project:");
+      const remoteIdx = headers.indexOf("X-Lore-Git-Remote:");
+      expect(projectIdx).toBeLessThan(remoteIdx);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   test("preserves user-set ANTHROPIC_CUSTOM_HEADERS", () => {
@@ -392,6 +410,9 @@ describe("captureUserUpstream", () => {
       "http://localhost:8080",
       "http://127.0.0.5:1234",
       "http://[::1]:3000",
+      "http://[::ffff:127.0.0.1]:3207",
+      "http://[0:0:0:0:0:ffff:7f00:5]:3207",
+      "http://[::ffff:0.0.0.0]:3207",
     ]) {
       expect(
         captureUserUpstream(claude, GATEWAY, { ANTHROPIC_BASE_URL: url }),
@@ -399,19 +420,28 @@ describe("captureUserUpstream", () => {
     }
   });
 
-  test("ignores a non-URL / unparseable value", () => {
-    const captured = captureUserUpstream(claude, GATEWAY, {
-      ANTHROPIC_BASE_URL: "not a url",
-    });
-    expect(captured).toBe(null);
+  test("does not reject an IPv4-mapped public address", () => {
+    expect(
+      captureUserUpstream(claude, GATEWAY, {
+        ANTHROPIC_BASE_URL: "https://[::ffff:192.0.2.1]/v1",
+      }),
+    ).toMatchObject({ wireProtocol: "anthropic" });
   });
 
-  test("ignores an empty / whitespace value", () => {
-    expect(
+  test("rejects a non-URL / unparseable value", () => {
+    expect(() =>
+      captureUserUpstream(claude, GATEWAY, {
+        ANTHROPIC_BASE_URL: "not a url",
+      }),
+    ).toThrow(/unsafe or invalid upstream URL/);
+  });
+
+  test("rejects an explicitly configured whitespace value", () => {
+    expect(() =>
       captureUserUpstream(claude, GATEWAY, {
         ANTHROPIC_BASE_URL: "   ",
       }),
-    ).toBe(null);
+    ).toThrow(/unsafe or invalid upstream URL/);
   });
 
   test("returns null for an agent with no adoptable base-URL var (opencode)", () => {
@@ -430,5 +460,14 @@ describe("captureUserUpstream", () => {
       url: "https://my-proxy.example.com",
       wireProtocol: "gemini",
     });
+  });
+
+  test("does not detach an env credential from an unsafe configured upstream", () => {
+    expect(
+      captureUserEnvCredential(claude, {
+        ANTHROPIC_AUTH_TOKEN: "private-proxy-token",
+        ANTHROPIC_BASE_URL: "https://proxy.example/v1?api_key=secret",
+      }),
+    ).toBeNull();
   });
 });

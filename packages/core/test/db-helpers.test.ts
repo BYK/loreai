@@ -1,5 +1,172 @@
 import { describe, test, expect, beforeEach } from "vitest";
-import { db, runUpsert, withTransaction, withSavepoint } from "../src/db";
+import {
+  close,
+  databaseInTransaction,
+  db,
+  runUpsert,
+  withTransaction,
+  withSavepoint,
+} from "../src/db";
+
+function withoutNativeTransactionState(
+  connection: ReturnType<typeof db>,
+): ReturnType<typeof db> {
+  return new Proxy(connection, {
+    get(target, property) {
+      if (property === "isTransaction" || property === "inTransaction") {
+        return undefined;
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+describe("databaseInTransaction", () => {
+  test("fallback leaves an autocommit connection unchanged", () => {
+    const connection = db();
+    const fallback = withoutNativeTransactionState(connection);
+
+    expect(databaseInTransaction(fallback)).toBe(false);
+    expect(connection.isTransaction).toBe(false);
+  });
+
+  test("fallback observes raw exec and prepared transaction statements", () => {
+    const connection = db();
+    const fallback = withoutNativeTransactionState(connection);
+
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      expect(databaseInTransaction(fallback)).toBe(true);
+    } finally {
+      connection.exec("COMMIT");
+    }
+    expect(databaseInTransaction(fallback)).toBe(false);
+
+    connection.query("BEGIN").run();
+    try {
+      expect(databaseInTransaction(fallback)).toBe(true);
+    } finally {
+      connection.query("ROLLBACK").run();
+    }
+    expect(databaseInTransaction(fallback)).toBe(false);
+  });
+
+  test("fallback follows nested and duplicate savepoint semantics", () => {
+    const connection = db();
+    const fallback = withoutNativeTransactionState(connection);
+
+    connection.exec("SAVEPOINT outer_sp");
+    try {
+      expect(databaseInTransaction(fallback)).toBe(true);
+      connection.exec("SAVEPOINT inner_sp; SAVEPOINT inner_sp");
+      expect(databaseInTransaction(fallback)).toBe(true);
+      connection.exec("ROLLBACK TO outer_sp");
+      expect(databaseInTransaction(fallback)).toBe(true);
+      connection.exec("RELEASE outer_sp");
+    } catch (error) {
+      if (connection.isTransaction) connection.exec("ROLLBACK");
+      throw error;
+    }
+    expect(databaseInTransaction(fallback)).toBe(false);
+
+    connection.exec("BEGIN; SAVEPOINT outer_tx; SAVEPOINT inner_tx");
+    try {
+      connection.exec("RELEASE outer_tx");
+      expect(databaseInTransaction(fallback)).toBe(true);
+    } finally {
+      connection.exec("ROLLBACK");
+    }
+    expect(databaseInTransaction(fallback)).toBe(false);
+  });
+
+  test("fallback reflects failed transaction boundaries", () => {
+    const connection = db();
+    const fallback = withoutNativeTransactionState(connection);
+    connection.exec(`
+      CREATE TABLE IF NOT EXISTS _t_tx_parent (id INTEGER PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS _t_tx_child (
+        parent_id INTEGER REFERENCES _t_tx_parent(id)
+          DEFERRABLE INITIALLY DEFERRED
+      );
+      DELETE FROM _t_tx_child;
+      DELETE FROM _t_tx_parent;
+      BEGIN;
+      INSERT INTO _t_tx_child(parent_id) VALUES (1);
+    `);
+    try {
+      expect(() => connection.exec("COMMIT")).toThrow();
+      expect(databaseInTransaction(fallback)).toBe(true);
+      expect(() => connection.exec("ROLLBACK TO missing_savepoint")).toThrow();
+      expect(databaseInTransaction(fallback)).toBe(true);
+    } finally {
+      connection.exec("ROLLBACK");
+    }
+    expect(databaseInTransaction(fallback)).toBe(false);
+  });
+
+  test("fallback propagates probe cleanup failures", () => {
+    const connection = db();
+    const fallback = withoutNativeTransactionState(connection);
+    const cleanupFailure = new Error("simulated rollback failure");
+    const brokenCleanup = new Proxy(fallback, {
+      get(target, property) {
+        if (property === "exec") {
+          return (sql: string) => {
+            if (sql === "BEGIN DEFERRED; ROLLBACK") {
+              connection.exec("BEGIN DEFERRED");
+              throw cleanupFailure;
+            }
+            return connection.exec(sql);
+          };
+        }
+        return Reflect.get(target, property, target);
+      },
+    });
+
+    try {
+      expect(() => databaseInTransaction(brokenCleanup)).toThrow(
+        cleanupFailure,
+      );
+      expect(connection.isTransaction).toBe(true);
+    } finally {
+      if (connection.isTransaction) connection.exec("ROLLBACK");
+    }
+  });
+
+  test("fallback observes transaction wrappers and callback rollback", () => {
+    const connection = db();
+    const fallback = withoutNativeTransactionState(connection);
+
+    withTransaction(() => {
+      expect(databaseInTransaction(fallback)).toBe(true);
+      withSavepoint("fallback_nested", () => {
+        expect(databaseInTransaction(fallback)).toBe(true);
+      });
+      expect(databaseInTransaction(fallback)).toBe(true);
+    });
+    expect(databaseInTransaction(fallback)).toBe(false);
+
+    expect(() =>
+      withTransaction(() => {
+        expect(databaseInTransaction(fallback)).toBe(true);
+        throw new Error("rollback fallback wrapper");
+      }),
+    ).toThrow("rollback fallback wrapper");
+    expect(databaseInTransaction(fallback)).toBe(false);
+  });
+
+  test("fallback starts clean after close and reopen", () => {
+    const connection = db();
+    connection.exec("BEGIN IMMEDIATE");
+    close();
+
+    const reopened = db();
+    expect(databaseInTransaction(withoutNativeTransactionState(reopened))).toBe(
+      false,
+    );
+  });
+});
 
 describe("runUpsert", () => {
   beforeEach(() => {

@@ -1,4 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   createHistogram,
   recordGap,
@@ -55,7 +57,14 @@ import {
   compressBody,
   normalizeBodyForComparison,
 } from "../src/cache-analytics";
-import { getKV, setKV } from "@loreai/core";
+import {
+  decodeWarmupHistogram,
+  encodeWarmupHistogram,
+  getKV,
+  MAX_WARMUP_HISTOGRAM_TOTAL,
+  normalizeWarmupHistogram,
+  setKV,
+} from "@loreai/core";
 import {
   setCacheSizeSnapshot,
   setCachePricing,
@@ -2331,6 +2340,7 @@ import {
   getGlobalHistogram,
   loadGlobalHistograms,
   flushGlobalHistograms,
+  getGlobalHistogramsSnapshot,
   blendedHistogramForSession,
 } from "../src/cache-warmer";
 
@@ -2512,11 +2522,49 @@ describe("undefined pid fallback", () => {
 // Global histogram persistence: backward-compat migration
 // ---------------------------------------------------------------------------
 
-import { db, projectId } from "@loreai/core";
+import {
+  db,
+  ensureProject,
+  mergeProjectInternal,
+  projectId,
+  temporal,
+  withSavepoint,
+} from "@loreai/core";
 
 describe("global histogram persistence", () => {
   const TEST_PROJECT_PATH = "/tmp/test-histogram-project";
+  const projectMutationChild = fileURLToPath(
+    new URL("./helpers/project-mutation-child.ts", import.meta.url),
+  );
   let pid: string;
+
+  function runProjectMutation(
+    operation: "merge" | "delete",
+    sourceId: string,
+    targetId?: string,
+  ): void {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        projectMutationChild,
+        operation,
+        sourceId,
+        ...(targetId ? [targetId] : []),
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          LORE_DB_PATH: process.env.LORE_DB_PATH,
+          LORE_NO_DB_TRACING: "1",
+        },
+        encoding: "utf8",
+      },
+    );
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  }
 
   beforeEach(() => {
     _resetForTest();
@@ -2560,6 +2608,190 @@ describe("global histogram persistence", () => {
     expect(hist.total).toBe(15); // 10 + 5
     expect(hist.counts[0]).toBe(10);
     expect(hist.counts[3]).toBe(5);
+  });
+
+  test("keeps a safe persisted histogram when valid slot totals overflow in aggregate", () => {
+    const d = db();
+    const binCount = HISTOGRAM_BINS.length + 1;
+    const perSlotTotal = 5_000_000_000_000_000;
+    const workCounts = Array.from({ length: binCount }, () => 0);
+    const eveningCounts = [...workCounts];
+    workCounts[0] = perSlotTotal;
+    eveningCounts[0] = perSlotTotal;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'work', ?, ?, 100), (?, 'evening', ?, ?, 100)`,
+    ).run(
+      pid,
+      JSON.stringify(workCounts),
+      perSlotTotal,
+      pid,
+      JSON.stringify(eveningCounts),
+      perSlotTotal,
+    );
+
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    const loaded = getGlobalHistogram(pid);
+    expect(Number.isSafeInteger(loaded.total)).toBe(true);
+    expect(loaded.total).toBeGreaterThan(0);
+    expect(loaded.counts.reduce((sum, count) => sum + count, 0)).toBe(
+      loaded.total,
+    );
+
+    recordGlobalGap(TEST_PROJECT_PATH, 120_000);
+    flushGlobalHistograms();
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(pid) as { counts: string; total: number };
+    expect(Number.isSafeInteger(row.total)).toBe(true);
+    const exact = decodeWarmupHistogram(row.counts, row.total);
+    expect(exact).toBeDefined();
+    expect(normalizeWarmupHistogram(exact ?? []).total).toBe(row.total);
+
+    _resetForTest();
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    expect(getGlobalHistogram(pid).total).toBe(row.total);
+  });
+
+  test("preserves rare buckets independent of persisted slot order", () => {
+    const d = db();
+    const firstPath = "/tmp/test-histogram-rare-first";
+    const secondPath = "/tmp/test-histogram-rare-second";
+    const firstId = ensureProject(firstPath);
+    const secondId = ensureProject(secondPath);
+    const largeTotal = Number.MAX_SAFE_INTEGER;
+    const large = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0);
+    const small = [...large];
+    large[0] = largeTotal - 1;
+    large[1] = 1;
+    small[2] = 1;
+    const insert = (projectId: string, largeFirst: boolean) => {
+      const rows = largeFirst
+        ? ([
+            ["large", large, largeTotal],
+            ["small", small, 1],
+          ] as const)
+        : ([
+            ["small", small, 1],
+            ["large", large, largeTotal],
+          ] as const);
+      for (const [slot, counts, total] of rows) {
+        d.query(
+          `INSERT INTO warmup_histograms
+             (project_id, time_slot, counts, total, updated_at)
+           VALUES (?, ?, ?, ?, 100)`,
+        ).run(projectId, slot, JSON.stringify(counts), total);
+      }
+    };
+    insert(firstId, true);
+    insert(secondId, false);
+
+    loadGlobalHistograms(firstPath);
+    loadGlobalHistograms(secondPath);
+    const first = getGlobalHistogram(firstId);
+    const second = getGlobalHistogram(secondId);
+    expect(first).toEqual(second);
+    expect(first.counts.slice(0, 3).every((count) => count > 0)).toBe(true);
+
+    recordGlobalGap(firstPath, 120_000);
+    recordGlobalGap(secondPath, 120_000);
+    flushGlobalHistograms();
+    for (const projectId of [firstId, secondId]) {
+      const row = d
+        .query(
+          "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+        )
+        .get(projectId) as { counts: string; total: number };
+      const exact = decodeWarmupHistogram(row.counts, row.total);
+      expect(exact?.slice(0, 3)).toEqual([BigInt(largeTotal - 1), 1n, 1n]);
+    }
+
+    _resetForTest();
+    loadGlobalHistograms(firstPath);
+    loadGlobalHistograms(secondPath);
+    expect(getGlobalHistogram(firstId)).toEqual(getGlobalHistogram(secondId));
+  });
+
+  test("publishes the retained weights after storage-budget compaction", () => {
+    const d = db();
+    const huge = 10n ** 3199n;
+    const firstWeights = Array.from({ length: 21 }, (_, index) =>
+      index < 10 ? huge * BigInt(index + 1) : 0n,
+    );
+    const secondWeights = Array.from({ length: 21 }, (_, index) =>
+      index >= 10 ? huge * BigInt(index + 1) : 0n,
+    );
+    const first = encodeWarmupHistogram(firstWeights);
+    const second = encodeWarmupHistogram(secondWeights);
+    expect(first.counts.length).toBeLessThan(64 * 1024);
+    expect(second.counts.length).toBeLessThan(64 * 1024);
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'first', ?, ?, 100), (?, 'second', ?, ?, 100)`,
+    ).run(pid, first.counts, first.total, pid, second.counts, second.total);
+
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    recordGlobalGap(TEST_PROJECT_PATH, 120_000);
+    flushGlobalHistograms();
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(pid) as { counts: string; total: number };
+    const retained = decodeWarmupHistogram(row.counts, row.total);
+    expect(retained).toBeDefined();
+    const expected = normalizeWarmupHistogram(retained ?? []);
+    expect(expected.total).toBe(MAX_WARMUP_HISTOGRAM_TOTAL);
+    expect(getGlobalHistogram(pid)).toEqual(expected);
+
+    _resetForTest();
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    expect(getGlobalHistogram(pid)).toEqual(expected);
+  });
+
+  test.each([
+    [
+      "negative compensated counts",
+      JSON.stringify([-1, 2, ...Array.from({ length: 19 }, () => 0)]),
+      "1",
+    ],
+    [
+      "unsafe numeric count",
+      JSON.stringify([
+        Number.MAX_SAFE_INTEGER + 1,
+        ...Array.from({ length: 20 }, () => 0),
+      ]),
+      String(Number.MAX_SAFE_INTEGER + 1),
+    ],
+    [
+      "forged exact representation",
+      JSON.stringify({
+        v: 1,
+        counts: [1, ...Array.from({ length: 20 }, () => 0)],
+        exact: Array.from({ length: 21 }, () => "0"),
+      }),
+      "1",
+    ],
+  ] as const)("ignores persisted %s", (_name, malformedCounts, total) => {
+    const d = db();
+    const validCounts = Array.from(
+      { length: HISTOGRAM_BINS.length + 1 },
+      () => 0,
+    );
+    validCounts[0] = 3;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'valid', ?, 3, 100), (?, 'malformed', ?, ?, 100)`,
+    ).run(pid, JSON.stringify(validCounts), pid, malformedCounts, total);
+
+    loadGlobalHistograms(TEST_PROJECT_PATH);
+    expect(getGlobalHistogram(pid)).toEqual({ counts: validCounts, total: 3 });
   });
 
   test("flush writes 'all' row and deletes old slot rows", () => {
@@ -2618,6 +2850,509 @@ describe("global histogram persistence", () => {
     expect(hist.total).toBe(10); // 7 + 3, no double-count
     expect(hist.counts[0]).toBe(7);
     expect(hist.counts[5]).toBe(3);
+  });
+
+  test("project merge preserves persisted history and unflushed target gaps", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-merge-source";
+    const targetPath = "/tmp/test-histogram-merge-target";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    const sourceCounts = Array.from(
+      { length: HISTOGRAM_BINS.length + 1 },
+      () => 0,
+    );
+    const targetCounts = [...sourceCounts];
+    sourceCounts[0] = 7;
+    targetCounts[0] = 3;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100), (?, 'all', ?, 3, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+    );
+
+    loadGlobalHistograms(targetPath);
+    recordGlobalGap(targetPath, 5_000);
+    mergeProjectInternal(sourceId, targetId);
+    flushGlobalHistograms();
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(targetId) as { counts: string; total: number };
+    const counts = JSON.parse(row.counts) as number[];
+    expect(row.total).toBe(11);
+    expect(counts[0]).toBe(11);
+    expect(getGlobalHistogram(targetId).total).toBe(11);
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM warmup_histograms WHERE project_id = ?",
+        )
+        .get(sourceId),
+    ).toEqual({ count: 0 });
+  });
+
+  test("project merge carries an unflushed source gap into the target", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-source-dirty";
+    const targetPath = "/tmp/test-histogram-source-dirty-target";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    const sourceCounts = Array.from(
+      { length: HISTOGRAM_BINS.length + 1 },
+      () => 0,
+    );
+    const targetCounts = [...sourceCounts];
+    sourceCounts[0] = 7;
+    targetCounts[0] = 3;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100), (?, 'all', ?, 3, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+    );
+
+    loadGlobalHistograms(sourcePath);
+    recordGlobalGap(sourcePath, 5_000);
+    mergeProjectInternal(sourceId, targetId);
+    flushGlobalHistograms();
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(targetId) as { counts: string; total: number };
+    expect(row.total).toBe(11);
+    expect((JSON.parse(row.counts) as number[])[0]).toBe(11);
+  });
+
+  test("cross-process merge rehomes an unflushed source gap by retired UUID", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-cross-process-source";
+    const aliasPath = "/tmp/test-histogram-cross-process-alias";
+    const targetPath = "/tmp/test-histogram-cross-process-target";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    d.query(
+      "INSERT INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+    ).run(aliasPath, sourceId);
+    expect(projectId(aliasPath)).toBe(sourceId); // prime the process-local memo
+    const counts = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0);
+    const sourceCounts = [...counts];
+    const targetCounts = [...counts];
+    sourceCounts[0] = 7;
+    targetCounts[0] = 3;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100), (?, 'all', ?, 3, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+    );
+
+    loadGlobalHistograms(aliasPath);
+    recordGlobalGap(aliasPath, 5_000);
+    runProjectMutation("merge", sourceId, targetId);
+    expect(projectId(aliasPath)).toBe(targetId);
+    expect(ensureProject(aliasPath)).toBe(targetId);
+    flushGlobalHistograms();
+    flushGlobalHistograms();
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(targetId) as { counts: string; total: number };
+    expect(row.total).toBe(11);
+    expect((JSON.parse(row.counts) as number[])[0]).toBe(11);
+    expect(getGlobalHistogramsSnapshot().has(sourceId)).toBe(false);
+    expect(getGlobalHistogram(sourceId).total).toBe(11);
+    expect(getGlobalHistogram(targetId).total).toBe(11);
+
+    const messageId = crypto.randomUUID();
+    const storedMessageId = temporal.store({
+      projectPath: aliasPath,
+      info: {
+        id: messageId,
+        sessionID: "cross-process-memo-session",
+        role: "user",
+        time: { created: Date.now() },
+        agent: "build",
+        model: { providerID: "test", modelID: "test" },
+      },
+      parts: [
+        {
+          id: crypto.randomUUID(),
+          sessionID: "cross-process-memo-session",
+          messageID: messageId,
+          type: "text",
+          text: "stored after external project merge",
+        },
+      ],
+    });
+    expect(storedMessageId).toBeDefined();
+    expect(
+      d
+        .query(
+          "SELECT source_id, project_id FROM temporal_messages WHERE id = ?",
+        )
+        .get(storedMessageId),
+    ).toEqual({ source_id: messageId, project_id: targetId });
+    expect(
+      blendedHistogramForSession(
+        makeSessionState({
+          projectPath: aliasPath,
+          survivalModel: createHistogram(),
+        }),
+      ).total,
+    ).toBe(11);
+  });
+
+  test("path reuse cannot redirect an old UUID's dirty gap", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-reused-source-path";
+    const targetPath = "/tmp/test-histogram-reused-target";
+    const otherTargetPath = "/tmp/test-histogram-reused-other-target";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    const otherTargetId = ensureProject(otherTargetPath);
+    const counts = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0);
+    const sourceCounts = [...counts];
+    const targetCounts = [...counts];
+    const otherCounts = [...counts];
+    sourceCounts[0] = 7;
+    targetCounts[0] = 3;
+    otherCounts[0] = 5;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100),
+              (?, 'all', ?, 3, 100),
+              (?, 'all', ?, 5, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+      otherTargetId,
+      JSON.stringify(otherCounts),
+    );
+
+    loadGlobalHistograms(sourcePath);
+    recordGlobalGap(sourcePath, 5_000);
+    runProjectMutation("merge", sourceId, targetId);
+    const recreatedId = crypto.randomUUID();
+    d.query(
+      "INSERT INTO projects (id, path, name, created_at) VALUES (?, ?, ?, ?)",
+    ).run(recreatedId, sourcePath, "recreated source", Date.now());
+    runProjectMutation("merge", recreatedId, otherTargetId);
+    flushGlobalHistograms();
+
+    const rows = d
+      .query(
+        "SELECT project_id, total FROM warmup_histograms WHERE project_id IN (?, ?) ORDER BY project_id",
+      )
+      .all(targetId, otherTargetId) as Array<{
+      project_id: string;
+      total: number;
+    }>;
+    expect(new Map(rows.map((row) => [row.project_id, row.total]))).toEqual(
+      new Map([
+        [targetId, 11],
+        [otherTargetId, 5],
+      ]),
+    );
+  });
+
+  test("cross-process deletion discards an orphan delta without path misattribution", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-cross-process-delete";
+    const aliasPath = "/tmp/test-histogram-cross-process-delete-alias";
+    const sourceId = ensureProject(sourcePath);
+    d.query(
+      "INSERT INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+    ).run(aliasPath, sourceId);
+    expect(projectId(aliasPath)).toBe(sourceId); // prime the stale-cache precondition
+    loadGlobalHistograms(aliasPath);
+    recordGlobalGap(aliasPath, 5_000);
+
+    runProjectMutation("delete", sourceId);
+    flushGlobalHistograms();
+    flushGlobalHistograms();
+
+    expect(getGlobalHistogramsSnapshot().has(sourceId)).toBe(false);
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM warmup_histograms WHERE project_id = ?",
+        )
+        .get(sourceId),
+    ).toEqual({ count: 0 });
+
+    const recreatedId = crypto.randomUUID();
+    d.query(
+      "INSERT INTO projects (id, path, name, created_at) VALUES (?, ?, ?, ?)",
+    ).run(recreatedId, aliasPath, "recreated after delete", Date.now());
+    expect(projectId(aliasPath)).toBe(recreatedId);
+    expect(ensureProject(aliasPath)).toBe(recreatedId);
+    recordGlobalGap(aliasPath, 5_000);
+    flushGlobalHistograms();
+    expect(
+      d
+        .query(
+          "SELECT total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+        )
+        .get(recreatedId),
+    ).toEqual({ total: 1 });
+  });
+
+  test("outer rollback keeps unflushed histogram state on the source project", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-merge-rollback-source";
+    const targetPath = "/tmp/test-histogram-merge-rollback-target";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    const sourceCounts = Array.from(
+      { length: HISTOGRAM_BINS.length + 1 },
+      () => 0,
+    );
+    const targetCounts = [...sourceCounts];
+    sourceCounts[0] = 7;
+    targetCounts[0] = 3;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100), (?, 'all', ?, 3, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+    );
+
+    loadGlobalHistograms(sourcePath);
+    recordGlobalGap(sourcePath, 5_000);
+    expect(() =>
+      withSavepoint("rollback_histogram_merge", () => {
+        mergeProjectInternal(sourceId, targetId);
+        throw new Error("rollback merge");
+      }),
+    ).toThrow("rollback merge");
+    flushGlobalHistograms();
+
+    const rows = d
+      .query(
+        "SELECT project_id, total FROM warmup_histograms WHERE project_id IN (?, ?) ORDER BY project_id",
+      )
+      .all(sourceId, targetId) as Array<{ project_id: string; total: number }>;
+    expect(new Map(rows.map((row) => [row.project_id, row.total]))).toEqual(
+      new Map([
+        [sourceId, 8],
+        [targetId, 3],
+      ]),
+    );
+  });
+
+  test("retired histogram IDs ignore a speculative merge in an outer savepoint", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-retired-in-transaction-source";
+    const targetPath = "/tmp/test-histogram-retired-in-transaction-target";
+    const speculativePath =
+      "/tmp/test-histogram-retired-in-transaction-speculative";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    const speculativeId = ensureProject(speculativePath);
+    const counts = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0);
+    const sourceCounts = [...counts];
+    const targetCounts = [...counts];
+    sourceCounts[0] = 7;
+    targetCounts[0] = 3;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100), (?, 'all', ?, 3, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+    );
+    mergeProjectInternal(sourceId, targetId);
+    loadGlobalHistograms(targetPath);
+
+    expect(() =>
+      withSavepoint("speculative_histogram_read", () => {
+        mergeProjectInternal(targetId, speculativeId);
+        expect(getGlobalHistogram(sourceId).total).toBe(10);
+        expect(getGlobalHistogramsSnapshot().has(sourceId)).toBe(false);
+        expect(getGlobalHistogramsSnapshot().has(speculativeId)).toBe(false);
+        throw new Error("rollback speculative histogram merge");
+      }),
+    ).toThrow("rollback speculative histogram merge");
+    expect(getGlobalHistogram(sourceId).total).toBe(10);
+  });
+
+  test("rolled-back merge cannot publish a speculative histogram load", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-speculative-source";
+    const targetPath = "/tmp/test-histogram-speculative-target";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    const counts = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0);
+    const sourceCounts = [...counts];
+    const targetCounts = [...counts];
+    sourceCounts[0] = 7;
+    targetCounts[0] = 3;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100), (?, 'all', ?, 3, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+    );
+
+    expect(() =>
+      withSavepoint("rollback_speculative_histogram_load", () => {
+        mergeProjectInternal(sourceId, targetId);
+        expect(loadGlobalHistograms(sourcePath)).toBeUndefined();
+        throw new Error("rollback speculative histogram load");
+      }),
+    ).toThrow("rollback speculative histogram load");
+
+    expect(loadGlobalHistograms(targetPath)).toBe(targetId);
+    expect(getGlobalHistogram(targetId).total).toBe(3);
+    expect(getGlobalHistogramsSnapshot().has(sourceId)).toBe(false);
+  });
+
+  test("rolled-back merge notification cannot steal a later merge's dirty gap", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-remerge-source";
+    const firstTargetPath = "/tmp/test-histogram-remerge-first-target";
+    const actualTargetPath = "/tmp/test-histogram-remerge-actual-target";
+    const sourceId = ensureProject(sourcePath);
+    const firstTargetId = ensureProject(firstTargetPath);
+    const actualTargetId = ensureProject(actualTargetPath);
+    const counts = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0);
+    const sourceCounts = [...counts];
+    const firstTargetCounts = [...counts];
+    const actualTargetCounts = [...counts];
+    sourceCounts[0] = 7;
+    firstTargetCounts[0] = 3;
+    actualTargetCounts[0] = 5;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100),
+              (?, 'all', ?, 3, 100),
+              (?, 'all', ?, 5, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      firstTargetId,
+      JSON.stringify(firstTargetCounts),
+      actualTargetId,
+      JSON.stringify(actualTargetCounts),
+    );
+
+    loadGlobalHistograms(sourcePath);
+    recordGlobalGap(sourcePath, 5_000);
+    expect(() =>
+      withSavepoint("rollback_first_histogram_merge", () => {
+        mergeProjectInternal(sourceId, firstTargetId);
+        throw new Error("rollback first merge");
+      }),
+    ).toThrow("rollback first merge");
+    mergeProjectInternal(sourceId, actualTargetId);
+    flushGlobalHistograms();
+
+    const rows = d
+      .query(
+        "SELECT project_id, total FROM warmup_histograms WHERE project_id IN (?, ?) ORDER BY project_id",
+      )
+      .all(firstTargetId, actualTargetId) as Array<{
+      project_id: string;
+      total: number;
+    }>;
+    expect(new Map(rows.map((row) => [row.project_id, row.total]))).toEqual(
+      new Map([
+        [firstTargetId, 3],
+        [actualTargetId, 13],
+      ]),
+    );
+  });
+
+  test("rolled-back outgoing edge cannot orphan an earlier committed merge", () => {
+    const d = db();
+    const sourcePath = "/tmp/test-histogram-chain-source";
+    const committedTargetPath = "/tmp/test-histogram-chain-committed";
+    const rolledBackTargetPath = "/tmp/test-histogram-chain-rolled-back";
+    const sourceId = ensureProject(sourcePath);
+    const committedTargetId = ensureProject(committedTargetPath);
+    const rolledBackTargetId = ensureProject(rolledBackTargetPath);
+    const counts = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0);
+    const sourceCounts = [...counts];
+    const committedCounts = [...counts];
+    const rolledBackCounts = [...counts];
+    sourceCounts[0] = 7;
+    committedCounts[0] = 3;
+    rolledBackCounts[0] = 5;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 7, 100),
+              (?, 'all', ?, 3, 100),
+              (?, 'all', ?, 5, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      committedTargetId,
+      JSON.stringify(committedCounts),
+      rolledBackTargetId,
+      JSON.stringify(rolledBackCounts),
+    );
+
+    loadGlobalHistograms(sourcePath);
+    recordGlobalGap(sourcePath, 5_000);
+    mergeProjectInternal(sourceId, committedTargetId);
+    expect(() =>
+      withSavepoint("rollback_outgoing_histogram_merge", () => {
+        mergeProjectInternal(committedTargetId, rolledBackTargetId);
+        throw new Error("rollback outgoing merge");
+      }),
+    ).toThrow("rollback outgoing merge");
+    flushGlobalHistograms();
+
+    const rows = d
+      .query(
+        "SELECT project_id, total FROM warmup_histograms WHERE project_id IN (?, ?) ORDER BY project_id",
+      )
+      .all(committedTargetId, rolledBackTargetId) as Array<{
+      project_id: string;
+      total: number;
+    }>;
+    expect(new Map(rows.map((row) => [row.project_id, row.total]))).toEqual(
+      new Map([
+        [committedTargetId, 11],
+        [rolledBackTargetId, 5],
+      ]),
+    );
   });
 });
 

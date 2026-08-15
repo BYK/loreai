@@ -86,6 +86,13 @@ export type RecallInput = {
    */
   recordTransfers?: boolean;
   /**
+   * Defer transfer-counter writes until the caller commits a larger persistence
+   * unit. When omitted, transfers retain their existing immediate-write
+   * behavior. The callback is synchronous so callers can run it inside their
+   * own SQLite savepoint.
+   */
+  deferTransferRecording?: (record: () => void) => void;
+  /**
    * Set of knowledge entry IDs (`019fxxxx-...` UUIDs — the canonical form
    * without the `k:` prefix) that are already present in the model's visible
    * context — the stable system[1] knowledge catalog and/or the durable
@@ -1753,27 +1760,34 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
   //   - "knowledge": promoted cross_project=1 entries whose project_id is a
   //     DIFFERENT non-null project than the current one.
   if (input.recordTransfers) {
-    try {
-      const pid = ensureProject(input.projectPath);
-      for (const { item: tagged } of fused) {
-        if (
-          tagged.source !== "cross-knowledge" &&
-          tagged.source !== "knowledge"
-        )
-          continue;
-        const entry = tagged.item;
-        // For same-source knowledge results, only promoted cross-project entries
-        // from another project count as transfers.
-        if (tagged.source === "knowledge" && entry.cross_project !== 1)
-          continue;
-        if (!entry.project_id || entry.project_id === pid) continue;
-        ltm.recordTransfer({
-          knowledgeId: entry.logical_id,
-          recalledInProjectId: pid,
-        });
+    const recordTransfers = (): void => {
+      try {
+        const pid = ensureProject(input.projectPath);
+        for (const { item: tagged } of fused) {
+          if (
+            tagged.source !== "cross-knowledge" &&
+            tagged.source !== "knowledge"
+          )
+            continue;
+          const entry = tagged.item;
+          // For same-source knowledge results, only promoted cross-project entries
+          // from another project count as transfers.
+          if (tagged.source === "knowledge" && entry.cross_project !== 1)
+            continue;
+          if (!entry.project_id || entry.project_id === pid) continue;
+          ltm.recordTransfer({
+            knowledgeId: entry.logical_id,
+            recalledInProjectId: pid,
+          });
+        }
+      } catch (err) {
+        log.warn("recall: transfer recording failed (non-fatal):", err);
       }
-    } catch (err) {
-      log.warn("recall: transfer recording failed (non-fatal):", err);
+    };
+    if (input.deferTransferRecording) {
+      input.deferTransferRecording(recordTransfers);
+    } else {
+      recordTransfers();
     }
   }
 

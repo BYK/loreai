@@ -86,10 +86,20 @@ export interface AdoptedUpstream {
   agentDisplayName: string;
 }
 
+/** Render an adopted base URL without exposing query-string credentials. */
+export function formatUpstreamForLog(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const query = parsed.search ? "?<redacted>" : "";
+    return `${parsed.origin}${parsed.pathname}${query}`;
+  } catch {
+    return "<invalid URL>";
+  }
+}
+
 /**
  * Map an agent's wire protocol to the gateway env var that overrides the
- * default upstream for that protocol. Gemini has no such default knob
- * (the native endpoint is fixed), so it relies purely on the injected header.
+ * default upstream for that protocol. Gemini has no such default knob.
  */
 function gatewayUpstreamEnvKey(
   wireProtocol: NonNullable<AgentDef["wireProtocol"]>,
@@ -109,17 +119,18 @@ function gatewayUpstreamEnvKey(
  * env) so the gateway proxies THERE instead of the hardcoded default. Called
  * BEFORE `startGateway`/`loadConfig` so the gateway picks up the override.
  *
- * Two mechanisms, applied together:
+ * Two mechanisms, applied together where the agent supports them:
  *  1. Set the gateway's own `LORE_UPSTREAM_<protocol>` process env — the
- *     in-process gateway reads this at `loadConfig()`, so EVERY agent (even
- *     header-less ones like Gemini/Copilot) gets routed to the user's host.
+ *     in-process gateway reads this at `loadConfig()`, so header-less agents
+ *     with a configurable protocol default get routed to the user's host.
  *  2. Return an `AdoptedUpstream` so the per-agent launch env can ALSO inject
  *     `X-Lore-Upstream-URL` (+ `X-Lore-Provider` for known hosts) — this is
  *     what flips the wire protocol/auth-scheme for a known provider that
  *     differs from the ingress shape (e.g. Claude Code → OpenRouter, which is
  *     an OpenAI-protocol provider reached via an Anthropic-shape client).
  *
- * Returns null when the user hasn't overridden the agent's base URL.
+ * Returns null when the user hasn't overridden the agent's base URL. Throws
+ * when an override exists but Lore has no safe routing mechanism for it.
  */
 export function applyUpstreamAdoption(
   agent: AgentDef,
@@ -128,6 +139,11 @@ export function applyUpstreamAdoption(
   const captured = captureUserUpstream(agent, gatewayUrl);
   if (!captured) return null;
   const gatewayEnvKey = gatewayUpstreamEnvKey(captured.wireProtocol);
+  if (!gatewayEnvKey && captured.wireProtocol !== "anthropic") {
+    throw new Error(
+      `${agent.displayName} cannot safely route its configured upstream through Lore`,
+    );
+  }
   const providerID = providerForUpstreamOrigin(captured.url);
   // Set the gateway default upstream for this protocol, UNLESS the user has
   // explicitly set it already (their explicit LORE_UPSTREAM_* wins).
@@ -153,7 +169,8 @@ export function applyUpstreamAdoption(
  * Remote-mode adoption: the remote gateway owns its own config, so we do NOT
  * set any local `LORE_UPSTREAM_*` env. We only compute the `AdoptedUpstream`
  * so the launch env can inject `X-Lore-Upstream-URL`/`X-Lore-Provider`, which
- * the remote gateway honors per request. Returns null when nothing to adopt.
+ * the remote gateway honors per request. Returns null when nothing to adopt
+ * and throws when the selected agent cannot transport those headers.
  */
 export function adoptForRemote(
   agent: AgentDef,
@@ -161,6 +178,11 @@ export function adoptForRemote(
 ): AdoptedUpstream | null {
   const captured = captureUserUpstream(agent, gatewayUrl);
   if (!captured) return null;
+  if (captured.wireProtocol !== "anthropic") {
+    throw new Error(
+      `${agent.displayName} cannot safely route its configured upstream through a remote Lore gateway`,
+    );
+  }
   return {
     url: captured.url,
     gatewayEnvKey: "",
@@ -174,9 +196,10 @@ export function adoptForRemote(
  * agents that forward `ANTHROPIC_CUSTOM_HEADERS` to the gateway (Claude Code /
  * Pi). Sets `X-Lore-Upstream-URL` and, for a known host, `X-Lore-Provider`.
  *
- * Agents without a header-forwarding mechanism (Codex/Hermes/Copilot/Gemini)
- * still get routed via the `LORE_UPSTREAM_<protocol>` gateway env set in
- * `applyUpstreamAdoption`; the header is a no-op for them.
+ * Agents without a header-forwarding mechanism (Codex/Hermes/Copilot) get
+ * routed only via the startup-time `LORE_UPSTREAM_<protocol>` gateway env set
+ * in `applyUpstreamAdoption`; reusing a gateway is therefore rejected for
+ * their adopted upstreams. Gemini has no equivalent default and fails closed.
  */
 export function injectAdoptionHeaders(
   agent: AgentDef,
@@ -400,10 +423,20 @@ export async function commandRun(
     // shift on conflict, but the user's ANTHROPIC_BASE_URL points at their own
     // provider host, not loopback, so the guard just needs a loopback origin.
     const prospectiveUrl = `http://127.0.0.1:${config.port}`;
-    adopted = applyUpstreamAdoption(selection.def, prospectiveUrl);
+    try {
+      adopted = applyUpstreamAdoption(selection.def, prospectiveUrl);
+    } catch (err) {
+      console.error(
+        `[lore] ${err instanceof Error ? err.message : String(err)}.`,
+      );
+      console.error(
+        "[lore] Remove the agent's custom base URL or configure Lore's upstream explicitly.",
+      );
+      return safeExit(1);
+    }
     if (adopted) {
       console.log(
-        `[lore] Adopting your ${adopted.agentDisplayName} upstream: ${adopted.url}` +
+        `[lore] Adopting your ${adopted.agentDisplayName} upstream: ${formatUpstreamForLog(adopted.url)}` +
           (adopted.providerID ? ` (provider: ${adopted.providerID})` : ""),
       );
     }
@@ -434,7 +467,17 @@ export async function commandRun(
     console.log(`[lore] Using remote gateway at ${gatewayUrl}`);
     // In remote mode, adopt via header injection only (no local gateway env).
     if (selection?.def) {
-      adopted = adoptForRemote(selection.def, gatewayUrl);
+      try {
+        adopted = adoptForRemote(selection.def, gatewayUrl);
+      } catch (err) {
+        console.error(
+          `[lore] ${err instanceof Error ? err.message : String(err)}.`,
+        );
+        console.error(
+          "[lore] Remove the agent's custom base URL or configure the remote gateway's upstream.",
+        );
+        return safeExit(1);
+      }
     }
   } else {
     // Local mode: start (or reuse) a local gateway.
@@ -455,6 +498,18 @@ export async function commandRun(
       console.log(`[lore] Gateway listening on ${gatewayUrl}`);
     } else {
       console.log(`[lore] Reusing existing gateway at ${gatewayUrl}`);
+      if (
+        adopted?.gatewayEnvKey &&
+        selection?.def?.wireProtocol !== "anthropic"
+      ) {
+        console.error(
+          `[lore] Cannot adopt your ${adopted.agentDisplayName} upstream when reusing an existing gateway.`,
+        );
+        console.error(
+          `[lore] Stop the existing gateway or start it with ${adopted.gatewayEnvKey} configured.`,
+        );
+        return safeExit(1);
+      }
     }
   }
   console.log(`[lore] Dashboard: ${gatewayUrl}/ui`);

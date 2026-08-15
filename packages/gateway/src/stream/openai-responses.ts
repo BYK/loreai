@@ -15,6 +15,7 @@
  * underlying SSE wire format is the same.
  */
 import { asString, log } from "@loreai/core";
+import { isDeepStrictEqual } from "node:util";
 import {
   ZERO_USAGE,
   type GatewayContentBlock,
@@ -87,6 +88,344 @@ export interface ResponsesAccState {
         args: string;
       }
   >;
+}
+
+export const SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES = [
+  "message",
+  "function_call",
+  "function_call_output",
+  "reasoning",
+  "item_reference",
+  "web_search_call",
+  "file_search_call",
+  "computer_call",
+  "computer_call_output",
+  "computer_tool_call",
+  "computer_tool_call_output",
+  "code_interpreter_call",
+  "image_generation_call",
+  "local_shell_call",
+  "local_shell_call_output",
+  "shell_call",
+  "shell_call_output",
+  "mcp_call",
+  "mcp_list_tools",
+  "mcp_approval_request",
+  "mcp_approval_response",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "apply_patch_call",
+  "apply_patch_call_output",
+  "program",
+  "program_output",
+  "tool_search_call",
+  "tool_search_output",
+  "additional_tools",
+  "compaction",
+] as const;
+const RESPONSES_OUTPUT_ITEM_TYPES = new Set<string>(
+  SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES,
+);
+type OutputItemStatusPhase = "added" | "done" | "terminal";
+type OutputItemStatusMatrix = Partial<
+  Record<OutputItemStatusPhase, ReadonlySet<string>>
+>;
+const IN_PROGRESS = new Set(["in_progress"]);
+const COMPLETED = new Set(["completed"]);
+const COMPLETED_OR_INCOMPLETE = new Set(["completed", "incomplete"]);
+const COMPLETED_OR_FAILED = new Set(["completed", "failed"]);
+const OUTPUT_ITEM_STATUSES_BY_TYPE: Record<string, OutputItemStatusMatrix> = {
+  message: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  function_call: {
+    added: IN_PROGRESS,
+    done: new Set(["completed", "incomplete", "failed"]),
+    terminal: new Set(["completed", "incomplete", "failed"]),
+  },
+  reasoning: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  web_search_call: {
+    added: new Set(["in_progress", "searching"]),
+    done: COMPLETED_OR_FAILED,
+    terminal: COMPLETED_OR_FAILED,
+  },
+  file_search_call: {
+    added: new Set(["in_progress", "searching"]),
+    done: new Set(["completed", "incomplete", "failed"]),
+    terminal: new Set(["completed", "incomplete", "failed"]),
+  },
+  tool_search_call: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  computer_call: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  computer_tool_call: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  code_interpreter_call: {
+    added: new Set(["in_progress", "interpreting"]),
+    done: new Set(["completed", "incomplete", "failed"]),
+    terminal: new Set(["completed", "incomplete", "failed"]),
+  },
+  image_generation_call: {
+    added: new Set(["in_progress", "generating"]),
+    done: COMPLETED_OR_FAILED,
+    terminal: COMPLETED_OR_FAILED,
+  },
+  local_shell_call: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  shell_call: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  mcp_call: {
+    added: new Set(["in_progress", "calling"]),
+    done: new Set(["completed", "incomplete", "failed"]),
+    terminal: new Set(["completed", "incomplete", "failed"]),
+  },
+  custom_tool_call: {
+    added: IN_PROGRESS,
+    done: COMPLETED_OR_INCOMPLETE,
+    terminal: COMPLETED_OR_INCOMPLETE,
+  },
+  apply_patch_call: {
+    added: IN_PROGRESS,
+    done: COMPLETED,
+    terminal: COMPLETED,
+  },
+  apply_patch_call_output: {
+    added: COMPLETED_OR_FAILED,
+    done: COMPLETED_OR_FAILED,
+    terminal: COMPLETED_OR_FAILED,
+  },
+};
+for (const type of [
+  "function_call_output",
+  "computer_call_output",
+  "computer_tool_call_output",
+  "local_shell_call_output",
+  "shell_call_output",
+  "custom_tool_call_output",
+  "program_output",
+  "tool_search_output",
+]) {
+  OUTPUT_ITEM_STATUSES_BY_TYPE[type] = {
+    added: COMPLETED,
+    done: COMPLETED,
+    terminal: COMPLETED,
+  };
+}
+
+export function isSupportedResponsesOutputItemType(
+  type: unknown,
+): type is string {
+  return typeof type === "string" && RESPONSES_OUTPUT_ITEM_TYPES.has(type);
+}
+
+export function isValidResponsesOutputItemStatus(
+  type: unknown,
+  status: unknown,
+  phase: OutputItemStatusPhase,
+): boolean {
+  if (status === undefined) return true;
+  if (typeof type !== "string" || typeof status !== "string") return false;
+  return OUTPUT_ITEM_STATUSES_BY_TYPE[type]?.[phase]?.has(status) ?? false;
+}
+
+function recordExtends(
+  actual: Record<string, unknown>,
+  streamed: Record<string, unknown>,
+  ignored: ReadonlySet<string> = new Set(),
+): boolean {
+  return Object.entries(streamed).every(
+    ([field, value]) =>
+      ignored.has(field) || terminalValueExtends(actual[field], value),
+  );
+}
+
+function terminalValueExtends(actual: unknown, streamed: unknown): boolean {
+  if (streamed === undefined) return true;
+  if (Array.isArray(streamed)) {
+    if (!Array.isArray(actual) || actual.length !== streamed.length) {
+      return false;
+    }
+    return streamed.every((value, index) =>
+      terminalValueExtends(actual[index], value),
+    );
+  }
+  if (isRecord(streamed)) {
+    if (!isRecord(actual)) return false;
+    return Object.entries(streamed).every(([field, value]) =>
+      terminalValueExtends(actual[field], value),
+    );
+  }
+  return isDeepStrictEqual(actual, streamed);
+}
+
+function sparseValueExtends(actual: unknown, established: unknown): boolean {
+  if (established === undefined || established === null) return true;
+  if (typeof established === "string" && established.length === 0) {
+    return typeof actual === "string";
+  }
+  if (Array.isArray(established)) {
+    if (!Array.isArray(actual) || actual.length < established.length) {
+      return false;
+    }
+    return established.every((value, index) =>
+      sparseValueExtends(actual[index], value),
+    );
+  }
+  if (isRecord(established)) {
+    if (!isRecord(actual)) return false;
+    return Object.entries(established).every(([field, value]) =>
+      sparseValueExtends(actual[field], value),
+    );
+  }
+  return isDeepStrictEqual(actual, established);
+}
+
+function sparseTextPartsExtend(actual: unknown, established: unknown): boolean {
+  if (!Array.isArray(established)) return established === undefined;
+  if (!Array.isArray(actual) || actual.length < established.length)
+    return false;
+  return established.every((rawPart, index) => {
+    const actualPart = actual[index];
+    if (!isRecord(rawPart) || !isRecord(actualPart)) return false;
+    return Object.entries(rawPart).every(([field, value]) => {
+      if (
+        (field === "text" || field === "refusal") &&
+        typeof value === "string"
+      ) {
+        return (
+          typeof actualPart[field] === "string" &&
+          actualPart[field].startsWith(value)
+        );
+      }
+      return sparseValueExtends(actualPart[field], value);
+    });
+  });
+}
+
+function terminalTextPartsMatch(actual: unknown, streamed: unknown): boolean {
+  if (!Array.isArray(actual) || !Array.isArray(streamed)) return false;
+  if (actual.length !== streamed.length) return false;
+  return streamed.every((streamedPart, index) => {
+    const actualPart = actual[index];
+    if (!isRecord(streamedPart) || !isRecord(actualPart)) return false;
+    return recordExtends(actualPart, streamedPart);
+  });
+}
+
+export function responsesDoneItemMatchesAdded(
+  done: Record<string, unknown>,
+  added: Record<string, unknown>,
+): boolean {
+  if (
+    done.type !== added.type ||
+    !isValidResponsesOutputItemStatus(done.type, done.status, "done") ||
+    !isValidResponsesOutputItemStatus(added.type, added.status, "added")
+  ) {
+    return false;
+  }
+  const ignored = new Set(["status"]);
+  if (added.type === "function_call") {
+    if (
+      typeof done.arguments !== "string" ||
+      (added.arguments !== undefined &&
+        (typeof added.arguments !== "string" ||
+          !done.arguments.startsWith(added.arguments)))
+    ) {
+      return false;
+    }
+    ignored.add("arguments");
+  }
+  if (added.type === "message") {
+    if (!sparseTextPartsExtend(done.content, added.content)) return false;
+    ignored.add("content");
+  }
+  if (added.type === "reasoning") {
+    if (!sparseTextPartsExtend(done.summary, added.summary)) return false;
+    if (!sparseTextPartsExtend(done.content, added.content)) return false;
+    ignored.add("summary");
+    ignored.add("content");
+  }
+  return Object.entries(added).every(
+    ([field, value]) =>
+      ignored.has(field) || sparseValueExtends(done[field], value),
+  );
+}
+
+export function responsesTerminalItemMatches(
+  actual: Record<string, unknown>,
+  streamed: Record<string, unknown>,
+): boolean {
+  if (actual.type !== streamed.type || actual.id !== streamed.id) return false;
+  if (
+    !isValidResponsesOutputItemStatus(actual.type, actual.status, "terminal") ||
+    !isValidResponsesOutputItemStatus(streamed.type, streamed.status, "done")
+  ) {
+    return false;
+  }
+  if (
+    streamed.status !== undefined &&
+    actual.status !== undefined &&
+    actual.status !== streamed.status
+  ) {
+    return false;
+  }
+  if (actual.type === "function_call") {
+    return recordExtends(actual, streamed, new Set(["status"]));
+  }
+  if (actual.type === "message") {
+    return (
+      recordExtends(actual, streamed, new Set(["status", "content"])) &&
+      terminalTextPartsMatch(actual.content, streamed.content)
+    );
+  }
+  if (actual.type === "reasoning") {
+    for (const field of ["summary", "content"] as const) {
+      if (
+        streamed[field] !== undefined &&
+        !terminalTextPartsMatch(actual[field], streamed[field])
+      ) {
+        return false;
+      }
+    }
+    return recordExtends(
+      actual,
+      streamed,
+      new Set(["status", "summary", "content"]),
+    );
+  }
+  return recordExtends(actual, streamed, new Set(["status"]));
+}
+
+/** Validated unsuccessful terminal, carrying usage for accounting-only paths. */
+export class ResponsesTerminalError extends Error {
+  constructor(
+    readonly response: GatewayResponse,
+    readonly status: string,
+  ) {
+    super(`upstream Responses request ended with status ${status}`);
+    this.name = "ResponsesTerminalError";
+  }
 }
 
 export function makeResponsesAccState(): ResponsesAccState {
@@ -518,6 +857,13 @@ function validatePublicResponsesEvent(
         typeof addedItem !== "object" ||
         Array.isArray(addedItem) ||
         typeof addedItem.type !== "string" ||
+        !isSupportedResponsesOutputItemType(addedItem.type) ||
+        (addedItem.id !== undefined && typeof addedItem.id !== "string") ||
+        !isValidResponsesOutputItemStatus(
+          addedItem.type,
+          addedItem.status,
+          "added",
+        ) ||
         (addedItem.type === "message" && typeof addedItem.id !== "string") ||
         (addedItem.type === "message" &&
           addedItem.status !== undefined &&
@@ -557,6 +903,13 @@ function validatePublicResponsesEvent(
         typeof doneItem !== "object" ||
         Array.isArray(doneItem) ||
         typeof doneItem.type !== "string" ||
+        !isSupportedResponsesOutputItemType(doneItem.type) ||
+        (doneItem.id !== undefined && typeof doneItem.id !== "string") ||
+        !isValidResponsesOutputItemStatus(
+          doneItem.type,
+          doneItem.status,
+          "done",
+        ) ||
         (doneItem.type === "message" && typeof doneItem.id !== "string") ||
         (doneItem.type === "message" &&
           doneItem.status !== undefined &&
@@ -571,11 +924,7 @@ function validatePublicResponsesEvent(
             doneItem.name.length === 0 ||
             typeof doneItem.arguments !== "string")) ||
         !addedItem ||
-        doneItem.type !== addedItem.type ||
-        (typeof addedItem.id === "string" && doneItem.id !== addedItem.id) ||
-        (addedItem.type === "function_call" &&
-          (doneItem.call_id !== addedItem.call_id ||
-            doneItem.name !== addedItem.name)) ||
+        !responsesDoneItemMatchesAdded(doneItem, addedItem) ||
         (typeof doneItem.id === "string" &&
           state.itemIndexById.get(doneItem.id) !== outputIndex) ||
         (typeof doneItem.call_id === "string" &&
@@ -792,16 +1141,30 @@ function validateCodexOutputItem(
   event: "response.output_item.added" | "response.output_item.done",
   item: unknown,
 ): asserts item is Record<string, unknown> {
-  if (!isRecord(item) || typeof item.type !== "string") {
+  if (
+    !isRecord(item) ||
+    typeof item.type !== "string" ||
+    !isSupportedResponsesOutputItemType(item.type)
+  ) {
     malformedResponsesEvent();
   }
-  for (const field of ["id", "status"] as const) {
-    if (item[field] !== undefined && typeof item[field] !== "string") {
-      malformedResponsesEvent();
-    }
+  if (item.id !== undefined && typeof item.id !== "string") {
+    malformedResponsesEvent();
+  }
+  if (
+    !isValidResponsesOutputItemStatus(
+      item.type,
+      item.status,
+      event === "response.output_item.added" ? "added" : "done",
+    )
+  ) {
+    malformedResponsesEvent();
   }
   if (
     event === "response.output_item.added" &&
+    (item.type === "message" ||
+      item.type === "function_call" ||
+      item.type === "reasoning") &&
     item.status !== undefined &&
     item.status !== "in_progress"
   ) {
@@ -809,9 +1172,20 @@ function validateCodexOutputItem(
   }
   if (
     event === "response.output_item.done" &&
+    (item.type === "message" || item.type === "reasoning") &&
     item.status !== undefined &&
     item.status !== "completed" &&
     item.status !== "incomplete"
+  ) {
+    malformedResponsesEvent();
+  }
+  if (
+    event === "response.output_item.done" &&
+    item.type === "function_call" &&
+    item.status !== undefined &&
+    item.status !== "completed" &&
+    item.status !== "incomplete" &&
+    item.status !== "failed"
   ) {
     malformedResponsesEvent();
   }
@@ -1069,6 +1443,9 @@ function normalizeCodexItemEvent(
   }
   if (event === "response.output_item.done") {
     reconcileCodexDoneItem(state, outputIndex, item);
+    if (existing && !responsesDoneItemMatchesAdded(item, existing)) {
+      malformedResponsesEvent();
+    }
   } else {
     if (itemId) {
       bindResponsesIdentity(state.itemIndexById, itemId, outputIndex);
@@ -1206,6 +1583,7 @@ function validatedTerminalStatus(
   event: "response.completed" | "response.done" | "response.incomplete",
   parsed: Record<string, unknown>,
   validation: ResponsesValidationMode,
+  requireKnownIncompleteReason = false,
 ): string {
   const terminal = parsed.response as Record<string, unknown> | undefined;
   if (!terminal || typeof terminal !== "object" || Array.isArray(terminal)) {
@@ -1250,7 +1628,7 @@ function validatedTerminalStatus(
           : status === "completed" || status === "incomplete";
   if (!valid) throw new Error("Responses terminal event/status mismatch");
   if (status === "incomplete") {
-    if (validation === "public") {
+    if (validation === "public" || requireKnownIncompleteReason) {
       if (
         details?.reason !== undefined &&
         details.reason !== "max_output_tokens" &&
@@ -1297,6 +1675,9 @@ export async function accumulateResponsesSSEStream(
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
     /** Passthrough clients must receive a provider's valid failure terminal. */
     allowFailureTerminal?: boolean;
+    /** Buffered callers that run successful-turn side effects must reject
+     * incomplete terminals rather than treating a parsed body as completion. */
+    requireCompletedTerminal?: boolean;
     /** Internal state injection used by validated true passthrough. */
     state?: ResponsesAccState;
     onReader?: (reader: ReadableStreamDefaultReader<Uint8Array>) => void;
@@ -1364,7 +1745,8 @@ export async function accumulateResponsesSSEStream(
       if (
         opts.validation &&
         event === "response.failed" &&
-        !opts.allowFailureTerminal
+        !opts.allowFailureTerminal &&
+        !opts.requireCompletedTerminal
       ) {
         throw new Error("response.failed terminal");
       }
@@ -1597,7 +1979,8 @@ export async function accumulateResponsesSSEStream(
         event === "response.completed" ||
         event === "response.done" ||
         event === "response.incomplete" ||
-        (opts.allowFailureTerminal && event === "response.failed")
+        ((opts.allowFailureTerminal || opts.requireCompletedTerminal) &&
+          event === "response.failed")
       ) {
         const terminal = parsed.response as Record<string, unknown> | undefined;
         if (opts.validation && terminal?.output !== undefined) {
@@ -1625,20 +2008,20 @@ export async function accumulateResponsesSSEStream(
               throw new Error("malformed Responses terminal event");
             }
             snapshotIndices.add(outputIndex);
-            for (const field of [
-              "call_id",
-              "name",
-              "arguments",
-              "content",
-            ] as const) {
+            if (snapshot.type === "item_reference") {
               if (
-                snapshot[field] !== undefined &&
-                JSON.stringify(snapshot[field]) !==
-                  JSON.stringify(accumulated[field])
+                Object.keys(snapshot).some(
+                  (key) => key !== "type" && key !== "id",
+                )
               ) {
                 throw new Error("malformed Responses terminal event");
               }
+              continue;
             }
+            if (!responsesTerminalItemMatches(snapshot, accumulated)) {
+              throw new Error("malformed Responses terminal event");
+            }
+            state.rawItems.set(outputIndex, { ...accumulated, ...snapshot });
           }
           if (
             snapshotIndices.size !== doneItems.size ||
@@ -1650,7 +2033,12 @@ export async function accumulateResponsesSSEStream(
         terminalStatus = opts.validation
           ? event === "response.failed"
             ? "failed"
-            : validatedTerminalStatus(event, parsed, opts.validation)
+            : validatedTerminalStatus(
+                event,
+                parsed,
+                opts.validation,
+                opts.requireCompletedTerminal,
+              )
           : typeof terminal?.status === "string"
             ? terminal.status
             : null;
@@ -1699,6 +2087,16 @@ export async function accumulateResponsesSSEStream(
   if (opts.validation && !terminalStatus) {
     throw new Error("missing terminal response status");
   }
+  if (
+    opts.validation &&
+    opts.requireCompletedTerminal &&
+    terminalStatus !== "completed"
+  ) {
+    throw new ResponsesTerminalError(
+      finalizeResponsesAcc(state),
+      terminalStatus ?? "unknown",
+    );
+  }
 
   return finalizeResponsesAcc(state);
 }
@@ -1736,13 +2134,13 @@ export function formatResponsesEvent(event: string, data: string): string {
  * injected tool_use never leaks to the client. When the recall tool is present
  * the caller keeps the buffered `accumulateResponsesSSEStream` path.
  *
- * `onComplete` is invoked exactly once with the accumulated response when the
- * upstream stream ends, mirroring the Anthropic `buildStreamingResponse`
- * contract so `postResponse` (cost/calibration/temporal) runs identically.
+ * `onComplete` is invoked exactly once with the accumulated response and a
+ * success flag. Failed/incomplete/malformed streams must not enter successful
+ * turn persistence or session-identity confirmation.
  */
 export function streamResponsesPassthrough(
   upstreamResponse: Response,
-  onComplete: (response: GatewayResponse) => void,
+  onComplete: (response: GatewayResponse, successful: boolean) => void,
   sessionID?: string,
   validation: ResponsesValidationMode = "public",
   signal?: AbortSignal,
@@ -1855,11 +2253,11 @@ export function streamResponsesPassthrough(
         keepaliveTimer = null;
       };
 
-      const finish = (): void => {
+      const finish = (successful: boolean): void => {
         if (completed) return;
         completed = true;
         try {
-          onComplete(finalizeResponsesAcc(state));
+          onComplete(finalizeResponsesAcc(state), successful);
         } catch (err) {
           log.error("openai-responses passthrough onComplete error:", err);
         }
@@ -1905,6 +2303,7 @@ export function streamResponsesPassthrough(
                   event === "response.failed"
                 ) {
                   terminalForwarded = true;
+                  finish(state.terminalEvent === "response.completed");
                 }
               },
             },
@@ -1912,7 +2311,10 @@ export function streamResponsesPassthrough(
           clearKeepalive();
           if (!completed) {
             completed = true;
-            onComplete(accumulated);
+            onComplete(
+              accumulated,
+              state.terminalEvent === "response.completed",
+            );
           }
           safeClose();
         } catch (err) {
@@ -1961,17 +2363,14 @@ export function streamResponsesPassthrough(
                     usage: null,
                     error: {
                       type: "server_error",
-                      message:
-                        err instanceof Error
-                          ? err.message
-                          : "upstream stream error",
+                      message: "Upstream response stream failed",
                     },
                   },
                 }),
               ),
             ),
           );
-          finish();
+          finish(false);
           safeClose();
         }
       };
@@ -2491,6 +2890,10 @@ export function translateAnthropicStreamToResponses(
                 }
 
                 const finalStatus = mapStatusFromStopReason(resp.stopReason);
+                const terminalEvent =
+                  finalStatus === "incomplete"
+                    ? "response.incomplete"
+                    : "response.completed";
 
                 const ru = resp.usage ?? ZERO_USAGE;
                 const inclusiveInputTokens = safeTokenSum(
@@ -2521,14 +2924,24 @@ export function translateAnthropicStreamToResponses(
 
                 await safeEnqueue(
                   encoder.encode(
-                    emit("response.completed", {
-                      type: "response.completed",
+                    emit(terminalEvent, {
+                      type: terminalEvent,
                       response: {
                         id: respId,
                         object: "response",
                         created_at: created,
                         model: resp.model,
                         status: finalStatus,
+                        ...(finalStatus === "incomplete"
+                          ? {
+                              incomplete_details: {
+                                reason:
+                                  resp.stopReason === "content_filter"
+                                    ? "content_filter"
+                                    : "max_output_tokens",
+                              },
+                            }
+                          : {}),
                         output: finalOutput,
                         usage: usageData,
                       },
@@ -2570,10 +2983,7 @@ export function translateAnthropicStreamToResponses(
                     usage: null,
                     error: {
                       type: "server_error",
-                      message:
-                        err instanceof Error
-                          ? err.message
-                          : "upstream stream error",
+                      message: "Upstream response stream failed",
                     },
                   },
                 }),
@@ -2652,6 +3062,7 @@ export function mapStatusFromStopReason(reason: string): string {
       return "completed";
     case "max_tokens":
     case "length":
+    case "content_filter":
       return "incomplete";
     default:
       return "completed";

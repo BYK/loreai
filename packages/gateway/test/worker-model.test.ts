@@ -196,6 +196,91 @@ describe("fetchModelData", () => {
     expect(first).toBe(second); // Same reference — cached
   });
 
+  test("a stale fetch cannot overwrite a cache seeded after it started", async () => {
+    let resolveFetch!: (response: Response) => void;
+    globalThis.fetch = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    ) as unknown as typeof fetch;
+
+    const stale = fetchModelData();
+    await vi.waitFor(() => expect(resolveFetch).toBeDefined());
+    _setModelDataForTest({
+      seeded: {
+        id: "seeded",
+        cost: { input: 9, output: 9, cache_read: 9 },
+        limit: { context: 9, output: 9 },
+      },
+    });
+    resolveFetch(
+      new Response(
+        JSON.stringify(
+          buildModelsDevResponse({
+            stale: {
+              cost: { input: 1, output: 1, cache_read: 1 },
+              limit: { context: 1, output: 1 },
+            },
+          }),
+        ),
+        { status: 200 },
+      ),
+    );
+
+    await stale;
+    expect(getModelEntrySync("seeded").cost?.input).toBe(9);
+    expect(getModelEntrySync("stale").cost?.input).not.toBe(1);
+  });
+
+  test("an older fetch cannot publish over or clear a newer in-flight owner", async () => {
+    const resolves: Array<(response: Response) => void> = [];
+    globalThis.fetch = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolves.push(resolve);
+        }),
+    ) as unknown as typeof fetch;
+
+    const older = fetchModelData();
+    await vi.waitFor(() => expect(resolves).toHaveLength(1));
+    clearModelDataCache();
+    const newer = fetchModelData();
+    await vi.waitFor(() => expect(resolves).toHaveLength(2));
+    resolves[0](
+      new Response(
+        JSON.stringify(
+          buildModelsDevResponse({
+            older: {
+              cost: { input: 1, output: 1, cache_read: 1 },
+              limit: { context: 1, output: 1 },
+            },
+          }),
+        ),
+        { status: 200 },
+      ),
+    );
+    await older;
+
+    expect(fetchModelData()).toBe(newer);
+    resolves[1](
+      new Response(
+        JSON.stringify(
+          buildModelsDevResponse({
+            newer: {
+              cost: { input: 2, output: 2, cache_read: 2 },
+              limit: { context: 2, output: 2 },
+            },
+          }),
+        ),
+        { status: 200 },
+      ),
+    );
+    await newer;
+    expect(getModelEntrySync("newer").cost?.input).toBe(2);
+    expect(getModelEntrySync("older").cost?.input).not.toBe(1);
+  });
+
   test("returns empty map on API error with no cache", async () => {
     globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response("Server Error", { status: 500 })),
