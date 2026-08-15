@@ -2679,7 +2679,7 @@ describe("streamResponsesRecallAware", () => {
     expect(recalled).toBe(1);
   });
 
-  test("preserves continuation terminal and item metadata", async () => {
+  test("preserves content_filter continuation terminal and item metadata", async () => {
     const citation = {
       type: "url_citation",
       start_index: 0,
@@ -2695,7 +2695,7 @@ describe("streamResponsesRecallAware", () => {
           id: "resp_terminal_metadata_followup",
           model: "gpt-5.6-terra",
           status: "incomplete",
-          incomplete_details: { reason: "max_output_tokens" },
+          incomplete_details: { reason: "content_filter" },
           output: [
             {
               type: "message",
@@ -2731,7 +2731,8 @@ describe("streamResponsesRecallAware", () => {
     );
 
     const output = await drain(client);
-    expect(output).toContain('"reason":"max_output_tokens"');
+    expect(output).toContain('"reason":"content_filter"');
+    expect(output).toContain('"status":"incomplete"');
     expect(output).toContain("https://example.com/lore");
     expect(output).not.toContain(PUBLIC_RECALL_ERROR);
   });

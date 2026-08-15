@@ -3220,6 +3220,64 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("does not persist an established streaming turn cancelled after its terminal", async () => {
+    const sessionHeader = "cancelled-established-terminal";
+    const store = vi.spyOn(temporal, "store");
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_cancelled_established"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-lore-session-id": sessionHeader },
+          }),
+          loadConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === sessionHeader,
+      );
+      expect(state).toBeDefined();
+      clearAllCosts();
+      store.mockClear();
+
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": sessionHeader },
+        }),
+        loadConfig(),
+      );
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      await reader?.cancel("client disconnected after terminal event");
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(getSessionCosts(state?.sessionID ?? "")).toBeNull();
+      expect(store).not.toHaveBeenCalled();
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearAllCosts();
+    }
+  });
+
   it.each(["completed", "incomplete"] as const)(
     "drops stale provisional %s accounting after a bounded reset drain",
     async (status) => {
@@ -6056,6 +6114,42 @@ describe("Pipeline — streaming responses", () => {
       const response = await handleRequest(
         {
           protocol: "anthropic",
+          model: "gpt-5.6-sol",
+          system: "title this",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "title" }] },
+          ],
+          tools: [],
+          stream: false,
+          maxTokens: 32,
+          metadata: {},
+          rawHeaders: {
+            authorization: "Bearer test-key",
+            "x-lore-agent": "title",
+            "x-lore-provider": "openai",
+          },
+        },
+        loadConfig(),
+      );
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("Gateway request failed");
+    } finally {
+      setUpstreamInterceptor(undefined);
+    }
+  });
+
+  it("rejects malformed completed JSON on same-protocol Responses meta passthrough", async () => {
+    setUpstreamInterceptor(
+      async () =>
+        new Response(JSON.stringify({ status: "completed" }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    try {
+      const response = await handleRequest(
+        {
+          protocol: "openai-responses",
           model: "gpt-5.6-sol",
           system: "title this",
           messages: [

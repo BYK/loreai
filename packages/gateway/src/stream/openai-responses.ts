@@ -2682,6 +2682,7 @@ export function mapStatusFromStopReason(reason: string): string {
       return "completed";
     case "max_tokens":
     case "length":
+    case "content_filter":
       return "incomplete";
     default:
       return "completed";

@@ -10032,11 +10032,7 @@ export async function accumulateNonStreamResponse(
 
   const json = JSON.parse(body) as Record<string, unknown>;
   if (protocol === "openai-responses") {
-    const response = accumulateResponsesNonStreamJSON(json);
-    const status = typeof json.status === "string" ? json.status : "unknown";
-    if (status === "completed" || status === "incomplete") {
-      assertValidNonStreamCompletion(json, protocol);
-    }
+    const { response, status } = parseResponsesNonStreamEnvelope(json);
     if (status !== "completed") {
       throw new ResponsesTerminalError(response, status);
     }
@@ -10055,6 +10051,18 @@ export async function accumulateNonStreamResponse(
       // Anthropic non-streaming JSON shape).
       return accumulateAnthropicNonStreamJSON(json);
   }
+}
+
+function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {
+  response: GatewayResponse;
+  status: string;
+} {
+  const response = accumulateResponsesNonStreamJSON(json);
+  const status = typeof json.status === "string" ? json.status : "unknown";
+  if (status === "completed" || status === "incomplete") {
+    assertValidNonStreamCompletion(json, "openai-responses");
+  }
+  return { response, status };
 }
 
 async function preserveIncompleteResponsesTerminal(
@@ -13155,6 +13163,11 @@ async function handlePassthrough(
       undefined,
       abortScope.signal,
     );
+    if (wireProtocol === "openai-responses") {
+      parseResponsesNonStreamEnvelope(
+        JSON.parse(body) as Record<string, unknown>,
+      );
+    }
     return new Response(body, {
       status: upstreamResponse.status,
       headers: { "content-type": "application/json" },
@@ -16032,7 +16045,10 @@ async function handleConversationTurn(
       async () => {
         await downstreamSettled;
         await new Promise<void>((resolve) => setImmediate(resolve));
-        if (requestGeneration !== streamingPostResponseGeneration) {
+        if (
+          requestGeneration !== streamingPostResponseGeneration ||
+          downstreamWasCancelled()
+        ) {
           dropStreamingFinalizer();
           return;
         }
@@ -16067,7 +16083,8 @@ async function handleConversationTurn(
         await new Promise<void>((resolve) => setImmediate(resolve));
         if (
           requestGeneration !== streamingPostResponseGeneration ||
-          sessionSignal.aborted
+          sessionSignal.aborted ||
+          downstreamWasCancelled()
         ) {
           dropStreamingFinalizer();
           return;
