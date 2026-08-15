@@ -160,6 +160,66 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     expect(rows[0].header_session_id).toBe("V2");
   });
 
+  it("does not adopt a fingerprint candidate whose persisted credential owner differs", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "key-A",
+      { "x-lore-session-id": "owner-V1" },
+    );
+    await response.text();
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "owner-V1" },
+    );
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const original = loreSessionRows(harness)[0];
+    const database = new DatabaseSync(harness.dbPath);
+    try {
+      database
+        .prepare(
+          "UPDATE session_state SET credential_fingerprint = ? WHERE session_id = ?",
+        )
+        .run("different-owner", original.session_id);
+    } finally {
+      database.close();
+    }
+    await harness.restartPipeline();
+
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "owner-V2" },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = loreSessionRows(harness);
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.find((row) => row.header_session_id === "owner-V1")?.session_id,
+    ).toBe(original.session_id);
+    expect(
+      rows.find((row) => row.header_session_id === "owner-V2")?.session_id,
+    ).not.toBe(original.session_id);
+  });
+
   it("does not persist fingerprint adoption after a failed resumed turn", async () => {
     harness = await createHarness({ fixtures: fixtures() });
     let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {

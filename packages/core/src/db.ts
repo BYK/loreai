@@ -6021,7 +6021,10 @@ export function loadSessionTracking(
  */
 export function findSessionStatesByFingerprint(
   fingerprint: string,
-  options?: { legacyUnownedOnly?: boolean },
+  options?: {
+    legacyUnownedOnly?: boolean;
+    credentialFingerprint?: string;
+  },
 ): Array<{
   session_id: string;
   message_count: number;
@@ -6030,15 +6033,24 @@ export function findSessionStatesByFingerprint(
   project_path_provisional: number;
 }> {
   if (!fingerprint) return [];
+  const ownerFilter = options?.legacyUnownedOnly
+    ? "AND credential_fingerprint = ''"
+    : options?.credentialFingerprint !== undefined
+      ? "AND credential_fingerprint = ?"
+      : "";
+  const params =
+    options?.credentialFingerprint !== undefined && !options.legacyUnownedOnly
+      ? [fingerprint, options.credentialFingerprint]
+      : [fingerprint];
   return db()
     .query(
       `SELECT session_id, message_count, is_subagent,
-              project_path, project_path_provisional
+               project_path, project_path_provisional
          FROM session_state
-        WHERE fingerprint = ? AND fingerprint != ''
-          ${options?.legacyUnownedOnly ? "AND credential_fingerprint = ''" : ""}`,
+         WHERE fingerprint = ? AND fingerprint != ''
+          ${ownerFilter}`,
     )
-    .all(fingerprint) as Array<{
+    .all(...params) as Array<{
     session_id: string;
     message_count: number;
     is_subagent: number;

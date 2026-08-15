@@ -5247,7 +5247,10 @@ async function adoptByFingerprint(input: {
   if (!projectPath) return null;
 
   const cred = extractAuth(req.rawHeaders);
-  const credentialFingerprint = cred ? authFingerprint(cred) : "";
+  // Restart adoption grants access to an existing session, so an upstream URL
+  // alone is not sufficient proof of ownership.
+  if (!cred) return null;
+  const credentialFingerprint = authFingerprint(cred);
   const fingerprintInput = req.messages.map((m) => ({
     role: m.role,
     content: m.content,
@@ -5260,23 +5263,21 @@ async function adoptByFingerprint(input: {
   }
 
   const reqIsSubagent = !!headers["x-parent-session-id"];
-  const candidates = findSessionStatesByFingerprint(fingerprint).map(
-    (candidate) => ({ ...candidate, credentialBound: true }),
-  );
-  if (cred) {
-    // v78 added the credential suffix to conversation fingerprints. Legacy
-    // candidates have the old unsuffixed fingerprint and no persisted owner;
-    // they still require the same multi-message overlap policy below.
-    const legacyFingerprint = await fingerprintMessages(fingerprintInput);
-    if (requestGeneration !== undefined) {
-      assertCurrentPipelineGeneration(req.signal, requestGeneration);
-    }
-    candidates.push(
-      ...findSessionStatesByFingerprint(legacyFingerprint, {
-        legacyUnownedOnly: true,
-      }).map((candidate) => ({ ...candidate, credentialBound: false })),
-    );
+  const candidates = findSessionStatesByFingerprint(fingerprint, {
+    credentialFingerprint,
+  }).map((candidate) => ({ ...candidate, credentialBound: true }));
+  // v78 added the credential suffix to conversation fingerprints. Legacy
+  // candidates have the old unsuffixed fingerprint and no persisted owner;
+  // they still require the same multi-message overlap policy below.
+  const legacyFingerprint = await fingerprintMessages(fingerprintInput);
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
   }
+  candidates.push(
+    ...findSessionStatesByFingerprint(legacyFingerprint, {
+      legacyUnownedOnly: true,
+    }).map((candidate) => ({ ...candidate, credentialBound: false })),
+  );
   const eligibleCandidates = candidates.filter(
     (c) => (c.is_subagent === 1) === reqIsSubagent,
   );

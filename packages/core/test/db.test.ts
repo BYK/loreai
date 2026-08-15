@@ -3127,7 +3127,7 @@ describe("db", () => {
       expect(findSessionStatesByFingerprint("")).toEqual([]);
     });
 
-    test("findSessionStatesByFingerprint can restrict legacy candidates to unowned rows", () => {
+    test("findSessionStatesByFingerprint can restrict candidates by owner", () => {
       const fp = `legacy-fp-${crypto.randomUUID().slice(0, 8)}`;
       const unowned = `legacy-unowned-${crypto.randomUUID()}`;
       const owned = `legacy-owned-${crypto.randomUUID()}`;
@@ -3145,6 +3145,16 @@ describe("db", () => {
           (row) => row.session_id,
         ),
       ).toEqual([unowned]);
+      expect(
+        findSessionStatesByFingerprint(fp, {
+          credentialFingerprint: "credential-a",
+        }).map((row) => row.session_id),
+      ).toEqual([owned]);
+      expect(
+        findSessionStatesByFingerprint(fp, {
+          credentialFingerprint: "credential-b",
+        }),
+      ).toEqual([]);
     });
 
     test("countMatchingTemporalIds counts only same-project, same-session ids", () => {
