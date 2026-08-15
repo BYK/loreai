@@ -4898,7 +4898,13 @@ describe("Pipeline — streaming responses", () => {
     },
   );
 
-  it.each(["regular", "structural", "compact", "responses-compact"] as const)(
+  it.each([
+    "regular",
+    "structural",
+    "compact",
+    "responses-compact",
+    "slash",
+  ] as const)(
     "rejects a queued %s request after affinity rotation revokes its identity",
     async (route) => {
       const oldAffinity = `queued-revoked-${route}-old`;
@@ -5012,6 +5018,18 @@ describe("Pipeline — streaming responses", () => {
           });
           request.stream = false;
           queued = handleRequest(request, loadConfig());
+        } else if (route === "slash") {
+          const request = makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": oldAffinity },
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: "/lore:amnesia:on" }],
+              },
+            ],
+          });
+          request.stream = false;
+          queued = handleRequest(request, loadConfig());
         } else if (route === "compact") {
           queued = handleCompactEndpoint(
             new Request("http://gateway.test/v1/compact", {
@@ -5049,8 +5067,8 @@ describe("Pipeline — streaming responses", () => {
         releaseRotation();
         expect(await rotationBody).toContain("event: response.completed");
         const response = await queued;
-        expect(response.status).toBe(404);
-        expect(await response.text()).toMatch(/authenticated session/i);
+        expect(response.status).toBe(route === "slash" ? 200 : 404);
+        expect(await response.text()).toMatch(/authenticated.*session/i);
         expect(upstreamCalls).toBe(3);
         expect(summaryRead).not.toHaveBeenCalled();
       } finally {

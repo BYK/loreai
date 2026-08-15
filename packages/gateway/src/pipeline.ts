@@ -5234,6 +5234,7 @@ async function adoptByFingerprint(input: {
   tier: 3;
   provisionalIdentity: true;
   provisionalKey?: string;
+  adoptionFingerprint: string;
 } | null> {
   const {
     req,
@@ -5367,6 +5368,7 @@ async function adoptByFingerprint(input: {
       tier: 3,
       provisionalIdentity: true,
       provisionalKey,
+      adoptionFingerprint: fingerprint,
     };
   }
   return {
@@ -5374,6 +5376,7 @@ async function adoptByFingerprint(input: {
     isNew: false,
     tier: 3,
     provisionalIdentity: true,
+    adoptionFingerprint: fingerprint,
   };
 }
 
@@ -5384,6 +5387,7 @@ type IdentifiedSession = {
   provisionalIdentity?: boolean;
   provisionalKey?: string;
   guardProject?: boolean;
+  adoptionFingerprint?: string;
 };
 
 async function identifySession(
@@ -13333,6 +13337,9 @@ async function handleProvisionalConversationTurn(
         projectPath,
         projectPathProvisional,
         credentialFingerprint,
+        ...(identified.adoptionFingerprint
+          ? { fingerprint: identified.adoptionFingerprint }
+          : {}),
         ...(upstreamUpdate.changed
           ? { lastUpstream: serializeUpstreamState(upstreamState) }
           : {}),
@@ -13377,6 +13384,9 @@ async function handleProvisionalConversationTurn(
     if (identified.tier === 3) observeHeaderValues(req.rawHeaders);
     state.projectPath = projectPath;
     state.projectPathProvisional = projectPathProvisional;
+    if (identified.adoptionFingerprint) {
+      state.fingerprint = identified.adoptionFingerprint;
+    }
     if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
     state.messageCount = req.messages.length;
     state._dirty = true;

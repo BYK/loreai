@@ -36,6 +36,7 @@ import { enableHostedMode, _resetHostedModeForTest } from "@loreai/core";
 const U0 = "alpha first task: please implement the parser module";
 const U1 = "second follow-up: now add tests for the parser";
 const U2 = "third instruction after the restart: refactor the helper";
+const U3 = "fourth instruction after another restart: verify migration";
 
 function body(messages: Array<{ role: string; content: string }>) {
   return {
@@ -537,7 +538,16 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
   });
 
   it("adopts a pre-credential session only after same-project transcript overlap", async () => {
-    harness = await createHarness({ fixtures: fixtures() });
+    harness = await createHarness({
+      fixtures: [
+        ...fixtures(),
+        makeFixtureEntry({
+          seq: 3,
+          requestMessages: [],
+          responseText: "A3 done.",
+        }),
+      ],
+    });
     const legacyHeader = "legacy-exact-header";
 
     let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
@@ -588,6 +598,80 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     expect(after[0].session_id).toBe(before[0].session_id);
     expect(after[0].header_session_id).toBe(migratedHeader);
     expect(after[0].credential_fingerprint).toMatch(/^[0-9a-f]{16}$/);
+
+    await harness.restartPipeline();
+    const secondMigratedHeader = "legacy-after-second-restart";
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+        { role: "assistant", content: "A2 done." },
+        { role: "user", content: U3 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": secondMigratedHeader },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const afterSecondRestart = loreSessionRows(harness);
+    expect(afterSecondRestart).toHaveLength(1);
+    expect(afterSecondRestart[0].session_id).toBe(before[0].session_id);
+    expect(afterSecondRestart[0].header_session_id).toBe(secondMigratedHeader);
+  });
+
+  it("does not adopt an ownerless legacy session without a presented credential", async () => {
+    harness = await createHarness({ fixtures: fixtures() });
+    let response = await harness.chat(
+      body([{ role: "user", content: U0 }]),
+      "key-A",
+      { "x-lore-session-id": "legacy-auth-required-old" },
+    );
+    await response.text();
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "legacy-auth-required-old" },
+    );
+    await response.text();
+    const [original] = loreSessionRows(harness);
+    await makeSessionLegacy(harness, original.session_id);
+    await harness.restartPipeline();
+
+    response = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+        { role: "assistant", content: "A1 done." },
+        { role: "user", content: U2 },
+      ]),
+      "",
+      { "x-lore-session-id": "legacy-auth-required-new" },
+    );
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = loreSessionRows(harness);
+    expect(
+      rows.find((row) => row.header_session_id === "legacy-auth-required-old")
+        ?.session_id,
+    ).toBe(original.session_id);
+    const independent = rows.find(
+      (row) => row.header_session_id === "legacy-auth-required-new",
+    );
+    expect(independent).toBeDefined();
+    expect(independent?.session_id).not.toBe(original.session_id);
   });
 
   it("does NOT let another transcript claim an exact legacy header", async () => {
