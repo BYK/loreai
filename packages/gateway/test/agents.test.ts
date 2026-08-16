@@ -462,12 +462,25 @@ describe("captureUserUpstream", () => {
     });
   });
 
-  test("does not detach an env credential from an unsafe configured upstream", () => {
-    expect(
+  test("reports an unsafe configured upstream instead of silently discarding its credential", () => {
+    expect(() =>
       captureUserEnvCredential(claude, {
         ANTHROPIC_AUTH_TOKEN: "private-proxy-token",
         ANTHROPIC_BASE_URL: "https://proxy.example/v1?api_key=secret",
       }),
-    ).toBeNull();
+    ).toThrow(/unsafe or invalid upstream URL in ANTHROPIC_BASE_URL/);
+  });
+
+  test("keeps an env credential when no upstream override is configured", () => {
+    expect(
+      captureUserEnvCredential(claude, {
+        ANTHROPIC_AUTH_TOKEN: "provider-default-token",
+      }),
+    ).toEqual({
+      token: "provider-default-token",
+      scheme: "bearer",
+      upstreamUrl: null,
+      envVarName: "ANTHROPIC_AUTH_TOKEN",
+    });
   });
 });
