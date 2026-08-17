@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -301,4 +301,47 @@ describe("commandImport (local mode) — multi-agent e2e decision matrix", () =>
     expect(out()).toContain("Ways forward");
     expect(shutdownMock).toHaveBeenCalled();
   });
+
+  test.each([
+    { name: "initial auth resolution", onDisk: false },
+    { name: "fallback-chain construction", onDisk: true },
+  ])(
+    "reports an invalid env upstream without throwing during $name",
+    async ({ onDisk }) => {
+      registerProvider(
+        fakeProvider({ name: "claude-code", displayName: "Claude Code" }),
+      );
+      if (onDisk) {
+        mkdirSync(join(fakeHome, ".claude"), { recursive: true });
+        writeFileSync(
+          join(fakeHome, ".claude", ".credentials.json"),
+          JSON.stringify({
+            claudeAiOauth: { accessToken: "disk-oauth", expiresAt: null },
+          }),
+          "utf8",
+        );
+      }
+      process.env.ANTHROPIC_AUTH_TOKEN = "private-proxy-token";
+      process.env.ANTHROPIC_BASE_URL =
+        "https://proxy.example/v1?api_key=secret";
+      const priorExitCode = process.exitCode;
+
+      try {
+        await expect(
+          commandImport([], { project, yes: true }),
+        ).resolves.toBeUndefined();
+
+        expect(out()).toContain("Can't import Claude Code");
+        expect(out()).toContain("ANTHROPIC_BASE_URL");
+        expect(out()).toContain("Fix or unset");
+        expect(out()).not.toContain("private-proxy-token");
+        expect(out()).not.toContain("api_key=secret");
+        expect(llmClientCalls).toHaveLength(0);
+        expect(shutdownMock).toHaveBeenCalled();
+        expect(process.exitCode).toBe(1);
+      } finally {
+        process.exitCode = priorExitCode;
+      }
+    },
+  );
 });

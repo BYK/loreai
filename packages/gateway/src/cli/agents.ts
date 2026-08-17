@@ -188,6 +188,18 @@ function cleanBaseUrl(raw: string | undefined): string | null {
   return trimmed;
 }
 
+export class InvalidEnvCredentialUpstreamError extends Error {
+  constructor(
+    readonly agentDisplayName: string,
+    readonly envVarName: string,
+  ) {
+    super(
+      `${agentDisplayName} has an unsafe or invalid upstream URL in ${envVarName}`,
+    );
+    this.name = "InvalidEnvCredentialUpstreamError";
+  }
+}
+
 /**
  * A credential the user configured for an agent purely through shell env vars:
  * the agent's base-URL (`upstreamEnvVars`) plus its auth-token
@@ -196,9 +208,11 @@ function cleanBaseUrl(raw: string | undefined): string | null {
  * corporate-proxy setup (e.g. Claude Code with ANTHROPIC_BASE_URL=openrouter.ai
  * + ANTHROPIC_AUTH_TOKEN=<key>). Returns the token + scheme + captured upstream
  * URL, so `lore import` can route extraction to that upstream. Returns null if
- * the agent has no env-credential mechanism, or the token/base URL is missing.
+ * the agent has no env-credential mechanism or no token is configured.
  * A base URL is NOT required (some setups set only the token and rely on the
- * provider default), but a token IS.
+ * provider default), but a token IS. Throws when a configured base URL is
+ * present but unsafe or invalid, so callers do not silently discard a valid
+ * credential or detach it from the user's intended upstream.
  */
 export function captureUserEnvCredential(
   agent: AgentDef,
@@ -236,7 +250,9 @@ export function captureUserEnvCredential(
     const raw = env[key];
     if (!raw) continue;
     const clean = cleanBaseUrl(raw);
-    if (!clean) return null;
+    if (!clean) {
+      throw new InvalidEnvCredentialUpstreamError(agent.displayName, key);
+    }
     upstreamUrl = clean;
     break;
   }
