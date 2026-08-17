@@ -169,19 +169,85 @@ export async function runSemanticLint(
       return report;
     }
 
+    const invariantSource: LintPhaseHealth = { status: "healthy" };
+    if (diff.hunks.length === 0) {
+      // No changed code can violate an invariant. Preserve core's zero-work
+      // contract without starting the gateway, importing .lore.md, or requiring
+      // an embedding provider merely because the action requested import.
+      phase = "invariantVectors";
+      const result = await invariantCheck.checkInvariants({
+        projectPath,
+        diff,
+        range,
+        model,
+        effort,
+        sessionID: `invariant-check-${Date.now()}`,
+        signal: deadlineController.signal,
+        deadlineMs: Math.max(0, deadlineAt - Date.now()),
+      });
+      throwIfDeadlineExceeded();
+      const gate = invariantCheck.gateDecision(
+        result.findings,
+        [],
+        options.gate ? "gate" : "advisory",
+      );
+      report = buildSemanticLintReport({
+        result,
+        gate,
+        model: `${model.providerID}/${model.modelID}`,
+        effort,
+        elapsedMs: Date.now() - startedAt,
+        invariantSource,
+      });
+      throwIfDeadlineExceeded();
+      await options.publishReport?.(report);
+      return report;
+    }
+
     phase = "invariantSource";
     throwIfDeadlineExceeded();
+    if (options.importLoreMd && !existsSync(join(projectPath, ".lore.md"))) {
+      report = failedReport({
+        options,
+        startedAt,
+        model,
+        effort,
+        range,
+        phase,
+        code: "invariant-source-import-failed",
+        error: "Requested invariant source .lore.md does not exist",
+      });
+      await options.publishReport?.(report);
+      return report;
+    }
     const startOpts: StartOptions = { quiet: true, local: true };
     const gateway = await startGateway(startOpts);
     owned = gateway.owned;
     shutdown = gateway.shutdown;
     throwIfDeadlineExceeded();
-    const invariantSource: LintPhaseHealth = { status: "healthy" };
     if (options.importLoreMd) {
       try {
-        if (!existsSync(join(projectPath, ".lore.md"))) {
-          throw new Error("Requested invariant source .lore.md does not exist");
-        }
+        await embedding.ensureEmbeddingReady({
+          signal: deadlineController.signal,
+          deadlineMs: Math.max(1, deadlineAt - Date.now()),
+        });
+        throwIfDeadlineExceeded();
+      } catch (error) {
+        throwIfDeadlineExceeded();
+        report = failedReport({
+          options,
+          startedAt,
+          model,
+          effort,
+          range,
+          phase,
+          code: "embedding-provider-readiness-failed",
+          error,
+        });
+        await options.publishReport?.(report);
+        return report;
+      }
+      try {
         importLoreFile(projectPath);
         const remainingMs = Math.max(1, deadlineAt - Date.now());
         await embedding.settleDocumentEmbeds({
@@ -260,13 +326,22 @@ export async function runSemanticLint(
       deadlineMs: Math.max(0, deadlineAt - Date.now()),
       onJudge: options.onJudge,
     });
-    // Do not accept even a complete zero-work core result after the overall
-    // orchestration deadline has elapsed.
-    throwIfDeadlineExceeded();
-    const overrides = invariantCheck.parseOverrides(
-      invariantCheck.collectCommitMessages(projectPath, range.base, range.head),
-    );
-    throwIfDeadlineExceeded();
+    // Preserve a typed core failure returned at the cancellation boundary.
+    // Successful/partial work still must not cross the overall deadline.
+    const preserveFailedAtDeadline =
+      result.status === "failed" &&
+      (deadlineController.signal.aborted || Date.now() >= deadlineAt);
+    if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
+    const overrides = preserveFailedAtDeadline
+      ? []
+      : invariantCheck.parseOverrides(
+          invariantCheck.collectCommitMessages(
+            projectPath,
+            range.base,
+            range.head,
+          ),
+        );
+    if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
     const gate = invariantCheck.gateDecision(
       result.findings,
       overrides,

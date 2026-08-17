@@ -1538,6 +1538,12 @@ describe("checkInvariants typed judge outcomes", () => {
     vi.spyOn(embedding, "embedInTokenBatches").mockRejectedValue(
       new Error("embed worker unavailable"),
     );
+    const ensureEmbeddingReady = vi
+      .spyOn(embedding, "ensureEmbeddingReady")
+      .mockResolvedValue();
+    const checkConfigChange = vi
+      .spyOn(embedding, "checkConfigChange")
+      .mockReturnValue(false);
     const { judge, judgeCall } = stubJudge(() => ({
       kind: "verdict",
       verdict: "satisfies",
@@ -1554,6 +1560,8 @@ describe("checkInvariants typed judge outcomes", () => {
     });
 
     expect(judgeCall).not.toHaveBeenCalled();
+    expect(ensureEmbeddingReady).toHaveBeenCalledOnce();
+    expect(checkConfigChange).toHaveBeenCalledOnce();
     expect(result.status).toBe("failed");
     expect(result.health.hunkVectors).toMatchObject({
       status: "failed",

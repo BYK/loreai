@@ -191,7 +191,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     expect(bodyWithEffort.reasoning_effort).toBeUndefined();
   });
 
-  test("effort off explicitly disables Copilot Responses reasoning", async () => {
+  test("effort off omits unsupported Copilot Responses reasoning none", async () => {
     const client = createGatewayLLMClient(
       UPSTREAMS,
       () => ({ scheme: "bearer", value: "tok" }),
@@ -203,6 +203,28 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
       model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
       reasoningEffort: "off",
       upstreamProviderID: "github-copilot",
+    });
+
+    const body = JSON.parse(
+      String((mockFetch.mock.calls[0]?.[1] as { body?: string })?.body ?? "{}"),
+    ) as Record<string, unknown>;
+    expect(body.reasoning).toBeUndefined();
+  });
+
+  test("effort off remains explicit for other Responses providers", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "openai" ? { scheme: "bearer", value: "tok" } : null,
+      { providerID: "openai", modelID: "gpt-5.6-luna" },
+    );
+    await client.prompt("sys", "user", {
+      sessionID: "sess-openai-off",
+      workerID: "lore-invariant-check",
+      model: { providerID: "openai", modelID: "gpt-5.6-luna" },
+      protocol: "openai-responses",
+      upstreamProviderID: "openai",
+      reasoningEffort: "off",
     });
 
     const body = JSON.parse(
