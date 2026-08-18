@@ -5774,9 +5774,13 @@ describe("workerModelCandidates", () => {
       modelID: "gpt-5-mini",
     });
     const ids = out.map((c) => c.modelID);
-    // Preferred appears exactly once (dedup), and Claude backups are present.
-    expect(ids.filter((m) => m === "gpt-5-mini")).toHaveLength(1);
-    expect(ids).toContain("claude-sonnet-4.6");
+    expect(ids).toEqual([
+      "gpt-5-mini",
+      "gpt-4o-mini",
+      "claude-sonnet-4.6",
+      // The official Copilot catalog uses a dot in its Haiku wire ID.
+      "claude-haiku-4.5",
+    ]);
     // Every candidate stays on the same provider — a worker must never switch.
     expect(out.every((c) => c.providerID === "github-copilot")).toBe(true);
   });
@@ -5933,6 +5937,40 @@ describe("worker 400 model-not-supported: fall back to a same-provider backup", 
     expect(secondBody.input).toBeUndefined();
     expect(secondBody.max_completion_tokens).toEqual(expect.any(Number));
     expect(secondBody.max_completion_tokens as number).toBeGreaterThan(256);
+  });
+
+  test("a protocol-specific bridge can disable incompatible model fallbacks", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(UNSUPPORTED_400, {
+        status: 400,
+        statusText: "Bad Request",
+      }),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "http://127.0.0.1:3207",
+        openai: "http://127.0.0.1:3207",
+      },
+      () => ({ scheme: "bearer", value: "copilot-sdk-bridge" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+      { dedicatedWorkerKey: true, disableModelFallbacks: true },
+    );
+
+    const outcome = await client.promptDetailed("system", "user", {
+      workerID: "lore-invariant-check",
+      sessionID: "sess-sdk-bridge",
+      upstreamProviderID: "github-copilot",
+      upstreamUrl: "http://127.0.0.1:3207",
+    });
+
+    expect(outcome).toMatchObject({
+      kind: "failure",
+      code: "model-unsupported",
+      model: "github-copilot/gpt-5.6-luna",
+      attempts: 1,
+    });
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toContain("/responses");
   });
 
   test("a provider with NO backup list surfaces the 400 (no swap, one call)", async () => {

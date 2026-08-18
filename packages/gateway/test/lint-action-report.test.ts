@@ -1,8 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import { EventEmitter } from "node:events";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   failedSemanticLintReport,
   MAX_LINT_REPORT_CANDIDATES,
@@ -539,7 +542,583 @@ describe("semantic lint action reporter", () => {
     expect(action).toContain('default: "90"');
     expect(action).toContain("--report-file");
     expect(action).toContain("if: always()");
+    expect(action).toContain(
+      "github-token and worker-api-key are mutually exclusive",
+    );
+    expect(action).toContain(
+      "github-token requires a Responses-compatible github-copilot/gpt-5.6-* model",
+    );
+    expect(action).toContain("npm ci --prefix");
+    expect(action).toContain("--ignore-scripts");
+    expect(action).not.toContain("npm install");
+    expect(action).toContain("'copilot-sdk-bridge'");
+    expect(action).not.toContain(
+      "LORE_WORKER_API_KEY: ${{ inputs.worker-api-key != '' && inputs.worker-api-key || inputs.github-token }}",
+    );
     expect(action).not.toMatch(/>\s*\/tmp\/lore-ic\.json/);
+
+    const actionlint = readFileSync(
+      resolve(actionDirectory, "../../actionlint.yaml"),
+      "utf8",
+    );
+    expect(actionlint).toContain(".github/workflows/semantic-linter.yml:");
+    expect(actionlint).toContain('unknown permission scope "copilot-requests"');
+    const ci = readFileSync(
+      resolve(actionDirectory, "../../workflows/ci.yml"),
+      "utf8",
+    );
+    expect(ci).toContain("-config-file .github/actionlint.yaml");
+  });
+
+  test("Copilot bridge disables ambient tools and translates Responses output", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    let sessionConfig: Record<string, unknown> | undefined;
+    const client = {
+      async createSession(config: Record<string, unknown>) {
+        sessionConfig = config;
+        return {
+          async sendAndWait({ prompt }: { prompt: string }) {
+            expect(prompt).toBe("judge this hunk");
+            return { data: { content: "SATISFIES: covered" } };
+          },
+          async abort() {},
+          async disconnect() {},
+        };
+      },
+    };
+
+    const response = await proxy.runCopilotResponse(client, {
+      model: "gpt-5.6-luna",
+      instructions: "Return one verdict line.",
+      input: [{ role: "user", content: "judge this hunk" }],
+      reasoning: { effort: "medium" },
+      max_output_tokens: 25_600,
+    });
+
+    expect(sessionConfig).toMatchObject({
+      model: "gpt-5.6-luna",
+      reasoningEffort: "medium",
+      modelCapabilities: { limits: { max_output_tokens: 25_600 } },
+      systemMessage: { mode: "replace", content: "Return one verdict line." },
+      tools: [],
+      availableTools: [],
+      enableConfigDiscovery: false,
+      enableSkills: false,
+      enableSessionStore: false,
+      infiniteSessions: { enabled: false },
+      memory: { enabled: false },
+    });
+    expect(sessionConfig?.excludedTools).toEqual([
+      "builtin:*",
+      "mcp:*",
+      "custom:*",
+    ]);
+    expect(response.output[0].content[0].text).toBe("SATISFIES: covered");
+    expect(response.usage).toBeUndefined();
+    expect(
+      proxy.copilotProxyErrorResponse(
+        new Error("billing_not_configured: quota exceeded"),
+      ),
+    ).toEqual({ status: 402, message: "insufficient credit or Copilot quota" });
+    expect(
+      proxy.copilotProxyErrorResponse(new Error("policy denied token")),
+    ).toEqual({
+      status: 403,
+      message: "Copilot authentication or policy rejected",
+    });
+    expect(
+      proxy.copilotProxyErrorResponse(
+        new Error('The requested model "gpt-5.6-luna" is not supported'),
+      ),
+    ).toEqual({ status: 400, message: "Copilot model is not supported" });
+  });
+
+  test("Copilot bridge aborts an in-flight SDK session", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    const controller = new AbortController();
+    let requestStarted = false;
+    const abort = vi.fn(async () => {});
+    const disconnect = vi.fn(async () => {});
+    const client = {
+      async createSession() {
+        return {
+          sendAndWait: () =>
+            new Promise(() => {
+              requestStarted = true;
+            }),
+          abort,
+          disconnect,
+        };
+      },
+    };
+    const pending = proxy.runCopilotResponse(
+      client,
+      {
+        model: "gpt-5.6-luna",
+        instructions: "Return one verdict line.",
+        input: [{ role: "user", content: "judge this hunk" }],
+      },
+      controller.signal,
+    );
+
+    await vi.waitFor(() => expect(requestStarted).toBe(true));
+    controller.abort(new Error("downstream closed"));
+
+    await expect(pending).rejects.toThrow("downstream closed");
+    expect(abort).toHaveBeenCalledOnce();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  test("Copilot bridge safely ignores a late abort after the response wins", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    const controller = new AbortController();
+    const abort = vi.fn(async () => {});
+    const disconnect = vi.fn(async () => {});
+    const response = await proxy.runCopilotResponse(
+      {
+        async createSession() {
+          return {
+            async sendAndWait() {
+              return {
+                data: {
+                  get content() {
+                    controller.abort(new Error("late disconnect"));
+                    return "SATISFIES: completed";
+                  },
+                },
+              };
+            },
+            abort,
+            disconnect,
+          };
+        },
+      },
+      {
+        model: "gpt-5.6-luna",
+        instructions: "Return one verdict line.",
+        input: [{ role: "user", content: "judge this hunk" }],
+      },
+      controller.signal,
+    );
+
+    expect(response.output[0].content[0].text).toBe("SATISFIES: completed");
+    expect(abort).toHaveBeenCalledOnce();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
+
+  test("Copilot bridge validates and normalizes request controls", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    expect(() => proxy.copilotSessionConfig(null)).toThrow(
+      "request body must be an object",
+    );
+    expect(() => proxy.copilotSessionConfig({})).toThrow(
+      "request model is required",
+    );
+    expect(() => proxy.copilotSessionConfig({ model: "gpt-5.6-luna" })).toThrow(
+      "request instructions are required",
+    );
+    expect(() =>
+      proxy.copilotSessionConfig({
+        model: "gpt-5.6-luna",
+        instructions: "judge",
+        input: { role: "user", content: "not an array" },
+      }),
+    ).toThrow("request user input is required");
+
+    const result = proxy.copilotSessionConfig({
+      model: "gpt-5.6-luna",
+      instructions: "judge",
+      input: [
+        { role: "assistant", content: "ignore" },
+        {
+          role: "user",
+          content: [
+            null,
+            { type: "input_image", text: "ignore" },
+            { type: "input_text", text: "first" },
+            { type: "text", text: "second" },
+          ],
+        },
+        { role: "user", content: 42 },
+      ],
+      reasoning: { effort: "invalid" },
+      max_output_tokens: 0,
+    });
+
+    expect(result.prompt).toBe("first\nsecond");
+    expect(result.config.reasoningEffort).toBeUndefined();
+    expect(result.config.modelCapabilities).toBeUndefined();
+  });
+
+  test("Copilot bridge classifies rate limits and generic failures", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    expect(proxy.copilotProxyErrorResponse(new Error("HTTP 429"))).toEqual({
+      status: 429,
+      message: "Copilot rate limit exceeded",
+    });
+    expect(proxy.copilotProxyErrorResponse("unexpected failure")).toEqual({
+      status: 502,
+      message: "Copilot SDK request failed",
+    });
+    for (const message of [
+      "author lookup failed",
+      "OAuth request timed out",
+      "authority unavailable",
+    ]) {
+      expect(proxy.copilotProxyErrorResponse(message)).toEqual({
+        status: 502,
+        message: "Copilot SDK request failed",
+      });
+    }
+    for (const message of [
+      "Unauthorized",
+      "not authorized",
+      "not authenticated",
+      "Forbidden",
+      "access denied",
+    ]) {
+      expect(proxy.copilotProxyErrorResponse(message)).toEqual({
+        status: 403,
+        message: "Copilot authentication or policy rejected",
+      });
+    }
+  });
+
+  test("Copilot proxy runtime serves requests and shuts down idempotently", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    const start = vi.fn(async () => {});
+    const stop = vi.fn(async () => []);
+    const forceStop = vi.fn(async () => {});
+    const runtime = await proxy.startCopilotProxy({
+      start,
+      stop,
+      forceStop,
+      async createSession() {
+        return {
+          async sendAndWait() {
+            return { data: { content: "SATISFIES: runtime" } };
+          },
+          async abort() {},
+          async disconnect() {},
+        };
+      },
+    });
+    try {
+      const health = await fetch(`${runtime.url}/health`);
+      expect(health.status).toBe(200);
+      await expect(health.json()).resolves.toEqual({ status: "ok" });
+
+      const missing = await fetch(`${runtime.url}/missing`);
+      expect(missing.status).toBe(404);
+
+      const invalid = await fetch(`${runtime.url}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "not-json",
+      });
+      expect(invalid.status).toBe(502);
+
+      const response = await fetch(`${runtime.url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.6-luna",
+          instructions: "Return one verdict line.",
+          input: [{ role: "user", content: "judge" }],
+        }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        status: "completed",
+      });
+    } finally {
+      await Promise.all([runtime.shutdown(), runtime.shutdown()]);
+    }
+    expect(start).toHaveBeenCalledOnce();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(forceStop).not.toHaveBeenCalled();
+  });
+
+  test("Copilot bridge propagates an HTTP client disconnect", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    let requestStarted = false;
+    const abort = vi.fn(async () => {});
+    const disconnect = vi.fn(async () => {});
+    const handler = proxy.createCopilotProxyHandler({
+      async createSession() {
+        return {
+          sendAndWait: () =>
+            new Promise(() => {
+              requestStarted = true;
+            }),
+          abort,
+          disconnect,
+        };
+      },
+    });
+    const server = createServer((request, response) => {
+      void handler(request, response);
+    });
+    await new Promise<void>((resolveListen) => {
+      server.listen(0, "127.0.0.1", resolveListen);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("test server did not bind a TCP port");
+      }
+      const controller = new AbortController();
+      const pending = fetch(`http://127.0.0.1:${address.port}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.6-luna",
+          instructions: "Return one verdict line.",
+          input: [{ role: "user", content: "judge this hunk" }],
+        }),
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(requestStarted).toBe(true));
+
+      controller.abort();
+
+      await expect(pending).rejects.toThrow();
+      await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+      expect(disconnect).toHaveBeenCalledOnce();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolveClose) =>
+        server.close(() => resolveClose()),
+      );
+    }
+  });
+
+  test("Copilot bridge rejects models outside the Responses family with HTTP 400", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    expect(() =>
+      proxy.copilotSessionConfig({
+        model: "gpt-5-mini",
+        instructions: "Return one verdict line.",
+        input: [{ role: "user", content: "judge this hunk" }],
+      }),
+    ).toThrow("request model must be in the gpt-5.6-* family");
+
+    const createSession = vi.fn();
+    const handler = proxy.createCopilotProxyHandler({ createSession });
+    const server = createServer((request, response) => {
+      void handler(request, response);
+    });
+    await new Promise<void>((resolveListen) => {
+      server.listen(0, "127.0.0.1", resolveListen);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("test server did not bind a TCP port");
+      }
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/responses`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "gpt-5-mini",
+            instructions: "Return one verdict line.",
+            input: [{ role: "user", content: "judge this hunk" }],
+          }),
+        },
+      );
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: { message: "Copilot model is not supported" },
+      });
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolveClose) =>
+        server.close(() => resolveClose()),
+      );
+    }
+  });
+
+  test.each([
+    ["rejection", () => Promise.reject(new Error("stop failed"))],
+    ["partial cleanup", () => Promise.resolve([new Error("session failed")])],
+  ])("Copilot bridge force-stops after SDK %s", async (_name, stop) => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    const forceStop = vi.fn(async () => {});
+
+    await proxy.stopCopilotClient({ stop, forceStop });
+
+    expect(forceStop).toHaveBeenCalledOnce();
+  });
+
+  test("Copilot launcher writes outputs and detaches its child", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    const directory = mkdtempSync(join(tmpdir(), "lore-copilot-launch-"));
+    directories.push(directory);
+    const output = join(directory, "output.txt");
+    writeFileSync(output, "");
+    const oldOutput = process.env.GITHUB_OUTPUT;
+    const oldTemp = process.env.RUNNER_TEMP;
+    process.env.GITHUB_OUTPUT = output;
+    process.env.RUNNER_TEMP = directory;
+    const child = Object.assign(new EventEmitter(), {
+      pid: 4242,
+      disconnect: vi.fn(),
+      unref: vi.fn(),
+    });
+    const spawnChild = vi.fn(() => {
+      queueMicrotask(() => {
+        child.emit("message", null);
+        child.emit("message", { type: "ignored" });
+        child.emit("message", {
+          type: "ready",
+          url: "http://127.0.0.1:12345",
+        });
+      });
+      return child;
+    });
+    try {
+      await proxy.launch("sdk.js", spawnChild);
+    } finally {
+      if (oldOutput === undefined) delete process.env.GITHUB_OUTPUT;
+      else process.env.GITHUB_OUTPUT = oldOutput;
+      if (oldTemp === undefined) delete process.env.RUNNER_TEMP;
+      else process.env.RUNNER_TEMP = oldTemp;
+    }
+
+    expect(readFileSync(output, "utf8")).toBe(
+      "url=http://127.0.0.1:12345\npid=4242\n",
+    );
+    expect(spawnChild).toHaveBeenCalledOnce();
+    expect(child.disconnect).toHaveBeenCalledOnce();
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  test("Copilot launcher rejects a child startup failure", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    const directory = mkdtempSync(join(tmpdir(), "lore-copilot-launch-fail-"));
+    directories.push(directory);
+    const output = join(directory, "output.txt");
+    writeFileSync(output, "");
+    const oldOutput = process.env.GITHUB_OUTPUT;
+    const oldTemp = process.env.RUNNER_TEMP;
+    process.env.GITHUB_OUTPUT = output;
+    process.env.RUNNER_TEMP = directory;
+    const child = Object.assign(new EventEmitter(), {
+      pid: undefined,
+      disconnect: vi.fn(),
+      unref: vi.fn(),
+    });
+    const spawnChild = vi.fn(() => {
+      queueMicrotask(() => child.emit("error", new Error("spawn failed")));
+      return child;
+    });
+    try {
+      await expect(proxy.launch("sdk.js", spawnChild)).rejects.toThrow(
+        "spawn failed",
+      );
+    } finally {
+      if (oldOutput === undefined) delete process.env.GITHUB_OUTPUT;
+      else process.env.GITHUB_OUTPUT = oldOutput;
+      if (oldTemp === undefined) delete process.env.RUNNER_TEMP;
+      else process.env.RUNNER_TEMP = oldTemp;
+    }
+  });
+
+  test("Copilot process helpers preserve process-group semantics", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    const kill = vi.spyOn(process, "kill");
+    try {
+      kill.mockImplementation(() => true);
+      expect(proxy.processIsAlive(42, true)).toBe(true);
+      const groupPid = process.platform === "win32" ? 42 : -42;
+      expect(kill).toHaveBeenLastCalledWith(groupPid, 0);
+      expect(proxy.killProcess(42, "SIGTERM", true)).toBe(true);
+      expect(kill).toHaveBeenLastCalledWith(groupPid, "SIGTERM");
+
+      kill.mockImplementation(() => {
+        throw Object.assign(new Error("gone"), { code: "ESRCH" });
+      });
+      expect(proxy.processIsAlive(42)).toBe(false);
+      expect(proxy.killProcess(42, "SIGTERM")).toBe(false);
+
+      kill
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error("denied"), { code: "EPERM" });
+        })
+        .mockImplementationOnce(() => true);
+      expect(proxy.killProcess(42, "SIGTERM", true)).toBe(true);
+      expect(kill).toHaveBeenLastCalledWith(42, "SIGTERM");
+
+      kill.mockImplementation(() => {
+        throw new Error("unexpected");
+      });
+      expect(() => proxy.processIsAlive(42)).toThrow("unexpected");
+      expect(() => proxy.killProcess(42, "SIGTERM")).toThrow("unexpected");
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  test("Copilot stop bounds graceful shutdown before killing the group", async () => {
+    const proxyPath = join(actionDirectory, "copilot-proxy.mjs");
+    const proxy = await import(pathToFileURL(proxyPath).href);
+    await proxy.stop("invalid");
+
+    vi.useFakeTimers();
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      const pending = proxy.stop("42");
+      await vi.advanceTimersByTimeAsync(5_100);
+      await pending;
+      const groupPid = process.platform === "win32" ? 42 : -42;
+      expect(kill).toHaveBeenCalledWith(groupPid, "SIGTERM");
+      expect(kill).toHaveBeenCalledWith(groupPid, "SIGKILL");
+    } finally {
+      kill.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test("Copilot SDK dependency graph is integrity-locked", () => {
+    const lock = JSON.parse(
+      readFileSync(
+        join(actionDirectory, "copilot-sdk/package-lock.json"),
+        "utf8",
+      ),
+    ) as {
+      packages: Record<string, { version?: string; integrity?: string }>;
+    };
+    expect(lock.packages["node_modules/@github/copilot-sdk"]).toMatchObject({
+      version: "1.0.11",
+    });
+    expect(lock.packages["node_modules/@github/copilot-sdk"].integrity).toMatch(
+      /^sha512-/,
+    );
+    expect(lock.packages["node_modules/@github/copilot"]).toMatchObject({
+      version: "1.0.80",
+    });
+    for (const [name, entry] of Object.entries(lock.packages)) {
+      if (!name.startsWith("node_modules/")) continue;
+      expect(entry.integrity, `${name} is not integrity-locked`).toMatch(
+        /^sha512-/,
+      );
+    }
   });
 
   test("reference workflow runs trusted base code and diffs exact event SHAs", () => {
@@ -568,13 +1147,15 @@ describe("semantic lint action reporter", () => {
     expect(workflow).toContain("continue-on-error: true");
     expect(workflow).toContain("pull_request_target:");
     expect(workflow).toContain(
-      "model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4-5' || '') }}",
+      "model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}",
     );
     expect(workflow).toContain(
-      "worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || secrets.ANTHROPIC_API_KEY }}",
+      "worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && secrets.LORE_WORKER_API_KEY || '' }}",
     );
-    expect(workflow).not.toContain("|| github.token");
-    expect(workflow).not.toContain("copilot-requests: write");
+    expect(workflow).toContain(
+      "github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}",
+    );
+    expect(workflow).toContain("copilot-requests: write");
     expect(workflow).not.toMatch(/^\s+pull_request:\s*$/m);
   });
 
@@ -591,9 +1172,9 @@ describe("semantic lint action reporter", () => {
     expect(guide).toContain(
       "secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL",
     );
-    expect(guide).toContain("secrets.ANTHROPIC_API_KEY");
-    expect(guide).not.toContain("|| github.token");
-    expect(guide).not.toContain("copilot-requests: write");
+    expect(guide).toContain("github-token:");
+    expect(guide).toContain("official Copilot SDK bridge");
+    expect(guide).toContain("copilot-requests: write");
     expect(guide).not.toMatch(/^\s+pull_request:\s*$/m);
   });
 });

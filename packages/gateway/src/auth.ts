@@ -27,10 +27,10 @@ export type AuthCredential =
  * The auth scheme a DEDICATED worker key (`LORE_WORKER_API_KEY`) must use for a
  * given worker-model provider. Defaults to `api-key` (→ `x-api-key`), the shape
  * the Anthropic/OpenAI/MiniMax dedicated-key paths have always used. GitHub
- * Copilot (`github-copilot`, api.githubcopilot.com) authenticates with a GitHub
- * token (OAuth bearer or the workflow's `GITHUB_TOKEN` under
- * `copilot-requests: write`) as `Authorization: Bearer`, so it is the one
- * provider that needs `bearer`.
+ * Copilot (`github-copilot`, api.githubcopilot.com) API credentials use
+ * `Authorization: Bearer`, so it is the one provider that needs `bearer`.
+ * Actions installation tokens require GitHub's official Copilot SDK resolution;
+ * the reference semantic-lint action provides that bridge separately.
  *
  * Single source of truth shared by every dedicated-key call site (the worker
  * pipeline and the `lore lint` CLI) so a new bearer provider is added in

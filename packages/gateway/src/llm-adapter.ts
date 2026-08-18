@@ -3404,12 +3404,15 @@ export function createGatewayLLMClient(
   defaultModel: { providerID: string; modelID: string },
   opts?: {
     dedicatedWorkerKey?: boolean;
+    /** Keep protocol-specific proxies on the selected model. */
+    disableModelFallbacks?: boolean;
     vertexProject?: string;
     /** Called with body-independent, URL-sanitized auth rejection details. */
     onAuthRejected?: (info: AuthRejectionInfo) => void;
   },
 ): GatewayLLMClient {
   const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
+  const disableModelFallbacks = opts?.disableModelFallbacks === true;
   // Configured GCP project for Vertex workers (else derived from ADC at call
   // time). Threaded so an explicit LORE_VERTEX_PROJECT (without GOOGLE_CLOUD_*)
   // is honored — the session base URL carries the region but never the project.
@@ -3447,7 +3450,10 @@ export function createGatewayLLMClient(
       // though a working backup exists — so pick up where the fallback left off
       // instead of re-failing the swap every chunk. Data stays recallable if
       // none is usable.
-      for (const cand of workerModelCandidates(model)) {
+      const candidates = disableModelFallbacks
+        ? [model]
+        : workerModelCandidates(model);
+      for (const cand of candidates) {
         if (!candidateBlocked(cand)) {
           model = cand;
           break;
@@ -3834,11 +3840,13 @@ export function createGatewayLLMClient(
             // from workerModelCandidates minus the active model and any already
             // blocklisted (incapable) candidate; each unsupported-model 400 pops
             // the next one.
-            const modelFallbacks = workerModelCandidates(model)
-              .slice(1)
-              .filter(
-                (c) => c.modelID !== model.modelID && !candidateBlocked(c),
-              );
+            const modelFallbacks = disableModelFallbacks
+              ? []
+              : workerModelCandidates(model)
+                  .slice(1)
+                  .filter(
+                    (c) => c.modelID !== model.modelID && !candidateBlocked(c),
+                  );
             // Resolve the retry budget once per call (not per attempt) — the
             // value can't change mid-loop and re-reading the env each iteration
             // is wasteful.
@@ -5166,6 +5174,7 @@ export function createGatewayLLMClient(
 export interface GatewayInvariantJudgeOptions {
   client: GatewayLLMClient;
   model: { providerID: string; modelID: string };
+  upstreamUrl?: string;
   effort?: ReasoningEffort;
   sessionID: string;
   candidateTimeoutMs?: number;
@@ -5199,6 +5208,12 @@ export function createGatewayInvariantJudge(
           user,
           {
             model: options.model,
+            ...(options.upstreamUrl
+              ? {
+                  upstreamUrl: options.upstreamUrl,
+                  upstreamProviderID: options.model.providerID,
+                }
+              : {}),
             workerID: "lore-invariant-check",
             thinking: false,
             reasoningEffort: options.effort,

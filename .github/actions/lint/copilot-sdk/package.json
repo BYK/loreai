@@ -1,0 +1,8 @@
+{
+  "name": "lore-semantic-linter-copilot-bridge",
+  "private": true,
+  "dependencies": {
+    "@github/copilot": "1.0.80",
+    "@github/copilot-sdk": "1.0.11"
+  }
+}

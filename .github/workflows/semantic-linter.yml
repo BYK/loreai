@@ -17,6 +17,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  copilot-requests: write
 
 jobs:
   lint:
@@ -67,21 +68,17 @@ jobs:
           head: ${{ github.event.pull_request.head.sha }}
           # Run the built CJS binary under Node (see the build step above).
           lore-command: "node packages/gateway/dist/bin.cjs"
-          # Judge model + credential. LORE_WORKER_API_KEY remains the explicit
-          # override and pairs with LORE_INVARIANT_MODEL when configured. This
-          # repository otherwise uses its ANTHROPIC_API_KEY secret with Haiku.
-          # A raw Actions GITHUB_TOKEN is not a Copilot API bearer credential:
-          # official Copilot CLI support performs private auth/billing handling
-          # that direct /responses calls do not. With no supported secret, pass
-          # no credential so Lore reports a precise no-auth health failure.
+          # Judge model + credential. A paired LORE_WORKER_API_KEY and
+          # LORE_INVARIANT_MODEL override the default. Otherwise the workflow's
+          # bare GitHub token is resolved through GitHub's official Copilot SDK;
+          # the copilot-requests permission above grants inference and billing.
           #
           # Model precedence:
-          #   - LORE_WORKER_API_KEY + LORE_INVARIANT_MODEL → explicit model.
-          #   - LORE_WORKER_API_KEY only → CLI/config default model.
-          #   - ANTHROPIC_API_KEY set    → anthropic/claude-haiku-4-5.
-          #   - no supported secret      → CLI default with no auth (reported).
-          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4-5' || '') }}
-          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          #   - paired override → explicit model + dedicated credential.
+          #   - otherwise       → GitHub Copilot Luna + workflow token.
+          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}
+          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && secrets.LORE_WORKER_API_KEY || '' }}
+          github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}
           # Reserve five minutes of the 25-minute job for report publication and
           # bounded gateway shutdown.
           deadline-seconds: "1200"
