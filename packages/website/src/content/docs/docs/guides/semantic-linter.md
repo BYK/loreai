@@ -23,7 +23,7 @@ It is **not** a replacement for tests, type checking, or a linter. It has no gro
 
 ## Quick start (GitHub Actions)
 
-The repository ships a reusable composite action and a reference workflow. The zero-secret path uses [GitHub Copilot](https://docs.github.com/en/copilot) via the built-in `GITHUB_TOKEN`, so there is nothing to configure on a repo with Copilot access — just grant the `copilot-requests: write` workflow permission and the token authenticates to `api.githubcopilot.com` directly as a Bearer credential.
+The repository ships a reusable composite action and a reference workflow. Add an `ANTHROPIC_API_KEY` Actions secret for the default `anthropic/claude-haiku-4.5` judge, or configure the custom credential and model pair described below.
 
 Add `.github/workflows/semantic-linter.yml`:
 
@@ -31,7 +31,7 @@ Add `.github/workflows/semantic-linter.yml`:
 name: Semantic linter (advisory)
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 concurrency:
@@ -41,7 +41,6 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
-  copilot-requests: write # lets GITHUB_TOKEN call GitHub Copilot as the default judge
 
 jobs:
   lint:
@@ -51,7 +50,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0 # full history so merge-base against the PR base resolves
+          # Execute only trusted base code. The PR head is fetched as diff data.
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - name: Fetch exact PR head for diffing
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          sha_re='^[0-9a-fA-F]{40}$'
+          [[ "$PR_HEAD_SHA" =~ $sha_re ]] || exit 1
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
+          git fetch --no-tags --depth=1 origin \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/lore-pr-head"
+          test "$(git rev-parse refs/remotes/origin/lore-pr-head)" = "$PR_HEAD_SHA"
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -61,36 +74,40 @@ jobs:
       - name: Run Lore semantic linter
         uses: ./.github/actions/lint
         with:
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
           lore-command: "node packages/gateway/dist/bin.cjs"
-          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5.6-luna' || '') }}
-          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}
+          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4.5' || '') }}
+          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || secrets.ANTHROPIC_API_KEY }}
 ```
 
-That is the whole setup. Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
+Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
 
 :::caution
-`fetch-depth: 0` is required. The check diffs the PR against the merge-base with its target branch; a shallow clone forces a noisy tip-to-tip diff instead of the fork-point diff.
+Use `pull_request_target` only with the trusted-base checkout pattern above. The workflow executes the base revision's code and fetches the PR head solely as immutable diff data, so the judge secret is never exposed to code supplied by the pull request.
 :::
 
 ### Choosing a judge model and credential
 
-The credential and the model are chosen independently.
+The credential and model are selected as a pair to prevent sending one provider's key to another provider.
 
 **Credential** (the `worker-api-key` input):
 
-- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `copilot-requests: write`, calling GitHub Copilot. The token is sent as a Bearer credential to `api.githubcopilot.com/responses` (the openai-responses worker adapter routes `gpt-5.6-*` via this endpoint — see PR #1582 / `isResponsesOnlyModel` in `llm-adapter.ts`) — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; that produces a visible inconclusive health report. Advisory mode remains non-blocking; gate mode fails closed.
-- **Dedicated key (busy repos).** Set a `LORE_WORKER_API_KEY` secret. It takes precedence over the token.
+- **Default.** Set `ANTHROPIC_API_KEY`; the reference workflow pairs it with `anthropic/claude-haiku-4.5`.
+- **Custom provider.** Set `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` together. The dedicated key takes precedence over `ANTHROPIC_API_KEY`.
+- **No supported secret.** The action passes no credential and reports an explicit `no-auth` health failure. A raw Actions `GITHUB_TOKEN` is not forwarded to provider APIs.
 
 **Model** (the `model` input, `provider/id`):
 
 | Situation | Model used |
 | --- | --- |
-| `LORE_INVARIANT_MODEL` repo variable is set | that value (with either credential) |
-| No dedicated key, no variable | `github-copilot/gpt-5.6-luna` |
-| Dedicated key, no variable | your repo's configured default worker model |
+| `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` are set | the variable value, authenticated by the dedicated key |
+| `LORE_WORKER_API_KEY` only | your repo's configured default worker model |
+| `ANTHROPIC_API_KEY` only (or a stale model variable without a dedicated key) | `anthropic/claude-haiku-4.5` |
+| Neither supported secret | no authenticated judge; the report is inconclusive with `no-auth` |
 
 :::note
-The model id must match the credential. A GitHub token needs a `github-copilot/...` id (sent as a Bearer token to `api.githubcopilot.com`); pairing a dedicated Anthropic key with a forced `github-copilot` id would 401 and silently no-op. The precedence table above avoids that trap: leave `model` empty when using a dedicated key unless you set `LORE_INVARIANT_MODEL`.
+The model id must match the credential. `LORE_INVARIANT_MODEL` is honored only when `LORE_WORKER_API_KEY` is also set; otherwise the Anthropic fallback forces its matching model. Official Copilot CLI support for Actions tokens includes authentication and billing behavior that is not equivalent to forwarding `GITHUB_TOKEN` directly to `api.githubcopilot.com`.
 :::
 
 ## How it works

@@ -567,6 +567,33 @@ describe("semantic lint action reporter", () => {
     );
     expect(workflow).toContain("continue-on-error: true");
     expect(workflow).toContain("pull_request_target:");
+    expect(workflow).toContain(
+      "model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4.5' || '') }}",
+    );
+    expect(workflow).toContain(
+      "worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || secrets.ANTHROPIC_API_KEY }}",
+    );
+    expect(workflow).not.toContain("|| github.token");
+    expect(workflow).not.toContain("copilot-requests: write");
     expect(workflow).not.toMatch(/^\s+pull_request:\s*$/m);
+  });
+
+  test("published workflow guide preserves trusted credential/model pairing", () => {
+    const guide = readFileSync(
+      resolve(
+        actionDirectory,
+        "../../../packages/website/src/content/docs/docs/guides/semantic-linter.md",
+      ),
+      "utf8",
+    );
+    expect(guide).toContain("pull_request_target:");
+    expect(guide).toContain("ref: ${{ github.event.pull_request.base.sha }}");
+    expect(guide).toContain(
+      "secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL",
+    );
+    expect(guide).toContain("secrets.ANTHROPIC_API_KEY");
+    expect(guide).not.toContain("|| github.token");
+    expect(guide).not.toContain("copilot-requests: write");
+    expect(guide).not.toMatch(/^\s+pull_request:\s*$/m);
   });
 });
