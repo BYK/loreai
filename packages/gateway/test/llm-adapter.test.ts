@@ -43,6 +43,7 @@ import {
   isDataPolicyBlocked404,
   isModelUnsupported400,
   isUnsupportedApi400,
+  classifyWorker400,
   isThinkingUnsupportedModel,
   markThinkingUnsupported,
   workerThinkingOnByDefault,
@@ -225,6 +226,27 @@ describe("readWorkerResponseText", () => {
     expect(text.endsWith("�")).toBe(true);
   });
 });
+
+test.each([
+  [
+    '{"error":{"message":"thinking.type.disabled is not supported"}}',
+    "thinking",
+  ],
+  ['{"error":{"message":"temperature is not supported"}}', "temperature"],
+  [
+    '{"error":{"message":"system.0.cache_control.ttl is invalid"}}',
+    "cache-control",
+  ],
+  ['{"error":{"message":"max_tokens exceeds the model limit"}}', "max-tokens"],
+  ['{"error":{"message":"unknown model"}}', "model"],
+  ['{"error":{"message":"credit balance is too low"}}', "billing"],
+  ['{"error":{"message":"request rejected"}}', "invalid-request"],
+])(
+  "classifyWorker400 maps %s without exposing the message",
+  (body, expected) => {
+    expect(classifyWorker400(body)).toBe(expected);
+  },
+);
 
 test("empty worker diagnostics never include response values", () => {
   const sentinel = "must-not-leak-empty-secret";
@@ -4559,9 +4581,9 @@ describe("worker temperature capability", () => {
 // api.anthropic.com). When active, the model can return an EMPTY thinking block
 // with no visible text — the worker then sees a "no usable text" empty response
 // and the whole distill/curate loop degrades. We send `thinking:{type:"disabled"}`
-// on genuine Anthropic Claude worker requests to force plain text output.
+// only when the model supports that opt-out; extended-thinking-only models omit it.
 // ---------------------------------------------------------------------------
-describe("worker thinking disabled for Anthropic Claude models", () => {
+describe("worker thinking suppression for Anthropic Claude models", () => {
   const mockFetch = vi.mocked(upstreamFetch);
 
   const UPSTREAMS = {
@@ -4693,7 +4715,7 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
     expect(bodyOf(0)).not.toHaveProperty("thinking");
   });
 
-  test("bedrock mantle Claude worker disables thinking (Anthropic Messages shape; sonnet-5-gen adaptive thinking is on by default on Bedrock too)", async () => {
+  test("bedrock mantle Haiku 4.5 worker omits the unsupported thinking opt-out", async () => {
     mockFetch.mockResolvedValue(okResponse());
     const client = createGatewayLLMClient(
       UPSTREAMS,
@@ -4709,7 +4731,7 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       protocol: "anthropic",
     });
 
-    expect(bodyOf(0)?.thinking).toEqual({ type: "disabled" });
+    expect(bodyOf(0)).not.toHaveProperty("thinking");
     // The body model is the mantle catalog id.
     expect(bodyOf(0)?.model).toBe("anthropic.claude-haiku-4-5");
   });
@@ -4761,7 +4783,7 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       clearModelDataCache();
     });
 
-    test("workerThinkingOnByDefault: toggle → true; effort/budget_tokens/none → false", () => {
+    test("workerThinkingOnByDefault: toggle → true; effort/budget_tokens/empty/none → false", () => {
       _setModelDataForTest({
         "claude-sonnet-5": {
           id: "claude-sonnet-5",
@@ -4779,6 +4801,15 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
           reasoning_options: [{ type: "budget_tokens" }],
         },
         "some-nonreasoning": { id: "some-nonreasoning", reasoning: false },
+        "claude-opus-5": {
+          id: "claude-opus-5",
+          reasoning: true,
+          reasoning_options: [],
+        },
+        "claude-sonnet-5-no-reasoning": {
+          id: "claude-sonnet-5-no-reasoning",
+          reasoning: false,
+        },
       });
       expect(workerThinkingOnByDefault({ modelID: "claude-sonnet-5" })).toBe(
         true,
@@ -4794,6 +4825,12 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       expect(workerThinkingOnByDefault({ modelID: "some-nonreasoning" })).toBe(
         false,
       );
+      expect(workerThinkingOnByDefault({ modelID: "claude-opus-5" })).toBe(
+        false,
+      );
+      expect(
+        workerThinkingOnByDefault({ modelID: "claude-sonnet-5-no-reasoning" }),
+      ).toBe(false);
     });
 
     test("workerModelReasons: ANY reasoning_options → true (broader than the toggle-only thinking predicate)", () => {
@@ -4834,13 +4871,39 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       expect(workerModelReasons({ modelID: "MiniMax-M1" })).toBe(false);
     });
 
-    test("workerThinkingOnByDefault: falls back to the Claude-id heuristic when models.dev has no data (offline safety)", () => {
+    test("workerThinkingOnByDefault: offline fallback only opts out supported on-by-default families", () => {
       clearModelDataCache(); // no models.dev data available
-      // A models.dev outage must NOT stop us disabling thinking on Claude models.
+      // A models.dev outage must not stop us disabling thinking where the API
+      // supports it, but Haiku 4.5 rejects `type:disabled` with HTTP 400.
       expect(workerThinkingOnByDefault({ modelID: "claude-sonnet-5" })).toBe(
         true,
       );
+      expect(workerThinkingOnByDefault({ modelID: "claude-opus-5" })).toBe(
+        true,
+      );
+      expect(workerThinkingOnByDefault({ modelID: "claude-haiku-4-5" })).toBe(
+        false,
+      );
       expect(workerThinkingOnByDefault({ modelID: "MiniMax-M1" })).toBe(false);
+    });
+
+    test("Haiku 4.5 API-key request omits thinking when model data is unavailable", async () => {
+      clearModelDataCache();
+      mockFetch.mockResolvedValue(okResponse());
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+      );
+
+      await client.prompt("system", "user", {
+        sessionID: "invariant-check-",
+        workerID: "lore-invariant-check",
+        model: { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(bodyOf(0)).not.toHaveProperty("thinking");
     });
 
     test("effort-only model (opus-4-8) does NOT get a thinking param when models.dev data is present", async () => {
@@ -4933,7 +4996,7 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       );
     });
 
-    const model = { providerID: "anthropic", modelID: "claude-legacy-3" };
+    const model = { providerID: "anthropic", modelID: "claude-sonnet-5" };
     const client = createGatewayLLMClient(
       UPSTREAMS,
       () => ({ scheme: "api-key", value: "sk-ant-test" }),
@@ -4960,7 +5023,7 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
   });
 
   test("omits the thinking param upfront once a model is learned", async () => {
-    const model = { providerID: "anthropic", modelID: "claude-legacy-3" };
+    const model = { providerID: "anthropic", modelID: "claude-sonnet-5" };
     markThinkingUnsupported(model);
     mockFetch.mockResolvedValue(okResponse());
 
@@ -5073,7 +5136,7 @@ describe("worker thinking disabled for Anthropic Claude models", () => {
       );
     });
 
-    const model = { providerID: "anthropic", modelID: "claude-legacy-3" };
+    const model = { providerID: "anthropic", modelID: "claude-sonnet-5" };
     const client = createGatewayLLMClient(
       UPSTREAMS,
       () => ({ scheme: "api-key", value: "sk-ant-test" }),
