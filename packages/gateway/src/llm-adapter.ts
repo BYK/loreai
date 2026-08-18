@@ -2209,8 +2209,9 @@ function buildCodexWorkerRequest(
  *
  * Unlike Codex, this path allows `max_output_tokens` (Copilot's `/responses`
  * honors it just like the Responses API spec) and threads `reasoningEffort`
- * through to nested `reasoning.{effort}`. Same `openAIReasoningEffort` returns
- * null on `off`/undefined so we omit both forms when the caller did not set it.
+ * through to nested `reasoning.{effort}`. Copilot's Responses models reject
+ * `temperature` under their default/explicit reasoning modes, so sampling is
+ * omitted there while other Responses providers retain it.
  */
 function buildOpenAIResponsesWorkerRequest(
   target: ProviderTarget,
@@ -2248,7 +2249,8 @@ function buildOpenAIResponsesWorkerRequest(
       store: false,
       stream: false,
       max_output_tokens: maxTokens,
-      ...(temperature != null && { temperature }),
+      ...(temperature != null &&
+        model.providerID !== "github-copilot" && { temperature }),
       ...(effort != null && { reasoning: { effort } }),
       instructions: system,
       input: [
