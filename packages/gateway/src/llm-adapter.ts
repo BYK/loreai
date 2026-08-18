@@ -206,6 +206,37 @@ function isBetaRelated400(body: string): boolean {
 }
 
 /**
+ * Reduce a first-party validation error to an allowlisted diagnostic category.
+ * Never return the upstream message: validation text can include request values,
+ * while CI only needs the rejected control family to diagnose an opaque 400.
+ */
+export function classifyWorker400(body: string): string {
+  let detail = body;
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown } };
+    if (typeof parsed.error?.message === "string") {
+      detail = parsed.error.message;
+    }
+  } catch {
+    // Plain-text provider errors are classified directly.
+  }
+  const categories: Array<[string, RegExp]> = [
+    ["thinking", /\bthinking\b/i],
+    ["temperature", /\btemperature\b/i],
+    ["cache-control", /cache[_ -]?control|cache[_ -]?ttl|prompt cach/i],
+    ["max-tokens", /max[_ -]?tokens|output tokens/i],
+    ["model", /\bmodel\b/i],
+    ["messages", /\bmessages?\b/i],
+    ["system", /\bsystem\b/i],
+    ["billing", /\bbilling\b|credit balance|insufficient credit/i],
+  ];
+  for (const [category, pattern] of categories) {
+    if (pattern.test(detail)) return category;
+  }
+  return "invalid-request";
+}
+
+/**
  * Worker call sites set `temperature: 0` for reproducible distillation/curation.
  * Newer models (e.g. Anthropic `claude-sonnet-5`) have DEPRECATED the sampling
  * `temperature` param and reject any request that includes it with a 400
@@ -363,18 +394,18 @@ export function isAnthropicClaudeModel(modelID: string): boolean {
  * param. This generalizes across providers/generations with no hardcoded list.
  *
  * FALLBACK (offline-safe): when models.dev has NO reasoning data for the model
- * (API outage, or an id newer than the models.dev snapshot), fall back to the
- * Claude-id heuristic so an on-by-default Claude model is still covered when the
- * data is unavailable — a models.dev outage must never silently re-break workers.
- * Sending the param is a harmless no-op for off-by-default Claude models, and the
- * runtime learning net strips it for any model that rejects it.
+ * (API outage, or an id newer than the models.dev snapshot), opt out only for
+ * Claude families whose API contract says thinking is on by default and accepts
+ * `type:"disabled"`. Extended-thinking-only models such as Claude Haiku 4.5 run
+ * without thinking when the field is omitted and reject `type:"disabled"` with
+ * a 400, so a broad Claude-id fallback makes offline/catalog-cold calls invalid.
  */
 export function workerThinkingOnByDefault(model: { modelID: string }): boolean {
-  const opts = getModelEntrySync(model.modelID).reasoning_options;
-  if (Array.isArray(opts) && opts.length > 0) {
-    return opts.some((o) => o?.type === "toggle");
-  }
-  return isAnthropicClaudeModel(model.modelID);
+  const entry = getModelEntrySync(model.modelID);
+  const opts = entry.reasoning_options;
+  if (Array.isArray(opts)) return opts.some((o) => o?.type === "toggle");
+  if (entry.reasoning === false) return false;
+  return /claude-(?:sonnet|opus)-5(?:-|$)/i.test(model.modelID);
 }
 
 /**
@@ -396,7 +427,7 @@ export function workerThinkingOnByDefault(model: { modelID: string }): boolean {
  * reasoning, returning empty `finish_reason:"length"` (observed in production
  * after the #1418 deploy). ANY non-empty `reasoning_options` → the model can
  * reason → floor applies. Empty/absent `reasoning_options` falls back to the
- * Claude-id heuristic (offline-safe, same as `workerThinkingOnByDefault`).
+ * broad Claude-id heuristic because over-allocating headroom is harmless.
  *
  * A floor, never a charge: a non-reasoning model still bills only what it emits,
  * so an over-broad true here costs nothing; a false NEGATIVE re-breaks workers.
@@ -421,13 +452,11 @@ export function modelRejectsTemperatureByData(modelID: string): boolean {
 
 /**
  * Companion to the temperature-capability learning above, for the `thinking`
- * param. Workers send `thinking:{type:"disabled"}` to genuine Anthropic Claude
- * models to suppress adaptive thinking (see `buildAnthropicWorkerRequest`).
- * Every current Claude model accepts it, but a model that predates the thinking
- * API (older claude-3.x, still reachable on some accounts) can reject an unknown
- * `thinking` field with a 400. We learn that at runtime — on the first such 400
- * — so subsequent calls omit the param, exactly mirroring the temperature
- * mechanism. In-memory; re-learns at most once per model per gateway lifetime.
+ * param. Workers send `thinking:{type:"disabled"}` to supported on-by-default
+ * Anthropic Claude models (see `buildAnthropicWorkerRequest`). Some models reject
+ * that configuration, so we learn the rejection at runtime and omit the param on
+ * subsequent calls, exactly mirroring the temperature mechanism. In-memory;
+ * re-learns at most once per model per gateway lifetime.
  */
 const thinkingUnsupportedModels = new Set<string>();
 
@@ -1789,7 +1818,7 @@ function buildAnthropicWorkerRequest(
     : model.modelID;
 
   // `disableThinking` (decided by the caller — see the retry loop) sends
-  // `thinking:{type:"disabled"}` for genuine Anthropic Claude workers. Workers
+  // `thinking:{type:"disabled"}` for supported Anthropic Claude workers. Workers
   // do deterministic single-shot summarization (distillation / curation) and
   // never benefit from thinking. Newer models (claude-sonnet-5+) use ADAPTIVE
   // thinking that is silently activated by the replayed Claude Code OAuth
@@ -1797,9 +1826,10 @@ function buildAnthropicWorkerRequest(
   // model can spend its budget on a thinking block and return an EMPTY thinking
   // block with no visible text — the worker then sees a "no usable text" empty
   // response and the whole distill/curate loop degrades. `{type:"disabled"}` is
-  // accepted (and a no-op) by all current Claude models; a rare model that
-  // rejects the param (older claude-3.x) is learned via a one-shot 400 retry in
-  // the loop, which then passes `disableThinking=false` here.
+  // accepted by on-by-default Sonnet/Opus models; extended-thinking-only models
+  // (including Haiku 4.5) reject it and are excluded by the caller. Any remaining
+  // rejection is learned via a one-shot 400 retry in the loop, which then passes
+  // `disableThinking=false` here.
   // Extended thinking, opt-in via reasoning effort. When a budget is set the
   // caller wants the model to reason — this OVERRIDES the default worker
   // disable-thinking suppression. Anthropic constraints when thinking is on:
@@ -3639,12 +3669,12 @@ export function createGatewayLLMClient(
       // on the newest generation (claude-sonnet-5 today) and otherwise burns the
       // `max_tokens` budget on a thinking block, starving the visible text and
       // yielding an empty worker response. `workerThinkingOnByDefault` decides
-      // this data-drivenly from models.dev `reasoning_options` (with a Claude-id
-      // fallback when the data is unavailable). Gated to the Anthropic Messages
-      // wire protocols — "anthropic" (direct + Bedrock mantle) and "vertex" —
-      // the only builders that emit the `thinking` field. A model observed to
-      // reject the param gets it omitted upfront; a runtime-learned 400 below
-      // flips this to false for the retry.
+      // this data-drivenly from models.dev `reasoning_options` (with a narrow
+      // Sonnet/Opus 5 fallback when the data is unavailable). Gated to the
+      // Anthropic Messages wire protocols — "anthropic" (direct + Bedrock
+      // mantle) and "vertex" — the only builders that emit the `thinking`
+      // field. A model observed to reject the param gets it omitted upfront; a
+      // runtime-learned 400 below flips this to false for the retry.
       let effectiveDisableThinking =
         (target.protocol === "anthropic" || target.protocol === "vertex") &&
         workerThinkingOnByDefault(model) &&
@@ -4688,8 +4718,8 @@ export function createGatewayLLMClient(
                 }
 
                 // 400 + a "thinking is unsupported" complaint → the model rejects
-                // the `thinking:{type:"disabled"}` param we add for Claude workers
-                // (a model that predates the thinking API, e.g. older claude-3.x).
+                // the `thinking:{type:"disabled"}` param we add for supported
+                // Claude workers.
                 // Learn it so future calls omit the param upfront, then rebuild
                 // THIS request without it and retry once. Rebuilt via
                 // buildWorkerRequest (not string-editing req.body) so the OAuth
@@ -4861,6 +4891,10 @@ export function createGatewayLLMClient(
 
                 log.error(
                   `worker upstream request failed: status=${response.status}` +
+                    (response.status === 400
+                      ? ` detail=${classifyWorker400(text)}`
+                      : "") +
+                    ` request_id=${diagnosticToken(response.headers.get("request-id") ?? undefined, "none")}` +
                     ` origin=${sanitizedWorkerOrigin(req.url)}` +
                     ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
                     ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
