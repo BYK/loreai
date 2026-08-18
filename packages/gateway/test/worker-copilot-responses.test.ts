@@ -202,6 +202,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
       workerID: "lore-invariant-check",
       model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
       reasoningEffort: "off",
+      temperature: 0,
       upstreamProviderID: "github-copilot",
     });
 
@@ -209,6 +210,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
       String((mockFetch.mock.calls[0]?.[1] as { body?: string })?.body ?? "{}"),
     ) as Record<string, unknown>;
     expect(body.reasoning).toBeUndefined();
+    expect(body.temperature).toBeUndefined();
   });
 
   test("effort off remains explicit for other Responses providers", async () => {
@@ -225,12 +227,14 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
       protocol: "openai-responses",
       upstreamProviderID: "openai",
       reasoningEffort: "off",
+      temperature: 0,
     });
 
     const body = JSON.parse(
       String((mockFetch.mock.calls[0]?.[1] as { body?: string })?.body ?? "{}"),
     ) as Record<string, unknown>;
     expect(body.reasoning).toEqual({ effort: "none" });
+    expect(body.temperature).toBe(0);
   });
 
   test("detailed outcome distinguishes missing auth from invalid model output", async () => {
