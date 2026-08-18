@@ -333,12 +333,25 @@ function terminalTextPartsMatch(actual: unknown, streamed: unknown): boolean {
   });
 }
 
+export function isValidResponsesReasoningEncryptedContent(
+  item: Record<string, unknown>,
+): boolean {
+  return (
+    item.type !== "reasoning" ||
+    item.encrypted_content === undefined ||
+    item.encrypted_content === null ||
+    typeof item.encrypted_content === "string"
+  );
+}
+
 export function responsesDoneItemMatchesAdded(
   done: Record<string, unknown>,
   added: Record<string, unknown>,
 ): boolean {
   if (
     done.type !== added.type ||
+    !isValidResponsesReasoningEncryptedContent(done) ||
+    !isValidResponsesReasoningEncryptedContent(added) ||
     !isValidResponsesOutputItemStatus(done.type, done.status, "done") ||
     !isValidResponsesOutputItemStatus(added.type, added.status, "added")
   ) {
@@ -363,8 +376,19 @@ export function responsesDoneItemMatchesAdded(
   if (added.type === "reasoning") {
     if (!sparseTextPartsExtend(done.summary, added.summary)) return false;
     if (!sparseTextPartsExtend(done.content, added.content)) return false;
+    const addedEncryptedContent = added.encrypted_content;
+    const doneEncryptedContent = done.encrypted_content;
+    if (
+      typeof addedEncryptedContent === "string" &&
+      typeof doneEncryptedContent !== "string"
+    ) {
+      return false;
+    }
     ignored.add("summary");
     ignored.add("content");
+    // OpenAI documents added reasoning ciphertext as provisional; only the
+    // completed item is suitable for replay and it may replace the added value.
+    ignored.add("encrypted_content");
   }
   return Object.entries(added).every(
     ([field, value]) =>
@@ -376,7 +400,14 @@ export function responsesTerminalItemMatches(
   actual: Record<string, unknown>,
   streamed: Record<string, unknown>,
 ): boolean {
-  if (actual.type !== streamed.type || actual.id !== streamed.id) return false;
+  if (
+    actual.type !== streamed.type ||
+    actual.id !== streamed.id ||
+    !isValidResponsesReasoningEncryptedContent(actual) ||
+    !isValidResponsesReasoningEncryptedContent(streamed)
+  ) {
+    return false;
+  }
   if (
     !isValidResponsesOutputItemStatus(actual.type, actual.status, "terminal") ||
     !isValidResponsesOutputItemStatus(streamed.type, streamed.status, "done")
@@ -415,6 +446,98 @@ export function responsesTerminalItemMatches(
     );
   }
   return recordExtends(actual, streamed, new Set(["status"]));
+}
+
+function assertResponsesDoneMatchesAccumulatedState(
+  state: ResponsesAccState,
+  outputIndex: number,
+  doneItem: Record<string, unknown>,
+  terminalContentParts: ReadonlyMap<
+    string,
+    { kind: "text" | "refusal"; value: string }
+  >,
+): void {
+  const normalized = state.items.get(outputIndex);
+  if (
+    normalized?.type === "tool_use" &&
+    state.argumentDoneItems.has(outputIndex) &&
+    doneItem.arguments !== normalized.args
+  ) {
+    malformedResponsesEvent();
+  }
+  if (normalized?.type !== "text") return;
+  const finalizedContent = finalizedResponsesMessageContent(
+    outputIndex,
+    terminalContentParts,
+  );
+  const doneContent = Array.isArray(doneItem.content)
+    ? doneItem.content
+    : undefined;
+  if (
+    finalizedContent.length > 0 &&
+    (!doneContent || doneContent.length !== finalizedContent.length)
+  ) {
+    malformedResponsesEvent();
+  }
+  if (!doneContent) return;
+  for (const [contentIndex, part] of doneContent.entries()) {
+    if (!isRecord(part)) continue;
+    const kind =
+      part.type === "output_text"
+        ? "text"
+        : part.type === "refusal"
+          ? "refusal"
+          : undefined;
+    if (!kind) continue;
+    const value = kind === "text" ? part.text : part.refusal;
+    const terminalPart = finalizedContent[contentIndex];
+    if (
+      terminalPart &&
+      (terminalPart.kind !== kind || terminalPart.value !== value)
+    ) {
+      malformedResponsesEvent();
+    }
+  }
+}
+
+function finalizedResponsesMessageContent(
+  outputIndex: number,
+  terminalContentParts: ReadonlyMap<
+    string,
+    { kind: "text" | "refusal"; value: string }
+  >,
+): Array<{ kind: "text" | "refusal"; value: string }> {
+  return Array.from(terminalContentParts)
+    .flatMap(([key, part]) => {
+      const [itemIndex, contentIndex] = key.split(":").map(Number);
+      return itemIndex === outputIndex ? [{ contentIndex, part }] : [];
+    })
+    .sort((a, b) => a.contentIndex - b.contentIndex)
+    .map(({ part }) => part);
+}
+
+function completeCodexMessageSnapshot(
+  snapshot: Record<string, unknown>,
+  outputIndex: number,
+  terminalContentParts: ReadonlyMap<
+    string,
+    { kind: "text" | "refusal"; value: string }
+  >,
+): Record<string, unknown> {
+  if (snapshot.type !== "message" || snapshot.content !== undefined) {
+    return snapshot;
+  }
+  const finalizedContent = finalizedResponsesMessageContent(
+    outputIndex,
+    terminalContentParts,
+  ).map((part) =>
+    part.kind === "text"
+      ? { type: "output_text", text: part.value }
+      : { type: "refusal", refusal: part.value },
+  );
+  return finalizedContent.length > 0
+    ? { ...snapshot, content: finalizedContent }
+    : snapshot;
 }
 
 /** Validated unsuccessful terminal, carrying usage for accounting-only paths. */
@@ -858,6 +981,7 @@ function validatePublicResponsesEvent(
         Array.isArray(addedItem) ||
         typeof addedItem.type !== "string" ||
         !isSupportedResponsesOutputItemType(addedItem.type) ||
+        !isValidResponsesReasoningEncryptedContent(addedItem) ||
         (addedItem.id !== undefined && typeof addedItem.id !== "string") ||
         !isValidResponsesOutputItemStatus(
           addedItem.type,
@@ -878,9 +1002,12 @@ function validatePublicResponsesEvent(
             typeof addedItem.arguments !== "string")) ||
         state.rawItems.has(outputIndex as number) ||
         (typeof addedItem.id === "string" &&
-          state.itemIndexById.has(addedItem.id)) ||
+          (state.itemIndexById.has(addedItem.id) ||
+            state.callIndexById.has(addedItem.id))) ||
         (typeof addedCallID === "string" &&
-          state.callIndexById.has(addedCallID))
+          (state.callIndexById.has(addedCallID) ||
+            state.itemIndexById.has(addedCallID))) ||
+        (typeof addedItem.id === "string" && addedItem.id === addedCallID)
       ) {
         malformed();
       }
@@ -904,6 +1031,7 @@ function validatePublicResponsesEvent(
         Array.isArray(doneItem) ||
         typeof doneItem.type !== "string" ||
         !isSupportedResponsesOutputItemType(doneItem.type) ||
+        !isValidResponsesReasoningEncryptedContent(doneItem) ||
         (doneItem.id !== undefined && typeof doneItem.id !== "string") ||
         !isValidResponsesOutputItemStatus(
           doneItem.type,
@@ -1090,13 +1218,20 @@ function findResponsesItemById(
 }
 
 function bindResponsesIdentity(
+  state: ResponsesAccState,
   index: Map<string, number>,
   identity: string,
   outputIndex: number,
 ): void {
-  const existingIndex = index.get(identity);
-  if (existingIndex !== undefined && existingIndex !== outputIndex) {
-    malformedResponsesEvent();
+  for (const namespace of [
+    state.itemIndexById,
+    state.callIndexById,
+    state.effectiveToolIndexById,
+  ]) {
+    const existingIndex = namespace.get(identity);
+    if (existingIndex !== undefined && existingIndex !== outputIndex) {
+      malformedResponsesEvent();
+    }
   }
   index.set(identity, outputIndex);
 }
@@ -1134,7 +1269,12 @@ function bindCodexEffectiveToolIdentity(
   ) {
     state.effectiveToolIndexById.delete(previous);
   }
-  bindResponsesIdentity(state.effectiveToolIndexById, identity, outputIndex);
+  bindResponsesIdentity(
+    state,
+    state.effectiveToolIndexById,
+    identity,
+    outputIndex,
+  );
 }
 
 function validateCodexOutputItem(
@@ -1144,7 +1284,8 @@ function validateCodexOutputItem(
   if (
     !isRecord(item) ||
     typeof item.type !== "string" ||
-    !isSupportedResponsesOutputItemType(item.type)
+    !isSupportedResponsesOutputItemType(item.type) ||
+    !isValidResponsesReasoningEncryptedContent(item)
   ) {
     malformedResponsesEvent();
   }
@@ -1193,23 +1334,13 @@ function validateCodexOutputItem(
     if (!Array.isArray(item.content)) malformedResponsesEvent();
     for (const part of item.content) {
       if (!isRecord(part)) malformedResponsesEvent();
-      if (part.type !== undefined && typeof part.type !== "string") {
-        malformedResponsesEvent();
-      }
       if (
-        part.type === "output_text" &&
-        part.text !== undefined &&
-        typeof part.text !== "string"
+        (part.type === "output_text" && typeof part.text === "string") ||
+        (part.type === "refusal" && typeof part.refusal === "string")
       ) {
-        malformedResponsesEvent();
+        continue;
       }
-      if (
-        part.type === "refusal" &&
-        part.refusal !== undefined &&
-        typeof part.refusal !== "string"
-      ) {
-        malformedResponsesEvent();
-      }
+      malformedResponsesEvent();
     }
   }
   if (item.type === "function_call") {
@@ -1241,7 +1372,7 @@ function createImplicitCodexItem(
     output_index: outputIndex,
     item,
   });
-  bindResponsesIdentity(state.itemIndexById, itemId, outputIndex);
+  bindResponsesIdentity(state, state.itemIndexById, itemId, outputIndex);
 }
 
 function bindCodexItemId(
@@ -1249,7 +1380,7 @@ function bindCodexItemId(
   outputIndex: number,
   itemId: string,
 ): void {
-  bindResponsesIdentity(state.itemIndexById, itemId, outputIndex);
+  bindResponsesIdentity(state, state.itemIndexById, itemId, outputIndex);
   state.unboundTextItems.delete(outputIndex);
   state.unboundToolItems.delete(outputIndex);
   const rawItem = state.rawItems.get(outputIndex);
@@ -1291,7 +1422,12 @@ function reconcileCodexDoneItem(
   const previousEffectiveIdentity = normalized.callId || normalized.id;
   normalized.callId = reconcileCodexIdentity(normalized.callId, item.call_id);
   if (normalized.callId) {
-    bindResponsesIdentity(state.callIndexById, normalized.callId, outputIndex);
+    bindResponsesIdentity(
+      state,
+      state.callIndexById,
+      normalized.callId,
+      outputIndex,
+    );
     bindCodexEffectiveToolIdentity(
       state,
       outputIndex,
@@ -1448,12 +1584,17 @@ function normalizeCodexItemEvent(
     }
   } else {
     if (itemId) {
-      bindResponsesIdentity(state.itemIndexById, itemId, outputIndex);
+      bindResponsesIdentity(state, state.itemIndexById, itemId, outputIndex);
       state.unboundTextItems.delete(outputIndex);
       state.unboundToolItems.delete(outputIndex);
     }
     if (item.type === "function_call" && isNonEmptyString(item.call_id)) {
-      bindResponsesIdentity(state.callIndexById, item.call_id, outputIndex);
+      bindResponsesIdentity(
+        state,
+        state.callIndexById,
+        item.call_id,
+        outputIndex,
+      );
     }
   }
   parsed.output_index = outputIndex;
@@ -1579,6 +1720,52 @@ function validateCodexResponsesEvent(
   }
 }
 
+/**
+ * Normalize one sparse Codex event and advance an independent normalization
+ * state. Callers that also accumulate the event must use a separate state: the
+ * Codex normalizer binds omitted indices and may seed done-only items.
+ */
+export function normalizeCodexResponsesEvent(
+  state: ResponsesAccState,
+  event: string,
+  parsed: Record<string, unknown>,
+  maxSparseIndex = DEFAULT_MAX_SSE_FRAMES,
+): void {
+  validateCodexResponsesEvent(state, event, parsed, maxSparseIndex);
+  if (
+    (event === "response.function_call_arguments.delta" ||
+      event === "response.function_call_arguments.done") &&
+    state.argumentDoneItems.has(parsed.output_index as number)
+  ) {
+    malformedResponsesEvent();
+  }
+  if (event === "response.function_call_arguments.done") {
+    state.argumentDoneItems.add(parsed.output_index as number);
+  }
+  applyResponsesEvent(state, event, parsed);
+  if (event === "response.output_text.done") {
+    state.textDoneItems.add(parsed.output_index as number);
+  } else if (event === "response.refusal.done") {
+    state.refusalDoneItems.add(parsed.output_index as number);
+  } else if (event === "response.output_item.added") {
+    const outputIndex = parsed.output_index as number;
+    const item = state.items.get(outputIndex);
+    if (item?.type === "tool_use" && (item.callId || item.id)) {
+      bindCodexEffectiveToolIdentity(
+        state,
+        outputIndex,
+        item.callId || item.id,
+      );
+    }
+  } else if (event === "response.output_item.done") {
+    const outputIndex = parsed.output_index as number;
+    state.activeTextItems.delete(outputIndex);
+    state.activeToolItems.delete(outputIndex);
+    state.unboundTextItems.delete(outputIndex);
+    state.unboundToolItems.delete(outputIndex);
+  }
+}
+
 function validatedTerminalStatus(
   event: "response.completed" | "response.done" | "response.incomplete",
   parsed: Record<string, unknown>,
@@ -1691,7 +1878,10 @@ export async function accumulateResponsesSSEStream(
   const activeContentIndexByItem = new Map<number, number>();
   const implicitContentIndexByItem = new Map<number, number>();
   const terminalContentIndexByItem = new Map<number, number>();
-  const terminalContentParts = new Map<string, "text" | "refusal">();
+  const terminalContentParts = new Map<
+    string,
+    { kind: "text" | "refusal"; value: string }
+  >();
   let lastSequenceNumber = -1;
   // Sparse numeric identities can never need more address space than the
   // number of frames we are willing to process. Cap even a caller-supplied
@@ -1760,34 +1950,21 @@ export async function accumulateResponsesSSEStream(
       }
       if (opts.validation && event === "response.output_item.done") {
         const outputIndex = parsed.output_index as number;
-        const normalized = state.items.get(outputIndex);
-        const doneItem = parsed.item as Record<string, unknown>;
-        if (
-          normalized?.type === "tool_use" &&
-          state.argumentDoneItems.has(outputIndex) &&
-          doneItem.arguments !== normalized.args
-        ) {
-          throw new Error("malformed Responses stream event");
-        }
-        if (normalized?.type === "text" && Array.isArray(doneItem.content)) {
-          for (const part of doneItem.content) {
-            if (!isRecord(part)) continue;
-            if (
-              part.type === "output_text" &&
-              state.textDoneItems.has(outputIndex) &&
-              part.text !== normalized.text
-            ) {
-              throw new Error("malformed Responses stream event");
-            }
-            if (
-              part.type === "refusal" &&
-              state.refusalDoneItems.has(outputIndex) &&
-              part.refusal !== normalized.refusal
-            ) {
-              throw new Error("malformed Responses stream event");
-            }
-          }
-        }
+        const doneItem =
+          opts.validation === "codex"
+            ? completeCodexMessageSnapshot(
+                parsed.item as Record<string, unknown>,
+                outputIndex,
+                terminalContentParts,
+              )
+            : (parsed.item as Record<string, unknown>);
+        parsed.item = doneItem;
+        assertResponsesDoneMatchesAccumulatedState(
+          state,
+          outputIndex,
+          doneItem,
+          terminalContentParts,
+        );
       }
       if (opts.validation && parsed.sequence_number !== undefined) {
         const sequenceNumber = parsed.sequence_number as number;
@@ -1885,11 +2062,17 @@ export async function accumulateResponsesSSEStream(
             if (alreadyDone && terminalValue !== accumulatedValue) {
               throw new Error("malformed Responses stream event");
             }
-            const existingKind = terminalContentParts.get(key);
-            if (existingKind && existingKind !== terminalKind) {
+            const existingPart = terminalContentParts.get(key);
+            if (existingPart && existingPart.kind !== terminalKind) {
               throw new Error("malformed Responses stream event");
             }
-            terminalContentParts.set(key, terminalKind);
+            if (typeof terminalValue !== "string") {
+              throw new Error("malformed Responses stream event");
+            }
+            terminalContentParts.set(key, {
+              kind: terminalKind,
+              value: terminalValue,
+            });
             terminalContentIndexByItem.set(outputIndex, contentIndex);
           }
         }
@@ -1919,10 +2102,13 @@ export async function accumulateResponsesSSEStream(
           event === "response.output_text.done" ||
           event === "response.refusal.done"
         ) {
-          terminalContentParts.set(
-            key,
-            event === "response.output_text.done" ? "text" : "refusal",
-          );
+          terminalContentParts.set(key, {
+            kind: event === "response.output_text.done" ? "text" : "refusal",
+            value:
+              event === "response.output_text.done"
+                ? (parsed.text as string)
+                : (parsed.refusal as string),
+          });
           terminalContentIndexByItem.set(outputIndex, contentIndex);
           implicitContentIndexByItem.delete(outputIndex);
         }
@@ -1993,13 +2179,12 @@ export async function accumulateResponsesSSEStream(
               throw new Error("malformed Responses terminal event");
             }
             const outputIndex = state.itemIndexById.get(snapshot.id);
-            const accumulated =
+            let accumulated =
               outputIndex === undefined
                 ? undefined
                 : state.rawItems.get(outputIndex);
             if (
               outputIndex === undefined ||
-              !doneItems.has(outputIndex) ||
               snapshotIndices.has(outputIndex) ||
               !accumulated ||
               (snapshot.type !== "item_reference" &&
@@ -2010,10 +2195,47 @@ export async function accumulateResponsesSSEStream(
             snapshotIndices.add(outputIndex);
             if (snapshot.type === "item_reference") {
               if (
+                !doneItems.has(outputIndex) ||
                 Object.keys(snapshot).some(
                   (key) => key !== "type" && key !== "id",
                 )
               ) {
+                throw new Error("malformed Responses terminal event");
+              }
+              continue;
+            }
+            if (!doneItems.has(outputIndex)) {
+              if (opts.validation !== "codex") {
+                throw new Error("malformed Responses terminal event");
+              }
+              const completedSnapshot = completeCodexMessageSnapshot(
+                snapshot,
+                outputIndex,
+                terminalContentParts,
+              );
+              reconcileCodexDoneItem(state, outputIndex, completedSnapshot);
+              if (
+                !responsesDoneItemMatchesAdded(completedSnapshot, accumulated)
+              ) {
+                throw new Error("malformed Responses terminal event");
+              }
+              assertResponsesDoneMatchesAccumulatedState(
+                state,
+                outputIndex,
+                completedSnapshot,
+                terminalContentParts,
+              );
+              applyResponsesEvent(state, "response.output_item.done", {
+                output_index: outputIndex,
+                item: completedSnapshot,
+              });
+              doneItems.add(outputIndex);
+              state.activeTextItems.delete(outputIndex);
+              state.activeToolItems.delete(outputIndex);
+              state.unboundTextItems.delete(outputIndex);
+              state.unboundToolItems.delete(outputIndex);
+              accumulated = state.rawItems.get(outputIndex);
+              if (!accumulated) {
                 throw new Error("malformed Responses terminal event");
               }
               continue;
@@ -2028,6 +2250,17 @@ export async function accumulateResponsesSSEStream(
             Array.from(doneItems).some((index) => !snapshotIndices.has(index))
           ) {
             throw new Error("malformed Responses terminal event");
+          }
+        }
+        if (opts.validation === "codex") {
+          for (const [outputIndex, item] of state.rawItems) {
+            if (
+              !doneItems.has(outputIndex) &&
+              item.type === "reasoning" &&
+              typeof item.encrypted_content === "string"
+            ) {
+              throw new Error("malformed Responses terminal event");
+            }
           }
         }
         terminalStatus = opts.validation

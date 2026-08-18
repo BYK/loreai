@@ -19,6 +19,7 @@ import {
   streamResponsesPassthrough,
   translateAnthropicStreamToResponses,
 } from "../src/stream/openai-responses";
+import { accumulateResponsesNonStreamJSON } from "../src/pipeline";
 import type { GatewayResponse } from "../src/translate/types";
 import { validateResponsesUsage } from "../src/usage-validation";
 
@@ -933,6 +934,87 @@ describe("accumulateResponsesSSEStream", () => {
     ).rejects.toThrow("malformed Responses stream event");
   });
 
+  test.each(["item-first", "call-first"])(
+    "public validation rejects cross-namespace identity aliases (%s)",
+    async (order) => {
+      const message = {
+        event: "response.output_item.added",
+        data: {
+          output_index: order === "item-first" ? 0 : 1,
+          item: { type: "message", id: "shared_public_identity" },
+        },
+      };
+      const tool = {
+        event: "response.output_item.added",
+        data: {
+          output_index: order === "call-first" ? 0 : 1,
+          item: {
+            type: "function_call",
+            id: "fc_public_alias",
+            call_id: "shared_public_identity",
+            name: "read",
+            arguments: "{}",
+          },
+        },
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse(
+            order === "item-first" ? [message, tool] : [tool, message],
+          ),
+          { validation: "public", stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
+  test("public validation rejects equal item and call IDs within one function call", async () => {
+    await expect(
+      accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "same_public_identity",
+                call_id: "same_public_identity",
+                name: "read",
+                arguments: "{}",
+              },
+            },
+          },
+        ]),
+        { validation: "public", stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Responses stream event");
+  });
+
+  test.each(["item-first", "call-first"])(
+    "non-stream Responses reject cross-namespace identity aliases (%s)",
+    (order) => {
+      const message = {
+        type: "message",
+        id: "shared_nonstream_identity",
+        content: [{ type: "output_text", text: "text" }],
+      };
+      const tool = {
+        type: "function_call",
+        id: "fc_nonstream_alias",
+        call_id: "shared_nonstream_identity",
+        name: "read",
+        arguments: "{}",
+      };
+      expect(() =>
+        accumulateResponsesNonStreamJSON({
+          status: "completed",
+          output: order === "item-first" ? [message, tool] : [tool, message],
+        }),
+      ).toThrow("malformed Responses response");
+    },
+  );
+
   test("Codex rejects duplicate effective call IDs across distinct items", async () => {
     await expect(
       accumulateResponsesSSEStream(
@@ -982,6 +1064,94 @@ describe("accumulateResponsesSSEStream", () => {
                 call_id: "call_codex_shared",
                 name: "second",
                 arguments: "{}",
+              },
+            },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Responses stream event");
+  });
+
+  test("Codex rejects a terminal call ID that aliases another item's ID", async () => {
+    await expect(
+      accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.done",
+            data: {
+              item: {
+                type: "message",
+                id: "shared_terminal_identity",
+                content: [{ type: "output_text", text: "text" }],
+              },
+            },
+          },
+          {
+            event: "response.output_item.added",
+            data: {
+              item: {
+                type: "function_call",
+                id: "fc_terminal_alias",
+                call_id: "",
+                name: "",
+                arguments: "",
+              },
+            },
+          },
+          {
+            event: "response.completed",
+            data: {
+              response: {
+                status: "completed",
+                output: [
+                  { type: "item_reference", id: "shared_terminal_identity" },
+                  {
+                    type: "function_call",
+                    id: "fc_terminal_alias",
+                    call_id: "shared_terminal_identity",
+                    name: "read",
+                    arguments: "{}",
+                    status: "completed",
+                  },
+                ],
+              },
+            },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Responses stream event");
+  });
+
+  test("Codex rejects an item ID that aliases another output's call ID", async () => {
+    await expect(
+      accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.done",
+            data: {
+              item: {
+                type: "function_call",
+                id: "fc_existing_call",
+                call_id: "shared_done_identity",
+                name: "read",
+                arguments: "{}",
+              },
+            },
+          },
+          {
+            event: "response.output_item.added",
+            data: { item: { type: "message", role: "assistant" } },
+          },
+          {
+            event: "response.output_item.done",
+            data: {
+              item: {
+                type: "message",
+                id: "shared_done_identity",
+                role: "assistant",
+                content: [{ type: "output_text", text: "text" }],
               },
             },
           },
@@ -1665,7 +1835,132 @@ describe("accumulateResponsesSSEStream", () => {
         ),
       ).toBe(false);
     }
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "reasoning",
+          id: "reasoning_ciphertext",
+          summary: [],
+          encrypted_content: "completed-ciphertext",
+        },
+        {
+          type: "reasoning",
+          id: "reasoning_ciphertext",
+          summary: [],
+          encrypted_content: "provisional-ciphertext",
+        },
+      ),
+    ).toBe(true);
+    for (const encrypted_content of [null, undefined, 42, [], {}]) {
+      expect(
+        responsesDoneItemMatchesAdded(
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            ...(encrypted_content === undefined ? {} : { encrypted_content }),
+          },
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            encrypted_content: "provisional-ciphertext",
+          },
+        ),
+      ).toBe(false);
+    }
+    for (const encrypted_content of [42, [], {}]) {
+      expect(
+        responsesDoneItemMatchesAdded(
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            encrypted_content: "completed-ciphertext",
+          },
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            encrypted_content,
+          },
+        ),
+      ).toBe(false);
+    }
   });
+
+  test("Codex rejects malformed reasoning ciphertext in sparse item lifecycles", async () => {
+    for (const event of [
+      "response.output_item.added",
+      "response.output_item.done",
+    ] as const) {
+      for (const encrypted_content of [42, [], {}]) {
+        await expect(
+          accumulateResponsesSSEStream(
+            buildSSEResponse([
+              {
+                event,
+                data: {
+                  type: event,
+                  item: {
+                    type: "reasoning",
+                    id: `rs_sparse_${event}`,
+                    summary: [],
+                    encrypted_content,
+                  },
+                },
+              },
+            ]),
+            { validation: "codex", stopAtTerminal: true },
+          ),
+        ).rejects.toThrow("malformed Responses stream event");
+      }
+    }
+  });
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects malformed reasoning ciphertext introduced by a terminal snapshot",
+    async (validation) => {
+      const item = {
+        type: "reasoning",
+        id: `rs_terminal_ciphertext_${validation}`,
+        summary: [],
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                type: "response.output_item.added",
+                output_index: 0,
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                type: "response.output_item.done",
+                output_index: 0,
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                type: "response.completed",
+                response: {
+                  status: "completed",
+                  output: [{ ...item, encrypted_content: 42 }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
 
   test("rejects terminal null replacement but permits sparse enrichment", () => {
     expect(
@@ -2794,6 +3089,429 @@ describe("accumulateResponsesSSEStream", () => {
 
     expect(result.content).toEqual([{ type: "text", text: "done-only text" }]);
   });
+
+  test.each([
+    ["missing type", { text: "text" }],
+    ["missing output text", { type: "output_text" }],
+    ["missing refusal", { type: "refusal" }],
+  ])("Codex rejects done-only message content with %s", async (_case, part) => {
+    await expect(
+      accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.done",
+            data: {
+              item: {
+                type: "message",
+                id: "msg_malformed_done_only",
+                content: [part],
+              },
+            },
+          },
+          {
+            event: "response.completed",
+            data: { response: { status: "completed" } },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Responses stream event");
+  });
+
+  test("Codex finalizes added-only provisional reasoning from the terminal snapshot", async () => {
+    const result = await accumulateResponsesSSEStream(
+      buildSSEResponse([
+        {
+          event: "response.output_item.added",
+          data: {
+            item: {
+              type: "reasoning",
+              id: "rs_terminal_finalized",
+              status: "in_progress",
+              summary: [],
+              encrypted_content: "ciphertext-A",
+            },
+          },
+        },
+        {
+          event: "response.completed",
+          data: {
+            response: {
+              status: "completed",
+              output: [
+                {
+                  type: "reasoning",
+                  id: "rs_terminal_finalized",
+                  status: "completed",
+                  summary: [],
+                  encrypted_content: "ciphertext-B",
+                },
+              ],
+            },
+          },
+        },
+      ]),
+      { validation: "codex", stopAtTerminal: true },
+    );
+
+    expect(result.rawOutputItems).toEqual([
+      {
+        type: "reasoning",
+        id: "rs_terminal_finalized",
+        status: "completed",
+        summary: [],
+        encrypted_content: "ciphertext-B",
+      },
+    ]);
+  });
+
+  test("Codex rejects terminal omission of added-only provisional reasoning", async () => {
+    await expect(
+      accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              item: {
+                type: "reasoning",
+                id: "rs_terminal_omitted",
+                summary: [],
+                encrypted_content: "provisional-ciphertext",
+              },
+            },
+          },
+          {
+            event: "response.completed",
+            data: { response: { status: "completed" } },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Responses terminal event");
+  });
+
+  test.each([
+    {
+      name: "output_text.done",
+      events: [
+        {
+          event: "response.output_text.done",
+          data: { item_id: "msg_terminal_synthesis", text: "GOOD" },
+        },
+      ],
+      content: (value: string) => [{ type: "output_text", text: value }],
+    },
+    {
+      name: "refusal.done",
+      events: [
+        {
+          event: "response.refusal.done",
+          data: { item_id: "msg_terminal_synthesis", refusal: "GOOD" },
+        },
+      ],
+      content: (value: string) => [{ type: "refusal", refusal: value }],
+    },
+    {
+      name: "content_part.done",
+      events: [
+        {
+          event: "response.content_part.added",
+          data: {
+            item_id: "msg_terminal_synthesis",
+            part: { type: "output_text", text: "" },
+          },
+        },
+        {
+          event: "response.content_part.done",
+          data: {
+            item_id: "msg_terminal_synthesis",
+            part: { type: "output_text", text: "GOOD" },
+          },
+        },
+      ],
+      content: (value: string) => [{ type: "output_text", text: value }],
+    },
+  ])(
+    "Codex terminal synthesis enforces accumulated $name content",
+    async ({ events, content }) => {
+      const stream = (terminalValue?: string) =>
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              item: {
+                type: "message",
+                id: "msg_terminal_synthesis",
+                role: "assistant",
+              },
+            },
+          },
+          ...events,
+          {
+            event: "response.completed",
+            data: {
+              response: {
+                status: "completed",
+                output: [
+                  {
+                    type: "message",
+                    id: "msg_terminal_synthesis",
+                    role: "assistant",
+                    status: "completed",
+                    ...(terminalValue === undefined
+                      ? {}
+                      : { content: content(terminalValue) }),
+                  },
+                ],
+              },
+            },
+          },
+        ]);
+
+      await expect(
+        accumulateResponsesSSEStream(stream("EVIL"), {
+          validation: "codex",
+          stopAtTerminal: true,
+        }),
+      ).rejects.toThrow("malformed Responses stream event");
+      await expect(
+        accumulateResponsesSSEStream(stream("GOOD"), {
+          validation: "codex",
+          stopAtTerminal: true,
+        }),
+      ).resolves.toMatchObject({
+        rawOutputItems: [expect.objectContaining({ content: content("GOOD") })],
+      });
+      await expect(
+        accumulateResponsesSSEStream(stream(), {
+          validation: "codex",
+          stopAtTerminal: true,
+        }),
+      ).resolves.toMatchObject({
+        rawOutputItems: [expect.objectContaining({ content: content("GOOD") })],
+      });
+    },
+  );
+
+  test("Codex rejects an item completion that truncates finalized message parts", async () => {
+    await expect(
+      accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              item: {
+                type: "message",
+                id: "msg_truncated_parts",
+                role: "assistant",
+              },
+            },
+          },
+          ...["one", "two"].flatMap((text, content_index) => [
+            {
+              event: "response.content_part.added",
+              data: {
+                item_id: "msg_truncated_parts",
+                content_index,
+                part: { type: "output_text", text: "" },
+              },
+            },
+            {
+              event: "response.content_part.done",
+              data: {
+                item_id: "msg_truncated_parts",
+                content_index,
+                part: { type: "output_text", text },
+              },
+            },
+          ]),
+          {
+            event: "response.output_item.done",
+            data: {
+              item: {
+                type: "message",
+                id: "msg_truncated_parts",
+                role: "assistant",
+                content: [{ type: "output_text", text: "one" }],
+              },
+            },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Responses stream event");
+  });
+
+  test.each([
+    ["absent", {}],
+    ["null", { encrypted_content: null }],
+  ])(
+    "Codex safely permits added-only reasoning with a %s ciphertext envelope",
+    async (_case, envelope) => {
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              item: {
+                type: "reasoning",
+                id: `rs_safe_${_case}`,
+                summary: [],
+                ...envelope,
+              },
+            },
+          },
+          {
+            event: "response.completed",
+            data: { response: { status: "completed" } },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      );
+
+      expect(result.rawOutputItems).toEqual([
+        expect.objectContaining({ id: `rs_safe_${_case}` }),
+      ]);
+    },
+  );
+
+  test("Codex accepts added A, done B, and repeated terminal B", async () => {
+    const result = await accumulateResponsesSSEStream(
+      buildSSEResponse([
+        {
+          event: "response.output_item.added",
+          data: {
+            item: {
+              type: "reasoning",
+              id: "rs_repeated_B",
+              summary: [],
+              encrypted_content: "ciphertext-A",
+            },
+          },
+        },
+        {
+          event: "response.output_item.done",
+          data: {
+            item: {
+              type: "reasoning",
+              id: "rs_repeated_B",
+              summary: [],
+              encrypted_content: "ciphertext-B",
+            },
+          },
+        },
+        {
+          event: "response.completed",
+          data: {
+            response: {
+              status: "completed",
+              output: [
+                {
+                  type: "reasoning",
+                  id: "rs_repeated_B",
+                  summary: [],
+                  encrypted_content: "ciphertext-B",
+                },
+              ],
+            },
+          },
+        },
+      ]),
+      { validation: "codex", stopAtTerminal: true },
+    );
+
+    expect(result.rawOutputItems?.[0]?.encrypted_content).toBe("ciphertext-B");
+  });
+
+  test.each([
+    ["A", { encrypted_content: "ciphertext-A" }],
+    ["C", { encrypted_content: "ciphertext-C" }],
+    ["omitted", {}],
+  ])(
+    "Codex rejects repeated terminal reasoning ciphertext %s after done B",
+    async (_case, terminalEnvelope) => {
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                item: {
+                  type: "reasoning",
+                  id: "rs_terminal_mutation",
+                  summary: [],
+                  encrypted_content: "ciphertext-A",
+                },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                item: {
+                  type: "reasoning",
+                  id: "rs_terminal_mutation",
+                  summary: [],
+                  encrypted_content: "ciphertext-B",
+                },
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [
+                    {
+                      type: "reasoning",
+                      id: "rs_terminal_mutation",
+                      summary: [],
+                      ...terminalEnvelope,
+                    },
+                  ],
+                },
+              },
+            },
+          ]),
+          { validation: "codex", stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["omitted", "repeated"])(
+    "Codex accepts a done-only final ciphertext with a %s terminal item",
+    async (terminalMode) => {
+      const finalItem = {
+        type: "reasoning",
+        id: `rs_done_only_${terminalMode}`,
+        status: "completed",
+        summary: [],
+        encrypted_content: "ciphertext-B",
+      };
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.done",
+            data: { item: finalItem },
+          },
+          {
+            event: "response.completed",
+            data: {
+              response: {
+                status: "completed",
+                ...(terminalMode === "repeated" ? { output: [finalItem] } : {}),
+              },
+            },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      );
+
+      expect(result.rawOutputItems?.[0]?.encrypted_content).toBe(
+        "ciphertext-B",
+      );
+    },
+  );
 
   test("Codex validation accepts provider-specific incomplete reasons", async () => {
     const response = buildSSEResponse([

@@ -1331,6 +1331,798 @@ describe("streamResponsesRecallAware", () => {
     );
   });
 
+  test("uses completed reasoning ciphertext in a recall continuation", async () => {
+    let completedResponse: GatewayResponse | undefined;
+    let continuationCiphertext: unknown;
+    const followUp = streamFrom([
+      created("resp_reasoning_ciphertext_followup", "gpt-5.6-terra"),
+      textItem(0, "answer", "msg_reasoning_ciphertext_answer"),
+      completed("resp_reasoning_ciphertext_followup"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reasoning_ciphertext", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_reasoning_ciphertext",
+            summary: [],
+            encrypted_content: "provisional-ciphertext",
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_reasoning_ciphertext",
+            summary: [],
+            encrypted_content: "completed-ciphertext",
+          },
+        }),
+        recallCall(1, { query: "reasoning ciphertext" }),
+        completed("resp_reasoning_ciphertext"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async ({ acc }) => {
+          continuationCiphertext = acc.rawOutputItems?.[0]?.encrypted_content;
+          return {
+            anchorText: buildAnchor("reasoning ciphertext"),
+            resultText: "memory",
+          };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+    expect(continuationCiphertext).toBe("completed-ciphertext");
+    expect(completedResponse?.rawOutputItems).toContainEqual(
+      expect.objectContaining({
+        id: "rs_reasoning_ciphertext",
+        encrypted_content: "completed-ciphertext",
+      }),
+    );
+  });
+
+  test("supports done-only sparse Codex items on principal and continuation streams", async () => {
+    const seenRecallCiphertexts: unknown[] = [];
+    let completedResponse: GatewayResponse | undefined;
+    const followUp = streamFrom([
+      created("resp_done_only_followup", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        item: {
+          type: "reasoning",
+          id: "rs_added_only_followup",
+          summary: [],
+        },
+      }),
+      sseEvent("response.output_item.done", {
+        item: {
+          type: "reasoning",
+          id: "rs_done_only_followup",
+          status: "completed",
+          summary: [],
+          encrypted_content: "ciphertext-D",
+        },
+      }),
+      sseEvent("response.output_item.done", {
+        item: {
+          type: "message",
+          id: "msg_done_only_followup",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "done-only answer" }],
+        },
+      }),
+      completed("resp_done_only_followup"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_done_only_principal", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "reasoning",
+            id: "rs_added_only_principal",
+            summary: [],
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "reasoning",
+            id: "rs_done_only_principal",
+            status: "completed",
+            summary: [],
+            encrypted_content: "ciphertext-B",
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "function_call",
+            id: "fc_done_only_recall",
+            call_id: "call_done_only_recall",
+            name: "recall",
+            arguments: JSON.stringify({ query: "done-only recall" }),
+            status: "completed",
+          },
+        }),
+        completed("resp_done_only_principal"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async ({ acc }) => {
+          seenRecallCiphertexts.push(
+            acc.rawOutputItems?.find(
+              (item) => item.id === "rs_done_only_principal",
+            )?.encrypted_content,
+          );
+          return {
+            anchorText: buildAnchor("done-only recall"),
+            resultText: "memory",
+          };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("done-only answer");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(seenRecallCiphertexts).toEqual(["ciphertext-B"]);
+    expect(
+      completedResponse?.rawOutputItems
+        ?.filter(
+          (item) =>
+            item.id === "rs_added_only_principal" ||
+            item.id === "rs_added_only_followup",
+        )
+        .map((item) => item.id),
+    ).toEqual(["rs_added_only_principal", "rs_added_only_followup"]);
+    expect(
+      completedResponse?.rawOutputItems
+        ?.filter(
+          (item) =>
+            item.type === "reasoning" &&
+            typeof item.encrypted_content === "string",
+        )
+        .map((item) => item.encrypted_content),
+    ).toEqual(["ciphertext-B", "ciphertext-D"]);
+  });
+
+  test("seeds data-only Codex items on principal and continuation streams", async () => {
+    let recallContent = "";
+    let completedResponse: GatewayResponse | undefined;
+    const followUp = streamFrom([
+      created("resp_data_only_followup", "gpt-5.6-terra"),
+      sseEvent("response.output_text.delta", {
+        item_id: "msg_data_only_followup",
+        content_index: 0,
+        delta: "continuation answer",
+      }),
+      sseEvent("response.output_text.done", {
+        item_id: "msg_data_only_followup",
+        content_index: 0,
+        text: "continuation answer",
+      }),
+      sseEvent("response.function_call_arguments.done", {
+        item_id: "fc_data_only_followup",
+        arguments: '{"path":"file"}',
+      }),
+      sseEvent("response.output_item.done", {
+        item: {
+          type: "function_call",
+          id: "fc_data_only_followup",
+          call_id: "call_data_only_followup",
+          name: "read",
+          arguments: '{"path":"file"}',
+          status: "completed",
+        },
+      }),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_data_only_followup",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg_data_only_followup",
+              role: "assistant",
+              status: "completed",
+            },
+            { type: "item_reference", id: "fc_data_only_followup" },
+          ],
+        },
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_data_only_principal", "gpt-5.6-terra"),
+        sseEvent("response.output_text.delta", {
+          item_id: "msg_data_only_principal",
+          content_index: 0,
+          delta: "principal preamble",
+        }),
+        sseEvent("response.output_text.done", {
+          item_id: "msg_data_only_principal",
+          content_index: 0,
+          text: "principal preamble",
+        }),
+        recallCall(1, { query: "data-only" }),
+        completed("resp_data_only_principal"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async ({ acc }) => {
+          recallContent = acc.content
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join("");
+          return {
+            anchorText: buildAnchor("data-only"),
+            resultText: "memory",
+          };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("continuation answer");
+    expect(output).toContain('"name":"read"');
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(recallContent).toContain("principal preamble");
+    expect(completedResponse?.content).toContainEqual({
+      type: "tool_use",
+      id: "call_data_only_followup",
+      name: "read",
+      input: { path: "file" },
+    });
+  });
+
+  test("forwards a principal data-only non-recall tool after its name resolves", async () => {
+    let recallCalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_data_only_visible", "gpt-5.6-terra"),
+        sseEvent("response.function_call_arguments.done", {
+          item_id: "fc_data_only_visible",
+          arguments: '{"path":"file"}',
+        }),
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "function_call",
+            id: "fc_data_only_visible",
+            call_id: "call_data_only_visible",
+            name: "read",
+            arguments: '{"path":"file"}',
+            status: "completed",
+          },
+        }),
+        completed("resp_data_only_visible"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(recallCalls).toBe(0);
+    expect(output).toContain('"name":"read"');
+    expect(output).toContain('{\\"path\\":\\"file\\"}');
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+  });
+
+  test("preserves principal finalized text when the Codex terminal item omits content", async () => {
+    let completedResponse: GatewayResponse | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_omitted_message_content", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "message",
+            id: "msg_omitted_message_content",
+            role: "assistant",
+          },
+        }),
+        sseEvent("response.output_text.done", {
+          item_id: "msg_omitted_message_content",
+          content_index: 0,
+          text: "finalized text",
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_omitted_message_content",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                id: "msg_omitted_message_content",
+                role: "assistant",
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          throw new Error("should not run");
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("finalized text");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(completedResponse?.content).toContainEqual({
+      type: "text",
+      text: "finalized text",
+    });
+  });
+
+  test("executes an added-only recall finalized by terminal arguments exactly once", async () => {
+    let recallCalls = 0;
+    const args = JSON.stringify({ query: "terminal recall" });
+    const followUp = streamFrom([
+      created("resp_terminal_recall_followup", "gpt-5.6-terra"),
+      textItem(0, "terminal recall answer"),
+      completed("resp_terminal_recall_followup"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_recall", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "function_call",
+            id: "fc_terminal_recall",
+            call_id: "",
+            name: "",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_recall",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_terminal_recall",
+                call_id: "call_terminal_recall",
+                name: "recall",
+                arguments: args,
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async ({ query }) => {
+          recallCalls++;
+          expect(query).toBe("terminal recall");
+          return {
+            anchorText: buildAnchor(query),
+            resultText: "memory",
+          };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(recallCalls).toBe(1);
+    expect(output).toContain("terminal recall answer");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain('"name":"recall"');
+    expect(output).not.toContain("fc_terminal_recall");
+    expect(output).not.toContain("call_terminal_recall");
+  });
+
+  test("rejects terminal recall arguments that contradict an established final value", async () => {
+    let recallCalls = 0;
+    const established = JSON.stringify({ query: "established" });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_recall_mismatch", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "function_call",
+            id: "fc_terminal_recall_mismatch",
+            call_id: "",
+            name: "recall",
+            arguments: "",
+          },
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          item_id: "fc_terminal_recall_mismatch",
+          arguments: established,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_recall_mismatch",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_terminal_recall_mismatch",
+                call_id: "call_terminal_recall_mismatch",
+                name: "recall",
+                arguments: JSON.stringify({ query: "changed" }),
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recallCalls).toBe(0);
+  });
+
+  test("uses continuation terminal ciphertext D for the next recall without mutating principal B", async () => {
+    const recallCiphertexts: unknown[] = [];
+    let completedResponse: GatewayResponse | undefined;
+    const finalFollowUp = streamFrom([
+      created("resp_ciphertext_chain_final", "gpt-5.6-terra"),
+      sseEvent("response.output_item.done", {
+        item: {
+          type: "message",
+          id: "msg_ciphertext_chain_final",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "final answer" }],
+        },
+      }),
+      completed("resp_ciphertext_chain_final"),
+    ]);
+    const chainedFollowUp = streamFrom([
+      created("resp_ciphertext_chain_middle", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        item: {
+          type: "reasoning",
+          id: "rs_ciphertext_chain_middle",
+          status: "in_progress",
+          summary: [],
+          encrypted_content: "ciphertext-C",
+        },
+      }),
+      sseEvent("response.output_item.added", {
+        item: {
+          type: "function_call",
+          id: "fc_ciphertext_chain_recall",
+          call_id: "",
+          name: "",
+          arguments: "",
+          status: "in_progress",
+        },
+      }),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_ciphertext_chain_middle",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [
+            {
+              type: "reasoning",
+              id: "rs_ciphertext_chain_middle",
+              status: "completed",
+              summary: [],
+              encrypted_content: "ciphertext-D",
+            },
+            {
+              type: "function_call",
+              id: "fc_ciphertext_chain_recall",
+              call_id: "call_ciphertext_chain_recall",
+              name: "recall",
+              arguments: JSON.stringify({ query: "second recall" }),
+              status: "completed",
+            },
+          ],
+        },
+      }),
+    ]);
+    let followUpCount = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_ciphertext_chain_principal", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "reasoning",
+            id: "rs_ciphertext_chain_principal",
+            summary: [],
+            encrypted_content: "ciphertext-A",
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "reasoning",
+            id: "rs_ciphertext_chain_principal",
+            summary: [],
+            encrypted_content: "ciphertext-B",
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "function_call",
+            id: "fc_ciphertext_chain_principal",
+            call_id: "call_ciphertext_chain_principal",
+            name: "recall",
+            arguments: JSON.stringify({ query: "first recall" }),
+            status: "completed",
+          },
+        }),
+        completed("resp_ciphertext_chain_principal"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async ({ acc }) => {
+          recallCiphertexts.push(
+            acc.rawOutputItems?.find((item) => item.type === "reasoning")
+              ?.encrypted_content,
+          );
+          return {
+            anchorText: buildAnchor(`ciphertext-${recallCiphertexts.length}`),
+            resultText: "memory",
+          };
+        },
+        runFollowUp: async () => ({
+          reader: (followUpCount++ === 0
+            ? chainedFollowUp
+            : finalFollowUp
+          ).body!.getReader(),
+        }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("final answer");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(recallCiphertexts).toEqual(["ciphertext-B", "ciphertext-D"]);
+    expect(
+      completedResponse?.rawOutputItems
+        ?.filter((item) => item.type === "reasoning")
+        .map((item) => item.encrypted_content),
+    ).toEqual(["ciphertext-B", "ciphertext-D"]);
+  });
+
+  test("rejects terminal omission of added-only provisional reasoning in Codex recall-aware mode", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_provisional_omitted", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "reasoning",
+            id: "rs_provisional_omitted",
+            summary: [],
+            encrypted_content: "provisional-ciphertext",
+          },
+        }),
+        completed("resp_provisional_omitted"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test("accepts an incomplete added-only Codex message lifecycle", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_added_only_message", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "message",
+            id: "msg_added_only_message",
+            role: "assistant",
+          },
+        }),
+        completed("resp_added_only_message"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).not.toContain("response.failed");
+  });
+
+  test("public mode still rejects an incomplete added-only message lifecycle", async () => {
+    const item = {
+      type: "message",
+      id: "msg_public_added_only",
+      role: "assistant",
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_public_added_only", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_public_added_only",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [{ ...item, status: "completed", content: [] }],
+          },
+        }),
+      ]),
+      {
+        validation: "public",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
+  test.each([
+    ["A", { encrypted_content: "ciphertext-A" }],
+    ["C", { encrypted_content: "ciphertext-C" }],
+    ["omitted", {}],
+  ])(
+    "rejects repeated terminal reasoning ciphertext %s after done B",
+    async (_case, terminalEnvelope) => {
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_repeated_ciphertext", "gpt-5.6-terra"),
+          sseEvent("response.output_item.added", {
+            item: {
+              type: "reasoning",
+              id: "rs_repeated_ciphertext",
+              summary: [],
+              encrypted_content: "ciphertext-A",
+            },
+          }),
+          sseEvent("response.output_item.done", {
+            item: {
+              type: "reasoning",
+              id: "rs_repeated_ciphertext",
+              summary: [],
+              encrypted_content: "ciphertext-B",
+            },
+          }),
+          sseEvent("response.completed", {
+            response: {
+              id: "resp_repeated_ciphertext",
+              model: "gpt-5.6-terra",
+              status: "completed",
+              output: [
+                {
+                  type: "reasoning",
+                  id: "rs_repeated_ciphertext",
+                  summary: [],
+                  ...terminalEnvelope,
+                },
+              ],
+            },
+          }),
+        ]),
+        {
+          validation: "codex",
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not run");
+          },
+        },
+      );
+
+      expect(await drain(client)).toContain("response.failed");
+    },
+  );
+
+  test("rejects malformed terminal reasoning ciphertext before recall execution", async () => {
+    let recalls = 0;
+    let followUps = 0;
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_malformed_terminal_ciphertext",
+      summary: [],
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_malformed_terminal_ciphertext", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: reasoning,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: reasoning,
+        }),
+        recallCall(1, { query: "must not execute" }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_malformed_terminal_ciphertext",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [{ ...reasoning, encrypted_content: 42 }],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          followUps++;
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    expect(recalls).toBe(0);
+    expect(followUps).toBe(0);
+  });
+
   test("rejects unfinished reasoning omitted from output_item.done", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([
