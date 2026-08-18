@@ -23,7 +23,7 @@ It is **not** a replacement for tests, type checking, or a linter. It has no gro
 
 ## Quick start (GitHub Actions)
 
-The repository ships a reusable composite action and a reference workflow. Add an `ANTHROPIC_API_KEY` Actions secret for the default `anthropic/claude-haiku-4.5` judge, or configure the custom credential and model pair described below.
+The repository ships a reusable composite action and a reference workflow. Add an `ANTHROPIC_API_KEY` Actions secret for the default `anthropic/claude-haiku-4-5` judge, or configure the custom credential and model pair described below.
 
 Add `.github/workflows/semantic-linter.yml`:
 
@@ -77,7 +77,7 @@ jobs:
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           lore-command: "node packages/gateway/dist/bin.cjs"
-          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4.5' || '') }}
+          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4-5' || '') }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || secrets.ANTHROPIC_API_KEY }}
 ```
 
@@ -93,7 +93,7 @@ The credential and model are selected as a pair to prevent sending one provider'
 
 **Credential** (the `worker-api-key` input):
 
-- **Default.** Set `ANTHROPIC_API_KEY`; the reference workflow pairs it with `anthropic/claude-haiku-4.5`.
+- **Default.** Set `ANTHROPIC_API_KEY`; the reference workflow pairs it with `anthropic/claude-haiku-4-5`.
 - **Custom provider.** Set `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` together. The dedicated key takes precedence over `ANTHROPIC_API_KEY`.
 - **No supported secret.** The action passes no credential and reports an explicit `no-auth` health failure. A raw Actions `GITHUB_TOKEN` is not forwarded to provider APIs.
 
@@ -103,7 +103,7 @@ The credential and model are selected as a pair to prevent sending one provider'
 | --- | --- |
 | `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` are set | the variable value, authenticated by the dedicated key |
 | `LORE_WORKER_API_KEY` only | your repo's configured default worker model |
-| `ANTHROPIC_API_KEY` only (or a stale model variable without a dedicated key) | `anthropic/claude-haiku-4.5` |
+| `ANTHROPIC_API_KEY` only (or a stale model variable without a dedicated key) | `anthropic/claude-haiku-4-5` |
 | Neither supported secret | no authenticated judge; the report is inconclusive with `no-auth` |
 
 :::note

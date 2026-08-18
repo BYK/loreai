@@ -78,9 +78,9 @@ jobs:
           # Model precedence:
           #   - LORE_WORKER_API_KEY + LORE_INVARIANT_MODEL → explicit model.
           #   - LORE_WORKER_API_KEY only → CLI/config default model.
-          #   - ANTHROPIC_API_KEY set    → anthropic/claude-haiku-4.5.
+          #   - ANTHROPIC_API_KEY set    → anthropic/claude-haiku-4-5.
           #   - no supported secret      → CLI default with no auth (reported).
-          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4.5' || '') }}
+          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4-5' || '') }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || secrets.ANTHROPIC_API_KEY }}
           # Reserve five minutes of the 25-minute job for report publication and
           # bounded gateway shutdown.
