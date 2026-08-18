@@ -1336,6 +1336,11 @@ export async function checkInvariants(
     );
   }
 
+  // Never compare vectors produced by different provider/model/dimension
+  // configurations. This clears stale rows before they can yield a false-clean
+  // cosine result; normal startup/import backfill repopulates the missing rows.
+  embedding.checkConfigChange();
+
   // Load invariant embeddings (same helper contradiction.ts uses).
   const invariantVecResult = loadInvariantVecs(allEntries);
   if (invariantVecResult.health.status === "failed") {
@@ -1945,10 +1950,21 @@ async function embedHunks(
   const texts = hunks.map((h) =>
     `${h.file}\n${h.text}`.slice(0, MAX_EMBED_CHARS_PER_HUNK),
   );
+  const deadlineAt =
+    options.deadlineMs === undefined
+      ? undefined
+      : Date.now() + options.deadlineMs;
   try {
+    await embedding.ensureEmbeddingReady(options);
     const vecs = await awaitHunkEmbedding(
       () => embedding.embedInTokenBatches(texts, "document"),
-      options,
+      {
+        ...options,
+        deadlineMs:
+          deadlineAt === undefined
+            ? undefined
+            : Math.max(0, deadlineAt - Date.now()),
+      },
     );
     const aligned = hunks.map((_, i) => vecs[i] ?? null);
     const available = aligned.filter((vec) => vec !== null).length;

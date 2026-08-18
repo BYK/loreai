@@ -2222,10 +2222,14 @@ function buildOpenAIResponsesWorkerRequest(
   temperature?: number,
   reasoningEffort?: ReasoningEffort,
 ): { url: string; headers: Record<string, string>; body: string } {
-  // Copilot's Responses endpoint defaults an omitted effort to medium. `off`
-  // therefore has to be explicit; omission does not disable reasoning.
+  // Copilot's Responses endpoint rejects `effort:"none"` with an opaque 400
+  // under Actions GITHUB_TOKEN auth. Omit it there (the endpoint defaults to
+  // medium); other Responses providers retain explicit `none` plus the runtime
+  // strip-and-retry fallback for providers that return a diagnosable error.
   const effort =
-    reasoningEffort === "off" ? "none" : openAIReasoningEffort(reasoningEffort);
+    reasoningEffort === "off" && model.providerID !== "github-copilot"
+      ? "none"
+      : openAIReasoningEffort(reasoningEffort);
 
   return {
     // Host-aware URL construction: github-copilot omits /v1 (issue #1052),

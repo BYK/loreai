@@ -1,6 +1,6 @@
 import { afterEach, describe, test, expect, beforeEach, vi } from "vitest";
 import { existsSync } from "node:fs";
-import { db, ensureProject } from "../src/db";
+import { db, ensureProject, withTransaction } from "../src/db";
 import { LOCAL_MODEL_PATH_ENV } from "../src/embedding-vendor";
 import {
   cosineSimilarity,
@@ -947,6 +947,20 @@ describe("checkConfigChange", () => {
     checkConfigChange();
     const changed = checkConfigChange();
     expect(changed).toBe(false);
+  });
+
+  test("reconciles a changed fingerprint inside an existing transaction", () => {
+    db()
+      .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+      .run("lore:embedding_config", "old-model:512");
+
+    const changed = withTransaction(() => checkConfigChange());
+
+    expect(changed).toBe(true);
+    const row = db()
+      .query("SELECT value FROM kv_meta WHERE key = 'lore:embedding_config'")
+      .get() as { value: string } | null;
+    expect(row?.value).toContain("local");
   });
 
   test("clears embeddings when fingerprint changes", () => {

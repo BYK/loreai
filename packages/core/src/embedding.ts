@@ -15,7 +15,14 @@
 
 import { availableParallelism, freemem } from "node:os";
 import { performance } from "node:perf_hooks";
-import { db, getKV, setKV } from "./db";
+import {
+  databaseInTransaction,
+  db,
+  getKV,
+  setKV,
+  withSavepoint,
+  withTransaction,
+} from "./db";
 import { isVecAvailable } from "./db/vec";
 import {
   clearAllEmbeddings,
@@ -107,6 +114,7 @@ export interface EmbeddingOperationOptions {
 
 /** Stable phase names for orchestration callers (notably semantic lint). */
 export type EmbeddingAbortPhase =
+  | "provider-readiness"
   | "settle-document-embeds"
   | "knowledge-backfill";
 
@@ -1920,10 +1928,12 @@ class EmbeddingPool implements EmbeddingProvider {
       if (s.inflight < best.inflight) best = s;
     }
 
-    // Every worker is busy: add capacity if we're below the ceiling and a full
-    // per-worker memory budget is free right now (re-checked live, so a box that
-    // has since gone tight won't load another ~680 MB model).
+    // Every worker is busy: add capacity only after one slot has completed a
+    // real embed. Cold workers share the same HuggingFace cache; starting two
+    // before either is healthy lets one read/purge the other's partial download.
+    // Once bootstrap succeeds, retain the normal lazy, memory-gated growth.
     const canGrow =
+      healthySlots.length > 0 &&
       best.inflight > 0 &&
       this.slots.length < this.ceiling &&
       this.liveFreemem() >= PER_WORKER_MEM_BUDGET_BYTES;
@@ -2421,6 +2431,88 @@ export function embeddingStatus(): EmbeddingHealth {
     provider: "remote",
     detail: "remote embedding provider active (vector recall enabled)",
   };
+}
+
+async function waitForEmbeddingRetry(
+  delayMs: number,
+  guard: EmbeddingAbortGuard,
+): Promise<void> {
+  if (delayMs <= 0) {
+    throwIfEmbeddingAborted(guard);
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const wait = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, delayMs);
+  });
+  try {
+    await awaitEmbeddingOperation(wait, guard);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Await a proven local embedding worker, including bounded transient-init
+ * retries. Remote providers return immediately to avoid spending API quota.
+ *
+ * This is for orchestration that requires vectors (not normal recall, which may
+ * degrade to FTS). The readiness probe serializes cold model download/load,
+ * waits for the provider-owned 2s/8s retry deadlines, and stops on the caller's
+ * cancellation boundary or a terminal/exhausted provider failure.
+ */
+export async function ensureEmbeddingReady(
+  options: EmbeddingOperationOptions = {},
+): Promise<void> {
+  const guard = createEmbeddingAbortGuard("provider-readiness", options);
+  throwIfEmbeddingAborted(guard);
+
+  for (;;) {
+    throwIfEmbeddingAborted(guard);
+    const provider = getProvider();
+    if (!provider) {
+      throw new LocalProviderUnavailableError(
+        "no embedding provider is configured",
+      );
+    }
+    if (!(provider instanceof EmbeddingPool)) {
+      throwIfEmbeddingAborted(guard);
+      return;
+    }
+    if (
+      localProviderFailureCause === "terminal" ||
+      (localProviderFailureCause === "transient-init-exhausted" &&
+        !provider.hasHealthySlot())
+    ) {
+      throw new LocalProviderUnavailableError(
+        "local embedding provider is unavailable",
+      );
+    }
+    if (provider.hasHealthySlot()) {
+      throwIfEmbeddingAborted(guard);
+      return;
+    }
+
+    try {
+      await awaitEmbeddingOperation(
+        provider.embed(["warmup"], "document"),
+        guard,
+      );
+      throwIfEmbeddingAborted(guard);
+      return;
+    } catch (error) {
+      if (error instanceof EmbeddingAbortError) throw error;
+      if (!(error instanceof LocalProviderUnavailableError)) throw error;
+      throwIfEmbeddingAborted(guard);
+      if (localProviderFailureCause !== null || localInitRetryAt <= 0) {
+        throw error;
+      }
+      await waitForEmbeddingRetry(
+        Math.max(0, localInitRetryAt - Date.now()),
+        guard,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3062,54 +3154,65 @@ const EMBEDDING_CONFIG_KEY = "lore:embedding_config";
  * Returns true if embeddings were cleared (full re-embed needed).
  */
 export function checkConfigChange(): boolean {
-  // Read stored fingerprint from kv_meta
-  const stored = db()
-    .query("SELECT value FROM kv_meta WHERE key = ?")
-    .get(EMBEDDING_CONFIG_KEY) as { value: string } | null;
-
   const current = configFingerprint();
+  const readStored = (): { value: string } | null =>
+    db()
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get(EMBEDDING_CONFIG_KEY) as { value: string } | null;
+  const observed = readStored();
 
-  if (stored && stored.value === current) return false;
+  if (observed?.value === current) return false;
 
-  const mode = readStorageMode(db());
+  const reconcile = (): boolean => {
+    // Re-check after BEGIN IMMEDIATE serializes competing processes. Without
+    // this, a late reconciler can clear vectors another process just rebuilt.
+    const stored = readStored();
+    if (stored?.value === current) return false;
 
-  // A vec0-store DB whose extension didn't load (degraded) cannot manage its
-  // embeddings — it can neither count/clear the unreadable vec0 tables nor
-  // recreate them. Leave the stored fingerprint UNCHANGED so the change is
-  // re-detected and handled the next time the DB opens on a capable runtime.
-  if (mode === "vec0" && !isVecAvailable()) return false;
+    const mode = readStorageMode(db());
 
-  // Config changed (or first run) — clear all embeddings in all tables
-  if (stored) {
-    const total =
-      mode === "vec0" ? countVec0Embeddings() : countBlobEmbeddings();
-    if (total > 0) {
-      clearAllEmbeddings(db());
-      log.info(
-        `embedding config changed (${stored.value} → ${current}), cleared ${total} stale embeddings`,
-      );
+    // A vec0-store DB whose extension didn't load (degraded) cannot manage its
+    // embeddings — it can neither count/clear the unreadable vec0 tables nor
+    // recreate them. Leave the stored fingerprint UNCHANGED so the change is
+    // re-detected and handled the next time the DB opens on a capable runtime.
+    if (mode === "vec0" && !isVecAvailable()) return false;
+
+    // Config changed (or first run) — clear all embeddings in all tables
+    if (stored) {
+      const total =
+        mode === "vec0" ? countVec0Embeddings() : countBlobEmbeddings();
+      if (total > 0) {
+        clearAllEmbeddings(db());
+        log.info(
+          `embedding config changed (${stored.value} → ${current}), cleared ${total} stale embeddings`,
+        );
+      }
+      // A *dimension* change makes the fixed-width vec0 tables incompatible:
+      // recreate them at the new dimension (clearAllEmbeddings emptied the old
+      // rows; ensureVec0Store drops + recreates when the stored dim differs, and
+      // is a no-op for a same-dimension model/provider swap).
+      if (mode === "vec0") {
+        ensureVec0Store(db(), config().search.embeddings.dimensions);
+      }
+      // The clear wiped temporal vectors too, and temporal has no dedicated
+      // backfill loop above — re-arm the resumable re-chunk walk so it refills
+      // the corpus under the new model/dimension on this same startup.
+      resetTemporalRechunkProgress();
     }
-    // A *dimension* change makes the fixed-width vec0 tables incompatible:
-    // recreate them at the new dimension (clearAllEmbeddings emptied the old
-    // rows; ensureVec0Store drops + recreates when the stored dim differs, and
-    // is a no-op for a same-dimension model/provider swap).
-    if (mode === "vec0") {
-      ensureVec0Store(db(), config().search.embeddings.dimensions);
-    }
-    // The clear wiped temporal vectors too, and temporal has no dedicated
-    // backfill loop above — re-arm the resumable re-chunk walk so it refills
-    // the corpus under the new model/dimension on this same startup.
-    resetTemporalRechunkProgress();
-  }
 
-  // Store new fingerprint
-  db()
-    .query(
-      "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
-    )
-    .run(EMBEDDING_CONFIG_KEY, current, current);
+    // Store new fingerprint
+    db()
+      .query(
+        "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+      )
+      .run(EMBEDDING_CONFIG_KEY, current, current);
 
-  return true;
+    return true;
+  };
+
+  return databaseInTransaction(db())
+    ? withSavepoint("embedding_config_reconcile", reconcile)
+    : withTransaction(reconcile);
 }
 
 /** Count blob-layout embeddings across all four tables (config-change logging). */

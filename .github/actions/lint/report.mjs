@@ -34,6 +34,7 @@ const phaseFailureCodes = new Set([
   "diff-command-failed",
   "invariant-source-read-failed",
   "invariant-source-import-failed",
+  "embedding-provider-readiness-failed",
   "invariant-vector-load-failed",
   "hunk-vectors-all-missing",
   "hunk-vector-embedding-failed",

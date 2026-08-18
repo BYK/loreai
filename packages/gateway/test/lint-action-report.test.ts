@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  failedSemanticLintReport,
   MAX_LINT_REPORT_CANDIDATES,
   MAX_LINT_REPORT_RESOLVED_REASON_LENGTH,
   validateSemanticLintReport,
@@ -178,6 +179,24 @@ function actionAccepts(value: unknown, cliExit = 0): boolean {
 }
 
 describe("semantic lint action reporter", () => {
+  test("accepts embedding readiness failures produced by the CLI validator", () => {
+    const value = failedSemanticLintReport({
+      model: "test/model",
+      effort: "off",
+      elapsedMs: 1,
+      range: { base: "a", head: "b", source: "test" },
+      failedPhase: "invariantSource",
+      failure: {
+        code: "embedding-provider-readiness-failed",
+        message: "local provider exhausted retries",
+      },
+      gateMode: "advisory",
+    });
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
   test("accepts the same boundary report as the CLI validator", () => {
     const value = resolvedReport(
       MAX_LINT_REPORT_CANDIDATES,

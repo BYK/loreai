@@ -3,7 +3,9 @@ import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
   embed,
+  ensureEmbeddingReady,
   isAvailable,
+  LocalProviderUnavailableError,
   recallEmbedsInFlight,
   resetProvider,
   _configuredEmbedPoolSize,
@@ -116,6 +118,14 @@ function settle<T>(
   );
 }
 
+async function warmPool(fakes: FakeWorker[]): Promise<void> {
+  const warm = embed(["bootstrap"], "document");
+  await flush();
+  expect(fakes).toHaveLength(1);
+  fakes[0].completeAll();
+  await warm;
+}
+
 describe("EmbeddingPool dispatch (#999)", () => {
   let savedProvider: unknown;
   let savedVoyage: string | undefined;
@@ -159,7 +169,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
     else delete process.env.NODE_ENV;
   });
 
-  it("dispatches concurrent embeds to distinct workers in parallel", async () => {
+  it("serializes cold bootstrap before dispatching concurrent embeds in parallel", async () => {
     _setEmbedPoolSizeForTest(2);
     _setPoolFreememForTest(64 * GB); // ample → growth allowed
     const fakes = installFakeWorkers();
@@ -168,16 +178,26 @@ describe("EmbeddingPool dispatch (#999)", () => {
     const p2 = embed(["beta"], "query");
     await flush();
 
-    // Two workers spawned, each carrying exactly one request — not serialized
-    // through a single worker (the whole point of #999).
+    // Until a real result proves model readiness, all cold requests share one
+    // worker so sibling initializers cannot race the shared model cache.
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0].embedIds).toHaveLength(2);
+
+    fakes[0].completeAll();
+    expect(await p1).toHaveLength(1);
+    expect(await p2).toHaveLength(1);
+
+    // After bootstrap, genuine concurrent demand grows the pool as before.
+    const p3 = embed(["gamma"], "query");
+    const p4 = embed(["delta"], "query");
+    await flush();
     expect(fakes).toHaveLength(2);
     expect(fakes[0].embedIds).toHaveLength(1);
     expect(fakes[1].embedIds).toHaveLength(1);
-
     fakes[0].completeAll();
     fakes[1].completeAll();
-    expect(await p1).toHaveLength(1);
-    expect(await p2).toHaveLength(1);
+    expect(await p3).toHaveLength(1);
+    expect(await p4).toHaveLength(1);
   });
 
   it("does not spawn a second worker for sequential (non-concurrent) embeds", async () => {
@@ -261,28 +281,28 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _setEmbedPoolSizeForTest(2);
     _setPoolFreememForTest(64 * GB);
     const fakes = installFakeWorkers();
+    await warmPool(fakes);
 
-    const first = settle(embed(["first"], "document"));
-    const second = embed(["second"], "document");
+    const healthy = embed(["healthy"], "document");
+    const failed = settle(embed(["failed"], "document"));
     await flush();
     expect(fakes).toHaveLength(2);
 
-    fakes[0].initError(
+    fakes[1].initError(
       "Can't create a session. ERROR_CODE: 7, ERROR_MESSAGE: Failed to load model because protobuf parsing failed.",
     );
-    fakes[1].completeAll();
-    const failed = await first;
-    expect(failed.ok).toBe(false);
-    expect(await second).toHaveLength(1);
+    fakes[0].completeAll();
+    expect((await failed).ok).toBe(false);
+    expect(await healthy).toHaveLength(1);
     expect(isAvailable()).toBe(true);
 
-    const failedSlotPosts = fakes[0].embedIds.length;
+    const failedSlotPosts = fakes[1].embedIds.length;
     const next = embed(["backfill"], "document");
     await flush();
     expect(fakes).toHaveLength(2);
-    expect(fakes[0].embedIds).toHaveLength(failedSlotPosts);
-    expect(fakes[1].embedIds).toHaveLength(1);
-    fakes[1].completeAll();
+    expect(fakes[1].embedIds).toHaveLength(failedSlotPosts);
+    expect(fakes[0].embedIds).toHaveLength(1);
+    fakes[0].completeAll();
     expect(await next).toHaveLength(1);
   });
 
@@ -295,8 +315,8 @@ describe("EmbeddingPool dispatch (#999)", () => {
     const first = settle(embed(["first"], "document"));
     const second = settle(embed(["second"], "document"));
     await flush();
+    expect(fakes).toHaveLength(1);
     fakes[0].initError("transient one");
-    fakes[1].initError("transient two");
     expect((await first).ok).toBe(false);
     expect((await second).ok).toBe(false);
     await flush();
@@ -304,13 +324,13 @@ describe("EmbeddingPool dispatch (#999)", () => {
 
     const cooling = await settle(embed(["too soon"], "document"));
     expect(cooling.ok).toBe(false);
-    expect(fakes).toHaveLength(2);
+    expect(fakes).toHaveLength(1);
 
     _setLocalInitRetryAtForTest(Date.now() - 1);
     const retry = embed(["after cooldown"], "document");
     await flush();
-    expect(fakes).toHaveLength(3);
-    fakes[2].completeAll();
+    expect(fakes).toHaveLength(2);
+    fakes[1].completeAll();
     expect(await retry).toHaveLength(1);
   });
 
@@ -554,30 +574,31 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(resetDone).toBe(true);
   });
 
-  it("clears transient exhaustion when an in-flight sibling succeeds", async () => {
+  it("keeps a proven sibling available after transient failures", async () => {
     _setEmbedPoolSizeForTest(4);
     _setPoolFreememForTest(64 * GB);
     _setLocalInitCooldownMsForTest(0);
     const fakes = installFakeWorkers();
+    await warmPool(fakes);
 
     const requests = Array.from({ length: 4 }, (_, index) =>
       settle(embed([`request-${index}`], "document")),
     );
     await flush();
     expect(fakes).toHaveLength(4);
-    fakes[0].initError("transient one");
-    fakes[1].initError("transient two");
-    fakes[2].initError("transient three");
-    expect(isAvailable()).toBe(false);
+    fakes[1].initError("transient one");
+    fakes[2].initError("transient two");
+    fakes[3].initError("transient three");
+    expect(isAvailable()).toBe(true);
 
-    fakes[3].completeAll();
+    fakes[0].completeAll();
     const outcomes = await Promise.all(requests);
     expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
     expect(isAvailable()).toBe(true);
 
     const next = embed(["after sibling recovery"], "document");
     await flush();
-    fakes[3].completeAll();
+    fakes[0].completeAll();
     expect(await next).toHaveLength(1);
   });
 
@@ -585,15 +606,19 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _setEmbedPoolSizeForTest(2);
     _setPoolFreememForTest(64 * GB);
     const fakes = installFakeWorkers();
+    await warmPool(fakes);
 
-    const failed = settle(embed(["terminal"], "document"));
     const sibling = embed(["sibling"], "document");
+    const failed = settle(embed(["terminal"], "document"));
     await flush();
-    fakes[0].initError("Cannot find package 'onnxruntime-node'");
-    fakes[1].completeAll();
+    fakes[1].initError("Cannot find package 'onnxruntime-node'");
+    fakes[0].completeAll();
     expect((await failed).ok).toBe(false);
     expect(await sibling).toHaveLength(1);
     expect(isAvailable()).toBe(false);
+    await expect(ensureEmbeddingReady()).rejects.toBeInstanceOf(
+      LocalProviderUnavailableError,
+    );
   });
 
   it("settles an embed when reset races cold worker initialization", async () => {
@@ -633,16 +658,17 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _setEmbedPoolSizeForTest(2);
     _setPoolFreememForTest(64 * GB);
     const fakes = installFakeWorkers();
-    const failed = settle(embed(["failed"], "document"));
+    await warmPool(fakes);
     const healthy = embed(["healthy"], "document");
+    const failed = settle(embed(["failed"], "document"));
     await flush();
-    fakes[0].exitOnShutdown = false;
-    fakes[0].initError("transient failure");
-    fakes[1].completeAll();
+    fakes[1].exitOnShutdown = false;
+    fakes[1].initError("transient failure");
+    fakes[0].completeAll();
     expect((await failed).ok).toBe(false);
     await healthy;
     await flush();
-    expect(fakes[0].gotShutdown).toBe(true);
+    expect(fakes[1].gotShutdown).toBe(true);
 
     let resetDone = false;
     const reset = resetProvider().then(() => {
@@ -650,16 +676,17 @@ describe("EmbeddingPool dispatch (#999)", () => {
     });
     await flush();
     expect(resetDone).toBe(false);
-    fakes[0].exit();
+    fakes[1].exit();
     await reset;
     expect(resetDone).toBe(true);
-    expect(fakes[1].gotShutdown).toBe(true);
+    expect(fakes[0].gotShutdown).toBe(true);
   });
 
   it("LORE_EMBED_POOL_SIZE sets the ceiling (env-driven, no test override)", async () => {
     process.env.LORE_EMBED_POOL_SIZE = "2";
     _setPoolFreememForTest(64 * GB);
     const fakes = installFakeWorkers();
+    await warmPool(fakes);
 
     const p1 = embed(["alpha"], "query");
     const p2 = embed(["beta"], "query");
@@ -728,6 +755,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
     process.env.NODE_ENV = "production";
     _setPoolFreememForTest(64 * GB); // ample → default ceiling of 2
     const fakes = installFakeWorkers();
+    await warmPool(fakes);
 
     const p1 = embed(["alpha"], "query");
     const p2 = embed(["beta"], "query");
@@ -757,6 +785,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _setEmbedPoolSizeForTest(2);
     _setPoolFreememForTest(64 * GB);
     const fakes = installFakeWorkers();
+    await warmPool(fakes);
 
     const p1 = embed(["alpha"], "query");
     const p2 = embed(["beta"], "query");
