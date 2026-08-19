@@ -1233,6 +1233,7 @@ const WORKER_MODEL_FALLBACKS: Record<string, string[]> = {
     "gpt-5-mini",
     "gpt-4o-mini",
     "claude-sonnet-4.6",
+    // Copilot's wire ID uses a dot; direct Anthropic uses claude-haiku-4-5.
     "claude-haiku-4.5",
   ],
 };

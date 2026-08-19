@@ -94,7 +94,7 @@ jobs:
         # run: blocks have cosmetic shellcheck findings (SC2086, SC2129,
         # SC2035, SC2012) that are not bugs. The value of actionlint is
         # in workflow schema validation, not shell style.
-        run: ./actionlint -color
+        run: ./actionlint -color -config-file .github/actionlint.yaml
 
   test:
     needs: [changes]

@@ -213,6 +213,26 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     expect(body.temperature).toBeUndefined();
   });
 
+  test("explicit worker upstream keeps Copilot protocol and provider provenance", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "sdk-bridge" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    );
+    await client.prompt("sys", "user", {
+      sessionID: "sess-copilot-upstream",
+      workerID: "lore-invariant-check",
+      model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+      upstreamUrl: "http://127.0.0.1:12345",
+      upstreamProviderID: "github-copilot",
+      reasoningEffort: "off",
+    });
+
+    expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:12345/v1/responses",
+    );
+  });
+
   test("effort off remains explicit for other Responses providers", async () => {
     const client = createGatewayLLMClient(
       UPSTREAMS,

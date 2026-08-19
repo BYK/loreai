@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 describe("runSemanticLint cancellation", () => {
-  it("proves embedding readiness before importing invariant fan-out", async () => {
+  it("proves readiness before import and honors the worker upstream", async () => {
     const events: string[] = [];
     const range = { base: "base", head: "head", source: "test" };
     let releaseReadiness: (() => void) | undefined;
@@ -96,9 +96,11 @@ describe("runSemanticLint cancellation", () => {
       },
       parseReasoningEffort: vi.fn(),
     }));
+    const createGatewayLLMClient = vi.fn(() => ({}));
+    const createGatewayInvariantJudge = vi.fn(() => ({}));
     vi.doMock("../src/llm-adapter", () => ({
-      createGatewayLLMClient: () => ({}),
-      createGatewayInvariantJudge: () => ({}),
+      createGatewayLLMClient,
+      createGatewayInvariantJudge,
     }));
     vi.doMock("../src/cli/start", () => ({
       startGateway: async () => {
@@ -106,7 +108,8 @@ describe("runSemanticLint cancellation", () => {
         return {
           owned: true,
           config: {
-            workerApiKey: undefined,
+            workerApiKey: "copilot-sdk-bridge",
+            workerUpstream: "http://copilot-bridge.test",
             upstreamAnthropic: "http://anthropic.test",
             upstreamOpenAI: "http://openai.test",
           },
@@ -139,6 +142,20 @@ describe("runSemanticLint cancellation", () => {
       "check",
       "cleanup",
     ]);
+    expect(createGatewayLLMClient).toHaveBeenCalledWith(
+      {
+        anthropic: "http://copilot-bridge.test",
+        openai: "http://copilot-bridge.test",
+      },
+      expect.any(Function),
+      expect.any(Object),
+      { dedicatedWorkerKey: true, disableModelFallbacks: true },
+    );
+    expect(createGatewayInvariantJudge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        upstreamUrl: "http://copilot-bridge.test",
+      }),
+    );
   });
 
   it("completes zero-hunk work without gateway, import, or embeddings", async () => {

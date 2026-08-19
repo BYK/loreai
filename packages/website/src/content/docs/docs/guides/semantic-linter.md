@@ -23,7 +23,7 @@ It is **not** a replacement for tests, type checking, or a linter. It has no gro
 
 ## Quick start (GitHub Actions)
 
-The repository ships a reusable composite action and a reference workflow. Add an `ANTHROPIC_API_KEY` Actions secret for the default `anthropic/claude-haiku-4-5` judge, or configure the custom credential and model pair described below.
+The repository ships a reusable composite action and a reference workflow. It uses the workflow's GitHub token with GitHub Copilot by default, or you can configure the custom credential and model pair described below.
 
 Add `.github/workflows/semantic-linter.yml`:
 
@@ -41,6 +41,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  copilot-requests: write
 
 jobs:
   lint:
@@ -77,8 +78,9 @@ jobs:
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
           lore-command: "node packages/gateway/dist/bin.cjs"
-          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && secrets.ANTHROPIC_API_KEY != '' && 'anthropic/claude-haiku-4-5' || '') }}
-          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || secrets.ANTHROPIC_API_KEY }}
+          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}
+          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && secrets.LORE_WORKER_API_KEY || '' }}
+          github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}
 ```
 
 Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
@@ -91,24 +93,26 @@ Use `pull_request_target` only with the trusted-base checkout pattern above. The
 
 The credential and model are selected as a pair to prevent sending one provider's key to another provider.
 
-**Credential** (the `worker-api-key` input):
+**Credential** (`worker-api-key` or `github-token`):
 
-- **Default.** Set `ANTHROPIC_API_KEY`; the reference workflow pairs it with `anthropic/claude-haiku-4-5`.
-- **Custom provider.** Set `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` together. The dedicated key takes precedence over `ANTHROPIC_API_KEY`.
-- **No supported secret.** The action passes no credential and reports an explicit `no-auth` health failure. A raw Actions `GITHUB_TOKEN` is not forwarded to provider APIs.
+- **Default.** The reference workflow passes `github.token` to the action's loopback-only official Copilot SDK bridge. The SDK resolves the Actions installation token and its billing identity; `copilot-requests: write` grants inference access. The token is not forwarded directly to `api.githubcopilot.com`.
+- **Custom provider.** Set `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` together. The custom pair takes precedence over the workflow token.
 
 **Model** (the `model` input, `provider/id`):
 
 | Situation | Model used |
 | --- | --- |
 | `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` are set | the variable value, authenticated by the dedicated key |
-| `LORE_WORKER_API_KEY` only | your repo's configured default worker model |
-| `ANTHROPIC_API_KEY` only (or a stale model variable without a dedicated key) | `anthropic/claude-haiku-4-5` |
-| Neither supported secret | no authenticated judge; the report is inconclusive with `no-auth` |
+| Only one custom override is set | `github-copilot/gpt-5.6-luna`, authenticated by the workflow token |
+| Neither custom override is set | `github-copilot/gpt-5.6-luna`, authenticated by the workflow token |
 
 :::note
-The model id must match the credential. `LORE_INVARIANT_MODEL` is honored only when `LORE_WORKER_API_KEY` is also set; otherwise the Anthropic fallback forces its matching model. Official Copilot CLI support for Actions tokens includes authentication and billing behavior that is not equivalent to forwarding `GITHUB_TOKEN` directly to `api.githubcopilot.com`.
+The model id must match the credential. The custom model and key are honored only when both are set; a partial override falls back atomically to the Copilot model and workflow token, so one provider's credential is never sent to another provider.
 :::
+
+The `github-token` bridge accepts only the Responses-compatible `github-copilot/gpt-5.6-*` family. Use `worker-api-key` for a different provider or a Copilot model that uses Chat Completions.
+
+For a personally owned repository, Copilot usage is billed to the repository owner's Copilot seat. Organization-owned repositories must enable **Allow use of Copilot CLI billed to the organization** in their Copilot policy settings. These billing and policy requirements are separate from the workflow permission.
 
 ## How it works
 

@@ -291,18 +291,23 @@ export async function runSemanticLint(
           value: workerKey,
         })
       : resolveAuth;
-    const client = createGatewayLLMClient(
-      {
-        anthropic: gateway.config.upstreamAnthropic,
-        openai: gateway.config.upstreamOpenAI,
-      },
-      judgeAuth,
-      model,
-      { dedicatedWorkerKey: !!workerKey },
-    );
+    const judgeUpstreams = gateway.config.workerUpstream
+      ? {
+          anthropic: gateway.config.workerUpstream,
+          openai: gateway.config.workerUpstream,
+        }
+      : {
+          anthropic: gateway.config.upstreamAnthropic,
+          openai: gateway.config.upstreamOpenAI,
+        };
+    const client = createGatewayLLMClient(judgeUpstreams, judgeAuth, model, {
+      dedicatedWorkerKey: !!workerKey,
+      disableModelFallbacks: workerKey === "copilot-sdk-bridge",
+    });
     const judge = createGatewayInvariantJudge({
       client,
       model,
+      upstreamUrl: gateway.config.workerUpstream,
       effort,
       sessionID: `invariant-check-${Date.now()}`,
       candidateTimeoutMs: options.candidateTimeoutMs,

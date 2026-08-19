@@ -24,6 +24,12 @@ inputs:
     description: "Judge credential (sets LORE_WORKER_API_KEY)."
     required: false
     default: ""
+  github-token:
+    description: >-
+      Actions GITHUB_TOKEN for the official Copilot SDK bridge. Requires
+      copilot-requests: write; do not also set worker-api-key.
+    required: false
+    default: ""
   lore-command:
     description: "Command used to invoke Lore."
     required: false
@@ -44,6 +50,43 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Validate judge credential inputs
+      shell: bash
+      env:
+        LORE_IC_MODEL: ${{ inputs.model }}
+        LORE_WORKER_API_KEY: ${{ inputs.worker-api-key }}
+        LORE_GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if [ -n "$LORE_GITHUB_TOKEN" ] && [ -n "$LORE_WORKER_API_KEY" ]; then
+          echo "github-token and worker-api-key are mutually exclusive" >&2
+          exit 1
+        fi
+        if [ -n "$LORE_GITHUB_TOKEN" ] && [[ ! "$LORE_IC_MODEL" =~ ^github-copilot/gpt-5\.6-[A-Za-z0-9._-]+$ ]]; then
+          echo "github-token requires a Responses-compatible github-copilot/gpt-5.6-* model" >&2
+          exit 1
+        fi
+
+    - name: Install official Copilot SDK bridge
+      if: inputs.github-token != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        install_dir="${GITHUB_ACTION_PATH}/copilot-sdk"
+        npm ci --prefix "$install_dir" --ignore-scripts --no-audit --no-fund
+
+    - name: Start official Copilot SDK bridge
+      id: copilot
+      if: inputs.github-token != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        install_dir="${GITHUB_ACTION_PATH}/copilot-sdk"
+        node "${GITHUB_ACTION_PATH}/copilot-proxy.mjs" launch \
+          "$install_dir/node_modules/@github/copilot-sdk/dist/index.js"
+
     - name: Compute invariant-DB cache key
       id: key
       shell: bash
@@ -72,7 +115,8 @@ runs:
         LORE_IC_HEAD: ${{ inputs.head }}
         LORE_IC_MODEL: ${{ inputs.model }}
         LORE_IC_EFFORT: ${{ inputs.effort }}
-        LORE_WORKER_API_KEY: ${{ inputs.worker-api-key }}
+        LORE_WORKER_API_KEY: ${{ inputs.worker-api-key != '' && inputs.worker-api-key || inputs.github-token != '' && 'copilot-sdk-bridge' || '' }}
+        LORE_WORKER_UPSTREAM: ${{ steps.copilot.outputs.url }}
         LORE_CMD: ${{ inputs.lore-command }}
         LORE_DB_PATH: ${{ steps.key.outputs.db }}
         LORE_IC_GATE: ${{ inputs.gate }}
@@ -140,3 +184,12 @@ runs:
         "${LORE_LINT_REPORT_FILE:-${RUNNER_TEMP}/lore-semantic-lint-report.json}"
         "${LORE_LINT_GATE:-false}"
         "${LORE_LINT_EXIT_CODE:-1}"
+
+    - name: Stop official Copilot SDK bridge
+      if: always() && steps.copilot.outputs.pid != ''
+      shell: bash
+      env:
+        LORE_COPILOT_PROXY_PID: ${{ steps.copilot.outputs.pid }}
+      run: >-
+        node "${{ github.action_path }}/copilot-proxy.mjs"
+        stop "$LORE_COPILOT_PROXY_PID"

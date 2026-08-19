@@ -23,6 +23,37 @@ function clientWith(outcomes: PromptOutcome[]): GatewayLLMClient {
 }
 
 describe("createGatewayInvariantJudge", () => {
+  test("forwards worker upstream with matching provider provenance", async () => {
+    let promptOptions: Record<string, unknown> | undefined;
+    const client: GatewayLLMClient = {
+      prompt: vi.fn(async () => null),
+      promptDetailed: vi.fn(async (_system, _user, options) => {
+        promptOptions = options;
+        return {
+          kind: "success",
+          text: JSON.stringify({ verdict: "satisfies", reason: "covered" }),
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 1,
+        } satisfies PromptOutcome;
+      }),
+    };
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      upstreamUrl: "http://127.0.0.1:12345",
+      effort: "off",
+      sessionID: "lint-upstream",
+    });
+
+    await judge.judge(INPUT);
+
+    expect(promptOptions).toMatchObject({
+      upstreamUrl: "http://127.0.0.1:12345",
+      upstreamProviderID: "github-copilot",
+    });
+  });
+
   test("repairs one invalid verdict and sums transport attempts", async () => {
     const client = clientWith([
       {
