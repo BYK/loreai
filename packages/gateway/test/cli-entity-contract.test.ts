@@ -1,10 +1,10 @@
 /**
- * Phase 3D.4 — typed `lore entity` with variadic positional + 10 flags.
+ * Phase 3D.4 — typed `lore entity` with variadic positional + 11 flags.
  *
  * Pins the typed wrapper for `lore entity`. The legacy handler takes a
  * subcommand as `positionals[0]` plus subcommand-specific args, and
- * reads 10 flags from the values dict (all, cross, interactive, json,
- * metadata, name, project, relation, type, value, yes) — 11 total
+ * reads 11 flags from the values dict (all, cross, dry-run, interactive,
+ * json, metadata, name, project, relation, type, value, yes) — 12 total
  * including --json auto-injection.
  *
  * Review findings addressed:
@@ -51,7 +51,7 @@ describe("Phase 3D.4 — typed lore entity", () => {
     expect(LEGACY_ROUTES.has("entity")).toBe(false);
   });
 
-  test("entity declares 10 flags + --json (all, cross, interactive, json, metadata, name, project, relation, type, value, yes)", async () => {
+  test("entity declares 11 flags + --json (all, cross, dry-run, interactive, json, metadata, name, project, relation, type, value, yes)", async () => {
     const { buildApplication, buildRouteMap, run } =
       await import("@stricli/core");
     const { entityCommand } = await import("../src/cli/commands/entity");
@@ -80,6 +80,7 @@ describe("Phase 3D.4 — typed lore entity", () => {
     const expected = [
       "--all",
       "--cross",
+      "--dry-run",
       "--interactive",
       "--json",
       "--metadata",
@@ -542,6 +543,30 @@ describe("Phase 3D.4 — typed lore entity", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.values.yes).toBe(true);
     expect(calls[0]?.values.json).toBe(true);
+    vi.resetModules();
+  });
+
+  test("entity dedup --dry-run overrides --yes before legacy dispatch", async () => {
+    vi.resetModules();
+    const calls: EntityCall[] = [];
+    const entityImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "entity", "dedup", "--yes", "--dry-run"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.values.yes).toBeUndefined();
     vi.resetModules();
   });
 });

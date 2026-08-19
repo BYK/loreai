@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 describe("lore entity dedup safety policy", () => {
-  test("--dry-run overrides --yes and preserves a real duplicate cluster", async () => {
+  test("legacy dedup preview preserves entities without --yes", async () => {
     const canonical = ensureEntity("tool", "Prefer idempotent writes");
     const duplicate = ensureEntity("tool", "Use atomic skill writes");
 
@@ -33,7 +33,6 @@ describe("lore entity dedup safety policy", () => {
 
     await commandEntity(["dedup"], {
       project: projectDir,
-      yes: true,
     });
 
     expect(

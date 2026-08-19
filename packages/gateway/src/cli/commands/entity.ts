@@ -20,8 +20,7 @@
  *     the typed wrapper rejects non-interactive invocations without
  *     `--yes` (mirrors `lore data`).
  *   - `dedup` writes only when `--yes` is supplied. `--dry-run` overrides
- *     `--yes` and the legacy confirm prompt is replaced by a wrapper
- *     reject when stdin is not a TTY (matches `lore data dedup`).
+ *     `--yes` and forces the legacy preview path.
  *   - `--json --interactive` is rejected before delegating, so the legacy
  *     handler never enters the interactive prompt-and-mutate path under
  *     machine output.
@@ -59,6 +58,7 @@ function isDestructive(
 type EntityFlags = {
   all: boolean;
   cross: boolean;
+  "dry-run": boolean;
   interactive: boolean;
   metadata?: string;
   name?: string;
@@ -97,6 +97,11 @@ export const entityCommand = buildOutputCommand<
       cross: {
         kind: "boolean",
         brief: "Cross-project entity search (entity search)",
+        default: false,
+      },
+      "dry-run": {
+        kind: "boolean",
+        brief: "Preview entity dedup without applying auto-merges",
         default: false,
       },
       interactive: {
@@ -192,7 +197,7 @@ export const entityCommand = buildOutputCommand<
     // the legacy handlers do not prompt.
     const sub = subcommand ?? "";
     const destructive = isDestructive(sub, subArgs);
-    const dryRun = (flags as { "dry-run"?: boolean })["dry-run"] === true;
+    const dryRun = flags["dry-run"];
     const willWrite =
       destructive && !dryRun && (sub === "dedup" ? flags.yes === true : true);
     if (willWrite && !flags.yes && (!process.stdin.isTTY || !!jsonFlag)) {
@@ -212,7 +217,9 @@ export const entityCommand = buildOutputCommand<
     if (flags.relation !== undefined) values.relation = flags.relation;
     if (flags.type !== undefined) values.type = flags.type;
     if (flags.value !== undefined) values.value = flags.value;
-    if (flags.yes) values.yes = true;
+    // Legacy dedup applies only when values.yes is true. Do not forward it
+    // when --dry-run is present, so --dry-run always wins over --yes.
+    if (flags.yes && !dryRun) values.yes = true;
     // F-4 (HIGH): forward --json (auto-injected by buildOutputCommand)
     // to the legacy handler. Legacy cmdList gates JSON output on
     // `flags.json` — without this, the legacy emits human table text
