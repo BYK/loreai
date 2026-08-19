@@ -18740,6 +18740,7 @@ export function earlyFlushStreamingResponse(
   modelId: string,
   signal?: AbortSignal,
   trackOperation?: (operation: Promise<unknown>) => void,
+  keepaliveMs = 5_000,
 ): Response {
   const encoder = new TextEncoder();
   const keepalive = encoder.encode(`: lore preparing\n\n`);
@@ -18775,8 +18776,26 @@ export function earlyFlushStreamingResponse(
 
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let responsePromise: Promise<Response> | undefined;
+  let innerPromise: Promise<Response> | undefined;
+  let readPromise: ReturnType<typeof readStreamChunk> | undefined;
   let cancelled = false;
   let finished = false;
+
+  async function awaitWithKeepalive<T>(
+    operation: Promise<T>,
+  ): Promise<{ value: T } | { keepalive: true }> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation.then((value) => ({ value }) as const),
+        new Promise<{ keepalive: true }>((resolve) => {
+          timeout = setTimeout(() => resolve({ keepalive: true }), keepaliveMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
 
   const finish = (
     controller: ReadableStreamDefaultController<Uint8Array>,
@@ -18806,10 +18825,17 @@ export function earlyFlushStreamingResponse(
               responsePromise = run(operationSignal);
               trackOperation?.(responsePromise);
             }
-            const inner = await responseAgainstAbort(
+            innerPromise ??= responseAgainstAbort(
               () => responsePromise as Promise<Response>,
               operationSignal,
             );
+            const pendingInner = awaitWithKeepalive(innerPromise);
+            const innerResult = await pendingInner;
+            if ("keepalive" in innerResult) {
+              controller.enqueue(keepalive);
+              return;
+            }
+            const inner = innerResult.value;
             if (cancelled) {
               void inner.body?.cancel().catch(() => {});
               return;
@@ -18832,9 +18858,16 @@ export function earlyFlushStreamingResponse(
             }
             reader = inner.body.getReader();
           }
-          const chunk = await readStreamChunk(reader, {
+          const pendingRead = (readPromise ??= readStreamChunk(reader, {
             signal: operationSignal,
-          });
+          }));
+          const chunkResult = await awaitWithKeepalive(pendingRead);
+          if ("keepalive" in chunkResult) {
+            controller.enqueue(keepalive);
+            return;
+          }
+          readPromise = undefined;
+          const chunk = chunkResult.value;
           if (cancelled) return;
           if (chunk.done) finish(controller);
           else controller.enqueue(chunk.value);
