@@ -14,7 +14,8 @@
  *   help           → print usage
  */
 import { parseArgs } from "node:util";
-import { stringifyUnknown } from "./lib/errors";
+import { stringifyUnknown, UsageError } from "./lib/errors";
+import { entityOperationPolicy } from "./lib/entity-policy";
 import { printHelp, printVersion } from "./help";
 import { commandStart, type StartOptions } from "./start";
 import {
@@ -574,6 +575,25 @@ export async function _cli(): Promise<void> {
       }
 
       case "entity": {
+        const entityPolicy = entityOperationPolicy(rest, values);
+        if (entityPolicy.invalidDryRun) {
+          throw new UsageError({
+            message: "`--dry-run` is supported only by `lore entity dedup`.",
+            tryCommand: "lore entity dedup --dry-run",
+          });
+        }
+        if (entityPolicy.jsonInteractive) {
+          throw new UsageError({
+            message: `Refusing \`--json --interactive\` for \`${entityPolicy.operation}\`.`,
+            tryCommand: `${entityPolicy.operation} --json`,
+          });
+        }
+        if (entityPolicy.requiresYes && values.yes !== true) {
+          throw new UsageError({
+            message: `Refusing destructive \`${entityPolicy.operation}\` without --yes.`,
+            tryCommand: `${entityPolicy.operation} --yes`,
+          });
+        }
         const { commandEntity } = await import("./entity");
         await commandEntity(rest, values);
         break;

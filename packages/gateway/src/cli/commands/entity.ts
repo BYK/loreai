@@ -1,5 +1,5 @@
 /**
- * `lore entity` — typed Stricli command (Phase 3D.4 + 3D.4 follow-up).
+ * `lore entity` — typed Stricli command (Phase 3D.4).
  *
  * Wraps the legacy `commandEntity` from `../entity` via the shared
  * `runLegacyAndCollect` bridge. The legacy handler takes:
@@ -11,55 +11,36 @@
  *                      `entity alias add <alias> <target>`,
  *                      `entity relation add <from> <to>`)
  *
- * Flags forwarded to the legacy values dict (10 + auto-injected --json):
- *   --all, --cross, --interactive/-i, --json, --metadata,
+ * Flags forwarded to the legacy values dict (11 + auto-injected --json):
+ *   --all, --cross, --dry-run, --interactive/-i, --json, --metadata,
  *   --name, --project, --relation, --type, --value, --yes/-y
  *
  * Destructive-operation confirmation policy (Phase 3D.4 follow-up):
- *   - `delete`, `merge`, `alias rm`, `relation rm` write by default;
- *     the typed wrapper rejects non-interactive invocations without
- *     `--yes` (mirrors `lore data`).
- *   - `dedup` writes only when `--yes` is supplied. `--dry-run` overrides
- *     `--yes` and forces the legacy preview path.
+ *   - `delete`, `merge`, `alias rm/remove`, and `relation rm/remove` write by
+ *     default and always require `--yes` before legacy dispatch.
+ *   - Every destructive operation requires `--yes`; `--dry-run` is a
+ *     non-interactive dedup preview and never mutates.
  *   - `--json --interactive` is rejected before delegating, so the legacy
- *     handler never enters the interactive prompt-and-mutate path under
- *     machine output.
+ *     handler never enters an interactive path under machine output.
+ *
+ * Output shape:
+ *   - human: rendered legacy text
+ *   - JSON:  { output: <captured stdout> }
+ *
+ * Exit codes: legacy semantics preserved (0 success, 1 unknown
+ * subcommand / invalid args / destructive error).
  */
 import { UsageError } from "../lib/errors";
 import { buildOutputCommand } from "../lib/command";
 import { runLegacyAndCollect } from "../lib/legacy-bridge";
 import { commandEntity } from "../entity";
-
-// Destructive top-level subcommands that write by default (require
-// --yes when stdin is not a TTY). None of the legacy entity write
-// handlers prompt the user; the wrapper enforces the confirm gate so
-// CI runs cannot mutate state silently.
-const WRITE_BY_DEFAULT = new Set<string>(["delete", "merge"]);
-
-function isDestructive(
-  subcommand: string,
-  positionals: readonly string[],
-): boolean {
-  if (subcommand === "dedup") return true;
-  if (WRITE_BY_DEFAULT.has(subcommand)) return true;
-  // `alias rm` / `relation rm` reach the writer through a two-level
-  // dispatcher; treat them as destructive when the user invokes the
-  // rm/remove subverb.
-  if (subcommand === "alias" && positionals[0] === "rm") return true;
-  if (
-    subcommand === "relation" &&
-    (positionals[0] === "rm" || positionals[0] === "remove")
-  ) {
-    return true;
-  }
-  return false;
-}
+import { entityOperationPolicy } from "../lib/entity-policy";
 
 type EntityFlags = {
   all: boolean;
   cross: boolean;
-  "dry-run": boolean;
   interactive: boolean;
+  "dry-run"?: boolean;
   metadata?: string;
   name?: string;
   project?: string;
@@ -79,11 +60,11 @@ export const entityCommand = buildOutputCommand<
   fullDescription:
     "Knowledge entity CRUD + alias/relation/merge/dedup/search. " +
     "First positional is the subcommand; subsequent positionals " +
-    "are subcommand-specific args. Flags: --all, --cross, " +
+    "are subcommand-specific args. Flags: --all, --cross, --dry-run, " +
     "--interactive/-i, --json, --metadata, --name, --project, " +
     "--relation, --type, --value, --yes/-y. Destructive " +
-    "subcommands: delete, merge, dedup. Confirmation policy for " +
-    "destructive operations is deferred (Phase 3D.4 follow-up).",
+    "subcommands: delete, merge, dedup, alias rm/remove, relation " +
+    "rm/remove. Destructive operations require --yes.",
   parameters: {
     // Single-character flag aliases: -i → --interactive, -y → --yes
     // (matching the legacy OPTIONS table at packages/gateway/src/cli/main.ts).
@@ -101,8 +82,8 @@ export const entityCommand = buildOutputCommand<
       },
       "dry-run": {
         kind: "boolean",
-        brief: "Preview entity dedup without applying auto-merges",
-        default: false,
+        brief: "Show dedup changes without applying them",
+        optional: true,
       },
       interactive: {
         kind: "boolean",
@@ -175,43 +156,17 @@ export const entityCommand = buildOutputCommand<
     const subArgs = positionals.slice(1);
     const jsonFlag = (flags as { json?: boolean }).json;
 
-    // JSON + interactive prompt together would corrupt machine output
-    // and produce interactive prompt behavior. Reject before delegating.
-    if (
-      jsonFlag &&
-      flags.interactive &&
-      isDestructive(subcommand ?? "", subArgs)
-    ) {
-      throw new UsageError({
-        message: `Refusing \`--json --interactive\` for destructive \`lore entity ${subcommand}\`.`,
-        tryCommand: `lore entity ${subcommand} --json --yes`,
-      });
-    }
-
-    // Central destructive confirmation policy: a destructive subcommand
-    // is only flagged when it WILL mutate state. For `dedup`, legacy
-    // gates the apply path on --yes, so without --yes it's a preview
-    // (non-mutating). For other write-by-default subcommands (delete,
-    // merge, alias rm, relation rm), any invocation without --yes in a
-    // non-interactive environment will mutate state silently because
-    // the legacy handlers do not prompt.
     const sub = subcommand ?? "";
-    const destructive = isDestructive(sub, subArgs);
-    // Only dedup has a preview mode. Other entity writers ignore
-    // --dry-run, so it MUST NOT weaken their confirmation gate.
-    const dryRun = sub === "dedup" && flags["dry-run"];
-    const willWrite =
-      destructive && !dryRun && (sub === "dedup" ? flags.yes === true : true);
-    if (willWrite && !flags.yes && (!process.stdin.isTTY || !!jsonFlag)) {
-      throw new UsageError({
-        message: `Refusing non-interactive \`lore entity ${sub}\` without --yes.`,
-        tryCommand: `lore entity ${sub} --yes`,
-      });
-    }
 
+    // JSON + interactive prompt together would corrupt machine output and
+    // produce interactive prompt behavior. Reject before delegating.
     const values: Record<string, unknown> = {};
     if (flags.all) values.all = true;
     if (flags.cross) values.cross = true;
+    if (flags["dry-run"]) {
+      values["dry-run"] = true;
+      values.dryRun = true;
+    }
     if (flags.interactive) values.interactive = true;
     if (flags.metadata !== undefined) values.metadata = flags.metadata;
     if (flags.name !== undefined) values.name = flags.name;
@@ -219,18 +174,32 @@ export const entityCommand = buildOutputCommand<
     if (flags.relation !== undefined) values.relation = flags.relation;
     if (flags.type !== undefined) values.type = flags.type;
     if (flags.value !== undefined) values.value = flags.value;
-    // Legacy dedup applies only when values.yes is true. Do not forward it
-    // when --dry-run is present, so --dry-run always wins over --yes.
-    if (flags.yes && !dryRun) values.yes = true;
-    // F-4 (HIGH): forward --json (auto-injected by buildOutputCommand)
-    // to the legacy handler. Legacy cmdList gates JSON output on
-    // `flags.json` — without this, the legacy emits human table text
-    // even when the typed pipeline's --json envelope is active.
+    if (flags.yes) values.yes = true;
     if (jsonFlag) values.json = true;
+
+    const policy = entityOperationPolicy([sub, ...subArgs], values);
+    if (policy.jsonInteractive) {
+      throw new UsageError({
+        message: `Refusing \`--json --interactive\` for \`${policy.operation}\`.`,
+        tryCommand: `${policy.operation} --json`,
+      });
+    }
+    if (policy.invalidDryRun) {
+      throw new UsageError({
+        message: "`--dry-run` is supported only by `lore entity dedup`.",
+        tryCommand: "lore entity dedup --dry-run",
+      });
+    }
+    if (policy.requiresYes && !flags.yes) {
+      throw new UsageError({
+        message: `Refusing destructive \`${policy.operation}\` without --yes.`,
+        tryCommand: `${policy.operation} --yes`,
+      });
+    }
     // Stricli spreads the variadic positional array into individual
     // handler params; collect back into the legacy string[].
     const { exitCode, captured } = await runLegacyAndCollect(() =>
-      commandEntity([subcommand ?? "", ...subArgs], values),
+      commandEntity([...positionals], values),
     );
     if (exitCode !== 0) {
       process.exitCode = exitCode;
