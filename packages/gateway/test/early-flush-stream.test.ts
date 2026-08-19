@@ -170,7 +170,7 @@ describe("earlyFlushStreamingResponse", () => {
 
   test("emits a canonical response.failed envelope when the inner pipeline rejects", async () => {
     const resp = earlyFlushStreamingResponse(async () => {
-      throw new Error("boom");
+      throw new Error("fetch failed");
     }, "gpt-5.6-terra");
 
     const out = await drain(resp);
@@ -180,7 +180,32 @@ describe("earlyFlushStreamingResponse", () => {
     const match = out.match(FAILED_EVENT_RE);
     expect(match).not.toBeNull();
     expect(match?.[1]).toBe("Gateway request failed");
-    expect(out).not.toContain("boom");
+    const event = JSON.parse(match?.[0].split("\ndata: ")[1].trim() ?? "{}");
+    expect(event.response.error).toEqual({
+      type: "server_error",
+      message: "Gateway request failed",
+    });
+  });
+
+  test("still emits response.failed when failure diagnostics throw", async () => {
+    let diagnosticCalls = 0;
+    const resp = earlyFlushStreamingResponse(
+      async () => {
+        throw new Error("fetch failed");
+      },
+      "gpt-5.6-terra",
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        diagnosticCalls++;
+        throw new Error("diagnostic failed");
+      },
+    );
+
+    const out = await drain(resp);
+    expect(diagnosticCalls).toBe(1);
+    expect(out).toMatch(FAILED_EVENT_RE);
   });
 
   test("emits a canonical response.failed envelope when the inner response is a non-SSE error body", async () => {
