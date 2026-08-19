@@ -72,6 +72,9 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # Lore already speaks Copilot's model APIs. This optional runtime handles
+        # the supported Actions installation-token and billing flow. See
+        # copilot-sdk/README.md for the architectural boundary.
         install_dir="${GITHUB_ACTION_PATH}/copilot-sdk"
         npm ci --prefix "$install_dir" --ignore-scripts --no-audit --no-fund
 

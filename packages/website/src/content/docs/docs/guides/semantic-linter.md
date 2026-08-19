@@ -110,7 +110,17 @@ The credential and model are selected as a pair to prevent sending one provider'
 The model id must match the credential. The custom model and key are honored only when both are set; a partial override falls back atomically to the Copilot model and workflow token, so one provider's credential is never sent to another provider.
 :::
 
-The `github-token` bridge accepts only the Responses-compatible `github-copilot/gpt-5.6-*` family. Use `worker-api-key` for a different provider or a Copilot model that uses Chat Completions.
+#### Why use the Copilot SDK bridge?
+
+Lore already knows how to call GitHub Copilot's Chat Completions and Responses endpoints. The bridge exists for **credential handling, not model transport**.
+
+A bearer credential already accepted by the Copilot model API, such as the user OAuth credential stored by OpenCode, can use Lore's direct `github-copilot` provider path. The workflow's `github.token` is different: it is a short-lived GitHub App installation token. `copilot-requests: write` authorizes Copilot use through supported GitHub tooling, but does not turn that installation token into a supported bearer credential for direct requests to `api.githubcopilot.com`. Direct forwarding was tried before the bridge was introduced and produced HTTP 400 responses even after the request body was corrected.
+
+The official Copilot runtime handles GitHub's authentication, entitlement, repository policy, endpoint selection, and billing attribution for the installation token. The SDK gives the action structured control over that runtime: it creates tool-disabled sessions with Lore's exact judge prompt, propagates cancellation, and performs bounded cleanup. Lore still owns candidate selection, model routing, retries, verdict parsing, and reporting; the action token is never forwarded by Lore to the model endpoint.
+
+The SDK and CLI are installed from the isolated, integrity-locked `.github/actions/lint/copilot-sdk` package so this optional CI path does not add a platform-specific Copilot binary to every Lore installation. That runtime could be removed if the action required a bearer credential already accepted by the Copilot model API instead, or if GitHub published a supported direct API contract for Actions installation tokens. Reimplementing the CLI's private authentication and billing behavior in Lore would be brittle and unsupported.
+
+The `github-token` bridge currently accepts only `github-copilot/gpt-5.6-*`. This is a Lore bridge implementation constraint, not an official SDK model limitation: the SDK supports every model available in Copilot CLI. Supporting other Copilot models requires updating the bridge and its local gateway route together. Use `worker-api-key` until then for a different provider or direct Copilot credential.
 
 For a personally owned repository, Copilot usage is billed to the repository owner's Copilot seat. Organization-owned repositories must enable **Allow use of Copilot CLI billed to the organization** in their Copilot policy settings. These billing and policy requirements are separate from the workflow permission.
 
