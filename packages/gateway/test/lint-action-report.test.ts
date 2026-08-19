@@ -1155,7 +1155,9 @@ describe("semantic lint action reporter", () => {
     expect(workflow).toContain(
       "github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}",
     );
-    expect(workflow).toContain("copilot-requests: write");
+    expect(workflow).toMatch(
+      /permissions:\n  actions: write\n  contents: read\n  pull-requests: read\n  copilot-requests: write\n\njobs:/,
+    );
     expect(workflow).not.toMatch(/^\s+pull_request:\s*$/m);
   });
 
