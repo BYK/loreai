@@ -29,6 +29,7 @@ import { createGatewayLLMClient } from "../src/llm-adapter";
 import { upstreamFetch } from "../src/fetch";
 import { clearAllCosts } from "../src/cost-tracker";
 import { resetBackgroundLimiter } from "../src/background-limiter";
+import { _resetForTest as _resetWorkerHealthForTest } from "../src/worker-health";
 import type { AuthCredential } from "../src/auth";
 
 const mockFetch = vi.mocked(upstreamFetch);
@@ -122,6 +123,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     mockFetch.mockReset();
     clearAllCosts();
     resetBackgroundLimiter();
+    _resetWorkerHealthForTest();
   });
 
   test("bearer cred → /responses URL + Copilot headers + Responses body", async () => {
@@ -187,6 +189,132 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     ) as Record<string, unknown>;
     expect(bodyWithEffort.reasoning).toEqual({ effort: "medium" });
     expect(bodyWithEffort.reasoning_effort).toBeUndefined();
+  });
+
+  test("effort off omits unsupported Copilot Responses reasoning none", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "tok" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    );
+    await client.prompt("sys", "user", {
+      sessionID: "sess-off",
+      workerID: "lore-invariant-check",
+      model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+      reasoningEffort: "off",
+      temperature: 0,
+      upstreamProviderID: "github-copilot",
+    });
+
+    const body = JSON.parse(
+      String((mockFetch.mock.calls[0]?.[1] as { body?: string })?.body ?? "{}"),
+    ) as Record<string, unknown>;
+    expect(body.reasoning).toBeUndefined();
+    expect(body.temperature).toBeUndefined();
+  });
+
+  test("explicit worker upstream keeps Copilot protocol and provider provenance", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "sdk-bridge" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    );
+    await client.prompt("sys", "user", {
+      sessionID: "sess-copilot-upstream",
+      workerID: "lore-invariant-check",
+      model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+      upstreamUrl: "http://127.0.0.1:12345",
+      upstreamProviderID: "github-copilot",
+      reasoningEffort: "off",
+    });
+
+    expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:12345/v1/responses",
+    );
+  });
+
+  test("effort off remains explicit for other Responses providers", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      (_sid, providerID) =>
+        providerID === "openai" ? { scheme: "bearer", value: "tok" } : null,
+      { providerID: "openai", modelID: "gpt-5.6-luna" },
+    );
+    await client.prompt("sys", "user", {
+      sessionID: "sess-openai-off",
+      workerID: "lore-invariant-check",
+      model: { providerID: "openai", modelID: "gpt-5.6-luna" },
+      protocol: "openai-responses",
+      upstreamProviderID: "openai",
+      reasoningEffort: "off",
+      temperature: 0,
+    });
+
+    const body = JSON.parse(
+      String((mockFetch.mock.calls[0]?.[1] as { body?: string })?.body ?? "{}"),
+    ) as Record<string, unknown>;
+    expect(body.reasoning).toEqual({ effort: "none" });
+    expect(body.temperature).toBe(0);
+  });
+
+  test("detailed outcome distinguishes missing auth from invalid model output", async () => {
+    const client = createGatewayLLMClient(UPSTREAMS, () => null, {
+      providerID: "github-copilot",
+      modelID: "gpt-5.6-luna",
+    });
+    const outcome = await client.promptDetailed("sys", "user", {
+      workerID: "lore-invariant-check",
+      model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    });
+
+    expect(outcome).toMatchObject({
+      kind: "failure",
+      code: "no-auth",
+      attempts: 0,
+    });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  test("reads successful Responses bodies beyond the old 64 KiB cap", async () => {
+    const text = "x".repeat(70 * 1024);
+    mockFetch.mockResolvedValueOnce(responsesOkResponse(text));
+
+    const { result } = await runWorker(
+      { scheme: "bearer", value: "tok" },
+      "gpt-5.6-luna",
+    );
+    expect(result).toBe(text);
+  });
+
+  test("provider-declared incomplete response is a typed failure even with text", async () => {
+    const body = JSON.parse(await responsesOkResponse("partial").text()) as {
+      status: string;
+      incomplete_details?: { reason: string };
+    };
+    body.status = "incomplete";
+    body.incomplete_details = { reason: "max_output_tokens" };
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "tok" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    );
+
+    const outcome = await client.promptDetailed("sys", "user", {
+      workerID: "lore-invariant-check",
+      model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+      upstreamProviderID: "github-copilot",
+    });
+    expect(outcome).toMatchObject({
+      kind: "failure",
+      code: "incomplete-response",
+      attempts: 1,
+    });
   });
 
   test("max_tokens becomes max_output_tokens (NOT max_completion_tokens)", async () => {
@@ -267,5 +395,129 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     expect(r2Url).toBe("https://api.githubcopilot.com/chat/completions");
     expect(r2Body.messages).toBeDefined();
     expect(r2Body.input).toBeUndefined();
+  });
+
+  test("unsupported_api_for_model rebuilds and retries via the alternate protocol", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: { code: "unsupported_api_for_model" } }),
+          { status: 400 },
+        ),
+      )
+      .mockResolvedValueOnce(responsesOkResponse("alternate worked"));
+
+    const model = { providerID: "github-copilot", modelID: "future-model" };
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "tok" }),
+      model,
+    );
+    const outcome = await client.promptDetailed("sys", "user", {
+      sessionID: "sess-alternate-protocol",
+      workerID: "lore-invariant-check",
+      model,
+      upstreamProviderID: "github-copilot",
+    });
+
+    expect(outcome).toMatchObject({
+      kind: "success",
+      text: "alternate worked",
+      protocol: "openai-responses",
+      attempts: 2,
+    });
+    expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toBe(
+      "https://api.githubcopilot.com/chat/completions",
+    );
+    expect(fetchArgUrl(mockFetch.mock.calls[1]?.[0])).toBe(
+      "https://api.githubcopilot.com/responses",
+    );
+    const alternateBody = JSON.parse(
+      String((mockFetch.mock.calls[1]?.[1] as { body?: string })?.body ?? "{}"),
+    ) as Record<string, unknown>;
+    expect(alternateBody.input).toBeDefined();
+    expect(alternateBody.messages).toBeUndefined();
+  });
+
+  test("alternate-protocol rebuild reapplies the serialized request cap", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: "unsupported_api_for_model" } }),
+        { status: 400 },
+      ),
+    );
+    const model = { providerID: "github-copilot", modelID: "future-model" };
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "tok" }),
+      model,
+    );
+
+    const outcome = await client.promptDetailed("", "\u0000".repeat(699_029), {
+      sessionID: "sess-alternate-protocol-cap",
+      workerID: "lore-invariant-check",
+      model,
+      maxTokens: 4096,
+      upstreamProviderID: "github-copilot",
+    });
+
+    expect(outcome.kind).toBe("failure");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(
+      Buffer.byteLength(
+        String((mockFetch.mock.calls[0]?.[1] as { body?: string })?.body ?? ""),
+      ),
+    ).toBeLessThanOrEqual(4 * 1024 * 1024);
+  });
+
+  test("model fallback recomputes Responses protocol for a chat-only backup", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: { code: "model_not_supported", message: "not available" },
+          }),
+          { status: 400 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "backup worked" } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "bearer", value: "tok" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+    );
+    const outcome = await client.promptDetailed("sys", "user", {
+      sessionID: "sess-mixed-protocol-fallback",
+      workerID: "lore-invariant-check",
+      model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
+      upstreamProviderID: "github-copilot",
+    });
+
+    expect(outcome).toMatchObject({
+      kind: "success",
+      text: "backup worked",
+      protocol: "openai",
+      attempts: 2,
+    });
+    expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toBe(
+      "https://api.githubcopilot.com/responses",
+    );
+    expect(fetchArgUrl(mockFetch.mock.calls[1]?.[0])).toBe(
+      "https://api.githubcopilot.com/chat/completions",
+    );
+    const fallbackBody = JSON.parse(
+      String((mockFetch.mock.calls[1]?.[1] as { body?: string })?.body ?? "{}"),
+    ) as Record<string, unknown>;
+    expect(fallbackBody.messages).toBeDefined();
+    expect(fallbackBody.input).toBeUndefined();
   });
 });

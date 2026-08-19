@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
   embed,
+  ensureEmbeddingReady,
+  EmbeddingAbortError,
   isAvailable,
   LocalProviderUnavailableError,
   _resetLocalProviderProbe,
@@ -85,6 +87,7 @@ describe("local embedding init retry (transient self-heal)", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     _setTestWorkerFactory(null);
     _setLocalInitCooldownMsForTest(null);
     _resetLocalProviderProbe();
@@ -142,6 +145,100 @@ describe("local embedding init retry (transient self-heal)", () => {
     const r2 = await p2;
     expect(r2.ok).toBe(true);
     expect(isAvailable()).toBe(true);
+  });
+
+  it("readiness waits through a transient failure and proves a fresh worker", async () => {
+    _setLocalInitCooldownMsForTest(0);
+    const fakes = installFakeWorkers();
+    const ready = ensureEmbeddingReady({ deadlineMs: 1_000 });
+
+    await flush();
+    expect(fakes).toHaveLength(1);
+    fakes[0].emit("message", { type: "init-error", error: TRANSIENT_ERR });
+    await flush();
+
+    expect(fakes).toHaveLength(2);
+    const recovered = fakes[1];
+    recovered.emit("message", {
+      type: "result",
+      id: recovered.lastPosted().id,
+      vectors: [new Float32Array([1, 2, 3])],
+    });
+    await expect(ready).resolves.toBeUndefined();
+    expect(isAvailable()).toBe(true);
+  });
+
+  it("readiness cancellation interrupts an active retry cooldown", async () => {
+    _setLocalInitCooldownMsForTest(60_000);
+    const fakes = installFakeWorkers();
+    const controller = new AbortController();
+    const ready = settle(
+      ensureEmbeddingReady({ signal: controller.signal, deadlineMs: 60_000 }),
+    );
+
+    await flush();
+    fakes[0].emit("message", { type: "init-error", error: TRANSIENT_ERR });
+    await flush();
+    controller.abort(new DOMException("stop readiness", "AbortError"));
+
+    const outcome = await ready;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.err).toBeInstanceOf(EmbeddingAbortError);
+      expect((outcome.err as EmbeddingAbortError).phase).toBe(
+        "provider-readiness",
+      );
+    }
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("does not report ready when the probe completes at its deadline", async () => {
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fakes = installFakeWorkers();
+    const ready = settle(ensureEmbeddingReady({ deadlineMs: 5 }));
+
+    await flush();
+    now = 5;
+    const worker = fakes[0];
+    worker.emit("message", {
+      type: "result",
+      id: worker.lastPosted().id,
+      vectors: [new Float32Array([1, 2, 3])],
+    });
+
+    const outcome = await ready;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.err).toBeInstanceOf(EmbeddingAbortError);
+      expect((outcome.err as EmbeddingAbortError).code).toBe(
+        "deadline-exceeded",
+      );
+    }
+  });
+
+  it("readiness stops after transient retry exhaustion", async () => {
+    _setLocalInitCooldownMsForTest(0);
+    const fakes = installFakeWorkers();
+    const ready = settle(ensureEmbeddingReady({ deadlineMs: 1_000 }));
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await flush();
+      expect(fakes).toHaveLength(attempt + 1);
+      fakes[attempt].emit("message", {
+        type: "init-error",
+        error: TRANSIENT_ERR,
+      });
+    }
+
+    const outcome = await ready;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.err).toBeInstanceOf(LocalProviderUnavailableError);
+    }
+    await flush();
+    expect(fakes).toHaveLength(3);
+    expect(isAvailable()).toBe(false);
   });
 
   it("latches permanently only after the retry budget is exhausted", async () => {

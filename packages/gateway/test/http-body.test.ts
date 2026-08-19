@@ -5,7 +5,8 @@
  * bodies by default (ChatGPT auth), and the gateway must decode them on ingress
  * and re-encode them on the way upstream.
  */
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, vi } from "vitest";
+import { randomBytes } from "node:crypto";
 import {
   brotliCompressSync,
   deflateRawSync,
@@ -24,6 +25,8 @@ import {
   isSupportedEncoding,
   mayReencodeUpstream,
   normalizeRequestEncoding,
+  MAX_HTTP_REQUEST_COMPRESSED_BYTES,
+  MAX_HTTP_REQUEST_DECOMPRESSED_BYTES,
 } from "../src/http-body";
 
 const SAMPLE = JSON.stringify({
@@ -129,6 +132,125 @@ describe("decodeRequestBody", () => {
       /Unsupported/,
     );
   });
+
+  test.each([
+    ["exact cap", MAX_HTTP_REQUEST_COMPRESSED_BYTES, true],
+    ["cap plus one", MAX_HTTP_REQUEST_COMPRESSED_BYTES + 1, false],
+  ] as const)(
+    "bounds identity request bytes at the %s",
+    async (_name, size, ok) => {
+      let cancelled = false;
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(size).fill(0x61));
+          if (ok) controller.close();
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const req = new Request("http://gateway.local/v1/messages", {
+        method: "POST",
+        body: source,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      if (ok) {
+        const decoded = await decodeRequestBody(req);
+        expect(Buffer.byteLength(decoded)).toBe(size);
+        expect(cancelled).toBe(false);
+      } else {
+        await expect(decodeRequestBody(req)).rejects.toThrow(
+          `exceeded ${MAX_HTTP_REQUEST_COMPRESSED_BYTES} byte limit`,
+        );
+        expect(cancelled).toBe(true);
+      }
+      expect(source.locked).toBe(false);
+    },
+  );
+
+  test.each(["gzip", "br", "zstd"])(
+    "rejects a %s decompression bomb at the output cap",
+    async (encoding) => {
+      const expanded = Buffer.alloc(
+        MAX_HTTP_REQUEST_DECOMPRESSED_BYTES + 1,
+        0x61,
+      );
+      const compressed = ENCODERS[encoding](expanded.toString("utf8"));
+      expect(compressed.byteLength).toBeLessThan(
+        MAX_HTTP_REQUEST_COMPRESSED_BYTES,
+      );
+      await expect(
+        decodeRequestBody(reqWith(compressed, encoding)),
+      ).rejects.toThrow(
+        `exceeded ${MAX_HTTP_REQUEST_DECOMPRESSED_BYTES} byte limit`,
+      );
+    },
+  );
+
+  test("abort preempts asynchronous decompression", async () => {
+    const compressed = gzipSync(randomBytes(8 * 1024 * 1024));
+    const controller = new AbortController();
+    const pending = decodeRequestBody(
+      reqWith(compressed, "gzip"),
+      controller.signal,
+    );
+    setImmediate(() =>
+      controller.abort(new DOMException("client disconnected", "AbortError")),
+    );
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test.each(["caller", "deadline"] as const)(
+    "%s abort cancels and unlocks a never-ending chunked upload",
+    async (mode) => {
+      if (mode === "deadline") vi.useFakeTimers();
+      const controller = new AbortController();
+      let cancelled = false;
+      let markPull!: () => void;
+      const pulling = new Promise<void>((resolve) => (markPull = resolve));
+      const source = new ReadableStream<Uint8Array>({
+        pull() {
+          markPull();
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const req = new Request("http://gateway.local/v1/messages", {
+        method: "POST",
+        body: source,
+        signal: controller.signal,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      const deadline =
+        mode === "deadline"
+          ? setTimeout(
+              () =>
+                controller.abort(
+                  new DOMException("request deadline", "TimeoutError"),
+                ),
+              300_000,
+            )
+          : undefined;
+      const pending = decodeRequestBody(req);
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: mode === "caller" ? "AbortError" : "TimeoutError",
+      });
+      await pulling;
+      if (mode === "caller") {
+        controller.abort(new DOMException("client disconnected", "AbortError"));
+      } else {
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      await rejected;
+      if (deadline) clearTimeout(deadline);
+      expect(cancelled).toBe(true);
+      expect(source.locked).toBe(false);
+      if (mode === "deadline") vi.useRealTimers();
+    },
+  );
 });
 
 describe("encodeUpstreamBody", () => {

@@ -7,6 +7,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { unlinkSync, existsSync } from "node:fs";
 import { zstdCompressSync } from "node:zlib";
+import {
+  loopbackRequest,
+  type LoopbackRequestInit,
+} from "./helpers/loopback-request";
 
 // ---------------------------------------------------------------------------
 // Test-scoped server setup
@@ -14,7 +18,7 @@ import { zstdCompressSync } from "node:zlib";
 
 let baseURL: string;
 let dbPath: string;
-let server: { stop: () => void; port: number; hosts: string[] };
+let server: { stop: () => Promise<void>; port: number; hosts: string[] };
 let closeDB: () => void;
 let resetPipelineState: () => Promise<void>;
 
@@ -39,12 +43,14 @@ beforeAll(async () => {
   await resetPipelineState();
 
   const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
   server = await startServer(config);
   baseURL = `http://127.0.0.1:${server.port}`;
 });
 
 afterAll(async () => {
-  if (server) server.stop();
+  if (server) await server.stop();
   if (closeDB) closeDB();
   if (resetPipelineState) await resetPipelineState();
 
@@ -62,13 +68,13 @@ afterAll(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function api(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${baseURL}${path}`, init);
+function api(path: string, init?: LoopbackRequestInit): Promise<Response> {
+  return loopbackRequest(`${baseURL}${path}`, init);
 }
 
 async function apiJSON<T = unknown>(
   path: string,
-  init?: RequestInit,
+  init?: LoopbackRequestInit,
 ): Promise<T> {
   const res = await api(path, init);
   return res.json() as Promise<T>;

@@ -34,11 +34,15 @@ describe("captureEmptyCompletion", () => {
       level: "warning",
       fingerprint: ["empty-completion", "openai-responses"],
     });
-    // Full diagnostic payload is attached for triage.
-    expect(
-      (opts as { contexts: { empty_completion: Record<string, unknown> } })
-        .contexts.empty_completion,
-    ).toMatchObject({ protocol: "openai-responses", model: "gpt-4o-mini" });
+    // Operational diagnostics are attached for triage without the session ID.
+    const context = (
+      opts as { contexts: { empty_completion: Record<string, unknown> } }
+    ).contexts.empty_completion;
+    expect(context).toMatchObject({
+      protocol: "openai-responses",
+      model: "gpt-4o-mini",
+    });
+    expect(context.sessionID).toBeUndefined();
   });
 
   it("is a no-op when Sentry is not initialized", () => {

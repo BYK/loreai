@@ -41,7 +41,7 @@ export function setSentryRequestContext(opts: {
     Sentry.setTag("auth_fingerprint", opts.authFingerprint);
   }
   Sentry.setTag("model", opts.model);
-  Sentry.setTag("upstream_url", opts.upstreamUrl);
+  Sentry.setTag("upstream_origin", safeTelemetryOrigin(opts.upstreamUrl));
   Sentry.setTag("port", String(opts.port));
 
   // Hash project path — sensitive info for secret projects
@@ -53,6 +53,17 @@ export function setSentryRequestContext(opts: {
 
   // Link to Sentry AI monitoring conversation tracking
   Sentry.setConversationId(opts.sessionID);
+}
+
+function safeTelemetryOrigin(value: string): string {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.origin
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 /**
@@ -702,6 +713,12 @@ import { setBustSpiralHook, type BustSpiralInfo } from "@loreai/core";
  * `bustSpiralAlerted` flag in core, cleared on recovery.
  */
 export function setupBustSpiralCapture(): void {
+  const safeInfo = (info: BustSpiralInfo) => ({
+    consecutiveBusts: info.consecutiveBusts,
+    transformCount: info.transformCount,
+    layer: info.layer,
+    capFit: info.capFit,
+  });
   setBustSpiralHook({
     onColdStart: (info: BustSpiralInfo) => {
       if (!Sentry.isInitialized()) return;
@@ -710,7 +727,7 @@ export function setupBustSpiralCapture(): void {
         level: "info",
         message:
           "Cold-start bust spiral observed (within grace window) — expected per #796/#804",
-        data: info,
+        data: safeInfo(info),
       });
     },
     onSpiral: (info: BustSpiralInfo) => {
@@ -725,7 +742,7 @@ export function setupBustSpiralCapture(): void {
           // One grouped issue per fingerprint, not per session/event.
           fingerprint: ["bust-spiral-past-grace"],
           contexts: {
-            bust_spiral: info as unknown as Record<string, unknown>,
+            bust_spiral: safeInfo(info),
           },
         },
       );
@@ -736,7 +753,7 @@ export function setupBustSpiralCapture(): void {
         category: "lore.cache.bust_spiral",
         level: "info",
         message: "Bust spiral recovered",
-        data: info,
+        data: safeInfo(info),
       });
     },
   });
@@ -776,7 +793,13 @@ export function captureEmptyCompletion(info: EmptyCompletionInfo): void {
       level: "warning",
       fingerprint: ["empty-completion", info.protocol],
       contexts: {
-        empty_completion: info as unknown as Record<string, unknown>,
+        empty_completion: {
+          protocol: info.protocol,
+          model: info.model,
+          stopReason: info.stopReason,
+          outputTokens: info.outputTokens,
+          recallDepth: info.recallDepth,
+        },
       },
     },
   );
@@ -1062,7 +1085,6 @@ export function captureClientAbortUnderPressure(ctx: {
       contexts: {
         abort_pressure: {
           route: ctx.route,
-          session_id: ctx.sessionID ?? "unknown",
           time_in_flight_ms: Date.now() - ctx.startMs,
           event_loop_lag_p99_ms: Math.round(lagP99Ms),
           rss_bytes: mem.rss,

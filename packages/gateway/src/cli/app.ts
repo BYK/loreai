@@ -32,6 +32,7 @@ import { importCommand } from "./commands/import";
 import { entityCommand } from "./commands/entity";
 import { dataCommand } from "./commands/data";
 import { recallCommand } from "./commands/recall";
+import { uninstallCommand } from "./commands/uninstall";
 
 /**
  * Routes that are still served by the legacy dispatcher.
@@ -128,6 +129,7 @@ export const routes = buildRouteMap({
     entity: entityCommand,
     data: dataCommand,
     recall: recallCommand,
+    uninstall: uninstallCommand,
   },
 });
 

@@ -16,11 +16,18 @@
  * code runs under both Bun and the Node.js npm distribution.
  */
 import { createServer as createHttpServer } from "node:http";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { Server } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { BlockList, isIP, type Socket } from "node:net";
 import { Readable } from "node:stream";
-import { embedding, log } from "@loreai/core";
-import { DEFAULT_PORT, type GatewayConfig } from "./config";
+import { embedding, GATEWAY_AUTH_HEADER, log } from "@loreai/core";
+import {
+  assertGatewayAccessConfigured,
+  DEFAULT_PORT,
+  extraHeadersForUpstream,
+  type GatewayConfig,
+} from "./config";
 import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
 import { workerHealthSummary } from "./worker-health";
 import {
@@ -30,6 +37,12 @@ import {
   setupVecReadLatencyCapture,
 } from "./sentry";
 import type { GatewayRequest } from "./translate/types";
+import { applyUpstreamExtraHeaders } from "./translate/types";
+import {
+  copyProviderAuthHeaders,
+  hasConflictingAuthHeaders,
+  PROVIDER_AUTH_HEADER_NAMES,
+} from "./auth";
 import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest } from "./translate/openai";
 import { parseGeminiRequest } from "./translate/gemini";
@@ -41,9 +54,14 @@ import {
   handleRequest,
   handleCompactEndpoint,
   handleResponsesCompactEndpoint,
+  createForegroundAbortScope,
+  wrapBodyWithCleanup,
 } from "./pipeline";
 import { upstreamFetch } from "./fetch";
+import { responseAgainstAbort } from "./abort-race";
+import { cancelAndReleaseReader, readStreamChunk } from "./stream/anthropic";
 import { decodeRequestBody } from "./http-body";
+import { SHUTDOWN_DEADLINE_MS } from "./shutdown-deadline";
 import {
   BEDROCK_RUNTIME_PATH_RE,
   proxyBedrockRuntimeRequest,
@@ -64,20 +82,47 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// CORS headers — permissive for localhost development
+// Browser-origin policy
 // ---------------------------------------------------------------------------
 
-const CORS_HEADERS: Record<string, string> = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-  "access-control-allow-headers": "*",
-  "access-control-max-age": "86400",
-};
+const CORS_METHODS = "GET, POST, DELETE, OPTIONS";
 
-function withCors(response: Response): Response {
-  for (const [key, value] of Object.entries(CORS_HEADERS)) {
-    response.headers.set(key, value);
+/**
+ * Data-plane responses are intentionally not CORS-enabled. Clone the response
+ * while removing upstream-supplied CORS headers too, so a cached no-Origin
+ * response cannot make model output readable to a later browser request.
+ */
+function withoutCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  // Snapshot before deleting so iterator invalidation cannot skip a header.
+  for (const name of Array.from(headers.keys())) {
+    if (name.startsWith("access-control-")) headers.delete(name);
   }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function withManagementCors(
+  response: Response,
+  origin: string | null,
+): Response {
+  // The dashboard contains destructive forms. Prevent an untrusted site from
+  // embedding it and clickjacking a loopback browser into submitting them.
+  response.headers.set("content-security-policy", "frame-ancestors 'none'");
+  response.headers.set("x-frame-options", "DENY");
+
+  // Same-origin browser requests and non-browser clients do not need CORS.
+  // For an explicitly cross-origin request, reflect only the already-validated
+  // loopback origin; a wildcard would let an arbitrary website drive localhost.
+  if (!origin) return response;
+  response.headers.set("access-control-allow-origin", origin);
+  response.headers.set("access-control-allow-methods", CORS_METHODS);
+  response.headers.set("access-control-allow-headers", "content-type");
+  response.headers.set("access-control-max-age", "600");
+  response.headers.append("vary", "Origin");
   return response;
 }
 
@@ -94,12 +139,28 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return record;
 }
 
+function jsonResponseWithoutCors(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
-  return withCors(
-    new Response(JSON.stringify(body), {
-      status,
-      headers: { "content-type": "application/json" },
-    }),
+  return withoutCors(jsonResponseWithoutCors(body, status));
+}
+
+function errorResponseWithoutCors(
+  status: number,
+  type: string,
+  message: string,
+): Response {
+  return jsonResponseWithoutCors(
+    {
+      type: "error",
+      error: { type, message },
+    },
+    status,
   );
 }
 
@@ -108,13 +169,220 @@ function errorResponse(
   type: string,
   message: string,
 ): Response {
-  return jsonResponse(
-    {
-      type: "error",
-      error: { type, message },
-    },
-    status,
+  return withoutCors(errorResponseWithoutCors(status, type, message));
+}
+
+// ---------------------------------------------------------------------------
+// Management access policy
+// ---------------------------------------------------------------------------
+
+const LOOPBACK_ADDRESSES = new BlockList();
+LOOPBACK_ADDRESSES.addSubnet("127.0.0.0", 8, "ipv4");
+LOOPBACK_ADDRESSES.addAddress("::1", "ipv6");
+
+/** True only for a numeric loopback socket address. Hostnames are not trusted. */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const family = isIP(address);
+  if (family === 4) return LOOPBACK_ADDRESSES.check(address, "ipv4");
+  if (family === 6) return LOOPBACK_ADDRESSES.check(address, "ipv6");
+  return false;
+}
+
+function isManagementPath(pathname: string): boolean {
+  return (
+    pathname === "/" ||
+    pathname === "/api" ||
+    pathname.startsWith("/api/") ||
+    pathname === "/ui" ||
+    pathname.startsWith("/ui/")
   );
+}
+
+function isDataPlanePath(pathname: string): boolean {
+  return (
+    pathname === "/v1/messages" ||
+    pathname === "/v1/chat/completions" ||
+    pathname === "/chat/completions" ||
+    pathname === "/v1/responses" ||
+    pathname === "/v1/codex/responses" ||
+    pathname === "/v1/responses/compact" ||
+    pathname === "/v1/compact" ||
+    pathname === "/v1/models" ||
+    GEMINI_PATH_RE.test(pathname) ||
+    BEDROCK_RUNTIME_PATH_RE.test(pathname)
+  );
+}
+
+/** Deliberately carries no route details or CORS headers. */
+function browserOriginDeniedResponse(): Response {
+  // Do not wait for or drain an attacker-controlled body after rejecting it.
+  return new Response(null, {
+    status: 403,
+    headers: { "cache-control": "no-store", connection: "close" },
+  });
+}
+
+/** Uniform remote data-plane denial: no body, challenge, or config detail. */
+function gatewayAccessDeniedResponse(): Response {
+  return new Response(null, {
+    status: 401,
+    headers: { "cache-control": "no-store", connection: "close" },
+  });
+}
+
+function conflictingProviderAuthResponse(): Response {
+  const response = errorResponseWithoutCors(
+    400,
+    "invalid_request_error",
+    "Conflicting provider authentication headers",
+  );
+  response.headers.set("cache-control", "no-store");
+  response.headers.set("connection", "close");
+  return response;
+}
+
+function rawHeaderCount(
+  rawHeaders: readonly string[] | undefined,
+  target: string,
+): number {
+  if (!rawHeaders) return 1;
+  let count = 0;
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (rawHeaders[index]?.toLowerCase() === target) count++;
+  }
+  return count;
+}
+
+function singleRawHeaderValue(
+  rawHeaders: readonly string[],
+  target: string,
+): string | null {
+  let value: string | null = null;
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (rawHeaders[index]?.toLowerCase() !== target) continue;
+    if (value !== null) return null;
+    value = rawHeaders[index + 1] ?? "";
+  }
+  return value;
+}
+
+function constantTimeTokenMatches(actual: string, expected: string): boolean {
+  const digest = (value: string): Buffer =>
+    createHash("sha256")
+      .update("lore.gateway-access.v1\0")
+      .update(value)
+      .digest();
+  return timingSafeEqual(digest(actual), digest(expected));
+}
+
+function gatewayAccessMatches(
+  headers: Headers,
+  expected: string,
+  rawHeaders?: readonly string[],
+): boolean {
+  if (rawHeaderCount(rawHeaders, GATEWAY_AUTH_HEADER) !== 1) return false;
+  const actual = rawHeaders
+    ? singleRawHeaderValue(rawHeaders, GATEWAY_AUTH_HEADER)
+    : headers.get(GATEWAY_AUTH_HEADER);
+  return actual !== null && constantTimeTokenMatches(actual, expected);
+}
+
+function hasRawConflictingProviderAuth(rawHeaders: readonly string[]): boolean {
+  const present = new Set<string>();
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index]?.toLowerCase();
+    if (!PROVIDER_AUTH_HEADER_NAMES.some((candidate) => candidate === name)) {
+      continue;
+    }
+    if (present.has(name)) return true;
+    present.add(name);
+    if (present.size > 1) return true;
+  }
+  return false;
+}
+
+/** Remove the access credential before any downstream request processing. */
+function withoutGatewayAccessHeader(req: Request): Request {
+  if (!req.headers.has(GATEWAY_AUTH_HEADER)) return req;
+  const headers = new Headers(req.headers);
+  headers.delete(GATEWAY_AUTH_HEADER);
+  return new Request(req.url, {
+    method: req.method,
+    headers,
+    body: req.body,
+    signal: req.signal,
+    ...(req.body ? { duplex: "half" } : {}),
+  });
+}
+
+/**
+ * Return an allowed CORS origin, null when Origin is absent, or false when an
+ * untrusted web origin supplied the header. Only numeric loopback hosts and the
+ * special-use `localhost` name are valid browser origins for management.
+ */
+function managementCorsOrigin(req: Request): string | null | false {
+  const origin = req.headers.get("origin");
+  if (!origin) return null;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    if (
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return false;
+    }
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+    if (hostname !== "localhost" && !isLoopbackAddress(hostname)) return false;
+    return origin;
+  } catch {
+    return false;
+  }
+}
+
+/** Deliberately carries no route details or CORS headers. */
+function hiddenManagementResponse(): Response {
+  // Close rather than leave a keep-alive socket waiting on an unauthorized,
+  // deliberately unread request body (request timeouts are disabled for LLM
+  // streaming routes).
+  return new Response(null, {
+    status: 404,
+    headers: { connection: "close" },
+  });
+}
+
+function requestWithSignal(req: Request, signal: AbortSignal): Request {
+  return new Request(req.url, {
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    signal,
+    ...(req.body ? { duplex: "half" } : {}),
+  });
+}
+
+export async function handleForegroundBodyRoute(
+  req: Request,
+  handle: (scopedRequest: Request) => Promise<Response>,
+): Promise<Response> {
+  const abortScope = createForegroundAbortScope(req.signal);
+  try {
+    const scopedRequest = requestWithSignal(req, abortScope.signal);
+    const response = await responseAgainstAbort(
+      () => handle(scopedRequest),
+      abortScope.signal,
+    );
+    return wrapBodyWithCleanup(response, abortScope.dispose, abortScope.signal);
+  } catch (error) {
+    abortScope.dispose();
+    throw error;
+  }
 }
 
 /**
@@ -147,7 +415,7 @@ function isWebSocketUpgrade(req: Request): boolean {
  * client not to keep retrying on the same socket.
  */
 function rejectWebSocketUpgrade(pathname: string): Response {
-  const resp = errorResponse(
+  const resp = errorResponseWithoutCors(
     426,
     "websocket_not_supported",
     `WebSocket transport is not supported for ${pathname}; use HTTP.`,
@@ -176,6 +444,7 @@ async function handleAnthropicMessages(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseAnthropicRequest(body, headersToRecord(req.headers));
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -184,7 +453,7 @@ async function handleAnthropicMessages(
   try {
     const result = await handleRequest(gatewayReq, config);
     // Pipeline returns a Response directly (streaming or non-streaming)
-    return withCors(result);
+    return withoutCors(result);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Pipeline error";
     log.error(`pipeline error: ${msg}`);
@@ -196,43 +465,49 @@ async function handleAnthropicMessages(
 // calling GET /v1/models will have their request forwarded to Anthropic,
 // which will likely reject the OpenAI API key. A proper fix would route
 // based on auth header type, but that's a separate enhancement.
-async function handleModelsPassthrough(
+export async function handleModelsPassthrough(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
+  const abortScope = createForegroundAbortScope(req.signal);
   try {
     // Forward auth headers from the original request so upstream
     // providers that require authentication don't reject with 401.
     const headers: Record<string, string> = {
       "content-type": "application/json",
     };
-    const apiKey = req.headers.get("x-api-key");
-    const auth = req.headers.get("authorization");
-    if (apiKey) headers["x-api-key"] = apiKey;
-    if (auth) headers.authorization = auth;
+    Object.assign(
+      headers,
+      copyProviderAuthHeaders(headersToRecord(req.headers)),
+    );
     // Anthropic requires the version header
     const anthropicVersion = req.headers.get("anthropic-version");
     if (anthropicVersion) headers["anthropic-version"] = anthropicVersion;
-    // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS (corporate proxies,
-    // Cloudflare AI Gateway auth, etc.) as a final overlay.
-    for (const [key, value] of Object.entries(config.upstreamExtraHeaders)) {
-      headers[key] = value;
-    }
-
-    const upstream = await upstreamFetch(
-      `${config.upstreamAnthropic}/v1/models`,
-      {
-        headers,
-      },
+    // Apply administrator credentials as one auth overlay: if configured auth
+    // is present it replaces every client auth variant rather than competing.
+    const upstreamUrl = `${config.upstreamAnthropic}/v1/models`;
+    applyUpstreamExtraHeaders(
+      headers,
+      extraHeadersForUpstream(config, upstreamUrl),
     );
-    // Clone to a new Response so we can append CORS headers
-    const response = new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: new Headers(upstream.headers),
-    });
-    return withCors(response);
+
+    const upstream = await responseAgainstAbort(
+      () =>
+        upstreamFetch(upstreamUrl, {
+          headers,
+          signal: abortScope.signal,
+        }),
+      abortScope.signal,
+    );
+    // Clone to attach foreground cleanup and strip any upstream CORS headers.
+    const response = wrapBodyWithCleanup(
+      upstream,
+      abortScope.dispose,
+      abortScope.signal,
+    );
+    return withoutCors(response);
   } catch (e) {
+    abortScope.dispose();
     const msg = e instanceof Error ? e.message : "Upstream unreachable";
     return errorResponse(502, "api_error", `Failed to fetch models: ${msg}`);
   }
@@ -261,6 +536,17 @@ function handleHealth(): Response {
   });
 }
 
+function controlTokenMatches(req: Request, token: string): boolean {
+  const authorization = req.headers.get("authorization") ?? "";
+  const expected = `Bearer ${token}`;
+  const actualBytes = Buffer.from(authorization);
+  const expectedBytes = Buffer.from(expected);
+  return (
+    actualBytes.length === expectedBytes.length &&
+    timingSafeEqual(actualBytes, expectedBytes)
+  );
+}
+
 async function handleOpenAIChatCompletions(
   req: Request,
   config: GatewayConfig,
@@ -277,6 +563,7 @@ async function handleOpenAIChatCompletions(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseOpenAIRequest(body, headersToRecord(req.headers));
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -287,7 +574,7 @@ async function handleOpenAIChatCompletions(
     // (OpenAI Chat Completions JSON or SSE), so no server-side translation
     // is needed. This prevents the class of bugs where the stream flag is
     // forgotten during format conversion.
-    return withCors(await handleRequest(gatewayReq, config));
+    return withoutCors(await handleRequest(gatewayReq, config));
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Pipeline error";
     log.error(`pipeline error: ${msg}`);
@@ -332,6 +619,7 @@ async function handleGeminiGenerateContent(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseGeminiRequest(body, headers, model, stream);
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -340,7 +628,7 @@ async function handleGeminiGenerateContent(
   try {
     // Pipeline returns the response in the client's native Gemini wire format
     // (generateContent JSON or streamGenerateContent SSE).
-    return withCors(await handleRequest(gatewayReq, config));
+    return withoutCors(await handleRequest(gatewayReq, config));
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Pipeline error";
     log.error(`pipeline error: ${msg}`);
@@ -367,6 +655,7 @@ async function handleOpenAIResponses(
       body,
       headersToRecord(req.headers),
     );
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
@@ -376,7 +665,7 @@ async function handleOpenAIResponses(
     // Pipeline returns the response in the client's native wire format
     // (OpenAI Responses API JSON or SSE), so no server-side translation
     // is needed.
-    return withCors(await handleRequest(gatewayReq, config));
+    return withoutCors(await handleRequest(gatewayReq, config));
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Pipeline error";
     log.error(`pipeline error: ${msg}`);
@@ -407,13 +696,14 @@ async function handleOpenAICodexResponses(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseOpenAICodexRequest(body, headersToRecord(req.headers));
+    gatewayReq.signal = req.signal;
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Failed to parse request";
     return errorResponse(400, "invalid_request_error", msg);
   }
 
   try {
-    return withCors(await handleRequest(gatewayReq, config));
+    return withoutCors(await handleRequest(gatewayReq, config));
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Pipeline error";
     log.error(`pipeline error: ${msg}`);
@@ -425,13 +715,32 @@ async function handleOpenAICodexResponses(
 // Server
 // ---------------------------------------------------------------------------
 
-export async function startServer(config: GatewayConfig): Promise<{
-  stop: () => void;
+const responseCompletionCallbacks = new WeakMap<Response, () => void>();
+
+export async function startServer(
+  config: GatewayConfig,
+  options: {
+    controlToken?: string;
+    /** Invoked asynchronously after an authenticated shutdown response flushes. */
+    onShutdown?: () => void | Promise<void>;
+    /** Focused lifecycle seam for exercising listener-close failures. */
+    closeServer?: (server: Server) => Promise<void>;
+    /** Focused lifecycle seam for bounded-drain regression tests. */
+    shutdownDeadlineMs?: number;
+    /** Focused access-control seam for simulating a socket peer in tests. */
+    peerAddressForRequest?: (request: IncomingMessage) => string | undefined;
+  } = {},
+): Promise<{
+  stop: () => Promise<void>;
   port: number;
   hosts: string[];
   /** Resolves when all bound servers are listening. */
   ready: Promise<void>;
 }> {
+  const closeBoundServer =
+    options.closeServer ??
+    ((server: Server) =>
+      closeServer(server, options.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS));
   // Defensive defaults for public API consumers who may pass incomplete config.
   // loadConfig() always provides these, but startServer is a public export.
   config = config ?? ({} as GatewayConfig);
@@ -445,6 +754,7 @@ export async function startServer(config: GatewayConfig): Promise<{
   if (!Number.isFinite(config.port) || config.port < 0) {
     config = { ...config, port: DEFAULT_PORT };
   }
+  assertGatewayAccessConfigured(config);
 
   // Bootstrap the daily spend counter from DB (recovers today's spend after restart)
   if (getDailyBudget() > 0) {
@@ -468,14 +778,72 @@ export async function startServer(config: GatewayConfig): Promise<{
   setupVecReadLatencyCapture();
 
   // Shared fetch handler for all server instances.
-  const fetch = async (req: Request): Promise<Response> => {
+  const fetch = async (
+    req: Request,
+    peerAddress: string | undefined,
+    rawHeaders?: readonly string[],
+  ): Promise<Response> => {
     const url = new URL(req.url);
     const { pathname } = url;
     const method = req.method;
+    const managementPath = isManagementPath(pathname);
+    const dataPlanePath = isDataPlanePath(pathname);
+    let allowedManagementOrigin: string | null = null;
 
-    // CORS preflight
+    if (managementPath) {
+      // Authorize from node:http's socket metadata, never from Forwarded,
+      // X-Forwarded-For, Host, or another client-controlled header. Keep this
+      // before preflight handling, lazy imports, and request body consumption.
+      if (!isLoopbackAddress(peerAddress)) return hiddenManagementResponse();
+
+      const origin = managementCorsOrigin(req);
+      if (origin === false) return hiddenManagementResponse();
+      allowedManagementOrigin = origin;
+
+      if (method === "OPTIONS") {
+        return withManagementCors(
+          new Response(null, { status: 204 }),
+          allowedManagementOrigin,
+        );
+      }
+    }
+
+    // Provider credentials authorize an upstream, not this gateway. Browser
+    // origins therefore cannot invoke any model/data-plane route, even from a
+    // loopback origin. Keep this ahead of preflight handling, body reads,
+    // authentication, session/storage setup, and upstream/interceptor work.
+    if (dataPlanePath && req.headers.has("origin")) {
+      return browserOriginDeniedResponse();
+    }
+
+    // Provider keys authorize model providers, never this gateway. Enforce the
+    // separate access credential and all mixed-provider-auth pairs centrally,
+    // before OPTIONS handling, body reads, session/storage/cost state, auth
+    // learning, configured credential overlays, or upstream/interceptor calls.
+    if (dataPlanePath) {
+      if (
+        (config.remoteGateway || config.hostedMode) &&
+        (!config.gatewayAuthToken ||
+          !gatewayAccessMatches(
+            req.headers,
+            config.gatewayAuthToken,
+            rawHeaders,
+          ))
+      ) {
+        return gatewayAccessDeniedResponse();
+      }
+      if (
+        hasConflictingAuthHeaders(headersToRecord(req.headers)) ||
+        (rawHeaders !== undefined && hasRawConflictingProviderAuth(rawHeaders))
+      ) {
+        return conflictingProviderAuthResponse();
+      }
+      req = withoutGatewayAccessHeader(req);
+    }
+
+    // Preserve no-Origin OPTIONS behavior without enabling browser CORS.
     if (method === "OPTIONS") {
-      return withCors(new Response(null, { status: 204 }));
+      return withoutCors(new Response(null, { status: 204 }));
     }
 
     if (config.debug && !log.isStderrSilenced()) {
@@ -492,13 +860,18 @@ export async function startServer(config: GatewayConfig): Promise<{
           `[lore] rejecting WebSocket upgrade for ${pathname} (HTTP-only gateway)`,
         );
       }
-      return withCors(rejectWebSocketUpgrade(pathname));
+      const response = rejectWebSocketUpgrade(pathname);
+      return managementPath
+        ? withManagementCors(response, allowedManagementOrigin)
+        : withoutCors(response);
     }
 
     try {
       // POST /v1/messages — Anthropic protocol
       if (method === "POST" && pathname === "/v1/messages") {
-        return await handleAnthropicMessages(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleAnthropicMessages(scoped, config),
+        );
       }
 
       // POST /v1/chat/completions — OpenAI protocol.
@@ -510,7 +883,9 @@ export async function startServer(config: GatewayConfig): Promise<{
         (pathname === "/v1/chat/completions" ||
           pathname === "/chat/completions")
       ) {
-        return await handleOpenAIChatCompletions(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleOpenAIChatCompletions(scoped, config),
+        );
       }
 
       // POST /v1beta/models/{model}:generateContent (or :streamGenerateContent)
@@ -519,23 +894,31 @@ export async function startServer(config: GatewayConfig): Promise<{
       if (method === "POST") {
         const gm = pathname.match(GEMINI_PATH_RE);
         if (gm) {
-          return await handleGeminiGenerateContent(
-            req,
-            config,
-            gm[1],
-            gm[2] === "streamGenerateContent",
+          return await handleForegroundBodyRoute(req, (scoped) =>
+            handleGeminiGenerateContent(
+              scoped,
+              config,
+              gm[1],
+              gm[2] === "streamGenerateContent",
+            ),
           );
         }
       }
 
       // POST /v1/responses/compact — Codex compaction (Responses API)
       if (method === "POST" && pathname === "/v1/responses/compact") {
-        return withCors(await handleResponsesCompactEndpoint(req, config));
+        return withoutCors(
+          await handleForegroundBodyRoute(req, (scoped) =>
+            handleResponsesCompactEndpoint(scoped, config),
+          ),
+        );
       }
 
       // POST /v1/codex/responses — Codex (ChatGPT) ingress (Responses format)
       if (method === "POST" && pathname === "/v1/codex/responses") {
-        return await handleOpenAICodexResponses(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleOpenAICodexResponses(scoped, config),
+        );
       }
 
       // POST /v1/responses — OpenAI Responses API protocol.
@@ -545,12 +928,18 @@ export async function startServer(config: GatewayConfig): Promise<{
       // against api.githubcopilot.com (its endpoints omit /v1). Wiring that needs
       // a host-aware responses path (like buildOpenAIChatCompletionsUrl) first.
       if (method === "POST" && pathname === "/v1/responses") {
-        return await handleOpenAIResponses(req, config);
+        return await handleForegroundBodyRoute(req, (scoped) =>
+          handleOpenAIResponses(scoped, config),
+        );
       }
 
       // POST /v1/compact — explicit compaction summary (Pi plugin, etc.)
       if (method === "POST" && pathname === "/v1/compact") {
-        return withCors(await handleCompactEndpoint(req, config));
+        return withoutCors(
+          await handleForegroundBodyRoute(req, (scoped) =>
+            handleCompactEndpoint(scoped, config),
+          ),
+        );
       }
 
       // POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough.
@@ -560,7 +949,7 @@ export async function startServer(config: GatewayConfig): Promise<{
       // already owns retries, streaming, and credential rotation). Region
       // comes from LORE_BEDROCK_REGION / AWS_REGION (loaded into config).
       if (method === "POST" && BEDROCK_RUNTIME_PATH_RE.test(pathname)) {
-        return withCors(
+        return withoutCors(
           await proxyBedrockRuntimeRequest(req, config.bedrockRegion),
         );
       }
@@ -575,10 +964,51 @@ export async function startServer(config: GatewayConfig): Promise<{
         return handleHealth();
       }
 
+      // Owner-only process control used by `lore stop`. Public health omits the
+      // PID because a public response cannot prove process ownership. Every
+      // unauthorized method is the same 404 as an absent route.
+      if (
+        (method === "GET" || method === "POST") &&
+        pathname === "/_lore/control"
+      ) {
+        if (
+          !options.controlToken ||
+          !controlTokenMatches(req, options.controlToken) ||
+          (method === "POST" && !options.onShutdown)
+        ) {
+          return errorResponse(
+            404,
+            "not_found",
+            `No route for ${method} /_lore/control`,
+          );
+        }
+        const response = jsonResponse({
+          status: "ok",
+          service: "lore",
+          pid: process.pid,
+          ...(method === "POST" ? { shutdown: "requested" } : {}),
+        });
+        if (method === "POST") {
+          responseCompletionCallbacks.set(response, () => {
+            try {
+              void Promise.resolve(options.onShutdown?.()).catch((error) => {
+                log.error("remote shutdown callback failed:", error);
+              });
+            } catch (error) {
+              log.error("remote shutdown callback failed:", error);
+            }
+          });
+        }
+        return response;
+      }
+
       // GET/POST/DELETE /api/* — REST API (lazy-imported to keep proxy hot path fast)
       if (pathname.startsWith("/api/")) {
         const { handleAPIRequest } = await import("./api");
-        return withCors(await handleAPIRequest(req, url, config));
+        return withManagementCors(
+          await handleAPIRequest(req, url, config),
+          allowedManagementOrigin,
+        );
       }
 
       // GET/POST /ui/* — Web dashboard (lazy-imported to keep proxy hot path fast)
@@ -605,31 +1035,43 @@ export async function startServer(config: GatewayConfig): Promise<{
             30_000,
           ),
         );
-        return withCors(await Promise.race([uiPromise, timeoutPromise]));
+        return withManagementCors(
+          await Promise.race([uiPromise, timeoutPromise]),
+          allowedManagementOrigin,
+        );
       }
 
       // GET / — redirect to dashboard. Build the redirect manually instead of
-      // via Response.redirect(), whose headers are immutable: withCors() would
-      // throw "immutable" while adding CORS headers and the root path would 500
-      // instead of redirecting.
+      // via Response.redirect(), whose headers are immutable: management CORS
+      // could not be applied and the root path would 500 instead of redirecting.
       if (method === "GET" && pathname === "/") {
-        return withCors(
+        return withManagementCors(
           new Response(null, {
             status: 302,
             headers: { location: new URL("/ui", url).toString() },
           }),
+          allowedManagementOrigin,
         );
       }
 
       // 404 for everything else
-      return errorResponse(
+      const notFound = errorResponseWithoutCors(
         404,
         "not_found",
         `No route for ${method} ${pathname}`,
       );
+      return managementPath
+        ? withManagementCors(notFound, allowedManagementOrigin)
+        : withoutCors(notFound);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Internal server error";
       log.error(`uncaught error: ${msg}`);
+      if (managementPath) {
+        return withManagementCors(
+          errorResponseWithoutCors(500, "api_error", msg),
+          allowedManagementOrigin,
+        );
+      }
       return errorResponse(500, "api_error", msg);
     }
   };
@@ -648,8 +1090,16 @@ export async function startServer(config: GatewayConfig): Promise<{
   try {
     for (const host of config.hosts) {
       const s = createHttpServer((nodeReq, nodeRes) => {
-        void handleNodeRequest(nodeReq, nodeRes, fetch, host, resolvedPort);
+        void handleNodeRequest(
+          nodeReq,
+          nodeRes,
+          fetch,
+          host,
+          resolvedPort,
+          options.peerAddressForRequest,
+        );
       });
+      trackServerSockets(s);
       // LLM streaming responses can be very long-lived — disable Node's
       // default timeouts (request/headers/keep-alive/socket) that would
       // otherwise kill idle streaming connections. 0 means "no timeout".
@@ -663,6 +1113,57 @@ export async function startServer(config: GatewayConfig): Promise<{
       // install a dedicated listener that writes a 426 + closes the socket.
       // Mirrors the `isWebSocketUpgrade` rejection in the fetch handler.
       s.on("upgrade", (req, socket) => {
+        const pathname = new URL(req.url ?? "/", "http://gateway.local")
+          .pathname;
+        if (isDataPlanePath(pathname) && req.headers.origin !== undefined) {
+          socket.end(
+            "HTTP/1.1 403 Forbidden\r\n" +
+              "Content-Length: 0\r\n" +
+              "Connection: close\r\n" +
+              "\r\n",
+          );
+          return;
+        }
+        if (isDataPlanePath(pathname)) {
+          const accessHeader = singleRawHeaderValue(
+            req.rawHeaders,
+            GATEWAY_AUTH_HEADER,
+          );
+          const accessAllowed =
+            !(config.remoteGateway || config.hostedMode) ||
+            (typeof config.gatewayAuthToken === "string" &&
+              accessHeader !== null &&
+              constantTimeTokenMatches(accessHeader, config.gatewayAuthToken));
+          if (!accessAllowed) {
+            socket.end(
+              "HTTP/1.1 401 Unauthorized\r\n" +
+                "Content-Length: 0\r\n" +
+                "Cache-Control: no-store\r\n" +
+                "Connection: close\r\n" +
+                "\r\n",
+            );
+            return;
+          }
+          if (hasRawConflictingProviderAuth(req.rawHeaders)) {
+            const body = JSON.stringify({
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message: "Conflicting provider authentication headers",
+              },
+            });
+            socket.end(
+              "HTTP/1.1 400 Bad Request\r\n" +
+                "Content-Type: application/json\r\n" +
+                `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+                "Cache-Control: no-store\r\n" +
+                "Connection: close\r\n" +
+                "\r\n" +
+                body,
+            );
+            return;
+          }
+        }
         if (config.debug && !log.isStderrSilenced()) {
           console.error(
             `[lore] rejecting WebSocket upgrade for ${req.url ?? "/"} (HTTP-only gateway)`,
@@ -685,10 +1186,6 @@ export async function startServer(config: GatewayConfig): Promise<{
             "Content-Type: application/json\r\n" +
             `Content-Length: ${Buffer.byteLength(body)}\r\n` +
             "Connection: close\r\n" +
-            "Access-Control-Allow-Origin: *\r\n" +
-            "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n" +
-            "Access-Control-Allow-Headers: *\r\n" +
-            "Access-Control-Max-Age: 86400\r\n" +
             "\r\n" +
             body,
         );
@@ -710,7 +1207,7 @@ export async function startServer(config: GatewayConfig): Promise<{
         // error still propagate to startGateway()'s port-fallback/reuse logic.
         if (isUnavailableAddressError(e)) {
           // Close this never-listening server to avoid leaking the handle.
-          s.close();
+          await closeBoundServer(s);
           // Always warn (not just in debug): silently degrading to loopback-only
           // when an explicitly-configured host is dropped is surprising, and the
           // event is low-frequency and actionable.
@@ -734,7 +1231,7 @@ export async function startServer(config: GatewayConfig): Promise<{
     // A later host failed to bind (e.g. EADDRINUSE) after earlier hosts
     // already bound — close the successfully-bound servers so we don't leak
     // file descriptors, then re-throw for startGateway() to handle.
-    for (const s of servers) s.close();
+    await Promise.all(servers.map(closeBoundServer));
     throw e;
   }
 
@@ -751,9 +1248,11 @@ export async function startServer(config: GatewayConfig): Promise<{
     .map((s) => serverReadyPromises.get(s))
     .filter((p): p is Promise<void> => p !== undefined);
 
+  let stopPromise: Promise<void> | undefined;
   const result = {
-    stop: () => {
-      for (const s of servers) s.close();
+    stop: (): Promise<void> => {
+      stopPromise ??= Promise.all(servers.map(closeBoundServer)).then(() => {});
+      return stopPromise;
     },
     port: resolvedPort,
     // Report the hosts we actually bound (unavailable ones were skipped), so
@@ -784,6 +1283,45 @@ export async function startServer(config: GatewayConfig): Promise<{
   }
 
   return promise;
+}
+
+const serverSockets = new WeakMap<Server, Set<Socket>>();
+
+function trackServerSockets(server: Server): void {
+  const sockets = new Set<Socket>();
+  serverSockets.set(server, sockets);
+  server.on("connection", (socket: Socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+}
+
+/**
+ * Stop accepting work, drain established requests, then destroy any sockets
+ * that still prevent `server.close()` from settling (including partial HTTP
+ * headers that never become an IncomingMessage).
+ */
+function closeServer(server: Server, deadlineMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      // Node's helpers cover parsed HTTP connections; explicit tracking also
+      // covers sockets still stalled in the HTTP parser and upgraded sockets.
+      server.closeIdleConnections();
+      server.closeAllConnections();
+      for (const socket of serverSockets.get(server) ?? []) socket.destroy();
+    }, deadlineMs);
+    server.close((error) => {
+      clearTimeout(timer);
+      if (
+        !error ||
+        (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING"
+      ) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    });
+  });
 }
 
 /**
@@ -859,6 +1397,107 @@ export function bracketHost(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
+export function bindNodeIngressAbort(
+  nodeReq: IncomingMessage,
+  nodeRes: ServerResponse,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const abort = (reason: unknown): void => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const onRequestAborted = (): void =>
+    abort(new DOMException("client request aborted", "AbortError"));
+  const onRequestClose = (): void => {
+    if (!nodeReq.complete) onRequestAborted();
+  };
+  const onRequestError = (error: Error): void => abort(error);
+  const onResponseClose = (): void => {
+    if (!nodeRes.writableEnded) {
+      abort(new DOMException("client response closed", "AbortError"));
+    }
+  };
+  const onResponseError = (error: Error): void => abort(error);
+  const onSocketClose = (): void => {
+    if (!nodeRes.writableEnded) {
+      abort(new DOMException("client socket closed", "AbortError"));
+    }
+  };
+  const onSocketError = (error: Error): void => abort(error);
+  nodeReq.on("aborted", onRequestAborted);
+  nodeReq.on("close", onRequestClose);
+  nodeReq.on("error", onRequestError);
+  nodeRes.on("close", onResponseClose);
+  nodeRes.on("error", onResponseError);
+  nodeReq.socket.on("close", onSocketClose);
+  nodeReq.socket.on("error", onSocketError);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      nodeReq.removeListener("aborted", onRequestAborted);
+      nodeReq.removeListener("close", onRequestClose);
+      nodeReq.removeListener("error", onRequestError);
+      nodeRes.removeListener("close", onResponseClose);
+      nodeRes.removeListener("error", onResponseError);
+      nodeReq.socket.removeListener("close", onSocketClose);
+      nodeReq.socket.removeListener("error", onSocketError);
+    },
+  };
+}
+
+export function waitForNodeResponseDrain(
+  nodeRes: ServerResponse,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      nodeRes.removeListener("drain", onDrain);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const finish = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      operation();
+    };
+    const onDrain = (): void => finish(resolve);
+    const onAbort = (): void => finish(() => reject(signal.reason));
+    nodeRes.on("drain", onDrain);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
+export function waitForNodeResponseCompletion(
+  nodeRes: ServerResponse,
+  signal: AbortSignal,
+): Promise<void> {
+  if (nodeRes.writableFinished || nodeRes.destroyed) return Promise.resolve();
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      nodeRes.removeListener("finish", onFinish);
+      nodeRes.removeListener("close", onClose);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const finish = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      operation();
+    };
+    const onFinish = (): void => finish(resolve);
+    const onClose = (): void => finish(resolve);
+    const onAbort = (): void => finish(() => reject(signal.reason));
+    nodeRes.on("finish", onFinish);
+    nodeRes.on("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
 /**
  * Convert a node:http `IncomingMessage` to a Web `Request`, run the shared
  * `fetch` handler, and stream the resulting Web `Response` back over the
@@ -868,13 +1507,21 @@ export function bracketHost(host: string): string {
  * `Response` (streaming or buffered), we write the status + headers, then
  * pipe the body chunk-by-chunk to keep long-lived SSE streams alive.
  */
-async function handleNodeRequest(
+export async function handleNodeRequest(
   nodeReq: IncomingMessage,
   nodeRes: ServerResponse,
-  fetch: (req: Request) => Response | Promise<Response>,
+  fetch: (
+    req: Request,
+    peerAddress: string | undefined,
+    rawHeaders?: readonly string[],
+  ) => Response | Promise<Response>,
   host: string,
   port: number,
+  peerAddressForRequest?: (request: IncomingMessage) => string | undefined,
 ): Promise<void> {
+  const ingressAbort = bindNodeIngressAbort(nodeReq, nodeRes);
+  let responseStarted = false;
+  let responseCompleted = false;
   try {
     const url = `http://${bracketHost(host)}:${port}${nodeReq.url ?? "/"}`;
 
@@ -887,41 +1534,90 @@ async function handleNodeRequest(
       method: nodeReq.method,
       headers: nodeReq.headers as Record<string, string>,
       body,
+      signal: ingressAbort.signal,
       // @ts-expect-error — required for Node.js request body streaming
       duplex: "half",
     });
 
-    const response = await fetch(req);
+    const response = await responseAgainstAbort(
+      () =>
+        Promise.resolve(
+          fetch(
+            req,
+            peerAddressForRequest
+              ? peerAddressForRequest(nodeReq)
+              : nodeReq.socket.remoteAddress,
+            nodeReq.rawHeaders,
+          ),
+        ),
+      ingressAbort.signal,
+    );
 
     const headerEntries: [string, string][] = [];
     response.headers.forEach((value, key) => {
       headerEntries.push([key, value]);
     });
     nodeRes.writeHead(response.status, Object.fromEntries(headerEntries));
+    responseStarted = true;
 
     if (response.body) {
       const reader = response.body.getReader();
       try {
         while (true) {
-          const { done, value } = await reader.read();
+          const { done, value } = await readStreamChunk(reader, {
+            signal: ingressAbort.signal,
+          });
           if (done) break;
           // Coerce SharedArrayBuffer-typed Uint8Array views to a regular
           // Buffer — Node's write() expects a string, Buffer, or
           // Uint8Array<ArrayBuffer>, not ArrayBufferLike.
-          nodeRes.write(
+          const canContinue = nodeRes.write(
             Buffer.from(value.buffer, value.byteOffset, value.byteLength),
           );
+          if (!canContinue) {
+            await waitForNodeResponseDrain(nodeRes, ingressAbort.signal);
+          }
         }
       } finally {
-        reader.releaseLock();
+        cancelAndReleaseReader(reader, ingressAbort.signal.reason);
       }
     }
-    nodeRes.end();
-  } catch (err) {
-    log.error("request handler error:", err);
-    if (!nodeRes.headersSent) {
-      nodeRes.writeHead(500, { "content-type": "application/json" });
+    if (!nodeRes.destroyed) {
+      const completed = waitForNodeResponseCompletion(
+        nodeRes,
+        ingressAbort.signal,
+      );
+      nodeRes.end();
+      await completed;
+      responseCompleted = true;
     }
-    nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+    if (responseCompleted) {
+      const onResponseComplete = responseCompletionCallbacks.get(response);
+      if (onResponseComplete) setImmediate(onResponseComplete);
+    }
+  } catch (err) {
+    if (!ingressAbort.signal.aborted) log.error("request handler error:", err);
+    if (
+      !responseStarted &&
+      !nodeRes.headersSent &&
+      !nodeRes.destroyed &&
+      !ingressAbort.signal.aborted
+    ) {
+      try {
+        const completed = waitForNodeResponseCompletion(
+          nodeRes,
+          ingressAbort.signal,
+        );
+        nodeRes.writeHead(500, { "content-type": "application/json" });
+        nodeRes.end(JSON.stringify({ error: "Internal server error" }));
+        await completed;
+      } catch {
+        if (!nodeRes.destroyed) nodeRes.destroy();
+      }
+    } else if (!nodeRes.destroyed) {
+      nodeRes.destroy();
+    }
+  } finally {
+    ingressAbort.cleanup();
   }
 }

@@ -109,7 +109,8 @@ describe("earlyFlushStreamingResponse", () => {
     // the `response:{}` envelope or splits the data field will fail.
     const match = out.match(FAILED_EVENT_RE);
     expect(match).not.toBeNull();
-    expect(match?.[1]).toBe("boom");
+    expect(match?.[1]).toBe("Gateway request failed");
+    expect(out).not.toContain("boom");
   });
 
   test("emits a canonical response.failed envelope when the inner response is a non-SSE error body", async () => {
@@ -120,12 +121,11 @@ describe("earlyFlushStreamingResponse", () => {
     const out = await drain(resp);
     const match = out.match(FAILED_EVENT_RE);
     expect(match).not.toBeNull();
-    // The HTTP status and the truncated upstream body surface in the message.
-    expect(match?.[1]).toContain("429");
-    expect(match?.[1]).toContain("upstream 429");
+    expect(match?.[1]).toBe("Gateway request failed");
+    expect(out).not.toContain("upstream 429");
   });
 
-  test("the pipeline runs once inside the stream start", async () => {
+  test("the pipeline runs once when downstream starts reading", async () => {
     const run = vi.fn(async () =>
       innerStream(["event: response.created\n\n"], 0),
     );
@@ -133,5 +133,99 @@ describe("earlyFlushStreamingResponse", () => {
 
     await drain(resp);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not drain the inner stream while downstream is stalled", async () => {
+    let pulls = 0;
+    const chunks = Array.from({ length: 100 }, () =>
+      new TextEncoder().encode("x".repeat(1024)),
+    );
+    const inner = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++;
+          const chunk = chunks.shift();
+          if (chunk) controller.enqueue(chunk);
+          else controller.close();
+        },
+      }),
+      { headers: SSE },
+    );
+    const response = earlyFlushStreamingResponse(
+      async () => inner,
+      "gpt-5.6-terra",
+    );
+    const reader = response.body?.getReader();
+
+    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe(
+      KEEPALIVE,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(pulls).toBeLessThanOrEqual(2);
+    expect(chunks.length).toBeGreaterThan(0);
+    await reader?.cancel();
+    expect(inner.body?.locked).toBe(false);
+  });
+
+  test("downstream cancellation aborts unresolved pre-response work", async () => {
+    let operationSignal: AbortSignal | undefined;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => (markStarted = resolve));
+    let upstreamCalls = 0;
+    const response = earlyFlushStreamingResponse(async (signal) => {
+      operationSignal = signal;
+      markStarted();
+      await new Promise(() => {});
+      upstreamCalls++;
+      return innerStream(["event: response.completed\n\n"], 0);
+    }, "gpt-5.6-terra");
+    const reader = response.body?.getReader();
+
+    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe(
+      KEEPALIVE,
+    );
+    await started;
+    await reader?.cancel(new DOMException("client gone", "AbortError"));
+    reader?.releaseLock();
+    expect(operationSignal?.aborted).toBe(true);
+    expect(upstreamCalls).toBe(0);
+    expect(response.body?.locked).toBe(false);
+  });
+
+  test("caller abort settles a valid nonterminal inner event with a hostile tail", async () => {
+    let cancelled = false;
+    const inner = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: response.created\ndata: {"type":"response.created","response":{"id":"stalled","status":"in_progress"}}\n\n',
+            ),
+          );
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      }),
+      { headers: SSE },
+    );
+    const abort = new AbortController();
+    const response = earlyFlushStreamingResponse(
+      async () => inner,
+      "gpt-5.6-terra",
+      abort.signal,
+    );
+    const pending = drain(response);
+    await new Promise((resolve) => setImmediate(resolve));
+    abort.abort(new DOMException("caller aborted", "AbortError"));
+    const output = await pending;
+    expect(output).toContain("event: response.created");
+    expect(output).toContain("event: response.failed");
+    expect(cancelled).toBe(true);
+    expect(inner.body?.locked).toBe(false);
   });
 });

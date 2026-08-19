@@ -1,6 +1,6 @@
-import { afterEach, describe, test, expect, beforeEach } from "vitest";
+import { afterEach, describe, test, expect, beforeEach, vi } from "vitest";
 import { existsSync } from "node:fs";
-import { db, ensureProject } from "../src/db";
+import { db, ensureProject, withTransaction } from "../src/db";
 import { LOCAL_MODEL_PATH_ENV } from "../src/embedding-vendor";
 import {
   cosineSimilarity,
@@ -425,10 +425,12 @@ describe("local provider unavailable — no auto-fallback (remote is opt-in)", (
 describe("pickRemoteFallback", () => {
   let savedVoyage: string | undefined;
   let savedOpenAI: string | undefined;
+  let savedFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
     savedVoyage = process.env.VOYAGE_API_KEY;
     savedOpenAI = process.env.OPENAI_API_KEY;
+    savedFetch = globalThis.fetch;
     delete process.env.VOYAGE_API_KEY;
     delete process.env.OPENAI_API_KEY;
   });
@@ -438,6 +440,7 @@ describe("pickRemoteFallback", () => {
     else delete process.env.VOYAGE_API_KEY;
     if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
     else delete process.env.OPENAI_API_KEY;
+    globalThis.fetch = savedFetch;
   });
 
   test("returns null when neither key is set", () => {
@@ -466,6 +469,67 @@ describe("pickRemoteFallback", () => {
   test("rejects placeholder API keys (e.g. 'nokey')", () => {
     process.env.OPENAI_API_KEY = "nokey";
     expect(pickRemoteFallback()).toBeNull();
+  });
+
+  test("Voyage failures expose status but never the response body or statusText", async () => {
+    const bodyMarker = "PRIVATE_VOYAGE_RESPONSE_BODY_MARKER";
+    const reasonMarker = "PRIVATE_VOYAGE_REASON_MARKER";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(bodyMarker, {
+          status: 503,
+          statusText: reasonMarker,
+        }),
+    );
+    const fallback = pickRemoteFallback();
+    expect(fallback?.name).toBe("voyage");
+    if (!fallback) throw new Error("expected Voyage fallback");
+
+    const promise = fallback.provider.embed(["query"], "query");
+    await expect(promise).rejects.toThrow("503");
+    await expect(promise).rejects.not.toThrow(bodyMarker);
+    await expect(promise).rejects.not.toThrow(reasonMarker);
+  });
+
+  test("Voyage malformed JSON errors do not retain the response prefix", async () => {
+    const bodyMarker = "PRIVATE_VOYAGE_MALFORMED_PREFIX";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(`${bodyMarker} not-json`, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const fallback = pickRemoteFallback();
+    if (!fallback) throw new Error("expected Voyage fallback");
+
+    const promise = fallback.provider.embed(["query"], "query");
+    await expect(promise).rejects.toThrow("malformed JSON");
+    await expect(promise).rejects.not.toThrow(bodyMarker);
+  });
+
+  test("Voyage request failures do not retain thrown URL secrets", async () => {
+    const userinfoMarker = "PRIVATE_VOYAGE_THROWN_USERINFO";
+    const queryMarker = "PRIVATE_VOYAGE_THROWN_QUERY";
+    const fragmentMarker = "PRIVATE_VOYAGE_THROWN_FRAGMENT";
+    process.env.VOYAGE_API_KEY = "vk-test-key-that-is-long-enough";
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error(
+        `fetch https://user:${userinfoMarker}@example.com/embed?token=${queryMarker}#${fragmentMarker} failed`,
+      );
+    });
+    const fallback = pickRemoteFallback();
+    if (!fallback) throw new Error("expected Voyage fallback");
+
+    const promise = fallback.provider.embed(["query"], "query");
+    await expect(promise).rejects.toThrow(
+      "Voyage embeddings API request failed",
+    );
+    await expect(promise).rejects.not.toThrow(userinfoMarker);
+    await expect(promise).rejects.not.toThrow(queryMarker);
+    await expect(promise).rejects.not.toThrow(fragmentMarker);
   });
 });
 
@@ -883,6 +947,20 @@ describe("checkConfigChange", () => {
     checkConfigChange();
     const changed = checkConfigChange();
     expect(changed).toBe(false);
+  });
+
+  test("reconciles a changed fingerprint inside an existing transaction", () => {
+    db()
+      .query("INSERT INTO kv_meta (key, value) VALUES (?, ?)")
+      .run("lore:embedding_config", "old-model:512");
+
+    const changed = withTransaction(() => checkConfigChange());
+
+    expect(changed).toBe(true);
+    const row = db()
+      .query("SELECT value FROM kv_meta WHERE key = 'lore:embedding_config'")
+      .get() as { value: string } | null;
+    expect(row?.value).toContain("local");
   });
 
   test("clears embeddings when fingerprint changes", () => {

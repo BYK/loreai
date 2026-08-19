@@ -43,6 +43,7 @@ import {
 } from "./references";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
+import { currentTenantId } from "./tenant";
 
 /** Sensitivity classification — product hint guiding auto-promotion decisions. */
 export type Sensitivity = "normal" | "sensitive" | "restricted";
@@ -113,6 +114,7 @@ export type KnowledgeEntry = {
    *  this equals `id`; cross-reference linkages (refs/transfers/markers) key on
    *  this, never the per-version `id`. */
   logical_id: string;
+  tenant_id: string;
   project_id: string | null;
   category: string;
   title: string;
@@ -148,7 +150,7 @@ export type KnowledgeEntry = {
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
 const KNOWLEDGE_COLS =
-  "id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at, logical_id";
+  "id, tenant_id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at, logical_id";
 
 /** Same columns with table alias prefix for use in JOIN queries. `confidence` and
  *  `last_reinforced_at` live on the metric register (alias `m`), not the immutable
@@ -156,7 +158,7 @@ const KNOWLEDGE_COLS =
  *  `LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id` (LEFT + COALESCE
  *  default mirrors the knowledge_current view, so a meta-less row never vanishes). */
 const KNOWLEDGE_COLS_K =
-  "k.id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, COALESCE(m.confidence, 1.0) AS confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, m.last_reinforced_at, k.logical_id";
+  "k.id, k.tenant_id, k.project_id, k.category, k.title, k.content, k.source_session, k.cross_project, COALESCE(m.confidence, 1.0) AS confidence, k.created_at, k.updated_at, k.metadata, k.created_by, k.updated_by, k.sensitivity, k.promotion_status, k.promoted_at, k.approval_status, k.approved_by, k.approved_at, k.source_user_id, k.source_entry_id, k.last_accessed_at, k.worker_provider_id, k.worker_model_id, m.last_reinforced_at, k.logical_id";
 
 /**
  * Upsert the metric-register row for a logical entry (A2 sub-PR 3b, #823).
@@ -286,6 +288,7 @@ export function create(input: {
    *  never opt in). Parsed back into a typed object on read. */
   metadata?: KnowledgeMetadata;
 }): string {
+  const tenantId = currentTenantId();
   const pid =
     input.scope === "project" && input.projectPath
       ? ensureProject(input.projectPath)
@@ -315,9 +318,9 @@ export function create(input: {
             .get(pid, input.title)
         : db()
             .query(
-              "SELECT logical_id FROM knowledge_current WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT logical_id FROM knowledge_current WHERE tenant_id = ? AND project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
-            .get(input.title)
+            .get(tenantId, input.title)
     ) as { logical_id: string } | null;
 
     // Build the update payload — forward confidence when the caller provided one
@@ -336,9 +339,9 @@ export function create(input: {
     // duplicates of entries that already exist as cross-project knowledge.
     const crossExisting = db()
       .query(
-        "SELECT logical_id FROM knowledge_current WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        "SELECT logical_id FROM knowledge_current WHERE tenant_id = ? AND cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
       )
-      .get(input.title) as { logical_id: string } | null;
+      .get(tenantId, input.title) as { logical_id: string } | null;
 
     if (crossExisting) {
       update(crossExisting.logical_id, dedupUpdate);
@@ -379,12 +382,13 @@ export function create(input: {
   }
   db()
     .query(
-      `INSERT INTO knowledge (id, logical_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, metadata, approval_status, approved_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO knowledge (id, logical_id, tenant_id, project_id, category, title, content, source_session, cross_project, created_at, updated_at, created_by, sensitivity, worker_provider_id, worker_model_id, metadata, approval_status, approved_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
       id, // logical_id: a fresh entry is its own logical identity (version 1)
+      tenantId,
       pid,
       input.category,
       input.title,
@@ -457,9 +461,9 @@ export function appendVersion(
   const ok = withTransaction(() => {
     const cur = db()
       .query(
-        "SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1 LIMIT 1",
+        "SELECT id FROM knowledge WHERE tenant_id = ? AND logical_id = ? AND is_current = 1 LIMIT 1",
       )
-      .get(logicalId) as { id: string } | undefined;
+      .get(currentTenantId(), logicalId) as { id: string } | undefined;
     if (!cur) return false;
     // vec0 layout has no `embedding` column on `knowledge` (dropped at cutover):
     // omit it from the forward-copy, and drop the demoted version's vec0 row so
@@ -475,20 +479,20 @@ export function appendVersion(
         // confidence/last_reinforced_at are NOT copied — they live on the register
         // (knowledge_meta), keyed by the stable logical_id, unchanged by an append.
         `INSERT INTO knowledge (
-           id, project_id, category, title, content, source_session, cross_project,
+           id, tenant_id, project_id, category, title, content, source_session, cross_project,
            created_at, updated_at, metadata, ${embCol}created_by,
            updated_by, sensitivity, promotion_status, promoted_at, approval_status,
            approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at,
            worker_provider_id, worker_model_id,
            logical_id, version, is_deleted, is_current)
          SELECT
-           ?, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
+            ?, tenant_id, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
            source_session, cross_project, created_at, ?, COALESCE(?, metadata), ${embSel}created_by,
            updated_by, sensitivity, promotion_status, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
            logical_id, version + 1, ?, 1
-         FROM knowledge WHERE id = ?`,
+          FROM knowledge WHERE id = ? AND tenant_id = ?`,
       )
       .run(
         newId,
@@ -501,6 +505,7 @@ export function appendVersion(
         stringifyMetadata(overrides.metadata),
         overrides.isDeleted ? 1 : 0,
         cur.id,
+        currentTenantId(),
       );
     return true;
   });
@@ -525,6 +530,7 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
   created: boolean;
   previousContent?: string;
 } {
+  const tenantId = currentTenantId();
   // Use the same dedup logic as create(): a return value where the id
   // matches an existing row means we hit a dedup branch. We probe for the
   // existence of the title BEFORE calling create() to know which branch fired.
@@ -543,9 +549,9 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
             .get(pid, input.title)
         : db()
             .query(
-              "SELECT id, content FROM knowledge_current WHERE project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              "SELECT id, content FROM knowledge_current WHERE tenant_id = ? AND project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
             )
-            .get(input.title)
+            .get(tenantId, input.title)
     ) as { id: string; content: string } | null;
 
     if (existing) {
@@ -556,9 +562,9 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
 
     const crossExisting = db()
       .query(
-        "SELECT id, content FROM knowledge_current WHERE cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        "SELECT id, content FROM knowledge_current WHERE tenant_id = ? AND cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
       )
-      .get(input.title) as { id: string; content: string } | null;
+      .get(tenantId, input.title) as { id: string; content: string } | null;
     if (crossExisting) {
       const id = create(input);
       return { id, created: false, previousContent: crossExisting.content };
@@ -607,23 +613,23 @@ export function listPendingTeamPromotions(
   projectId?: string,
 ): TeamPromotionCandidate[] {
   const where =
-    "p.scope_id IS NOT NULL AND k.approval_status NOT IN ('approved','rejected')";
+    "p.tenant_id = ? AND p.scope_id IS NOT NULL AND k.approval_status NOT IN ('approved','rejected')";
   const rows = (
     projectId
       ? db()
           .query(
             `SELECT k.logical_id, k.title, k.category, k.project_id
              FROM knowledge_current k JOIN projects p ON p.id = k.project_id
-             WHERE ${where} AND k.project_id = ? ORDER BY k.updated_at DESC`,
+              WHERE ${where} AND k.project_id = ? ORDER BY k.updated_at DESC`,
           )
-          .all(projectId)
+          .all(currentTenantId(), projectId)
       : db()
           .query(
             `SELECT k.logical_id, k.title, k.category, k.project_id
              FROM knowledge_current k JOIN projects p ON p.id = k.project_id
              WHERE ${where} ORDER BY k.updated_at DESC`,
           )
-          .all()
+          .all(currentTenantId())
   ) as Array<{
     logical_id: string;
     title: string;
@@ -674,9 +680,9 @@ export function approveForTeam(
 ): boolean {
   const res = db()
     .query(
-      "UPDATE knowledge SET approval_status = 'approved', approved_by = ?, approved_at = ? WHERE logical_id = ? AND is_current = 1",
+      "UPDATE knowledge SET approval_status = 'approved', approved_by = ?, approved_at = ? WHERE tenant_id = ? AND logical_id = ? AND is_current = 1",
     )
-    .run(approvedBy ?? null, Date.now(), logicalId);
+    .run(approvedBy ?? null, Date.now(), currentTenantId(), logicalId);
   // The knowledge row's own migration rides its UPDATE (column-agnostic capture trigger); its linked
   // entity graph has no such trigger from this UPDATE, so re-enqueue it explicitly (#1307).
   if (res.changes > 0) teamPromotionChangedCb?.(logicalId);
@@ -690,9 +696,9 @@ export function approveForTeam(
 export function rejectForTeam(logicalId: string): boolean {
   const res = db()
     .query(
-      "UPDATE knowledge SET approval_status = 'rejected', approved_by = NULL, approved_at = NULL WHERE logical_id = ? AND is_current = 1",
+      "UPDATE knowledge SET approval_status = 'rejected', approved_by = NULL, approved_at = NULL WHERE tenant_id = ? AND logical_id = ? AND is_current = 1",
     )
-    .run(logicalId);
+    .run(currentTenantId(), logicalId);
   // Symmetric with approveForTeam: re-enqueue the linked graph so it migrates BACK to personal
   // (unless an entity is still linked to OTHER team-approved knowledge — the resolver decides).
   if (res.changes > 0) teamPromotionChangedCb?.(logicalId);
@@ -727,11 +733,13 @@ function titleCollides(
       ? "(project_id IS NULL OR cross_project = 1 OR project_id = ?)"
       : "(project_id IS NULL OR cross_project = 1)";
   const params: unknown[] =
-    pid !== null ? [logicalId, newTitle, pid] : [logicalId, newTitle];
+    pid !== null
+      ? [currentTenantId(), logicalId, newTitle, pid]
+      : [currentTenantId(), logicalId, newTitle];
   const hit = db()
     .query(
       `SELECT 1 FROM knowledge_current
-         WHERE logical_id != ? AND confidence > 0 AND LOWER(title) = LOWER(?)
+         WHERE tenant_id = ? AND logical_id != ? AND confidence > 0 AND LOWER(title) = LOWER(?)
            AND ${scopeClause}
          LIMIT 1`,
     )
@@ -761,6 +769,7 @@ export function update(
   // `id` may be a current OR superseded version id — resolve to the logical_id.
   const logicalId = logicalIdOf(id);
   const cur = getByLogical(logicalId);
+  if (!cur) return;
 
   // Re-title guard (D1b): `title` is BOTH the top-weighted FTS field AND the
   // exact-match dedup identity key. `appendVersion` will happily write any title,
@@ -922,9 +931,9 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
   // (the user resolved it by removing one side, or it was pruned). (#1123)
   db()
     .query(
-      "DELETE FROM knowledge_contradictions WHERE logical_id_a = ? OR logical_id_b = ?",
+      "DELETE FROM knowledge_contradictions WHERE tenant_id = ? AND (logical_id_a = ? OR logical_id_b = ?)",
     )
-    .run(logicalId, logicalId);
+    .run(currentTenantId(), logicalId, logicalId);
 }
 
 /** True when the entry for this logical_id was deleted (tombstoned). */
@@ -932,15 +941,15 @@ export function isTombstoned(id: string): boolean {
   // A2: the current version is an is_deleted death certificate.
   const deathCert = db()
     .query(
-      "SELECT 1 FROM knowledge WHERE logical_id = ? AND is_current = 1 AND is_deleted = 1 LIMIT 1",
+      "SELECT 1 FROM knowledge WHERE tenant_id = ? AND logical_id = ? AND is_current = 1 AND is_deleted = 1 LIMIT 1",
     )
-    .get(id) as { 1: number } | null;
+    .get(currentTenantId(), id) as { 1: number } | null;
   if (deathCert) return true;
   // Legacy: entries deleted before the append-only flip left a tombstone row and
   // no death-cert version (they were physically deleted).
   const legacy = db()
-    .query("SELECT 1 FROM knowledge_tombstones WHERE id = ?")
-    .get(id) as { 1: number } | null;
+    .query("SELECT 1 FROM knowledge_tombstones WHERE tenant_id = ? AND id = ?")
+    .get(currentTenantId(), id) as { 1: number } | null;
   return legacy != null;
 }
 
@@ -963,34 +972,35 @@ export function findTombstonedByTitle(input: {
   title: string;
   projectId: string | null;
 }): boolean {
+  const tenantId = currentTenantId();
   // A live current version with this title takes precedence — it is an update
   // target, not a resurrection. Only report "tombstoned" when NO live row exists.
   const live =
     input.projectId !== null
       ? (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 0 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
           )
-          .get(input.projectId, input.title) as { 1: number } | null)
+          .get(tenantId, input.projectId, input.title) as { 1: number } | null)
       : (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 0 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
           )
-          .get(input.title) as { 1: number } | null);
+          .get(tenantId, input.title) as { 1: number } | null);
   if (live) return false;
 
   const deathCert =
     input.projectId !== null
       ? (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 1 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
           )
-          .get(input.projectId, input.title) as { 1: number } | null)
+          .get(tenantId, input.projectId, input.title) as { 1: number } | null)
       : (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE is_current = 1 AND is_deleted = 1 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
           )
-          .get(input.title) as { 1: number } | null);
+          .get(tenantId, input.title) as { 1: number } | null);
   return deathCert != null;
 }
 
@@ -999,7 +1009,9 @@ export function findTombstonedByTitle(input: {
  * (re-)created with that exact UUID, so a future delete can tombstone it again.
  */
 export function clearTombstone(id: string): void {
-  db().query("DELETE FROM knowledge_tombstones WHERE id = ?").run(id);
+  db()
+    .query("DELETE FROM knowledge_tombstones WHERE tenant_id = ? AND id = ?")
+    .run(currentTenantId(), id);
 }
 
 // ---------------------------------------------------------------------------
@@ -1084,6 +1096,7 @@ export function findFuzzyDuplicate(input: {
   projectId: string | null;
   excludeId?: string;
 }): { id: string; title: string } | null {
+  const tenantId = currentTenantId();
   const q = ftsQueryOr(input.title);
   if (q === EMPTY_QUERY) return null;
 
@@ -1098,6 +1111,7 @@ export function findFuzzyDuplicate(input: {
          CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
          WHERE knowledge_fts MATCH ?
+         AND k.tenant_id = ?
          AND (k.project_id = ? OR k.cross_project = 1)
          AND COALESCE(m.confidence, 1.0) > 0.2
          ${excludeClause}
@@ -1106,6 +1120,7 @@ export function findFuzzyDuplicate(input: {
          CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
          WHERE knowledge_fts MATCH ?
+         AND k.tenant_id = ?
          AND (k.project_id IS NULL OR k.cross_project = 1)
          AND COALESCE(m.confidence, 1.0) > 0.2
          ${excludeClause}
@@ -1115,13 +1130,21 @@ export function findFuzzyDuplicate(input: {
       input.projectId !== null
         ? [
             q,
+            tenantId,
             input.projectId,
             ...(input.excludeId ? [input.excludeId] : []),
             tw,
             cw,
             catw,
           ]
-        : [q, ...(input.excludeId ? [input.excludeId] : []), tw, cw, catw];
+        : [
+            q,
+            tenantId,
+            ...(input.excludeId ? [input.excludeId] : []),
+            tw,
+            cw,
+            catw,
+          ];
 
     const candidates = db()
       .query(sql)
@@ -1189,9 +1212,9 @@ export async function findSemanticDuplicate(input: {
     const row = db()
       .query(
         `SELECT id FROM knowledge_current
-         WHERE id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1)`,
+         WHERE tenant_id = ? AND id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1)`,
       )
-      .get(hit.id, input.projectId) as { id: string } | null;
+      .get(currentTenantId(), hit.id, input.projectId) as { id: string } | null;
     if (row) return { id: row.id, similarity: hit.similarity };
   }
   return null;
@@ -1208,14 +1231,14 @@ function forProjectQuery(
 ): { sql: string; params: ReadParam[] } {
   const sql = includeCross
     ? `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-         WHERE (project_id = ? OR (project_id IS NULL) OR (cross_project = 1))
+         WHERE tenant_id = ? AND (project_id = ? OR (project_id IS NULL) OR (cross_project = 1))
          AND confidence > 0.2
          ORDER BY confidence DESC, updated_at DESC`
     : `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-         WHERE project_id = ?
+         WHERE tenant_id = ? AND project_id = ?
          AND confidence > 0.2
          ORDER BY confidence DESC, updated_at DESC`;
-  return { sql, params: [pid] };
+  return { sql, params: [currentTenantId(), pid] };
 }
 
 export function forProject(
@@ -1321,9 +1344,9 @@ export function pruneDeadEntriesAllProjects(limit = -1): KnowledgeEntry[] {
   const dead = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-       WHERE cross_project = 0 AND confidence <= ? LIMIT ?`,
+       WHERE tenant_id = ? AND cross_project = 0 AND confidence <= ? LIMIT ?`,
     )
-    .all(DEAD_CONFIDENCE_FLOOR, limit)
+    .all(currentTenantId(), DEAD_CONFIDENCE_FLOOR, limit)
     .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   for (const e of dead) remove(e.id);
   return dead;
@@ -1362,12 +1385,17 @@ export function compactKnowledgeVersions(limit = 500): number {
              SELECT id, updated_at,
                     ROW_NUMBER() OVER (PARTITION BY logical_id ORDER BY version DESC) AS rn
                FROM knowledge
-              WHERE is_current = 0
+              WHERE tenant_id = ? AND is_current = 0
            )
            WHERE rn > ? OR updated_at < ?
            LIMIT ?`,
         )
-        .all(COMPACTION_KEEP_SUPERSEDED, cutoff, limit) as Array<{ id: string }>
+        .all(
+          currentTenantId(),
+          COMPACTION_KEEP_SUPERSEDED,
+          cutoff,
+          limit,
+        ) as Array<{ id: string }>
     ).map((r) => r.id);
     if (ids.length === 0) return 0;
     // vec0 layout: superseded rows already have no vec entry (appendVersion drops it on
@@ -1502,9 +1530,9 @@ export function markInjected(ids: string[]): void {
   db()
     .query(
       `UPDATE knowledge_meta SET last_reinforced_at = ?
-        WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE id IN (${placeholders}))`,
+        WHERE logical_id IN (SELECT logical_id FROM knowledge WHERE tenant_id = ? AND id IN (${placeholders}))`,
     )
-    .run(Date.now(), ...ids);
+    .run(Date.now(), currentTenantId(), ...ids);
 }
 
 /**
@@ -1519,6 +1547,7 @@ export function reinforce(id: string, delta: number = REINFORCE_STEP): void {
   // confidence). `id` may be any version id — resolve to the stable logical_id.
   const now = Date.now();
   const logicalId = logicalIdOf(id);
+  if (!getByLogical(logicalId)) return;
   applyConfidenceDelta(logicalId, delta, now);
   db()
     .query(
@@ -1542,6 +1571,7 @@ export function penalizeStaleReferences(
   logicalId: string,
   delta: number = REFERENCE_DRIFT_PENALTY,
 ): void {
+  if (!getByLogical(logicalId)) return;
   // confidence is a materialized cache over the PN-counter register (A2 3b-2):
   // a direct `UPDATE knowledge_meta SET confidence = …` would be WIPED by the next
   // rematerializeConfidence (any reinforce/decay/credit/update/prune). Record the
@@ -1585,7 +1615,9 @@ export async function validateProjectReferences(
   projectPath: string,
   resolver: ReferenceResolver,
   now: number = Date.now(),
+  signal?: AbortSignal,
 ): Promise<RefCheckResult> {
+  signal?.throwIfAborted();
   const pid = ensureProject(projectPath);
   const proj = db()
     .query("SELECT last_refcheck_at FROM projects WHERE id = ?")
@@ -1632,6 +1664,7 @@ export async function validateProjectReferences(
   }
 
   const statusMap = await resolver.resolve(unionList);
+  signal?.throwIfAborted();
   if (statusMap == null) {
     // Whole batch unverifiable (probe error/timeout / no FS) → strict no-op.
     // Consume the gate so a failing probe isn't re-hammered every idle tick.
@@ -2012,12 +2045,18 @@ export function outcomeImpactMany(
     const placeholders = batch.map(() => "?").join(",");
     const rows = db()
       .query(
-        `SELECT logical_id, verdict, COUNT(*) AS n
-         FROM knowledge_session_injections
-         WHERE logical_id IN (${placeholders}) AND verdict IN ('pass','fail')
-         GROUP BY logical_id, verdict`,
+        `SELECT i.logical_id, i.verdict, COUNT(*) AS n
+         FROM knowledge_session_injections i
+         JOIN knowledge_current k ON k.logical_id = i.logical_id
+         WHERE k.tenant_id = ? AND i.logical_id IN (${placeholders})
+           AND i.verdict IN ('pass','fail')
+         GROUP BY i.logical_id, i.verdict`,
       )
-      .all(...batch) as { logical_id: string; verdict: string; n: number }[];
+      .all(currentTenantId(), ...batch) as {
+      logical_id: string;
+      verdict: string;
+      n: number;
+    }[];
     for (const r of rows) {
       let cur = out.get(r.logical_id);
       if (!cur) {
@@ -2057,6 +2096,7 @@ export type RefValidity = {
 /** Read the last reference-validity snapshot for an entry by logical_id. Read-only;
  *  surfaced by `lore data show`. */
 export function refValidity(logicalId: string): RefValidity | null {
+  if (!getByLogical(logicalId)) return null;
   const row = db()
     .query(
       "SELECT broken, total, checked_at FROM knowledge_ref_validity WHERE logical_id = ?",
@@ -2104,6 +2144,7 @@ export type KnowledgeFileRefs = {
  * session-context, not user knowledge; remote machines generate their own.
  */
 export function setFileRefs(logicalId: string, paths: string[]): string[] {
+  if (!getByLogical(logicalId)) return [];
   // Defensive normalization: drop empty strings, dedupe, sort for determinism,
   // cap at MAX_FILE_REFS_PER_ENTRY. Callers should already do this — the
   // re-cap here is a safety net against a buggy caller passing thousands.
@@ -2148,10 +2189,15 @@ export function knowledgeFileRefsBatch(
   const placeholders = logicalIds.map(() => "?").join(",");
   const rows = db()
     .query(
-      `SELECT logical_id, paths_json FROM knowledge_file_refs
-        WHERE logical_id IN (${placeholders})`,
+      `SELECT f.logical_id, f.paths_json
+         FROM knowledge_file_refs f
+         JOIN knowledge_current k ON k.logical_id = f.logical_id
+        WHERE k.tenant_id = ? AND f.logical_id IN (${placeholders})`,
     )
-    .all(...logicalIds) as Array<{ logical_id: string; paths_json: string }>;
+    .all(currentTenantId(), ...logicalIds) as Array<{
+    logical_id: string;
+    paths_json: string;
+  }>;
   for (const r of rows) {
     let parsed: unknown;
     try {
@@ -2189,11 +2235,13 @@ export function knowledgeRefAnchors(
   // stable secondary sort by anchor keeps output deterministic (cache-friendly).
   const rows = db()
     .query(
-      `SELECT logical_id, kind, anchor FROM knowledge_ref_anchor
-        WHERE logical_id IN (${placeholders})
-        ORDER BY logical_id, kind, anchor`,
+      `SELECT a.logical_id, a.kind, a.anchor
+         FROM knowledge_ref_anchor a
+         JOIN knowledge_current k ON k.logical_id = a.logical_id
+        WHERE k.tenant_id = ? AND a.logical_id IN (${placeholders})
+        ORDER BY a.logical_id, a.kind, a.anchor`,
     )
-    .all(...logicalIds) as Array<{
+    .all(currentTenantId(), ...logicalIds) as Array<{
     logical_id: string;
     kind: string;
     anchor: string;
@@ -2378,8 +2426,9 @@ async function scoreEntriesFTS(
           CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
           WHERE knowledge_fts MATCH ?
+          AND k.tenant_id = ?
           AND COALESCE(m.confidence, 1.0) > 0.2`,
-      [title, content, category, q],
+      [title, content, category, q, currentTenantId()],
     )) as Array<{
       id: string;
       rank: number;
@@ -2430,6 +2479,8 @@ export const CONTEXT_SOURCE_LIMIT = 12;
 export const RECALLED_CONTEXT_CATEGORY = "recalled";
 
 export type ForSessionOptions = {
+  /** Abort stale request work before reinforcement/transfer side effects. */
+  signal?: AbortSignal;
   /** Caller-provided context (e.g., user's current message) for relevance
    *  scoring when no session context exists in the DB yet. */
   contextHint?: string;
@@ -2519,6 +2570,7 @@ export async function forSession(
   maxTokens: number,
   options?: ForSessionOptions,
 ): Promise<KnowledgeEntry[]> {
+  options?.signal?.throwIfAborted();
   // Measure this hot per-turn path's main-thread blocking cost (#966 B). The
   // awaits below (embed + the pool-backed vector search) are wrapped so the
   // wall-time remainder is the synchronous entry-load / FTS / scoring / packing
@@ -2546,15 +2598,19 @@ export async function forSession(
   // free while a worker scans. Knowledge is not written on the hot per-message
   // path, so a worker's read-only snapshot is safe (staleness-tolerant). #966 B.
   const projectSql = `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-       WHERE project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
+       WHERE tenant_id = ? AND project_id = ? AND cross_project = 0 AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`;
   const crossSql = `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-       WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
+       WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1) AND confidence > 0.2${categoryClause}
        ORDER BY confidence DESC, updated_at DESC`;
   const [projectRows, crossRows] = await timer.await(
     Promise.all([
-      offloadAllOrTimeout(projectSql, [pid, ...categoryParams]),
-      offloadAllOrTimeout(crossSql, [...categoryParams]),
+      offloadAllOrTimeout(projectSql, [
+        currentTenantId(),
+        pid,
+        ...categoryParams,
+      ]),
+      offloadAllOrTimeout(crossSql, [currentTenantId(), ...categoryParams]),
     ]),
   );
   // Symmetric degrade: if EITHER scan's worker wedged (timeout), drop the whole
@@ -2667,10 +2723,12 @@ export async function forSession(
     // preference injected into system[1] every turn would still age out and be
     // pruned by decayProject/pruneDeadEntries after the grace window — silently
     // deleting an actively-used directive. Resets the decay clock only.
+    options?.signal?.throwIfAborted();
     try {
       markInjected(result.map((e) => e.id));
       recordSessionInjections(sessionID, projectPath, result);
     } catch (err) {
+      options?.signal?.throwIfAborted();
       log.warn(
         "forSession(preference): reinforcement failed (non-fatal):",
         err,
@@ -2734,6 +2792,7 @@ export async function forSession(
       );
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
     } catch (err) {
+      options?.signal?.throwIfAborted();
       log.warn("Vector scoring failed, falling back to FTS5:", err);
       vectorScores = new Map();
     }
@@ -2930,6 +2989,7 @@ export async function forSession(
       result.push({
         id: section.id,
         logical_id: section.id, // synthetic lat.md entry: its own logical identity
+        tenant_id: currentTenantId(),
         project_id: section.project_id,
         category: "lat.md",
         title: `[${section.file}] ${section.heading}`,
@@ -2966,6 +3026,7 @@ export async function forSession(
   // (project_id === pid) are not transfers; lat.md synthetics are skipped (they
   // are not knowledge rows). The in-memory throttle bounds writes so this
   // every-message path does not hammer SQLite.
+  options?.signal?.throwIfAborted();
   try {
     for (const entry of result) {
       if (entry.category === "lat.md") continue;
@@ -2979,6 +3040,7 @@ export async function forSession(
       });
     }
   } catch (err) {
+    options?.signal?.throwIfAborted();
     log.warn("forSession: transfer recording failed (non-fatal):", err);
   }
 
@@ -2986,6 +3048,7 @@ export async function forSession(
   // Being selected for the prompt resets each entry's decay clock — it is "still
   // relevant" — WITHOUT bumping confidence (that would re-flatten everything to
   // 1.0 and destroy the decay signal). lat.md synthetics are not knowledge rows.
+  options?.signal?.throwIfAborted();
   try {
     // Only real knowledge rows get reinforced / recorded — lat.md and
     // recalled-context synthetics are not knowledge and have no confidence
@@ -2997,6 +3060,7 @@ export async function forSession(
     markInjected(knowledgeResult.map((e) => e.id));
     recordSessionInjections(sessionID, projectPath, knowledgeResult);
   } catch (err) {
+    options?.signal?.throwIfAborted();
     log.warn("forSession: reinforcement failed (non-fatal):", err);
   }
 
@@ -3008,6 +3072,7 @@ export async function forSession(
   // (lat.md synthetics are packed separately in step 6), so this never leaks a
   // lat.md row, which has no recall id.
   if (options?.overflowSink) {
+    options.signal?.throwIfAborted();
     const selectedIds = new Set(result.map((e) => e.id));
     for (const { entry } of allScored) {
       // Recalled-context synthetics are not knowledge rows — keep the ToC
@@ -3068,6 +3133,7 @@ async function loadContextSourceCandidates(
   ): KnowledgeEntry => ({
     id,
     logical_id: id,
+    tenant_id: currentTenantId(),
     project_id: pid,
     category: RECALLED_CONTEXT_CATEGORY,
     title,
@@ -3344,9 +3410,9 @@ function scoreFTS(
 export function all(): KnowledgeEntry[] {
   return db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE confidence > 0.2 ORDER BY confidence DESC, updated_at DESC`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND confidence > 0.2 ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all()
+    .all(currentTenantId())
     .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 }
 
@@ -3355,10 +3421,10 @@ export function crossProject(): KnowledgeEntry[] {
   return db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-       WHERE (project_id IS NULL OR cross_project = 1) AND confidence > 0.2
+       WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1) AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all()
+    .all(currentTenantId())
     .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 }
 
@@ -3379,9 +3445,9 @@ export function crossProject(): KnowledgeEntry[] {
 export function rerankPreferences(): number {
   const prefs = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE category = 'preference' AND confidence = 1.0`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND category = 'preference' AND confidence = 1.0`,
     )
-    .all()
+    .all(currentTenantId())
     .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 
   // Strong unconditional directives
@@ -3431,16 +3497,16 @@ function searchLike(input: {
     const pid = ensureProject(input.projectPath);
     return db()
       .query(
-        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
       )
-      .all(pid, ...likeParams, input.limit)
+      .all(currentTenantId(), pid, ...likeParams, input.limit)
       .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   }
   return db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
     )
-    .all(...likeParams, input.limit)
+    .all(currentTenantId(), ...likeParams, input.limit)
     .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 }
 
@@ -3458,6 +3524,7 @@ export function search(input: {
        CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
+       AND k.tenant_id = ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
        AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`
@@ -3465,6 +3532,7 @@ export function search(input: {
        CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
+       AND k.tenant_id = ?
        AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY bm25(knowledge_fts, ?, ?, ?) LIMIT ?`;
 
@@ -3473,8 +3541,8 @@ export function search(input: {
   try {
     return runRelaxedSearch(input.query, (matchExpr) => {
       const params = pid
-        ? [matchExpr, pid, title, content, category, limit]
-        : [matchExpr, title, content, category, limit];
+        ? [matchExpr, currentTenantId(), pid, title, content, category, limit]
+        : [matchExpr, currentTenantId(), title, content, category, limit];
       return db()
         .query(ftsSQL)
         .all(...params)
@@ -3513,6 +3581,7 @@ export async function searchScored(input: {
        CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
+       AND k.tenant_id = ?
        AND (k.project_id = ? OR k.project_id IS NULL OR k.cross_project = 1)
        AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY rank LIMIT ?`
@@ -3520,6 +3589,7 @@ export async function searchScored(input: {
        CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
        WHERE knowledge_fts MATCH ?
+       AND k.tenant_id = ?
        AND COALESCE(m.confidence, 1.0) > 0.2
        ORDER BY rank LIMIT ?`;
 
@@ -3528,8 +3598,8 @@ export async function searchScored(input: {
       input.query,
       async (matchExpr) => {
         const params = pid
-          ? [title, content, category, matchExpr, pid, limit]
-          : [title, content, category, matchExpr, limit];
+          ? [title, content, category, matchExpr, currentTenantId(), pid, limit]
+          : [title, content, category, matchExpr, currentTenantId(), limit];
         // Staleness-tolerant knowledge FTS scan — offload off the event loop
         // (#966 B). KNOWLEDGE_COLS_K excludes the embedding BLOB, so the rows are
         // structured-clone-safe across the worker boundary.
@@ -3574,6 +3644,7 @@ export async function searchScoredOtherProjects(input: {
      CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
      WHERE knowledge_fts MATCH ?
+     AND k.tenant_id = ?
      AND k.project_id IS NOT NULL
      AND k.project_id != ?
      AND k.cross_project = 0
@@ -3584,7 +3655,15 @@ export async function searchScoredOtherProjects(input: {
     return await runRelaxedSearchAsync(
       input.query,
       async (matchExpr) => {
-        const params = [title, content, category, matchExpr, excludePid, limit];
+        const params = [
+          title,
+          content,
+          category,
+          matchExpr,
+          currentTenantId(),
+          excludePid,
+          limit,
+        ];
         // Staleness-tolerant cross-project knowledge FTS scan — offload off the
         // event loop (#966 B). KNOWLEDGE_COLS_K excludes the embedding BLOB.
         const rows = await offloadAllOrTimeout(ftsSQL, params);
@@ -3603,8 +3682,10 @@ export async function searchScoredOtherProjects(input: {
 
 export function get(id: string): KnowledgeEntry | null {
   const row = db()
-    .query(`SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE id = ?`)
-    .get(id);
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND id = ?`,
+    )
+    .get(currentTenantId(), id);
   // Hydrate the `metadata` column like every `.all()` site does — without this
   // the single-row getters would return an unparsed JSON string, violating the
   // `KnowledgeEntry.metadata: KnowledgeMetadata | null` contract (#627 Phase 1).
@@ -3626,8 +3707,8 @@ export async function getManyOffloaded(
   if (!ids.length) return map;
   const placeholders = ids.map(() => "?").join(",");
   const rows = (await offloadAll(
-    `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE id IN (${placeholders})`,
-    ids,
+    `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND id IN (${placeholders})`,
+    [currentTenantId(), ...ids],
   )) as Record<string, unknown>[];
   for (const row of rows) {
     const entry = hydrateKnowledgeEntry(row) as KnowledgeEntry;
@@ -3646,9 +3727,9 @@ export async function getManyOffloaded(
 export function getByLogical(logicalId: string): KnowledgeEntry | null {
   const row = db()
     .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE logical_id = ?`,
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND logical_id = ?`,
     )
-    .get(logicalId);
+    .get(currentTenantId(), logicalId);
   // Hydrate `metadata` (#627 Phase 1) — see get() above.
   return row ? (hydrateKnowledgeEntry(row) as KnowledgeEntry) : null;
 }
@@ -3674,8 +3755,8 @@ export async function getManyByLogicalOffloaded(
   if (!logicalIds.length) return map;
   const placeholders = logicalIds.map(() => "?").join(",");
   const rows = (await offloadAll(
-    `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE logical_id IN (${placeholders})`,
-    logicalIds,
+    `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND logical_id IN (${placeholders})`,
+    [currentTenantId(), ...logicalIds],
   )) as Record<string, unknown>[];
   for (const row of rows) {
     const entry = hydrateKnowledgeEntry(row) as KnowledgeEntry;
@@ -3693,8 +3774,8 @@ export async function getManyByLogicalOffloaded(
  */
 export function logicalIdOf(id: string): string {
   const row = db()
-    .query("SELECT logical_id FROM knowledge WHERE id = ?")
-    .get(id) as { logical_id: string } | null;
+    .query("SELECT logical_id FROM knowledge WHERE tenant_id = ? AND id = ?")
+    .get(currentTenantId(), id) as { logical_id: string } | null;
   return row?.logical_id ?? id;
 }
 
@@ -3730,9 +3811,9 @@ export function versionHistory(id: string): KnowledgeVersion[] {
   const logicalId = logicalIdOf(id);
   return db()
     .query(
-      `SELECT ${VERSION_COLS} FROM knowledge WHERE logical_id = ? ORDER BY version ASC`,
+      `SELECT ${VERSION_COLS} FROM knowledge WHERE tenant_id = ? AND logical_id = ? ORDER BY version ASC`,
     )
-    .all(logicalId) as KnowledgeVersion[];
+    .all(currentTenantId(), logicalId) as KnowledgeVersion[];
 }
 
 /**
@@ -3748,10 +3829,10 @@ export function recentKnowledgeChanges(
 ): KnowledgeVersion[] {
   return db()
     .query(
-      `SELECT ${VERSION_COLS} FROM knowledge WHERE project_id = ?
+      `SELECT ${VERSION_COLS} FROM knowledge WHERE tenant_id = ? AND project_id = ?
        ORDER BY updated_at DESC, version DESC LIMIT ?`,
     )
-    .all(projectId, limit) as KnowledgeVersion[];
+    .all(currentTenantId(), projectId, limit) as KnowledgeVersion[];
 }
 
 /**
@@ -3767,9 +3848,9 @@ export function getWorkerSource(
 ): { providerID: string; modelID: string } | null {
   const row = db()
     .query(
-      "SELECT worker_provider_id, worker_model_id FROM knowledge_current WHERE id = ?",
+      "SELECT worker_provider_id, worker_model_id FROM knowledge_current WHERE tenant_id = ? AND id = ?",
     )
-    .get(id) as {
+    .get(currentTenantId(), id) as {
     worker_provider_id: string | null;
     worker_model_id: string | null;
   } | null;
@@ -3813,10 +3894,13 @@ export function pruneOversized(maxLength: number): number {
               AS raw_confidence
          FROM knowledge k
          JOIN knowledge_meta m ON m.logical_id = k.logical_id
-         WHERE k.is_current = 1 AND k.is_deleted = 0
-           AND LENGTH(k.content) > ? AND m.confidence > 0`,
+          WHERE k.tenant_id = ? AND k.is_current = 1 AND k.is_deleted = 0
+            AND LENGTH(k.content) > ? AND m.confidence > 0`,
     )
-    .all(maxLength) as { logical_id: string; raw_confidence: number }[];
+    .all(currentTenantId(), maxLength) as {
+    logical_id: string;
+    raw_confidence: number;
+  }[];
   for (const e of oversized)
     applyConfidenceDelta(e.logical_id, -e.raw_confidence, now);
   return oversized.length;
@@ -4521,10 +4605,11 @@ export function recordDedupFeedback(input: {
   db()
     .query(
       `INSERT INTO dedup_feedback
-         (project_id, entry_a_title, entry_b_title, similarity, accepted, source, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          (tenant_id, project_id, entry_a_title, entry_b_title, similarity, accepted, source, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
+      currentTenantId(),
       input.projectId,
       input.entryATitle,
       input.entryBTitle,
@@ -4547,9 +4632,12 @@ export function getDismissedKnowledgePairs(): Set<string> {
   const rows = db()
     .query(
       `SELECT entry_a_title, entry_b_title FROM dedup_feedback
-       WHERE kind = 'knowledge' AND accepted = 0 AND source = 'dashboard'`,
+       WHERE tenant_id = ? AND kind = 'knowledge' AND accepted = 0 AND source = 'dashboard'`,
     )
-    .all() as Array<{ entry_a_title: string; entry_b_title: string }>;
+    .all(currentTenantId()) as Array<{
+    entry_a_title: string;
+    entry_b_title: string;
+  }>;
   const dismissed = new Set<string>();
   for (const r of rows) {
     dismissed.add(`${r.entry_a_title}\x1f${r.entry_b_title}`);
@@ -4605,10 +4693,19 @@ export function recordContradiction(input: {
   const res = db()
     .query(
       `INSERT OR IGNORE INTO knowledge_contradictions
-         (logical_id_a, logical_id_b, project_id, similarity, rationale, status, detected_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`,
+          (tenant_id, logical_id_a, logical_id_b, project_id, similarity, rationale, status, detected_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
     )
-    .run(a, b, input.projectId, input.similarity, input.rationale, now, now);
+    .run(
+      currentTenantId(),
+      a,
+      b,
+      input.projectId,
+      input.similarity,
+      input.rationale,
+      now,
+      now,
+    );
   return res.changes > 0;
 }
 
@@ -4631,10 +4728,10 @@ export function recordContradictionCleared(input: {
   db()
     .query(
       `INSERT OR IGNORE INTO knowledge_contradictions
-         (logical_id_a, logical_id_b, project_id, similarity, rationale, status, detected_at, updated_at)
-       VALUES (?, ?, ?, ?, NULL, 'cleared', ?, ?)`,
+          (tenant_id, logical_id_a, logical_id_b, project_id, similarity, rationale, status, detected_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, NULL, 'cleared', ?, ?)`,
     )
-    .run(a, b, input.projectId, input.similarity, now, now);
+    .run(currentTenantId(), a, b, input.projectId, input.similarity, now, now);
 }
 
 /**
@@ -4647,9 +4744,9 @@ export function contradictionExists(a0: string, b0: string): boolean {
   const row = db()
     .query(
       `SELECT COUNT(*) AS n FROM knowledge_contradictions
-       WHERE logical_id_a = ? AND logical_id_b = ?`,
+       WHERE tenant_id = ? AND logical_id_a = ? AND logical_id_b = ?`,
     )
-    .get(a, b) as { n: number };
+    .get(currentTenantId(), a, b) as { n: number };
   return row.n > 0;
 }
 
@@ -4670,11 +4767,16 @@ export function listOpenContradictions(
          FROM knowledge_contradictions c
          JOIN knowledge_current ka ON ka.logical_id = c.logical_id_a
          JOIN knowledge_current kb ON kb.logical_id = c.logical_id_b
-        WHERE c.status = 'open'
+        WHERE c.tenant_id = ? AND ka.tenant_id = ? AND kb.tenant_id = ? AND c.status = 'open'
         ${pid ? "AND (c.project_id = ? OR c.project_id IS NULL)" : ""}
         ORDER BY c.detected_at DESC`,
     )
-    .all(...(pid ? [pid] : [])) as Array<{
+    .all(
+      currentTenantId(),
+      currentTenantId(),
+      currentTenantId(),
+      ...(pid ? [pid] : []),
+    ) as Array<{
     logical_id_a: string;
     logical_id_b: string;
     similarity: number;
@@ -4709,9 +4811,9 @@ export function setContradictionStatus(
   db()
     .query(
       `UPDATE knowledge_contradictions SET status = ?, updated_at = ?
-       WHERE logical_id_a = ? AND logical_id_b = ?`,
+       WHERE tenant_id = ? AND logical_id_a = ? AND logical_id_b = ?`,
     )
-    .run(status, Date.now(), a, b);
+    .run(status, Date.now(), currentTenantId(), a, b);
 }
 
 /**
@@ -4845,14 +4947,14 @@ export function getDedupFeedback(
     projectId !== null
       ? db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'knowledge' AND project_id = ? ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE tenant_id = ? AND kind = 'knowledge' AND project_id = ? ORDER BY similarity",
           )
-          .all(projectId)
+          .all(currentTenantId(), projectId)
       : db()
           .query(
-            "SELECT similarity, accepted, source FROM dedup_feedback WHERE kind = 'knowledge' AND project_id IS NULL ORDER BY similarity",
+            "SELECT similarity, accepted, source FROM dedup_feedback WHERE tenant_id = ? AND kind = 'knowledge' AND project_id IS NULL ORDER BY similarity",
           )
-          .all()
+          .all(currentTenantId())
   ) as Array<{ similarity: number; accepted: number; source: string }>;
   return rows.map((r) => ({
     similarity: r.similarity,
@@ -4867,14 +4969,14 @@ export function getDedupFeedbackCount(projectId: string | null): number {
     projectId !== null
       ? db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'knowledge' AND project_id = ?",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE tenant_id = ? AND kind = 'knowledge' AND project_id = ?",
           )
-          .get(projectId)
+          .get(currentTenantId(), projectId)
       : db()
           .query(
-            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE kind = 'knowledge' AND project_id IS NULL",
+            "SELECT COUNT(*) as cnt FROM dedup_feedback WHERE tenant_id = ? AND kind = 'knowledge' AND project_id IS NULL",
           )
-          .get()
+          .get(currentTenantId())
   ) as { cnt: number } | null;
   return row?.cnt ?? 0;
 }
@@ -4896,20 +4998,20 @@ export function pruneDedupFeedback(projectId: string | null): void {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE kind = 'knowledge' AND project_id = ?
-           ORDER BY created_at ASC LIMIT ?
-         )`,
+            SELECT id FROM dedup_feedback WHERE tenant_id = ? AND kind = 'knowledge' AND project_id = ?
+            ORDER BY created_at ASC LIMIT ?
+          )`,
       )
-      .run(projectId, excess);
+      .run(currentTenantId(), projectId, excess);
   } else {
     db()
       .query(
         `DELETE FROM dedup_feedback WHERE id IN (
-           SELECT id FROM dedup_feedback WHERE kind = 'knowledge' AND project_id IS NULL
-           ORDER BY created_at ASC LIMIT ?
-         )`,
+            SELECT id FROM dedup_feedback WHERE tenant_id = ? AND kind = 'knowledge' AND project_id IS NULL
+            ORDER BY created_at ASC LIMIT ?
+          )`,
       )
-      .run(excess);
+      .run(currentTenantId(), excess);
   }
 }
 
@@ -4934,6 +5036,14 @@ export function recordTransfer(input: {
   recalledInProjectId: string;
 }): void {
   if (!input.recalledInProjectId) return;
+  if (!getByLogical(input.knowledgeId)) return;
+  if (
+    db()
+      .query("SELECT 1 FROM projects WHERE tenant_id = ? AND id = ?")
+      .get(currentTenantId(), input.recalledInProjectId) == null
+  ) {
+    return;
+  }
   const now = Date.now();
   db()
     .query(
@@ -4953,6 +5063,7 @@ export function recordTransfer(input: {
  * COUNT(*) suffices.
  */
 export function transferCount(knowledgeId: string): number {
+  if (!getByLogical(knowledgeId)) return 0;
   const row = db()
     .query(
       "SELECT COUNT(*) as cnt FROM knowledge_transfers WHERE knowledge_id = ?",
@@ -4968,9 +5079,12 @@ export function transferCount(knowledgeId: string): number {
 export function transferCounts(): Map<string, number> {
   const rows = db()
     .query(
-      "SELECT knowledge_id, COUNT(*) as cnt FROM knowledge_transfers GROUP BY knowledge_id",
+      `SELECT t.knowledge_id, COUNT(*) as cnt
+         FROM knowledge_transfers t
+         JOIN knowledge_current k ON k.logical_id = t.knowledge_id
+        WHERE k.tenant_id = ? GROUP BY t.knowledge_id`,
     )
-    .all() as Array<{ knowledge_id: string; cnt: number }>;
+    .all(currentTenantId()) as Array<{ knowledge_id: string; cnt: number }>;
   const m = new Map<string, number>();
   for (const r of rows) m.set(r.knowledge_id, r.cnt);
   return m;
@@ -4985,6 +5099,7 @@ export type KnowledgeTransfer = {
 
 /** Full per-foreign-project breakdown for one entry, newest activity first. */
 export function transfersFor(knowledgeId: string): KnowledgeTransfer[] {
+  if (!getByLogical(knowledgeId)) return [];
   return db()
     .query(
       `SELECT recalled_in_project_id, hit_count, first_recalled_at, last_recalled_at
@@ -5014,7 +5129,7 @@ function shouldRecordTransfer(
 ): boolean {
   // No session → stable synthetic key so we still throttle per (entry, project).
   const sid = sessionID ?? "__nosession__";
-  const key = `${sid}\x1f${knowledgeId}\x1f${recalledInProjectId}`;
+  const key = `${currentTenantId()}\x1f${sid}\x1f${knowledgeId}\x1f${recalledInProjectId}`;
   const now = Date.now();
   const last = transferDedup.get(key);
   if (last != null && now - last < TRANSFER_DEDUP_WINDOW_MS) return false;

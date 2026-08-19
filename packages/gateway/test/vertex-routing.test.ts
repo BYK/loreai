@@ -16,6 +16,7 @@
  */
 import { describe, test, expect, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 /** A non-streaming Anthropic message response (Vertex returns native shape). */
 function vertexJSONResponse(): Response {
@@ -33,10 +34,10 @@ function vertexJSONResponse(): Response {
   );
 }
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -74,11 +75,13 @@ describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
     });
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
       _setTestVertexTokenProvider(null);
@@ -94,7 +97,7 @@ describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

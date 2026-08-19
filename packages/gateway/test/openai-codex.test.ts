@@ -91,6 +91,19 @@ describe("buildOpenAIResponsesUpstreamRequest (codex)", () => {
     expect(body.service_tier).toBe("priority");
   });
 
+  test("does not send OpenRouter provider options to the Codex backend", () => {
+    const req = parseOpenAICodexRequest(
+      { ...codexBody, provider: { only: ["google-vertex/europe"] } },
+      {},
+    );
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    ).body as Record<string, unknown>;
+
+    expect(body.provider).toBeUndefined();
+  });
+
   test("forces store:false even when the client omits store", () => {
     const { store: _omit, ...noStore } = codexBody;
     const req = parseOpenAICodexRequest(noStore, {});

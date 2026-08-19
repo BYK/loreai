@@ -11,6 +11,7 @@
 import { describe, test, expect, vi } from "vitest";
 import {
   LORE_COMMIT_REMINDER,
+  accumulateOpenAINonStreamJSON,
   loreMessagesToGateway,
   responsesProvenanceContent,
   responsesProvenanceByMessageId,
@@ -46,6 +47,7 @@ import {
   addRecallStoreEntry,
   MAX_RECALL_STORE_ENTRIES,
   MAX_RECALL_STORE_BYTES,
+  executeRecall,
 } from "../src/recall";
 import {
   buildOpenAIResponsesUpstreamRequest,
@@ -190,6 +192,62 @@ describe("RECALL_GATEWAY_TOOL", () => {
     // person/service reference against memory before filesystem exploration.
     expect(RECALL_GATEWAY_TOOL.description).toContain(
       "before searching the filesystem",
+    );
+  });
+});
+
+describe("executeRecall malformed input", () => {
+  test.each([
+    null,
+    [],
+    "query",
+    { query: null },
+    { query: "ok", scope: "invalid" },
+    { query: "ok", limit: 0 },
+    { query: "ok", limit: 1.5 },
+  ])("returns the safe failure result for %#", async (input) => {
+    const result = await executeRecall(
+      {
+        type: "tool_use",
+        id: "recall-malformed",
+        name: RECALL_TOOL_NAME,
+        input,
+      },
+      process.cwd(),
+      "malformed-input",
+    );
+    expect(result.result).toBe(
+      "Recall search failed. The memory system encountered an error.",
+    );
+    expect(result.input).toEqual({ query: "", scope: "all", id: undefined });
+  });
+
+  test('OpenAI arguments "null" reaches the same safe failure path', async () => {
+    const parsed = accumulateOpenAINonStreamJSON({
+      choices: [
+        {
+          index: 0,
+          finish_reason: "tool_calls",
+          message: {
+            tool_calls: [
+              {
+                id: "call-null",
+                function: { name: RECALL_TOOL_NAME, arguments: "null" },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const block = parsed.content[0];
+    if (block?.type !== "tool_use") throw new Error("missing recall tool use");
+    const result = await executeRecall(
+      block,
+      process.cwd(),
+      "openai-null-input",
+    );
+    expect(result.result).toBe(
+      "Recall search failed. The memory system encountered an error.",
     );
   });
 });
@@ -773,6 +831,9 @@ describe("buildRecallFollowUpRequest", () => {
     expect((resultBlock as { toolUseId: string }).toolUseId).toBe(
       recallBlock.id,
     );
+    expect((resultBlock as { toolName?: string }).toolName).toBe(
+      RECALL_TOOL_NAME,
+    );
 
     // Tools list keeps recall — the continuation is recall-aware and
     // can handle further recall calls (multi-turn recall).
@@ -781,6 +842,27 @@ describe("buildRecallFollowUpRequest", () => {
       "Read",
       "recall",
     ]);
+  });
+
+  test("keeps distinct provider id/name on a generated follow-up result", () => {
+    const call: GatewayToolUseBlock = {
+      type: "tool_use",
+      id: "call-1",
+      name: "lookup",
+      input: { query: "x" },
+    };
+    const followUp = buildRecallFollowUpRequest(
+      makeRequest(),
+      makeResponse([call], "tool_use"),
+      '{"value":1}',
+      call,
+      false,
+    );
+    expect(followUp.messages.at(-1)?.content[0]).toMatchObject({
+      type: "tool_result",
+      toolUseId: "call-1",
+      toolName: "lookup",
+    });
   });
 
   test("preserves other request properties", () => {
@@ -1140,6 +1222,73 @@ describe("runRecallFollowUpStreaming", () => {
     expect(forwardedSignal).toBe(controller.signal);
   });
 
+  test("settles on abort when follow-up setup ignores its signal", async () => {
+    const controller = new AbortController();
+    const ctx: RecallFollowUpCtx = {
+      forward: () => new Promise(() => {}),
+      parseJSON: () => {
+        throw new Error("should not be called");
+      },
+    };
+    const pending = runRecallFollowUpStreaming(
+      ctx,
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+      controller.signal,
+    );
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test.each(["abort", "timeout"] as const)(
+    "%s cancels both branches of a pending SSE content probe without awaiting hostile cancellation",
+    async (mode) => {
+      if (mode === "timeout") vi.useFakeTimers();
+      const caller = new AbortController();
+      let sourceCancelled = false;
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            return new Promise(() => {});
+          },
+          cancel() {
+            sourceCancelled = true;
+            return new Promise<void>(() => {});
+          },
+        }),
+      );
+      const pending = runRecallFollowUpStreaming(
+        {
+          forward: async () => ({
+            response,
+            effectiveProtocol: "openai-responses",
+          }),
+          parseJSON: () => Promise.reject(new Error("should not be called")),
+        },
+        makeRequest(),
+        resp,
+        "recall results",
+        recallBlock,
+        mode === "abort" ? caller.signal : undefined,
+      );
+      await Promise.resolve();
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: mode === "abort" ? "AbortError" : "TimeoutError",
+      });
+      if (mode === "abort") {
+        caller.abort(new DOMException("client disconnected", "AbortError"));
+      } else {
+        await vi.advanceTimersByTimeAsync(10_000);
+      }
+      await rejected;
+      await Promise.resolve();
+      expect(sourceCancelled).toBe(true);
+      if (mode === "timeout") vi.useRealTimers();
+    },
+  );
+
   test("cancellation interrupts a stalled non-OK response body", async () => {
     const controller = new AbortController();
     let bodyCancelled = false;
@@ -1424,6 +1573,56 @@ describe("runRecallFollowUpJSON", () => {
       ),
     ).rejects.toThrow("recall follow-up expected JSON but got SSE");
   });
+
+  test("abort settles when JSON follow-up setup ignores its signal", async () => {
+    const controller = new AbortController();
+    const pending = runRecallFollowUpJSON(
+      {
+        forward: () => new Promise(() => {}),
+        parseJSON: () => Promise.reject(new Error("should not be called")),
+      },
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+      controller.signal,
+    );
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  test("abort settles and cancels the body when JSON parsing ignores its signal", async () => {
+    const controller = new AbortController();
+    let bodyCancelled = false;
+    let markParsing!: () => void;
+    const parsing = new Promise<void>((resolve) => (markParsing = resolve));
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          bodyCancelled = true;
+        },
+      }),
+      { headers: { "content-type": "application/json" } },
+    );
+    const pending = runRecallFollowUpJSON(
+      {
+        forward: async () => ({ response, effectiveProtocol: "anthropic" }),
+        parseJSON: () => {
+          markParsing();
+          return new Promise(() => {});
+        },
+      },
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+      controller.signal,
+    );
+    await parsing;
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(bodyCancelled).toBe(true);
+  });
 });
 
 describe("runRecallFollowUpStreamAccumulated", () => {
@@ -1562,6 +1761,43 @@ describe("runRecallFollowUpStreamAccumulated", () => {
     ).rejects.toThrow("requires ctx.parseSSE");
     // Must fail fast before forwarding — never send an unaccumulatable request.
     expect(forwardCalled).toBe(false);
+  });
+
+  test("abort settles and cancels the body when SSE accumulation ignores its signal", async () => {
+    const controller = new AbortController();
+    let bodyCancelled = false;
+    let markParsing!: () => void;
+    const parsing = new Promise<void>((resolve) => (markParsing = resolve));
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(streamController) {
+          streamController.enqueue(new TextEncoder().encode("data: test\n\n"));
+        },
+        cancel() {
+          bodyCancelled = true;
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const pending = runRecallFollowUpStreamAccumulated(
+      {
+        forward: async () => ({ response, effectiveProtocol: "openai" }),
+        parseJSON: () => Promise.reject(new Error("should not be called")),
+        parseSSE: () => {
+          markParsing();
+          return new Promise(() => {});
+        },
+      },
+      makeRequest(),
+      resp,
+      "recall results",
+      recallBlock,
+      controller.signal,
+    );
+    await parsing;
+    controller.abort(new DOMException("client disconnected", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(bodyCancelled).toBe(true);
   });
 });
 

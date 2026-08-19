@@ -6,7 +6,8 @@
  *  - How to detect it (binary name on PATH)
  *  - What env vars to set so it talks through the gateway
  */
-import { getGitRemote } from "@loreai/core";
+import { GATEWAY_AUTH_HEADER, getGitRemote } from "@loreai/core";
+import { PROVIDER_AUTH_HEADER_NAMES } from "../auth";
 import { CLAUDE_CODE_FIRST_PARTY_ENV } from "../cch";
 import { whichSync } from "./lib/which";
 
@@ -82,7 +83,17 @@ function isLoopbackHost(hostname: string): boolean {
   if (h === "localhost" || h === "::1" || h === "0.0.0.0" || h === "::")
     return true;
   // 127.0.0.0/8
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  // URL canonicalizes IPv4-mapped IPv6, e.g. ::ffff:127.0.0.1 becomes
+  // ::ffff:7f00:1. Decode its high IPv4 octet so mapped loopback/wildcard
+  // addresses cannot bypass the self-proxy guard.
+  const mapped = h.match(
+    /^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/,
+  );
+  if (!mapped) return false;
+  const high = Number.parseInt(mapped[1], 16);
+  const low = Number.parseInt(mapped[2], 16);
+  return high >>> 8 === 127 || (high === 0 && low === 0);
 }
 
 /**
@@ -92,8 +103,11 @@ function isLoopbackHost(hostname: string): boolean {
  * Returns the first defined `upstreamEnvVars` value that points somewhere
  * OTHER than a loopback host, so we never "adopt" the gateway pointing at
  * itself and re-launches through `lore run` stay idempotent even if the
- * gateway restarts on a different port. Returns undefined when the agent has
+ * gateway restarts on a different port. Returns null when the agent has
  * no adoptable base-URL var, none is set, or the only value is loopback.
+ * Throws when a non-empty configured value cannot be routed safely; callers
+ * must not mistake an invalid override for an absent one and launch with the
+ * override's credential against Lore's default upstream.
  */
 export function captureUserUpstream(
   agent: AgentDef,
@@ -104,6 +118,11 @@ export function captureUserUpstream(
   for (const key of agent.upstreamEnvVars) {
     const raw = env[key];
     if (!raw) continue;
+    const invalid = () => {
+      throw new Error(
+        `${agent.displayName} has an unsafe or invalid upstream URL in ${key}`,
+      );
+    };
     // Strip control chars (CR/LF/etc.) up front — a newline in a base-URL env
     // var would otherwise ride through into an injected header (CRLF header
     // smuggling). `new URL()` tolerates an embedded newline, so we cannot rely
@@ -111,20 +130,25 @@ export function captureUserUpstream(
     // normalize at the source so every consumer sees a clean value.
     // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
     const trimmed = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
-    if (!trimmed) continue;
+    if (!trimmed) invalid();
     // A real base URL has no internal whitespace. Reject anything with an
     // interior space/tab — after control-char stripping, a CRLF-smuggling
     // payload like "https://host/\nX-Api-Key: stolen" collapses to a value
     // with an interior space, which must not be adopted.
-    if (/\s/.test(trimmed)) continue;
+    if (/\s/.test(trimmed)) invalid();
     let parsed: URL;
     try {
       parsed = new URL(trimmed);
     } catch {
+      invalid();
       continue;
     }
-    // Only adopt a real http(s) URL that isn't the gateway itself.
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+    // Only adopt a real http(s) URL that isn't the gateway itself. Credentials
+    // belong in the agent's auth env, never in a base URL that may be forwarded
+    // in a routing header or surfaced in diagnostics.
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") invalid();
+    if (parsed.username || parsed.password || parsed.search || parsed.hash)
+      invalid();
     // Reject ANY loopback host, not just the exact gateway origin: the gateway
     // may restart on a different port (contention), so a stale
     // ANTHROPIC_BASE_URL=http://127.0.0.1:<old-port> must not be adopted (would
@@ -140,7 +164,9 @@ export function captureUserUpstream(
 /**
  * Sanitize + validate a base-URL env value. Returns a clean http(s) URL string
  * (control chars stripped, interior whitespace rejected — see the CRLF note in
- * captureUserUpstream) or null if unusable. Loopback is NOT rejected here:
+ * captureUserUpstream) or null if unusable. Userinfo, queries, and fragments
+ * are rejected because gateway route normalization cannot preserve them.
+ * Loopback is NOT rejected here:
  * unlike `lore run`, `lore import` starts no long-lived gateway to point at, so
  * a loopback base URL (a running gateway the user already has) is a legitimate
  * extraction upstream.
@@ -154,10 +180,24 @@ function cleanBaseUrl(raw: string | undefined): string | null {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
       return null;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash)
+      return null;
   } catch {
     return null;
   }
   return trimmed;
+}
+
+export class InvalidEnvCredentialUpstreamError extends Error {
+  constructor(
+    readonly agentDisplayName: string,
+    readonly envVarName: string,
+  ) {
+    super(
+      `${agentDisplayName} has an unsafe or invalid upstream URL in ${envVarName}`,
+    );
+    this.name = "InvalidEnvCredentialUpstreamError";
+  }
 }
 
 /**
@@ -168,9 +208,11 @@ function cleanBaseUrl(raw: string | undefined): string | null {
  * corporate-proxy setup (e.g. Claude Code with ANTHROPIC_BASE_URL=openrouter.ai
  * + ANTHROPIC_AUTH_TOKEN=<key>). Returns the token + scheme + captured upstream
  * URL, so `lore import` can route extraction to that upstream. Returns null if
- * the agent has no env-credential mechanism, or the token/base URL is missing.
+ * the agent has no env-credential mechanism or no token is configured.
  * A base URL is NOT required (some setups set only the token and rely on the
- * provider default), but a token IS.
+ * provider default), but a token IS. Throws when a configured base URL is
+ * present but unsafe or invalid, so callers do not silently discard a valid
+ * credential or detach it from the user's intended upstream.
  */
 export function captureUserEnvCredential(
   agent: AgentDef,
@@ -205,11 +247,14 @@ export function captureUserEnvCredential(
   // Capture the paired base URL (first defined + valid), if any.
   let upstreamUrl: string | null = null;
   for (const key of agent.upstreamEnvVars ?? []) {
-    const clean = cleanBaseUrl(env[key]);
-    if (clean) {
-      upstreamUrl = clean;
-      break;
+    const raw = env[key];
+    if (!raw) continue;
+    const clean = cleanBaseUrl(raw);
+    if (!clean) {
+      throw new InvalidEnvCredentialUpstreamError(agent.displayName, key);
     }
+    upstreamUrl = clean;
+    break;
   }
   return { ...picked, upstreamUrl, envVarName };
 }
@@ -259,6 +304,27 @@ export function appendCustomHeader(
   const existing = env[envKey] ?? process.env[envKey] ?? "";
   const header = `${clean(name)}: ${clean(value)}`;
   env[envKey] = existing ? `${existing}\n${header}` : header;
+}
+
+/** Set exactly one custom-header line, replacing case-insensitive duplicates. */
+export function setCustomHeader(
+  env: Record<string, string>,
+  envKey: string,
+  name: string,
+  value: string,
+): void {
+  // oxlint-disable-next-line no-control-regex -- intentional control-character sanitization
+  const clean = (s: string) => s.replace(/[\x00-\x1f\x7f]/g, "");
+  const cleanName = clean(name);
+  const target = cleanName.toLowerCase();
+  const existing = env[envKey] ?? process.env[envKey] ?? "";
+  const retained = existing.split(/\r?\n/).filter((line) => {
+    const colonIndex = line.indexOf(":");
+    if (colonIndex < 0) return line.trim() !== "";
+    return line.slice(0, colonIndex).trim().toLowerCase() !== target;
+  });
+  retained.push(`${cleanName}: ${clean(value)}`);
+  env[envKey] = retained.join("\n");
 }
 
 /**
@@ -405,6 +471,13 @@ export const AGENTS: AgentDef[] = [
           if (colonIdx <= 0) continue;
           const name = line.slice(0, colonIdx).trim();
           const value = line.slice(colonIdx + 1).trim();
+          const lower = name.toLowerCase();
+          if (
+            lower === GATEWAY_AUTH_HEADER ||
+            PROVIDER_AUTH_HEADER_NAMES.some((candidate) => candidate === lower)
+          ) {
+            continue;
+          }
           if (name) pairs.push(`${name} = ${tomlQuote(value)}`);
         }
         if (pairs.length) {

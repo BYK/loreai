@@ -1,11 +1,16 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { registerSink, type LogSink } from "../src/log";
 import {
   db,
   close,
   ensureProject,
   projectId,
+  canonicalProjectId,
+  onProjectMutation,
   invalidateProjectIdCache,
   mergeProjectInternal,
+  PROJECT_MERGE_TABLES,
   loadForceMinLayer,
   saveForceMinLayer,
   getMeta,
@@ -20,6 +25,7 @@ import {
   loadSessionTracking,
   findSessionStatesByFingerprint,
   countMatchingTemporalIds,
+  withSavepoint,
   appendSessionPromptDelta,
   listSessionPromptDeltas,
   loadHeaderSessionIndex,
@@ -35,9 +41,28 @@ import {
   isUnattributedProjectPath,
   UNATTRIBUTED_PROJECT_PREFIX,
   assertFts5Available,
+  MIGRATIONS,
 } from "../src/db";
 import { enableHostedMode, _resetHostedModeForTest } from "../src/hosted";
-import { deleteProject } from "../src/data";
+import {
+  deleteProject,
+  invalidateProjectsCache,
+  listProjects,
+  mergeProjects,
+} from "../src/data";
+import {
+  decodeWarmupHistogram,
+  encodeWarmupHistogram,
+  emptyWarmupHistogramCounts,
+  normalizeWarmupHistogram,
+} from "../src/warmup-histogram";
+
+const passthroughLogSink: LogSink = {
+  info() {},
+  warn() {},
+  error() {},
+  captureException() {},
+};
 
 describe("db", () => {
   test("initializes and creates tables", () => {
@@ -119,7 +144,155 @@ describe("db", () => {
     const row = db().query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(row.version).toBe(79);
+    expect(row.version).toBe(MIGRATIONS.length);
+  });
+
+  test("v81 quarantines sync bookkeeping that predates tenant provenance", () => {
+    const database = db();
+    database.exec("DELETE FROM sync_outbox; DELETE FROM sync_state;");
+    database
+      .query(
+        "INSERT INTO sync_outbox (table_name, row_id, op, changed_at) VALUES ('knowledge', 'legacy-outbox', 'delete', 1)",
+      )
+      .run();
+    database
+      .query(
+        `INSERT INTO sync_state
+           (table_name, row_id, content_hash, revision, remote_updated_at)
+         VALUES ('knowledge', 'legacy-state', NULL, 0, NULL)`,
+      )
+      .run();
+
+    // Reproduce an on-disk v80 database: the rows exist, but neither table can
+    // attribute them to a storage tenant. Re-open through the real migration.
+    database.exec("ALTER TABLE sync_outbox DROP COLUMN tenant_id");
+    database.exec("ALTER TABLE sync_state DROP COLUMN tenant_id");
+    database.exec("UPDATE schema_version SET version = 80");
+    close();
+
+    const migrated = db();
+    expect(
+      migrated.query("SELECT row_id, tenant_id FROM sync_outbox").all(),
+    ).toEqual([{ row_id: "legacy-outbox", tenant_id: null }]);
+    expect(
+      migrated.query("SELECT row_id, tenant_id FROM sync_state").all(),
+    ).toEqual([{ row_id: "legacy-state", tenant_id: null }]);
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    expect(
+      migrated
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get("sync.tenantIsolationReconcile"),
+    ).toEqual({ value: "1" });
+
+    migrated.exec(
+      "DELETE FROM sync_outbox; DELETE FROM sync_state; UPDATE kv_meta SET value = '0' WHERE key = 'sync.tenantIsolationReconcile';",
+    );
+  });
+
+  test("v82 preserves existing temporal/tool data while adding owned identities", () => {
+    const database = db();
+    const projectID = ensureProject(
+      `/tmp/v82-existing-data-${crypto.randomUUID()}`,
+    );
+    const messageID = `legacy-message-${crypto.randomUUID()}`;
+    const callID = `legacy-call-${crypto.randomUUID()}`;
+    database
+      .query(
+        `INSERT INTO temporal_messages
+           (id, source_id, project_id, session_id, role, content, tokens,
+            distilled, created_at, metadata)
+         VALUES (?, ?, ?, 'legacy-session', 'user', 'legacy zircon content',
+                 3, 0, 1000, '{}')`,
+      )
+      .run(messageID, messageID, projectID);
+    database.exec("DELETE FROM tool_calls;");
+    database
+      .query(
+        `INSERT INTO tool_calls
+           (call_id, message_id, project_id, session_id, tool, status,
+            created_at, verifier, input_paths_json)
+         VALUES (?, ?, ?, 'legacy-session', 'read', 'completed', 1000, 0,
+                 '["legacy.ts"]')`,
+      )
+      .run(callID, messageID, projectID);
+
+    // Reproduce the v81 layouts exactly: no temporal source_id and a globally
+    // primary-keyed tool call. Existing IDs and payloads must survive v82.
+    database.exec(`
+      DROP INDEX idx_temporal_source_identity;
+      ALTER TABLE temporal_messages DROP COLUMN source_id;
+      CREATE TABLE tool_calls_v81 (
+        call_id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error_type TEXT,
+        error_message TEXT,
+        duration_ms INTEGER,
+        created_at INTEGER NOT NULL,
+        verifier INTEGER,
+        input_paths_json TEXT
+      );
+      INSERT INTO tool_calls_v81 SELECT * FROM tool_calls;
+      DROP TABLE tool_calls;
+      ALTER TABLE tool_calls_v81 RENAME TO tool_calls;
+      CREATE INDEX idx_tool_calls_project_tool_status
+        ON tool_calls (project_id, tool, status);
+      CREATE INDEX idx_tool_calls_project_session
+        ON tool_calls (project_id, session_id);
+      UPDATE schema_version SET version = 81;
+    `);
+    close();
+
+    const migrated = db();
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    expect(
+      migrated
+        .query(
+          "SELECT id, source_id, content FROM temporal_messages WHERE id = ?",
+        )
+        .get(messageID),
+    ).toEqual({
+      id: messageID,
+      source_id: messageID,
+      content: "legacy zircon content",
+    });
+    expect(
+      migrated
+        .query(
+          `SELECT m.id FROM temporal_fts f
+             JOIN temporal_messages m ON m.rowid = f.rowid
+            WHERE temporal_fts MATCH 'zircon' AND m.id = ?`,
+        )
+        .get(messageID),
+    ).toEqual({ id: messageID });
+    expect(
+      migrated
+        .query(
+          "SELECT call_id, status, input_paths_json FROM tool_calls WHERE call_id = ?",
+        )
+        .get(callID),
+    ).toEqual({
+      call_id: callID,
+      status: "completed",
+      input_paths_json: '["legacy.ts"]',
+    });
+    const pk = (
+      migrated.query("PRAGMA table_info(tool_calls)").all() as Array<{
+        name: string;
+        pk: number;
+      }>
+    )
+      .filter((column) => column.pk > 0)
+      .sort((a, b) => a.pk - b.pk)
+      .map((column) => column.name);
+    expect(pk).toEqual(["project_id", "session_id", "call_id"]);
   });
 
   test("v55: confidence/last_reinforced_at moved to knowledge_meta, exposed via view", () => {
@@ -176,7 +349,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(79);
+    expect(ver.version).toBe(MIGRATIONS.length);
     // Register + JOIN view were rebuilt and are queryable (confidence exposed).
     expect(
       fresh
@@ -213,7 +386,7 @@ describe("db", () => {
     const ver = fresh.query("SELECT version FROM schema_version").get() as {
       version: number;
     };
-    expect(ver.version).toBe(79);
+    expect(ver.version).toBe(MIGRATIONS.length);
   });
 
   test("v56: knowledge_ref_validity table + projects.last_refcheck_at exist after recovery", () => {
@@ -686,6 +859,11 @@ describe("db", () => {
           "INSERT OR IGNORE INTO project_path_aliases (path, project_id) VALUES (?, ?)",
         )
         .run(worktree, id1);
+      db()
+        .query(
+          "INSERT INTO project_id_aliases (retired_id, project_id) VALUES (?, ?)",
+        )
+        .run("retired-before-delete", id1);
       expect(ensureProject(worktree)).toBe(id1); // prime the memo
 
       deleteProject(id1);
@@ -698,6 +876,13 @@ describe("db", () => {
       expect(
         db().query("SELECT 1 AS n FROM projects WHERE id = ?").get(id2),
       ).toBeTruthy();
+      expect(
+        db()
+          .query(
+            "SELECT project_id FROM project_id_aliases WHERE retired_id = ?",
+          )
+          .get("retired-before-delete"),
+      ).toBeNull();
     });
 
     test("mergeProjectInternal invalidates the memo (source path resolves to the winner, not the deleted source)", () => {
@@ -719,6 +904,88 @@ describe("db", () => {
 
       expect(ensureProject(loserPath)).toBe(winner);
       expect(projectId(loserPath)).toBe(winner);
+    });
+
+    test("does not publish an alias to the memo before its transaction commits", () => {
+      enableHostedMode();
+      try {
+        const canonical = `/test/memo-rollback/canonical-${crypto.randomUUID()}`;
+        const worktree = `/test/memo-rollback/worktree-${crypto.randomUUID()}`;
+        const remote = `github.com/test/memo-rollback-${crypto.randomUUID()}`;
+        const id = ensureProject(canonical, undefined, remote);
+
+        withSavepoint("project_alias_publication", () => {
+          expect(ensureProject(worktree, undefined, remote)).toBe(id);
+          // Delete the still-uncommitted alias directly. If ensureProject had
+          // speculatively memoized it, projectId would keep returning `id` even
+          // though no SQL row now supports that mapping.
+          db()
+            .query("DELETE FROM project_path_aliases WHERE path = ?")
+            .run(worktree);
+          expect(projectId(worktree)).toBeUndefined();
+        });
+      } finally {
+        _resetHostedModeForTest();
+      }
+    });
+
+    test("does not publish a lookup under a data version committed after its query", () => {
+      const path = `/test/query-memo-race-${crypto.randomUUID()}`;
+      const movedPath = `${path}-moved`;
+      const oldId = crypto.randomUUID();
+      db()
+        .query(
+          "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          oldId,
+          path,
+          "old owner",
+          `github.com/test/query-memo-race-${crypto.randomUUID()}`,
+          Date.now(),
+        );
+      invalidateProjectIdCache();
+
+      const freshId = crypto.randomUUID();
+      const external = new DatabaseSync(process.env.LORE_DB_PATH as string);
+      external.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON");
+      let reassigned = false;
+      registerSink({
+        ...passthroughLogSink,
+        withDbSpan<T>(sql: string, fn: () => T): T {
+          const result = fn();
+          if (
+            !reassigned &&
+            sql.includes("SELECT id, git_remote FROM projects") &&
+            sql.includes("path = ?")
+          ) {
+            reassigned = true;
+            external.exec("BEGIN IMMEDIATE");
+            external
+              .prepare("UPDATE projects SET path = ? WHERE id = ?")
+              .run(movedPath, oldId);
+            external
+              .prepare(
+                "INSERT INTO projects (id, path, name, created_at) VALUES (?, ?, ?, ?)",
+              )
+              .run(freshId, path, "fresh owner", Date.now());
+            external.exec("COMMIT");
+          }
+          return result;
+        },
+      });
+      try {
+        // This query legitimately saw oldId, but the external commit lands
+        // after the SQL completes and before memo publication.
+        expect(projectId(path)).toBe(oldId);
+      } finally {
+        registerSink(passthroughLogSink);
+        external.close();
+      }
+
+      expect(reassigned).toBe(true);
+      // The lookup-start data_version must invalidate the stale result here.
+      expect(projectId(path)).toBe(freshId);
     });
   });
 
@@ -833,14 +1100,110 @@ describe("db", () => {
       expect(
         ensureProject(path, undefined, "github.com/test/backfill-cache"),
       ).toBe(id);
-      // Raw-delete the row WITHOUT invalidating: a cache HIT must still return
-      // id, proving the post-backfill mapping was memoized (so the next call
-      // skips the exact-path lookup — the extra lookup Seer flagged).
-      db().query("DELETE FROM projects WHERE id = ?").run(id);
-      expect(
-        ensureProject(path, undefined, "github.com/test/backfill-cache"),
-      ).toBe(id);
+      const queries: string[] = [];
+      registerSink({
+        ...passthroughLogSink,
+        withDbSpan<T>(sql: string, fn: () => T): T {
+          queries.push(sql);
+          return fn();
+        },
+      });
+      try {
+        expect(
+          ensureProject(path, undefined, "github.com/test/backfill-cache"),
+        ).toBe(id);
+        expect(queries).toContain("PRAGMA data_version");
+        expect(
+          queries.some((sql) =>
+            sql.includes("SELECT id, git_remote FROM projects WHERE path = ?"),
+          ),
+        ).toBe(false);
+      } finally {
+        registerSink(passthroughLogSink);
+      }
     });
+
+    test("external path reassignment invalidates a live cached UUID", () => {
+      const path = `/test/external-path-owner-${crypto.randomUUID()}`;
+      const movedPath = `${path}-moved`;
+      const oldId = ensureProject(
+        path,
+        undefined,
+        `github.com/test/external-path-${crypto.randomUUID()}`,
+      );
+      expect(projectId(path)).toBe(oldId); // prime the remote-backed memo
+
+      const freshId = crypto.randomUUID();
+      const external = new DatabaseSync(process.env.LORE_DB_PATH as string);
+      try {
+        external.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON");
+        external.exec("BEGIN IMMEDIATE");
+        external
+          .prepare("UPDATE projects SET path = ? WHERE id = ?")
+          .run(movedPath, oldId);
+        external
+          .prepare(
+            "INSERT INTO projects (id, path, name, created_at) VALUES (?, ?, ?, ?)",
+          )
+          .run(freshId, path, "fresh external owner", Date.now());
+        external.exec("COMMIT");
+      } finally {
+        external.close();
+      }
+
+      expect(projectId(path)).toBe(freshId);
+      expect(ensureProject(path)).toBe(freshId);
+    });
+  });
+
+  test("committed canonical reads stay bound to the live database path", () => {
+    const sourceId = ensureProject(
+      `/test/committed-reader-source-${crypto.randomUUID()}`,
+    );
+    const targetId = ensureProject(
+      `/test/committed-reader-target-${crypto.randomUUID()}`,
+    );
+    mergeProjectInternal(sourceId, targetId);
+
+    const originalPath = process.env.LORE_DB_PATH;
+    process.env.LORE_DB_PATH = ":memory:";
+    try {
+      withSavepoint("committed_reader_live_path", () => {
+        expect(canonicalProjectId(sourceId, { committed: true })).toBe(
+          targetId,
+        );
+      });
+    } finally {
+      if (originalPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = originalPath;
+    }
+  });
+
+  test("committed canonical reads fail closed for private in-memory databases", () => {
+    const originalPath = process.env.LORE_DB_PATH;
+    close();
+    try {
+      const memoryPaths = [
+        ":memory:",
+        `file:lore-committed-${crypto.randomUUID()}?mode=memory&cache=shared`,
+      ];
+      for (const [index, memoryPath] of memoryPaths.entries()) {
+        process.env.LORE_DB_PATH = memoryPath;
+        const sourceId = ensureProject(`/test/in-memory-source-${index}`);
+        const targetId = ensureProject(`/test/in-memory-target-${index}`);
+        withSavepoint("in_memory_committed_reader", () => {
+          mergeProjectInternal(sourceId, targetId);
+          expect(
+            canonicalProjectId(sourceId, { committed: true }),
+          ).toBeUndefined();
+        });
+        close();
+      }
+    } finally {
+      close();
+      if (originalPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = originalPath;
+    }
   });
 
   // Regression: the "git-remote magnet" bug. A non-repo path (e.g. a parent
@@ -1035,6 +1398,759 @@ describe("db", () => {
       .get("/test/merge/source") as { project_id: string } | null;
     expect(alias).not.toBeNull();
     expect(alias?.project_id).toBe(targetId);
+    expect(canonicalProjectId(sourceId)).toBe(targetId);
+  });
+
+  test("project self-merges preserve the project and all scoped data", () => {
+    const project = ensureProject("/test/merge/self");
+    db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        crypto.randomUUID(),
+        project,
+        "session-self-merge",
+        "user",
+        "must survive",
+        Date.now(),
+      );
+    const mutations: unknown[] = [];
+    const unsubscribe = onProjectMutation((mutation) =>
+      mutations.push(mutation),
+    );
+
+    try {
+      mergeProjectInternal(project, project);
+      expect(mergeProjects(project, project)).toEqual({
+        knowledge_moved: 0,
+        messages_moved: 0,
+        distillations_moved: 0,
+      });
+
+      expect(
+        db().query("SELECT path FROM projects WHERE id = ?").get(project),
+      ).toEqual({ path: "/test/merge/self" });
+      expect(
+        db()
+          .query("SELECT content FROM temporal_messages WHERE project_id = ?")
+          .all(project),
+      ).toEqual([{ content: "must survive" }]);
+      expect(mutations).toEqual([]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("project ID redirects flatten transitive merges and ignore stale sources", () => {
+    const source = ensureProject("/test/merge-id-alias/source");
+    const middle = ensureProject("/test/merge-id-alias/middle");
+    const target = ensureProject("/test/merge-id-alias/target");
+    const staleTarget = ensureProject("/test/merge-id-alias/stale-target");
+
+    mergeProjectInternal(source, middle);
+    mergeProjectInternal(middle, target);
+    mergeProjectInternal(source, staleTarget);
+
+    expect(canonicalProjectId(source)).toBe(target);
+    expect(canonicalProjectId(middle)).toBe(target);
+    expect(canonicalProjectId(target)).toBe(target);
+    expect(
+      db()
+        .query(
+          "SELECT retired_id, project_id FROM project_id_aliases WHERE retired_id IN (?, ?) ORDER BY retired_id",
+        )
+        .all(source, middle),
+    ).toEqual(
+      [
+        { retired_id: source, project_id: target },
+        { retired_id: middle, project_id: target },
+      ].sort((a, b) => a.retired_id.localeCompare(b.retired_id)),
+    );
+  });
+
+  test("mergeProjectInternal covers every project-scoped table", () => {
+    const d = db();
+    expect(Object.isFrozen(PROJECT_MERGE_TABLES)).toBe(true);
+    const tables = (
+      d
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .all() as Array<{ name: string }>
+    )
+      .map((row) => row.name)
+      .filter(
+        (name) =>
+          !name.startsWith("temporal_vec_") &&
+          !name.startsWith("distillation_vec_"),
+      );
+    const projectScoped = tables.filter((table) => {
+      const quoted = table.replaceAll('"', '""');
+      const columns = d.query(`PRAGMA table_info("${quoted}")`).all() as Array<{
+        name: string;
+      }>;
+      return columns.some(
+        (column) =>
+          column.name === "project_id" ||
+          column.name === "recalled_in_project_id",
+      );
+    });
+    const registered = PROJECT_MERGE_TABLES.filter((table) =>
+      tables.includes(table),
+    );
+    expect(projectScoped.sort()).toEqual([...registered].sort());
+  });
+
+  test("mergeProjectInternal preserves collision-prone project sidecars", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-sidecars/source");
+    const targetId = ensureProject("/test/merge-sidecars/target");
+    const sourceCounts = Array.from({ length: 21 }, () => 1);
+    const targetCounts = Array.from({ length: 21 }, () => 2);
+
+    d.query(
+      `INSERT INTO session_prompt_deltas
+         (session_id, seq, project_id, selector, content)
+       VALUES ('source-session', 1, ?, 'after-system', 'source delta')`,
+    ).run(sourceId);
+    d.query(
+      `INSERT INTO import_history
+         (id, project_id, agent_name, source_id, source_hash,
+          entries_created, entries_updated, imported_at)
+       VALUES ('target-import', ?, 'opencode', 'shared', 'old', 1, 2, 100),
+              ('source-import', ?, 'opencode', 'shared', 'new', 3, 4, 200),
+              ('source-only-import', ?, 'claude', 'unique', 'only', 5, 6, 150)`,
+    ).run(targetId, sourceId, sourceId);
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, 21, 100), (?, 'all', ?, 42, 200)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      targetId,
+      JSON.stringify(targetCounts),
+    );
+    d.query(
+      `INSERT INTO dedup_feedback
+         (project_id, entry_a_title, entry_b_title, similarity, accepted,
+          source, created_at, kind)
+       VALUES (?, 'source-a', 'source-b', 0.9, 1, 'manual', 100, 'knowledge'),
+              (?, 'target-a', 'target-b', 0.8, 0, 'manual', 200, 'knowledge')`,
+    ).run(sourceId, targetId);
+    d.query(
+      `INSERT INTO knowledge_tombstones (id, project_id, deleted_at)
+       VALUES ('source-tombstone', ?, 100), ('target-tombstone', ?, 200)`,
+    ).run(sourceId, targetId);
+    d.query(
+      `INSERT INTO cache_bust_stats
+         (project_id, cause, relocatable, turns, write_tokens, updated_at)
+       VALUES (?, 'system-host-change', 1, 2, 20, 100),
+              (?, 'system-host-change', 1, 3, 30, 200)`,
+    ).run(sourceId, targetId);
+    d.query(
+      `INSERT INTO knowledge_contradictions
+         (logical_id_a, logical_id_b, project_id, similarity, status,
+          detected_at, updated_at)
+       VALUES ('source-a', 'source-b', ?, 0.9, 'open', 100, 100),
+              ('target-a', 'target-b', ?, 0.8, 'resolved', 200, 200)`,
+    ).run(sourceId, targetId);
+
+    mergeProjectInternal(sourceId, targetId);
+
+    for (const table of [
+      "session_prompt_deltas",
+      "import_history",
+      "warmup_histograms",
+      "dedup_feedback",
+      "knowledge_tombstones",
+      "cache_bust_stats",
+      "knowledge_contradictions",
+    ]) {
+      const quoted = table.replaceAll('"', '""');
+      const source = d
+        .query(`SELECT COUNT(*) AS count FROM "${quoted}" WHERE project_id = ?`)
+        .get(sourceId) as { count: number };
+      expect(source.count, table).toBe(0);
+    }
+    expect(
+      d
+        .query(
+          "SELECT project_id FROM session_prompt_deltas WHERE session_id = 'source-session'",
+        )
+        .get(),
+    ).toEqual({ project_id: targetId });
+    expect(
+      d
+        .query(
+          `SELECT source_hash, entries_created, entries_updated, imported_at
+             FROM import_history
+            WHERE project_id = ? AND agent_name = 'opencode' AND source_id = 'shared'`,
+        )
+        .get(targetId),
+    ).toEqual({
+      source_hash: "new",
+      entries_created: 3,
+      entries_updated: 4,
+      imported_at: 200,
+    });
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM import_history WHERE project_id = ?",
+        )
+        .get(targetId),
+    ).toEqual({ count: 2 });
+    const histogram = d
+      .query(
+        "SELECT counts, total, updated_at FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(targetId) as { counts: string; total: number; updated_at: number };
+    expect(JSON.parse(histogram.counts)).toEqual(
+      Array.from({ length: 21 }, () => 3),
+    );
+    expect(histogram).toMatchObject({ total: 63, updated_at: 200 });
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM dedup_feedback WHERE project_id = ?",
+        )
+        .get(targetId),
+    ).toEqual({ count: 2 });
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM knowledge_tombstones WHERE project_id = ?",
+        )
+        .get(targetId),
+    ).toEqual({ count: 2 });
+    expect(
+      d
+        .query(
+          `SELECT turns, write_tokens, updated_at FROM cache_bust_stats
+            WHERE project_id = ? AND cause = 'system-host-change' AND relocatable = 1`,
+        )
+        .get(targetId),
+    ).toEqual({ turns: 5, write_tokens: 50, updated_at: 200 });
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM knowledge_contradictions WHERE project_id = ?",
+        )
+        .get(targetId),
+    ).toEqual({ count: 2 });
+  });
+
+  test("mergeProjectInternal rebuilds colliding session rollups from source rows", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-rollup/source");
+    const targetId = ensureProject("/test/merge-rollup/target");
+    const sessionId = "shared-rollup-session";
+    d.query(
+      `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, created_at)
+       VALUES ('source-rollup-message', ?, ?, 'user', 'source', 5, 100),
+              ('target-rollup-message', ?, ?, 'assistant', 'target', 7, 200)`,
+    ).run(sourceId, sessionId, targetId, sessionId);
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM session_rollup WHERE session_id = ?",
+        )
+        .get(sessionId),
+    ).toEqual({ count: 2 });
+
+    mergeProjectInternal(sourceId, targetId);
+
+    expect(
+      d
+        .query(
+          `SELECT project_id, message_count, token_sum, first_message_at,
+                  last_message_at, first_assistant_metadata, dirty
+             FROM session_rollup WHERE session_id = ?`,
+        )
+        .all(sessionId),
+    ).toEqual([
+      {
+        project_id: targetId,
+        message_count: 2,
+        token_sum: 12,
+        first_message_at: 100,
+        last_message_at: 200,
+        first_assistant_metadata: null,
+        dirty: 0,
+      },
+    ]);
+  });
+
+  test("mergeProjectInternal never combines invalid warmup histograms", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-histogram/source");
+    const targetId = ensureProject("/test/merge-histogram/target");
+    const valid = JSON.stringify(Array.from({ length: 21 }, () => 2));
+    const invalid = new Map<string, string>([
+      ["wrong-length", JSON.stringify([1, 1])],
+      [
+        "non-finite",
+        `[${Array.from({ length: 21 }, () => "1")
+          .slice(0, 20)
+          .join(",")},1e400]`,
+      ],
+      ["malformed", "{bad"],
+      [
+        "negative",
+        JSON.stringify([-1, ...Array.from({ length: 20 }, () => 1)]),
+      ],
+      [
+        "fractional",
+        JSON.stringify([0.5, ...Array.from({ length: 20 }, () => 1)]),
+      ],
+    ]);
+    for (const [slot, counts] of invalid) {
+      d.query(
+        `INSERT INTO warmup_histograms
+           (project_id, time_slot, counts, total, updated_at)
+         VALUES (?, ?, ?, 21, 100), (?, ?, ?, 42, 200)`,
+      ).run(sourceId, slot, counts, targetId, slot, valid);
+    }
+
+    mergeProjectInternal(sourceId, targetId);
+
+    const rows = d
+      .query(
+        "SELECT time_slot, counts, total, updated_at FROM warmup_histograms WHERE project_id = ? ORDER BY time_slot",
+      )
+      .all(targetId) as Array<{
+      time_slot: string;
+      counts: string;
+      total: number;
+      updated_at: number;
+    }>;
+    expect(rows).toHaveLength(invalid.size);
+    for (const row of rows) {
+      expect(row.counts, row.time_slot).toBe(valid);
+      expect(row.total, row.time_slot).toBe(42);
+      expect(row.updated_at, row.time_slot).toBe(200);
+    }
+  });
+
+  test("mergeProjectInternal makes the source canonical path target the winner", () => {
+    const d = db();
+    const sourcePath = "/test/merge-alias-conflict/source";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject("/test/merge-alias-conflict/target");
+    const unrelatedId = ensureProject("/test/merge-alias-conflict/unrelated");
+    d.query(
+      "INSERT INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+    ).run(sourcePath, unrelatedId);
+
+    mergeProjectInternal(sourceId, targetId);
+
+    expect(projectId(sourcePath)).toBe(targetId);
+    expect(
+      d
+        .query("SELECT project_id FROM project_path_aliases WHERE path = ?")
+        .get(sourcePath),
+    ).toEqual({ project_id: targetId });
+  });
+
+  test("mergeProjectInternal rejects 64-bit counter overflow atomically", () => {
+    const d = db();
+    const cacheSource = ensureProject("/test/merge-overflow/cache-source");
+    const cacheTarget = ensureProject("/test/merge-overflow/cache-target");
+    d.exec(`
+      INSERT INTO cache_bust_stats
+        (project_id, cause, relocatable, turns, write_tokens, updated_at)
+      VALUES ('${cacheSource}', 'overflow', 0, 1, 1, 100),
+             ('${cacheTarget}', 'overflow', 0, 9223372036854775807,
+              9223372036854775807, 200);
+    `);
+    expect(() => mergeProjectInternal(cacheSource, cacheTarget)).toThrow(
+      /counter overflow/,
+    );
+    expect(
+      d
+        .query("SELECT COUNT(*) AS count FROM projects WHERE id IN (?, ?)")
+        .get(cacheSource, cacheTarget),
+    ).toEqual({ count: 2 });
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM cache_bust_stats WHERE project_id IN (?, ?)",
+        )
+        .get(cacheSource, cacheTarget),
+    ).toEqual({ count: 2 });
+
+    const transferSource = ensureProject(
+      "/test/merge-overflow/transfer-source",
+    );
+    const transferTarget = ensureProject(
+      "/test/merge-overflow/transfer-target",
+    );
+    d.exec(`
+      INSERT INTO knowledge_transfers
+        (knowledge_id, recalled_in_project_id, hit_count,
+         first_recalled_at, last_recalled_at)
+      VALUES ('overflow-entry', '${transferSource}', 1, 100, 100),
+             ('overflow-entry', '${transferTarget}', 9223372036854775807,
+              200, 200);
+    `);
+    expect(() => mergeProjectInternal(transferSource, transferTarget)).toThrow(
+      /counter overflow/,
+    );
+    expect(
+      d
+        .query("SELECT COUNT(*) AS count FROM projects WHERE id IN (?, ?)")
+        .get(transferSource, transferTarget),
+    ).toEqual({ count: 2 });
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM knowledge_transfers WHERE recalled_in_project_id IN (?, ?)",
+        )
+        .get(transferSource, transferTarget),
+    ).toEqual({ count: 2 });
+  });
+
+  test.each([
+    ["turns", 1.5, 2],
+    ["write tokens", 1, 2.5],
+  ] as const)(
+    "mergeProjectInternal rejects fractional source-only cache %s atomically",
+    (_field, turns, writeTokens) => {
+      const d = db();
+      const cacheSource = ensureProject(
+        `/test/merge-invalid/cache-source-${_field}`,
+      );
+      const cacheTarget = ensureProject(
+        `/test/merge-invalid/cache-target-${_field}`,
+      );
+      d.query(
+        `INSERT INTO cache_bust_stats
+           (project_id, cause, relocatable, turns, write_tokens, updated_at)
+         VALUES (?, ?, 0, ?, ?, 100)`,
+      ).run(cacheSource, `invalid-source-${_field}`, turns, writeTokens);
+
+      expect(() => mergeProjectInternal(cacheSource, cacheTarget)).toThrow(
+        /counter overflow/,
+      );
+      expect(
+        d
+          .query(
+            `SELECT project_id, turns, write_tokens
+               FROM cache_bust_stats WHERE project_id = ?`,
+          )
+          .get(cacheSource),
+      ).toEqual({
+        project_id: cacheSource,
+        turns,
+        write_tokens: writeTokens,
+      });
+      expect(
+        d
+          .query("SELECT COUNT(*) AS count FROM projects WHERE id IN (?, ?)")
+          .get(cacheSource, cacheTarget),
+      ).toEqual({ count: 2 });
+    },
+  );
+
+  test("mergeProjectInternal rejects fractional source-only transfer counters atomically", () => {
+    const d = db();
+    const transferSource = ensureProject("/test/merge-invalid/transfer-source");
+    const transferTarget = ensureProject("/test/merge-invalid/transfer-target");
+    d.exec(`
+      INSERT INTO knowledge_transfers
+        (knowledge_id, recalled_in_project_id, hit_count,
+         first_recalled_at, last_recalled_at)
+      VALUES ('invalid-source-entry', '${transferSource}', 3.5, 100, 100);
+    `);
+    expect(() => mergeProjectInternal(transferSource, transferTarget)).toThrow(
+      /counter overflow/,
+    );
+    expect(
+      d
+        .query(
+          `SELECT recalled_in_project_id, hit_count
+             FROM knowledge_transfers
+            WHERE knowledge_id = 'invalid-source-entry'`,
+        )
+        .get(),
+    ).toEqual({ recalled_in_project_id: transferSource, hit_count: 3.5 });
+    expect(
+      d
+        .query("SELECT COUNT(*) AS count FROM projects WHERE id IN (?, ?)")
+        .get(transferSource, transferTarget),
+    ).toEqual({ count: 2 });
+  });
+
+  test("mergeProjectInternal preserves valid histogram distributions across aggregate overflow", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-overflow-histogram/source");
+    const targetId = ensureProject("/test/merge-overflow-histogram/target");
+    const laterId = ensureProject("/test/merge-overflow-histogram/later");
+    const sourceTotal = Number.MAX_SAFE_INTEGER;
+    const emptyCounts = Array.from({ length: 21 }, () => 0);
+    const sourceCounts = [...emptyCounts];
+    const targetCounts = [...emptyCounts];
+    const laterCounts = [...emptyCounts];
+    sourceCounts[0] = sourceTotal - 1;
+    sourceCounts[1] = 1;
+    targetCounts[2] = 1;
+    laterCounts[3] = 1;
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, ?, 100),
+              (?, 'all', ?, ?, 100),
+              (?, 'all', ?, ?, 100)`,
+    ).run(
+      sourceId,
+      JSON.stringify(sourceCounts),
+      sourceTotal,
+      targetId,
+      JSON.stringify(targetCounts),
+      1,
+      laterId,
+      JSON.stringify(laterCounts),
+      1,
+    );
+
+    mergeProjectInternal(sourceId, targetId);
+    mergeProjectInternal(targetId, laterId);
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(laterId) as { counts: string; total: number };
+    const exact = decodeWarmupHistogram(row.counts, row.total);
+    expect(exact).toBeDefined();
+    const counts = normalizeWarmupHistogram(exact ?? []).counts;
+    expect(Number.isSafeInteger(row.total)).toBe(true);
+    expect(counts.reduce((sum, count) => sum + count, 0)).toBe(row.total);
+    expect(counts.slice(0, 4).every((count) => count > 0)).toBe(true);
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM warmup_histograms WHERE project_id IN (?, ?)",
+        )
+        .get(sourceId, targetId),
+    ).toEqual({ count: 0 });
+  });
+
+  test("mergeProjectInternal persists a decodable row when exact weights gain a digit", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-exact-boundary/source");
+    const targetId = ensureProject("/test/merge-exact-boundary/target");
+    const boundary = 10n ** 1000n - 1n;
+    const sourceWeights = emptyWarmupHistogramCounts();
+    const targetWeights = emptyWarmupHistogramCounts();
+    sourceWeights[0] = boundary;
+    sourceWeights[1] = 1n;
+    targetWeights[0] = boundary;
+    targetWeights[2] = 1n;
+    const source = encodeWarmupHistogram(sourceWeights);
+    const target = encodeWarmupHistogram(targetWeights);
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'all', ?, ?, 100), (?, 'all', ?, ?, 100)`,
+    ).run(
+      sourceId,
+      source.counts,
+      source.total,
+      targetId,
+      target.counts,
+      target.total,
+    );
+
+    mergeProjectInternal(sourceId, targetId);
+
+    const row = d
+      .query(
+        "SELECT counts, total FROM warmup_histograms WHERE project_id = ? AND time_slot = 'all'",
+      )
+      .get(targetId) as { counts: string; total: number };
+    const decoded = decodeWarmupHistogram(row.counts, row.total);
+    expect(decoded).toBeDefined();
+    expect(decoded?.[0].toString()).toHaveLength(1001);
+    expect(decoded?.slice(0, 3).every((count) => count > 0n)).toBe(true);
+  });
+
+  test.each([
+    ["source", 200, 100],
+    ["target", 100, 200],
+  ] as const)(
+    "mergeProjectInternal retains newer %s histogram with unsafe totals",
+    (_newer, sourceUpdatedAt, targetUpdatedAt) => {
+      const d = db();
+      const sourceId = ensureProject(
+        `/test/merge-unsafe-histogram/source-${sourceUpdatedAt}`,
+      );
+      const targetId = ensureProject(
+        `/test/merge-unsafe-histogram/target-${targetUpdatedAt}`,
+      );
+      const sourceCounts = JSON.stringify(Array.from({ length: 21 }, () => 1));
+      const targetCounts = JSON.stringify(Array.from({ length: 21 }, () => 2));
+      d.exec(`
+        INSERT INTO warmup_histograms
+          (project_id, time_slot, counts, total, updated_at)
+        VALUES ('${sourceId}', 'all', '${sourceCounts}',
+                9223372036854775807, ${sourceUpdatedAt}),
+               ('${targetId}', 'all', '${targetCounts}',
+                9223372036854775806, ${targetUpdatedAt});
+      `);
+
+      mergeProjectInternal(sourceId, targetId);
+
+      const row = d
+        .query(
+          `SELECT counts, CAST(total AS TEXT) AS total, updated_at
+             FROM warmup_histograms
+            WHERE project_id = ? AND time_slot = 'all'`,
+        )
+        .get(targetId);
+      expect(row).toEqual(
+        sourceUpdatedAt > targetUpdatedAt
+          ? {
+              counts: sourceCounts,
+              total: "9223372036854775807",
+              updated_at: sourceUpdatedAt,
+            }
+          : {
+              counts: targetCounts,
+              total: "9223372036854775806",
+              updated_at: targetUpdatedAt,
+            },
+      );
+    },
+  );
+
+  test.each([
+    ["source", 200, 100],
+    ["target", 100, 200],
+  ] as const)(
+    "mergeProjectInternal retains newer %s histogram when totals disagree with counts",
+    (_newer, sourceUpdatedAt, targetUpdatedAt) => {
+      const d = db();
+      const sourceId = ensureProject(
+        `/test/merge-inconsistent-histogram/source-${sourceUpdatedAt}`,
+      );
+      const targetId = ensureProject(
+        `/test/merge-inconsistent-histogram/target-${targetUpdatedAt}`,
+      );
+      const sourceCounts = JSON.stringify(Array.from({ length: 21 }, () => 1));
+      const targetCounts = JSON.stringify(Array.from({ length: 21 }, () => 2));
+      d.query(
+        `INSERT INTO warmup_histograms
+           (project_id, time_slot, counts, total, updated_at)
+         VALUES (?, 'all', ?, 22, ?), (?, 'all', ?, 43, ?)`,
+      ).run(
+        sourceId,
+        sourceCounts,
+        sourceUpdatedAt,
+        targetId,
+        targetCounts,
+        targetUpdatedAt,
+      );
+
+      mergeProjectInternal(sourceId, targetId);
+
+      expect(
+        d
+          .query(
+            `SELECT counts, total, updated_at
+               FROM warmup_histograms
+              WHERE project_id = ? AND time_slot = 'all'`,
+          )
+          .get(targetId),
+      ).toEqual(
+        sourceUpdatedAt > targetUpdatedAt
+          ? { counts: sourceCounts, total: 22, updated_at: sourceUpdatedAt }
+          : { counts: targetCounts, total: 43, updated_at: targetUpdatedAt },
+      );
+    },
+  );
+
+  test("mergeProjectInternal rejects malformed rollup source counters", () => {
+    const d = db();
+    const sourceId = ensureProject("/test/merge-invalid-rollup/source");
+    const targetId = ensureProject("/test/merge-invalid-rollup/target");
+    const sessionId = "invalid-rollup-session";
+    d.exec(`
+      INSERT INTO temporal_messages
+        (id, project_id, session_id, role, content, tokens, created_at)
+      VALUES ('invalid-source-rollup', '${sourceId}', '${sessionId}',
+              'user', 'source', 1.25, 100),
+             ('invalid-target-rollup', '${targetId}', '${sessionId}',
+              'assistant', 'target', 2.5, 200);
+    `);
+
+    expect(() => mergeProjectInternal(sourceId, targetId)).toThrow(
+      /rollup counter invalid/,
+    );
+    expect(
+      d
+        .query("SELECT COUNT(*) AS count FROM projects WHERE id IN (?, ?)")
+        .get(sourceId, targetId),
+    ).toEqual({ count: 2 });
+    expect(
+      d
+        .query(
+          "SELECT COUNT(*) AS count FROM session_rollup WHERE session_id = ?",
+        )
+        .get(sessionId),
+    ).toEqual({ count: 2 });
+  });
+
+  test("listProjects never caches an uncommitted nested merge", () => {
+    const sourcePath = "/test/merge-list-cache/source";
+    const targetPath = "/test/merge-list-cache/target";
+    const sourceId = ensureProject(sourcePath);
+    const targetId = ensureProject(targetPath);
+    invalidateProjectsCache();
+    expect(listProjects().some((project) => project.id === sourceId)).toBe(
+      true,
+    );
+
+    expect(() =>
+      withSavepoint("outer_merge_rollback", () => {
+        mergeProjectInternal(sourceId, targetId);
+        expect(listProjects().some((project) => project.id === sourceId)).toBe(
+          false,
+        );
+        throw new Error("force outer rollback");
+      }),
+    ).toThrow("force outer rollback");
+
+    expect(projectId(sourcePath)).toBe(sourceId);
+    expect(canonicalProjectId(sourceId)).toBe(sourceId);
+    expect(
+      db()
+        .query("SELECT project_id FROM project_id_aliases WHERE retired_id = ?")
+        .get(sourceId),
+    ).toBeNull();
+    expect(listProjects().some((project) => project.id === sourceId)).toBe(
+      true,
+    );
+  });
+
+  test("project mutation listeners fan out without replacing data cache invalidation", () => {
+    listProjects();
+    const mutations: string[] = [];
+    const unsubscribe = onProjectMutation((mutation) => {
+      mutations.push(mutation.type);
+    });
+    try {
+      const project = ensureProject(
+        `/test/listener-fanout-${crypto.randomUUID()}`,
+      );
+      expect(mutations).toEqual(["create"]);
+      expect(listProjects().some(({ id }) => id === project)).toBe(true);
+    } finally {
+      unsubscribe();
+    }
   });
 
   test("recoverMissingObjects creates project_path_aliases when missing", () => {
@@ -1060,6 +2176,28 @@ describe("db", () => {
       .get() as { name: string } | null;
     expect(after).not.toBeNull();
     expect(after?.name).toBe("project_path_aliases");
+  });
+
+  test("recoverMissingObjects creates project_id_aliases when missing", () => {
+    const d = db();
+    d.exec("DROP TABLE IF EXISTS project_id_aliases");
+    expect(
+      d
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='project_id_aliases'",
+        )
+        .get(),
+    ).toBeNull();
+
+    close();
+    const fresh = db();
+    expect(
+      fresh
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='project_id_aliases'",
+        )
+        .get(),
+    ).toEqual({ name: "project_id_aliases" });
   });
 
   test("saveSessionCosts and loadSessionCosts round-trip", () => {
@@ -1363,6 +2501,7 @@ describe("db", () => {
       stableLtmText: "frozen stable LTM text",
       stableLtmTokens: 77,
       recallStore: JSON.stringify([["all:q", { toolUseId: "t1" }]]),
+      amnesia: true,
       dedupDecisions: JSON.stringify([["m1:p1", true]]),
       lastKnownMessageCount: 137,
       lastUpstream: JSON.stringify({ model: "gpt-test" }),
@@ -1382,6 +2521,7 @@ describe("db", () => {
     expect(loaded?.recallStore).toBe(
       JSON.stringify([["all:q", { toolUseId: "t1" }]]),
     );
+    expect(loaded?.amnesia).toBe(true);
     expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
     // v43: persisted for accurate calibrated-delta estimation after restart.
     expect(loaded?.lastKnownMessageCount).toBe(137);
@@ -1931,14 +3071,14 @@ describe("db", () => {
       expect(names).toContain("idx_tool_calls_project_session");
     });
 
-    test("call_id PK upserts in place", () => {
+    test("owned call_id PK upserts in place", () => {
       const pid = ensureProject("/tmp/tool-calls-pk-test");
       const insert = () =>
         db().query(
           `INSERT INTO tool_calls
                (call_id, message_id, project_id, session_id, tool, status, error_type, error_message, duration_ms, created_at)
              VALUES ('c1', 'm1', ?, 's1', 'bash', ?, ?, ?, ?, 1000)
-             ON CONFLICT(call_id) DO UPDATE SET
+              ON CONFLICT(project_id, session_id, call_id) DO UPDATE SET
                status = excluded.status,
                error_type = excluded.error_type,
                error_message = excluded.error_message,
@@ -2102,7 +3242,12 @@ describe("db", () => {
       const sidOther = `adopt-other-${crypto.randomUUID()}`;
       const sidEmpty = `adopt-empty-${crypto.randomUUID()}`;
       const fp = `fp-${crypto.randomUUID().slice(0, 8)}`;
-      saveSessionTracking(sidA, { fingerprint: fp, messageCount: 100 });
+      saveSessionTracking(sidA, {
+        fingerprint: fp,
+        messageCount: 100,
+        projectPath: "/tmp/adopt-provisional",
+        projectPathProvisional: true,
+      });
       saveSessionTracking(sidB, {
         fingerprint: fp,
         messageCount: 200,
@@ -2124,12 +3269,14 @@ describe("db", () => {
       expect(bySid.get(sidA)?.message_count).toBe(100);
       expect(bySid.get(sidB)?.is_subagent).toBe(1);
       expect(bySid.get(sidA)?.is_subagent).toBe(0);
+      expect(bySid.get(sidA)?.project_path).toBe("/tmp/adopt-provisional");
+      expect(bySid.get(sidA)?.project_path_provisional).toBe(1);
 
       // Empty query never matches the empty-fingerprint rows.
       expect(findSessionStatesByFingerprint("")).toEqual([]);
     });
 
-    test("findSessionStatesByFingerprint can restrict legacy candidates to unowned rows", () => {
+    test("findSessionStatesByFingerprint can restrict candidates by owner", () => {
       const fp = `legacy-fp-${crypto.randomUUID().slice(0, 8)}`;
       const unowned = `legacy-unowned-${crypto.randomUUID()}`;
       const owned = `legacy-owned-${crypto.randomUUID()}`;
@@ -2147,6 +3294,16 @@ describe("db", () => {
           (row) => row.session_id,
         ),
       ).toEqual([unowned]);
+      expect(
+        findSessionStatesByFingerprint(fp, {
+          credentialFingerprint: "credential-a",
+        }).map((row) => row.session_id),
+      ).toEqual([owned]);
+      expect(
+        findSessionStatesByFingerprint(fp, {
+          credentialFingerprint: "credential-b",
+        }),
+      ).toEqual([]);
     });
 
     test("countMatchingTemporalIds counts only same-project, same-session ids", () => {
@@ -2157,10 +3314,10 @@ describe("db", () => {
         db()
           .query(
             `INSERT INTO temporal_messages
-               (id, project_id, session_id, role, content, tokens, distilled, created_at)
-             VALUES (?, ?, ?, 'user', 'x', 1, 0, 1000)`,
+                (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at)
+              VALUES (?, ?, ?, ?, 'user', 'x', 1, 0, 1000)`,
           )
-          .run(id, pid, sid);
+          .run(id, id, pid, sid);
       ins(pidA, sess, "m1");
       ins(pidA, sess, "m2");
       ins(pidA, sess, "m3");
@@ -2189,10 +3346,10 @@ describe("db", () => {
         db()
           .query(
             `INSERT INTO temporal_messages
-               (id, project_id, session_id, role, content, tokens, distilled, created_at)
-             VALUES (?, ?, ?, 'user', 'x', 1, 0, 1000)`,
+                (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at)
+              VALUES (?, ?, ?, ?, 'user', 'x', 1, 0, 1000)`,
           )
-          .run(id, pid, sess);
+          .run(id, id, pid, sess);
       }
       // 1200 ids (>999 SQLite bound-variable limit) — must not throw and must
       // count only the 5 that exist.

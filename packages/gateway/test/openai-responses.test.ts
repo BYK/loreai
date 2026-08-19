@@ -701,6 +701,7 @@ describe("parseOpenAIResponsesRequest", () => {
         previous_response_id: "resp_abc123",
         reasoning: { effort: "high" },
         truncation: "auto",
+        provider: { only: ["google-vertex/europe"], allow_fallbacks: false },
       },
       headers,
     );
@@ -708,6 +709,10 @@ describe("parseOpenAIResponsesRequest", () => {
     expect(req.extras?.previous_response_id).toBe("resp_abc123");
     expect(req.extras?.reasoning).toEqual({ effort: "high" });
     expect(req.extras?.truncation).toBe("auto");
+    expect(req.extras?.provider).toEqual({
+      only: ["google-vertex/europe"],
+      allow_fallbacks: false,
+    });
   });
 
   test("parses message with content array (input_text parts)", () => {
@@ -761,16 +766,17 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
         stream: true,
         max_output_tokens: 2048,
         temperature: 0.5,
+        provider: { only: ["google-vertex/europe"] },
       },
       { authorization: "Bearer sk-test" },
     );
 
     const result = buildOpenAIResponsesUpstreamRequest(
       req,
-      "https://api.openai.com",
+      "https://openrouter.ai/api",
     );
 
-    expect(result.url).toBe("https://api.openai.com/v1/responses");
+    expect(result.url).toBe("https://openrouter.ai/api/v1/responses");
     expect(result.headers["content-type"]).toBe("application/json");
     expect(result.headers.Authorization).toBe("Bearer sk-test");
 
@@ -780,7 +786,47 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(body.instructions).toBe("Be helpful");
     expect(body.max_output_tokens).toBe(2048);
     expect(body.temperature).toBe(0.5);
+    expect(body.provider).toEqual({ only: ["google-vertex/europe"] });
     expect(Array.isArray(body.input)).toBe(true);
+  });
+
+  test("does not forward OpenRouter provider options to another provider", () => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5-mini",
+        input: "Hello",
+        provider: { only: ["must-not-leak"] },
+      },
+      { "x-lore-provider": "openai" },
+    );
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as Record<string, unknown>;
+
+    expect(Object.hasOwn(body, "provider")).toBe(false);
+  });
+
+  test.each([
+    ["explicit null", null],
+    ["empty object", {}],
+  ])("preserves %s OpenRouter provider values", (_label, provider) => {
+    const req = parseOpenAIResponsesRequest(
+      {
+        model: "anthropic/claude-sonnet-4-6",
+        input: "Hello",
+        provider,
+      },
+      {},
+    );
+    req.metadata.provider = { only: ["stale-metadata-provider"] };
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://openrouter.ai/api",
+    ).body as Record<string, unknown>;
+    expect(Object.hasOwn(body, "provider")).toBe(true);
+    expect(body.provider).toEqual(provider);
   });
 
   test("round-trips tool definitions", () => {
@@ -1037,6 +1083,24 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(output[1].arguments).toBe('{"query":"cats"}');
   });
 
+  test("non-streaming: preserves validated native output items", async () => {
+    const rawOutputItems = [
+      {
+        type: "web_search_call",
+        id: "ws_abc",
+        status: "completed",
+        action: { type: "search", query: "cats" },
+      },
+    ];
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, rawOutputItems },
+      false,
+    );
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body.output).toEqual(rawOutputItems);
+  });
+
   test("non-streaming: max_tokens maps to incomplete status", async () => {
     const resp: GatewayResponse = {
       ...baseResponse,
@@ -1046,6 +1110,9 @@ describe("buildOpenAIResponsesResponse", () => {
     const response = buildOpenAIResponsesResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.status).toBe("incomplete");
+    expect(body.incomplete_details).toEqual({
+      reason: "max_output_tokens",
+    });
   });
 
   test("non-streaming: id gets resp_ prefix if missing", async () => {
@@ -1078,6 +1145,37 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(text).toContain("Hello! How can I help?");
   });
 
+  test("streaming: max_tokens emits an incomplete terminal", async () => {
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, stopReason: "max_tokens" },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.incomplete");
+    expect(text).toContain('"status":"incomplete"');
+    expect(text).toContain('"reason":"max_output_tokens"');
+    expect(text).not.toContain("event: response.completed");
+  });
+
+  test.each([false, true])(
+    "stream=%s: content_filter remains an incomplete terminal",
+    async (streaming) => {
+      const response = buildOpenAIResponsesResponse(
+        { ...baseResponse, stopReason: "content_filter" },
+        streaming,
+      );
+      const text = await response.text();
+
+      expect(text).toContain('"status":"incomplete"');
+      expect(text).toContain('"reason":"content_filter"');
+      if (streaming) {
+        expect(text).toContain("event: response.incomplete");
+        expect(text).not.toContain("event: response.completed");
+      }
+    },
+  );
+
   test("streaming: tool_use produces function_call events", async () => {
     const resp: GatewayResponse = {
       id: "test",
@@ -1101,7 +1199,7 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(text).toContain('"name":"search"');
   });
 
-  test("non-streaming: emits prompt_tokens_details.cached_tokens when present", async () => {
+  test("non-streaming: emits input_tokens_details.cached_tokens when present", async () => {
     const resp: GatewayResponse = {
       ...baseResponse,
       usage: {
@@ -1114,17 +1212,17 @@ describe("buildOpenAIResponsesResponse", () => {
     const response = buildOpenAIResponsesResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.input_tokens).toBe(100);
+    expect(usage.input_tokens).toBe(180);
     expect(usage.output_tokens).toBe(20);
-    const details = usage.prompt_tokens_details as Record<string, number>;
+    const details = usage.input_tokens_details as Record<string, number>;
     expect(details.cached_tokens).toBe(80);
   });
 
-  test("non-streaming: omits prompt_tokens_details when no cached tokens", async () => {
+  test("non-streaming: omits input_tokens_details when no cached tokens", async () => {
     const response = buildOpenAIResponsesResponse(baseResponse, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.prompt_tokens_details).toBeUndefined();
+    expect(usage.input_tokens_details).toBeUndefined();
   });
 
   test("streaming: emits cached_tokens in response.completed usage", async () => {
@@ -1164,7 +1262,7 @@ describe("buildOpenAIResponse (Chat Completions) — cached_tokens", () => {
     const response = buildOpenAIResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.prompt_tokens).toBe(100);
+    expect(usage.prompt_tokens).toBe(180);
     expect(usage.completion_tokens).toBe(20);
     const details = usage.prompt_tokens_details as Record<string, number>;
     expect(details.cached_tokens).toBe(80);

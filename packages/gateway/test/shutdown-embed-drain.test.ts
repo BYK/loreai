@@ -35,10 +35,14 @@ describe("startGateway shutdown drains in-flight embeds (issue #1331)", () => {
     let drainArg: number | undefined = -1;
     const drainSpy = vi
       .spyOn(embedding, "settleDocumentEmbeds")
-      .mockImplementation(async (timeoutMs?: number) => {
-        order.push("drain");
-        drainArg = timeoutMs;
-      });
+      .mockImplementation(
+        async (
+          timeoutMs?: Parameters<typeof embedding.settleDocumentEmbeds>[0],
+        ) => {
+          order.push("drain");
+          drainArg = typeof timeoutMs === "number" ? timeoutMs : undefined;
+        },
+      );
     const resetSpy = vi
       .spyOn(embedding, "resetProvider")
       .mockImplementation(async () => {

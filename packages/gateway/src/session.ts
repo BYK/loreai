@@ -10,22 +10,30 @@
  *    legacy name). Checked in priority order; first match wins.
  *
  *  **Tier 2 — Learned headers** (bootstrapped via fingerprint):
- *    During the first few fingerprinted turns, collect candidate `x-`
- *    headers with ID-like values. Promote a header after it is stable
+ *    During the first few fingerprinted turns, collect non-credential
+ *    candidate `x-` headers with ID-like values. Promote a header after it is stable
  *    within a session (same value across 3 turns) AND varies across
  *    different sessions (not a global constant like client version).
  *
  *  **Tier 3 — Fingerprint fallback** (bootstrap + unknown clients):
- *    SHA-256 of the first user message + auth suffix. Used to bootstrap
- *    Tier 2 learning and as permanent fallback for headerless clients.
+ *    SHA-256 of the first user message + auth suffix. Remote gateways use a
+ *    domain-separated full tenant fingerprint instead. Used to bootstrap Tier
+ *    2 learning and as permanent fallback for headerless clients.
  *    Model is intentionally excluded (model strings change mid-session).
  *
  * The session ID packs 8 random bytes + 4 bytes of unix timestamp
  * (seconds, big-endian) into 12 bytes, then base62-encodes them to a
  * compact alphanumeric string (~17 chars).
  *
- * This module has zero dependencies on `@loreai/core` — pure utility.
+ * This module depends only on the shared credential-header policy from core.
  */
+
+import {
+  isCredentialHeaderName,
+  KNOWN_SESSION_HEADERS,
+} from "./credential-headers";
+
+export { isCredentialHeaderName, KNOWN_SESSION_HEADERS };
 
 // ---------------------------------------------------------------------------
 // Base62 encoding
@@ -169,9 +177,10 @@ export function scanForMarker(
  * Compute a SHA-256 fingerprint from the first user message's content,
  * optionally incorporating an auth credential suffix.
  *
- * Returns the first 16 hex characters of the hash. Used as the Tier 3
- * (fallback) session correlator — combined with message-count proximity
- * to disambiguate forked sessions that share the same first message.
+ * Local mode returns the historical first 16 hex characters of the hash.
+ * Remote mode prefixes that correlator with the full server-derived tenant
+ * fingerprint so the persisted lookup retains an exact tenant boundary. Used
+ * as the Tier 3 fallback with message-count proximity to disambiguate forks.
  *
  * Model is intentionally excluded: model strings change mid-session
  * (e.g. `claude-opus-4-7` → `opus-4-6`) and including them caused
@@ -179,7 +188,7 @@ export function scanForMarker(
  */
 export async function fingerprintMessages(
   messages: Array<{ role: string; content: unknown }>,
-  extras?: { authSuffix?: string },
+  extras?: { authSuffix?: string; tenantFingerprint?: string },
 ): Promise<string> {
   let firstUserContent = "";
   for (const msg of messages) {
@@ -190,17 +199,28 @@ export async function fingerprintMessages(
     }
   }
 
-  const material = firstUserContent + (extras?.authSuffix ?? "");
+  // Preserve the historical/local fingerprint byte-for-byte. Remote mode uses
+  // an explicitly versioned encoding so pre-binding historical rows cannot be
+  // adopted across tenants after an upgrade. Delimiters also remove the
+  // concatenation ambiguity of the legacy firstMessage+suffix format.
+  const material = extras?.tenantFingerprint
+    ? `lore.remote-session-fingerprint.v1\0${extras.tenantFingerprint}\0${firstUserContent}`
+    : firstUserContent + (extras?.authSuffix ?? "");
   const encoded = new TextEncoder().encode(material);
   const hash = await crypto.subtle.digest("SHA-256", encoded);
   const bytes = new Uint8Array(hash);
 
-  // First 16 hex chars (8 bytes)
+  // First 16 hex chars (8 bytes) for message correlation. In remote mode the
+  // full tenant fingerprint is retained as a separate, exact-match component:
+  // a truncated combined hash would make a theoretical cross-tenant collision
+  // adoptable after restart, violating the tenant boundary.
   let hex = "";
   for (let i = 0; i < 8; i++) {
     hex += bytes[i].toString(16).padStart(2, "0");
   }
-  return hex;
+  return extras?.tenantFingerprint
+    ? `lore-tenant-fingerprint-v1:${extras.tenantFingerprint}:${hex}`
+    : hex;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,17 +264,6 @@ export function isClaudeCodeClient(
 // ---------------------------------------------------------------------------
 // Session identification
 // ---------------------------------------------------------------------------
-
-/**
- * Well-known HTTP headers that carry a persistent, unique session ID.
- * Checked in order — first match wins.
- */
-export const KNOWN_SESSION_HEADERS = [
-  "x-lore-session-id", // Lore plugins (stable, deterministic) — checked first
-  "x-claude-code-session-id", // Claude Code (fresh UUID per conversation — never rotates)
-  "x-session-id", // Generic session ID (e.g. OpenCode v1.17+, stable per session)
-  "x-session-affinity", // OpenCode (nanoid, regenerated on process restart — MAY rotate)
-] as const;
 
 /**
  * Headers whose values may change on a client process restart while the
@@ -369,16 +378,18 @@ export function isIdLikeValue(value: string): boolean {
 /**
  * Collect candidate headers from a request that could carry session IDs.
  *
- * Returns all `x-` prefixed headers with ID-like values — both those
+ * Returns non-credential `x-` prefixed headers with ID-like values — both those
  * matching the session/affinity name patterns and generic ones. The
- * learning algorithm will filter by stability over time.
+ * learning algorithm will filter by stability over time. Credential names are
+ * rejected here, before their raw values can enter either promotion pass.
  */
 export function collectCandidateHeaders(
   rawHeaders: Record<string, string>,
 ): Map<string, string> {
   const candidates = new Map<string, string>();
   for (const [name, value] of Object.entries(rawHeaders)) {
-    if (!name.startsWith("x-")) continue;
+    if (isCredentialHeaderName(name)) continue;
+    if (!name.toLowerCase().startsWith("x-")) continue;
     if (!isIdLikeValue(value)) continue;
 
     // Accept if name matches session/affinity pattern, or if the value
@@ -401,6 +412,7 @@ export function collectCandidateHeaders(
 export function learnHeaders(
   candidates: Map<string, HeaderCandidate> | undefined,
   rawHeaders: Record<string, string>,
+  options: { commitGlobal?: boolean } = {},
 ): {
   updatedCandidates: Map<string, HeaderCandidate>;
   promoted: { name: string; value: string } | null;
@@ -424,12 +436,14 @@ export function learnHeaders(
     }
 
     // Update global cross-session tracking
-    let globalSet = globalHeaderValues.get(name);
-    if (!globalSet) {
-      globalSet = new Set();
-      globalHeaderValues.set(name, globalSet);
+    if (options.commitGlobal !== false) {
+      let globalSet = globalHeaderValues.get(name);
+      if (!globalSet) {
+        globalSet = new Set();
+        globalHeaderValues.set(name, globalSet);
+      }
+      globalSet.add(value);
     }
-    globalSet.add(value);
   }
 
   // Remove candidates that disappeared from this request
@@ -449,7 +463,9 @@ export function learnHeaders(
     if (!isSessionHeaderName(name)) continue;
 
     const globalSet = globalHeaderValues.get(name);
-    if (globalSet && globalSet.size > 1) {
+    const distinctValues = new Set(globalSet);
+    distinctValues.add(candidate.value);
+    if (distinctValues.size > 1) {
       promoted = { name, value: candidate.value };
       break;
     }
@@ -461,7 +477,9 @@ export function learnHeaders(
       if (candidate.seenCount < LEARNING_THRESHOLD) continue;
 
       const globalSet = globalHeaderValues.get(name);
-      if (globalSet && globalSet.size > 1) {
+      const distinctValues = new Set(globalSet);
+      distinctValues.add(candidate.value);
+      if (distinctValues.size > 1) {
         promoted = { name, value: candidate.value };
         break;
       }
@@ -469,6 +487,19 @@ export function learnHeaders(
   }
 
   return { updatedCandidates: currentCandidates, promoted };
+}
+
+/** Commit candidate-header observations after a provisional turn succeeds. */
+export function observeHeaderValues(rawHeaders: Record<string, string>): void {
+  const incoming = collectCandidateHeaders(rawHeaders);
+  for (const [name, value] of incoming) {
+    let globalSet = globalHeaderValues.get(name);
+    if (!globalSet) {
+      globalSet = new Set();
+      globalHeaderValues.set(name, globalSet);
+    }
+    globalSet.add(value);
+  }
 }
 
 // ---------------------------------------------------------------------------

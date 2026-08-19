@@ -241,6 +241,31 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
     expect(body.provider).toEqual({ sort: "price" });
   });
 
+  test("openrouter worker request inherits explicit session provider routing", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "or-worker-key" }),
+      { providerID: "openrouter", modelID: "deepseek/deepseek-chat" },
+    );
+    const providerOptions = {
+      only: ["google-vertex/europe", "amazon-bedrock/eu-west-1"],
+      allow_fallbacks: false,
+    };
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-openrouter-explicit-routing",
+      workerID: "lore-distill",
+      model: { providerID: "openrouter", modelID: "deepseek/deepseek-chat" },
+      protocol: "openai",
+      providerOptions,
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const opts = mockFetch.mock.calls[0][1] as { body: string };
+    const body = JSON.parse(opts.body) as { provider?: unknown };
+    expect(body.provider).toEqual(providerOptions);
+  });
+
   test("openrouter worker request sets :floor even when the session supplies an upstreamUrl (production path)", async () => {
     // Regression for the resolveTarget override-matches branch: a real OpenRouter
     // session forwards its endpoint as `upstreamUrl` + `upstreamProviderID`. That
@@ -290,5 +315,63 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
     const opts = mockFetch.mock.calls[0][1] as { body: string };
     const body = JSON.parse(opts.body) as { provider?: unknown };
     expect(body.provider).toBeUndefined();
+  });
+
+  test.each([
+    ["DeepSeek", "deepseek", "deepseek-chat", "openai"],
+    ["direct OpenAI", "openai", "gpt-5-mini", "openai"],
+    [
+      "GitHub Copilot Responses",
+      "github-copilot",
+      "gpt-5.4-mini",
+      "openai-responses",
+    ],
+    ["Codex", "openai-codex", "gpt-5.1-codex-mini", "openai-responses"],
+  ] as const)(
+    "%s worker rejects foreign provider body options",
+    async (_label, providerID, modelID, protocol) => {
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "poison-test-key" }),
+        { providerID, modelID },
+        { dedicatedWorkerKey: true },
+      );
+
+      await client.prompt("system", "user", {
+        sessionID: `sess-poison-${providerID}`,
+        workerID: "lore-query-expand",
+        model: { providerID, modelID },
+        protocol,
+        providerOptions: { only: ["poison-foreign-endpoint"] },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const options = mockFetch.mock.calls[0][1] as { body: string };
+      const body = JSON.parse(options.body) as Record<string, unknown>;
+      expect(body.provider).toBeUndefined();
+    },
+  );
+
+  test("OpenRouter treats a malformed providerOptions array as absent", async () => {
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "or-worker-key" }),
+      { providerID: "openrouter", modelID: "deepseek/deepseek-chat" },
+    );
+
+    await client.prompt("system", "user", {
+      sessionID: "sess-openrouter-malformed-routing",
+      workerID: "lore-distill",
+      model: {
+        providerID: "openrouter",
+        modelID: "deepseek/deepseek-chat",
+      },
+      protocol: "openai",
+      providerOptions: ["poison"] as unknown as Record<string, unknown>,
+    });
+
+    const options = mockFetch.mock.calls[0][1] as { body: string };
+    const body = JSON.parse(options.body) as Record<string, unknown>;
+    expect(body.provider).toEqual({ sort: "price" });
   });
 });

@@ -1,66 +1,86 @@
-import { describe, test, expect, afterEach } from "vitest";
-import { writePortFile, readPortFile, removePortFile } from "../src/portfile";
+import { chmodSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { dataDir } from "@loreai/core";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import {
+  inspectPortFile,
+  readPortFile,
+  removePortFile,
+  writePortFile,
+} from "../src/portfile";
 
-// Clean up any port file we wrote during tests.
+let base: string;
+let previousXdg: string | undefined;
+
+beforeEach(() => {
+  previousXdg = process.env.XDG_DATA_HOME;
+  base = mkdtempSync(join(tmpdir(), "lore-portfile-test-"));
+  process.env.XDG_DATA_HOME = base;
+});
+
 afterEach(() => {
-  try {
-    // Force-remove by writing a known value then removing with that value.
-    writePortFile(99999);
-    removePortFile(99999);
-  } catch {
-    /* best effort */
-  }
+  if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
+  else process.env.XDG_DATA_HOME = previousXdg;
+  rmSync(base, { recursive: true, force: true });
 });
 
 describe("portfile", () => {
-  test("readPortFile returns null when no file exists", () => {
-    // Ensure no port file exists (afterEach from previous test handles this,
-    // but also clean before first run).
-    writePortFile(99999);
-    removePortFile(99999);
-
+  test("round-trips and overwrites legacy port values", () => {
     expect(readPortFile()).toBeNull();
-  });
-
-  test("writePortFile + readPortFile round-trips a port number", () => {
     writePortFile(3207);
     expect(readPortFile()).toBe(3207);
-  });
-
-  test("writePortFile overwrites an existing port file", () => {
-    writePortFile(3207);
     writePortFile(5673);
     expect(readPortFile()).toBe(5673);
   });
 
-  test("removePortFile deletes the file when port matches", () => {
+  test("restores owner-only permissions when replacing a file", () => {
+    if (process.platform === "win32") return;
     writePortFile(3207);
-    removePortFile(3207);
-    expect(readPortFile()).toBeNull();
-  });
-
-  test("removePortFile does NOT delete the file when port differs", () => {
+    chmodSync(join(dataDir(), "gateway.port"), 0o666);
     writePortFile(5673);
-    removePortFile(3207); // wrong port — should not remove
-    expect(readPortFile()).toBe(5673);
+    expect(lstatSync(join(dataDir(), "gateway.port")).mode & 0o777).toBe(0o600);
   });
 
-  test("removePortFile is a no-op when no file exists", () => {
-    // Should not throw.
+  test("legacy cleanup removes only a matching port", () => {
+    writePortFile(5673);
     removePortFile(3207);
+    expect(readPortFile()).toBe(5673);
+    removePortFile(5673);
     expect(readPortFile()).toBeNull();
+    expect(() => removePortFile(5673)).not.toThrow();
   });
 
-  test("readPortFile rejects invalid content", () => {
-    // Simulate corrupted file by writing a valid port, then we can't
-    // easily write arbitrary content via the API — but we can verify
-    // the validation logic by writing port 0 (invalid) and checking.
-    // Actually writePortFile accepts any number, but readPortFile
-    // validates port > 0 && port <= 65535.
+  test("rejects invalid legacy content", () => {
     writePortFile(0);
     expect(readPortFile()).toBeNull();
-
     writePortFile(70000);
     expect(readPortFile()).toBeNull();
+  });
+
+  test("strict inspection distinguishes absent from legacy invalid evidence", () => {
+    expect(inspectPortFile()).toEqual({ state: "absent" });
+    writePortFile(3207);
+    expect(inspectPortFile()).toMatchObject({ state: "invalid" });
+  });
+
+  test("round-trips an authenticated generation record", () => {
+    const token = "owner".repeat(8);
+    writePortFile(3207, token);
+    expect(readPortFile()).toBe(3207);
+    expect(inspectPortFile()).toEqual({
+      state: "valid",
+      record: { version: 1, port: 3207, token },
+    });
+  });
+
+  test("token cleanup preserves a same-port successor", () => {
+    const successorToken = "successor".repeat(4);
+    writePortFile(3207, successorToken);
+    removePortFile(3207, "predecessor".repeat(4));
+    expect(inspectPortFile()).toEqual({
+      state: "valid",
+      record: { version: 1, port: 3207, token: successorToken },
+    });
   });
 });

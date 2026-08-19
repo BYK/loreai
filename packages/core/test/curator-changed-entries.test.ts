@@ -1,10 +1,13 @@
-import { describe, expect, test } from "vitest";
-import { applyOps, enforceEntryCap } from "../src/curator";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { applyOps, enforceEntryCap, run as runCurator } from "../src/curator";
 import type { ChangedEntry } from "../src/curator";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
+import type { LLMClient } from "../src/types";
 
 const PROJECT = "/tmp/lore-curator-delta/project";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("curator applyOps changedEntries", () => {
   test("returns createdEntries for genuine creates", () => {
@@ -228,5 +231,163 @@ describe("curator enforceEntryCap (soft-cap eviction)", () => {
     expect(ltm.get(owned[1])).toBeNull(); // 0.5 evicted
     expect(ltm.get(owned[2])).toBeNull(); // 0.7 evicted
     expect(ltm.forProject(CAP_PROJECT, false)).toHaveLength(3);
+  });
+});
+
+describe("signal-bound curator maintenance", () => {
+  test("runs duplicate cleanup, cap enforcement, and cursor persistence", async () => {
+    const projectPath = "/tmp/lore-curator-signal-maintenance/project";
+    const sessionID = "signal-maintenance-session";
+    const pid = ensureProject(projectPath);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM session_state WHERE session_id = ?").run(sessionID);
+    const now = Date.now();
+    for (let i = 0; i < 3; i++) {
+      db()
+        .query(
+          `INSERT INTO temporal_messages
+             (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           VALUES (?, ?, ?, 'user', ?, 1, 0, ?, '{}')`,
+        )
+        .run(
+          `signal-maintenance-message-${i}`,
+          pid,
+          sessionID,
+          `message ${i}`,
+          now + i,
+        );
+    }
+    for (let i = 0; i < 201; i++) {
+      ltm.create({
+        projectPath,
+        category: "gotcha",
+        title: `Signal maintenance ${i}`,
+        content: `Distinct maintenance content ${i}`,
+        scope: "project",
+        confidence: 0.5,
+      });
+    }
+    const deduplicate = vi.spyOn(ltm, "deduplicate");
+    const llm: LLMClient = {
+      prompt: vi.fn().mockResolvedValue(
+        JSON.stringify({
+          ops: [
+            {
+              op: "create",
+              category: "gotcha",
+              title: "Foreground maintenance trigger",
+              content: "A distinct entry that triggers the post-create sweep.",
+              scope: "project",
+            },
+          ],
+          entities: [],
+          relations: [],
+        }),
+      ),
+    };
+
+    await runCurator({
+      llm,
+      projectPath,
+      sessionID,
+      signal: new AbortController().signal,
+    });
+
+    expect(deduplicate).toHaveBeenCalledWith(projectPath, { dryRun: false });
+    expect(ltm.forProject(projectPath, false)).toHaveLength(200);
+    expect(
+      db()
+        .query("SELECT last_curated_at FROM session_state WHERE session_id = ?")
+        .get(sessionID),
+    ).toMatchObject({ last_curated_at: expect.any(Number) });
+  });
+
+  test("aborting after dedup prevents stale cap and cursor writes", async () => {
+    const projectPath = "/tmp/lore-curator-signal-abort/project";
+    const sessionID = "signal-maintenance-abort-session";
+    const pid = ensureProject(projectPath);
+    db().query("DELETE FROM knowledge WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
+    db().query("DELETE FROM session_state WHERE session_id = ?").run(sessionID);
+    const now = Date.now();
+    for (let i = 0; i < 3; i++) {
+      db()
+        .query(
+          `INSERT INTO temporal_messages
+             (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+           VALUES (?, ?, ?, 'user', ?, 1, 0, ?, '{}')`,
+        )
+        .run(
+          `signal-abort-message-${i}`,
+          pid,
+          sessionID,
+          `message ${i}`,
+          now + i,
+        );
+    }
+    for (let i = 0; i < 201; i++) {
+      ltm.create({
+        projectPath,
+        category: "gotcha",
+        title: `Signal abort ${i}`,
+        content: `Distinct abort content ${i}`,
+        scope: "project",
+        confidence: 0.5,
+      });
+    }
+    const beforeCuration = ltm.forProject(projectPath, false).length;
+    let releaseDedup!: () => void;
+    const dedupBlocked = new Promise<
+      Awaited<ReturnType<typeof ltm.deduplicate>>
+    >((resolve) => {
+      releaseDedup = () =>
+        resolve({
+          clusters: [],
+          totalRemoved: 0,
+          pairSimilarities: new Map(),
+          entryTitles: new Map(),
+        });
+    });
+    const deduplicate = vi
+      .spyOn(ltm, "deduplicate")
+      .mockReturnValueOnce(dedupBlocked);
+    const controller = new AbortController();
+    const llm: LLMClient = {
+      prompt: vi.fn().mockResolvedValue(
+        JSON.stringify({
+          ops: [
+            {
+              op: "create",
+              category: "gotcha",
+              title: "Abort maintenance trigger",
+              content: "Trigger the dedup phase before cancellation.",
+              scope: "project",
+            },
+          ],
+          entities: [],
+          relations: [],
+        }),
+      ),
+    };
+
+    const pending = runCurator({
+      llm,
+      projectPath,
+      sessionID,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(deduplicate).toHaveBeenCalledTimes(1));
+    controller.abort(new DOMException("pipeline reset", "AbortError"));
+    releaseDedup();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(ltm.forProject(projectPath, false)).toHaveLength(beforeCuration + 1);
+    expect(beforeCuration + 1).toBeGreaterThan(200);
+    expect(
+      db()
+        .query("SELECT last_curated_at FROM session_state WHERE session_id = ?")
+        .get(sessionID),
+    ).toBeNull();
   });
 });

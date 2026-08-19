@@ -14,11 +14,20 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
+  chmodSync,
+  lstatSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import { commandSetup, loadJsonSetupBackup } from "../src/cli/setup";
 import { writePortFile } from "../src/portfile";
+import {
+  readGatewayProcessFile,
+  removePidFile,
+  writeGatewayProcessFile,
+} from "../src/pidfile";
 
 // Integration coverage for the setup.ts IO surface (backup capture on setup,
 // `lore setup undo`, liveness reporting, port detection). Everything is scoped
@@ -58,6 +67,32 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+async function authenticatedGateway(token: string): Promise<Server> {
+  return await new Promise((resolve) => {
+    const server = createServer((request, response) => {
+      if (
+        request.url === "/_lore/control" &&
+        request.headers.authorization === `Bearer ${token}`
+      ) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({ status: "ok", service: "lore", pid: process.pid }),
+        );
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+    server.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
 describe("commandSetup — Claude Code", () => {
   const claudePath = () => join(home, ".claude", "settings.json");
 
@@ -92,13 +127,98 @@ describe("commandSetup — Claude Code", () => {
     expect(existsSync(`${claudePath()}.lore-backup`)).toBe(false);
   });
 
-  it("detects the live gateway port from the port file (falls back when down)", async () => {
-    // Seed a port file; the probe will fail (nothing listening) so setup falls
-    // back to the default port. Exercises detectLiveGatewayPort's probe path.
+  it("ignores an unauthenticated stale port file", async () => {
     writePortFile(5673);
     await commandSetup(["claude-code"], {});
     const cfg = JSON.parse(readFileSync(claudePath(), "utf8"));
     expect(cfg.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3207");
+  });
+
+  it("selects and reports an authenticated process-record port", async () => {
+    const token = "setup-authenticated-token".repeat(2);
+    const server = await authenticatedGateway(token);
+    const port = (server.address() as { port: number }).port;
+    writeGatewayProcessFile({
+      version: 2,
+      pid: process.pid,
+      port,
+      hosts: ["127.0.0.1"],
+      token,
+      processIdentity: "test:setup-authenticated",
+    });
+    try {
+      await commandSetup(["claude-code"], {});
+      const cfg = JSON.parse(readFileSync(claudePath(), "utf8"));
+      expect(cfg.env.ANTHROPIC_BASE_URL).toBe(`http://127.0.0.1:${port}`);
+      expect(logged()).toContain(
+        `Gateway is reachable at http://127.0.0.1:${port}`,
+      );
+    } finally {
+      removePidFile(process.pid);
+      await closeServer(server);
+    }
+  });
+
+  it("does not trust a listener that only spoofs public health", async () => {
+    const server = await new Promise<Server>((resolve) => {
+      const listener = createServer((_request, response) => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"status":"ok"}');
+      });
+      listener.listen(0, "127.0.0.1", () => resolve(listener));
+    });
+    const port = (server.address() as { port: number }).port;
+    try {
+      expect(readGatewayProcessFile()).toBeNull();
+      await commandSetup(["claude-code"], { port });
+      expect(logged()).toContain(
+        `Gateway is not reachable at http://127.0.0.1:${port}`,
+      );
+      expect(logged()).not.toContain("Gateway is reachable at");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("restores absence after first setup created the JSON config", async () => {
+    await commandSetup(["claude-code"], { port: 3299 });
+    await commandSetup(["undo", "claude-code"], {});
+    expect(existsSync(claudePath())).toBe(false);
+    expect(existsSync(`${claudePath()}.lore-backup`)).toBe(false);
+  });
+
+  it("fails closed on a deleted and recreated matching config generation", async () => {
+    await commandSetup(["claude-code"], { port: 3299 });
+    const configured = readFileSync(claudePath(), "utf8");
+    rmSync(claudePath());
+    writeFileSync(claudePath(), configured);
+
+    await expect(commandSetup(["undo", "claude-code"], {})).rejects.toThrow(
+      "config generation",
+    );
+    expect(readFileSync(claudePath(), "utf8")).toBe(configured);
+    expect(existsSync(`${claudePath()}.lore-backup`)).toBe(true);
+  });
+
+  it("rejects a symlinked config without overwriting its target", async () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const target = join(home, "claude-target.json");
+    writeFileSync(target, '{"secret":"untouched"}\n');
+    symlinkSync(target, claudePath());
+
+    await expect(commandSetup(["claude-code"], { port: 3299 })).rejects.toThrow(
+      "symbolic links are not allowed",
+    );
+    expect(readFileSync(target, "utf8")).toBe('{"secret":"untouched"}\n');
+  });
+
+  it("preserves config mode and creates a private sidecar", async () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(claudePath(), "{}\n");
+    chmodSync(claudePath(), 0o640);
+    await commandSetup(["claude-code"], { port: 3299 });
+    expect(lstatSync(claudePath()).mode & 0o777).toBe(0o640);
+    expect(lstatSync(`${claudePath()}.lore-backup`).mode & 0o777).toBe(0o600);
   });
 });
 
@@ -145,13 +265,50 @@ describe("commandSetup — OpenCode", () => {
 
     await commandSetup(["undo", "opencode"], {});
 
-    const restored = JSON.parse(readFileSync(ocPath(), "utf8"));
-    // Provider baseURLs + compaction were lore-set on an empty config → undo
-    // removes them entirely (prunes emptied objects).
-    expect(restored.provider).toBeUndefined();
-    expect(restored.compaction).toBeUndefined();
-    expect(restored._loreBackup).toBeUndefined();
+    // Setup created this file from absence, so undo restores absence.
+    expect(existsSync(ocPath())).toBe(false);
     expect(existsSync(`${ocPath()}.lore-backup`)).toBe(false);
+  });
+
+  it("restores absence after first setup created the OpenCode config", async () => {
+    await commandSetup(["opencode"], { port: 3299, noPlugin: true });
+    await commandSetup(["undo", "opencode"], {});
+    expect(existsSync(ocPath())).toBe(false);
+  });
+
+  it("restores overwritten provider and plugin containers exactly", async () => {
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      ocPath(),
+      '{"provider":["custom"],"plugin":"manual","compaction":null}\n',
+    );
+    await commandSetup(["opencode"], { port: 3299, noPlugin: true });
+    await commandSetup(["undo", "opencode"], {});
+    expect(JSON.parse(readFileSync(ocPath(), "utf8"))).toEqual({
+      provider: ["custom"],
+      plugin: "manual",
+      compaction: null,
+    });
+  });
+
+  it("edits and undoes active JSONC without dropping comments", async () => {
+    const jsoncPath = join(home, ".config", "opencode", "opencode.jsonc");
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      jsoncPath,
+      `{
+  // Keep this user comment.
+  "theme": "tokyonight",
+}\n`,
+    );
+
+    await commandSetup(["opencode"], { port: 3299, "no-plugin": true });
+    expect(readFileSync(jsoncPath, "utf8")).toContain("Keep this user comment");
+    await commandSetup(["undo", "opencode"], {});
+    const restored = readFileSync(jsoncPath, "utf8");
+    expect(restored).toContain("Keep this user comment");
+    expect(restored).not.toContain("baseURL");
+    expect(restored).not.toContain('"provider"');
   });
 
   it("does NOT remove a plugin lore never added (Seer #876)", async () => {
@@ -276,13 +433,16 @@ describe("commandSetup — OpenCode", () => {
     expect(existsSync(`${ocPath()}.lore-backup`)).toBe(false);
   });
 
-  it("tolerates a corrupt sidecar backup (nothing to undo, no throw)", async () => {
+  it("fails closed on a corrupt sidecar before setup overwrites config", async () => {
     mkdirSync(join(home, ".config", "opencode"), { recursive: true });
     writeFileSync(ocPath(), JSON.stringify({ provider: {} }, null, 2));
     writeFileSync(`${ocPath()}.lore-backup`, "{ not valid json");
 
-    await commandSetup(["undo", "opencode"], {});
-    expect(logged().toLowerCase()).toContain("no lore backup");
+    const original = readFileSync(ocPath(), "utf8");
+    await expect(
+      commandSetup(["opencode"], { port: 3399, noPlugin: true }),
+    ).rejects.toThrow("Invalid Lore setup backup");
+    expect(readFileSync(ocPath(), "utf8")).toBe(original);
   });
 
   it("loadJsonSetupBackup returns null for an unreadable sidecar (never throws)", () => {
@@ -295,15 +455,14 @@ describe("commandSetup — OpenCode", () => {
     expect(loadJsonSetupBackup(ocPath())).toBeNull();
   });
 
-  it("undo tolerates an unreadable sidecar instead of crashing", async () => {
+  it("undo fails closed on an unreadable sidecar", async () => {
     mkdirSync(join(home, ".config", "opencode"), { recursive: true });
     writeFileSync(ocPath(), JSON.stringify({ provider: {} }, null, 2));
     mkdirSync(`${ocPath()}.lore-backup`, { recursive: true });
 
-    await expect(
-      commandSetup(["undo", "opencode"], {}),
-    ).resolves.toBeUndefined();
-    expect(logged().toLowerCase()).toContain("no lore backup");
+    await expect(commandSetup(["undo", "opencode"], {})).rejects.toThrow(
+      "Could not read Lore setup backup",
+    );
   });
 
   it("re-running setup never overwrites the TRUE original backup", async () => {
@@ -489,6 +648,17 @@ describe("commandSetup — undo with nothing to restore", () => {
 });
 
 describe("commandSetup — argument handling", () => {
+  it("does not print a rejected remote URL secret", async () => {
+    await commandSetup(["codex"], {
+      remote: "https://user:super-secret@gateway.example/lore",
+    });
+    expect(process.exitCode).toBe(1);
+    expect(logged()).toContain("Invalid remote URL");
+    expect(logged()).not.toContain("super-secret");
+    expect(existsSync(join(home, ".codex"))).toBe(false);
+    process.exitCode = 0;
+  });
+
   it("rejects an unknown app for setup", async () => {
     await commandSetup(["bogus"], { port: 3299 });
     expect(logged()).toContain('Unknown app "bogus"');

@@ -12,6 +12,7 @@ import {
   KNOWN_SESSION_HEADERS,
   ROTATION_MAX_AGE_MS,
   isSessionHeaderName,
+  isCredentialHeaderName,
   isIdLikeValue,
   collectCandidateHeaders,
   learnHeaders,
@@ -350,6 +351,39 @@ describe("fingerprintMessages", () => {
     });
     expect(hash1).not.toBe(hash2);
   });
+
+  test("remote tenant fingerprints use a versioned encoding distinct from historical rows", async () => {
+    const messages = [{ role: "user", content: "Hello" }];
+    const tenantFingerprint = "a".repeat(64);
+    const historical = await fingerprintMessages(messages, {
+      authSuffix: tenantFingerprint,
+    });
+    const remote = await fingerprintMessages(messages, { tenantFingerprint });
+    expect(remote).not.toBe(historical);
+    expect(remote).toMatch(
+      new RegExp(
+        `^lore-tenant-fingerprint-v1:${tenantFingerprint}:[a-f0-9]{16}$`,
+      ),
+    );
+    expect(remote).toBe(
+      await fingerprintMessages(messages, { tenantFingerprint }),
+    );
+  });
+
+  test("remote message fingerprints retain the full tenant boundary", async () => {
+    const messages = [{ role: "user", content: "identical opening" }];
+    const tenantA = "a".repeat(64);
+    const tenantB = "b".repeat(64);
+    const fingerprintA = await fingerprintMessages(messages, {
+      tenantFingerprint: tenantA,
+    });
+    const fingerprintB = await fingerprintMessages(messages, {
+      tenantFingerprint: tenantB,
+    });
+    expect(fingerprintA).not.toBe(fingerprintB);
+    expect(fingerprintA).toContain(tenantA);
+    expect(fingerprintB).toContain(tenantB);
+  });
 });
 
 // ===========================================================================
@@ -551,6 +585,80 @@ describe("collectCandidateHeaders", () => {
     });
     expect(candidates.size).toBe(0);
   });
+
+  const credentialHeaderCorpus = [
+    { name: "Authorization", promotionPass: "not-x" },
+    { name: "Proxy-Authorization", promotionPass: "not-x" },
+    { name: "api-key", promotionPass: "not-x" },
+    { name: "cf-aig-authorization", promotionPass: "not-x" },
+    { name: "x-api-key", promotionPass: "second" },
+    { name: "x-goog-api-key", promotionPass: "second" },
+    { name: "x-session-token", promotionPass: "second" },
+    { name: "x-session-auth", promotionPass: "second" },
+    { name: "x-session-secret", promotionPass: "second" },
+    { name: "x-auth-token", promotionPass: "second" },
+    { name: "x-authtoken", promotionPass: "second" },
+    { name: "x-refresh-token", promotionPass: "second" },
+    { name: "x-client-secret", promotionPass: "second" },
+    { name: "x-access-key-id", promotionPass: "second" },
+    { name: "x-custom-auth", promotionPass: "second" },
+    { name: "x-credential-id", promotionPass: "second" },
+    { name: "x-password", promotionPass: "second" },
+    { name: "x-session-key", promotionPass: "first" },
+    { name: "x-client-session-key", promotionPass: "first" },
+    { name: "x-auth-session-id", promotionPass: "first" },
+    { name: "x-oauth-session-id", promotionPass: "first" },
+    { name: "x-secret-session-id", promotionPass: "first" },
+    { name: "x-token-session-id", promotionPass: "first" },
+    { name: "x-key-session-id", promotionPass: "first" },
+  ] as const;
+
+  test.each(credentialHeaderCorpus)(
+    "rejects credential header $name before the $promotionPass promotion pass",
+    ({ name, promotionPass }) => {
+      _resetGlobalHeaderValues();
+      const value = "credential-value-aaaa1111";
+      const otherValue = "credential-value-bbbb2222";
+
+      expect(isCredentialHeaderName(name)).toBe(true);
+      expect(collectCandidateHeaders({ [name]: value }).has(name)).toBe(false);
+
+      // Confirm that this corpus drives both promotion loops on the vulnerable
+      // implementation, rather than only testing names that could never reach
+      // either loop.
+      if (promotionPass === "first") {
+        expect(isSessionHeaderName(name)).toBe(true);
+      } else if (promotionPass === "second") {
+        expect(isSessionHeaderName(name)).toBe(false);
+      }
+
+      // Model an already-tracked candidate at the promotion threshold and a
+      // second session carrying a distinct value. Collection must remove the
+      // credential before either promotion pass can inspect it.
+      learnHeaders(undefined, { [name]: otherValue });
+      const preexisting = new Map([[name, { value, seenCount: 2 }]]);
+      const result = learnHeaders(preexisting, { [name]: value });
+
+      expect(result.updatedCandidates.has(name)).toBe(false);
+      expect(result.promoted).toBeNull();
+    },
+  );
+
+  test.each(KNOWN_SESSION_HEADERS)(
+    "does not classify established session header %s as a credential",
+    (name) => {
+      const value = "legitimate-session-value-1234";
+      expect(isCredentialHeaderName(name)).toBe(false);
+      expect(collectCandidateHeaders({ [name]: value }).get(name)).toBe(value);
+    },
+  );
+
+  test.each(["x-keyboard-session-id", "x-monkey-session-id"])(
+    "does not reject non-credential key substring in %s",
+    (name) => {
+      expect(isCredentialHeaderName(name)).toBe(false);
+    },
+  );
 });
 
 // ===========================================================================
@@ -644,6 +752,23 @@ describe("learnHeaders", () => {
       value: "session-aaaa1111",
     });
   });
+
+  test.each([
+    ["x-client-session-id", "first"],
+    ["x-conversation-id", "second"],
+  ] as const)(
+    "still learns legitimate %s headers through the %s promotion pass",
+    (name, _promotionPass) => {
+      const headers = { [name]: "session-aaaa1111" };
+      learnHeaders(undefined, { [name]: "session-bbbb2222" });
+
+      const r1 = learnHeaders(undefined, headers);
+      const r2 = learnHeaders(r1.updatedCandidates, headers);
+      const r3 = learnHeaders(r2.updatedCandidates, headers);
+
+      expect(r3.promoted).toEqual({ name, value: "session-aaaa1111" });
+    },
+  );
 
   test("prefers session-named headers over generic ones for promotion", () => {
     // Both headers are stable for 3 turns and cross-session unique,

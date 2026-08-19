@@ -10,11 +10,48 @@ import type {
   GatewayRequest,
   GatewayResponse,
   GatewayTool,
+  GatewayUsage,
 } from "./types";
-import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
+import {
+  blocksToText,
+  forwardClientHeaders,
+  providerRoutingValue,
+  requestTargetsOpenRouter,
+  ZERO_USAGE,
+} from "./types";
 import type { AnthropicCacheOptions } from "./anthropic";
 import { asString } from "@loreai/core";
 import { extractAuth } from "../auth";
+import { safeTokenSum } from "../usage-validation";
+
+function openAIUsage(usage: GatewayUsage): Record<string, unknown> {
+  const inclusiveInputTokens = safeTokenSum(
+    [
+      usage.inputTokens,
+      usage.cacheReadInputTokens,
+      usage.cacheCreationInputTokens,
+    ],
+    "OpenAI response usage overflow",
+  );
+  const result: Record<string, unknown> = {
+    prompt_tokens: inclusiveInputTokens,
+    completion_tokens: usage.outputTokens,
+    total_tokens: safeTokenSum(
+      [inclusiveInputTokens, usage.outputTokens],
+      "OpenAI response usage overflow",
+    ),
+  };
+  if (
+    usage.cacheReadInputTokens != null ||
+    usage.cacheCreationInputTokens != null
+  ) {
+    result.prompt_tokens_details = {
+      cached_tokens: usage.cacheReadInputTokens ?? 0,
+      cache_write_tokens: usage.cacheCreationInputTokens ?? 0,
+    };
+  }
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // OpenAI → GatewayRequest
@@ -55,6 +92,9 @@ export function parseOpenAIRequest(
   }
   if (typeof raw.top_logprobs === "number") {
     extras.top_logprobs = raw.top_logprobs;
+  }
+  if (Object.hasOwn(raw, "provider")) {
+    extras.provider = raw.provider;
   }
   if (raw.stream_options && typeof raw.stream_options === "object") {
     const so = raw.stream_options as Record<string, unknown>;
@@ -158,10 +198,7 @@ export function parseOpenAIRequest(
     stream,
     maxTokens,
     metadata: {},
-    rawHeaders: {
-      ...headers,
-      "x-api-key": headers["x-api-key"] ?? "",
-    },
+    rawHeaders: { ...headers },
     extras,
   };
 }
@@ -354,24 +391,7 @@ function buildOpenAINonStreamResponse(resp: GatewayResponse): Response {
         logprobs: null,
       },
     ],
-    usage: {
-      prompt_tokens: usage.inputTokens,
-      completion_tokens: usage.outputTokens,
-      total_tokens: usage.inputTokens + usage.outputTokens,
-      ...(usage.cacheReadInputTokens != null ||
-      usage.cacheCreationInputTokens != null
-        ? {
-            prompt_tokens_details: {
-              ...(usage.cacheReadInputTokens != null
-                ? { cached_tokens: usage.cacheReadInputTokens }
-                : {}),
-              ...(usage.cacheCreationInputTokens != null
-                ? { cache_creation_tokens: usage.cacheCreationInputTokens }
-                : {}),
-            },
-          }
-        : {}),
-    },
+    usage: openAIUsage(usage),
   };
 
   return new Response(JSON.stringify(response), {
@@ -414,24 +434,7 @@ function buildOpenAIStreamResponse(resp: GatewayResponse): Response {
       // Emitted unconditionally, not gated on include_usage — same as the
       // reference; clients that didn't opt in simply ignore the extra field.
       const ru = resp.usage ?? ZERO_USAGE;
-      const terminalUsage: Record<string, unknown> = {
-        prompt_tokens: ru.inputTokens,
-        completion_tokens: ru.outputTokens,
-        total_tokens: ru.inputTokens + ru.outputTokens,
-      };
-      if (
-        ru.cacheReadInputTokens != null ||
-        ru.cacheCreationInputTokens != null
-      ) {
-        const details: Record<string, number> = {};
-        if (ru.cacheReadInputTokens != null) {
-          details.cached_tokens = ru.cacheReadInputTokens;
-        }
-        if (ru.cacheCreationInputTokens != null) {
-          details.cache_creation_tokens = ru.cacheCreationInputTokens;
-        }
-        terminalUsage.prompt_tokens_details = details;
-      }
+      const terminalUsage = openAIUsage(ru);
 
       function emitChunk(
         delta: Record<string, unknown>,
@@ -774,6 +777,11 @@ export function buildOpenAIUpstreamRequest(
     if (req.extras.stream_options !== undefined) {
       body.stream_options = req.extras.stream_options;
     }
+  }
+
+  const providerRouting = providerRoutingValue(req);
+  if (providerRouting.present && requestTargetsOpenRouter(req, upstreamBase)) {
+    body.provider = providerRouting.value;
   }
 
   return {

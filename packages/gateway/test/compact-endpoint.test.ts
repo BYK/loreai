@@ -1,23 +1,57 @@
 /**
  * Coverage for the explicit compaction endpoints (`POST /v1/compact`, used by
- * the Pi plugin). Focuses on the request-validation + no-session branches of
- * handleCompactEndpoint, which return deterministic responses without any
- * upstream call.
+ * the Pi plugin). Focuses on strict session preflight and request validation
+ * after a session has been authenticated.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
-import { shouldCancelCompactionFromBudget } from "../src/pipeline";
+import {
+  DEFAULT_MODEL,
+  DEFAULT_SYSTEM,
+  makeFixtureEntry,
+  STANDARD_TOOLS,
+} from "./helpers/fixtures";
+import {
+  generateCompactionSummary,
+  handleCompactEndpoint,
+  shouldCancelCompactionFromBudget,
+} from "../src/pipeline";
+import { loadConfig } from "../src/config";
 
-async function postCompact(baseURL: string, body: string): Promise<Response> {
-  return fetch(`${baseURL}/v1/compact`, {
+async function postCompact(
+  harness: Harness,
+  body: string,
+  sessionID?: string,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-api-key": "test-key",
+  };
+  if (sessionID) headers["x-lore-session-id"] = sessionID;
+  return harness.request("/v1/compact", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": "test-key",
-    },
+    headers,
     body,
   });
+}
+
+async function establishSession(
+  harness: Harness,
+  sessionID: string,
+): Promise<Response> {
+  return harness.chat(
+    {
+      model: DEFAULT_MODEL,
+      max_tokens: 1024,
+      stream: false,
+      system: DEFAULT_SYSTEM,
+      messages: [{ role: "user", content: "Establish this session." }],
+      tools: STANDARD_TOOLS,
+    },
+    "test-key",
+    { "x-lore-session-id": sessionID },
+  );
 }
 
 describe("POST /v1/compact", () => {
@@ -25,35 +59,134 @@ describe("POST /v1/compact", () => {
 
   afterEach(() => harness?.teardown());
 
-  it("returns 400 on invalid JSON", async () => {
+  it("rejects an unknown session before parsing invalid JSON", async () => {
     harness = await createHarness({ fixtures: [] });
-    const resp = await postCompact(harness.baseURL, "{ not json");
-    expect(resp.status).toBe(400);
+    const resp = await postCompact(harness, "{ not json");
+    expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
-    expect(body.error).toBe("invalid_request");
-    expect(body.message).toBe("Invalid JSON body");
+    expect(body.error).toBe("session_not_found");
   });
 
-  it("returns 400 when project_path is missing", async () => {
-    harness = await createHarness({ fixtures: [] });
-    const resp = await postCompact(harness.baseURL, JSON.stringify({}));
+  it("rejects invalid JSON after authenticating a valid session", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [
+            { role: "user", content: "Establish this session." },
+          ],
+          responseText: "Session established.",
+          model: DEFAULT_MODEL,
+        }),
+      ],
+    });
+    const sessionID = "compact-invalid-json-session";
+    expect((await establishSession(harness, sessionID)).status).toBe(200);
+
+    const resp = await postCompact(harness, "{ not json", sessionID);
     expect(resp.status).toBe(400);
+    expect(await resp.json()).toEqual({
+      error: "invalid_request",
+      message: "Invalid JSON body",
+    });
+  });
+
+  it("rejects missing authentication without reading an indefinite body", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      type: "bytes",
+      pull() {
+        return new Promise(() => {});
+      },
+    });
+    const req = new Request("http://gateway.test/v1/compact", {
+      method: "POST",
+      body: source,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const response = await handleCompactEndpoint(req, loadConfig());
+    expect(response.status).toBe(401);
+    expect(req.bodyUsed).toBe(false);
+    await response.body?.cancel();
+  });
+
+  it("rejects an unknown session without reading an indefinite body", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      type: "bytes",
+      pull() {
+        return new Promise(() => {});
+      },
+    });
+    const req = new Request("http://gateway.test/v1/compact", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-key",
+        "x-lore-session-id": "unknown-stalled-session",
+      },
+      body: source,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const response = await handleCompactEndpoint(req, loadConfig());
+    expect(response.status).toBe(404);
+    expect(req.bodyUsed).toBe(false);
+    await response.body?.cancel();
+  });
+
+  it("rejects an unknown session before validating project_path", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const resp = await postCompact(harness, JSON.stringify({}));
+    expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
-    expect(body.error).toBe("invalid_request");
-    expect(body.message).toContain("project_path is required");
+    expect(body.error).toBe("session_not_found");
+  });
+
+  it("rejects missing project_path after authenticating a valid session", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [
+            { role: "user", content: "Establish this session." },
+          ],
+          responseText: "Session established.",
+          model: DEFAULT_MODEL,
+        }),
+      ],
+    });
+    const sessionID = "compact-missing-project-session";
+    expect((await establishSession(harness, sessionID)).status).toBe(200);
+
+    const resp = await postCompact(harness, JSON.stringify({}), sessionID);
+    expect(resp.status).toBe(400);
+    expect(await resp.json()).toEqual({
+      error: "invalid_request",
+      message: "project_path is required",
+    });
   });
 
   it("returns 404 when no active session exists for the project", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({ project_path: process.cwd() }),
     );
     expect(resp.status).toBe(404);
     const body = (await resp.json()) as { error: string; message: string };
     expect(body.error).toBe("session_not_found");
-    expect(body.message).toContain("No active session found");
+    expect(body.message).toContain("No authenticated session found");
   });
+});
+
+it("compaction summary generation rejects an already-aborted foreground signal", async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException("client disconnected", "AbortError"));
+  await expect(
+    generateCompactionSummary({
+      projectPath: process.cwd(),
+      sessionID: "aborted-compaction",
+      config: loadConfig(),
+      signal: controller.signal,
+    }),
+  ).rejects.toMatchObject({ name: "AbortError" });
 });
 
 /**
@@ -78,7 +211,7 @@ describe("POST /v1/compact — tokens_before field", () => {
   it("ignores tokens_before when the project has no active session (404 wins)", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: process.cwd(),
         tokens_before: 50_000,
@@ -94,7 +227,7 @@ describe("POST /v1/compact — tokens_before field", () => {
     // schema is exercised.
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: process.cwd(),
         tokens_before: 0,
@@ -109,7 +242,7 @@ describe("POST /v1/compact — tokens_before field", () => {
     // The `typeof === "number"` guard drops all of these safely.
     for (const bad of [null, "100", '"NaN"', true, false, {}]) {
       const resp = await postCompact(
-        harness.baseURL,
+        harness,
         JSON.stringify({
           project_path: process.cwd(),
           tokens_before: bad,
@@ -123,7 +256,7 @@ describe("POST /v1/compact — tokens_before field", () => {
   it("rejects negative tokens_before — falls through to summary path", async () => {
     harness = await createHarness({ fixtures: [] });
     const resp = await postCompact(
-      harness.baseURL,
+      harness,
       JSON.stringify({
         project_path: process.cwd(),
         tokens_before: -100,

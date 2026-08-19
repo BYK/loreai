@@ -500,7 +500,7 @@ try {
   // Cleanup
   // -----------------------------------------------------------------------
   console.log("[smoke] Stopping server...");
-  server.stop();
+  await server.stop();
 
   // Clean up temp DB and related files
   for (const suffix of ["", "-shm", "-wal"]) {

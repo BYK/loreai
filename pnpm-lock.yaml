@@ -161,6 +161,9 @@ importers:
       google-auth-library:
         specifier: ^10.9.0
         version: 10.9.0
+      jsonc-parser:
+        specifier: 3.3.1
+        version: 3.3.1
       p-limit:
         specifier: '7'
         version: 7.3.0

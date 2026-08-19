@@ -7,10 +7,12 @@
 import {
   normalizeRemoteUrl,
   discoverWorkspaceRoot,
+  GATEWAY_AUTH_HEADER,
   UNATTRIBUTED_PROJECT_PREFIX,
   isUnattributedProjectPath,
   log,
 } from "@loreai/core";
+import { hasConflictingAuthHeaders } from "./auth";
 
 // ---------------------------------------------------------------------------
 // Port defaults
@@ -26,6 +28,10 @@ export const DEFAULT_PORTS = [3207, 5673] as const;
 
 /** The primary default port (first in the fallback chain). */
 export const DEFAULT_PORT = DEFAULT_PORTS[0];
+
+/** Match the existing owner-control token bounds used by gateway pid records. */
+export const GATEWAY_AUTH_TOKEN_MIN_LENGTH = 32;
+export const GATEWAY_AUTH_TOKEN_MAX_LENGTH = 256;
 
 // ---------------------------------------------------------------------------
 // Config shape
@@ -46,6 +52,14 @@ export interface GatewayConfig {
   upstreamAnthropic: string;
   /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
   upstreamOpenAI: string;
+  /**
+   * Normalized HTTPS origins that remote/hosted clients may select with
+   * `X-Lore-Upstream-URL`. Empty by default, so caller-selected upstreams are
+   * denied unless the gateway administrator explicitly allows their origins.
+   * Local gateways do not consult this list. Env: LORE_CALLER_UPSTREAM_ALLOWLIST
+   * (comma-separated origins).
+   */
+  callerUpstreamAllowlist: readonly string[];
   /** AWS Bedrock region. Selects both the bedrock-mantle Anthropic endpoint
    * and the bedrock-runtime Converse/InvokeModel endpoint. Resolves from
    * `LORE_BEDROCK_REGION` first, then falls back to `AWS_REGION` /
@@ -68,6 +82,12 @@ export interface GatewayConfig {
   debug: boolean;
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
   remoteUrl?: string;
+  /**
+   * Gateway access credential required by every remote/hosted data-plane
+   * request. This is separate from provider credentials. Env:
+   * LORE_GATEWAY_AUTH_TOKEN.
+   */
+  gatewayAuthToken?: string;
   /**
    * Hosted/remote mode — disables all filesystem operations that use
    * client-controlled paths (git subprocess, .lore.json/.lore.md read/write,
@@ -124,7 +144,7 @@ export interface GatewayConfig {
    */
   remoteGatewayCommandDefault?: boolean;
   /**
-   * Extra HTTP headers to inject on every upstream call (corporate proxies,
+   * Extra HTTP headers to inject on configured upstream calls (corporate proxies,
    * Cloudflare AI Gateway's `cf-aig-authorization`, LiteLLM team-routing
    * tokens, audit/logging tracing headers, etc.).
    *
@@ -133,13 +153,14 @@ export interface GatewayConfig {
    * for `ANTHROPIC_CUSTOM_HEADERS`. Keys are lowercased; values are
    * whitespace-trimmed. Empty / malformed lines are skipped with a warning.
    *
-   * Precedence (highest wins): gateway-managed headers (`x-api-key`,
-   * `Authorization`, `x-lore-*`) > these user-supplied extras > client
-   * forwarded headers. This means a user-supplied `Authorization: Bearer
-   * svc-token` overrides the session's credential — useful for routing
-   * worker calls or routing sessions to a service account.
+   * These headers are credentials owned by the gateway administrator. They are
+   * base-path-bound to `LORE_UPSTREAM_ANTHROPIC`, `LORE_UPSTREAM_OPENAI`, and
+   * `LORE_WORKER_UPSTREAM` (when configured), and are omitted when a client
+   * selects any other base with `X-Lore-Upstream-URL`.
    */
   upstreamExtraHeaders: Record<string, string>;
+  /** Normalized HTTP(S) base paths authorized to receive upstreamExtraHeaders. */
+  upstreamExtraHeaderBases?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +171,26 @@ export interface GatewayConfig {
 export function loadConfig(): GatewayConfig {
   const env = process.env;
   const hosts = parseHosts(env.LORE_LISTEN_HOST);
+  const upstreamAnthropic = trimTrailingSlash(
+    env.LORE_UPSTREAM_ANTHROPIC || "https://api.anthropic.com",
+  );
+  const upstreamOpenAI = trimTrailingSlash(
+    env.LORE_UPSTREAM_OPENAI || "https://api.openai.com",
+  );
+  const workerUpstream = env.LORE_WORKER_UPSTREAM
+    ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
+    : undefined;
+  /**
+   * Comma-separated HTTPS origins that remote/hosted clients may select via
+   * `X-Lore-Upstream-URL`. Entries must be origins only (no credentials, paths,
+   * queries, fragments, or wildcards), and duplicates are rejected after URL
+   * normalization. Unset means deny every caller-selected origin. Configured
+   * provider upstreams are administrator-selected and do not require an entry.
+   * Env: `LORE_CALLER_UPSTREAM_ALLOWLIST`.
+   */
+  const callerUpstreamAllowlist = parseCallerUpstreamAllowlist(
+    env.LORE_CALLER_UPSTREAM_ALLOWLIST,
+  );
   /**
    * Explicitly marks this gateway as a remote / multi-tenant one.
    * When set to `1`, the gateway assumes a per-user bucketing model
@@ -182,16 +223,26 @@ export function loadConfig(): GatewayConfig {
   const hostedModeDefined = "LORE_HOSTED_MODE" in env;
   const autoDetected =
     !remoteGatewayDefined && !hostedModeDefined && hasNonLoopbackHost(hosts);
+  const upstreamExtraHeaders = parseCurlHeaders(
+    env.LORE_UPSTREAM_EXTRA_HEADERS,
+  );
+  if (hasConflictingAuthHeaders(upstreamExtraHeaders)) {
+    throw new Error(
+      "LORE_UPSTREAM_EXTRA_HEADERS must configure at most one provider authentication mechanism",
+    );
+  }
+  if (hasGatewayAccessHeader(upstreamExtraHeaders)) {
+    throw new Error(
+      "LORE_UPSTREAM_EXTRA_HEADERS cannot contain the gateway access header",
+    );
+  }
   return {
     port: parsePort(env.LORE_LISTEN_PORT, DEFAULT_PORT),
     portExplicit: !!env.LORE_LISTEN_PORT,
     hosts,
-    upstreamAnthropic: trimTrailingSlash(
-      env.LORE_UPSTREAM_ANTHROPIC || "https://api.anthropic.com",
-    ),
-    upstreamOpenAI: trimTrailingSlash(
-      env.LORE_UPSTREAM_OPENAI || "https://api.openai.com",
-    ),
+    upstreamAnthropic,
+    upstreamOpenAI,
+    callerUpstreamAllowlist,
     /**
      * Idle timeout in seconds. After this many seconds with no active
      * request, the gateway stops the per-session in-memory cache
@@ -208,12 +259,16 @@ export function loadConfig(): GatewayConfig {
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
       : undefined,
+    gatewayAuthToken: parseGatewayAuthToken(env.LORE_GATEWAY_AUTH_TOKEN),
     hostedMode: hostedModeEnv,
     workerApiKey: env.LORE_WORKER_API_KEY || undefined,
-    workerUpstream: env.LORE_WORKER_UPSTREAM
-      ? trimTrailingSlash(env.LORE_WORKER_UPSTREAM)
-      : undefined,
-    upstreamExtraHeaders: parseCurlHeaders(env.LORE_UPSTREAM_EXTRA_HEADERS),
+    workerUpstream,
+    upstreamExtraHeaders,
+    upstreamExtraHeaderBases: configuredUpstreamBases([
+      upstreamAnthropic,
+      upstreamOpenAI,
+      workerUpstream,
+    ]),
     // Bedrock (bedrock-mantle) region — selects the regional mantle endpoint.
     bedrockRegion:
       env.LORE_BEDROCK_REGION ??
@@ -232,6 +287,59 @@ export function loadConfig(): GatewayConfig {
     remoteGateway: remoteGatewayEnv || hostedModeEnv || autoDetected,
     remoteGatewayAutoDetected: autoDetected,
   };
+}
+
+/** Parse a header-safe, brute-force-resistant gateway access token. */
+export function parseGatewayAuthToken(
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (
+    value.length < GATEWAY_AUTH_TOKEN_MIN_LENGTH ||
+    value.length > GATEWAY_AUTH_TOKEN_MAX_LENGTH ||
+    // Visible ASCII excluding comma keeps one configured token distinguishable
+    // from Fetch/Node's comma-joined duplicate-header representation.
+    !/^[\x21-\x2b\x2d-\x7e]+$/.test(value)
+  ) {
+    throw new Error(
+      `LORE_GATEWAY_AUTH_TOKEN must be ${GATEWAY_AUTH_TOKEN_MIN_LENGTH}-${GATEWAY_AUTH_TOKEN_MAX_LENGTH} visible ASCII characters without commas`,
+    );
+  }
+  return value;
+}
+
+/** Apply the fail-closed remote/hosted startup invariant after CLI overrides. */
+export function assertGatewayAccessConfigured(
+  config: Pick<
+    GatewayConfig,
+    "remoteGateway" | "hostedMode" | "gatewayAuthToken"
+  > &
+    Partial<Pick<GatewayConfig, "upstreamExtraHeaders">>,
+): void {
+  const gatewayAuthToken = parseGatewayAuthToken(config.gatewayAuthToken);
+  if ((config.remoteGateway || config.hostedMode) && !gatewayAuthToken) {
+    throw new Error(
+      "Remote/hosted gateway mode requires LORE_GATEWAY_AUTH_TOKEN",
+    );
+  }
+  if (hasConflictingAuthHeaders(config.upstreamExtraHeaders)) {
+    throw new Error(
+      "Configured upstream headers contain conflicting authentication mechanisms",
+    );
+  }
+  if (hasGatewayAccessHeader(config.upstreamExtraHeaders)) {
+    throw new Error(
+      "Configured upstream headers cannot contain the gateway access header",
+    );
+  }
+}
+
+function hasGatewayAccessHeader(
+  headers: Record<string, string> | null | undefined,
+): boolean {
+  return Object.keys(headers ?? {}).some(
+    (name) => name.toLowerCase() === GATEWAY_AUTH_HEADER,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +450,99 @@ export function resolveUpstreamRoute(model: string): UpstreamRoute | null {
 const MAX_UPSTREAM_URL_LENGTH = 2048;
 
 /**
+ * Parse the administrator allowlist for caller-selected upstream origins.
+ *
+ * Only comma-separated HTTPS origins are accepted. The whole configuration is
+ * rejected on any invalid or normalization-equivalent duplicate entry so an
+ * administrator never gets a silently weakened or ambiguous policy.
+ */
+export function parseCallerUpstreamAllowlist(
+  input: string | undefined,
+): readonly string[] {
+  if (input === undefined || input.trim() === "") return Object.freeze([]);
+
+  const origins: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of input.split(",").entries()) {
+    const raw = entry.trim();
+    const invalid = (): never => {
+      throw new Error(
+        `Invalid LORE_CALLER_UPSTREAM_ALLOWLIST entry ${index + 1}: expected a unique HTTPS origin`,
+      );
+    };
+    if (
+      !raw ||
+      raw.length > MAX_UPSTREAM_URL_LENGTH ||
+      !/^https:\/\//i.test(raw) ||
+      raw.includes("*") ||
+      raw.includes("\\") ||
+      raw.includes("?") ||
+      raw.includes("#") ||
+      // oxlint-disable-next-line no-control-regex -- reject URL parser normalization of controls/whitespace
+      /[\x00-\x20\x7f]/.test(raw)
+    ) {
+      invalid();
+    }
+    const authorityStart = raw.indexOf("://") + 3;
+    const pathStart = raw.indexOf("/", authorityStart);
+    if (pathStart !== -1 && raw.slice(pathStart) !== "/") invalid();
+    const authority = raw.slice(
+      authorityStart,
+      pathStart === -1 ? raw.length : pathStart,
+    );
+    if (authority.endsWith(":")) invalid();
+
+    const parsed = (() => {
+      try {
+        return new URL(raw);
+      } catch {
+        return invalid();
+      }
+    })();
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      !parsed.hostname
+    ) {
+      invalid();
+    }
+
+    const origin = parsed.origin;
+    if (seen.has(origin)) {
+      throw new Error(
+        `Invalid LORE_CALLER_UPSTREAM_ALLOWLIST entry ${index + 1}: duplicate normalized origin`,
+      );
+    }
+    seen.add(origin);
+    origins.push(origin);
+  }
+  return Object.freeze(origins);
+}
+
+/**
+ * Whether this gateway may honor a caller-selected upstream URL. Local mode
+ * deliberately preserves arbitrary HTTP/private inference endpoints; remote
+ * and hosted modes use only the server-side config and require exact origin
+ * membership in the administrator allowlist.
+ */
+export function isCallerUpstreamAllowed(
+  config: Pick<GatewayConfig, "remoteGateway" | "hostedMode"> &
+    Partial<Pick<GatewayConfig, "callerUpstreamAllowlist">>,
+  upstreamUrl: string,
+): boolean {
+  if (!config.remoteGateway && !config.hostedMode) return true;
+  try {
+    const parsed = new URL(upstreamUrl);
+    if (parsed.protocol !== "https:") return false;
+    return (config.callerUpstreamAllowlist ?? []).includes(parsed.origin);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Extract and validate the `X-Lore-Upstream-URL` header from a request.
  *
  * Used by local/custom providers (vllm, llama.cpp, ollama, etc.) to tell the
@@ -376,6 +577,107 @@ export function extractUpstreamUrlHeader(
   } catch {
     return undefined;
   }
+}
+
+/** Strip credentials and non-routing URL components before diagnostic logging. */
+export function upstreamUrlForLog(value: string | null | undefined): string {
+  if (!value) return "none";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return "invalid";
+    }
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return "invalid";
+  }
+}
+
+/**
+ * Normalize an HTTP(S) upstream base while preserving its path boundary.
+ * Query/fragment/userinfo are never part of a trusted base. Encoded path
+ * separators and dot bytes are rejected (including double encoding) so an
+ * intermediary cannot decode a value into traversal after this check.
+ */
+export function normalizeUpstreamBase(url: string): string | undefined {
+  try {
+    // Inspect the supplied bytes before WHATWG URL normalization can erase a
+    // literal or encoded dot segment. Repeat decoding to catch `%252e` forms.
+    let raw = url;
+    for (let i = 0; i < 4; i++) {
+      // oxlint-disable-next-line no-control-regex -- intentional URL hardening
+      if (raw.includes("\\") || /[\x00-\x1f\x7f]/.test(raw)) return undefined;
+      if (/%(?:0[0-9a-f]|1[0-9a-f]|2e|2f|5c|7f)/i.test(raw)) {
+        return undefined;
+      }
+      const decoded = decodeURIComponent(raw);
+      if (decoded === raw) break;
+      raw = decoded;
+    }
+    const rawPath = raw
+      .replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "")
+      .split(/[?#]/, 1)[0];
+    if (rawPath.split("/").some((part) => part === "." || part === "..")) {
+      return undefined;
+    }
+
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return undefined;
+    }
+    if (parsed.username || parsed.password) return undefined;
+    if (parsed.search || parsed.hash) return undefined;
+    if (parsed.pathname.includes("\\")) return undefined;
+    const segments = parsed.pathname.split("/");
+    if (segments.some((segment) => segment === "." || segment === "..")) {
+      return undefined;
+    }
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.origin + (pathname === "/" ? "" : pathname);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Segment-safe base containment (`/tenant-a` never matches `/tenant-ab`). */
+export function isUpstreamWithinBase(
+  upstreamUrl: string,
+  configuredBase: string,
+): boolean {
+  const destination = normalizeUpstreamBase(upstreamUrl);
+  const base = normalizeUpstreamBase(configuredBase);
+  if (!destination || !base) return false;
+  if (destination === base) return true;
+  return destination.startsWith(`${base}/`);
+}
+
+/**
+ * Return gateway-admin extra headers only when the destination is one of the
+ * configured upstream base paths. Client URL overrides remain supported, but an
+ * arbitrary override never receives gateway-global credentials.
+ */
+export function extraHeadersForUpstream(
+  config: Pick<
+    GatewayConfig,
+    | "upstreamAnthropic"
+    | "upstreamOpenAI"
+    | "workerUpstream"
+    | "upstreamExtraHeaders"
+  > &
+    Partial<Pick<GatewayConfig, "upstreamExtraHeaderBases">>,
+  upstreamUrl: string,
+): Record<string, string> {
+  if (Object.keys(config.upstreamExtraHeaders).length === 0) return {};
+  const trustedBases =
+    config.upstreamExtraHeaderBases ??
+    configuredUpstreamBases([
+      config.upstreamAnthropic,
+      config.upstreamOpenAI,
+      config.workerUpstream,
+    ]);
+  return trustedBases.some((base) => isUpstreamWithinBase(upstreamUrl, base))
+    ? config.upstreamExtraHeaders
+    : {};
 }
 
 /** Maximum allowed length for an upstream path header value. */
@@ -1101,13 +1403,27 @@ function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
+function configuredUpstreamBases(
+  upstreams: Array<string | undefined>,
+): readonly string[] {
+  return [
+    ...new Set(
+      upstreams
+        .map((upstream) =>
+          upstream ? normalizeUpstreamBase(upstream) : undefined,
+        )
+        .filter((base): base is string => base !== undefined),
+    ),
+  ];
+}
+
 /**
  * Parse curl-style multi-line header blocks into a `Record<string, string>`.
  *
  * Accepts the same format Anthropic's SDK uses for `ANTHROPIC_CUSTOM_HEADERS`
  * and `OpenAI-Organization`-style env-var header lists: one `Name: Value`
  * per line, separated by `\n`. Keys are lowercased and trimmed; values are
- * trimmed. Empty lines and malformed lines (no colon) are skipped with a
+ * trimmed. Empty lines and malformed lines are skipped with a body-independent
  * warning logged to stderr. Returns `{}` when the input is empty/undefined.
  *
  * Header names are validated to contain only printable ASCII (RFC 7230
@@ -1121,13 +1437,13 @@ export function parseCurlHeaders(
 ): Record<string, string> {
   if (!input) return {};
   const out: Record<string, string> = {};
-  for (const rawLine of input.split(/\r?\n/)) {
+  for (const [index, rawLine] of input.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line) continue;
     const colonIdx = line.indexOf(":");
     if (colonIdx <= 0) {
       log.notice(
-        `warning: ignoring malformed LORE_UPSTREAM_EXTRA_HEADERS line: ${JSON.stringify(line)}`,
+        `warning: ignoring malformed LORE_UPSTREAM_EXTRA_HEADERS line ${index + 1}`,
       );
       continue;
     }
@@ -1140,7 +1456,7 @@ export function parseCurlHeaders(
     const value = rawValue.replace(/[\x00-\x1f\x7f]/g, "").trim();
     if (!name || !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
       log.notice(
-        `warning: ignoring invalid header name in LORE_UPSTREAM_EXTRA_HEADERS: ${JSON.stringify(rawName)}`,
+        `warning: ignoring invalid header name in LORE_UPSTREAM_EXTRA_HEADERS line ${index + 1}`,
       );
       continue;
     }

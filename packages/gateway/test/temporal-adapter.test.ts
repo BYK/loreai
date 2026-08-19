@@ -1,12 +1,19 @@
 import { describe, test, expect } from "vitest";
 import {
+  deterministicID,
   gatewayMessagesToLore,
+  legacyDeterministicID,
   resolveToolResults,
 } from "../src/temporal-adapter";
 import type { GatewayMessage } from "../src/translate/types";
 import type { LorePart } from "@loreai/core";
 import { isToolPart } from "@loreai/core";
 import { estimateMessages } from "../../core/src/gradient";
+import { loreMessagesToGateway } from "../src/pipeline";
+import {
+  buildGeminiUpstreamRequest,
+  parseGeminiRequest,
+} from "../src/translate/gemini";
 
 // Test-local view of a tool part's state covering all status variants.
 type TestToolState = {
@@ -70,6 +77,63 @@ function makeToolConversation(): GatewayMessage[] {
     },
   ];
 }
+
+describe("deterministic message identity", () => {
+  test("is stable within a session and distinct across sessions", () => {
+    const content = [{ type: "text" as const, text: "identical response" }];
+    const first = deterministicID("session-a", "assistant", 0, content);
+
+    expect(deterministicID("session-a", "assistant", 0, content)).toBe(first);
+    expect(deterministicID("session-b", "assistant", 0, content)).not.toBe(
+      first,
+    );
+  });
+
+  test("uses the supplied absolute start index for single-message responses", () => {
+    const content = [{ type: "text" as const, text: "repeated answer" }];
+    const first = gatewayMessagesToLore(
+      [{ role: "assistant", content }],
+      "session-a",
+      1,
+    )[0].info.id;
+    const later = gatewayMessagesToLore(
+      [{ role: "assistant", content }],
+      "session-a",
+      3,
+    )[0].info.id;
+
+    expect(later).not.toBe(first);
+  });
+
+  test("carries exact invocation-relative pre-v82 IDs beside absolute modern IDs", () => {
+    const history: GatewayMessage[] = [
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "assistant", content: [{ type: "text", text: "second" }] },
+      { role: "user", content: [{ type: "text", text: "third" }] },
+    ];
+    const converted = gatewayMessagesToLore(history, "bridge-session");
+    expect(converted[2].legacySourceID).toBe(
+      legacyDeterministicID("user", 2, history[2].content),
+    );
+
+    const response = gatewayMessagesToLore(
+      [history[1]],
+      "bridge-session",
+      history.length,
+    )[0];
+    expect(response.info.id).toBe(
+      deterministicID(
+        "bridge-session",
+        "assistant",
+        history.length,
+        history[1].content,
+      ),
+    );
+    expect(response.legacySourceID).toBe(
+      legacyDeterministicID("assistant", 0, history[1].content),
+    );
+  });
+});
 
 // ---------------------------------------------------------------------------
 // resolveToolResults: pairing + stripping
@@ -342,5 +406,75 @@ describe("resolveToolResults", () => {
     expect(messages[0].parts).toHaveLength(1);
     expect(messages[0].hiddenInputTokens).toBeGreaterThan(1_000);
     expect(estimateMessages(messages)).toBeGreaterThan(1_000);
+  });
+
+  test("preserves distinct Gemini call id and name through Lore and egress", () => {
+    const parsed = parseGeminiRequest(
+      {
+        contents: [
+          {
+            role: "model",
+            parts: [
+              {
+                functionCall: {
+                  id: "call-1",
+                  name: "lookup",
+                  args: { query: "x" },
+                },
+              },
+            ],
+          },
+          {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  id: "call-1",
+                  name: "lookup",
+                  response: { value: 1 },
+                },
+              },
+            ],
+          },
+        ],
+      },
+      {},
+      "gemini-test",
+      false,
+    );
+    const lore = gatewayMessagesToLore(parsed.messages, "sess-gemini-id");
+    resolveToolResults(lore);
+    const reconstructed = loreMessagesToGateway(lore);
+    expect(reconstructed[0].content[0]).toMatchObject({
+      type: "tool_use",
+      id: "call-1",
+      name: "lookup",
+    });
+    expect(reconstructed[1].content[0]).toMatchObject({
+      type: "tool_result",
+      toolUseId: "call-1",
+      toolName: "lookup",
+    });
+    const body = buildGeminiUpstreamRequest(
+      { ...parsed, messages: reconstructed },
+      "https://gemini.example",
+    ).body as Record<string, unknown>;
+    const contents = body.contents as Array<{
+      parts: Array<Record<string, unknown>>;
+    }>;
+    expect(contents[0].parts[0]).toEqual({
+      functionCall: {
+        id: "call-1",
+        name: "lookup",
+        args: { query: "x" },
+      },
+    });
+    expect(contents[1].parts[0]).toEqual({
+      functionResponse: {
+        id: "call-1",
+        name: "lookup",
+        response: { value: 1 },
+      },
+    });
   });
 });

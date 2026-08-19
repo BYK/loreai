@@ -22,7 +22,9 @@ import {
   recordCacheBustObservation,
   findSessionStatesByFingerprint,
   countMatchingTemporalIds,
+  getGitRemote,
   projectId,
+  resolveProjectByRemoteOrPath,
   projectGitRemote,
   mergeProjectInternal,
   isUnattributedProjectPath,
@@ -87,6 +89,8 @@ import {
   enableHostedMode,
   importLoreFileAs,
   resolveWorkspaces,
+  currentTenantId,
+  withTenant,
 } from "@loreai/core";
 
 import type {
@@ -104,25 +108,30 @@ import type {
 } from "./translate/types";
 import {
   applyUpstreamExtraHeaders,
+  buildUpstreamSnapshotHeaders,
   blocksToText,
   isEmptyCompletion,
   looksLikeSSE,
-  forwardClientHeaders,
+  providerRoutingValue,
+  requestTargetsOpenRouter,
   ZERO_USAGE,
 } from "./translate/types";
 import type { GatewayConfig } from "./config";
 import {
   getProjectPath,
   extractGitRemoteHeader,
-  extractProjectHeader,
   resolveUpstreamRoute,
   extractUpstreamUrlHeader,
   extractUpstreamPathHeader,
   verbatimUpstreamUrl,
   extractProviderHeader,
   hasCopilotIntegrationHeader,
-  resolveLastSeenProvider,
   resolveProviderRoute,
+  extraHeadersForUpstream,
+  upstreamUrlForLog,
+  isUpstreamWithinBase,
+  isCallerUpstreamAllowed,
+  normalizeUpstreamBase,
   unattributedBucketPath,
   type ProjectPathResult,
 } from "./config";
@@ -133,7 +142,8 @@ import {
   KNOWN_SESSION_HEADERS,
   extractKnownSessionHeader,
   learnHeaders,
-  findRotationPredecessor,
+  observeHeaderValues,
+  isCredentialHeaderName,
 } from "./session";
 import {
   detectCompactionRequest,
@@ -181,6 +191,13 @@ import {
   formatResponsesEvent,
   makeResponsesAccState,
   mapStatusFromStopReason,
+  isSupportedResponsesOutputItemType,
+  isValidResponsesOutputItemStatus,
+  isValidResponsesReasoningEncryptedContent,
+  responsesDoneItemMatchesAdded,
+  responsesTerminalItemMatches,
+  normalizeCodexResponsesEvent,
+  ResponsesTerminalError,
   type ResponsesAccState,
 } from "./stream/openai-responses";
 import {
@@ -197,6 +214,11 @@ import {
   translateAnthropicStreamToGemini,
 } from "./stream/gemini";
 import {
+  safeTokenSum,
+  validateOpenAIUsage,
+  validateResponsesUsage,
+} from "./usage-validation";
+import {
   accumulateSSEResponse,
   createStreamAccumulator,
   createRecallAwareAccumulator,
@@ -206,6 +228,10 @@ import {
   buildKeepaliveCompactionStream,
   buildSSEMarkerMessage,
   formatSSEEvent,
+  AnthropicSSEValidator,
+  cancelAndReleaseReader,
+  readStreamChunk,
+  DEFAULT_MAX_SSE_FRAMES,
   type StreamAccumulator,
   type RecallAwareAccumulator,
 } from "./stream/anthropic";
@@ -214,10 +240,14 @@ import {
   updateAssistantMessageTokens,
   resolveToolResults,
   deterministicID,
+  legacyDeterministicID,
 } from "./temporal-adapter";
 import {
+  canonicalWorkerProviderID,
   createGatewayLLMClient,
   disjointOpenAIInputTokens,
+  workerProviderSupportsProtocol,
+  type GatewayPromptOptions,
 } from "./llm-adapter";
 import { createBatchLLMClient } from "./batch-queue";
 import {
@@ -228,24 +258,26 @@ import {
   boundedSettle,
 } from "./background-limiter";
 import {
+  copyProviderAuthHeaders,
   extractAuth,
   authFingerprint,
+  credentialTenantFingerprint,
   setLastSeenAuth,
   setSessionAuth,
   resolveAuth,
   isAuthStale,
+  hasConflictingAuthHeaders,
   workerKeyScheme,
   type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
 import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
 import { flushPendingImport } from "./pending-import";
-import { upstreamErrorHint } from "./upstream-error-hint";
 import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
+import { hasWorkerSessionAuth } from "./worker-auth";
 import {
   makeWorkerHealth,
-  recordWorkerFailure,
   allowWorkerProbe,
   isWorkerCreditPaused,
   getDegradationWarning,
@@ -342,6 +374,7 @@ import {
   recallAnchorContext,
 } from "./recall";
 import { upstreamFetch } from "./fetch";
+import { promiseAgainstAbort, responseAgainstAbort } from "./abort-race";
 import {
   buildUpstreamRouteContext,
   decodeRequestBody,
@@ -589,6 +622,163 @@ function containsGitCommit(req: GatewayRequest): boolean {
 
 /** Active upstream interceptor — used for recording/replay. */
 let activeInterceptor: UpstreamInterceptor | undefined;
+/** Monotonic request-start order for concurrency-safe upstream snapshots. */
+let upstreamRequestOrder = 0;
+/** Test-only seam for forcing adversarial request ordering before capture. */
+let beforeUpstreamCaptureForTest:
+  | ((req: GatewayRequest, state: SessionState) => Promise<void>)
+  | undefined;
+/** Foreground request lifetimes cancelled when the pipeline is reset. */
+const activeForegroundAbortControllers = new Set<AbortController>();
+
+export function setBeforeUpstreamCaptureForTest(
+  hook:
+    | ((req: GatewayRequest, state: SessionState) => Promise<void>)
+    | undefined,
+): void {
+  beforeUpstreamCaptureForTest = hook;
+}
+
+/** Test-only observer for pinning post-response lifecycle ordering. */
+let postResponseStartObserver: (() => void) | undefined;
+let recallPersistenceCommitObserver: (() => void) | undefined;
+let pipelineResetPauseForTest: Promise<void> | undefined;
+let pipelinePreUpstreamPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let provisionalFinalizerPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let pipelineResetSettleTimeoutMs = 5000;
+let pipelineResetInProgress = false;
+let pipelineResetPromise: Promise<void> | undefined;
+
+interface ActivePipelineRequest {
+  admissionKey: string;
+  abort: (reason: unknown) => void;
+  settled: Promise<void>;
+  sessionIDs: Set<string>;
+}
+
+const activePipelineRequests = new Set<ActivePipelineRequest>();
+const detachedPipelineRequests = new Set<ActivePipelineRequest>();
+const DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS = 64;
+const MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY = 16;
+const MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION = 1;
+const MAX_PENDING_SESSION_CLAIMS = 64;
+const MAX_DETACHED_PIPELINE_REQUESTS = 64;
+let maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
+let maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
+
+interface PendingSessionClaim {
+  active: ActivePipelineRequest;
+  sessionID: string;
+  signal: AbortSignal;
+  resolve: () => void;
+  reject: (reason: unknown) => void;
+  onAbort: () => void;
+}
+
+const pendingSessionClaims = new Map<string, PendingSessionClaim>();
+
+class PipelineCapacityError extends Error {}
+
+function activePipelineRequestsForSession(sessionID: string): number {
+  let count = 0;
+  for (const request of activePipelineRequests) {
+    if (request.sessionIDs.has(sessionID)) count++;
+  }
+  return count;
+}
+
+function activePipelineRequestsForAdmissionKey(admissionKey: string): number {
+  let count = 0;
+  for (const request of activePipelineRequests) {
+    if (request.admissionKey === admissionKey) count++;
+  }
+  return count;
+}
+
+function pendingSessionClaimsForAdmissionKey(admissionKey: string): number {
+  let count = 0;
+  for (const claim of pendingSessionClaims.values()) {
+    if (claim.active.admissionKey === admissionKey) count++;
+  }
+  return count;
+}
+
+function pipelineSessionHasCapacity(sessionID: string): boolean {
+  return (
+    activePipelineRequestsForSession(sessionID) +
+      (streamingPostResponseFinalizers.get(sessionID)?.pending ?? 0) <
+    MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION
+  );
+}
+
+function pumpPendingSessionClaims(): void {
+  for (const [sessionID, claim] of pendingSessionClaims) {
+    if (
+      activePipelineRequests.size + streamingPostResponsePending >=
+      maxActivePipelineRequests
+    ) {
+      return;
+    }
+    if (
+      activePipelineRequestsForAdmissionKey(claim.active.admissionKey) +
+        (streamingPostResponsePendingByAdmissionKey.get(
+          claim.active.admissionKey,
+        ) ?? 0) >=
+      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
+    ) {
+      continue;
+    }
+    if (!pipelineSessionHasCapacity(sessionID)) continue;
+    pendingSessionClaims.delete(sessionID);
+    claim.signal.removeEventListener("abort", claim.onAbort);
+    if (claim.signal.aborted) {
+      claim.reject(claim.signal.reason);
+      continue;
+    }
+    claim.active.sessionIDs.add(sessionID);
+    activePipelineRequests.add(claim.active);
+    claim.resolve();
+  }
+}
+
+function isPipelineSessionActive(sessionID: string): boolean {
+  return (
+    activePipelineRequestsForSession(sessionID) > 0 ||
+    streamingPostResponseFinalizers.has(sessionID)
+  );
+}
+
+export function activePipelineRequestCountForTest(): number {
+  return activePipelineRequests.size;
+}
+
+export function detachedPipelineRequestCountForTest(): number {
+  return detachedPipelineRequests.size;
+}
+
+export function pendingPipelineSessionClaimCountForTest(): number {
+  return pendingSessionClaims.size;
+}
+
+export function setMaxActivePipelineRequestsForTest(
+  limit = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS,
+): void {
+  maxActivePipelineRequests = limit;
+}
+
+export function setMaxDetachedPipelineRequestsForTest(
+  limit = MAX_DETACHED_PIPELINE_REQUESTS,
+): void {
+  maxDetachedPipelineRequests = limit;
+}
+
+export function isPipelineSessionActiveForTest(sessionID: string): boolean {
+  return isPipelineSessionActive(sessionID);
+}
 
 /**
  * Set (or clear) the module-level upstream interceptor.
@@ -604,6 +794,42 @@ export function setUpstreamInterceptor(
   activeInterceptor = interceptor;
 }
 
+export function setPostResponseStartObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  postResponseStartObserver = observer;
+}
+
+export function setRecallPersistenceCommitObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  recallPersistenceCommitObserver = observer;
+}
+
+export function setPipelineResetPauseForTest(
+  pause: Promise<void> | undefined,
+): void {
+  pipelineResetPauseForTest = pause;
+}
+
+export function setPipelinePreUpstreamPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setProvisionalFinalizerPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  provisionalFinalizerPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setPipelineResetSettleTimeoutForTest(timeoutMs = 5000): void {
+  pipelineResetSettleTimeoutMs = timeoutMs;
+}
+
 /**
  * Reset all module-level singleton state.
  *
@@ -614,6 +840,73 @@ export function setUpstreamInterceptor(
 export async function resetPipelineState(opts?: {
   fast?: boolean;
 }): Promise<void> {
+  if (pipelineResetPromise) return pipelineResetPromise;
+  pipelineResetInProgress = true;
+  const reset = (async () => {
+    try {
+      await resetPipelineStateInner(opts);
+    } finally {
+      pipelineResetInProgress = false;
+      pipelineResetPromise = undefined;
+    }
+  })();
+  pipelineResetPromise = reset;
+  return reset;
+}
+
+async function resetPipelineStateInner(opts?: {
+  fast?: boolean;
+}): Promise<void> {
+  streamingPostResponsesAccepting = false;
+  await pipelineResetPauseForTest;
+  const resetReason = new DOMException("gateway pipeline reset", "AbortError");
+  pipelineGenerationAbort.abort(resetReason);
+  const foregroundControllers = [...activeForegroundAbortControllers];
+  activeForegroundAbortControllers.clear();
+  for (const controller of foregroundControllers) {
+    if (!controller.signal.aborted) controller.abort(resetReason);
+  }
+  const activeRequests = [
+    ...new Set([
+      ...activePipelineRequests,
+      ...[...pendingSessionClaims.values()].map((claim) => claim.active),
+    ]),
+  ];
+  for (const request of activeRequests) request.abort(resetReason);
+  await boundedSettle(
+    activeRequests.map((request) => request.settled),
+    pipelineResetSettleTimeoutMs,
+  );
+  for (const request of activeRequests) {
+    if (!activePipelineRequests.has(request)) continue;
+    activePipelineRequests.delete(request);
+    request.sessionIDs.clear();
+    if (detachedPipelineRequests.size < maxDetachedPipelineRequests) {
+      detachedPipelineRequests.add(request);
+    } else {
+      log.error(
+        "pipeline quarantine full; dropping stale lifecycle reservation",
+      );
+    }
+  }
+  // Streaming responses register post-response finalizers before closing their
+  // bodies. Drain them before sessions or the DB-facing pipeline state are
+  // cleared; a finalizer may also schedule ordinary background work, which the
+  // non-fast drain below will then observe.
+  await boundedSettle(
+    [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
+    pipelineResetSettleTimeoutMs,
+  );
+  streamingPostResponseGeneration++;
+  pipelineGenerationAbort = new AbortController();
+  streamingPostResponseFinalizers.clear();
+  streamingPostResponsePendingByAdmissionKey.clear();
+  streamingPostResponsePending = 0;
+  maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
+  maxStreamingPostResponsesPerSession =
+    DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+  lastStreamingPostResponseOverflowLog = 0;
+  lastStreamingPostResponseResetLog = 0;
   // Quiesce background work before tearing anything down. Only the non-fast
   // path drains — today that's test/eval teardown (the fast process-exit path,
   // the sole production caller, skips this to keep Ctrl+C snappy). Stop the
@@ -638,16 +931,24 @@ export async function resetPipelineState(opts?: {
     inFlightBackground.clear();
   }
   initialized = false;
+  maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
+  maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
   sessions.clear();
   cwdWarned.clear();
   staleHeaderWarned.clear();
   subagentParentPendingLogged.clear();
   headerSessionIndex.clear();
+  ambiguousHeaderSessionKeys.clear();
+  provisionalHeaderSessionIndex.clear();
+  identityAdmissionTails.clear();
+  headerSessionIndexHydrated = false;
   ltmSessionCache.clear();
   ltmPinnedText.clear();
   lastSavedDedupDecisions.clear();
   stableLtmCache.clear();
   stableLtmInFlight.clear();
+  sessionLifecycleAborts.clear();
+  streamingPostResponseWaiters.clear();
   // Shut down the batch queue before clearing the client. On process exit
   // (`fast`), skip the synchronous LLM drain — replaying queued background
   // prompts through retries/backoff is what made Ctrl+C hang for minutes; they
@@ -661,6 +962,10 @@ export async function resetPipelineState(opts?: {
   }
   llmClient = null;
   activeInterceptor = undefined;
+  beforeUpstreamCaptureForTest = undefined;
+  postResponseStartObserver = undefined;
+  recallPersistenceCommitObserver = undefined;
+  provisionalFinalizerPauseForTest = undefined;
   if (stopFileWatcher) {
     stopFileWatcher();
     stopFileWatcher = null;
@@ -682,6 +987,192 @@ export async function resetPipelineState(opts?: {
 
 /** Per-session state tracked across requests. */
 const sessions = new Map<string, SessionState>();
+
+const DEFAULT_MAX_STREAMING_POST_RESPONSES = 64;
+// Production requests reserve capacity before upstream work. The limits remain
+// as defense-in-depth for unreserved/test-only scheduling.
+const DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION = 2;
+
+/**
+ * Deferred streaming finalizers keyed by session. The streamer invokes its
+ * callback before closing so registration is atomic with terminal delivery,
+ * but the expensive synchronous accounting itself runs on the next event-loop
+ * turn, allowing the body reader (and Node bridge) to observe EOF first. The
+ * bounded registry preserves in-process ordering; a process crash in that one
+ * event-loop-turn window can still lose final accounting, which is the explicit
+ * availability trade-off required to avoid holding client EOF behind SQLite.
+ */
+const streamingPostResponseFinalizers = new Map<
+  string,
+  { tail: Promise<void>; pending: number }
+>();
+const streamingPostResponsePendingByAdmissionKey = new Map<string, number>();
+let streamingPostResponsePending = 0;
+let streamingPostResponseGeneration = 0;
+let pipelineGenerationAbort = new AbortController();
+let streamingPostResponsesAccepting = true;
+let maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
+let maxStreamingPostResponsesPerSession =
+  DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+let lastStreamingPostResponseOverflowLog = 0;
+let lastStreamingPostResponseResetLog = 0;
+let streamingPostResponseWaitObserverForTest: (() => void) | undefined;
+
+export function setStreamingPostResponseLimitsForTest(
+  globalLimit?: number,
+  perSessionLimit?: number,
+): void {
+  maxStreamingPostResponses =
+    globalLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES;
+  maxStreamingPostResponsesPerSession =
+    perSessionLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+}
+
+export function streamingPostResponsePendingForTest(): number {
+  return streamingPostResponsePending;
+}
+
+export function setStreamingPostResponseWaitObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  streamingPostResponseWaitObserverForTest = observer;
+}
+
+export function scheduleStreamingPostResponseForTest(
+  sessionID: string,
+  operation: () => void | Promise<void>,
+  onDrop: () => void = () => {},
+): void {
+  scheduleStreamingPostResponse(
+    sessionID,
+    streamingPostResponseGeneration,
+    operation,
+    onDrop,
+  );
+}
+
+function scheduleStreamingPostResponse(
+  sessionID: string,
+  generation: number,
+  operation: () => void | Promise<void>,
+  onDrop: () => void,
+  // Conversation requests reserve global + session capacity before upstream.
+  // Unreserved callers still use the defensive queue limits below.
+  capacityReserved = false,
+  admissionKey?: string,
+): void {
+  const drop = (): void => {
+    try {
+      onDrop();
+    } catch (error) {
+      log.error("streaming post-response drop cleanup failed:", error);
+    }
+  };
+  if (
+    !streamingPostResponsesAccepting ||
+    generation !== streamingPostResponseGeneration
+  ) {
+    const now = Date.now();
+    if (now - lastStreamingPostResponseResetLog >= 30_000) {
+      lastStreamingPostResponseResetLog = now;
+      log.info("streaming post-response skipped during pipeline reset");
+    }
+    drop();
+    return;
+  }
+  const existing = streamingPostResponseFinalizers.get(sessionID);
+  if (
+    (!capacityReserved &&
+      streamingPostResponsePending >= maxStreamingPostResponses) ||
+    (!capacityReserved &&
+      (existing?.pending ?? 0) >= maxStreamingPostResponsesPerSession)
+  ) {
+    const now = Date.now();
+    if (now - lastStreamingPostResponseOverflowLog >= 30_000) {
+      lastStreamingPostResponseOverflowLog = now;
+      log.warn("streaming post-response queue full; dropping finalizer");
+    }
+    drop();
+    return;
+  }
+  const state = existing ?? { tail: Promise.resolve(), pending: 0 };
+  const previous = state.tail;
+  state.pending++;
+  streamingPostResponsePending++;
+  if (admissionKey !== undefined) {
+    streamingPostResponsePendingByAdmissionKey.set(
+      admissionKey,
+      (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) + 1,
+    );
+  }
+  const current = (async () => {
+    await previous;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (generation !== streamingPostResponseGeneration) {
+      drop();
+      return;
+    }
+    try {
+      await operation();
+    } catch (error) {
+      log.error("streaming post-response processing failed:", error);
+    }
+  })();
+  state.tail = current;
+  streamingPostResponseFinalizers.set(sessionID, state);
+  void current.finally(() => {
+    if (streamingPostResponseFinalizers.get(sessionID) !== state) return;
+    state.pending--;
+    streamingPostResponsePending--;
+    if (admissionKey !== undefined) {
+      const remaining =
+        (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 1) - 1;
+      if (remaining > 0) {
+        streamingPostResponsePendingByAdmissionKey.set(admissionKey, remaining);
+      } else {
+        streamingPostResponsePendingByAdmissionKey.delete(admissionKey);
+      }
+    }
+    if (state.tail === current && state.pending === 0) {
+      streamingPostResponseFinalizers.delete(sessionID);
+    }
+    pumpPendingSessionClaims();
+  });
+}
+
+const MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION = 16;
+const streamingPostResponseWaiters = new Map<string, number>();
+
+class StreamingPostResponseWaitCapacityError extends Error {}
+
+async function awaitStreamingPostResponse(
+  sessionID: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!streamingPostResponseFinalizers.has(sessionID)) return;
+  const waiters = streamingPostResponseWaiters.get(sessionID) ?? 0;
+  if (waiters >= MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION) {
+    throw new StreamingPostResponseWaitCapacityError(
+      "streaming post-response wait queue full",
+    );
+  }
+  streamingPostResponseWaiters.set(sessionID, waiters + 1);
+  try {
+    for (;;) {
+      const state = streamingPostResponseFinalizers.get(sessionID);
+      if (!state) return;
+      const tail = state.tail;
+      streamingPostResponseWaitObserverForTest?.();
+      await promiseAgainstAbort(() => tail, signal);
+      const latest = streamingPostResponseFinalizers.get(sessionID);
+      if (latest !== state || state.tail === tail) return;
+    }
+  } finally {
+    const remaining = (streamingPostResponseWaiters.get(sessionID) ?? 1) - 1;
+    if (remaining > 0) streamingPostResponseWaiters.set(sessionID, remaining);
+    else streamingPostResponseWaiters.delete(sessionID);
+  }
+}
 
 /** Sessions that have already logged the cwd-fallback warning (dedup). */
 const cwdWarned = new Set<string>();
@@ -739,17 +1230,75 @@ export function rebindActiveSession(
 }
 
 /**
- * Reverse lookup: maps header-based session ID values to internal session IDs.
+ * Reverse lookup: maps tenant-scoped header values to internal session IDs.
  * Key: `credentialFingerprint\x1fheaderName\x1fheaderValue`.
- * Value: internal session ID (the key in `sessions`).
- *
- * Populated for both Tier 1 (known headers) and Tier 2 (learned headers).
  */
 const headerSessionIndex = new Map<string, string>();
+const ambiguousHeaderSessionKeys = new Set<string>();
+type ProvisionalHeaderMapping = {
+  sessionID: string;
+  createdAt: number;
+  guardProject: boolean;
+  adoptionFingerprint?: string;
+  expectedUnowned: boolean;
+};
+const provisionalHeaderSessionIndex = new Map<
+  string,
+  ProvisionalHeaderMapping
+>();
+const identityAdmissionTails = new Map<string, Promise<void>>();
+const MAX_PROVISIONAL_HEADER_MAPPINGS = 1024;
+const PROVISIONAL_HEADER_MAPPING_TTL_MS = 5 * 60_000;
+let headerSessionIndexHydrated = false;
 const SESSION_INDEX_SEPARATOR = "\x1f";
+const TENANT_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
 
-function requestCredentialFingerprint(headers: Record<string, string>): string {
+/** Remote and hosted gateways treat the request credential as a tenant boundary. */
+function usesRemoteSessionBinding(config: GatewayConfig): boolean {
+  return config.remoteGateway || config.hostedMode;
+}
+
+/** Server-derived durable storage owner; client headers never select it. */
+function requestStorageTenant(
+  headers: Record<string, string>,
+  config: GatewayConfig,
+): string {
+  if (!usesRemoteSessionBinding(config)) return "";
   const credential = extractAuth(headers);
+  return credential
+    ? credentialTenantFingerprint(credential)
+    : `unauthenticated:${crypto.randomUUID()}`;
+}
+
+/** Run a request under the same server-derived storage owner as the main pipeline. */
+function withRequestStorageTenant<T>(
+  headers: Record<string, string>,
+  config: GatewayConfig,
+  fn: () => T,
+): T {
+  return withTenant(requestStorageTenant(headers, config), fn);
+}
+
+function requestHeaders(headers: Headers): Record<string, string> {
+  const rawHeaders: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+  return rawHeaders;
+}
+
+/**
+ * Resolve the credential scope used by every session-identity mechanism.
+ * `null` means an unauthenticated remote request and must never be correlated.
+ */
+function requestCredentialFingerprint(
+  headers: Record<string, string>,
+  config: GatewayConfig,
+): string | null {
+  const credential = extractAuth(headers);
+  if (usesRemoteSessionBinding(config)) {
+    return credential ? credentialTenantFingerprint(credential) : null;
+  }
   return credential ? authFingerprint(credential) : "";
 }
 
@@ -761,6 +1310,464 @@ function sessionIndexKey(
   return [credentialFingerprint, headerName, headerValue].join(
     SESSION_INDEX_SEPARATOR,
   );
+}
+
+async function withIdentityAdmission<T>(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) return operation();
+  const key = sessionIndexKey(
+    requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+    known.headerName,
+    known.sessionId,
+  );
+  const previous = identityAdmissionTails.get(key);
+  let release!: () => void;
+  const ownCompletion = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous ? previous.then(() => ownCompletion) : ownCompletion;
+  identityAdmissionTails.set(key, tail);
+  try {
+    if (previous) await promiseAgainstAbort(() => previous, req.signal);
+    return await operation();
+  } finally {
+    release();
+    if (identityAdmissionTails.get(key) === tail) {
+      identityAdmissionTails.delete(key);
+    }
+  }
+}
+
+function setProvisionalHeaderMapping(
+  key: string,
+  sessionID: string,
+  guardProject = false,
+  adoptionFingerprint?: string,
+  expectedUnowned = false,
+): void {
+  const now = Date.now();
+  for (const [candidate, entry] of provisionalHeaderSessionIndex) {
+    if (now - entry.createdAt > PROVISIONAL_HEADER_MAPPING_TTL_MS) {
+      provisionalHeaderSessionIndex.delete(candidate);
+    }
+  }
+  const existing = getProvisionalHeaderMapping(key);
+  if (existing && existing !== sessionID) {
+    throw new Error("ambiguous session headers");
+  }
+  provisionalHeaderSessionIndex.delete(key);
+  while (
+    provisionalHeaderSessionIndex.size >= MAX_PROVISIONAL_HEADER_MAPPINGS
+  ) {
+    const oldest = provisionalHeaderSessionIndex.keys().next().value;
+    if (oldest === undefined) break;
+    provisionalHeaderSessionIndex.delete(oldest);
+  }
+  provisionalHeaderSessionIndex.set(key, {
+    sessionID,
+    createdAt: now,
+    guardProject,
+    adoptionFingerprint,
+    expectedUnowned,
+  });
+}
+
+function getProvisionalHeaderEntry(
+  key: string,
+): ProvisionalHeaderMapping | null {
+  const entry = provisionalHeaderSessionIndex.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.createdAt > PROVISIONAL_HEADER_MAPPING_TTL_MS) {
+    provisionalHeaderSessionIndex.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function getProvisionalHeaderMapping(key: string): string | undefined {
+  return getProvisionalHeaderEntry(key)?.sessionID;
+}
+
+function provisionalMappingGuardsProject(
+  key: string,
+  sessionID: string,
+): boolean {
+  if (getProvisionalHeaderMapping(key) !== sessionID) return false;
+  return provisionalHeaderSessionIndex.get(key)?.guardProject === true;
+}
+
+/** @internal Test seam for exercising ownership expiry during an in-flight turn. */
+export function expireProvisionalHeaderMappingsForTest(): void {
+  provisionalHeaderSessionIndex.clear();
+}
+
+function provisionalKeyOwned(key: string, sessionID: string): boolean {
+  return (
+    headerSessionIndex.get(key) === sessionID ||
+    getProvisionalHeaderMapping(key) === sessionID
+  );
+}
+
+function dropOwnedProvisionalKey(
+  key: string | undefined,
+  sessionID: string,
+): void {
+  if (key && getProvisionalHeaderMapping(key) === sessionID) {
+    provisionalHeaderSessionIndex.delete(key);
+  }
+}
+
+function conflictsWithConfidentSessionProject(
+  sessionID: string,
+  pathResult: ProjectPathResult,
+): boolean {
+  if (pathResult.source !== "header" && pathResult.source !== "inferred") {
+    return false;
+  }
+  const live = sessions.get(sessionID);
+  if (live?.projectPath && live.projectPathProvisional === false) {
+    return live.projectPath !== pathResult.path;
+  }
+  const persisted = loadSessionTracking(sessionID);
+  return (
+    !!persisted?.projectPath &&
+    persisted.projectPathProvisional === false &&
+    persisted.projectPath !== pathResult.path
+  );
+}
+
+function legacyAdoptionTargetIsUnowned(sessionID: string): boolean {
+  return loadSessionTracking(sessionID)?.credentialFingerprint === "";
+}
+
+function isConfidentlyBoundToProject(
+  state: SessionState,
+  projectPath: string,
+): boolean {
+  return (
+    state.projectPathProvisional !== true && state.projectPath === projectPath
+  );
+}
+
+function hydrateHeaderSessionIndex(config: GatewayConfig): void {
+  if (headerSessionIndexHydrated) return;
+  restoreHeaderSessionMappings(config);
+  headerSessionIndexHydrated = true;
+}
+
+function findIndexedKnownSessionID(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): string | undefined {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return undefined;
+  hydrateHeaderSessionIndex(config);
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) return undefined;
+  return headerSessionIndex.get(
+    sessionIndexKey(credentialFingerprint, known.headerName, known.sessionId),
+  );
+}
+
+function hasConflictingConfirmedHeader(
+  req: GatewayRequest,
+  expectedSessionID: string,
+  excludedKey: string,
+  config: GatewayConfig,
+): boolean {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return true;
+  hydrateHeaderSessionIndex(config);
+  for (const [key, sessionID] of headerSessionIndex) {
+    if (key === excludedKey || sessionID === expectedSessionID) continue;
+    const parsed = parseSessionIndexKey(key);
+    if (!parsed || parsed.headerName === "context-marker") continue;
+    if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+    if (req.rawHeaders[parsed.headerName] === parsed.headerValue) return true;
+  }
+  return false;
+}
+
+type IndexedSessionResolution =
+  | {
+      kind: "match";
+      sessionID: string;
+      provisional?: boolean;
+      provisionalKey?: string;
+    }
+  | { kind: "ambiguous" }
+  | { kind: "none" };
+
+function resolveIndexedSession(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  includeProvisional = false,
+): IndexedSessionResolution {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (known) {
+    if (includeProvisional) {
+      const credentialFingerprint = requestCredentialFingerprint(
+        req.rawHeaders,
+        config,
+      );
+      if (credentialFingerprint === null) return { kind: "none" };
+      const key = sessionIndexKey(
+        credentialFingerprint,
+        known.headerName,
+        known.sessionId,
+      );
+      const confirmedSessionID = findIndexedKnownSessionID(req, config);
+      const sessionID = confirmedSessionID ?? getProvisionalHeaderMapping(key);
+      return sessionID
+        ? {
+            kind: "match",
+            sessionID,
+            provisional: !confirmedSessionID,
+            ...(!confirmedSessionID ? { provisionalKey: key } : {}),
+          }
+        : { kind: "none" };
+    }
+    const sessionID = findIndexedKnownSessionID(req, config);
+    return sessionID ? { kind: "match", sessionID } : { kind: "none" };
+  }
+
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return { kind: "none" };
+  hydrateHeaderSessionIndex(config);
+  let match: string | undefined;
+  let provisional = false;
+  let provisionalKey: string | undefined;
+  for (const [key, sessionID] of headerSessionIndex) {
+    const parsed = parseSessionIndexKey(key);
+    if (!parsed || parsed.headerName === "context-marker") continue;
+    if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+    if (req.rawHeaders[parsed.headerName] !== parsed.headerValue) continue;
+    if (match && match !== sessionID) return { kind: "ambiguous" };
+    match = sessionID;
+  }
+  if (includeProvisional) {
+    for (const [key, entry] of provisionalHeaderSessionIndex) {
+      const sessionID = getProvisionalHeaderMapping(key);
+      if (!sessionID || sessionID !== entry.sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (!parsed || parsed.headerName === "context-marker") continue;
+      if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+      if (req.rawHeaders[parsed.headerName] !== parsed.headerValue) continue;
+      if (match && match !== sessionID) return { kind: "ambiguous" };
+      match = sessionID;
+      provisional = true;
+      provisionalKey ??= key;
+    }
+  }
+  if (match) {
+    return { kind: "match", sessionID: match, provisional, provisionalKey };
+  }
+
+  const markerSid = extractSessionMarker(req.messages);
+  if (!markerSid) return { kind: "none" };
+  const sessionID = headerSessionIndex.get(
+    sessionIndexKey(credentialFingerprint, "context-marker", markerSid),
+  );
+  return sessionID ? { kind: "match", sessionID } : { kind: "none" };
+}
+
+function findIndexedSessionID(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): string | undefined {
+  const resolution = resolveIndexedSession(req, config);
+  return resolution.kind === "match" ? resolution.sessionID : undefined;
+}
+
+/**
+ * Revalidate an authenticated index lookup after an async wait. Affinity
+ * rotation can revoke the request's alias while it is queued for the session;
+ * callers must fail closed instead of continuing with the stale session ID.
+ */
+function confirmedIndexedIdentityResolvesTo(
+  req: GatewayRequest,
+  expectedSessionID: string,
+  config: GatewayConfig,
+): boolean {
+  const resolution = resolveIndexedSession(req, config);
+  return (
+    resolution.kind === "match" &&
+    resolution.sessionID === expectedSessionID &&
+    resolution.provisional !== true
+  );
+}
+
+function findLiveSessionState(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  allSessions: ReadonlyMap<string, SessionState> = sessions,
+): SessionState | undefined {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (known) {
+    // An indexed higher-priority header is authoritative even when its session
+    // is not currently hydrated; never fall through to a conflicting alias.
+    const indexedSid = findIndexedKnownSessionID(req, config);
+    return indexedSid ? allSessions.get(indexedSid) : undefined;
+  }
+  const indexedSid = findIndexedSessionID(req, config);
+  return indexedSid ? allSessions.get(indexedSid) : undefined;
+}
+
+function resolveAuthenticatedDirectSession(
+  req: GatewayRequest,
+  projectPath: string,
+  config: GatewayConfig,
+  knownHeaderOnly = true,
+): SessionState | undefined {
+  if (knownHeaderOnly && !extractKnownSessionHeader(req.rawHeaders))
+    return undefined;
+  const sessionID = knownHeaderOnly
+    ? findIndexedKnownSessionID(req, config)
+    : findIndexedSessionID(req, config);
+  if (!sessionID) return undefined;
+  try {
+    return getOrCreateSession(
+      sessionID,
+      projectPath,
+      "header",
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+      config,
+    );
+  } catch (error) {
+    if (error instanceof SessionTenantMismatchError) return undefined;
+    throw error;
+  }
+}
+
+function knownSessionHeaderForRequest(
+  req: GatewayRequest,
+  sessionID: string,
+  config: GatewayConfig,
+): { headerName: string; sessionId: string } | null {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return null;
+  let known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) {
+    for (const [key, entry] of provisionalHeaderSessionIndex) {
+      if (entry.sessionID !== sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (!parsed || parsed.headerName === "context-marker") continue;
+      if (parsed.credentialFingerprint !== credentialFingerprint) continue;
+      if (req.rawHeaders[parsed.headerName] !== parsed.headerValue) continue;
+      known = {
+        headerName: parsed.headerName,
+        sessionId: parsed.headerValue,
+      };
+      break;
+    }
+  }
+  return known;
+}
+
+function publishKnownSessionHeader(
+  known: { headerName: string; sessionId: string },
+  state: SessionState,
+  credentialFingerprint: string,
+): void {
+  const confirmedKey = sessionIndexKey(
+    credentialFingerprint,
+    known.headerName,
+    known.sessionId,
+  );
+  if (credentialFingerprint) {
+    for (const [key, sessionID] of headerSessionIndex) {
+      if (sessionID !== state.sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (parsed?.credentialFingerprint === "") {
+        headerSessionIndex.delete(key);
+      }
+    }
+  }
+  if (isRotationEligible(known.headerName)) {
+    for (const [key, sessionID] of headerSessionIndex) {
+      if (key === confirmedKey || sessionID !== state.sessionID) continue;
+      const parsed = parseSessionIndexKey(key);
+      if (
+        parsed?.credentialFingerprint === credentialFingerprint &&
+        parsed.headerName === known.headerName
+      ) {
+        headerSessionIndex.delete(key);
+      }
+    }
+  }
+  provisionalHeaderSessionIndex.delete(confirmedKey);
+  headerSessionIndex.set(confirmedKey, state.sessionID);
+  state.headerSessionId = known.sessionId;
+  state.headerName = known.headerName;
+  state.credentialFingerprint = credentialFingerprint;
+}
+
+function confirmKnownSessionHeader(
+  req: GatewayRequest,
+  state: SessionState,
+  config: GatewayConfig,
+  tracking: Parameters<typeof saveSessionTracking>[1] = {},
+  persistTurn?: () => void,
+): void {
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return;
+  const known = knownSessionHeaderForRequest(req, state.sessionID, config);
+  if (!known) return;
+  withSavepoint("confirm_session_header", () => {
+    persistTurn?.();
+    saveSessionTracking(state.sessionID, {
+      ...tracking,
+      headerSessionId: known.sessionId,
+      headerName: known.headerName,
+      credentialFingerprint,
+    });
+  });
+  publishKnownSessionHeader(known, state, credentialFingerprint);
+}
+
+export function evictLiveSessionForTest(
+  req: GatewayRequest,
+  config?: GatewayConfig,
+): boolean {
+  const credential = extractAuth(req.rawHeaders);
+  const credentialFingerprint = config
+    ? requestCredentialFingerprint(req.rawHeaders, config)
+    : credential
+      ? authFingerprint(credential)
+      : "";
+  if (credentialFingerprint === null) return false;
+  for (const headerName of KNOWN_SESSION_HEADERS) {
+    const headerValue = req.rawHeaders[headerName];
+    if (!headerValue) continue;
+    const sid = headerSessionIndex.get(
+      sessionIndexKey(credentialFingerprint, headerName, headerValue),
+    );
+    if (sid) {
+      const removed = sessions.delete(sid);
+      if (removed) evictPipelineSessionState(sid);
+      return removed;
+    }
+  }
+  return false;
 }
 
 function parseSessionIndexKey(key: string): {
@@ -776,6 +1783,72 @@ function parseSessionIndexKey(key: string): {
     headerName: key.slice(first + 1, second),
     headerValue: key.slice(second + 1),
   };
+}
+
+/**
+ * Restore persisted header mappings under the current gateway trust policy.
+ * Remote mode accepts only full tenant-bound rows; local mode never interprets
+ * a remote tenant row as a local identity. Credential-shaped historical header
+ * mappings are cleared rather than merely ignored.
+ */
+function restoreHeaderSessionMappings(config: GatewayConfig): {
+  restored: number;
+  cleared: number;
+} {
+  let restored = 0;
+  let cleared = 0;
+  for (const entry of loadHeaderSessionIndex()) {
+    if (isCredentialHeaderName(entry.headerName)) {
+      saveSessionTracking(entry.sessionId, {
+        headerSessionId: null,
+        headerName: null,
+      });
+      cleared++;
+      continue;
+    }
+    const remoteFingerprint = TENANT_FINGERPRINT_RE.test(
+      entry.credentialFingerprint,
+    );
+    if (
+      usesRemoteSessionBinding(config) ? !remoteFingerprint : remoteFingerprint
+    ) {
+      continue;
+    }
+    const key = sessionIndexKey(
+      entry.credentialFingerprint,
+      entry.headerName,
+      entry.headerSessionId,
+    );
+    if (ambiguousHeaderSessionKeys.has(key)) continue;
+    const existing = headerSessionIndex.get(key);
+    if (existing && existing !== entry.sessionId) {
+      headerSessionIndex.delete(key);
+      ambiguousHeaderSessionKeys.add(key);
+      continue;
+    }
+    headerSessionIndex.set(key, entry.sessionId);
+    restored++;
+  }
+  return { restored, cleared };
+}
+
+/** Resolve an active header-bound session under the current tenant policy. */
+function activeSessionForKnownHeader(
+  req: GatewayRequest,
+  allSessions: ReadonlyMap<string, SessionState>,
+  config: GatewayConfig,
+): SessionState | undefined {
+  const known = extractKnownSessionHeader(req.rawHeaders);
+  if (!known) return undefined;
+  const credentialFingerprint = requestCredentialFingerprint(
+    req.rawHeaders,
+    config,
+  );
+  if (credentialFingerprint === null) return undefined;
+  const sid = headerSessionIndex.get(
+    sessionIndexKey(credentialFingerprint, known.headerName, known.sessionId),
+  );
+  return sid ? allSessions.get(sid) : undefined;
 }
 
 /**
@@ -2376,6 +3449,54 @@ const stableLtmCache = new Map<
  * into stableLtmCache), so a LATER miss after a restart recomputes fresh.
  */
 const stableLtmInFlight = new Map<string, Promise<void>>();
+const sessionLifecycleAborts = new Map<string, AbortController>();
+
+function sessionLifecycleSignal(sessionID: string): AbortSignal {
+  let controller = sessionLifecycleAborts.get(sessionID);
+  if (!controller) {
+    controller = new AbortController();
+    sessionLifecycleAborts.set(sessionID, controller);
+  }
+  return controller.signal;
+}
+
+function stableLtmComputeSignal(sessionID: string): AbortSignal {
+  return AbortSignal.any([
+    pipelineGenerationAbort.signal,
+    sessionLifecycleSignal(sessionID),
+  ]);
+}
+
+function evictStableLtmSession(sessionID: string): void {
+  sessionLifecycleAborts
+    .get(sessionID)
+    ?.abort(new DOMException("stable LTM session was evicted", "AbortError"));
+  sessionLifecycleAborts.delete(sessionID);
+  stableLtmCache.delete(sessionID);
+  stableLtmInFlight.delete(sessionID);
+}
+
+function evictPipelineSessionState(sessionID: string): void {
+  // Keep the persisted header→session mapping warm. Eviction removes only the
+  // heavy live state; dropping this index would force an unbounded DB reload on
+  // the next request and would make state-changing slash commands unable to
+  // rehydrate the authoritative canonical session safely.
+  ltmSessionCache.delete(sessionID);
+  ltmPinnedText.delete(sessionID);
+  lastSavedDedupDecisions.delete(sessionID);
+  evictStableLtmSession(sessionID);
+  cwdWarned.delete(sessionID);
+  staleHeaderWarned.delete(sessionID);
+  for (const key of subagentParentPendingLogged) {
+    if (key.startsWith(`${sessionID}:`))
+      subagentParentPendingLogged.delete(key);
+  }
+}
+
+/** Test seam for exercising the same cleanup used by idle session eviction. */
+export function evictStableLtmSessionForTest(sessionID: string): void {
+  evictStableLtmSession(sessionID);
+}
 
 /**
  * Run a stable-LTM compute under single-flight dedup for a session. If a
@@ -2386,7 +3507,10 @@ const stableLtmInFlight = new Map<string, Promise<void>>();
  */
 export async function singleFlightStableLtm(
   sessionID: string,
-  compute: () => Promise<{ formatted: string; tokenCount: number } | undefined>,
+  compute: (
+    signal: AbortSignal,
+  ) => Promise<{ formatted: string; tokenCount: number } | undefined>,
+  callerSignal?: AbortSignal,
 ): Promise<{ formatted: string; tokenCount: number } | undefined> {
   // Cache hit — fast path. Reading the cache FIRST is essential: a previous
   // caller may have already settled and deleted its in-flight entry, so a
@@ -2395,19 +3519,24 @@ export async function singleFlightStableLtm(
   if (cached) return cached;
   const inFlight = stableLtmInFlight.get(sessionID);
   if (inFlight) {
-    await inFlight;
+    await promiseAgainstAbort(() => inFlight, callerSignal);
     return stableLtmCache.get(sessionID);
   }
-  const promise = (async () => {
+  const signal = stableLtmComputeSignal(sessionID);
+  let promise!: Promise<void>;
+  promise = (async () => {
     try {
-      const result = await compute();
+      const result = await promiseAgainstAbort(() => compute(signal), signal);
+      signal.throwIfAborted();
       if (result) stableLtmCache.set(sessionID, result);
     } finally {
-      stableLtmInFlight.delete(sessionID);
+      if (stableLtmInFlight.get(sessionID) === promise) {
+        stableLtmInFlight.delete(sessionID);
+      }
     }
   })();
   stableLtmInFlight.set(sessionID, promise);
-  await promise;
+  await promiseAgainstAbort(() => promise, callerSignal);
   return stableLtmCache.get(sessionID);
 }
 
@@ -2423,8 +3552,11 @@ async function computeStableLtm(
   cfg: ReturnType<typeof loreConfig>,
   contextHint: string | undefined,
   prefBudget: number,
+  signal?: AbortSignal,
+  requestGeneration?: number,
 ): Promise<{ formatted: string; tokenCount: number } | undefined> {
   const prefEntries = await ltm.forSession(projectPath, sessionID, prefBudget, {
+    signal,
     categories: ["preference"],
     ...(contextHint ? { contextHint } : {}),
   });
@@ -2484,6 +3616,11 @@ async function computeStableLtm(
   ]
     .filter(Boolean)
     .join("\n\n");
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+  } else {
+    signal?.throwIfAborted();
+  }
   const tokenCount = formatted ? coreEstimateTokens(formatted) : 0;
   const stable = { formatted, tokenCount };
   stableLtmCache.set(sessionID, stable);
@@ -2520,6 +3657,7 @@ async function precomputeStableLtmForIdleSession(
   sessionID: string,
   state: SessionState,
 ): Promise<void> {
+  const requestGeneration = streamingPostResponseGeneration;
   try {
     if (stableLtmCache.has(sessionID)) return;
     const cfg = loreConfig();
@@ -2535,8 +3673,16 @@ async function precomputeStableLtmForIdleSession(
     log.info(
       `idle precompute: warming stable LTM for session ${sessionID.slice(0, 16)} (pref=${prefBudget})`,
     );
-    await singleFlightStableLtm(sessionID, () =>
-      computeStableLtm(sessionID, projectPath, cfg, undefined, prefBudget),
+    await singleFlightStableLtm(sessionID, (signal) =>
+      computeStableLtm(
+        sessionID,
+        projectPath,
+        cfg,
+        undefined,
+        prefBudget,
+        signal,
+        requestGeneration,
+      ),
     );
   } catch (err) {
     log.warn(
@@ -2964,7 +4110,13 @@ async function initIfNeeded(
   projectPath: string,
   config: GatewayConfig,
   gitRemote?: string,
+  signal?: AbortSignal,
+  requestGeneration?: number,
 ): Promise<void> {
+  if (!pipelineResetInProgress) streamingPostResponsesAccepting = true;
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+  }
   if (initialized) return;
 
   // Enable hosted mode before any FS operations — once set, all core
@@ -2974,6 +4126,9 @@ async function initIfNeeded(
   }
 
   await load(projectPath);
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+  }
   ensureProject(projectPath, undefined, gitRemote);
   initialized = true;
 
@@ -3052,19 +4207,14 @@ async function initIfNeeded(
   // with a known session header generates a new session ID and orphans the
   // old session's persisted state.
   try {
-    const headerEntries = loadHeaderSessionIndex();
-    for (const entry of headerEntries) {
-      const indexKey = sessionIndexKey(
-        entry.credentialFingerprint,
-        entry.headerName,
-        entry.headerSessionId,
+    const restored = restoreHeaderSessionMappings(config);
+    if (restored.cleared > 0) {
+      log.warn(
+        `cleared ${restored.cleared} unsafe persisted header→session mapping(s)`,
       );
-      headerSessionIndex.set(indexKey, entry.sessionId);
     }
-    if (headerEntries.length > 0) {
-      log.info(
-        `restored ${headerEntries.length} header→session mappings from DB`,
-      );
+    if (restored.restored > 0) {
+      log.info(`restored ${restored.restored} header→session mappings from DB`);
     }
   } catch (e) {
     log.warn("header session index restore failed:", e);
@@ -3089,43 +4239,27 @@ async function initIfNeeded(
     // session tracking) so the resume turn reads it from cache instead. The
     // compute is single-flighted per session; a concurrent turn's
     // `singleFlightStableLtm` shares the same in-flight promise.
-    const idleHandler = async (sessionID: string, state: SessionState) => {
-      void precomputeStableLtmForIdleSession(sessionID, state);
-      await baseIdleHandler(sessionID, state);
-    };
+    const idleHandler = async (sessionID: string, state: SessionState) =>
+      withTenant(state.storageTenantId ?? "", async () => {
+        void precomputeStableLtmForIdleSession(sessionID, state);
+        await baseIdleHandler(sessionID, state);
+      });
     stopIdleScheduler = startIdleScheduler(
       config,
       sessions,
       idleHandler,
-      (sessionID) => {
-        // Clean up pipeline-level satellite Maps on session eviction.
-        // The headerSessionIndex entries are keyed by header values pointing
-        // TO this sessionID — remove them too.
-        for (const [key, sid] of headerSessionIndex) {
-          if (sid === sessionID) headerSessionIndex.delete(key);
-        }
-        ltmSessionCache.delete(sessionID);
-        ltmPinnedText.delete(sessionID);
-        lastSavedDedupDecisions.delete(sessionID);
-        stableLtmCache.delete(sessionID);
-        stableLtmInFlight.delete(sessionID);
-        cwdWarned.delete(sessionID);
-        staleHeaderWarned.delete(sessionID);
-        // Clear subagent parent-pending dedup entries for this session —
-        // keys are `${sessionID}:${parentClientId}`, so filter by prefix.
-        for (const key of subagentParentPendingLogged) {
-          if (key.startsWith(`${sessionID}:`)) {
-            subagentParentPendingLogged.delete(key);
-          }
-        }
-      },
+      evictPipelineSessionState,
+      isPipelineSessionActive,
     );
   }
 
   // Start background cloud sync (no-op until the user runs `lore sync enable`).
   if (!stopSyncScheduler) {
     const { startSyncScheduler } = await import("./sync");
-    stopSyncScheduler = startSyncScheduler();
+    if (requestGeneration !== undefined) {
+      assertCurrentPipelineGeneration(signal, requestGeneration);
+    }
+    if (!stopSyncScheduler) stopSyncScheduler = startSyncScheduler(config);
   }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);
@@ -3157,7 +4291,12 @@ function getLLMClient(config: GatewayConfig): LLMClient {
           scheme: workerKeyScheme(providerID),
           value: workerApiKey,
         })
-      : resolveAuth;
+      : (sessionID, providerID) => {
+          if (sessionID) return resolveAuth(sessionID, providerID);
+          return usesRemoteSessionBinding(config)
+            ? null
+            : resolveAuth(undefined, providerID);
+        };
 
     // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker
     // calls route to this URL instead of the default upstream URLs.
@@ -3168,8 +4307,12 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     if (config.workerApiKey || config.workerUpstream) {
       log.info(
         `worker routing: ` +
-          `auth=${config.workerApiKey ? "dedicated key" : "session"}, ` +
-          `upstream=${config.workerUpstream ?? "default"}`,
+          `source=${config.workerApiKey ? "dedicated key" : "session"}, ` +
+          `upstream=${
+            config.workerUpstream
+              ? upstreamUrlForLog(config.workerUpstream)
+              : "default"
+          }`,
       );
     }
 
@@ -3182,78 +4325,6 @@ function getLLMClient(config: GatewayConfig): LLMClient {
         vertexProject: config.vertexProject,
       },
     );
-
-    // Workers always use the same provider as the session. Route worker
-    // calls through the session's upstream URL and wire protocol so they
-    // use the session's credentials, endpoint, and request format. The
-    // protocol from the UpstreamSnapshot is the source of truth — it was
-    // resolved at conversation-turn time and correctly handles aggregator
-    // providers (e.g. OpenCode Zen) whose route has protocol=null.
-    //
-    // When a dedicated worker API key is set (LORE_WORKER_API_KEY), skip
-    // injection — the worker uses its own credentials and default upstream.
-    //
-    // CROSS-PROVIDER GUARD: The model was resolved at idle-handler start
-    // from state.lastUpstream, but the URL is resolved HERE (lazily) from
-    // the CURRENT state.lastUpstream. If the user switched providers
-    // between those two points, the model and URL come from different
-    // providers → 404. Detect this and re-resolve the worker model from
-    // the current upstream. See: LOREAI-GATEWAY-2A.
-    const inner: LLMClient = {
-      async prompt(system, user, opts) {
-        if (opts?.sessionID && !opts.upstreamUrl && !workerApiKey) {
-          const state = sessions.get(opts.sessionID);
-          if (state?.lastUpstream?.url) {
-            // Cross-provider guard: if the model's provider doesn't match
-            // the current upstream provider, re-resolve to avoid sending
-            // e.g. MiniMax-M3 to api.anthropic.com.
-            //
-            // When opts.model is undefined, the rawClient will use
-            // defaultModel (hardcoded at construction time, typically
-            // Anthropic). We must also guard against THAT mismatch —
-            // otherwise an unknown-provider session (MiniMax, xAI, etc.)
-            // gets the Anthropic defaultModel sent to its upstream URL.
-            let effectiveOpts = opts;
-            const modelProvider =
-              opts?.model?.providerID ?? defaultModel.providerID;
-            const upstreamProvider = state.lastUpstream.providerID;
-            if (upstreamProvider && modelProvider !== upstreamProvider) {
-              const reResolved = getWorkerModel(state.lastUpstream);
-              if (reResolved) {
-                effectiveOpts = { ...opts, model: reResolved };
-              } else {
-                // Can't resolve a valid worker model for the current
-                // provider — skip this call rather than send cross-provider.
-                log.warn(
-                  `worker cross-provider guard: model=${modelProvider}/${opts?.model?.modelID ?? defaultModel.modelID} vs upstream=${upstreamProvider} — skipping (worker=${opts?.workerID ?? "unknown"}, session=${opts.sessionID})`,
-                );
-                recordWorkerFailure(
-                  opts.sessionID,
-                  opts?.workerID ?? "unknown",
-                  "cross-provider",
-                );
-                return null;
-              }
-            }
-            // Thread the session's provider so the adapter can enforce
-            // cross-provider safety: it only honors `upstreamUrl` when the
-            // (possibly re-resolved) worker model's provider matches
-            // `upstreamProviderID`. If a configured `workerModel` re-resolves
-            // to a DIFFERENT provider than the session (the production
-            // minimax-on-Anthropic case), the adapter routes by the worker
-            // model's own provider route — or fails closed if it has none —
-            // instead of sending it to the session's foreign endpoint.
-            return rawClient.prompt(system, user, {
-              ...effectiveOpts,
-              upstreamUrl: state.lastUpstream.url,
-              upstreamProviderID: upstreamProvider,
-              protocol: state.lastUpstream.protocol,
-            });
-          }
-        }
-        return rawClient.prompt(system, user, opts);
-      },
-    };
 
     // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
     // Enabled by default — disable via LORE_BATCH_DISABLED=1.
@@ -3270,20 +4341,66 @@ function getLLMClient(config: GatewayConfig): LLMClient {
     if (Sentry.isInitialized()) {
       Sentry.setTag("batch_enabled", String(!batchDisabled));
     }
-    if (batchDisabled) {
-      llmClient = inner;
-      batchQueueEnabled = false;
-    } else {
-      llmClient = createBatchLLMClient(
-        inner,
-        workerUpstreams,
-        getWorkerAuth,
-        defaultModel,
-      );
-      batchQueueEnabled = true;
+    const dispatchClient = batchDisabled
+      ? rawClient
+      : createBatchLLMClient(
+          rawClient,
+          workerUpstreams,
+          getWorkerAuth,
+          defaultModel,
+        );
+    batchQueueEnabled = !batchDisabled;
+
+    // Resolve routing BEFORE the batch client sees opts. Batch enqueue chooses
+    // provider, model, auth, and grouping immediately; wrapping it on the inside
+    // would queue stale/default opts and only correct them during sync fallback.
+    // Current session state is authoritative over a caller's stale opts.model.
+    const routedClient: LLMClient & {
+      shutdown?: (options?: { drainQueue?: boolean }) => Promise<void>;
+      stats?: () => unknown;
+    } = {
+      async prompt(system, user, opts) {
+        if (!opts?.sessionID || opts.upstreamUrl) {
+          return dispatchClient.prompt(system, user, opts);
+        }
+        const state = sessions.get(opts.sessionID);
+        const effectiveModel =
+          (state ? getWorkerModel(state.lastUpstream) : undefined) ??
+          opts.model ??
+          defaultModel;
+        const snapshot = state
+          ? matchingProviderSnapshot(state, effectiveModel.providerID)
+          : undefined;
+        const effectiveOpts: GatewayPromptOptions = {
+          ...opts,
+          model: effectiveModel,
+        };
+        if (
+          snapshot?.providerOptions &&
+          canonicalWorkerProviderID(effectiveModel.providerID) === "openrouter"
+        ) {
+          effectiveOpts.providerOptions = snapshot.providerOptions;
+        }
+        if (!workerApiKey && snapshot?.url && snapshot.providerID) {
+          effectiveOpts.upstreamUrl = snapshot.url;
+          effectiveOpts.upstreamProviderID = snapshot.providerID;
+          effectiveOpts.protocol = snapshot.protocol;
+        }
+        return dispatchClient.prompt(system, user, effectiveOpts);
+      },
+    };
+    if ("shutdown" in dispatchClient && "stats" in dispatchClient) {
+      routedClient.shutdown = (options) => dispatchClient.shutdown(options);
+      routedClient.stats = () => dispatchClient.stats();
     }
+    llmClient = routedClient;
   }
   return llmClient;
+}
+
+/** Test-only access to the fully wrapped gateway worker client. */
+export function getLLMClientForTest(config: GatewayConfig): LLMClient {
+  return getLLMClient(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -3399,8 +4516,18 @@ export function resolveSessionProjectPath(
       );
     }
 
+    if (!healed && previous) {
+      // Keep writing to the original bucket until re-attribution succeeds.
+      // Moving the binding to projectPath here would lose `previous`, so the
+      // next confident turn could never retry and the old rows would remain
+      // permanently split from the session.
+      sessionState.projectPath = previous;
+      sessionState.projectPathProvisional = true;
+      return previous;
+    }
+
     sessionState.projectPath = projectPath;
-    sessionState.projectPathProvisional = !healed;
+    sessionState.projectPathProvisional = false;
 
     // Backfill git_remote on the (now confident) project row — idempotent.
     if (effectiveRemote) {
@@ -3544,7 +4671,9 @@ export function applySyntheticResolution(
     const wasProvisional = sessionState.projectPathProvisional === true;
 
     if (wasProvisional && previous && previous !== newPath) {
-      reattributeProvisionalProject(previous, newPath, gitRemote);
+      if (!reattributeProvisionalProject(previous, newPath, gitRemote)) {
+        return currentProjectPath;
+      }
     }
 
     sessionState.projectPath = newPath;
@@ -3621,13 +4750,19 @@ function syntheticToolUseResponse(
       },
     });
     if (req.protocol === "openai") {
-      return translateAnthropicStreamToOpenAI(anthropicSSE);
+      return translateAnthropicStreamToOpenAI(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     if (req.protocol === "openai-responses") {
-      return translateAnthropicStreamToResponses(anthropicSSE);
+      return translateAnthropicStreamToResponses(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     if (req.protocol === "gemini") {
-      return translateAnthropicStreamToGemini(anthropicSSE);
+      return translateAnthropicStreamToGemini(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     return anthropicSSE;
   }
@@ -3648,16 +4783,434 @@ function syntheticToolUseResponse(
 // Session management helpers
 // ---------------------------------------------------------------------------
 
+const UPSTREAM_STATE_VERSION = 2;
+const MAX_UPSTREAM_SNAPSHOTS_PER_SESSION = 16;
+const MAX_PROVIDER_OPTIONS_BYTES = 64 * 1024;
+const UPSTREAM_PROTOCOLS = new Set<UpstreamSnapshot["protocol"]>([
+  "anthropic",
+  "openai",
+  "openai-responses",
+  "vertex",
+  "gemini",
+]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function freezeRecursively<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
+    return value;
+  }
+  for (const child of Object.values(value)) freezeRecursively(child);
+  return Object.freeze(value);
+}
+
+function freezeUpstreamSnapshot(snapshot: UpstreamSnapshot): UpstreamSnapshot {
+  const providerOptions = snapshot.providerOptions
+    ? freezeRecursively(structuredClone(snapshot.providerOptions))
+    : undefined;
+  return Object.freeze({
+    ...snapshot,
+    headers: Object.freeze({ ...snapshot.headers }),
+    ...(providerOptions ? { providerOptions } : {}),
+  });
+}
+
+function validatedUpstreamSnapshot(value: unknown): UpstreamSnapshot | null {
+  if (!isPlainRecord(value)) return null;
+  if (typeof value.url !== "string") return null;
+  if (!UPSTREAM_PROTOCOLS.has(value.protocol as UpstreamSnapshot["protocol"])) {
+    return null;
+  }
+  if (typeof value.model !== "string" || value.model.length === 0) return null;
+  if (
+    value.providerID !== undefined &&
+    (typeof value.providerID !== "string" || value.providerID.length === 0)
+  ) {
+    return null;
+  }
+  if (
+    !isPlainRecord(value.headers) ||
+    !Object.values(value.headers).every((header) => typeof header === "string")
+  ) {
+    return null;
+  }
+  if (
+    Object.hasOwn(value, "providerOptions") &&
+    !isPlainRecord(value.providerOptions)
+  ) {
+    return null;
+  }
+  return freezeUpstreamSnapshot({
+    url: value.url,
+    // Legacy snapshots predate provenance. Treat them as caller-selected so a
+    // remote gateway never revives a pre-policy arbitrary destination.
+    callerSelected:
+      typeof value.callerSelected === "boolean" ? value.callerSelected : true,
+    protocol: value.protocol as UpstreamSnapshot["protocol"],
+    ...(value.providerID ? { providerID: value.providerID } : {}),
+    model: value.model,
+    // Older persisted snapshots may contain credentials from before routing
+    // state became credential-safe. Re-run the current forwarding filter when
+    // hydrating instead of trusting those historical header bytes.
+    headers: buildUpstreamSnapshotHeaders(
+      value.headers as Record<string, string>,
+    ),
+    ...(isPlainRecord(value.providerOptions)
+      ? { providerOptions: value.providerOptions }
+      : {}),
+  });
+}
+
+function providersEquivalent(left: string, right: string): boolean {
+  return canonicalWorkerProviderID(left) === canonicalWorkerProviderID(right);
+}
+
+function matchingProviderSnapshot(
+  state: SessionState,
+  providerID: string,
+): UpstreamSnapshot | undefined {
+  const direct = state.upstreamByProvider.get(providerID);
+  if (direct?.providerID === providerID) return direct;
+  for (const snapshot of state.upstreamByProvider.values()) {
+    if (
+      snapshot.providerID &&
+      providersEquivalent(snapshot.providerID, providerID) &&
+      workerProviderSupportsProtocol(providerID, snapshot.protocol)
+    ) {
+      return snapshot;
+    }
+  }
+  return undefined;
+}
+
+/** Test-only visibility into protocol-aware alias selection. */
+export function matchingProviderSnapshotForTest(
+  state: SessionState,
+  providerID: string,
+): UpstreamSnapshot | undefined {
+  return matchingProviderSnapshot(state, providerID);
+}
+
+type MutableUpstreamState = Pick<
+  SessionState,
+  | "lastUpstream"
+  | "upstreamByProvider"
+  | "_upstreamRequestOrder"
+  | "_upstreamRequestOrderByProvider"
+>;
+
+function serializeUpstreamState(state: MutableUpstreamState): string {
+  const stripHeaders = (snapshot: UpstreamSnapshot) => ({
+    ...snapshot,
+    headers: {},
+  });
+  const upstreamByProvider: Record<string, unknown> = Object.create(null);
+  for (const [providerID, snapshot] of state.upstreamByProvider) {
+    upstreamByProvider[providerID] = stripHeaders(snapshot);
+  }
+  return JSON.stringify({
+    version: UPSTREAM_STATE_VERSION,
+    ...(state.lastUpstream
+      ? { lastUpstream: stripHeaders(state.lastUpstream) }
+      : {}),
+    upstreamByProvider,
+  });
+}
+
+function deserializeUpstreamState(
+  serialized: string,
+  config: GatewayConfig,
+): {
+  lastUpstream?: UpstreamSnapshot;
+  upstreamByProvider: Map<string, UpstreamSnapshot>;
+} {
+  const parsed = JSON.parse(serialized) as unknown;
+  const legacy = validatedUpstreamSnapshot(parsed);
+  if (legacy) {
+    const restored = {
+      lastUpstream: legacy,
+      upstreamByProvider: new Map(
+        legacy.providerID ? [[legacy.providerID, legacy]] : [],
+      ),
+    };
+    return filterRestoredUpstreamState(restored, config);
+  }
+  if (
+    !isPlainRecord(parsed) ||
+    parsed.version !== UPSTREAM_STATE_VERSION ||
+    !isPlainRecord(parsed.upstreamByProvider)
+  ) {
+    throw new Error("invalid persisted upstream state");
+  }
+
+  const upstreamByProvider = new Map<string, UpstreamSnapshot>();
+  for (const [providerID, rawSnapshot] of Object.entries(
+    parsed.upstreamByProvider,
+  )) {
+    const snapshot = validatedUpstreamSnapshot(rawSnapshot);
+    if (
+      providerID.length === 0 ||
+      !snapshot?.providerID ||
+      providerID !== snapshot.providerID
+    ) {
+      throw new Error("invalid persisted provider upstream snapshot");
+    }
+    upstreamByProvider.set(providerID, snapshot);
+  }
+
+  let lastUpstream: UpstreamSnapshot | undefined;
+  if (Object.hasOwn(parsed, "lastUpstream")) {
+    lastUpstream = validatedUpstreamSnapshot(parsed.lastUpstream) ?? undefined;
+    if (!lastUpstream) throw new Error("invalid persisted last upstream");
+    const lastProviderID = lastUpstream.providerID;
+    if (lastProviderID) {
+      const providerSnapshot = upstreamByProvider.get(lastProviderID);
+      if (
+        !providerSnapshot ||
+        providerSnapshot.url !== lastUpstream.url ||
+        providerSnapshot.callerSelected !== lastUpstream.callerSelected ||
+        providerSnapshot.protocol !== lastUpstream.protocol ||
+        providerSnapshot.model !== lastUpstream.model ||
+        JSON.stringify(providerSnapshot.providerOptions) !==
+          JSON.stringify(lastUpstream.providerOptions)
+      ) {
+        throw new Error("inconsistent persisted last upstream");
+      }
+    }
+  }
+  return filterRestoredUpstreamState(
+    { lastUpstream, upstreamByProvider },
+    config,
+  );
+}
+
+/**
+ * Re-apply the current remote-gateway origin policy to persisted route state.
+ * Legacy snapshots are marked caller-selected by validation above, so an
+ * upgrade cannot revive an arbitrary pre-policy URL for workers or warmups.
+ */
+function filterRestoredUpstreamState(
+  restored: {
+    lastUpstream?: UpstreamSnapshot;
+    upstreamByProvider: Map<string, UpstreamSnapshot>;
+  },
+  config: GatewayConfig,
+): {
+  lastUpstream?: UpstreamSnapshot;
+  upstreamByProvider: Map<string, UpstreamSnapshot>;
+} {
+  if (!usesRemoteSessionBinding(config)) return restored;
+  const allowed = (snapshot: UpstreamSnapshot): boolean =>
+    snapshot.callerSelected === false ||
+    (snapshot.callerSelected === true &&
+      isCallerUpstreamAllowed(config, snapshot.url));
+  return {
+    ...(restored.lastUpstream && allowed(restored.lastUpstream)
+      ? { lastUpstream: restored.lastUpstream }
+      : {}),
+    upstreamByProvider: new Map(
+      [...restored.upstreamByProvider].filter(([, snapshot]) =>
+        allowed(snapshot),
+      ),
+    ),
+  };
+}
+
+/** Test-only access to persisted-route policy revalidation. */
+export function restoreUpstreamStateForTest(
+  serialized: string,
+  config: GatewayConfig,
+): {
+  lastUpstream?: UpstreamSnapshot;
+  upstreamByProvider: Map<string, UpstreamSnapshot>;
+} {
+  return deserializeUpstreamState(serialized, config);
+}
+
+function buildRequestUpstreamSnapshot(
+  req: GatewayRequest,
+  route: ResolvedRequestUpstreamRoute,
+): UpstreamSnapshot {
+  const providerRouting = providerRoutingValue(req);
+  const providerOptions =
+    !req.codex &&
+    requestTargetsOpenRouter(req, route.effectiveUpstreamBase) &&
+    providerRouting.present &&
+    isPlainRecord(providerRouting.value)
+      ? providerRouting.value
+      : undefined;
+  if (
+    providerOptions &&
+    Buffer.byteLength(JSON.stringify(providerOptions)) >
+      MAX_PROVIDER_OPTIONS_BYTES
+  ) {
+    throw new Error(
+      `OpenRouter provider routing options exceed ${MAX_PROVIDER_OPTIONS_BYTES} bytes`,
+    );
+  }
+  const snapshot: UpstreamSnapshot = {
+    url: route.effectiveUpstreamBase,
+    callerSelected: route.headerUpstream !== undefined,
+    protocol: route.effectiveProtocol,
+    ...(route.providerID ? { providerID: route.providerID } : {}),
+    model: req.model,
+    headers: buildUpstreamSnapshotHeaders(req.rawHeaders),
+    ...(providerOptions ? { providerOptions } : {}),
+  };
+  return freezeUpstreamSnapshot(snapshot);
+}
+
+function prepareRequestUpstream(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): {
+  route: ResolvedRequestUpstreamRoute;
+  snapshot: UpstreamSnapshot;
+} {
+  const route = resolveRequestUpstreamRoute(req, config);
+  const snapshot = buildRequestUpstreamSnapshot(req, route);
+  return { route, snapshot };
+}
+
+function applyRequestUpstream(
+  state: MutableUpstreamState,
+  snapshot: UpstreamSnapshot,
+  requestOrder: number,
+  config: GatewayConfig,
+): { changed: boolean; resetCache: boolean } {
+  let changed = false;
+  let resetCache = false;
+
+  if (requestOrder >= (state._upstreamRequestOrder ?? 0)) {
+    const previous = state.lastUpstream;
+    if (
+      (previous &&
+        (previous.url !== snapshot.url ||
+          previous.protocol !== snapshot.protocol ||
+          previous.model !== snapshot.model ||
+          previous.providerID !== snapshot.providerID ||
+          !isDeepStrictEqual(
+            previous.providerOptions,
+            snapshot.providerOptions,
+          ))) ||
+      (Object.keys(config.upstreamExtraHeaders).length > 0 &&
+        Object.keys(extraHeadersForUpstream(config, snapshot.url)).length === 0)
+    ) {
+      // The cached body is route-specific and may contain a prior turn's full
+      // transcript. Clear it synchronously with route capture so a failed or
+      // in-flight policy-tightening request cannot let the idle warmer replay
+      // that body (or admin extras) to the newly selected destination.
+      resetCache = true;
+    }
+    state.lastUpstream = snapshot;
+    state._upstreamRequestOrder = requestOrder;
+    changed = true;
+  }
+
+  if (snapshot.providerID) {
+    state._upstreamRequestOrderByProvider ??= new Map();
+    const previousOrder =
+      state._upstreamRequestOrderByProvider.get(snapshot.providerID) ?? 0;
+    if (requestOrder >= previousOrder) {
+      if (
+        !state.upstreamByProvider.has(snapshot.providerID) &&
+        state.upstreamByProvider.size >= MAX_UPSTREAM_SNAPSHOTS_PER_SESSION
+      ) {
+        const oldestProviderID = state.upstreamByProvider.keys().next().value;
+        if (oldestProviderID !== undefined) {
+          state.upstreamByProvider.delete(oldestProviderID);
+          state._upstreamRequestOrderByProvider.delete(oldestProviderID);
+        }
+      }
+      state.upstreamByProvider.set(snapshot.providerID, snapshot);
+      state._upstreamRequestOrderByProvider.set(
+        snapshot.providerID,
+        requestOrder,
+      );
+      changed = true;
+    }
+  }
+
+  return { changed, resetCache };
+}
+
+function captureRequestUpstream(
+  req: GatewayRequest,
+  state: SessionState,
+  config: GatewayConfig,
+  requestOrder: number,
+): ResolvedRequestUpstreamRoute {
+  const prepared = prepareRequestUpstream(req, config);
+  const { changed, resetCache } = applyRequestUpstream(
+    state,
+    prepared.snapshot,
+    requestOrder,
+    config,
+  );
+  if (resetCache) state.cacheAnalytics.lastRequestBody = null;
+
+  if (changed) {
+    saveSessionTracking(state.sessionID, {
+      lastUpstream: serializeUpstreamState(state),
+    });
+  }
+  return prepared.route;
+}
+
+class SessionTenantMismatchError extends Error {
+  constructor() {
+    super("Session storage tenant does not match the authenticated request");
+    this.name = "SessionTenantMismatchError";
+  }
+}
+
 function getOrCreateSession(
   sessionID: string,
   projectPath: string,
-  pathSource: ProjectPathResult["source"] = "cwd",
-  credentialFingerprint = "",
+  pathSource: ProjectPathResult["source"],
+  credentialFingerprint: string,
+  config: GatewayConfig,
 ): SessionState {
+  const storageTenantId = currentTenantId();
   let state = sessions.get(sessionID);
+  if (state) {
+    // A session's storage owner is immutable. Reassigning it to whichever
+    // request happened to touch it most recently turns an isolation failure
+    // into durable cross-tenant background work. Missing ownership is accepted
+    // only for the historical local namespace.
+    if (
+      (state.storageTenantId === undefined && storageTenantId !== "") ||
+      (state.storageTenantId !== undefined &&
+        state.storageTenantId !== storageTenantId) ||
+      (usesRemoteSessionBinding(config) &&
+        credentialFingerprint !== "" &&
+        state.credentialFingerprint !== credentialFingerprint)
+    ) {
+      throw new SessionTenantMismatchError();
+    }
+    state.storageTenantId ??= "";
+  }
   if (!state) {
     // Restore persisted tracking state from DB (survives process restarts)
     const persisted = loadSessionTracking(sessionID);
+    // In remote mode the full credential fingerprint is both the authenticated
+    // session owner and the durable storage tenant. A corrupt/stale index must
+    // never hydrate a row owned by a different credential.
+    if (
+      usesRemoteSessionBinding(config) &&
+      credentialFingerprint !== "" &&
+      (storageTenantId !== credentialFingerprint ||
+        (persisted !== null &&
+          persisted.credentialFingerprint !== credentialFingerprint))
+    ) {
+      throw new SessionTenantMismatchError();
+    }
     // Project binding (v36): a persisted binding must survive restart so the
     // session's project_id never splits. A persisted CONFIDENT binding wins
     // over the current request's path — otherwise a path-less first
@@ -3693,11 +5246,13 @@ function getOrCreateSession(
       fingerprint: persisted?.fingerprint || "",
       credentialFingerprint:
         persisted?.credentialFingerprint || credentialFingerprint,
+      storageTenantId,
       lastRequestTime: Date.now(),
       lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
       turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
       consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
+      amnesia: persisted?.amnesia ?? false,
       recallStore: new Map(),
       upstreamByProvider: new Map(),
       cacheAnalytics: {
@@ -3789,35 +5344,12 @@ function getOrCreateSession(
     }
     if (persisted?.lastUpstream != null) {
       try {
-        const parsed = JSON.parse(persisted.lastUpstream) as unknown;
-        if (
-          parsed &&
-          typeof parsed === "object" &&
-          typeof (parsed as UpstreamSnapshot).url === "string" &&
-          [
-            "anthropic",
-            "openai",
-            "openai-responses",
-            "vertex",
-            "gemini",
-          ].includes((parsed as UpstreamSnapshot).protocol) &&
-          typeof (parsed as UpstreamSnapshot).model === "string" &&
-          (parsed as UpstreamSnapshot).model.length > 0 &&
-          (parsed as UpstreamSnapshot).headers &&
-          typeof (parsed as UpstreamSnapshot).headers === "object" &&
-          !Array.isArray((parsed as UpstreamSnapshot).headers) &&
-          Object.values((parsed as UpstreamSnapshot).headers).every(
-            (value) => typeof value === "string",
-          )
-        ) {
-          state.lastUpstream = parsed as UpstreamSnapshot;
-          if (state.lastUpstream.providerID) {
-            state.upstreamByProvider.set(
-              state.lastUpstream.providerID,
-              state.lastUpstream,
-            );
-          }
-        }
+        const restored = deserializeUpstreamState(
+          persisted.lastUpstream,
+          config,
+        );
+        state.lastUpstream = restored.lastUpstream;
+        state.upstreamByProvider = restored.upstreamByProvider;
       } catch {
         log.warn(
           `corrupt last upstream for session ${sessionID.slice(0, 16)}, ignoring`,
@@ -3862,6 +5394,9 @@ function getOrCreateSession(
   // Ensure upstreamByProvider exists (upgrade from older session state)
   if (!state.upstreamByProvider) {
     state.upstreamByProvider = new Map();
+  }
+  if (credentialFingerprint) {
+    state.credentialFingerprint = credentialFingerprint;
   }
 
   return state;
@@ -3998,46 +5533,99 @@ const ADOPT_MIN_OVERLAP = 2;
  * Confirmation uses user messages only: temporal storage persists user messages
  * with position-stable deterministic IDs, while assistant responses are stored
  * under a synthetic index-0 ID — so only user messages are a reliable
- * cross-restart match signal. The project_id scope of the overlap query also
- * enforces same-project (a cross-project fingerprint twin yields zero overlap).
- * Subagent status must match, and a fork guard rejects a count that dropped far
- * below the candidate's stored count.
+ * cross-restart match signal. Confidently bound candidates require overlap in
+ * the incoming project. A provisionally bound candidate instead checks its
+ * existing bucket, allowing a later confident path to self-heal that bucket
+ * without weakening the cross-project guard for confident bindings. Subagent
+ * status must match, and a fork guard rejects a count that dropped far below the
+ * candidate's stored count.
  *
  * Called from BOTH mint paths: the Tier-1 path (known header present but its
  * value is new — the opencode restart case; `known` is rebound to the adopted
  * sid for a future Tier-1 fast path) and the Tier-3 path (no known header).
  */
+function trustedAdoptionRemote(
+  projectPath: string,
+  headers: Record<string, string>,
+): string | undefined {
+  const supplied = extractGitRemoteHeader(headers);
+  // Adoption is read-only, so it cannot call ensureProject's trusted-remote
+  // resolver. Match the current path's on-disk remote locally; only a hosted
+  // gateway, which cannot inspect client disk, may trust the normalized header.
+  return isHostedMode() ? supplied : (getGitRemote(projectPath) ?? undefined);
+}
+
 async function adoptByFingerprint(input: {
   req: GatewayRequest;
   headers: Record<string, string>;
   projectPath: string;
+  gitRemote?: string;
   known: { headerName: string; sessionId: string } | null;
   msgCount: number;
-}): Promise<{ sessionID: string; isNew: false; tier: 3 } | null> {
-  const { req, headers, projectPath, known, msgCount } = input;
+  requestGeneration?: number;
+  config: GatewayConfig;
+  credentialFingerprint: string;
+}): Promise<{
+  sessionID: string;
+  isNew: false;
+  tier: 3;
+  provisionalIdentity: true;
+  provisionalKey?: string;
+  adoptionFingerprint: string;
+  expectedUnowned: boolean;
+} | null> {
+  const {
+    req,
+    headers,
+    projectPath,
+    gitRemote,
+    known,
+    msgCount,
+    requestGeneration,
+    config,
+    credentialFingerprint,
+  } = input;
   if (!projectPath) return null;
 
   const cred = extractAuth(req.rawHeaders);
-  const credentialFingerprint = cred ? authFingerprint(cred) : "";
+  // Restart adoption grants access to an existing session, so an upstream URL
+  // alone is not sufficient proof of ownership.
+  if (!cred) return null;
+  const authenticatedFingerprint = usesRemoteSessionBinding(config)
+    ? credentialTenantFingerprint(cred)
+    : authFingerprint(cred);
+  if (credentialFingerprint !== authenticatedFingerprint) return null;
   const fingerprintInput = req.messages.map((m) => ({
     role: m.role,
     content: m.content,
   }));
-  const fingerprint = await fingerprintMessages(fingerprintInput, {
-    authSuffix: cred ? authFingerprint(cred) : "",
-  });
+  const remoteBinding = usesRemoteSessionBinding(config);
+  const fingerprint = await fingerprintMessages(
+    fingerprintInput,
+    remoteBinding
+      ? { tenantFingerprint: credentialFingerprint }
+      : { authSuffix: cred ? authFingerprint(cred) : "" },
+  );
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
 
   const reqIsSubagent = !!headers["x-parent-session-id"];
-  const candidates = findSessionStatesByFingerprint(fingerprint);
-  if (cred) {
-    // v78 added the credential suffix to conversation fingerprints. Legacy
-    // candidates have the old unsuffixed fingerprint and no persisted owner;
-    // they still require the same project-scoped multi-message overlap below.
-    const legacyFingerprint = await fingerprintMessages(fingerprintInput);
+  const candidates = findSessionStatesByFingerprint(fingerprint, {
+    credentialFingerprint,
+  }).map((candidate) => ({ ...candidate, credentialBound: true }));
+  // v78 added the credential suffix to conversation fingerprints. Legacy
+  // candidates have the old unsuffixed fingerprint and no persisted owner;
+  // they still require the same multi-message overlap policy below.
+  const legacyFingerprint = await fingerprintMessages(fingerprintInput);
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
+  if (!remoteBinding) {
     candidates.push(
       ...findSessionStatesByFingerprint(legacyFingerprint, {
         legacyUnownedOnly: true,
-      }),
+      }).map((candidate) => ({ ...candidate, credentialBound: false })),
     );
   }
   const eligibleCandidates = candidates.filter(
@@ -4053,21 +5641,29 @@ async function adoptByFingerprint(input: {
   // an early message only lowers overlap (graceful miss → no adoption), never a
   // false positive. The primary target (opencode x-lore-session-id) sends no
   // such markers, and marker clients carry them on the latest turn only.
-  const probeIDs: string[] = [];
+  const probeMessages: Array<{ index: number; message: GatewayMessage }> = [];
   let probedUsers = 0;
   const probeLimit = Math.min(req.messages.length, ADOPT_PROBE_MESSAGES);
   for (let i = 0; i < probeLimit; i++) {
     const m = req.messages[i];
     if (m.role !== "user") continue;
     probedUsers++;
-    probeIDs.push(deterministicID(m.role, i, m.content));
+    probeMessages.push({ index: i, message: m });
   }
-  if (probeIDs.length < ADOPT_MIN_OVERLAP) return null;
+  if (probeMessages.length < ADOPT_MIN_OVERLAP) return null;
 
-  const pid = ensureProject(projectPath);
+  const incomingProjectId = resolveProjectByRemoteOrPath(
+    gitRemote,
+    projectPath,
+  );
   const minOverlap = Math.max(ADOPT_MIN_OVERLAP, Math.ceil(probedUsers * 0.5));
-  let best: { sid: string; overlap: number; countDiff: number } | null = null;
-  // temporal_messages.id is globally unique, so valid rows cannot give two
+  let best: {
+    sid: string;
+    overlap: number;
+    countDiff: number;
+    credentialBound: boolean;
+  } | null = null;
+  // Source IDs include the candidate session, so valid rows cannot give two
   // sessions the same positive overlap set. Keep the tie guard as defense in
   // depth for a corrupt/imported database rather than selecting by row order.
   let ambiguousBest = false;
@@ -4077,7 +5673,55 @@ async function adoptByFingerprint(input: {
     if (msgCount - c.message_count < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) {
       continue;
     }
-    const overlap = countMatchingTemporalIds(pid, c.session_id, probeIDs);
+    // A confident or legacy-unowned candidate remains scoped to the incoming
+    // project. Only a credential-bound provisional binding may prove continuity
+    // against its current bucket before the incoming project has been created.
+    const usesPersistedProvisionalProject =
+      c.credentialBound && c.project_path_provisional === 1 && !!c.project_path;
+    const candidateProjectId = c.project_path
+      ? resolveProjectByRemoteOrPath(undefined, c.project_path)
+      : null;
+    if (
+      !usesPersistedProvisionalProject &&
+      (!incomingProjectId || candidateProjectId !== incomingProjectId)
+    ) {
+      continue;
+    }
+    // Derive message IDs from the persisted canonical path. A new clone path
+    // can resolve to the same project by git remote without being an alias yet;
+    // deriving IDs from that unregistered path would create a second project
+    // and make genuine transcript overlap impossible to observe.
+    const overlapProjectPath =
+      c.project_path && (usesPersistedProvisionalProject || candidateProjectId)
+        ? c.project_path
+        : projectPath;
+    const overlapProjectId = usesPersistedProvisionalProject
+      ? candidateProjectId
+      : incomingProjectId;
+    if (!overlapProjectId) continue;
+    const probeIDs = probeMessages.map(({ index, message }) => {
+      const sourceID = deterministicID(
+        c.session_id,
+        message.role,
+        index,
+        message.content,
+      );
+      return temporal.storedMessageId({
+        projectPath: overlapProjectPath,
+        sessionID: c.session_id,
+        sourceID,
+        legacySourceID: legacyDeterministicID(
+          message.role,
+          index,
+          message.content,
+        ),
+      });
+    });
+    const overlap = countMatchingTemporalIds(
+      overlapProjectId,
+      c.session_id,
+      probeIDs,
+    );
     if (overlap < minOverlap) continue;
     const countDiff = Math.abs(msgCount - c.message_count);
     if (
@@ -4085,7 +5729,12 @@ async function adoptByFingerprint(input: {
       overlap > best.overlap ||
       (overlap === best.overlap && countDiff < best.countDiff)
     ) {
-      best = { sid: c.session_id, overlap, countDiff };
+      best = {
+        sid: c.session_id,
+        overlap,
+        countDiff,
+        credentialBound: c.credentialBound,
+      };
       ambiguousBest = false;
     } else if (overlap === best.overlap && countDiff === best.countDiff) {
       ambiguousBest = true;
@@ -4093,33 +5742,74 @@ async function adoptByFingerprint(input: {
   }
   if (!best || ambiguousBest) return null;
 
-  // When a known header is present, rebind it → adopted sid so future turns
-  // identify via the Tier 1 fast path (and stop re-confirming overlap).
-  if (known) {
-    headerSessionIndex.set(
-      sessionIndexKey(credentialFingerprint, known.headerName, known.sessionId),
-      best.sid,
-    );
-    saveSessionTracking(best.sid, {
-      headerSessionId: known.sessionId,
-      headerName: known.headerName,
-      credentialFingerprint,
-    });
-  }
+  // Keep the adopted header provisional until a successful response confirms
+  // it in postResponse. This preserves retry continuity without authorizing
+  // sensitive routes after a failed/aborted adoption turn.
   log.info(
     `adopted prior session ${best.sid.slice(0, 16)} for resumed conversation ` +
       `(overlap=${best.overlap}/${probedUsers}` +
       `${known ? `, header=${known.headerName}` : ""})`,
   );
-  return { sessionID: best.sid, isNew: false, tier: 3 };
+  if (known) {
+    const provisionalKey = sessionIndexKey(
+      credentialFingerprint,
+      known.headerName,
+      known.sessionId,
+    );
+    setProvisionalHeaderMapping(
+      provisionalKey,
+      best.sid,
+      false,
+      fingerprint,
+      !best.credentialBound,
+    );
+    return {
+      sessionID: best.sid,
+      isNew: false,
+      tier: 3,
+      provisionalIdentity: true,
+      provisionalKey,
+      adoptionFingerprint: fingerprint,
+      expectedUnowned: !best.credentialBound,
+    };
+  }
+  return {
+    sessionID: best.sid,
+    isNew: false,
+    tier: 3,
+    provisionalIdentity: true,
+    adoptionFingerprint: fingerprint,
+    expectedUnowned: !best.credentialBound,
+  };
 }
+
+type IdentifiedSession = {
+  sessionID: string;
+  isNew: boolean;
+  tier: 1 | 2 | 2.5 | 3;
+  provisionalIdentity?: boolean;
+  provisionalKey?: string;
+  guardProject?: boolean;
+  adoptionFingerprint?: string;
+  expectedUnowned?: boolean;
+};
 
 async function identifySession(
   req: GatewayRequest,
   projectPath: string,
-): Promise<{ sessionID: string; isNew: boolean; tier: 1 | 2 | 2.5 | 3 }> {
+  projectPathSource: ProjectPathResult["source"] | undefined,
+  requestGeneration: number | undefined,
+  config: GatewayConfig,
+): Promise<IdentifiedSession> {
   const headers = req.rawHeaders;
-  const credentialFingerprint = requestCredentialFingerprint(headers);
+  const credentialFingerprint = requestCredentialFingerprint(headers, config);
+
+  // Remote correlation is authenticated. Without a usable credential, every
+  // request receives an unindexed session rather than inheriting another
+  // client's header, marker, fingerprint, or worker credential.
+  if (credentialFingerprint === null) {
+    return { sessionID: generateSessionID(), isNew: true, tier: 3 };
+  }
 
   // --- Tier 1: Known headers ---
   // Sub-agent requests (carrying x-parent-session-id) are NOT merged into the
@@ -4134,24 +5824,53 @@ async function identifySession(
       known.headerName,
       known.sessionId,
     );
+    hydrateHeaderSessionIndex(config);
+    if (ambiguousHeaderSessionKeys.has(indexKey)) {
+      throw new Error("ambiguous persisted session header");
+    }
     let existingSid = headerSessionIndex.get(indexKey);
+    let provisionalIdentity = false;
+    let guardProject = false;
+    let adoptionFingerprint: string | undefined;
+    let expectedUnowned = false;
     if (!existingSid) {
-      for (const entry of loadHeaderSessionIndex()) {
-        headerSessionIndex.set(
-          sessionIndexKey(
-            entry.credentialFingerprint,
-            entry.headerName,
-            entry.headerSessionId,
-          ),
-          entry.sessionId,
-        );
-      }
-      existingSid = headerSessionIndex.get(indexKey);
+      const provisional = getProvisionalHeaderEntry(indexKey);
+      existingSid = provisional?.sessionID;
+      provisionalIdentity = provisional !== null;
+      guardProject =
+        existingSid !== undefined &&
+        provisionalMappingGuardsProject(indexKey, existingSid);
+      adoptionFingerprint = provisional?.adoptionFingerprint;
+      expectedUnowned = provisional?.expectedUnowned === true;
     }
     if (existingSid) {
+      if (
+        provisionalIdentity &&
+        hasConflictingConfirmedHeader(req, existingSid, indexKey, config)
+      ) {
+        throw new Error("ambiguous session headers");
+      }
+      if (provisionalIdentity) {
+        setProvisionalHeaderMapping(
+          indexKey,
+          existingSid,
+          guardProject,
+          adoptionFingerprint,
+          expectedUnowned,
+        );
+      }
       // Session may only exist in DB (after gateway restart) — that's fine,
       // getOrCreateSession() will hydrate it from the session_state table.
-      return { sessionID: existingSid, isNew: false, tier: 1 };
+      return {
+        sessionID: existingSid,
+        isNew: false,
+        tier: 1,
+        provisionalIdentity,
+        ...(provisionalIdentity ? { provisionalKey: indexKey } : {}),
+        ...(guardProject ? { guardProject: true } : {}),
+        ...(adoptionFingerprint ? { adoptionFingerprint } : {}),
+        ...(expectedUnowned ? { expectedUnowned: true } : {}),
+      };
     }
 
     // --- Tier 1a: Cross-header migration ---
@@ -4159,6 +5878,7 @@ async function identifySession(
     // x-lore-session-id), but the request also contains a lower-priority
     // known header that IS already indexed (e.g. x-session-affinity from
     // before the upgrade). Re-index under the new header and resume.
+    let fallbackMatch: { sessionID: string; headerName: string } | undefined;
     for (const fallbackName of KNOWN_SESSION_HEADERS) {
       if (fallbackName === known.headerName) continue; // skip the primary
       const fallbackValue = headers[fallbackName];
@@ -4170,147 +5890,77 @@ async function identifySession(
       );
       const fallbackSid = headerSessionIndex.get(fallbackKey);
       if (fallbackSid) {
-        // Migrate: index under the new (higher-priority) header.
-        headerSessionIndex.set(indexKey, fallbackSid);
-        saveSessionTracking(fallbackSid, {
-          headerSessionId: known.sessionId,
-          headerName: known.headerName,
-          credentialFingerprint,
-        });
-        // Update in-memory state if present.
-        const inMemory = sessions.get(fallbackSid);
-        if (inMemory) {
-          inMemory.headerSessionId = known.sessionId;
-          inMemory.headerName = known.headerName;
-          inMemory.credentialFingerprint = credentialFingerprint;
+        if (fallbackMatch && fallbackMatch.sessionID !== fallbackSid) {
+          throw new Error("ambiguous session headers");
         }
+        fallbackMatch = { sessionID: fallbackSid, headerName: fallbackName };
+      }
+    }
+    if (fallbackMatch) {
+      const incomingProject =
+        projectPathSource === "header" || projectPathSource === "inferred"
+          ? projectPath
+          : undefined;
+      const existing = loadSessionTracking(fallbackMatch.sessionID);
+      const conflictsWithConfidentProject =
+        !!incomingProject &&
+        !!existing?.projectPath &&
+        existing.projectPathProvisional === false &&
+        existing.projectPath !== incomingProject;
+      if (!conflictsWithConfidentProject) {
+        setProvisionalHeaderMapping(indexKey, fallbackMatch.sessionID, true);
         log.info(
-          `session ${fallbackSid.slice(0, 16)}: migrated from ${fallbackName} to ${known.headerName}`,
+          `session ${fallbackMatch.sessionID.slice(0, 16)}: provisional migration from ${fallbackMatch.headerName} to ${known.headerName}`,
         );
-        return { sessionID: fallbackSid, isNew: false, tier: 1 };
+        return {
+          sessionID: fallbackMatch.sessionID,
+          isNew: false,
+          tier: 1,
+          provisionalIdentity: true,
+          provisionalKey: indexKey,
+          guardProject: true,
+        };
       }
-    }
-
-    // --- Tier 1b: Header value rotation detection ---
-    // Only for headers whose values may change on a client restart while the
-    // logical session continues (e.g. OpenCode's x-session-affinity nanoid).
-    // Headers like x-claude-code-session-id mint a fresh value per
-    // *conversation* — a new value is always a genuinely new session, and
-    // merging would collapse distinct conversations (and their projects) into
-    // one, causing cross-project contamination on remote/multi-client gateways.
-    const predecessor = !isRotationEligible(known.headerName)
-      ? null
-      : findRotationPredecessor(
-          credentialFingerprint,
-          known.headerName,
-          known.sessionId,
-          headerSessionIndex,
-          (sid) => {
-            // Session may be in memory or only in DB (after gateway restart).
-            const inMemory = sessions.get(sid);
-            if (inMemory) {
-              return {
-                sid,
-                isSubagent: !!inMemory.isSubagent,
-                lastActiveAt: inMemory.lastRequestTime,
-              };
-            }
-            // Lightweight DB check for recency and subagent status.
-            const persisted = loadSessionTracking(sid);
-            if (!persisted) return null; // orphaned index entry
-            return {
-              sid,
-              isSubagent: persisted.isSubagent,
-              // lastTurnAt=0 means gradient never ran yet — session is new,
-              // treat as recently active (not infinitely stale).
-              lastActiveAt:
-                persisted.lastTurnAt > 0 ? persisted.lastTurnAt : Date.now(),
-            };
-          },
-        );
-
-    // Fix 2 (defense in depth): even for a rotation-eligible header, never
-    // re-home a session onto a DIFFERENT confident project. If the incoming
-    // request carries an explicit X-Lore-Project that disagrees with the
-    // predecessor's bound project, this is not a benign restart — treat it as
-    // a genuinely new session to avoid cross-project contamination.
-    if (predecessor) {
-      const incomingProject = extractProjectHeader(headers);
-      if (incomingProject) {
-        const predTracking = loadSessionTracking(predecessor.sid);
-        const predProject = predTracking?.projectPath;
-        const predConfident =
-          !!predProject && predTracking?.projectPathProvisional === false;
-        if (predConfident && predProject !== incomingProject) {
-          log.warn(
-            `session rotation refused (${known.headerName}): incoming project ` +
-              `${incomingProject} differs from predecessor ${predecessor.sid.slice(0, 16)} ` +
-              `project ${predProject} — creating a new session instead of merging.`,
-          );
-          const sessionID = generateSessionID();
-          headerSessionIndex.set(indexKey, sessionID);
-          saveSessionTracking(sessionID, {
-            headerSessionId: known.sessionId,
-            headerName: known.headerName,
-            credentialFingerprint,
-          });
-          // The old predecessor's index entry is intentionally preserved — the
-          // old session is still valid and may receive requests with its nanoid.
-          // It will age out via ROTATION_MAX_AGE_MS naturally. If another new
-          // nanoid arrives later, the old entry creates an ambiguity (multiple
-          // predecessors) → findRotationPredecessor returns null → new session.
-          return { sessionID, isNew: true, tier: 1 };
-        }
-      }
-    }
-
-    if (predecessor) {
-      // Resume the old session with the new header value.
-      const oldKey = sessionIndexKey(
-        credentialFingerprint,
-        known.headerName,
-        predecessor.oldHeaderValue,
+      log.warn(
+        `session migration refused (${fallbackMatch.headerName}): incoming project ` +
+          `${incomingProject} differs from session ${fallbackMatch.sessionID.slice(0, 16)} ` +
+          `project ${existing.projectPath} - creating a new session instead of merging.`,
       );
-      headerSessionIndex.delete(oldKey);
-      headerSessionIndex.set(indexKey, predecessor.sid);
-
-      // Update in-memory state if present.
-      const inMemory = sessions.get(predecessor.sid);
-      if (inMemory) {
-        inMemory.headerSessionId = known.sessionId;
-        inMemory.headerName = known.headerName;
-        inMemory.credentialFingerprint = credentialFingerprint;
-      }
-
-      // Persist the new header mapping immediately.
-      saveSessionTracking(predecessor.sid, {
-        headerSessionId: known.sessionId,
-        headerName: known.headerName,
-        credentialFingerprint,
-      });
-
-      log.info(
-        `session ${predecessor.sid.slice(0, 16)}: resumed via ${known.headerName} value rotation`,
-      );
-      return { sessionID: predecessor.sid, isNew: false, tier: 1 };
     }
 
-    // --- Tier 1 → 3b: restart-proof adoption ---
-    // The known header value is new and rotation found no predecessor. Before
-    // minting a fresh session, try to adopt a prior session for this same
-    // conversation (resumed after a restart under a new x-lore-session-id) via
-    // its persisted fingerprint + content-hash overlap. (issue #796)
+    // --- Tier 1 → 3b: overlap-proven restart adoption ---
+    // A new known-header value is never continuity proof by itself. Before
+    // minting a fresh session, adopt only when the persisted fingerprint and
+    // project-scoped leading-user-message overlap prove that this is the same
+    // conversation. Successful publication below still revokes an old value
+    // for rotation-eligible headers such as x-session-affinity. (issue #796)
     const adopted = await adoptByFingerprint({
       req,
       headers,
       projectPath,
+      gitRemote: trustedAdoptionRemote(projectPath, headers),
       known,
       msgCount: req.messages.length,
+      requestGeneration,
+      config,
+      credentialFingerprint,
     });
     if (adopted) return adopted;
 
-    // Genuinely new session — no predecessor or ambiguous concurrent sessions.
+    // If a lower-priority confirmed identity existed but project validation
+    // rejected the migration, keep this replacement provisional until success.
+    // A completely new header can retain the normal eager session bootstrap.
     const sessionID = generateSessionID();
+    if (fallbackMatch) {
+      setProvisionalHeaderMapping(indexKey, sessionID);
+      return {
+        sessionID,
+        isNew: true,
+        tier: 1,
+        provisionalIdentity: true,
+        provisionalKey: indexKey,
+      };
+    }
     headerSessionIndex.set(indexKey, sessionID);
     saveSessionTracking(sessionID, {
       headerSessionId: known.sessionId,
@@ -4321,15 +5971,20 @@ async function identifySession(
   }
 
   // --- Tier 2: Learned headers ---
-  // Check if any existing session has a promoted header that matches
-  // a header value in the current request.
-  for (const [sid, state] of sessions) {
-    if (!state.headerSessionId || !state.headerName) continue;
-    if ((state.credentialFingerprint ?? "") !== credentialFingerprint) continue;
-    const currentValue = headers[state.headerName];
-    if (currentValue && currentValue === state.headerSessionId) {
-      return { sessionID: sid, isNew: false, tier: 2 };
-    }
+  // Resolve through the shared index so multiple headers identifying different
+  // sessions fail closed instead of selecting insertion order.
+  const indexedResolution = resolveIndexedSession(req, config, true);
+  if (indexedResolution.kind === "ambiguous") {
+    throw new Error("ambiguous session headers");
+  }
+  if (indexedResolution.kind === "match") {
+    return {
+      sessionID: indexedResolution.sessionID,
+      isNew: false,
+      tier: 2,
+      provisionalIdentity: indexedResolution.provisional,
+      provisionalKey: indexedResolution.provisionalKey,
+    };
   }
 
   // --- Tier 2.5: Context markers (injected by Hermes plugin pre_llm_call) ---
@@ -4359,55 +6014,85 @@ async function identifySession(
     content: m.content,
   }));
   const cred = extractAuth(req.rawHeaders);
-  const fingerprint = await fingerprintMessages(rawMessages, {
-    authSuffix: cred ? authFingerprint(cred) : "",
-  });
+  const fingerprint = await fingerprintMessages(
+    rawMessages,
+    usesRemoteSessionBinding(config)
+      ? { tenantFingerprint: credentialFingerprint }
+      : { authSuffix: cred ? authFingerprint(cred) : "" },
+  );
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
   const msgCount = req.messages.length;
 
   // Find the best matching session: same fingerprint + closest message count
   let bestMatch: { sid: string; countDiff: number } | null = null;
+  let ambiguousBestMatch = false;
 
-  for (const [sid, state] of sessions) {
-    if (state.fingerprint !== fingerprint) continue;
+  if (cred) {
+    for (const [sid, state] of sessions) {
+      if (state.credentialFingerprint !== credentialFingerprint) continue;
+      if (state.fingerprint !== fingerprint) continue;
+      if (
+        (projectPathSource === "header" || projectPathSource === "inferred") &&
+        state.projectPathProvisional === false &&
+        state.projectPath !== projectPath
+      ) {
+        continue;
+      }
 
-    const diff = msgCount - state.messageCount;
+      const diff = msgCount - state.messageCount;
 
-    // Normal session: count grows by 2–6 per turn.
-    // Fork: count drops significantly (parent at 600, fork at 300).
-    // Reject if the count dropped too far (likely a fork).
-    if (diff < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) continue;
+      // Normal session: count grows by 2–6 per turn.
+      // Fork: count drops significantly (parent at 600, fork at 300).
+      // Reject if the count dropped too far (likely a fork).
+      if (diff < -MESSAGE_COUNT_PROXIMITY_THRESHOLD) continue;
 
-    const absDiff = Math.abs(diff);
-    if (!bestMatch || absDiff < bestMatch.countDiff) {
-      bestMatch = { sid, countDiff: absDiff };
+      const absDiff = Math.abs(diff);
+      if (!bestMatch || absDiff < bestMatch.countDiff) {
+        bestMatch = { sid, countDiff: absDiff };
+        ambiguousBestMatch = false;
+      } else if (absDiff === bestMatch.countDiff) {
+        ambiguousBestMatch = true;
+      }
     }
   }
+  if (ambiguousBestMatch) bestMatch = null;
 
   if (bestMatch) {
     // Run header learning on the matched session (Tier 2 bootstrap).
     const state = sessions.get(bestMatch.sid);
     if (state && !state.headerSessionId) {
-      const result = learnHeaders(state.candidateHeaders, headers);
-      state.candidateHeaders = result.updatedCandidates;
+      const candidateSnapshot = state.candidateHeaders
+        ? new Map(
+            Array.from(state.candidateHeaders, ([name, candidate]) => [
+              name,
+              { ...candidate },
+            ]),
+          )
+        : undefined;
+      const result = learnHeaders(candidateSnapshot, headers, {
+        commitGlobal: false,
+      });
       if (result.promoted) {
-        state.headerSessionId = result.promoted.value;
-        state.headerName = result.promoted.name;
-        // Index the promoted header for future Tier 2 lookups.
+        // Preserve retry continuity in memory, but do not authorize the learned
+        // header until a successful response confirms it in postResponse.
         const indexKey = sessionIndexKey(
           credentialFingerprint,
           result.promoted.name,
           result.promoted.value,
         );
-        headerSessionIndex.set(indexKey, bestMatch.sid);
-        // Persist immediately — rare event, critical for post-restart correlation
-        saveSessionTracking(bestMatch.sid, {
-          headerSessionId: result.promoted.value,
-          headerName: result.promoted.name,
-          credentialFingerprint,
-        });
+        setProvisionalHeaderMapping(indexKey, bestMatch.sid);
         log.info(
-          `session ${bestMatch.sid.slice(0, 16)}: promoted header ${result.promoted.name} for Tier 2 identification`,
+          `session ${bestMatch.sid.slice(0, 16)}: provisional header promotion ${result.promoted.name}`,
         );
+        return {
+          sessionID: bestMatch.sid,
+          isNew: false,
+          tier: 3,
+          provisionalIdentity: true,
+          provisionalKey: indexKey,
+        };
       }
     }
     return { sessionID: bestMatch.sid, isNew: false, tier: 3 };
@@ -4423,8 +6108,12 @@ async function identifySession(
     req,
     headers,
     projectPath,
+    gitRemote: trustedAdoptionRemote(projectPath, headers),
     known: null,
     msgCount,
+    requestGeneration,
+    config,
+    credentialFingerprint,
   });
   if (adopted) return adopted;
 
@@ -4436,6 +6125,182 @@ async function identifySession(
 // ---------------------------------------------------------------------------
 // Upstream forwarding
 // ---------------------------------------------------------------------------
+
+type EffectiveUpstreamProtocol = UpstreamSnapshot["protocol"];
+
+type ResolvedRequestUpstreamRoute = {
+  /** Explicit, sanitized X-Lore-Provider value (not inferred signals). */
+  providerHeader?: string;
+  /** Provider identity actually selected, including Copilot inference. */
+  providerID?: string;
+  headerUpstream?: string;
+  headerUpstreamPath?: string;
+  providerRoute: ReturnType<typeof resolveProviderRoute>;
+  modelRoute: ReturnType<typeof resolveUpstreamRoute>;
+  effectiveProtocol: EffectiveUpstreamProtocol;
+  effectiveUpstreamBase: string;
+  bedrockMantle: boolean;
+};
+
+/**
+ * Preserve the legacy process-global credential only for a local, unambiguous
+ * direct-provider request to the exact configured base. Remote/hosted gateways,
+ * explicit provider selection, and client-selected URLs never populate it.
+ */
+function captureLegacyGlobalAuth(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  cred: AuthCredential,
+): string | undefined {
+  if (usesRemoteSessionBinding(config)) return undefined;
+  if (
+    req.rawHeaders["x-lore-provider"] ||
+    req.rawHeaders["x-lore-upstream-url"]
+  ) {
+    return undefined;
+  }
+  const route = resolveRequestUpstreamRoute(req, config);
+  const providerID =
+    route.effectiveProtocol === "anthropic"
+      ? "anthropic"
+      : route.effectiveProtocol === "openai" ||
+          route.effectiveProtocol === "openai-responses"
+        ? "openai"
+        : undefined;
+  if (!providerID) return undefined;
+  const configuredBase =
+    providerID === "anthropic"
+      ? config.upstreamAnthropic
+      : config.upstreamOpenAI;
+  const routeBase = normalizeUpstreamBase(route.effectiveUpstreamBase);
+  const trustedBase = normalizeUpstreamBase(configuredBase);
+  if (!routeBase || !trustedBase || routeBase !== trustedBase) {
+    return undefined;
+  }
+  setLastSeenAuth(cred, providerID);
+  return providerID;
+}
+
+/**
+ * Single source of truth for foreground routing and its durable snapshot.
+ * This is deliberately synchronous: dynamic models.dev lookup is cache-only,
+ * so capture can run before any fetch/interceptor and failed requests still
+ * retain the exact route intent used by forwardToUpstream.
+ */
+function resolveRequestUpstreamRoute(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): ResolvedRequestUpstreamRoute {
+  const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
+  const headerUpstreamPath = extractUpstreamPathHeader(req.rawHeaders);
+  const providerHeader = extractProviderHeader(req.rawHeaders);
+  if (req.rawHeaders["x-lore-provider"] && !providerHeader) {
+    throw new Error("Unsupported or invalid X-Lore-Provider");
+  }
+  if (req.rawHeaders["x-lore-upstream-url"] && !headerUpstream) {
+    throw new Error("Invalid X-Lore-Upstream-URL");
+  }
+  if (headerUpstream && !isCallerUpstreamAllowed(config, headerUpstream)) {
+    throw new Error(
+      "X-Lore-Upstream-URL origin is not allowed by this remote gateway",
+    );
+  }
+  let providerID = providerHeader;
+  let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
+  if (!providerRoute && providerID) {
+    // Explicit request routing is cache-only. An unknown untrusted provider
+    // must fail closed without triggering side-channel network activity.
+    providerRoute = lookupProviderRoute(providerID, false);
+  }
+  if (
+    !providerRoute &&
+    !headerUpstream &&
+    hasCopilotIntegrationHeader(req.rawHeaders)
+  ) {
+    providerID = "github-copilot";
+    providerRoute = resolveProviderRoute(providerID);
+  }
+  const modelRoute = resolveUpstreamRoute(req.model);
+  const selfUrlBuildingProtocol =
+    providerRoute?.bedrockMantle === true ||
+    providerRoute?.protocol === "vertex";
+  if (headerUpstream && !extractAuth(req.rawHeaders)) {
+    throw new Error("An explicit upstream URL requires client authentication");
+  }
+  if (
+    headerUpstream &&
+    headerUpstreamPath &&
+    !isUpstreamWithinBase(
+      new URL(headerUpstreamPath, new URL(headerUpstream).origin).href,
+      headerUpstream,
+    )
+  ) {
+    throw new Error("Explicit upstream path escapes its upstream base");
+  }
+  if (providerID && !providerRoute && !headerUpstream) {
+    throw new Error(`Unsupported provider "${providerID}"`);
+  }
+  if (
+    providerID &&
+    providerRoute?.url == null &&
+    !headerUpstream &&
+    !selfUrlBuildingProtocol
+  ) {
+    throw new Error(
+      `Provider "${providerID}" requires an explicit upstream URL`,
+    );
+  }
+  const providerRouteUsable =
+    providerRoute &&
+    (providerRoute.url != null || headerUpstream || selfUrlBuildingProtocol)
+      ? providerRoute
+      : null;
+  const nativeIngressAnthropicOverride =
+    providerHeader != null && providerRouteUsable?.protocol === "anthropic";
+  const effectiveProtocol: EffectiveUpstreamProtocol =
+    req.protocol === "openai-responses"
+      ? nativeIngressAnthropicOverride
+        ? "anthropic"
+        : "openai-responses"
+      : req.protocol === "gemini"
+        ? nativeIngressAnthropicOverride
+          ? "anthropic"
+          : "gemini"
+        : (providerRouteUsable?.protocol ??
+          modelRoute?.protocol ??
+          req.protocol);
+  const bedrockMantle = isBedrockMantleDispatch(
+    providerRouteUsable,
+    effectiveProtocol,
+  );
+  const selfBuiltUpstreamUrl = bedrockMantle
+    ? bedrockMantleUrl(config.bedrockRegion)
+    : effectiveProtocol === "vertex"
+      ? `https://${vertexHost(config.vertexRegion)}`
+      : null;
+  const effectiveUpstreamBase =
+    headerUpstream ??
+    selfBuiltUpstreamUrl ??
+    providerRoute?.url ??
+    modelRoute?.url ??
+    (effectiveProtocol === "anthropic"
+      ? config.upstreamAnthropic
+      : effectiveProtocol === "gemini"
+        ? GEMINI_DEFAULT_UPSTREAM
+        : config.upstreamOpenAI);
+
+  return {
+    providerHeader,
+    providerID,
+    headerUpstream,
+    headerUpstreamPath,
+    providerRoute,
+    modelRoute,
+    effectiveProtocol,
+    effectiveUpstreamBase,
+    bedrockMantle,
+  };
+}
 
 /** Result from forwardToUpstream — includes the serialized body for cache analytics. */
 type UpstreamResult = {
@@ -4467,123 +6332,24 @@ async function forwardToUpstream(
   interceptor?: UpstreamInterceptor,
   cache?: AnthropicCacheOptions,
   signal?: AbortSignal,
+  resolvedRoute?: ResolvedRequestUpstreamRoute,
 ): Promise<UpstreamResult> {
   let url: string;
   let headers: Record<string, string>;
   let body: unknown;
 
-  // Resolve upstream URL and protocol via a four-tier priority chain:
-  //   1. X-Lore-Upstream-URL header  (explicit user override)
-  //   2. X-Lore-Provider header      (plugin identifies the provider)
-  //      a. Static PROVIDER_ROUTES table (fast, no network)
-  //      b. Dynamic models.dev lookup  (async, cached 1h, covers new providers)
-  //   3. Model prefix route           (fallback for bare agents like Claude Code)
-  //   4. Config defaults              (upstreamAnthropic / upstreamOpenAI)
-  // Preserve "openai-responses" from ingress — model prefix routing returns
-  // "openai" for OpenAI models, but we must not downgrade the wire protocol.
-  const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
-  // The client's ORIGINAL endpoint pathname (set by the fetch interceptor), used
-  // below to forward verbatim instead of synthesizing a canonical `/v1/...` path.
-  const headerUpstreamPath = extractUpstreamPathHeader(req.rawHeaders);
-  const providerID = extractProviderHeader(req.rawHeaders);
-  let providerRoute = providerID ? resolveProviderRoute(providerID) : null;
-  // Dynamic fallback: look up unknown providers from models.dev cache.
-  // Non-blocking — returns cached data or null (triggers background refresh).
-  if (!providerRoute && providerID) {
-    providerRoute = lookupProviderRoute(providerID);
-  }
-  // GitHub Copilot CLI (default GitHub-hosted mode) is redirected at the gateway
-  // via COPILOT_API_URL. It sends OpenAI-format requests with its own exchanged
-  // Copilot bearer token and a `Copilot-Integration-Id` header, but has no way to
-  // set X-Lore-Provider — so its model ids (gpt-*, claude-*, gemini-*) would route
-  // by model prefix to the WRONG upstream (api.openai.com / api.anthropic.com).
-  // Treat the integration header as the routing signal → github-copilot upstream
-  // (api.githubcopilot.com). Explicit X-Lore-Provider and X-Lore-Upstream-URL
-  // (incl. BYOK, where the user points COPILOT_PROVIDER_BASE_URL at the gateway)
-  // still win, since both set providerRoute / headerUpstream first.
-  if (
-    !providerRoute &&
-    !headerUpstream &&
-    hasCopilotIntegrationHeader(req.rawHeaders)
-  ) {
-    providerRoute = resolveProviderRoute("github-copilot");
-  }
-  const modelRoute = resolveUpstreamRoute(req.model);
-
-  // Only use provider route protocol when we also have a usable URL from it
-  // (either providerRoute.url or headerUpstream). When url is null (local/
-  // custom providers like vllm, github-copilot), the protocol should come
-  // from whichever tier actually provides the URL to avoid mismatches.
-  //
-  // EXCEPTION: self-URL-building routes are usable with a null url and no
-  // X-Lore-Upstream-URL because they build a region-specific base from config:
-  //   - bedrock-mantle: `bedrock-mantle.<region>.api.aws/anthropic` (Anthropic
-  //     protocol — only the base URL + model id differ from native Anthropic);
-  //   - vertex: `<region>-aiplatform.googleapis.com` (part 2, not yet wired).
-  // Without this, `X-Lore-Provider: bedrock` would fall through to the model-
-  // prefix route (api.anthropic.com for claude-* IDs) and silently bypass it.
-  const selfUrlBuildingProtocol =
-    providerRoute?.bedrockMantle === true ||
-    providerRoute?.protocol === "vertex";
-  const providerRouteUsable =
-    providerRoute &&
-    (providerRoute.url != null || headerUpstream || selfUrlBuildingProtocol)
-      ? providerRoute
-      : null;
-
-  // Protocol resolution: provider routes with `protocol: null` are proxy/
-  // aggregator providers (OpenCode Zen, Vercel AI Gateway) that accept
-  // whichever protocol the client sent — preserve the ingress protocol.
-  // Direct providers (DeepSeek, Groq, etc.) specify their protocol explicitly
-  // so the gateway can translate (e.g., Claude Code → OpenAI-only backend).
-  const effectiveProtocol =
-    req.protocol === "openai-responses"
-      ? "openai-responses"
-      : req.protocol === "gemini"
-        ? // A native Gemini ingress ALWAYS stays gemini. The provider route still
-          // supplies the upstream URL (e.g. X-Lore-Provider: google →
-          // generativelanguage), but its protocol must not downgrade a native
-          // generateContent request: the `gemini-` model-prefix route and the
-          // `google` provider route are both the OpenAI-compat layer
-          // (protocol "openai"), which would wrongly re-translate to Chat
-          // Completions. opencode/pi's @ai-sdk/google speaks native generateContent.
-          "gemini"
-        : (providerRouteUsable?.protocol ??
-          modelRoute?.protocol ??
-          req.protocol);
-
-  // Self-URL-building routes derive their base from config (region), not from
-  // the route tables. This must take precedence over `modelRoute?.url`: a
-  // claude-* model ID resolves to api.anthropic.com via the model-prefix route,
-  // which would otherwise mask the real Bedrock/Vertex base. For bedrock-mantle
-  // the base is the regional mantle endpoint and the wire protocol stays
-  // `anthropic` (so the normal Anthropic path handles it; only body.model is
-  // remapped below). An explicit X-Lore-Upstream-URL header still wins.
-  // bedrock-mantle ALWAYS rides the anthropic wire path (the model remap below
-  // lives only in the anthropic branch). Shared with the snapshot path so the
-  // two can never diverge; see isBedrockMantleDispatch for the invariant.
-  const bedrockMantle = isBedrockMantleDispatch(
-    providerRouteUsable,
+  const route = resolvedRoute ?? resolveRequestUpstreamRoute(req, config);
+  const {
+    providerHeader,
+    providerID,
+    headerUpstream,
+    headerUpstreamPath,
+    providerRoute,
+    modelRoute,
     effectiveProtocol,
-  );
-  const selfBuiltUpstreamUrl = bedrockMantle
-    ? bedrockMantleUrl(config.bedrockRegion)
-    : effectiveProtocol === "vertex"
-      ? `https://${vertexHost(config.vertexRegion)}`
-      : null;
-  const effectiveUpstreamBase =
-    headerUpstream ??
-    selfBuiltUpstreamUrl ??
-    providerRoute?.url ??
-    modelRoute?.url ??
-    (effectiveProtocol === "anthropic"
-      ? config.upstreamAnthropic
-      : effectiveProtocol === "gemini"
-        ? // Native Gemini default upstream (Generative Language API). `gemini-*`
-          // models resolve this via modelRoute.url already; this covers a native
-          // gemini ingress whose model id doesn't match the `gemini-` prefix.
-          GEMINI_DEFAULT_UPSTREAM
-        : config.upstreamOpenAI);
+    effectiveUpstreamBase,
+    bedrockMantle,
+  } = route;
 
   // Warn when a provider route exists but has no URL and no header override —
   // the request will fall through to config defaults which likely have wrong
@@ -4605,13 +6371,13 @@ async function forwardToUpstream(
   // provider routing issues without guessing.
   const routingAuth = extractAuth(req.rawHeaders);
   log.info(
-    `upstream: ${effectiveUpstreamBase} ` +
+    `upstream: ${upstreamUrlForLog(effectiveUpstreamBase)} ` +
       `(provider=${providerID ?? "none"}, ` +
-      `providerURL=${providerRoute?.url ?? "none"}, ` +
-      `modelRoute=${modelRoute?.url ?? "none"}, ` +
+      `providerURL=${upstreamUrlForLog(providerRoute?.url)}, ` +
+      `modelRoute=${upstreamUrlForLog(modelRoute?.url)}, ` +
       `headerUpstream=${headerUpstream ? "yes" : "no"}, ` +
       `protocol=${effectiveProtocol}, ` +
-      `auth=${routingAuth ? `${routingAuth.scheme}:${routingAuth.value.slice(0, 8)}…` : "none"})`,
+      `scheme=${routingAuth?.scheme ?? "none"})`,
   );
 
   // Defense-in-depth: warn when a bearer token prefix clearly mismatches
@@ -4622,7 +6388,7 @@ async function forwardToUpstream(
     !effectiveUpstreamBase.includes("githubcopilot")
   ) {
     log.error(
-      `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${effectiveUpstreamBase} — ` +
+      `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${upstreamUrlForLog(effectiveUpstreamBase)} — ` +
         `provider: ${providerID ?? "none"}`,
     );
   }
@@ -4694,7 +6460,7 @@ async function forwardToUpstream(
       : cache;
     const result = buildAnthropicRequest(req, effectiveCache);
 
-    const project = await resolveVertexProject(config.vertexProject);
+    const project = await resolveVertexProject(config.vertexProject, signal);
     if (!project) {
       throw new Error(
         "Vertex: no GCP project configured. Set GOOGLE_CLOUD_PROJECT (or " +
@@ -4708,7 +6474,7 @@ async function forwardToUpstream(
     // override else config, rawPredict URL, toVertexBody, and stripping the
     // api.anthropic.com-only headers + setting the bearer) is a pure helper so
     // it can be unit-tested in isolation — see buildVertexUpstream.
-    const token = await getVertexAccessToken();
+    const token = await getVertexAccessToken(signal);
     const vt = buildVertexUpstream({
       anthropicHeaders: result.headers,
       anthropicBody: result.body as Record<string, unknown>,
@@ -4792,7 +6558,7 @@ async function forwardToUpstream(
   // corporate proxies, LiteLLM team-routing tokens, Cloudflare AI Gateway
   // auth, and service-account scenarios can override any header — including
   // the gateway-reconstructed `x-api-key` / `Authorization`.
-  applyUpstreamExtraHeaders(headers, config.upstreamExtraHeaders);
+  applyUpstreamExtraHeaders(headers, extraHeadersForUpstream(config, url));
 
   let serializedBody = JSON.stringify(body);
 
@@ -4851,7 +6617,7 @@ async function forwardToUpstream(
     req.rawHeaders["content-encoding"],
     buildUpstreamRouteContext({
       upstreamUrlHeader: headerUpstream,
-      providerHeader: providerID,
+      providerHeader,
       ingressProtocol: req.protocol,
       effectiveProtocol,
       ingressUpstreamBase,
@@ -4863,27 +6629,35 @@ async function forwardToUpstream(
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
   if (effectiveInterceptor) {
-    const response = await effectiveInterceptor(
-      body,
-      req.model,
-      req.stream,
+    const response = await responseAgainstAbort(
       () =>
-        upstreamFetch(url, {
-          method: "POST",
-          headers,
-          body: upstreamBody,
-          signal,
-        }),
+        effectiveInterceptor(body, req.model, req.stream, () =>
+          responseAgainstAbort(
+            () =>
+              upstreamFetch(url, {
+                method: "POST",
+                headers,
+                body: upstreamBody,
+                signal,
+              }),
+            signal,
+          ),
+        ),
+      signal,
     );
     return { response, serializedBody, effectiveProtocol };
   }
 
-  const response = await upstreamFetch(url, {
-    method: "POST",
-    headers,
-    body: upstreamBody,
+  const response = await responseAgainstAbort(
+    () =>
+      upstreamFetch(url, {
+        method: "POST",
+        headers,
+        body: upstreamBody,
+        signal,
+      }),
     signal,
-  });
+  );
   return { response, serializedBody, effectiveProtocol };
 }
 
@@ -4932,7 +6706,7 @@ function maxReportedUsageForModelID(
  *  - **Case 2 (mixed tools)**: suppresses recall blocks, stores the pending
  *    result for injection into the next request.
  */
-function buildStreamingResponse(
+export function buildStreamingResponse(
   upstreamResponse: Response,
   onComplete: (response: GatewayResponse) => void,
   recallContext?: {
@@ -4942,6 +6716,9 @@ function buildStreamingResponse(
     config: GatewayConfig;
     sessionState: SessionState;
     cacheOptions: AnthropicCacheOptions;
+    upstreamRoute?: ResolvedRequestUpstreamRoute;
+    /** Suppress recall-result retention for amnesia/no-store turns. */
+    noStore?: boolean;
     /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
      *  recall marker is emitted as its own Anthropic SSE message envelope
      *  (split) or as an inline synthetic text content block (which the
@@ -4980,6 +6757,7 @@ function buildStreamingResponse(
   sessionID?: string,
   /** Per-model client-usage cap (anti-compaction). Defaults to the 200K cap. */
   maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
+  signal?: AbortSignal,
 ): Response {
   const recallAccum = recallContext
     ? createRecallAwareAccumulator(RECALL_TOOL_NAME, {
@@ -4999,6 +6777,31 @@ function buildStreamingResponse(
   // Client-disconnect detection: shared between start() and cancel()
   let cancelled = false;
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let resumeDemand: (() => void) | undefined;
+  const recallAbort = new AbortController();
+  const streamSignal = signal
+    ? AbortSignal.any([signal, recallAbort.signal])
+    : recallAbort.signal;
+  const onStreamAbort = (): void => {
+    resumeDemand?.();
+    resumeDemand = undefined;
+    if (signal?.aborted && !recallAbort.signal.aborted) {
+      recallAbort.abort(signal.reason);
+    }
+    if (activeReader) cancelAndReleaseReader(activeReader, streamSignal.reason);
+    else
+      void upstreamResponse.body?.cancel(streamSignal.reason).catch(() => {});
+  };
+  streamSignal.addEventListener("abort", onStreamAbort, { once: true });
+  if (streamSignal.aborted) onStreamAbort();
+  const recallDeadline = setTimeout(
+    () =>
+      recallAbort.abort(
+        new DOMException("recall stream deadline exceeded", "TimeoutError"),
+      ),
+    FOREGROUND_REQUEST_TIMEOUT_MS,
+  );
+  const clearRecallDeadline = (): void => clearTimeout(recallDeadline);
 
   // --- Keepalive ping timer ---
   // Emits SSE `ping` events on the client-facing stream when no upstream
@@ -5014,9 +6817,23 @@ function buildStreamingResponse(
   let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
 
   const stream = new ReadableStream({
-    async start(controller) {
+    start(controller) {
       // Guard helpers for client-disconnect safety
-      const safeEnqueue = (data: Uint8Array): boolean => {
+      const waitForDemand = async (): Promise<void> => {
+        while (
+          !cancelled &&
+          !streamSignal.aborted &&
+          (controller.desiredSize ?? 1) <= 0
+        ) {
+          await new Promise<void>((resolve) => {
+            resumeDemand = resolve;
+          });
+        }
+        streamSignal.throwIfAborted();
+      };
+      const safeEnqueue = async (data: Uint8Array): Promise<boolean> => {
+        if (cancelled) return false;
+        await waitForDemand();
         if (cancelled) return false;
         try {
           controller.enqueue(data);
@@ -5027,6 +6844,8 @@ function buildStreamingResponse(
         }
       };
       const safeClose = (): void => {
+        clearRecallDeadline();
+        streamSignal.removeEventListener("abort", onStreamAbort);
         if (cancelled) return;
         try {
           controller.close();
@@ -5040,7 +6859,7 @@ function buildStreamingResponse(
         if (keepaliveTimer) clearTimeout(keepaliveTimer);
         keepaliveTimer = setTimeout(function tick() {
           if (cancelled) return;
-          safeEnqueue(pingEvent);
+          if ((controller.desiredSize ?? 1) > 0) void safeEnqueue(pingEvent);
           // Re-arm: keep pinging every KEEPALIVE_INACTIVITY_MS until an
           // upstream event arrives (which calls resetKeepalive) or the
           // stream closes (which calls clearKeepalive).
@@ -5051,422 +6870,569 @@ function buildStreamingResponse(
         if (keepaliveTimer) clearTimeout(keepaliveTimer);
         keepaliveTimer = null;
       };
-      try {
-        // Parse and forward upstream SSE events
-        if (!upstreamResponse.body) {
-          throw new Error("Upstream response has no body");
-        }
-        const reader = upstreamResponse.body.getReader();
-        activeReader = reader;
+      void (async () => {
+        try {
+          // Parse and forward upstream SSE events
+          if (!upstreamResponse.body) {
+            throw new Error("Upstream response has no body");
+          }
+          const reader = upstreamResponse.body.getReader();
+          activeReader = reader;
 
-        // When a warning needs to be prepended to the response, we emit a
-        // synthetic text content block after any leading thinking blocks,
-        // then offset all subsequent real content block indices by 1.
-        // The accumulator sees the original (un-offset) data so postResponse()
-        // gets the clean response — only the client stream has the warning.
-        // Thinking blocks are forwarded at their original indices to preserve
-        // the expected ordering (clients may inspect the first block's type).
-        let warningEmitted = false;
-        let inThinking = false;
-        let warningBlockIndex = 0; // incremented past thinking blocks
-        const warningOffset = warningText ? 1 : 0;
+          // When a warning needs to be prepended to the response, we emit a
+          // synthetic text content block after any leading thinking blocks,
+          // then offset all subsequent real content block indices by 1.
+          // The accumulator sees the original (un-offset) data so postResponse()
+          // gets the clean response — only the client stream has the warning.
+          // Thinking blocks are forwarded at their original indices to preserve
+          // the expected ordering (clients may inspect the first block's type).
+          let warningEmitted = false;
+          let inThinking = false;
+          let warningBlockIndex = 0; // incremented past thinking blocks
+          const warningOffset = warningText ? 1 : 0;
 
-        resetKeepalive();
-        const eventStream = parseSSEStream(reader);
-        for await (const { event, data } of eventStream) {
-          resetKeepalive(); // upstream is alive — reset inactivity timer
-          const forwarded = accumulator.processEvent(event, data);
-          if (forwarded) {
-            // --- Warning injection: skip thinking blocks, inject before first text/tool block ---
-            if (warningText && !warningEmitted) {
-              if (event === "message_start" || event === "ping") {
-                // Forward as-is, no action needed
-                if (!safeEnqueue(encoder.encode(forwarded))) break;
-                continue;
-              }
-
-              // Track thinking blocks — forward at original indices, no offset
-              if (event === "content_block_start") {
-                try {
-                  const parsed = JSON.parse(data);
-                  if (parsed.content_block?.type === "thinking") {
-                    inThinking = true;
-                    warningBlockIndex++;
-                    if (!safeEnqueue(encoder.encode(forwarded))) break;
-                    continue;
-                  }
-                } catch {
-                  /* fall through to inject */
+          resetKeepalive();
+          const validator = new AnthropicSSEValidator();
+          const eventStream = parseSSEStream(reader, {
+            signal: streamSignal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            requireEventTerminator: true,
+            fatalUtf8: true,
+            maxFrames: DEFAULT_MAX_SSE_FRAMES,
+            maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
+          });
+          for await (const { event, data } of eventStream) {
+            resetKeepalive(); // upstream is alive — reset inactivity timer
+            validator.process(event, data);
+            const forwarded = accumulator.processEvent(event, data);
+            if (forwarded) {
+              // --- Warning injection: skip thinking blocks, inject before first text/tool block ---
+              if (warningText && !warningEmitted) {
+                if (event === "message_start" || event === "ping") {
+                  // Forward as-is, no action needed
+                  if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                  continue;
                 }
-              }
-              if (inThinking) {
-                if (event === "content_block_stop") inThinking = false;
-                if (!safeEnqueue(encoder.encode(forwarded))) break;
-                continue;
-              }
 
-              // First non-thinking content block — inject warning before it
-              const blockStart = JSON.stringify({
-                type: "content_block_start",
-                index: warningBlockIndex,
-                content_block: { type: "text", text: "" },
-              });
-              const blockDelta = JSON.stringify({
-                type: "content_block_delta",
-                index: warningBlockIndex,
-                delta: { type: "text_delta", text: warningText },
-              });
-              const blockStop = JSON.stringify({
-                type: "content_block_stop",
-                index: warningBlockIndex,
-              });
-              const warningSSE =
-                `event: content_block_start\ndata: ${blockStart}\n\n` +
-                `event: content_block_delta\ndata: ${blockDelta}\n\n` +
-                `event: content_block_stop\ndata: ${blockStop}\n\n`;
-              if (!safeEnqueue(encoder.encode(warningSSE))) break;
-              warningEmitted = true;
-              // Fall through to offset and forward this event
-            }
-
-            // Offset content block indices to account for the injected warning block
-            let toSend = forwarded;
-            if (warningOffset > 0 && warningEmitted) {
-              toSend = forwarded.replace(
-                /^(data: )(.+)$/m,
-                (_, prefix, jsonStr) => {
+                // Track thinking blocks — forward at original indices, no offset
+                if (event === "content_block_start") {
                   try {
-                    const obj = JSON.parse(jsonStr);
-                    if (typeof obj.index === "number") {
-                      obj.index += warningOffset;
-                      return prefix + JSON.stringify(obj);
+                    const parsed = JSON.parse(data);
+                    if (parsed.content_block?.type === "thinking") {
+                      inThinking = true;
+                      warningBlockIndex++;
+                      if (!(await safeEnqueue(encoder.encode(forwarded))))
+                        break;
+                      continue;
                     }
                   } catch {
-                    /* not JSON — leave as-is */
+                    /* fall through to inject */
                   }
-                  return prefix + jsonStr;
+                }
+                if (inThinking) {
+                  if (event === "content_block_stop") inThinking = false;
+                  if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                  continue;
+                }
+
+                // First non-thinking content block — inject warning before it
+                const blockStart = JSON.stringify({
+                  type: "content_block_start",
+                  index: warningBlockIndex,
+                  content_block: { type: "text", text: "" },
+                });
+                const blockDelta = JSON.stringify({
+                  type: "content_block_delta",
+                  index: warningBlockIndex,
+                  delta: { type: "text_delta", text: warningText },
+                });
+                const blockStop = JSON.stringify({
+                  type: "content_block_stop",
+                  index: warningBlockIndex,
+                });
+                const warningSSE =
+                  `event: content_block_start\ndata: ${blockStart}\n\n` +
+                  `event: content_block_delta\ndata: ${blockDelta}\n\n` +
+                  `event: content_block_stop\ndata: ${blockStop}\n\n`;
+                if (!(await safeEnqueue(encoder.encode(warningSSE)))) break;
+                warningEmitted = true;
+                // Fall through to offset and forward this event
+              }
+
+              // Offset content block indices to account for the injected warning block
+              let toSend = forwarded;
+              if (warningOffset > 0 && warningEmitted) {
+                toSend = forwarded.replace(
+                  /^(data: )(.+)$/m,
+                  (_, prefix, jsonStr) => {
+                    try {
+                      const obj = JSON.parse(jsonStr);
+                      if (typeof obj.index === "number") {
+                        obj.index += warningOffset;
+                        return prefix + JSON.stringify(obj);
+                      }
+                    } catch {
+                      /* not JSON — leave as-is */
+                    }
+                    return prefix + jsonStr;
+                  },
+                );
+              }
+              if (!(await safeEnqueue(encoder.encode(toSend)))) break;
+            }
+            if (validator.isDone()) break;
+          }
+          cancelAndReleaseReader(reader);
+          if (activeReader === reader) activeReader = null;
+          if (!cancelled) validator.assertDone();
+
+          // --- Recall interception (streaming) ---
+          // Loop allows the model to call recall multiple times (e.g. drill
+          // down into t:<id> source citations). Uses RecallAwareAccumulator
+          // for each continuation stream to detect further recall calls.
+          if (recallAccum?.hasRecall() && recallContext) {
+            let currentAccum: RecallAwareAccumulator = recallAccum;
+            let currentResp = recallAccum.getResponse();
+            let currentBlockOffset = warningOffset; // accumulates across iterations
+            let currentModifiedReq = recallContext.modifiedReq;
+            let recallDepth = 0;
+
+            // Snapshot IDs already in LTM context (system[1] catalog + durable
+            // delta) so recall can hint "N of K results already in LTM" when the
+            // model would otherwise treat redundant hits as new info and emit
+            // a silent 3-token stop.
+            const alreadyInLtmIds = buildAlreadyInLtmIds(
+              recallContext.stableLtmText,
+              recallContext.pendingKnowledgeDelta,
+            );
+
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              const recallBlock = findRecallToolUse(currentResp);
+              if (!recallBlock) break;
+
+              recallDepth++;
+              const { result, input } = await promiseAgainstAbort(
+                () =>
+                  withTenant(
+                    recallContext.sessionState.storageTenantId ?? "",
+                    () =>
+                      executeRecall(
+                        recallBlock,
+                        recallContext.sessionState.projectPath,
+                        recallContext.sessionState.sessionID,
+                        getLLMClient(recallContext.config),
+                        alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
+                        streamSignal,
+                      ),
+                  ),
+                streamSignal,
+              );
+
+              const scope = input.scope ?? "all";
+
+              // Store recall result for marker round-trip expansion
+              const anchorId = crypto.randomUUID();
+              const storeKey = `anchor:${anchorId}`;
+              const position = currentResp.content.indexOf(recallBlock);
+              const markerPrefix = recallContext.clientSpeaksAnthropic
+                ? currentResp.content.filter(
+                    (block) =>
+                      block.type !== "tool_use" || block.id !== recallBlock.id,
+                  )
+                : currentResp.content.slice(0, position);
+              const anchorContextId = recallAnchorContext(
+                recallContext.clientMessages,
+                recallContext.clientMessages.length,
+                [...recallVisibleContent, ...markerPrefix],
+              );
+              const companionToolUses = currentResp.content.flatMap(
+                (block, index) => {
+                  if (
+                    block.type !== "tool_use" ||
+                    block.id === recallBlock.id
+                  ) {
+                    return [];
+                  }
+                  return [
+                    {
+                      id: block.id,
+                      name: block.name,
+                      input: block.input,
+                      side:
+                        recallContext.clientSpeaksAnthropic || index < position
+                          ? ("before" as const)
+                          : ("after" as const),
+                    },
+                  ];
                 },
               );
-            }
-            if (!safeEnqueue(encoder.encode(toSend))) break;
-          }
-        }
-
-        // --- Recall interception (streaming) ---
-        // Loop allows the model to call recall multiple times (e.g. drill
-        // down into t:<id> source citations). Uses RecallAwareAccumulator
-        // for each continuation stream to detect further recall calls.
-        if (recallAccum?.hasRecall() && recallContext) {
-          let currentAccum: RecallAwareAccumulator = recallAccum;
-          let currentResp = recallAccum.getResponse();
-          let currentBlockOffset = warningOffset; // accumulates across iterations
-          let currentModifiedReq = recallContext.modifiedReq;
-          let recallDepth = 0;
-
-          // Snapshot IDs already in LTM context (system[1] catalog + durable
-          // delta) so recall can hint "N of K results already in LTM" when the
-          // model would otherwise treat redundant hits as new info and emit
-          // a silent 3-token stop.
-          const alreadyInLtmIds = buildAlreadyInLtmIds(
-            recallContext.stableLtmText,
-            recallContext.pendingKnowledgeDelta,
-          );
-
-          // eslint-disable-next-line no-constant-condition
-          while (true) {
-            const recallBlock = findRecallToolUse(currentResp);
-            if (!recallBlock) break;
-
-            recallDepth++;
-            const { result, input } = await executeRecall(
-              recallBlock,
-              recallContext.sessionState.projectPath,
-              recallContext.sessionState.sessionID,
-              getLLMClient(recallContext.config),
-              alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
-            );
-
-            const scope = input.scope ?? "all";
-
-            // Store recall result for marker round-trip expansion
-            const anchorId = crypto.randomUUID();
-            const storeKey = `anchor:${anchorId}`;
-            const position = currentResp.content.indexOf(recallBlock);
-            const markerPrefix = recallContext.clientSpeaksAnthropic
-              ? currentResp.content.filter(
-                  (block) =>
-                    block.type !== "tool_use" || block.id !== recallBlock.id,
-                )
-              : currentResp.content.slice(0, position);
-            const anchorContextId = recallAnchorContext(
-              recallContext.clientMessages,
-              recallContext.clientMessages.length,
-              [...recallVisibleContent, ...markerPrefix],
-            );
-            const companionToolUses = currentResp.content.flatMap(
-              (block, index) => {
-                if (block.type !== "tool_use" || block.id === recallBlock.id) {
-                  return [];
-                }
-                return [
+              if (!recallContext.noStore) {
+                addRecallStoreEntry(
+                  recallContext.sessionState.recallStore,
+                  storeKey,
                   {
-                    id: block.id,
-                    name: block.name,
-                    input: block.input,
-                    side:
-                      recallContext.clientSpeaksAnthropic || index < position
-                        ? ("before" as const)
-                        : ("after" as const),
+                    toolUseId: recallBlock.id,
+                    anchorId,
+                    anchorContextId,
+                    input,
+                    position,
+                    result,
+                    ...(companionToolUses.length > 0
+                      ? { companionToolUses }
+                      : {}),
                   },
-                ];
-              },
-            );
-            addRecallStoreEntry(
-              recallContext.sessionState.recallStore,
-              storeKey,
-              {
-                toolUseId: recallBlock.id,
-                anchorId,
-                anchorContextId,
-                input,
-                position,
-                result,
-                ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
-              },
-            );
-            // Persist the store (v46) so the marker still expands byte-identically
-            // after a gateway restart instead of leaking raw marker text upstream.
-            saveSessionTracking(recallContext.sessionState.sessionID, {
-              recallStore: serializeRecallStore(
-                recallContext.sessionState.recallStore,
-              ),
-            });
+                );
+                // Persist the store (v46) so the marker still expands byte-identically
+                // after a gateway restart instead of leaking raw marker text upstream.
+                saveSessionTracking(recallContext.sessionState.sessionID, {
+                  recallStore: serializeRecallStore(
+                    recallContext.sessionState.recallStore,
+                  ),
+                });
+              }
 
-            // Emit marker — split into its own SSE message envelope for Anthropic-native
-            // clients (so the marker renders as a DISTINCT assistant message in
-            // the transcript, not inline with the model's preamble); for
-            // non-Anthropic clients (OpenAI Chat Completions / Responses /
-            // Gemini), emit it as a SYNTHETIC text content block in the Anthropic SSE.
-            // The OpenAI/Responses/Gemini adapters (stream/openai.ts, stream/openai-responses.ts,
-            // stream/gemini.ts) each translate text content blocks into their native
-            // streaming format automatically — so the marker reaches the OpenAI client
-            // as a delta.content chunk, the Responses client as an output_text delta,
-            // and the Gemini client as a text part. This preserves the recall context
-            // across turns (the client's persisted transcript has SOMETHING for
-            // expandRecallMarkers to find next turn, fixing the silent-recall-loss bug
-            // that would result from dropping the marker entirely for these clients).
-            const markerText = buildAnchoredRecallMarker(
-              input.query,
-              scope,
-              input.id,
-              anchorId,
-            );
-            if (recallContext.clientSpeaksAnthropic) {
-              recallVisibleContent.push(...markerPrefix, {
-                type: "text",
-                text: markerText,
-              });
-            } else {
-              recallVisibleContent.push(
-                ...currentResp.content.map((block) =>
-                  block.type === "tool_use" && block.id === recallBlock.id
-                    ? { type: "text" as const, text: markerText }
-                    : block,
-                ),
+              // Emit marker — split into its own SSE message envelope for Anthropic-native
+              // clients (so the marker renders as a DISTINCT assistant message in
+              // the transcript, not inline with the model's preamble); for
+              // non-Anthropic clients (OpenAI Chat Completions / Responses /
+              // Gemini), emit it as a SYNTHETIC text content block in the Anthropic SSE.
+              // The OpenAI/Responses/Gemini adapters (stream/openai.ts, stream/openai-responses.ts,
+              // stream/gemini.ts) each translate text content blocks into their native
+              // streaming format automatically — so the marker reaches the OpenAI client
+              // as a delta.content chunk, the Responses client as an output_text delta,
+              // and the Gemini client as a text part. This preserves the recall context
+              // across turns (the client's persisted transcript has SOMETHING for
+              // expandRecallMarkers to find next turn, fixing the silent-recall-loss bug
+              // that would result from dropping the marker entirely for these clients).
+              const markerText = buildAnchoredRecallMarker(
+                input.query,
+                scope,
+                input.id,
+                anchorId,
               );
-            }
-            let syntheticMarker: string;
-            if (recallContext.clientSpeaksAnthropic) {
-              const syntheticMessageId = `lore_marker_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-              syntheticMarker = buildSSEMarkerMessage(
-                syntheticMessageId,
-                currentResp.model,
-                markerText,
-              );
-            } else {
-              // Inline synthetic text block at the index where the recall
-              // tool_use was suppressed. Existing translators forward text
-              // blocks to the client's native streaming format — see
-              // stream/openai.ts:225-239 (text_delta → delta.content chunk),
-              // stream/openai-responses.ts (text → output_text delta), and
-              // stream/gemini.ts (buffered → text part in aggregated frame).
-              const markerIdx =
-                currentAccum.clientBlockCount() + currentBlockOffset;
-              syntheticMarker = [
-                formatSSEEvent(
-                  "content_block_start",
-                  JSON.stringify({
-                    type: "content_block_start",
-                    index: markerIdx,
-                    content_block: { type: "text", text: "" },
-                  }),
-                ),
-                formatSSEEvent(
-                  "content_block_delta",
-                  JSON.stringify({
-                    type: "content_block_delta",
-                    index: markerIdx,
-                    delta: { type: "text_delta", text: markerText },
-                  }),
-                ),
-                formatSSEEvent(
-                  "content_block_stop",
-                  JSON.stringify({
-                    type: "content_block_stop",
-                    index: markerIdx,
-                  }),
-                ),
-              ].join("");
-            }
-            // For Anthropic-native clients, the marker is a SEPARATE SSE
-            // message envelope (own message_start/message_stop). The original
-            // envelope (preamble) must close BEFORE the marker opens —
-            // otherwise the wire has two message_start events with no closing
-            // message_stop between them, which is malformed Anthropic SSE.
-            // Forward the original's held-back message_delta + message_stop
-            // FIRST, then emit the marker. Use `takeHeldBackEvents()` so the
-            // mixed-tools terminal-close branch can't double-emit the same
-            // events.
-            // For non-Anthropic clients, the marker is inline so the original
-            // envelope stays open — held-back events are forwarded LATER
-            // (after the follow-up completes, in the recall-only success
-            // path at pipeline.ts:~4960).
-            if (recallContext.clientSpeaksAnthropic) {
-              const originalHeldBack = currentAccum.takeHeldBackEvents();
-              if (originalHeldBack) {
-                if (!safeEnqueue(encoder.encode(originalHeldBack))) {
-                  clearKeepalive();
-                  return;
+              if (recallContext.clientSpeaksAnthropic) {
+                recallVisibleContent.push(...markerPrefix, {
+                  type: "text",
+                  text: markerText,
+                });
+              } else {
+                recallVisibleContent.push(
+                  ...currentResp.content.map((block) =>
+                    block.type === "tool_use" && block.id === recallBlock.id
+                      ? { type: "text" as const, text: markerText }
+                      : block,
+                  ),
+                );
+              }
+              let syntheticMarker: string;
+              if (recallContext.clientSpeaksAnthropic) {
+                const syntheticMessageId = `lore_marker_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+                syntheticMarker = buildSSEMarkerMessage(
+                  syntheticMessageId,
+                  currentResp.model,
+                  markerText,
+                );
+              } else {
+                // Inline synthetic text block at the index where the recall
+                // tool_use was suppressed. Existing translators forward text
+                // blocks to the client's native streaming format — see
+                // stream/openai.ts:225-239 (text_delta → delta.content chunk),
+                // stream/openai-responses.ts (text → output_text delta), and
+                // stream/gemini.ts (buffered → text part in aggregated frame).
+                const markerIdx =
+                  currentAccum.clientBlockCount() + currentBlockOffset;
+                syntheticMarker = [
+                  formatSSEEvent(
+                    "content_block_start",
+                    JSON.stringify({
+                      type: "content_block_start",
+                      index: markerIdx,
+                      content_block: { type: "text", text: "" },
+                    }),
+                  ),
+                  formatSSEEvent(
+                    "content_block_delta",
+                    JSON.stringify({
+                      type: "content_block_delta",
+                      index: markerIdx,
+                      delta: { type: "text_delta", text: markerText },
+                    }),
+                  ),
+                  formatSSEEvent(
+                    "content_block_stop",
+                    JSON.stringify({
+                      type: "content_block_stop",
+                      index: markerIdx,
+                    }),
+                  ),
+                ].join("");
+              }
+              // For Anthropic-native clients, the marker is a SEPARATE SSE
+              // message envelope (own message_start/message_stop). The original
+              // envelope (preamble) must close BEFORE the marker opens —
+              // otherwise the wire has two message_start events with no closing
+              // message_stop between them, which is malformed Anthropic SSE.
+              // Forward the original's held-back message_delta + message_stop
+              // FIRST, then emit the marker. Use `takeHeldBackEvents()` so the
+              // mixed-tools terminal-close branch can't double-emit the same
+              // events.
+              // For non-Anthropic clients, the marker is inline so the original
+              // envelope stays open — held-back events are forwarded LATER
+              // (after the follow-up completes, in the recall-only success
+              // path at pipeline.ts:~4960).
+              if (recallContext.clientSpeaksAnthropic) {
+                const originalHeldBack = currentAccum.takeHeldBackEvents();
+                if (originalHeldBack) {
+                  if (!(await safeEnqueue(encoder.encode(originalHeldBack)))) {
+                    clearKeepalive();
+                    return;
+                  }
                 }
               }
-            }
 
-            if (!safeEnqueue(encoder.encode(syntheticMarker))) {
-              clearKeepalive();
-              return;
-            }
+              if (!(await safeEnqueue(encoder.encode(syntheticMarker)))) {
+                clearKeepalive();
+                return;
+              }
 
-            if (currentAccum.hasOtherTools()) {
-              // Mixed tools — forward held-back events, close stream
+              if (currentAccum.hasOtherTools()) {
+                // Mixed tools — forward held-back events, close stream
+                log.info(
+                  `recall (stream, mixed, depth=${recallDepth}): stored result for session ` +
+                    `${recallContext.sessionState.sessionID.slice(0, 16)}`,
+                );
+
+                // For non-Anthropic clients, the marker is inline (envelope
+                // stays open), so the held-back events close the envelope at
+                // stream end. For Anthropic clients, the held-back was already
+                // consumed (via takeHeldBackEvents) before the marker emission
+                // above — so takeHeldBackEvents() returns "" here, no-op.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                onComplete(markerResp);
+                safeClose();
+                return;
+              }
+
+              // Recall-only — send follow-up, pipe continuation
               log.info(
-                `recall (stream, mixed, depth=${recallDepth}): stored result for session ` +
+                `recall (stream, depth=${recallDepth}): executing follow-up for session ` +
                   `${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
 
-              // For non-Anthropic clients, the marker is inline (envelope
-              // stays open), so the held-back events close the envelope at
-              // stream end. For Anthropic clients, the held-back was already
-              // consumed (via takeHeldBackEvents) before the marker emission
-              // above — so takeHeldBackEvents() returns "" here, no-op.
-              const heldBack = currentAccum.takeHeldBackEvents();
-              if (heldBack) {
-                safeEnqueue(encoder.encode(heldBack));
-              }
+              // Build (stream:true) + forward + assert-SSE + get reader in one
+              // coupled call so the follow-up's stream flag can never diverge
+              // from how the continuation is consumed (parseSSEStream below).
+              // Disable conversation caching on the follow-up: the appended
+              // recall result makes the prefix diverge from the next real turn,
+              // so the cache write would be wasted money.
+              const streamingRecallCtx: RecallFollowUpCtx = {
+                forward: (r, signal) =>
+                  forwardToUpstream(
+                    r,
+                    recallContext.config,
+                    undefined,
+                    {
+                      ...recallContext.cacheOptions,
+                      cacheConversation: false,
+                    },
+                    signal,
+                    recallContext.upstreamRoute,
+                  ),
+                // JSON parsing is unused on the streaming path (assertSSEResponse
+                // guarantees an SSE body); provide a guard that throws if reached.
+                parseJSON: () => {
+                  throw new Error(
+                    "parseJSON must not be called on the streaming recall path",
+                  );
+                },
+              };
 
-              const markerResp = replaceRecallWithMarker(
-                currentResp,
-                new Map([[recallBlock.id, markerText]]),
-              );
-              clearKeepalive();
-              onComplete(markerResp);
-              safeClose();
-              return;
-            }
-
-            // Recall-only — send follow-up, pipe continuation
-            log.info(
-              `recall (stream, depth=${recallDepth}): executing follow-up for session ` +
-                `${recallContext.sessionState.sessionID.slice(0, 16)}`,
-            );
-
-            // Build (stream:true) + forward + assert-SSE + get reader in one
-            // coupled call so the follow-up's stream flag can never diverge
-            // from how the continuation is consumed (parseSSEStream below).
-            // Disable conversation caching on the follow-up: the appended
-            // recall result makes the prefix diverge from the next real turn,
-            // so the cache write would be wasted money.
-            const streamingRecallCtx: RecallFollowUpCtx = {
-              forward: (r, signal) =>
-                forwardToUpstream(
-                  r,
-                  recallContext.config,
-                  undefined,
-                  {
-                    ...recallContext.cacheOptions,
-                    cacheConversation: false,
-                  },
-                  signal,
-                ),
-              // JSON parsing is unused on the streaming path (assertSSEResponse
-              // guarantees an SSE body); provide a guard that throws if reached.
-              parseJSON: () => {
-                throw new Error(
-                  "parseJSON must not be called on the streaming recall path",
+              let streamingFollowUp: Awaited<
+                ReturnType<typeof runRecallFollowUpStreaming>
+              >;
+              try {
+                streamingFollowUp = await runRecallFollowUpStreaming(
+                  streamingRecallCtx,
+                  currentModifiedReq,
+                  currentResp,
+                  result,
+                  recallBlock,
+                  streamSignal,
                 );
-              },
-            };
-
-            let streamingFollowUp: Awaited<
-              ReturnType<typeof runRecallFollowUpStreaming>
-            >;
-            try {
-              streamingFollowUp = await runRecallFollowUpStreaming(
-                streamingRecallCtx,
-                currentModifiedReq,
-                currentResp,
-                result,
-                recallBlock,
-              );
-            } catch (fetchErr) {
-              log.error(
-                `recall follow-up fetch error (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}:`,
-                fetchErr,
-              );
-              // takeHeldBackEvents() — for Anthropic this is a no-op
-              // (already consumed before the marker envelope emission
-              // above); for non-Anthropic the held-back closes the
-              // (still-open) envelope here.
-              const heldBack = currentAccum.takeHeldBackEvents();
-              if (heldBack) {
-                safeEnqueue(encoder.encode(heldBack));
+              } catch {
+                log.error(
+                  `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
+                );
+                // takeHeldBackEvents() — for Anthropic this is a no-op
+                // (already consumed before the marker envelope emission
+                // above); for non-Anthropic the held-back closes the
+                // (still-open) envelope here.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                onComplete(markerResp);
+                safeClose();
+                return;
               }
-              const markerResp = replaceRecallWithMarker(
-                currentResp,
-                new Map([[recallBlock.id, markerText]]),
-              );
-              clearKeepalive();
-              onComplete(markerResp);
-              safeClose();
-              return;
-            }
 
-            if (!streamingFollowUp.ok) {
-              log.error(
-                `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"} ${streamingFollowUp.detail}`,
-                new Error(
-                  `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
-                ),
+              if (!streamingFollowUp.ok) {
+                log.error(
+                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
+                  new Error(
+                    `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
+                  ),
+                );
+                captureToolPairing400({
+                  status: streamingFollowUp.status ?? 0,
+                  errorBody: streamingFollowUp.detail,
+                  messages: currentModifiedReq.messages,
+                  // Layer is not in scope on the streaming recall continuation;
+                  // -1 signals "unknown" while still tagging the error class.
+                  layer: -1,
+                  model: currentModifiedReq.model,
+                  sessionID: recallContext.sessionState.sessionID,
+                });
+                // takeHeldBackEvents() — for Anthropic this is a no-op
+                // (already consumed before the marker envelope emission
+                // above); for non-Anthropic the held-back closes the
+                // (still-open) envelope here.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                onComplete(markerResp);
+                safeClose();
+                return;
+              }
+
+              const followUp = streamingFollowUp.followUp;
+              log.info(
+                `recall follow-up response (depth=${recallDepth}): session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
-              captureToolPairing400({
-                status: streamingFollowUp.status ?? 0,
-                errorBody: streamingFollowUp.detail,
-                messages: currentModifiedReq.messages,
-                // Layer is not in scope on the streaming recall continuation;
-                // -1 signals "unknown" while still tagging the error class.
-                layer: -1,
-                model: currentModifiedReq.model,
-                sessionID: recallContext.sessionState.sessionID,
+
+              // Pipe the continuation stream through a recall-aware accumulator.
+              // For Anthropic-native clients:
+              //  - The marker is its own SSE message envelope (separate
+              //    message_start/message_stop), so the continuation's content_block_start
+              //    indices start at 0 in its own message — blockOffset=0.
+              //  - The continuation must open with its OWN message_start (don't suppress).
+              //    The original envelope's message_start/message_stop were already closed
+              //    by the explicit held-back forwarding just before the marker envelope.
+              //
+              // For non-Anthropic clients:
+              //  - The marker is an inline synthetic text block, so the original envelope
+              //    stays open throughout the marker and the continuation. The continuation
+              //    extends the original envelope — blockOffset includes the marker block,
+              //    and the continuation's message_start is suppressed (single-message
+              //    stream per OpenAI Chat Completions / Responses / Gemini).
+              const contBlockOffset = recallContext.clientSpeaksAnthropic
+                ? 0
+                : currentAccum.clientBlockCount() + currentBlockOffset + 1;
+              const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+                scaleClientUsage: true,
+                maxReportedUsage,
+                blockOffset: contBlockOffset,
+                suppressMessageStart: !recallContext.clientSpeaksAnthropic,
               });
-              // takeHeldBackEvents() — for Anthropic this is a no-op
-              // (already consumed before the marker envelope emission
-              // above); for non-Anthropic the held-back closes the
-              // (still-open) envelope here.
-              const heldBack = currentAccum.takeHeldBackEvents();
-              if (heldBack) {
-                safeEnqueue(encoder.encode(heldBack));
+              const contReader = streamingFollowUp.reader;
+              activeReader = contReader;
+
+              const continuationValidator = new AnthropicSSEValidator();
+              try {
+                for await (const {
+                  event: contEvent,
+                  data: contData,
+                } of parseSSEStream(contReader, {
+                  signal: streamSignal,
+                  inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                  requireEventTerminator: true,
+                  fatalUtf8: true,
+                  maxFrames: DEFAULT_MAX_SSE_FRAMES,
+                  maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
+                })) {
+                  resetKeepalive(); // continuation stream alive — reset timer
+                  continuationValidator.process(contEvent, contData);
+                  const forwarded = contAccum.processEvent(contEvent, contData);
+                  if (forwarded) {
+                    // Forward non-recall, non-held-back events to client.
+                    // message_delta usage scaling is handled by a separate pass
+                    // below only for the final continuation's terminal events.
+                    if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                  }
+                  if (continuationValidator.isDone()) break;
+                }
+              } finally {
+                cancelAndReleaseReader(contReader, streamSignal.reason);
+                if (activeReader === contReader) activeReader = null;
               }
+              if (!cancelled) continuationValidator.assertDone();
+
+              log.info(
+                `recall follow-up stream complete (depth=${recallDepth}): ` +
+                  `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
+              );
+
+              // Check if continuation contained recall — if so, loop
+              if (contAccum.hasRecall() && recallDepth < MAX_RECALL_DEPTH) {
+                currentAccum = contAccum;
+                currentResp = contAccum.getResponse();
+                currentBlockOffset = contBlockOffset;
+                currentModifiedReq = followUp;
+                continue; // Loop: execute the new recall, emit marker, follow up
+              }
+
+              // No more recall (or depth exhausted) — forward terminal events, close
+              if (contAccum.hasRecall()) {
+                log.warn(
+                  `recall depth exhausted (${MAX_RECALL_DEPTH}) in streaming path`,
+                );
+              }
+
+              // For non-Anthropic clients: the original (preamble) envelope is
+              // kept open throughout the inline marker and the follow-up
+              // continuation. The continuation's terminal message_delta +
+              // message_stop (held back in contAccum below) close the original
+              // envelope inline as the stream ends. Forwarding the preamble's
+              // held-back here would duplicate the close event and break the
+              // OpenAI wire (extra [DONE] sentinel + contradictory
+              // finish_reason). For Anthropic clients, the preamble's
+              // held-back was already consumed before the marker envelope
+              // emission above — contAccum's held-back is the relevant close.
+              // Use takeHeldBackEvents() (not peek) so the held-back is
+              // atomically consumed: defense-in-depth against any future code
+              // path that might read contAccum's heldBack again (e.g. a
+              // refactor that re-enters the drill-down loop or replays the
+              // accumulator). In the current control flow the heldBack is read
+              // exactly once — this just makes the consume semantics explicit.
+              const heldBack = contAccum.takeHeldBackEvents();
+              if (heldBack) {
+                // Scale usage in held-back message_delta for anti-compaction
+                await safeEnqueue(encoder.encode(heldBack));
+              }
+
               const markerResp = replaceRecallWithMarker(
-                currentResp,
+                contAccum.hasRecall() ? contAccum.getResponse() : currentResp,
                 new Map([[recallBlock.id, markerText]]),
               );
               clearKeepalive();
@@ -5474,144 +7440,60 @@ function buildStreamingResponse(
               safeClose();
               return;
             }
+          }
 
-            const followUp = streamingFollowUp.followUp;
-            log.info(
-              `recall follow-up response (depth=${recallDepth}): session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
-            );
-
-            // Pipe the continuation stream through a recall-aware accumulator.
-            // For Anthropic-native clients:
-            //  - The marker is its own SSE message envelope (separate
-            //    message_start/message_stop), so the continuation's content_block_start
-            //    indices start at 0 in its own message — blockOffset=0.
-            //  - The continuation must open with its OWN message_start (don't suppress).
-            //    The original envelope's message_start/message_stop were already closed
-            //    by the explicit held-back forwarding just before the marker envelope.
-            //
-            // For non-Anthropic clients:
-            //  - The marker is an inline synthetic text block, so the original envelope
-            //    stays open throughout the marker and the continuation. The continuation
-            //    extends the original envelope — blockOffset includes the marker block,
-            //    and the continuation's message_start is suppressed (single-message
-            //    stream per OpenAI Chat Completions / Responses / Gemini).
-            const contBlockOffset = recallContext.clientSpeaksAnthropic
-              ? 0
-              : currentAccum.clientBlockCount() + currentBlockOffset + 1;
-            const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
-              scaleClientUsage: true,
-              maxReportedUsage,
-              blockOffset: contBlockOffset,
-              suppressMessageStart: !recallContext.clientSpeaksAnthropic,
+          // No recall — normal path
+          clearKeepalive();
+          const response = accumulator.getResponse();
+          onComplete(response);
+          safeClose();
+        } catch (err) {
+          streamSignal.removeEventListener("abort", onStreamAbort);
+          clearKeepalive();
+          clearRecallDeadline();
+          if (activeReader) {
+            cancelAndReleaseReader(activeReader, err);
+            activeReader = null;
+          }
+          // Client disconnect / abort is benign — downgrade from error to info
+          // to avoid Sentry noise from normal connection lifecycle events.
+          const isAbort =
+            err instanceof DOMException && err.name === "AbortError";
+          if (isAbort) {
+            log.info("streaming pipeline aborted (client disconnect)");
+            // Only surfaces to Sentry if the host was under pressure at abort time.
+            captureClientAbortUnderPressure({
+              startMs: streamStartMs,
+              route: "stream",
+              sessionID,
             });
-            const contReader = streamingFollowUp.reader;
-            activeReader = contReader;
-
-            for await (const {
-              event: contEvent,
-              data: contData,
-            } of parseSSEStream(contReader)) {
-              resetKeepalive(); // continuation stream alive — reset timer
-              const forwarded = contAccum.processEvent(contEvent, contData);
-              if (forwarded) {
-                // Forward non-recall, non-held-back events to client.
-                // message_delta usage scaling is handled by a separate pass
-                // below only for the final continuation's terminal events.
-                if (!safeEnqueue(encoder.encode(forwarded))) break;
-              }
-            }
-
-            log.info(
-              `recall follow-up stream complete (depth=${recallDepth}): ` +
-                `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
-            );
-
-            // Check if continuation contained recall — if so, loop
-            if (contAccum.hasRecall() && recallDepth < MAX_RECALL_DEPTH) {
-              currentAccum = contAccum;
-              currentResp = contAccum.getResponse();
-              currentBlockOffset = contBlockOffset;
-              currentModifiedReq = followUp;
-              continue; // Loop: execute the new recall, emit marker, follow up
-            }
-
-            // No more recall (or depth exhausted) — forward terminal events, close
-            if (contAccum.hasRecall()) {
-              log.warn(
-                `recall depth exhausted (${MAX_RECALL_DEPTH}) in streaming path`,
-              );
-            }
-
-            // For non-Anthropic clients: the original (preamble) envelope is
-            // kept open throughout the inline marker and the follow-up
-            // continuation. The continuation's terminal message_delta +
-            // message_stop (held back in contAccum below) close the original
-            // envelope inline as the stream ends. Forwarding the preamble's
-            // held-back here would duplicate the close event and break the
-            // OpenAI wire (extra [DONE] sentinel + contradictory
-            // finish_reason). For Anthropic clients, the preamble's
-            // held-back was already consumed before the marker envelope
-            // emission above — contAccum's held-back is the relevant close.
-            // Use takeHeldBackEvents() (not peek) so the held-back is
-            // atomically consumed: defense-in-depth against any future code
-            // path that might read contAccum's heldBack again (e.g. a
-            // refactor that re-enters the drill-down loop or replays the
-            // accumulator). In the current control flow the heldBack is read
-            // exactly once — this just makes the consume semantics explicit.
-            const heldBack = contAccum.takeHeldBackEvents();
-            if (heldBack) {
-              // Scale usage in held-back message_delta for anti-compaction
-              safeEnqueue(encoder.encode(heldBack));
-            }
-
-            const markerResp = replaceRecallWithMarker(
-              contAccum.hasRecall() ? contAccum.getResponse() : currentResp,
-              new Map([[recallBlock.id, markerText]]),
-            );
-            clearKeepalive();
-            onComplete(markerResp);
-            safeClose();
-            return;
+          } else {
+            log.error("streaming pipeline error:", err);
+          }
+          try {
+            controller.error(err);
+          } catch {
+            // Controller already closed or cancelled — error already logged above
           }
         }
-
-        // No recall — normal path
-        clearKeepalive();
-        const response = accumulator.getResponse();
-        onComplete(response);
-        safeClose();
-      } catch (err) {
-        clearKeepalive();
-        // Client disconnect / abort is benign — downgrade from error to info
-        // to avoid Sentry noise from normal connection lifecycle events.
-        const isAbort =
-          err instanceof DOMException && err.name === "AbortError";
-        if (isAbort) {
-          log.info("streaming pipeline aborted (client disconnect)");
-          // Only surfaces to Sentry if the host was under pressure at abort time.
-          captureClientAbortUnderPressure({
-            startMs: streamStartMs,
-            route: "stream",
-            sessionID,
-          });
-        } else {
-          log.error("streaming pipeline error:", err);
-        }
-        try {
-          controller.error(err);
-        } catch {
-          // Controller already closed or cancelled — error already logged above
-        }
-      }
+      })();
+    },
+    pull() {
+      resumeDemand?.();
+      resumeDemand = undefined;
     },
     cancel() {
+      resumeDemand?.();
+      resumeDemand = undefined;
       if (keepaliveTimer) clearTimeout(keepaliveTimer);
       keepaliveTimer = null;
       cancelled = true;
-      try {
-        void activeReader?.cancel();
-      } catch {
-        /* ignore */
+      streamSignal.removeEventListener("abort", onStreamAbort);
+      clearRecallDeadline();
+      recallAbort.abort(new DOMException("client disconnected", "AbortError"));
+      if (activeReader) {
+        cancelAndReleaseReader(activeReader);
+        activeReader = null;
       }
     },
   });
@@ -5657,7 +7539,11 @@ function buildStreamingResponse(
 export function streamResponsesRecallAware(
   upstreamResponse: Response,
   opts: {
-    onComplete: (response: GatewayResponse) => void;
+    onComplete: (response: GatewayResponse, successful: boolean) => void;
+    onTransactionReady?: (transaction: {
+      commit: () => void;
+      rollback: () => void;
+    }) => void;
     sessionID?: string;
     maxRecallDepth?: number;
     maxDeferredBytes?: number;
@@ -5665,6 +7551,9 @@ export function streamResponsesRecallAware(
     maxRetainedStateBytes?: number;
     maxStreamBytes?: number;
     maxSSEFrames?: number;
+    validation?: "public" | "codex";
+    /** Caller abort combined with the stream's client-disconnect controller. */
+    signal?: AbortSignal;
     /**
      * Called when a `recall` function_call is fully parsed. Runs the recall
      * (LTM search + optional LLM result) and returns the pieces needed to
@@ -5705,6 +7594,8 @@ export function streamResponsesRecallAware(
 ): Response {
   const state = makeResponsesAccState();
   const syntheticIdentities = new Set<string>();
+  const referenceIdentities = new Set<string>();
+  const outputIdentities = new Set<string>();
   const responseLifecycles = new WeakMap<
     ResponsesAccState,
     { created: boolean; terminal: boolean }
@@ -5719,21 +7610,24 @@ export function streamResponsesRecallAware(
     }
     return lifecycle;
   };
+  type TextPartLifecycle = {
+    kind: string;
+    authoritativeValue: string;
+    authoritativeValueSeen: boolean;
+    deltaSeen: boolean;
+    valueDone: boolean;
+    finalValue?: string;
+    partAdded: boolean;
+    partDone: boolean;
+    partFinalValue?: string;
+  };
   type OutputLifecycle = {
+    argumentDeltaSeen: boolean;
+    argumentDeltas: string;
     argumentsDone: boolean;
     outputDone: boolean;
-    content: Map<
-      number,
-      {
-        kind?: string;
-        valueSeen: boolean;
-        valueDone: boolean;
-        finalValue?: string;
-        partFinalValue?: string;
-        partAdded: boolean;
-        partDone: boolean;
-      }
-    >;
+    reasoning: Map<number, TextPartLifecycle>;
+    content: Map<number, TextPartLifecycle>;
   };
   const outputLifecycles = new WeakMap<
     ResponsesAccState,
@@ -5749,14 +7643,101 @@ export function streamResponsesRecallAware(
     }
     return lifecycles;
   };
+  const codexNormalizationStates = new WeakMap<
+    ResponsesAccState,
+    ResponsesAccState
+  >();
+  const normalizeCodexEvent = (
+    acc: ResponsesAccState,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): ResponsesAccState | undefined => {
+    if (opts.validation !== "codex") return undefined;
+    let normalizationState = codexNormalizationStates.get(acc);
+    if (!normalizationState) {
+      normalizationState = makeResponsesAccState();
+      codexNormalizationStates.set(acc, normalizationState);
+    }
+    normalizeCodexResponsesEvent(
+      normalizationState,
+      event,
+      parsed,
+      Math.min(maxSSEFrames, DEFAULT_MAX_SSE_FRAMES),
+    );
+    return normalizationState;
+  };
+  const emptyTextPartLifecycle = (kind: string): TextPartLifecycle => ({
+    kind,
+    authoritativeValue: "",
+    authoritativeValueSeen: false,
+    deltaSeen: false,
+    valueDone: false,
+    partAdded: false,
+    partDone: false,
+  });
+  const partValue = (
+    kind: string,
+    part: Record<string, unknown>,
+    description: string,
+  ): string => {
+    const value = kind === "refusal" ? part.refusal : part.text;
+    if (typeof value !== "string") {
+      throw new Error(`invalid Responses ${description} value`);
+    }
+    return value;
+  };
+  const finalizedMessageContent = (
+    lifecycle: OutputLifecycle,
+  ): Array<Record<string, unknown>> =>
+    Array.from(lifecycle.content)
+      .sort(([left], [right]) => left - right)
+      .filter(([, part]) => part.valueDone || part.partDone)
+      .map(([, part]) =>
+        part.kind === "refusal"
+          ? { type: "refusal", refusal: part.authoritativeValue }
+          : { type: "output_text", text: part.authoritativeValue },
+      );
+  const seedTextParts = (
+    parts: unknown,
+    target: Map<number, TextPartLifecycle>,
+    allowedKinds: ReadonlySet<string>,
+    description: string,
+  ): void => {
+    if (parts === undefined) return;
+    if (!Array.isArray(parts)) {
+      throw new Error(`Responses ${description} must be an array`);
+    }
+    for (const [index, rawPart] of parts.entries()) {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const part = rawPart as Record<string, unknown>;
+      if (typeof part.type !== "string" || !allowedKinds.has(part.type)) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const lifecycle = emptyTextPartLifecycle(part.type);
+      lifecycle.authoritativeValue = partValue(
+        part.type,
+        part,
+        `${description} initial`,
+      );
+      lifecycle.authoritativeValueSeen = true;
+      target.set(index, lifecycle);
+    }
+  };
   let transactionBaseline: ResponsesAccState | undefined;
+  let transactionProviderUsage: GatewayUsage = { ...ZERO_USAGE };
   const transactionRollbacks: Array<() => void> = [];
+  let deferredTransaction:
+    | { commit: () => void; rollback: () => void }
+    | undefined;
   const restoreTransactionBaseline = (): void => {
     if (!transactionBaseline) return;
     state.id = transactionBaseline.id;
     state.model = transactionBaseline.model;
     state.stopReason = transactionBaseline.stopReason;
     state.terminalEvent = transactionBaseline.terminalEvent;
+    state.terminalResponse = transactionBaseline.terminalResponse;
     state.usage = { ...transactionBaseline.usage };
     state.items = new Map(transactionBaseline.items);
     state.rawItems = new Map(transactionBaseline.rawItems);
@@ -5784,7 +7765,7 @@ export function streamResponsesRecallAware(
   let hiddenRecallBytes = 0;
   const maxSSEFrames = opts.maxSSEFrames ?? 100_000;
   const frameCounter = { count: 0 };
-  const sseInactivityMs = 120_000;
+  const sseInactivityMs = FOREGROUND_SSE_INACTIVITY_MS;
 
   const parseRecallArguments = (
     value: unknown,
@@ -5851,25 +7832,119 @@ export function streamResponsesRecallAware(
     }
     return { query, ...(scope ? { scope } : {}), ...(id ? { id } : {}) };
   };
+  type PendingResponsesRecall = {
+    outputIndex: number;
+    contentPosition: number;
+    query: string;
+    scope?: string;
+    id?: string;
+    toolUseId: string;
+  };
+  const collectCompletedRecall = (
+    acc: ResponsesAccState,
+    outputIndex: number,
+    parsedInputs: Map<number, { query: string; scope?: string; id?: string }>,
+    pending: PendingResponsesRecall[],
+  ): boolean => {
+    const rawItem = acc.rawItems.get(outputIndex);
+    if (
+      rawItem?.type !== "function_call" ||
+      rawItem.name !== RECALL_TOOL_NAME
+    ) {
+      return false;
+    }
+    if (pending.some((recall) => recall.outputIndex === outputIndex)) {
+      throw new Error(`duplicate recall completion for index ${outputIndex}`);
+    }
+    const input =
+      parsedInputs.get(outputIndex) ?? parseRecallArguments(rawItem.arguments);
+    const recallItem = acc.items.get(outputIndex);
+    const toolUseId =
+      recallItem?.type === "tool_use" ? recallItem.callId || recallItem.id : "";
+    if (!toolUseId) {
+      throw new Error(
+        `recall output missing identity for index ${outputIndex}`,
+      );
+    }
+    const contentPosition = finalizeResponsesAcc(acc).content.findIndex(
+      (block) => block.type === "tool_use" && block.id === toolUseId,
+    );
+    pending.push({
+      outputIndex,
+      contentPosition,
+      query: input.query,
+      scope: input.scope,
+      id: input.id,
+      toolUseId,
+    });
+    parsedInputs.delete(outputIndex);
+    return true;
+  };
 
+  const addUsageTokens = (left: number, right: number): number => {
+    const result = left + right;
+    if (
+      !Number.isSafeInteger(left) ||
+      left < 0 ||
+      !Number.isSafeInteger(right) ||
+      right < 0 ||
+      !Number.isSafeInteger(result)
+    ) {
+      throw new Error("Responses usage token overflow");
+    }
+    return result;
+  };
   const mergeUsage = (target: GatewayUsage, source: GatewayUsage): void => {
-    target.inputTokens += source.inputTokens;
-    target.outputTokens += source.outputTokens;
+    target.inputTokens = addUsageTokens(target.inputTokens, source.inputTokens);
+    target.outputTokens = addUsageTokens(
+      target.outputTokens,
+      source.outputTokens,
+    );
     if (source.cacheReadInputTokens != null) {
-      target.cacheReadInputTokens =
-        (target.cacheReadInputTokens ?? 0) + source.cacheReadInputTokens;
+      target.cacheReadInputTokens = addUsageTokens(
+        target.cacheReadInputTokens ?? 0,
+        source.cacheReadInputTokens,
+      );
     }
     if (source.cacheCreationInputTokens != null) {
-      target.cacheCreationInputTokens =
-        (target.cacheCreationInputTokens ?? 0) +
-        source.cacheCreationInputTokens;
+      target.cacheCreationInputTokens = addUsageTokens(
+        target.cacheCreationInputTokens ?? 0,
+        source.cacheCreationInputTokens,
+      );
     }
+  };
+  const assertUsageMergeable = (
+    target: GatewayUsage,
+    source: GatewayUsage,
+  ): void => {
+    const inputTokens = addUsageTokens(target.inputTokens, source.inputTokens);
+    const outputTokens = addUsageTokens(
+      target.outputTokens,
+      source.outputTokens,
+    );
+    const cacheReadInputTokens = addUsageTokens(
+      target.cacheReadInputTokens ?? 0,
+      source.cacheReadInputTokens ?? 0,
+    );
+    const cacheCreationInputTokens = addUsageTokens(
+      target.cacheCreationInputTokens ?? 0,
+      source.cacheCreationInputTokens ?? 0,
+    );
+    addUsageTokens(
+      addUsageTokens(
+        addUsageTokens(inputTokens, cacheReadInputTokens),
+        cacheCreationInputTokens,
+      ),
+      outputTokens,
+    );
   };
 
   let cancelled = false;
   let terminalDelivered = false;
   const abortController = new AbortController();
-  const signal = abortController.signal;
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, abortController.signal])
+    : abortController.signal;
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   const outputIndexForEvent = (
@@ -5878,7 +7953,7 @@ export function streamResponsesRecallAware(
     state: ResponsesAccState,
   ): number | undefined => {
     const requiresOutputIndex =
-      /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_summary|refusal)/.test(
+      /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_(?:summary|text)|refusal)/.test(
         event,
       );
     const hasOutputIndex = Object.hasOwn(parsed, "output_index");
@@ -5888,6 +7963,42 @@ export function streamResponsesRecallAware(
       throw new Error(`invalid Responses output_index for ${event}`);
     }
     const outputIndex = index as number;
+    if (
+      opts.validation === "codex" &&
+      event === "response.output_item.done" &&
+      !state.rawItems.has(outputIndex)
+    ) {
+      const doneItem = parsed.item as Record<string, unknown> | undefined;
+      if (!doneItem) {
+        throw new Error(
+          `Responses output_item.done missing item for index ${outputIndex}`,
+        );
+      }
+      if (doneItem.type === "message" && doneItem.role === undefined) {
+        doneItem.role = "assistant";
+      }
+      const seedItem = { ...doneItem };
+      delete seedItem.status;
+      if (seedItem.type === "message") delete seedItem.content;
+      outputIndexForEvent(
+        "response.output_item.added",
+        { output_index: outputIndex, item: seedItem },
+        state,
+      );
+      applyResponsesEvent(state, "response.output_item.added", {
+        output_index: outputIndex,
+        item: seedItem,
+      });
+      if (seedItem.type === "function_call") {
+        const seededLifecycle = lifecyclesFor(state).get(outputIndex);
+        if (!seededLifecycle) {
+          throw new Error(
+            `missing Responses lifecycle for index ${outputIndex}`,
+          );
+        }
+        seededLifecycle.argumentsDone = true;
+      }
+    }
     const lifecycles = lifecyclesFor(state);
     const lifecycle = lifecycles.get(outputIndex);
     if (lifecycle?.outputDone && event !== "response.output_item.added") {
@@ -5900,37 +8011,83 @@ export function streamResponsesRecallAware(
         throw new Error(`duplicate Responses output_index ${outputIndex}`);
       }
       const item = parsed.item as Record<string, unknown> | undefined;
+      const sparseCodexFunction =
+        opts.validation === "codex" && item?.type === "function_call";
       if (
         !item ||
         typeof item.type !== "string" ||
+        !isSupportedResponsesOutputItemType(item.type) ||
+        !isValidResponsesReasoningEncryptedContent(item) ||
+        !isValidResponsesOutputItemStatus(item.type, item.status, "added") ||
         typeof item.id !== "string" ||
         item.id.length === 0 ||
         (item.type === "function_call" &&
           (typeof item.call_id !== "string" ||
-            item.call_id.length === 0 ||
             typeof item.name !== "string" ||
-            item.name.length === 0))
+            (!sparseCodexFunction &&
+              (item.call_id.length === 0 || item.name.length === 0))))
       ) {
         throw new Error(
           `incomplete Responses output_item.added identity for index ${outputIndex}`,
         );
       }
-      if (item.type === "function_call" && item.id === item.call_id) {
+      if (
+        item.type === "function_call" &&
+        item.call_id !== "" &&
+        item.id === item.call_id
+      ) {
         throw new Error("duplicate Responses identity within output item");
       }
-      const identities = [item.id, item.call_id].filter(
-        (value): value is string => typeof value === "string",
-      );
-      if (identities.some((identity) => syntheticIdentities.has(identity))) {
-        throw new Error("duplicate synthetic Responses item identity");
+      if (
+        item.type === "function_call" &&
+        item.arguments !== undefined &&
+        typeof item.arguments !== "string"
+      ) {
+        throw new Error("invalid initial Responses function arguments");
       }
+      if (
+        item.type === "function_call" &&
+        item.status !== undefined &&
+        typeof item.status !== "string"
+      ) {
+        throw new Error("invalid initial Responses function status");
+      }
+      if (
+        item.type === "function_call" &&
+        item.name === RECALL_TOOL_NAME &&
+        item.status !== undefined &&
+        item.status !== "in_progress" &&
+        item.status !== "completed"
+      ) {
+        throw new Error("recall function call cannot start failed");
+      }
+      if (item.type === "message" && item.role !== "assistant") {
+        throw new Error("Responses output message must have assistant role");
+      }
+      const identities = [item.id, item.call_id].filter(
+        (value): value is string =>
+          typeof value === "string" && value.length > 0,
+      );
+      if (
+        identities.some(
+          (identity) =>
+            outputIdentities.has(identity) ||
+            referenceIdentities.has(identity) ||
+            syntheticIdentities.has(identity),
+        )
+      ) {
+        throw new Error("duplicate Responses item identity");
+      }
+      for (const identity of identities) outputIdentities.add(identity);
       for (const [existingIndex, existing] of state.rawItems) {
         const newIdentities = [item.id, item.call_id].filter(
-          (value): value is string => typeof value === "string",
+          (value): value is string =>
+            typeof value === "string" && value.length > 0,
         );
         const existingIdentities = new Set(
           [existing.id, existing.call_id].filter(
-            (value): value is string => typeof value === "string",
+            (value): value is string =>
+              typeof value === "string" && value.length > 0,
           ),
         );
         if (
@@ -5940,11 +8097,40 @@ export function streamResponsesRecallAware(
           throw new Error("duplicate Responses item identity");
         }
       }
-      lifecycles.set(outputIndex, {
+      const initialArguments =
+        item.type === "function_call" && typeof item.arguments === "string"
+          ? item.arguments
+          : "";
+      const newLifecycle: OutputLifecycle = {
+        argumentDeltaSeen: initialArguments.length > 0,
+        argumentDeltas: initialArguments,
         argumentsDone: item.type !== "function_call",
         outputDone: false,
+        reasoning: new Map(),
         content: new Map(),
-      });
+      };
+      if (item.type === "message") {
+        seedTextParts(
+          item.content,
+          newLifecycle.content,
+          new Set(["output_text", "refusal"]),
+          "message content",
+        );
+      } else if (item.type === "reasoning") {
+        seedTextParts(
+          item.summary,
+          newLifecycle.reasoning,
+          new Set(["summary_text"]),
+          "reasoning summary",
+        );
+        seedTextParts(
+          item.content,
+          newLifecycle.content,
+          new Set(["reasoning_text"]),
+          "reasoning content",
+        );
+      }
+      lifecycles.set(outputIndex, newLifecycle);
     } else if (!state.rawItems.has(outputIndex)) {
       throw new Error(
         `Responses ${event} arrived before output_item.added for index ${outputIndex}`,
@@ -5956,16 +8142,73 @@ export function streamResponsesRecallAware(
       }
       const item = parsed.item as Record<string, unknown> | undefined;
       if (
+        opts.validation === "codex" &&
+        event === "response.output_item.done" &&
+        item?.type === "message" &&
+        item.content === undefined &&
+        lifecycle
+      ) {
+        const content = finalizedMessageContent(lifecycle);
+        if (content.length > 0) item.content = content;
+      }
+      if (
         event === "response.output_item.done" &&
         (!item ||
-          item.type !== declared?.type ||
-          item.id !== declared?.id ||
-          item.call_id !== declared?.call_id ||
-          item.name !== declared?.name)
+          !declared ||
+          !isValidResponsesReasoningEncryptedContent(item) ||
+          !responsesDoneItemMatchesAdded(item, declared))
       ) {
         throw new Error(
           `Responses output_item.done changed item identity for index ${outputIndex}`,
         );
+      }
+      let finalFunctionIdentity: { callId: string; name: string } | undefined;
+      if (
+        event === "response.output_item.done" &&
+        item?.type === "function_call"
+      ) {
+        const normalized = state.items.get(outputIndex);
+        if (normalized?.type !== "tool_use") {
+          throw new Error(
+            `Responses output_item.done changed item type for index ${outputIndex}`,
+          );
+        }
+        const finalCallId = item.call_id;
+        const finalName = item.name;
+        if (
+          typeof finalCallId !== "string" ||
+          finalCallId.length === 0 ||
+          typeof finalName !== "string" ||
+          finalName.length === 0 ||
+          finalCallId === item.id
+        ) {
+          throw new Error(
+            `Responses output_item.done has incomplete function identity for index ${outputIndex}`,
+          );
+        }
+        const establishedIdentities = new Set(
+          [declared?.id, declared?.call_id].filter(
+            (value): value is string =>
+              typeof value === "string" && value.length > 0,
+          ),
+        );
+        if (
+          !establishedIdentities.has(finalCallId) &&
+          (outputIdentities.has(finalCallId) ||
+            referenceIdentities.has(finalCallId) ||
+            syntheticIdentities.has(finalCallId))
+        ) {
+          throw new Error("duplicate Responses item identity");
+        }
+        for (const [existingIndex, existing] of state.rawItems) {
+          if (
+            existingIndex !== outputIndex &&
+            (existing.id === finalCallId || existing.call_id === finalCallId)
+          ) {
+            throw new Error("duplicate Responses item identity");
+          }
+        }
+        finalFunctionIdentity = { callId: finalCallId, name: finalName };
       }
       const declaredType = declared?.type;
       const itemId = parsed.item_id;
@@ -5980,6 +8223,7 @@ export function streamResponsesRecallAware(
       if (
         (event.startsWith("response.output_text") ||
           event.startsWith("response.content_part") ||
+          event.startsWith("response.reasoning_text") ||
           event.startsWith("response.refusal")) &&
         (!Number.isSafeInteger(parsed.content_index) ||
           (parsed.content_index as number) < 0)
@@ -5989,20 +8233,17 @@ export function streamResponsesRecallAware(
       if (
         event.startsWith("response.output_text") ||
         event.startsWith("response.content_part") ||
+        event.startsWith("response.reasoning_text") ||
         event.startsWith("response.refusal")
       ) {
         const contentIndex = parsed.content_index as number;
-        const contentState = lifecycle.content.get(contentIndex) ?? {
-          valueSeen: false,
-          valueDone: false,
-          partAdded: false,
-          partDone: false,
-        };
         const expectedKind = event.startsWith("response.output_text")
           ? "output_text"
           : event.startsWith("response.refusal")
             ? "refusal"
-            : undefined;
+            : event.startsWith("response.reasoning_text")
+              ? "reasoning_text"
+              : undefined;
         const part = parsed.part as Record<string, unknown> | undefined;
         const partKind =
           event.startsWith("response.content_part") &&
@@ -6010,54 +8251,106 @@ export function streamResponsesRecallAware(
             ? part.type
             : undefined;
         const kind = expectedKind ?? partKind;
-        if (!kind || (contentState.kind && contentState.kind !== kind)) {
+        if (
+          !kind ||
+          !["output_text", "refusal", "reasoning_text"].includes(kind)
+        ) {
+          throw new Error(`invalid Responses content type for ${event}`);
+        }
+        const expectedItemType =
+          kind === "reasoning_text" ? "reasoning" : "message";
+        if (declaredType !== expectedItemType) {
+          throw new Error(
+            `Responses ${event} does not match item type ${String(declaredType)}`,
+          );
+        }
+        const contentState =
+          lifecycle.content.get(contentIndex) ?? emptyTextPartLifecycle(kind);
+        if (contentState.kind !== kind) {
           throw new Error(
             `Responses ${event} changed content type for index ${outputIndex}:${contentIndex}`,
           );
         }
-        contentState.kind = kind;
         if (event === "response.content_part.added") {
-          if (contentState.partAdded) {
+          if (
+            contentState.partAdded ||
+            contentState.deltaSeen ||
+            contentState.valueDone
+          ) {
             throw new Error(
-              `duplicate Responses content_part.added for index ${outputIndex}:${contentIndex}`,
+              `invalid Responses content_part.added for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          if (!part) {
+            throw new Error(`invalid Responses ${event} part`);
+          }
+          const initialValue = partValue(kind, part, event);
+          if (
+            contentState.authoritativeValueSeen &&
+            contentState.authoritativeValue !== initialValue
+          ) {
+            throw new Error(
+              `Responses content_part.added changed initial content for index ${outputIndex}:${contentIndex}`,
             );
           }
           contentState.partAdded = true;
+          contentState.authoritativeValue = initialValue;
+          contentState.authoritativeValueSeen = true;
         } else if (event === "response.content_part.done") {
           if (!contentState.partAdded || contentState.partDone) {
             throw new Error(
               `invalid Responses content_part.done for index ${outputIndex}:${contentIndex}`,
             );
           }
-          contentState.partDone = true;
-          const partValue = kind === "output_text" ? part?.text : part?.refusal;
-          if (typeof partValue !== "string") {
-            throw new Error(`invalid Responses ${event} final value`);
+          if (!part) {
+            throw new Error(`invalid Responses ${event} part`);
           }
-          contentState.partFinalValue = partValue;
+          const finalPartValue = partValue(kind, part, event);
           if (
-            contentState.finalValue !== undefined &&
-            contentState.finalValue !== partValue
+            (contentState.authoritativeValueSeen &&
+              contentState.authoritativeValue !== finalPartValue) ||
+            (contentState.finalValue !== undefined &&
+              contentState.finalValue !== finalPartValue)
           ) {
             throw new Error(
               `Responses content_part.done changed content for index ${outputIndex}:${contentIndex}`,
             );
           }
+          contentState.partDone = true;
+          contentState.partFinalValue = finalPartValue;
+          contentState.authoritativeValue = finalPartValue;
+          contentState.authoritativeValueSeen = true;
         } else {
-          if (contentState.valueDone) {
+          if (contentState.valueDone || contentState.partDone) {
             throw new Error(
               `Responses content changed after completion for index ${outputIndex}:${contentIndex}`,
             );
           }
-          contentState.valueSeen = true;
-          if (event.endsWith(".done")) {
+          if (event.endsWith(".delta")) {
+            if (typeof parsed.delta !== "string") {
+              throw new Error(`invalid Responses ${event} delta`);
+            }
+            contentState.deltaSeen = true;
+            contentState.authoritativeValue += parsed.delta;
+            contentState.authoritativeValueSeen = true;
+          } else if (event.endsWith(".done")) {
             const finalValue =
-              kind === "output_text" ? parsed.text : parsed.refusal;
+              kind === "refusal" ? parsed.refusal : parsed.text;
             if (typeof finalValue !== "string") {
               throw new Error(`invalid Responses ${event} final value`);
             }
             contentState.valueDone = true;
             contentState.finalValue = finalValue;
+            if (
+              contentState.authoritativeValueSeen &&
+              contentState.authoritativeValue !== finalValue
+            ) {
+              throw new Error(
+                `Responses ${event} changed streamed content for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            contentState.authoritativeValue = finalValue;
+            contentState.authoritativeValueSeen = true;
             if (
               contentState.partFinalValue !== undefined &&
               contentState.partFinalValue !== finalValue
@@ -6079,7 +8372,6 @@ export function streamResponsesRecallAware(
       }
       if (
         ((event.startsWith("response.output_text") ||
-          event.startsWith("response.content_part") ||
           event.startsWith("response.refusal")) &&
           declaredType !== "message") ||
         (event.startsWith("response.reasoning_summary") &&
@@ -6091,13 +8383,129 @@ export function streamResponsesRecallAware(
           `Responses ${event} does not match item type ${String(declaredType)}`,
         );
       }
+      if (event.startsWith("response.reasoning_summary")) {
+        const summaryIndex = parsed.summary_index as number;
+        const summaryState =
+          lifecycle.reasoning.get(summaryIndex) ??
+          emptyTextPartLifecycle("summary_text");
+        if (event === "response.reasoning_summary_part.added") {
+          if (
+            summaryState.partAdded ||
+            summaryState.deltaSeen ||
+            summaryState.valueDone
+          ) {
+            throw new Error(
+              `invalid Responses reasoning summary part for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          const part = parsed.part as Record<string, unknown> | undefined;
+          if (part !== undefined) {
+            if (part.type !== "summary_text") {
+              throw new Error("invalid Responses reasoning summary part");
+            }
+            const initialValue = partValue(
+              "summary_text",
+              part,
+              "reasoning summary initial",
+            );
+            if (
+              summaryState.authoritativeValueSeen &&
+              summaryState.authoritativeValue !== initialValue
+            ) {
+              throw new Error(
+                `Responses reasoning summary part changed initial content for index ${outputIndex}:${summaryIndex}`,
+              );
+            }
+            summaryState.authoritativeValue = initialValue;
+            summaryState.authoritativeValueSeen = true;
+          }
+          summaryState.partAdded = true;
+        } else if (event === "response.reasoning_summary_part.done") {
+          if (!summaryState.partAdded || summaryState.partDone) {
+            throw new Error(
+              `invalid Responses reasoning summary completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          const part = parsed.part as Record<string, unknown> | undefined;
+          if (part !== undefined) {
+            if (part.type !== "summary_text") {
+              throw new Error("invalid Responses reasoning summary part");
+            }
+            const finalPartValue = partValue(
+              "summary_text",
+              part,
+              "reasoning summary final",
+            );
+            if (
+              (summaryState.authoritativeValueSeen &&
+                summaryState.authoritativeValue !== finalPartValue) ||
+              (summaryState.finalValue !== undefined &&
+                summaryState.finalValue !== finalPartValue)
+            ) {
+              throw new Error(
+                `Responses reasoning summary part changed content for index ${outputIndex}:${summaryIndex}`,
+              );
+            }
+            summaryState.partFinalValue = finalPartValue;
+            summaryState.authoritativeValue = finalPartValue;
+            summaryState.authoritativeValueSeen = true;
+          }
+          summaryState.partDone = true;
+        } else if (event.endsWith(".delta")) {
+          if (summaryState.valueDone || summaryState.partDone) {
+            throw new Error(
+              `Responses reasoning summary changed after completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          if (typeof parsed.delta !== "string") {
+            throw new Error("invalid Responses reasoning summary delta");
+          }
+          summaryState.deltaSeen = true;
+          summaryState.authoritativeValue += parsed.delta;
+          summaryState.authoritativeValueSeen = true;
+        } else if (event.endsWith(".done")) {
+          if (summaryState.valueDone || summaryState.partDone) {
+            throw new Error(
+              `duplicate Responses reasoning summary completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          if (typeof parsed.text !== "string") {
+            throw new Error("invalid Responses reasoning summary final value");
+          }
+          if (
+            summaryState.authoritativeValueSeen &&
+            summaryState.authoritativeValue !== parsed.text
+          ) {
+            throw new Error(
+              `Responses reasoning summary changed streamed content for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          summaryState.valueDone = true;
+          summaryState.finalValue = parsed.text;
+          summaryState.authoritativeValue = parsed.text;
+          summaryState.authoritativeValueSeen = true;
+        }
+        lifecycle.reasoning.set(summaryIndex, summaryState);
+      }
       if (event === "response.function_call_arguments.done") {
         if (lifecycle.argumentsDone) {
           throw new Error(
             `duplicate Responses function arguments completion for index ${outputIndex}`,
           );
         }
+        if (typeof parsed.arguments !== "string") {
+          throw new Error("invalid Responses function arguments completion");
+        }
+        if (
+          lifecycle.argumentDeltaSeen &&
+          lifecycle.argumentDeltas !== parsed.arguments
+        ) {
+          throw new Error(
+            `Responses function arguments completion changed streamed arguments for index ${outputIndex}`,
+          );
+        }
         lifecycle.argumentsDone = true;
+        lifecycle.argumentDeltas = parsed.arguments;
       } else if (
         event.startsWith("response.function_call_arguments") &&
         lifecycle.argumentsDone
@@ -6105,24 +8513,55 @@ export function streamResponsesRecallAware(
         throw new Error(
           `Responses function arguments changed after completion for index ${outputIndex}`,
         );
+      } else if (event === "response.function_call_arguments.delta") {
+        if (typeof parsed.delta !== "string") {
+          throw new Error("invalid Responses function arguments delta");
+        }
+        lifecycle.argumentDeltaSeen = true;
+        lifecycle.argumentDeltas += parsed.delta;
       }
       if (event === "response.output_item.done") {
-        if (declaredType === "function_call" && !lifecycle.argumentsDone) {
-          throw new Error(
-            `Responses function call completed before arguments for index ${outputIndex}`,
-          );
-        }
         if (declaredType === "function_call") {
           const normalized = state.items.get(outputIndex);
           if (
             normalized?.type !== "tool_use" ||
-            typeof item?.arguments !== "string" ||
-            item.arguments !== normalized.args
+            typeof item?.arguments !== "string"
           ) {
             throw new Error(
               `Responses output_item.done changed arguments for index ${outputIndex}`,
             );
           }
+          if (
+            (lifecycle.argumentDeltaSeen || lifecycle.argumentsDone) &&
+            item.arguments !== lifecycle.argumentDeltas
+          ) {
+            throw new Error(
+              `Responses output_item.done changed arguments for index ${outputIndex}`,
+            );
+          }
+          if (!lifecycle.argumentDeltaSeen && !lifecycle.argumentsDone) {
+            lifecycle.argumentDeltas = item.arguments;
+            lifecycle.argumentsDone = true;
+          }
+          if (!finalFunctionIdentity) {
+            throw new Error(
+              `Responses output_item.done missing function identity for index ${outputIndex}`,
+            );
+          }
+          if (item?.status !== undefined && typeof item.status !== "string") {
+            throw new Error("invalid Responses function call status");
+          }
+          if (
+            item.name === RECALL_TOOL_NAME &&
+            item?.status !== undefined &&
+            item.status !== "completed"
+          ) {
+            throw new Error("recall function call did not complete");
+          }
+          outputIdentities.add(finalFunctionIdentity.callId);
+          normalized.callId = finalFunctionIdentity.callId;
+          normalized.name = finalFunctionIdentity.name;
+          normalized.args = item.arguments;
         }
         if (declaredType === "message") {
           const finalContent = item?.content;
@@ -6131,8 +8570,22 @@ export function streamResponsesRecallAware(
               `Responses message completed without content for index ${outputIndex}`,
             );
           }
-          for (const [contentIndex, contentState] of lifecycle.content) {
-            const finalPart = finalContent[contentIndex] as
+          const orderedContent = Array.from(lifecycle.content).sort(
+            ([left], [right]) => left - right,
+          );
+          if (
+            orderedContent.length > 0 &&
+            finalContent.length !== orderedContent.length
+          ) {
+            throw new Error(
+              `Responses output_item.done changed content count for index ${outputIndex}`,
+            );
+          }
+          for (const [
+            ordinal,
+            [contentIndex, contentState],
+          ] of orderedContent.entries()) {
+            const finalPart = finalContent[ordinal] as
               | Record<string, unknown>
               | undefined;
             if (!finalPart || finalPart.type !== contentState.kind) {
@@ -6140,7 +8593,7 @@ export function streamResponsesRecallAware(
                 `Responses output_item.done changed content type for index ${outputIndex}:${contentIndex}`,
               );
             }
-            if (contentState.valueSeen && !contentState.valueDone) {
+            if (contentState.deltaSeen && !contentState.valueDone) {
               throw new Error(
                 `Responses content ended before completion for index ${outputIndex}:${contentIndex}`,
               );
@@ -6150,13 +8603,18 @@ export function streamResponsesRecallAware(
                 `Responses content part ended before completion for index ${outputIndex}:${contentIndex}`,
               );
             }
-            const finalValue =
-              contentState.kind === "output_text"
-                ? finalPart.text
-                : finalPart.refusal;
+            const finalValue = partValue(
+              contentState.kind,
+              finalPart,
+              "output item content",
+            );
             if (
-              contentState.finalValue !== undefined &&
-              finalValue !== contentState.finalValue
+              (contentState.authoritativeValueSeen &&
+                finalValue !== contentState.authoritativeValue) ||
+              (contentState.finalValue !== undefined &&
+                finalValue !== contentState.finalValue) ||
+              (contentState.partFinalValue !== undefined &&
+                finalValue !== contentState.partFinalValue)
             ) {
               throw new Error(
                 `Responses output_item.done changed content for index ${outputIndex}:${contentIndex}`,
@@ -6164,10 +8622,145 @@ export function streamResponsesRecallAware(
             }
           }
         }
+        if (declaredType === "reasoning") {
+          const summary = item?.summary;
+          if (summary !== undefined && !Array.isArray(summary)) {
+            throw new Error("Responses reasoning summary must be an array");
+          }
+          if (summary === undefined) {
+            for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+              if (
+                (summaryState.deltaSeen && !summaryState.valueDone) ||
+                (summaryState.partAdded && !summaryState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+            }
+          }
+          if (Array.isArray(summary)) {
+            for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+              const finalPart = summary[summaryIndex] as
+                | Record<string, unknown>
+                | undefined;
+              if (!finalPart) {
+                if (
+                  (summaryState.deltaSeen && !summaryState.valueDone) ||
+                  (summaryState.partAdded && !summaryState.partDone)
+                ) {
+                  throw new Error(
+                    `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                  );
+                }
+                continue;
+              }
+              if (
+                finalPart.type !== "summary_text" ||
+                typeof finalPart.text !== "string"
+              ) {
+                throw new Error("invalid Responses reasoning summary item");
+              }
+              if (
+                (summaryState.deltaSeen && !summaryState.valueDone) ||
+                (summaryState.partAdded && !summaryState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+              if (
+                summaryState.authoritativeValueSeen &&
+                summaryState.authoritativeValue !== finalPart.text
+              ) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning summary for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+            }
+          }
+          const finalContent = item?.content;
+          if (finalContent !== undefined && !Array.isArray(finalContent)) {
+            throw new Error("Responses reasoning content must be an array");
+          }
+          if (lifecycle.content.size > 0) {
+            if (!Array.isArray(finalContent)) {
+              throw new Error(
+                `Responses reasoning completed without content for index ${outputIndex}`,
+              );
+            }
+            for (const [contentIndex, contentState] of lifecycle.content) {
+              const finalPart = finalContent[contentIndex] as
+                | Record<string, unknown>
+                | undefined;
+              if (!finalPart || finalPart.type !== contentState.kind) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning content type for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+              if (
+                (contentState.deltaSeen && !contentState.valueDone) ||
+                (contentState.partAdded && !contentState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning content ended before completion for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+              const finalValue = partValue(
+                contentState.kind,
+                finalPart,
+                "reasoning output item content",
+              );
+              if (
+                (contentState.authoritativeValueSeen &&
+                  contentState.authoritativeValue !== finalValue) ||
+                (contentState.finalValue !== undefined &&
+                  contentState.finalValue !== finalValue) ||
+                (contentState.partFinalValue !== undefined &&
+                  contentState.partFinalValue !== finalValue)
+              ) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning content for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+            }
+          }
+        }
         lifecycle.outputDone = true;
       }
     }
     return outputIndex;
+  };
+  const seedImplicitCodexItem = (
+    acc: ResponsesAccState,
+    normalizationState: ResponsesAccState | undefined,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): void => {
+    if (
+      !normalizationState ||
+      event === "response.output_item.added" ||
+      event === "response.output_item.done"
+    ) {
+      return;
+    }
+    const outputIndex = parsed.output_index;
+    if (!Number.isSafeInteger(outputIndex) || (outputIndex as number) < 0)
+      return;
+    const index = outputIndex as number;
+    if (acc.rawItems.has(index)) return;
+    const normalizedRaw = normalizationState.rawItems.get(index);
+    if (!normalizedRaw) return;
+    const seedItem = { ...normalizedRaw };
+    outputIndexForEvent(
+      "response.output_item.added",
+      { output_index: index, item: seedItem },
+      acc,
+    );
+    applyResponsesEvent(acc, "response.output_item.added", {
+      output_index: index,
+      item: seedItem,
+    });
   };
   const validateResponseLifecycle = (
     acc: ResponsesAccState,
@@ -6184,6 +8777,19 @@ export function streamResponsesRecallAware(
       if (!response || typeof response.id !== "string" || !response.id) {
         throw new Error("response.created missing response identity");
       }
+      if (
+        response.status !== undefined &&
+        response.status !== "in_progress" &&
+        !(opts.validation === "codex" && response.status === "queued")
+      ) {
+        throw new Error("response.created has invalid status");
+      }
+      if (
+        response.output !== undefined &&
+        (!Array.isArray(response.output) || response.output.length > 0)
+      ) {
+        throw new Error("response.created must start with empty output");
+      }
       lifecycle.created = true;
       return;
     }
@@ -6197,6 +8803,15 @@ export function streamResponsesRecallAware(
           "Responses in-progress event changed response identity",
         );
       }
+      if (response?.status !== undefined && response.status !== "in_progress") {
+        throw new Error("response.in_progress has invalid status");
+      }
+      if (
+        response?.output !== undefined &&
+        (!Array.isArray(response.output) || response.output.length > 0)
+      ) {
+        throw new Error("response.in_progress must have empty output");
+      }
     }
     if (
       event === "response.completed" ||
@@ -6208,61 +8823,344 @@ export function streamResponsesRecallAware(
       if (acc.id && response?.id !== acc.id) {
         throw new Error("Responses terminal event changed response identity");
       }
+      const status = response?.status;
+      const terminalStatuses = new Set([
+        "completed",
+        "incomplete",
+        "failed",
+        "cancelled",
+      ]);
+      if (typeof status !== "string" || !terminalStatuses.has(status)) {
+        throw new Error("Responses terminal event has nonterminal status");
+      }
+      if (
+        (event === "response.completed" &&
+          status !== "completed" &&
+          !(opts.validation === "codex" && status === "incomplete")) ||
+        (event === "response.incomplete" && status !== "incomplete") ||
+        (event === "response.failed" &&
+          status !== "failed" &&
+          status !== "cancelled")
+      ) {
+        throw new Error("Responses terminal event contradicts response status");
+      }
+      if (status === "incomplete") {
+        const details = response?.incomplete_details;
+        if (
+          details !== undefined &&
+          details !== null &&
+          (typeof details !== "object" || Array.isArray(details))
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+        const reason =
+          details && typeof details === "object" && !Array.isArray(details)
+            ? (details as Record<string, unknown>).reason
+            : undefined;
+        if (
+          reason !== undefined &&
+          reason !== "max_output_tokens" &&
+          reason !== "content_filter"
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+      }
       lifecycle.terminal = true;
     }
   };
   const assertOutputLifecyclesComplete = (acc: ResponsesAccState): void => {
     const lifecycles = lifecyclesFor(acc);
     for (const index of acc.rawItems.keys()) {
-      if (!lifecycles.get(index)?.outputDone) {
+      if (lifecycles.get(index)?.outputDone) continue;
+      if (opts.validation !== "codex") {
         throw new Error(
           `Responses stream ended before output_item.done for index ${index}`,
         );
+      }
+      const item = acc.rawItems.get(index);
+      if (
+        item?.type === "reasoning" &&
+        typeof item.encrypted_content === "string"
+      ) {
+        throw new Error(
+          `Responses stream ended with provisional reasoning for index ${index}`,
+        );
+      }
+      // Sparse Codex may omit output_item.done. Non-reasoning items and
+      // reasoning without a string ciphertext envelope are safe to retain.
+    }
+  };
+  const preserveStreamedReasoning = (
+    acc: ResponsesAccState,
+    outputIndex: number,
+  ): void => {
+    const raw = acc.rawItems.get(outputIndex);
+    const lifecycle = lifecyclesFor(acc).get(outputIndex);
+    if (raw?.type !== "reasoning" || !lifecycle?.reasoning.size) return;
+    const summary = Array.isArray(raw.summary) ? [...raw.summary] : [];
+    let changed = false;
+    for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+      if (
+        summary[summaryIndex] === undefined &&
+        summaryState.authoritativeValueSeen
+      ) {
+        summary[summaryIndex] = {
+          type: "summary_text",
+          text: summaryState.authoritativeValue,
+        };
+        changed = true;
+      }
+    }
+    if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
+  };
+  const assertTerminalReasoningMatchesLifecycle = (
+    lifecycle: OutputLifecycle,
+    actual: Record<string, unknown>,
+    outputIndex: number,
+  ): void => {
+    const collections: Array<
+      [unknown, ReadonlyMap<number, TextPartLifecycle>, string]
+    > = [
+      [actual.summary, lifecycle.reasoning, "reasoning summary"],
+      [actual.content, lifecycle.content, "reasoning content"],
+    ];
+    for (const [rawParts, states, description] of collections) {
+      if (rawParts === undefined) continue;
+      if (!Array.isArray(rawParts)) {
+        throw new Error(`Responses terminal ${description} must be an array`);
+      }
+      for (const [partIndex, state] of states) {
+        const part = rawParts[partIndex];
+        if (!part || typeof part !== "object" || Array.isArray(part)) {
+          throw new Error(`Responses terminal changed ${description}`);
+        }
+        const record = part as Record<string, unknown>;
+        if (
+          record.type !== state.kind ||
+          (state.authoritativeValueSeen &&
+            partValue(state.kind, record, `terminal ${description}`) !==
+              state.authoritativeValue)
+        ) {
+          throw new Error(
+            `Responses terminal changed ${description} for index ${outputIndex}:${partIndex}`,
+          );
+        }
       }
     }
   };
   const assertTerminalOutputMatches = (
     acc: ResponsesAccState,
     parsed: Record<string, unknown>,
+    onSynthesizedDone?: (
+      outputIndex: number,
+      item: Record<string, unknown>,
+    ) => void,
   ): void => {
     const response = parsed.response as Record<string, unknown> | undefined;
     if (!response) throw new Error("Responses terminal event missing response");
     if (acc.id && response.id !== acc.id) {
       throw new Error("Responses terminal event changed response identity");
     }
-    if (response.output === undefined) return;
+    if (response.output === undefined) {
+      if (opts.validation === "public" && response.status === "completed") {
+        throw new Error("Responses terminal output must be an array");
+      }
+      return;
+    }
     if (!Array.isArray(response.output)) {
       throw new Error("Responses terminal output must be an array");
     }
-    const actualOutput = response.output.filter(
-      (item): item is Record<string, unknown> =>
-        !!item &&
-        typeof item === "object" &&
-        (item as Record<string, unknown>).type !== "item_reference",
-    );
-    const expected = [...acc.rawItems.entries()]
-      .sort(([a], [b]) => a - b)
-      .map(([, item]) => item)
-      .filter((item) => item.type !== "item_reference");
-    if (actualOutput.length !== expected.length) {
-      throw new Error("Responses terminal output changed item count");
+    // ChatGPT/Codex can omit some or all streamed items from the terminal
+    // snapshot. Treat the output_item lifecycle as authoritative while still
+    // requiring every repeated terminal item to match in stream order.
+    const actualOutput = response.output.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error("Responses terminal output contains malformed item");
+      }
+      return item as Record<string, unknown>;
+    });
+    const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
+    if (
+      opts.validation === "public" &&
+      actualOutput.length !== expected.length
+    ) {
+      throw new Error("Responses terminal output changed streamed item");
     }
-    for (let i = 0; i < expected.length; i++) {
-      const actual = actualOutput[i];
-      const streamed = expected[i];
+    let expectedIndex = 0;
+    for (const actual of actualOutput) {
+      const isReference = actual.type === "item_reference";
       if (
-        !actual ||
-        actual.type !== streamed.type ||
-        actual.id !== streamed.id ||
-        actual.call_id !== streamed.call_id ||
-        (streamed.type === "message" &&
-          !isDeepStrictEqual(actual.content, streamed.content)) ||
-        (streamed.type === "function_call" &&
-          actual.arguments !== streamed.arguments)
+        isReference &&
+        (typeof actual.id !== "string" ||
+          !actual.id ||
+          Object.keys(actual).some((key) => key !== "type" && key !== "id"))
+      ) {
+        throw new Error("Responses terminal output contains invalid reference");
+      }
+      const matchIndex = expected.findIndex(
+        ([outputIndex, streamed], index) => {
+          if (
+            index < expectedIndex ||
+            actual.id !== streamed.id ||
+            (!isReference && actual.type !== streamed.type)
+          ) {
+            return false;
+          }
+          if (isReference || actual.call_id === streamed.call_id) return true;
+          return (
+            opts.validation === "codex" &&
+            !lifecyclesFor(acc).get(outputIndex)?.outputDone
+          );
+        },
+      );
+      if (matchIndex < 0) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      if (opts.validation === "public" && matchIndex !== expectedIndex) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      const [outputIndex, streamed] = expected[matchIndex];
+      const lifecycle = lifecyclesFor(acc).get(outputIndex);
+      if (
+        !isReference &&
+        opts.validation === "codex" &&
+        lifecycle &&
+        !lifecycle.outputDone
+      ) {
+        outputIndexForEvent(
+          "response.output_item.done",
+          { output_index: outputIndex, item: actual },
+          acc,
+        );
+        applyResponsesEvent(acc, "response.output_item.done", {
+          output_index: outputIndex,
+          item: actual,
+        });
+        preserveStreamedReasoning(acc, outputIndex);
+        onSynthesizedDone?.(outputIndex, actual);
+      } else if (
+        !isReference &&
+        !responsesTerminalItemMatches(actual, streamed)
       ) {
         throw new Error("Responses terminal output changed streamed item");
       }
+      if (!isReference && actual.type === "reasoning") {
+        if (!lifecycle) {
+          throw new Error(
+            `missing Responses lifecycle for index ${outputIndex}`,
+          );
+        }
+        assertTerminalReasoningMatchesLifecycle(lifecycle, actual, outputIndex);
+      }
+      if (!isReference) {
+        acc.rawItems.set(outputIndex, { ...streamed, ...actual });
+      }
+      expectedIndex = matchIndex + 1;
     }
+  };
+  type ReferenceLifecycle = { id: string; done: boolean };
+  const consumeReferenceEvent = (
+    acc: ResponsesAccState,
+    references: Map<number, ReferenceLifecycle>,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): boolean => {
+    const rawIndex = parsed.output_index;
+    const item = parsed.item as Record<string, unknown> | undefined;
+    if (
+      event === "response.output_item.added" &&
+      item?.type === "item_reference"
+    ) {
+      if (!Number.isSafeInteger(rawIndex) || (rawIndex as number) < 0) {
+        throw new Error("invalid Responses output_index for item_reference");
+      }
+      const outputIndex = rawIndex as number;
+      if (
+        typeof item.id !== "string" ||
+        !item.id ||
+        Object.keys(item).some((key) => key !== "type" && key !== "id")
+      ) {
+        throw new Error("invalid Responses output item reference");
+      }
+      if (
+        references.has(outputIndex) ||
+        acc.rawItems.has(outputIndex) ||
+        syntheticIdentities.has(item.id) ||
+        outputIdentities.has(item.id) ||
+        [...acc.rawItems.values()].some(
+          (existing) => existing.id === item.id || existing.call_id === item.id,
+        ) ||
+        referenceIdentities.has(item.id)
+      ) {
+        throw new Error("duplicate Responses item reference");
+      }
+      references.set(outputIndex, { id: item.id, done: false });
+      referenceIdentities.add(item.id);
+      return true;
+    }
+    if (!Number.isSafeInteger(rawIndex)) return false;
+    const outputIndex = rawIndex as number;
+    const reference = references.get(outputIndex);
+    if (!reference) return false;
+    if (
+      event !== "response.output_item.done" ||
+      reference.done ||
+      !item ||
+      item.type !== "item_reference" ||
+      item.id !== reference.id ||
+      Object.keys(item).some((key) => key !== "type" && key !== "id")
+    ) {
+      throw new Error(
+        `invalid Responses item_reference lifecycle for index ${outputIndex}`,
+      );
+    }
+    reference.done = true;
+    return true;
+  };
+  const assertReferenceLifecyclesComplete = (
+    references: ReadonlyMap<number, ReferenceLifecycle>,
+  ): void => {
+    for (const [outputIndex, reference] of references) {
+      if (!reference.done) {
+        throw new Error(
+          `Responses stream ended before item_reference completion for index ${outputIndex}`,
+        );
+      }
+    }
+  };
+  const assertRecallItemsCompleted = (
+    acc: ResponsesAccState,
+    recallIndices: readonly number[],
+  ): void => {
+    for (const outputIndex of recallIndices) {
+      const status = acc.rawItems.get(outputIndex)?.status;
+      if (status !== undefined && status !== "completed") {
+        throw new Error(
+          `recall function call did not complete for index ${outputIndex}`,
+        );
+      }
+    }
+  };
+  const stripHiddenReferenceOutput = (
+    parsed: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    const response = parsed.response as Record<string, unknown> | undefined;
+    if (!Array.isArray(response?.output)) return parsed;
+    const output = response.output.filter(
+      (item) =>
+        !(
+          item &&
+          typeof item === "object" &&
+          !Array.isArray(item) &&
+          (item as Record<string, unknown>).type === "item_reference" &&
+          typeof (item as Record<string, unknown>).id === "string" &&
+          referenceIdentities.has(
+            (item as Record<string, unknown>).id as string,
+          )
+        ),
+    );
+    if (output.length === response.output.length) return parsed;
+    return { ...parsed, response: { ...response, output } };
   };
   const reserveSyntheticIdentity = (
     syntheticId: string,
@@ -6270,6 +9168,8 @@ export function streamResponsesRecallAware(
   ): void => {
     if (
       syntheticIdentities.has(syntheticId) ||
+      referenceIdentities.has(syntheticId) ||
+      outputIdentities.has(syntheticId) ||
       states.some(
         (acc) =>
           [...acc.items.values()].some(
@@ -6325,11 +9225,11 @@ export function streamResponsesRecallAware(
     return encoder.encode(output);
   };
 
-  const finish = (resp: GatewayResponse): boolean => {
+  const finish = (resp: GatewayResponse, successful: boolean): boolean => {
     if (completionAttempted) return completed;
     completionAttempted = true;
     try {
-      opts.onComplete(resp);
+      opts.onComplete(resp, successful);
       completed = true;
       return true;
     } catch (err) {
@@ -6385,7 +9285,7 @@ export function streamResponsesRecallAware(
     const cancelLateReader = async (): Promise<void> => {
       try {
         const late = await operation;
-        await late.reader.cancel();
+        cancelAndReleaseReader(late.reader, signal.reason);
       } catch {
         // The aborted request no longer observes the callback result.
       }
@@ -6410,10 +9310,17 @@ export function streamResponsesRecallAware(
       signal.removeEventListener("abort", onAbort);
     }
     if (signal.aborted) {
-      void result.reader.cancel().catch(() => {});
+      cancelAndReleaseReader(result.reader, signal.reason);
       throw signal.reason;
     }
     return result;
+  };
+  const shiftedOutputIndex = (index: number, offset: number): number => {
+    const shifted = index + offset;
+    if (!Number.isSafeInteger(shifted) || shifted < 0) {
+      throw new Error("Responses output_index overflow");
+    }
+    return shifted;
   };
 
   /**
@@ -6506,14 +9413,14 @@ export function streamResponsesRecallAware(
     const finalOutput = buildOutputItems();
     const finalStatus = mapStatusFromStopReason(res.stopReason);
     const ru = res.usage ?? ZERO_USAGE;
-    const inclusiveInputTokens =
-      ru.inputTokens +
-      (ru.cacheReadInputTokens ?? 0) +
-      (ru.cacheCreationInputTokens ?? 0);
+    const inclusiveInputTokens = addUsageTokens(
+      addUsageTokens(ru.inputTokens, ru.cacheReadInputTokens ?? 0),
+      ru.cacheCreationInputTokens ?? 0,
+    );
     const usageData: Record<string, unknown> = {
       input_tokens: inclusiveInputTokens,
       output_tokens: ru.outputTokens,
-      total_tokens: inclusiveInputTokens + ru.outputTokens,
+      total_tokens: addUsageTokens(inclusiveInputTokens, ru.outputTokens),
     };
     if (
       ru.cacheReadInputTokens != null ||
@@ -6525,14 +9432,17 @@ export function streamResponsesRecallAware(
       };
     }
     const terminalEvent = state.terminalEvent ?? "response.completed";
+    const terminalResponse = state.terminalResponse;
     return formatResponsesEvent(
       terminalEvent,
       JSON.stringify({
         type: terminalEvent,
         response: {
+          ...terminalResponse,
           id: state.id,
           object: "response",
-          created_at: Math.floor(Date.now() / 1000),
+          created_at:
+            terminalResponse?.created_at ?? Math.floor(Date.now() / 1000),
           model: res.model || state.model,
           status: finalStatus,
           output: finalOutput,
@@ -6569,7 +9479,7 @@ export function streamResponsesRecallAware(
               role: "assistant",
               status: "completed",
             }),
-            content: item.content,
+            content: Array.isArray(raw?.content) ? raw.content : item.content,
           });
           continue;
         }
@@ -6591,13 +9501,15 @@ export function streamResponsesRecallAware(
           content: [{ type: "output_text", text: item.text, annotations: [] }],
         });
       } else {
+        const raw = state.rawItems.get(index);
         finalOutput.push({
+          ...raw,
           type: "function_call",
           id: item.id,
           call_id: item.callId,
           name: item.name,
           arguments: item.args,
-          status: "completed",
+          status: typeof raw?.status === "string" ? raw.status : "completed",
         });
       }
     }
@@ -6605,29 +9517,51 @@ export function streamResponsesRecallAware(
   }
 
   let resumeDemand: (() => void) | undefined;
+  const cleanupAbort = (): void =>
+    signal.removeEventListener("abort", onStreamAbort);
+  const onStreamAbort = (): void => {
+    resumeDemand?.();
+    resumeDemand = undefined;
+    if (keepaliveTimer) clearTimeout(keepaliveTimer);
+    keepaliveTimer = null;
+    if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
+    else void upstreamResponse.body?.cancel(signal.reason).catch(() => {});
+  };
+  signal.addEventListener("abort", onStreamAbort, { once: true });
+  if (signal.aborted) onStreamAbort();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       void (async () => {
         const waitForDemand = async (): Promise<void> => {
-          while (!cancelled && (controller.desiredSize ?? 1) <= 0) {
+          while (
+            !cancelled &&
+            !signal.aborted &&
+            (controller.desiredSize ?? 1) <= 0
+          ) {
             await new Promise<void>((resolve) => {
               resumeDemand = resolve;
             });
           }
+          signal.throwIfAborted();
         };
-        const safeEnqueue = async (chunk: Uint8Array): Promise<boolean> => {
+        const safeEnqueue = async (
+          chunk: Uint8Array,
+          afterEnqueue?: () => void,
+        ): Promise<boolean> => {
           if (cancelled) return false;
           await waitForDemand();
           if (cancelled) return false;
           try {
             controller.enqueue(sequenceChunk(chunk));
-            return true;
           } catch {
             cancelled = true;
             return false;
           }
+          afterEnqueue?.();
+          return true;
         };
         const safeClose = (): void => {
+          cleanupAbort();
           if (cancelled) return;
           try {
             controller.close();
@@ -6635,15 +9569,26 @@ export function streamResponsesRecallAware(
             // Already closed/cancelled
           }
         };
+        const safeError = (error: unknown): void => {
+          cleanupAbort();
+          if (cancelled) return;
+          try {
+            controller.error(error);
+          } catch {
+            // Already closed/cancelled.
+          }
+        };
 
         const resetKeepalive = (): void => {
           if (keepaliveTimer) clearTimeout(keepaliveTimer);
           keepaliveTimer = setTimeout(function tick() {
-            if (cancelled) return;
+            if (cancelled || signal.aborted) return;
             if ((controller.desiredSize ?? 1) > 0) {
               void safeEnqueue(keepaliveComment);
             }
-            keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+            if (!signal.aborted) {
+              keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+            }
           }, KEEPALIVE_INACTIVITY_MS);
         };
         const clearKeepalive = (): void => {
@@ -6655,7 +9600,7 @@ export function streamResponsesRecallAware(
         // Recall items are gateway-internal and must stay hidden on every exit,
         // including failures raised before marker replacement.
         const recallIndices = new Set<number>();
-        const referenceIndices = new Set<number>();
+        const referenceIndices = new Map<number, ReferenceLifecycle>();
 
         try {
           if (!upstreamResponse.body) {
@@ -6672,18 +9617,30 @@ export function streamResponsesRecallAware(
             { query: string; scope?: string; id?: string }
           >();
           // Ordered list of parsed recall invocations: { outputIndex, block }.
-          const pendingRecalls: Array<{
-            outputIndex: number;
-            contentPosition: number;
-            query: string;
-            scope?: string;
-            id?: string;
-            toolUseId: string;
-          }> = [];
+          const pendingRecalls: PendingResponsesRecall[] = [];
           // Whether any NON-recall function_call appeared (mixed-tools case).
           let otherToolSeen = false;
-          const deferredEvents: Uint8Array[] = [];
+          const unresolvedToolIndices = new Set<number>();
+          const unresolvedToolBytes = new Map<number, number>();
+          const deferredEvents: Array<{
+            chunk: Uint8Array;
+            candidateIndex?: number;
+          }> = [];
           let deferredBytes = 0;
+          const discardDeferredCandidate = (outputIndex: number): void => {
+            for (let index = deferredEvents.length - 1; index >= 0; index--) {
+              if (deferredEvents[index].candidateIndex === outputIndex) {
+                deferredEvents.splice(index, 1);
+              }
+            }
+          };
+          const promoteDeferredCandidate = (outputIndex: number): void => {
+            hiddenRecallBytes += unresolvedToolBytes.get(outputIndex) ?? 0;
+            unresolvedToolBytes.delete(outputIndex);
+            if (hiddenRecallBytes > maxHiddenRecallBytes) {
+              throw new Error("recall stream exceeded deferred event limit");
+            }
+          };
 
           resetKeepalive();
           for await (const { event, data } of parseSSEStream(reader, {
@@ -6710,41 +9667,34 @@ export function streamResponsesRecallAware(
                 throw new Error(`malformed JSON in Responses event ${event}`);
               }
               // Non-JSON keepalive/comment event — forward as-is.
-              if (recallIndices.size === 0 && event !== "message") {
-                await safeEnqueue(
-                  encoder.encode(formatResponsesEvent(event, data)),
-                );
+              if (event !== "message") {
+                const chunk = encoder.encode(formatResponsesEvent(event, data));
+                if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
+                  deferredBytes += chunk.byteLength;
+                  if (deferredBytes > maxDeferredBytes) {
+                    throw new Error(
+                      "recall stream exceeded deferred event limit",
+                    );
+                  }
+                  deferredEvents.push({ chunk });
+                } else {
+                  await safeEnqueue(chunk);
+                }
               }
               continue;
             }
             if (parsed.type !== event) {
               throw new Error(`Responses payload type does not match ${event}`);
             }
+            const normalizationState = normalizeCodexEvent(
+              state,
+              event,
+              parsed,
+            );
             validateResponseLifecycle(state, event, parsed);
+            seedImplicitCodexItem(state, normalizationState, event, parsed);
 
-            const rawOutputIndex = parsed.output_index;
-            const addedItem = parsed.item as
-              | Record<string, unknown>
-              | undefined;
-            if (
-              event === "response.output_item.added" &&
-              addedItem?.type === "item_reference"
-            ) {
-              if (
-                !Number.isSafeInteger(rawOutputIndex) ||
-                (rawOutputIndex as number) < 0
-              ) {
-                throw new Error(
-                  "invalid Responses output_index for item_reference",
-                );
-              }
-              referenceIndices.add(rawOutputIndex as number);
-              continue;
-            }
-            if (
-              Number.isSafeInteger(rawOutputIndex) &&
-              referenceIndices.has(rawOutputIndex as number)
-            ) {
+            if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
               continue;
             }
 
@@ -6754,75 +9704,125 @@ export function streamResponsesRecallAware(
               if (retainedStateBytes > maxRetainedStateBytes) {
                 throw new Error("Responses retained state exceeded byte limit");
               }
+              const implicitItem = state.rawItems.get(outputIndex);
+              if (
+                opts.validation === "codex" &&
+                event !== "response.output_item.added" &&
+                event !== "response.output_item.done" &&
+                implicitItem?.type === "function_call" &&
+                implicitItem.name === ""
+              ) {
+                unresolvedToolIndices.add(outputIndex);
+              }
             }
 
-            // Detect a recall function_call item from its `added` event.
+            let resolvedVisibleTool = false;
+            // Detect recall and unresolved sparse function-call identities.
             if (
-              event === "response.output_item.added" &&
+              (event === "response.output_item.added" ||
+                event === "response.output_item.done") &&
               outputIndex !== undefined
             ) {
               const item = parsed.item as Record<string, unknown> | undefined;
               const isRecallCall =
                 item?.type === "function_call" && item?.name === "recall";
               if (isRecallCall) {
+                unresolvedToolIndices.delete(outputIndex);
+                discardDeferredCandidate(outputIndex);
+                promoteDeferredCandidate(outputIndex);
                 recallIndices.add(outputIndex);
               } else if (item?.type === "function_call") {
-                otherToolSeen = true;
+                if (
+                  event === "response.output_item.added" &&
+                  opts.validation === "codex" &&
+                  item.name === ""
+                ) {
+                  unresolvedToolIndices.add(outputIndex);
+                } else {
+                  resolvedVisibleTool =
+                    unresolvedToolIndices.delete(outputIndex);
+                  unresolvedToolBytes.delete(outputIndex);
+                  otherToolSeen = true;
+                }
               }
+            }
+
+            if (
+              resolvedVisibleTool &&
+              recallIndices.size === 0 &&
+              unresolvedToolIndices.size === 0
+            ) {
+              for (const deferred of deferredEvents) {
+                if (!(await safeEnqueue(deferred.chunk))) break;
+              }
+              deferredEvents.length = 0;
+              deferredBytes = 0;
             }
 
             const isRecallEvent =
               outputIndex !== undefined && recallIndices.has(outputIndex);
+            const isUnresolvedToolEvent =
+              outputIndex !== undefined &&
+              unresolvedToolIndices.has(outputIndex);
 
             // Always accumulate into the internal state for postResponse.
             applyResponsesEvent(state, event, parsed);
+            if (
+              event === "response.output_item.done" &&
+              outputIndex !== undefined
+            ) {
+              preserveStreamedReasoning(state, outputIndex);
+            }
 
             // Suppress all events belonging to a recall item, but still count
             // them so malformed argument streams cannot grow without bound.
-            if (isRecallEvent && outputIndex !== undefined) {
-              const hiddenBytes = encoder.encode(
+            if (
+              (isRecallEvent || isUnresolvedToolEvent) &&
+              outputIndex !== undefined
+            ) {
+              const hiddenChunk = encoder.encode(
                 formatResponsesEvent(event, data),
-              ).byteLength;
+              );
+              const hiddenBytes = hiddenChunk.byteLength;
               deferredBytes += hiddenBytes;
-              hiddenRecallBytes += hiddenBytes;
+              if (isRecallEvent) {
+                hiddenRecallBytes += hiddenBytes;
+              } else {
+                unresolvedToolBytes.set(
+                  outputIndex,
+                  (unresolvedToolBytes.get(outputIndex) ?? 0) + hiddenBytes,
+                );
+              }
               if (
                 deferredBytes > maxDeferredBytes ||
                 hiddenRecallBytes > maxHiddenRecallBytes
               ) {
                 throw new Error("recall stream exceeded deferred event limit");
               }
-              if (event === "response.function_call_arguments.done") {
+              if (
+                event === "response.function_call_arguments.done" &&
+                isRecallEvent
+              ) {
                 parsedRecallInputs.set(
                   outputIndex,
                   parseRecallArguments(parsed.arguments),
                 );
               }
+              if (isUnresolvedToolEvent && !isRecallEvent) {
+                deferredEvents.push({
+                  chunk: hiddenChunk,
+                  candidateIndex: outputIndex,
+                });
+              }
               if (event === "response.output_item.done") {
-                const input = parsedRecallInputs.get(outputIndex);
-                if (!input) {
-                  throw new Error(
-                    `recall output completed before arguments for index ${outputIndex}`,
+                if (isRecallEvent) {
+                  collectCompletedRecall(
+                    state,
+                    outputIndex,
+                    parsedRecallInputs,
+                    pendingRecalls,
                   );
                 }
-                const query = input.query;
-                const recallItem = state.items.get(outputIndex);
-                const recallToolUseId =
-                  recallItem?.type === "tool_use" ? recallItem.callId : "";
-                const contentPosition = finalizeResponsesAcc(
-                  state,
-                ).content.findIndex(
-                  (block) =>
-                    block.type === "tool_use" && block.id === recallToolUseId,
-                );
-                pendingRecalls.push({
-                  outputIndex,
-                  contentPosition,
-                  query,
-                  scope: input.scope,
-                  id: input.id,
-                  toolUseId: recallToolUseId,
-                });
-                parsedRecallInputs.delete(outputIndex);
               }
               // Don't forward recall-item events to the client.
               continue;
@@ -6835,25 +9835,82 @@ export function streamResponsesRecallAware(
               event === "response.incomplete" ||
               event === "response.failed"
             ) {
-              assertOutputLifecyclesComplete(state);
-              assertTerminalOutputMatches(state, parsed);
+              const terminalParsed = stripHiddenReferenceOutput(parsed);
+              if (opts.validation === "codex") {
+                assertTerminalOutputMatches(
+                  state,
+                  terminalParsed,
+                  (outputIndex, item) => {
+                    if (item.type !== "function_call") return;
+                    if (item.name === RECALL_TOOL_NAME) {
+                      unresolvedToolIndices.delete(outputIndex);
+                      discardDeferredCandidate(outputIndex);
+                      promoteDeferredCandidate(outputIndex);
+                      recallIndices.add(outputIndex);
+                      collectCompletedRecall(
+                        state,
+                        outputIndex,
+                        parsedRecallInputs,
+                        pendingRecalls,
+                      );
+                    } else {
+                      unresolvedToolIndices.delete(outputIndex);
+                      unresolvedToolBytes.delete(outputIndex);
+                      otherToolSeen = true;
+                    }
+                  },
+                );
+                assertOutputLifecyclesComplete(state);
+              } else {
+                assertOutputLifecyclesComplete(state);
+                assertTerminalOutputMatches(state, terminalParsed);
+              }
+              assertReferenceLifecyclesComplete(referenceIndices);
+              assertRecallItemsCompleted(
+                state,
+                pendingRecalls.map((recall) => recall.outputIndex),
+              );
               if (pendingRecalls.length === 0) {
+                if (unresolvedToolIndices.size > 0) {
+                  throw new Error(
+                    "Responses terminal left sparse function identity unresolved",
+                  );
+                }
                 if (recallIndices.size > 0) {
                   throw new Error(
                     "recall stream ended before function arguments completed",
                   );
                 }
+                for (const deferred of deferredEvents) {
+                  if (!(await safeEnqueue(deferred.chunk))) break;
+                }
+                deferredEvents.length = 0;
+                deferredBytes = 0;
                 // No recall — forward the terminal event verbatim.
+                const finalResponse = finalizeResponsesAcc(state);
                 if (
                   !(await safeEnqueue(
-                    encoder.encode(formatResponsesEvent(event, data)),
+                    encoder.encode(
+                      formatResponsesEvent(
+                        event,
+                        terminalParsed === parsed
+                          ? data
+                          : JSON.stringify(terminalParsed),
+                      ),
+                    ),
+                    () => {
+                      terminalDelivered = true;
+                      finish(
+                        finalResponse,
+                        state.terminalEvent === "response.completed",
+                      );
+                    },
                   ))
                 )
                   break;
-                void reader.cancel().catch(() => {});
+                cancelAndReleaseReader(reader, signal.reason);
                 principalReader = null;
                 clearKeepalive();
-                finish(finalizeResponsesAcc(state));
                 safeClose();
                 return;
               }
@@ -6884,6 +9941,7 @@ export function streamResponsesRecallAware(
                 items: new Map(state.items),
                 rawItems: new Map(state.rawItems),
               };
+              transactionProviderUsage = { ...ZERO_USAGE };
               const pendingCommits: Array<() => void> = [];
               const transactionalEvents: Uint8Array[] = [];
               let transactionalBytes = 0;
@@ -6900,13 +9958,22 @@ export function streamResponsesRecallAware(
                 const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
                 reserveSyntheticIdentity(syntheticId, [state]);
                 const recallAcc = finalizeResponsesAcc(state);
+                const contentPosition = recallAcc.content.findIndex(
+                  (block) =>
+                    block.type === "tool_use" && block.id === recall.toolUseId,
+                );
+                if (contentPosition < 0) {
+                  throw new Error(
+                    "recall block not found in finalized response",
+                  );
+                }
                 const executed = await settleRecall({
                   query: recall.query,
                   scope: recall.scope,
                   id: recall.id,
                   outputIndex: recall.outputIndex,
                   toolUseId: recall.toolUseId,
-                  contentPosition: recall.contentPosition,
+                  contentPosition,
                   acc: recallAcc,
                   signal,
                 });
@@ -6929,10 +9996,14 @@ export function streamResponsesRecallAware(
                     text: executed.anchorText,
                   });
                   queueTransactional(anchorChunk);
-                  for (const chunk of deferredEvents) queueTransactional(chunk);
+                  for (const deferred of deferredEvents) {
+                    queueTransactional(deferred.chunk);
+                  }
                 } else {
                   queueTransactional(anchorChunk);
-                  for (const chunk of deferredEvents) queueTransactional(chunk);
+                  for (const deferred of deferredEvents) {
+                    queueTransactional(deferred.chunk);
+                  }
                 }
                 deferredEvents.length = 0;
                 deferredBytes = 0;
@@ -6950,7 +10021,7 @@ export function streamResponsesRecallAware(
                       resultText: executed.resultText,
                       acc: recallAcc,
                       toolUseId: recall.toolUseId,
-                      contentPosition: recall.contentPosition,
+                      contentPosition,
                       signal,
                     });
                     let recallDepth = pendingRecalls.length;
@@ -6958,24 +10029,91 @@ export function streamResponsesRecallAware(
                       activeReader = follow.reader;
                       const contState = makeResponsesAccState();
                       const contRecallIndices = new Set<number>();
-                      const contReferenceIndices = new Set<number>();
+                      const contReferenceIndices = new Map<
+                        number,
+                        ReferenceLifecycle
+                      >();
                       const contRecallInputs = new Map<
                         number,
                         { query: string; scope?: string; id?: string }
                       >();
-                      const contPending: typeof pendingRecalls = [];
-                      const heldContinuationEvents: Uint8Array[] = [];
+                      const contPending: PendingResponsesRecall[] = [];
+                      const contUnresolvedToolIndices = new Set<number>();
+                      const contUnresolvedToolBytes = new Map<number, number>();
+                      const heldContinuationEvents: Array<{
+                        chunk: Uint8Array;
+                        candidateIndex?: number;
+                      }> = [];
                       let heldContinuationBytes = 0;
+                      const holdContinuation = (
+                        chunk: Uint8Array,
+                        candidateIndex?: number,
+                      ): void => {
+                        heldContinuationBytes += chunk.byteLength;
+                        if (heldContinuationBytes > maxDeferredBytes) {
+                          throw new Error(
+                            "recall continuation exceeded deferred event limit",
+                          );
+                        }
+                        heldContinuationEvents.push({
+                          chunk,
+                          ...(candidateIndex !== undefined
+                            ? { candidateIndex }
+                            : {}),
+                        });
+                      };
+                      const discardContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        for (
+                          let index = heldContinuationEvents.length - 1;
+                          index >= 0;
+                          index--
+                        ) {
+                          if (
+                            heldContinuationEvents[index].candidateIndex ===
+                            outputIndex
+                          ) {
+                            heldContinuationEvents.splice(index, 1);
+                          }
+                        }
+                      };
+                      const flushHeldContinuation = (): void => {
+                        for (const held of heldContinuationEvents) {
+                          queueTransactional(held.chunk);
+                        }
+                        heldContinuationEvents.length = 0;
+                        heldContinuationBytes = 0;
+                      };
                       let continuationRecallBytes = 0;
+                      const promoteContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        const bytes =
+                          contUnresolvedToolBytes.get(outputIndex) ?? 0;
+                        contUnresolvedToolBytes.delete(outputIndex);
+                        continuationRecallBytes += bytes;
+                        hiddenRecallBytes += bytes;
+                        if (
+                          continuationRecallBytes > maxDeferredBytes ||
+                          hiddenRecallBytes > maxHiddenRecallBytes
+                        ) {
+                          throw new Error(
+                            "recall continuation exceeded deferred event limit",
+                          );
+                        }
+                      };
                       let contOtherTool = false;
                       let continuationCompleted = false;
                       let continuationFailed = false;
-                      const contIndex =
+                      const contIndex = shiftedOutputIndex(
                         Math.max(
                           -1,
                           ...state.rawItems.keys(),
                           ...state.items.keys(),
-                        ) + 1;
+                        ),
+                        1,
+                      );
                       try {
                         for await (const {
                           event: ce,
@@ -7005,13 +10143,18 @@ export function streamResponsesRecallAware(
                                 `malformed JSON in Responses event ${ce}`,
                               );
                             }
-                            if (
-                              contRecallIndices.size === 0 &&
-                              ce !== "message"
-                            ) {
-                              queueTransactional(
-                                encoder.encode(formatResponsesEvent(ce, cd)),
+                            if (ce !== "message") {
+                              const chunk = encoder.encode(
+                                formatResponsesEvent(ce, cd),
                               );
+                              if (
+                                contRecallIndices.size > 0 ||
+                                contUnresolvedToolIndices.size > 0
+                              ) {
+                                holdContinuation(chunk);
+                              } else {
+                                queueTransactional(chunk);
+                              }
                             }
                             continue;
                           }
@@ -7020,32 +10163,24 @@ export function streamResponsesRecallAware(
                               `Responses payload type does not match ${ce}`,
                             );
                           }
+                          const contNormalizationState = normalizeCodexEvent(
+                            contState,
+                            ce,
+                            cparsed,
+                          );
                           validateResponseLifecycle(contState, ce, cparsed);
-                          const rawContinuationIndex = cparsed.output_index;
-                          const addedContinuationItem = cparsed.item as
-                            | Record<string, unknown>
-                            | undefined;
+                          seedImplicitCodexItem(
+                            contState,
+                            contNormalizationState,
+                            ce,
+                            cparsed,
+                          );
                           if (
-                            ce === "response.output_item.added" &&
-                            addedContinuationItem?.type === "item_reference"
-                          ) {
-                            if (
-                              !Number.isSafeInteger(rawContinuationIndex) ||
-                              (rawContinuationIndex as number) < 0
-                            ) {
-                              throw new Error(
-                                "invalid Responses output_index for item_reference",
-                              );
-                            }
-                            contReferenceIndices.add(
-                              rawContinuationIndex as number,
-                            );
-                            continue;
-                          }
-                          if (
-                            Number.isSafeInteger(rawContinuationIndex) &&
-                            contReferenceIndices.has(
-                              rawContinuationIndex as number,
+                            consumeReferenceEvent(
+                              contState,
+                              contReferenceIndices,
+                              ce,
+                              cparsed,
                             )
                           ) {
                             continue;
@@ -7062,9 +10197,21 @@ export function streamResponsesRecallAware(
                                 "Responses retained state exceeded byte limit",
                               );
                             }
+                            const implicitItem = contState.rawItems.get(ci);
+                            if (
+                              opts.validation === "codex" &&
+                              ce !== "response.output_item.added" &&
+                              ce !== "response.output_item.done" &&
+                              implicitItem?.type === "function_call" &&
+                              implicitItem.name === ""
+                            ) {
+                              contUnresolvedToolIndices.add(ci);
+                            }
                           }
+                          let resolvedVisibleTool = false;
                           if (
-                            ce === "response.output_item.added" &&
+                            (ce === "response.output_item.added" ||
+                              ce === "response.output_item.done") &&
                             ci !== undefined
                           ) {
                             const item = cparsed.item as
@@ -7074,20 +10221,71 @@ export function streamResponsesRecallAware(
                               item?.type === "function_call" &&
                               item.name === RECALL_TOOL_NAME
                             ) {
+                              contUnresolvedToolIndices.delete(ci);
+                              discardContinuationCandidate(ci);
+                              promoteContinuationCandidate(ci);
                               contRecallIndices.add(ci);
                             } else if (item?.type === "function_call") {
-                              contOtherTool = true;
+                              if (
+                                ce === "response.output_item.added" &&
+                                opts.validation === "codex" &&
+                                item.name === ""
+                              ) {
+                                contUnresolvedToolIndices.add(ci);
+                              } else {
+                                resolvedVisibleTool =
+                                  contUnresolvedToolIndices.delete(ci);
+                                contUnresolvedToolBytes.delete(ci);
+                                contOtherTool = true;
+                              }
                             }
                           }
+                          if (
+                            resolvedVisibleTool &&
+                            contRecallIndices.size === 0 &&
+                            contUnresolvedToolIndices.size === 0
+                          ) {
+                            flushHeldContinuation();
+                          }
                           applyResponsesEvent(contState, ce, cparsed);
+                          if (
+                            ce === "response.output_item.done" &&
+                            ci !== undefined
+                          ) {
+                            preserveStreamedReasoning(contState, ci);
+                          }
                           const isContRecall =
                             ci !== undefined && contRecallIndices.has(ci);
-                          if (isContRecall) {
-                            const hiddenBytes = encoder.encode(
-                              formatResponsesEvent(ce, cd),
-                            ).byteLength;
-                            continuationRecallBytes += hiddenBytes;
-                            hiddenRecallBytes += hiddenBytes;
+                          const isContUnresolvedTool =
+                            ci !== undefined &&
+                            contUnresolvedToolIndices.has(ci);
+                          if (
+                            (isContRecall || isContUnresolvedTool) &&
+                            ci !== undefined
+                          ) {
+                            const hiddenChunk = encoder.encode(
+                              formatResponsesEvent(
+                                ce,
+                                JSON.stringify({
+                                  ...cparsed,
+                                  output_index: shiftedOutputIndex(
+                                    ci,
+                                    contIndex,
+                                  ),
+                                }),
+                              ),
+                            );
+                            const hiddenBytes = hiddenChunk.byteLength;
+                            if (isContRecall) {
+                              continuationRecallBytes += hiddenBytes;
+                              hiddenRecallBytes += hiddenBytes;
+                            } else {
+                              contUnresolvedToolBytes.set(
+                                ci,
+                                (contUnresolvedToolBytes.get(ci) ?? 0) +
+                                  hiddenBytes,
+                              );
+                            }
                             if (
                               continuationRecallBytes > maxDeferredBytes ||
                               hiddenRecallBytes > maxHiddenRecallBytes
@@ -7097,39 +10295,26 @@ export function streamResponsesRecallAware(
                               );
                             }
                             if (
-                              ce === "response.function_call_arguments.done"
+                              ce === "response.function_call_arguments.done" &&
+                              isContRecall
                             ) {
                               contRecallInputs.set(
                                 ci,
                                 parseRecallArguments(cparsed.arguments),
                               );
                             }
+                            if (isContUnresolvedTool && !isContRecall) {
+                              holdContinuation(hiddenChunk, ci);
+                            }
                             if (ce === "response.output_item.done") {
-                              const input = contRecallInputs.get(ci);
-                              if (!input) {
-                                throw new Error(
-                                  `recall continuation completed before arguments for index ${ci}`,
+                              if (isContRecall) {
+                                collectCompletedRecall(
+                                  contState,
+                                  ci,
+                                  contRecallInputs,
+                                  contPending,
                                 );
                               }
-                              const item = contState.items.get(ci);
-                              const toolUseId =
-                                item?.type === "tool_use" ? item.callId : "";
-                              const contentPosition = finalizeResponsesAcc(
-                                contState,
-                              ).content.findIndex(
-                                (block) =>
-                                  block.type === "tool_use" &&
-                                  block.id === toolUseId,
-                              );
-                              contPending.push({
-                                outputIndex: ci,
-                                contentPosition,
-                                query: input.query,
-                                scope: input.scope,
-                                id: input.id,
-                                toolUseId,
-                              });
-                              contRecallInputs.delete(ci);
                             }
                             continue;
                           }
@@ -7139,8 +10324,59 @@ export function streamResponsesRecallAware(
                             ce === "response.incomplete" ||
                             ce === "response.failed"
                           ) {
-                            assertOutputLifecyclesComplete(contState);
-                            assertTerminalOutputMatches(contState, cparsed);
+                            const terminalParsed =
+                              stripHiddenReferenceOutput(cparsed);
+                            if (opts.validation === "codex") {
+                              assertTerminalOutputMatches(
+                                contState,
+                                terminalParsed,
+                                (outputIndex, item) => {
+                                  if (item.type !== "function_call") return;
+                                  if (item.name === RECALL_TOOL_NAME) {
+                                    contUnresolvedToolIndices.delete(
+                                      outputIndex,
+                                    );
+                                    discardContinuationCandidate(outputIndex);
+                                    promoteContinuationCandidate(outputIndex);
+                                    contRecallIndices.add(outputIndex);
+                                    collectCompletedRecall(
+                                      contState,
+                                      outputIndex,
+                                      contRecallInputs,
+                                      contPending,
+                                    );
+                                  } else {
+                                    contUnresolvedToolIndices.delete(
+                                      outputIndex,
+                                    );
+                                    contUnresolvedToolBytes.delete(outputIndex);
+                                    contOtherTool = true;
+                                  }
+                                },
+                              );
+                              assertOutputLifecyclesComplete(contState);
+                            } else {
+                              assertOutputLifecyclesComplete(contState);
+                              assertTerminalOutputMatches(
+                                contState,
+                                terminalParsed,
+                              );
+                            }
+                            assertReferenceLifecyclesComplete(
+                              contReferenceIndices,
+                            );
+                            assertRecallItemsCompleted(
+                              contState,
+                              contPending.map((recall) => recall.outputIndex),
+                            );
+                            if (contUnresolvedToolIndices.size > 0) {
+                              throw new Error(
+                                "Responses continuation left sparse function identity unresolved",
+                              );
+                            }
+                            if (contRecallIndices.size === 0) {
+                              flushHeldContinuation();
+                            }
                             continuationCompleted =
                               contState.terminalEvent !== undefined;
                             continuationFailed =
@@ -7159,42 +10395,39 @@ export function streamResponsesRecallAware(
                                 ce,
                                 JSON.stringify({
                                   ...cparsed,
-                                  output_index: ci + contIndex,
+                                  output_index: shiftedOutputIndex(
+                                    ci,
+                                    contIndex,
+                                  ),
                                 }),
                               ),
                             );
-                            if (contRecallIndices.size > 0) {
-                              heldContinuationBytes += shifted.byteLength;
-                              if (heldContinuationBytes > maxDeferredBytes) {
-                                throw new Error(
-                                  "recall continuation exceeded deferred event limit",
-                                );
-                              }
-                              heldContinuationEvents.push(shifted);
+                            if (
+                              contRecallIndices.size > 0 ||
+                              contUnresolvedToolIndices.size > 0
+                            ) {
+                              holdContinuation(shifted);
                             } else queueTransactional(shifted);
                           } else if (ce !== "message") {
                             const chunk = encoder.encode(
                               formatResponsesEvent(ce, cd),
                             );
-                            if (contRecallIndices.size > 0) {
-                              heldContinuationBytes += chunk.byteLength;
-                              if (heldContinuationBytes > maxDeferredBytes) {
-                                throw new Error(
-                                  "recall continuation exceeded deferred event limit",
-                                );
-                              }
-                              heldContinuationEvents.push(chunk);
+                            if (
+                              contRecallIndices.size > 0 ||
+                              contUnresolvedToolIndices.size > 0
+                            ) {
+                              holdContinuation(chunk);
                             } else queueTransactional(chunk);
                           }
                         }
                       } finally {
-                        void follow.reader.cancel().catch(() => {});
+                        cancelAndReleaseReader(follow.reader, signal.reason);
                       }
                       const mergeContinuation = (): void => {
                         for (const item of contState.rawItems.values()) {
                           const itemIdentities = [item.id, item.call_id].filter(
                             (value): value is string =>
-                              typeof value === "string",
+                              typeof value === "string" && value.length > 0,
                           );
                           for (const existing of state.items.values()) {
                             const existingIdentities = new Set(
@@ -7205,7 +10438,7 @@ export function streamResponsesRecallAware(
                                   : undefined,
                               ].filter(
                                 (value): value is string =>
-                                  typeof value === "string",
+                                  typeof value === "string" && value.length > 0,
                               ),
                             );
                             if (
@@ -7222,7 +10455,7 @@ export function streamResponsesRecallAware(
                             const existingIdentities = new Set(
                               [existing.id, existing.call_id].filter(
                                 (value): value is string =>
-                                  typeof value === "string",
+                                  typeof value === "string" && value.length > 0,
                               ),
                             );
                             if (
@@ -7237,13 +10470,24 @@ export function streamResponsesRecallAware(
                           }
                         }
                         for (const [idx, item] of contState.items) {
-                          state.items.set(idx + contIndex, item);
+                          state.items.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
                         }
                         for (const [idx, item] of contState.rawItems) {
-                          state.rawItems.set(idx + contIndex, item);
+                          state.rawItems.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
                         }
                         mergeUsage(state.usage, contState.usage);
                       };
+                      assertUsageMergeable(
+                        transactionProviderUsage,
+                        contState.usage,
+                      );
+                      mergeUsage(transactionProviderUsage, contState.usage);
                       if (continuationFailed) {
                         throw new Error(
                           "recall follow-up returned response.failed",
@@ -7251,7 +10495,7 @@ export function streamResponsesRecallAware(
                       }
                       if (
                         !continuationCompleted ||
-                        contState.items.size === 0
+                        contState.rawItems.size === 0
                       ) {
                         throw new Error(
                           "recall follow-up ended without a completed response containing output",
@@ -7275,6 +10519,7 @@ export function streamResponsesRecallAware(
                           "incomplete recall continuation cannot execute another recall",
                         );
                       }
+                      assertUsageMergeable(state.usage, contState.usage);
                       let nextRecall: (typeof contPending)[number] | undefined;
                       let nextExecuted:
                         | {
@@ -7292,9 +10537,27 @@ export function streamResponsesRecallAware(
                           );
                         }
                         recallDepth++;
-                        nextRecall = contPending[0];
                         nextAcc = finalizeResponsesAcc(contState);
-                        const nextSyntheticId = `msg_${state.id || "lore"}_${nextRecall.outputIndex + contIndex}`;
+                        const pendingNextRecall = contPending[0];
+                        const contentPosition = nextAcc.content.findIndex(
+                          (block) =>
+                            block.type === "tool_use" &&
+                            block.id === pendingNextRecall.toolUseId,
+                        );
+                        if (contentPosition < 0) {
+                          throw new Error(
+                            "recall block not found in finalized continuation",
+                          );
+                        }
+                        nextRecall = {
+                          ...pendingNextRecall,
+                          contentPosition,
+                        };
+                        const shiftedRecallIndex = shiftedOutputIndex(
+                          nextRecall.outputIndex,
+                          contIndex,
+                        );
+                        const nextSyntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
                         reserveSyntheticIdentity(nextSyntheticId, [
                           state,
                           contState,
@@ -7319,19 +10582,23 @@ export function streamResponsesRecallAware(
                         queueTransactional(
                           encoder.encode(
                             emitTextItem(
-                              nextRecall.outputIndex + contIndex,
+                              shiftedRecallIndex,
                               nextExecuted.anchorText,
                             ),
                           ),
                         );
                       }
-                      for (const chunk of heldContinuationEvents) {
-                        queueTransactional(chunk);
+                      for (const held of heldContinuationEvents) {
+                        queueTransactional(held.chunk);
+                      }
+                      for (const index of contRecallIndices) {
+                        recallIndices.add(shiftedOutputIndex(index, contIndex));
                       }
                       mergeContinuation();
                       if (!nextRecall || !nextExecuted || contOtherTool) {
                         state.stopReason = contState.stopReason;
                         state.terminalEvent = contState.terminalEvent;
+                        state.terminalResponse = contState.terminalResponse;
                         break;
                       }
                       follow = await settleFollowUp({
@@ -7383,21 +10650,57 @@ export function streamResponsesRecallAware(
                 }
               }
               if (
-                !(await safeEnqueue(encoder.encode(buildTerminal(visibleResp))))
+                !(await safeEnqueue(
+                  encoder.encode(buildTerminal(visibleResp)),
+                  () => {
+                    terminalDelivered = true;
+                    const successful =
+                      state.terminalEvent === "response.completed";
+                    let transactionSettled = false;
+                    const transaction = {
+                      commit: () => {
+                        if (transactionSettled) return;
+                        try {
+                          for (const commit of pendingCommits) commit();
+                          transactionSettled = true;
+                          pendingCommits.length = 0;
+                          transactionRollbacks.length = 0;
+                          transactionBaseline = undefined;
+                        } catch (error) {
+                          pendingCommits.length = 0;
+                          transaction.rollback();
+                          throw error;
+                        }
+                      },
+                      rollback: () => {
+                        if (transactionSettled) return;
+                        transactionSettled = true;
+                        pendingCommits.length = 0;
+                        rollbackTransaction();
+                      },
+                    };
+                    deferredTransaction = transaction;
+                    if (successful) opts.onTransactionReady?.(transaction);
+                    if (!finish(visibleResp, successful)) {
+                      transaction.rollback();
+                      throw new Error(
+                        "recall onComplete failed after delivery",
+                      );
+                    }
+                    if (successful) {
+                      if (!opts.onTransactionReady) transaction.commit();
+                    } else {
+                      transaction.rollback();
+                    }
+                  },
+                ))
               ) {
                 throw new Error(
                   "client disconnected while delivering recall terminal",
                 );
               }
-              terminalDelivered = true;
               if (cancelled) throw signal.reason;
-              if (!finish(visibleResp)) {
-                throw new Error("recall onComplete failed after delivery");
-              }
-              for (const commit of pendingCommits.splice(0)) commit();
-              transactionRollbacks.length = 0;
-              transactionBaseline = undefined;
-              void reader.cancel().catch(() => {});
+              cancelAndReleaseReader(reader, signal.reason);
               principalReader = null;
               safeClose();
               return;
@@ -7405,12 +10708,12 @@ export function streamResponsesRecallAware(
 
             // Non-terminal, non-recall event: forward verbatim.
             const chunk = encoder.encode(formatResponsesEvent(event, data));
-            if (recallIndices.size > 0) {
+            if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
               deferredBytes += chunk.byteLength;
               if (deferredBytes > maxDeferredBytes) {
                 throw new Error("recall stream exceeded deferred event limit");
               }
-              deferredEvents.push(chunk);
+              deferredEvents.push({ chunk });
             } else if (!(await safeEnqueue(chunk))) {
               break;
             }
@@ -7422,10 +10725,14 @@ export function streamResponsesRecallAware(
         } catch (err) {
           rollbackTransaction();
           if (principalReader) {
-            void principalReader.cancel().catch(() => {});
+            cancelAndReleaseReader(principalReader, signal.reason);
           }
           principalReader = null;
           clearKeepalive();
+          if (opts.signal?.aborted && !cancelled) {
+            safeError(opts.signal.reason);
+            return;
+          }
           if (terminalDelivered) {
             safeClose();
             return;
@@ -7437,7 +10744,11 @@ export function streamResponsesRecallAware(
               `openai-responses recall-aware stream aborted${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
             );
             if (cancelled || signal.aborted) {
-              safeClose();
+              if (opts.signal?.aborted && !cancelled) {
+                safeError(opts.signal.reason);
+              } else {
+                safeClose();
+              }
               return;
             }
           } else {
@@ -7446,6 +10757,30 @@ export function streamResponsesRecallAware(
               err,
             );
           }
+          const failedResponse = finalizeResponsesAcc(state);
+          try {
+            assertUsageMergeable(
+              failedResponse.usage ?? ZERO_USAGE,
+              transactionProviderUsage,
+            );
+            failedResponse.usage ??= { ...ZERO_USAGE };
+            mergeUsage(failedResponse.usage, transactionProviderUsage);
+          } catch (usageError) {
+            log.error(
+              "failed to merge recall continuation usage for accounting:",
+              usageError,
+            );
+          }
+          transactionProviderUsage = { ...ZERO_USAGE };
+          failedResponse.content = failedResponse.content.filter(
+            (block) =>
+              (block.type !== "tool_use" || block.name !== RECALL_TOOL_NAME) &&
+              (block.type !== "text" || !parseRecallAnchor(block.text)),
+          );
+          failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
+            (item) =>
+              item.type !== "function_call" || item.name !== RECALL_TOOL_NAME,
+          );
           await safeEnqueue(
             encoder.encode(
               formatResponsesEvent(
@@ -7469,21 +10804,20 @@ export function streamResponsesRecallAware(
                 }),
               ),
             ),
+            () => finish(failedResponse, false),
           );
-          const failedResponse = finalizeResponsesAcc(state);
-          failedResponse.content = failedResponse.content.filter(
-            (block) =>
-              (block.type !== "tool_use" || block.name !== RECALL_TOOL_NAME) &&
-              (block.type !== "text" || !parseRecallAnchor(block.text)),
-          );
-          failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
-            (item) =>
-              item.type !== "function_call" || item.name !== RECALL_TOOL_NAME,
-          );
-          finish(failedResponse);
           safeClose();
         }
-      })();
+      })().catch((error) => {
+        cleanupAbort();
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = null;
+        try {
+          controller.error(error);
+        } catch {
+          // Already closed/cancelled.
+        }
+      });
     },
 
     pull() {
@@ -7494,20 +10828,15 @@ export function streamResponsesRecallAware(
       resumeDemand?.();
       resumeDemand = undefined;
       cancelled = true;
-      rollbackTransaction();
+      cleanupAbort();
+      if (deferredTransaction) deferredTransaction.rollback();
+      else rollbackTransaction();
       abortController.abort(
         new DOMException("Responses client disconnected", "AbortError"),
       );
       if (keepaliveTimer) clearTimeout(keepaliveTimer);
-      try {
-        if (activeReader) {
-          void activeReader.cancel();
-        } else {
-          void upstreamResponse.body?.cancel();
-        }
-      } catch {
-        // Best-effort cancellation
-      }
+      if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
+      else void upstreamResponse.body?.cancel(signal.reason).catch(() => {});
     },
   });
 
@@ -7529,7 +10858,98 @@ export function streamResponsesRecallAware(
  *  - "openai": OpenAI Chat Completions API format
  *  - "openai-responses": OpenAI Responses API format
  */
-async function accumulateNonStreamResponse(
+const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
+const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
+
+export async function readForegroundBody(
+  response: Response,
+  diagnostic: boolean,
+  onTruncated?: () => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const limit = diagnostic
+    ? MAX_FOREGROUND_ERROR_BYTES
+    : MAX_FOREGROUND_RESPONSE_BYTES;
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await readStreamChunk(reader, { signal });
+      if (done) break;
+      if (!value) continue;
+      const remaining = limit - bytes;
+      if (value.byteLength >= remaining) {
+        if (!diagnostic) {
+          if (value.byteLength > remaining) {
+            throw new Error(`foreground response exceeded ${limit} byte limit`);
+          }
+        } else {
+          // Reaching the cap is conservatively treated as truncation: proving
+          // exact EOF would require one more read, which may stall forever.
+          onTruncated?.();
+          if (remaining > 0) chunks.push(value.subarray(0, remaining));
+          bytes += Math.max(0, remaining);
+          break;
+        }
+      }
+      chunks.push(value);
+      bytes += value.byteLength;
+    }
+    const body = Buffer.concat(chunks);
+    if (diagnostic) return new TextDecoder().decode(body);
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(body);
+    } catch {
+      throw new Error("malformed upstream response UTF-8");
+    }
+  } finally {
+    cancelAndReleaseReader(reader);
+  }
+}
+
+async function preserveUpstreamErrorResponse(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<Response> {
+  let truncated = false;
+  const body = await readForegroundBody(
+    response,
+    true,
+    () => {
+      truncated = true;
+    },
+    signal,
+  );
+  const headers = new Headers(response.headers);
+  // The retained body may be shorter than the provider's original payload.
+  for (const name of [
+    "connection",
+    "content-encoding",
+    "content-length",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "set-cookie",
+    "set-cookie2",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ]) {
+    headers.delete(name);
+  }
+  if (truncated) headers.set("x-lore-body-truncated", "true");
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+export async function accumulateNonStreamResponse(
   upstreamResponse: Response,
   protocol:
     | "anthropic"
@@ -7537,6 +10957,9 @@ async function accumulateNonStreamResponse(
     | "openai-responses"
     | "vertex"
     | "gemini" = "anthropic",
+  codex = false,
+  signal?: AbortSignal,
+  requireValidCompletion = false,
 ): Promise<GatewayResponse> {
   // Some providers (the ChatGPT/Copilot/Codex backend, DeepSeek) return an SSE
   // stream even when stream: false was sent — sometimes WITHOUT the
@@ -7547,36 +10970,305 @@ async function accumulateNonStreamResponse(
   // "data: {...}" / "event: ..." text — LOREAI-GATEWAY-38 / -1P). Otherwise
   // parse the single JSON body.
   const contentType = upstreamResponse.headers.get("content-type") ?? "";
-  const body = await upstreamResponse.text();
+  const body = await readForegroundBody(
+    upstreamResponse,
+    false,
+    undefined,
+    signal,
+  );
   if (looksLikeSSE(contentType, body)) {
     const sse = new Response(body, {
       headers: { "content-type": "text/event-stream" },
     });
     switch (protocol) {
       case "openai":
-        return accumulateOpenAISSEStream(sse);
+        return accumulateOpenAISSEStream(sse, {
+          signal,
+          strict: true,
+          stopAtTerminal: true,
+          consumeUntilDone: true,
+        });
       case "openai-responses":
-        return accumulateResponsesSSEStream(sse);
+        return accumulateResponsesSSEStream(sse, {
+          signal,
+          validation: codex ? "codex" : "public",
+          stopAtTerminal: true,
+          requireCompletedTerminal: true,
+        });
       case "gemini":
-        return accumulateGeminiSSEStream(sse);
+        return accumulateGeminiSSEStream(sse, {
+          signal,
+          strict: true,
+          stopAtTerminal: true,
+        });
       default:
         // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
-        return accumulateSSEResponse(sse);
+        return accumulateSSEResponse(sse, {
+          signal,
+          strict: true,
+          stopAtTerminal: true,
+        });
     }
   }
 
   const json = JSON.parse(body) as Record<string, unknown>;
+  if (protocol === "openai-responses") {
+    const { response, status } = parseResponsesNonStreamEnvelope(json);
+    if (status !== "completed") {
+      throw new ResponsesTerminalError(response, status);
+    }
+    return response;
+  }
+  if (requireValidCompletion) {
+    assertValidNonStreamCompletion(json, protocol);
+  }
   switch (protocol) {
     case "openai":
       return accumulateOpenAINonStreamJSON(json);
-    case "openai-responses":
-      return accumulateResponsesNonStreamJSON(json);
     case "gemini":
       return parseGeminiResponseJSON(json);
     default:
       // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
       // Anthropic non-streaming JSON shape).
       return accumulateAnthropicNonStreamJSON(json);
+  }
+}
+
+function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {
+  response: GatewayResponse;
+  status: string;
+} {
+  const response = accumulateResponsesNonStreamJSON(json);
+  const status = typeof json.status === "string" ? json.status : "unknown";
+  if (status === "completed" || status === "incomplete") {
+    assertValidNonStreamCompletion(json, "openai-responses");
+  }
+  return { response, status };
+}
+
+async function preserveIncompleteResponsesTerminal(
+  operation: Promise<GatewayResponse>,
+): Promise<GatewayResponse> {
+  try {
+    return await operation;
+  } catch (error) {
+    if (
+      error instanceof ResponsesTerminalError &&
+      error.status === "incomplete"
+    ) {
+      return error.response;
+    }
+    throw error;
+  }
+}
+
+function assertValidNonStreamCompletion(
+  json: Record<string, unknown>,
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
+): void {
+  if (json.error !== undefined && json.error !== null) {
+    throw new Error("upstream response contained an error");
+  }
+
+  if (protocol === "openai") {
+    const choices = json.choices;
+    const first = Array.isArray(choices) ? choices[0] : undefined;
+    if (
+      !first ||
+      typeof first !== "object" ||
+      Array.isArray(first) ||
+      !(first as Record<string, unknown>).message ||
+      typeof (first as Record<string, unknown>).finish_reason !== "string"
+    ) {
+      throw new Error("upstream OpenAI request did not complete");
+    }
+    return;
+  }
+
+  if (protocol === "openai-responses") {
+    const status = json.status;
+    if (
+      (status !== "completed" && status !== "incomplete") ||
+      typeof json.id !== "string" ||
+      typeof json.model !== "string" ||
+      !Array.isArray(json.output) ||
+      !json.usage ||
+      typeof json.usage !== "object" ||
+      Array.isArray(json.usage)
+    ) {
+      throw new Error("upstream Responses request did not complete");
+    }
+    const seenIdentities = new Set<string>();
+    for (const rawItem of json.output) {
+      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const item = rawItem as Record<string, unknown>;
+      if (
+        typeof item.type !== "string" ||
+        !item.type ||
+        !isSupportedResponsesOutputItemType(item.type) ||
+        typeof item.id !== "string" ||
+        !item.id ||
+        seenIdentities.has(item.id)
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      seenIdentities.add(item.id);
+      if (item.type === "message") {
+        const validItemStatus =
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (
+          item.role !== "assistant" ||
+          !validItemStatus ||
+          !Array.isArray(item.content)
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const rawPart of item.content) {
+          if (
+            !rawPart ||
+            typeof rawPart !== "object" ||
+            Array.isArray(rawPart)
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          const part = rawPart as Record<string, unknown>;
+          if (
+            (part.type === "output_text" && typeof part.text !== "string") ||
+            (part.type === "refusal" && typeof part.refusal !== "string") ||
+            (part.type !== "output_text" && part.type !== "refusal")
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+        }
+      } else if (item.type === "function_call") {
+        const validItemStatus =
+          item.status === "completed" ||
+          item.status === "failed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (
+          typeof item.call_id !== "string" ||
+          !item.call_id ||
+          seenIdentities.has(item.call_id) ||
+          typeof item.name !== "string" ||
+          !item.name ||
+          typeof item.arguments !== "string" ||
+          !validItemStatus
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        seenIdentities.add(item.call_id);
+      } else if (item.type === "reasoning") {
+        const validItemStatus =
+          item.status === undefined ||
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (!validItemStatus) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const [field, partType] of [
+          ["summary", "summary_text"],
+          ["content", "reasoning_text"],
+        ] as const) {
+          const parts = item[field];
+          if (parts === undefined) continue;
+          if (!Array.isArray(parts)) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          for (const rawPart of parts) {
+            if (
+              !rawPart ||
+              typeof rawPart !== "object" ||
+              Array.isArray(rawPart) ||
+              (rawPart as Record<string, unknown>).type !== partType ||
+              typeof (rawPart as Record<string, unknown>).text !== "string"
+            ) {
+              throw new Error("upstream Responses request did not complete");
+            }
+          }
+        }
+        if (
+          item.encrypted_content !== undefined &&
+          item.encrypted_content !== null &&
+          typeof item.encrypted_content !== "string"
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      } else if (item.type === "item_reference") {
+        // A standalone non-stream response has no streamed item lifecycle to
+        // resolve this reference against; accepting it would silently erase
+        // provider output during normalization.
+        throw new Error("upstream Responses request did not complete");
+      } else {
+        if (
+          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      }
+    }
+    if (status === "incomplete") {
+      const details = json.incomplete_details;
+      if (
+        details !== undefined &&
+        details !== null &&
+        (typeof details !== "object" ||
+          Array.isArray(details) ||
+          typeof (details as Record<string, unknown>).reason !== "string")
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const reason =
+        details && typeof details === "object" && !Array.isArray(details)
+          ? (details as Record<string, unknown>).reason
+          : undefined;
+      if (
+        reason !== undefined &&
+        reason !== "max_output_tokens" &&
+        reason !== "content_filter"
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+    }
+    return;
+  }
+
+  if (protocol === "gemini") {
+    const candidates = json.candidates;
+    const first = Array.isArray(candidates) ? candidates[0] : undefined;
+    const promptFeedback = json.promptFeedback;
+    const blockReason =
+      promptFeedback &&
+      typeof promptFeedback === "object" &&
+      !Array.isArray(promptFeedback)
+        ? (promptFeedback as Record<string, unknown>).blockReason
+        : undefined;
+    if (
+      (!first ||
+        typeof first !== "object" ||
+        Array.isArray(first) ||
+        typeof (first as Record<string, unknown>).finishReason !== "string") &&
+      typeof blockReason !== "string"
+    ) {
+      throw new Error("upstream Gemini request did not complete");
+    }
+    return;
+  }
+
+  if (
+    json.type !== "message" ||
+    json.role !== "assistant" ||
+    typeof json.id !== "string" ||
+    typeof json.model !== "string" ||
+    !Array.isArray(json.content) ||
+    typeof json.stop_reason !== "string" ||
+    !json.usage ||
+    typeof json.usage !== "object" ||
+    Array.isArray(json.usage)
+  ) {
+    throw new Error("upstream Anthropic request did not complete");
   }
 }
 
@@ -7587,7 +11279,82 @@ export function accumulateOpenAINonStreamJSON(
   json: Record<string, unknown>,
 ): GatewayResponse {
   const content: GatewayContentBlock[] = [];
+  if (json.choices !== undefined && !Array.isArray(json.choices)) {
+    throw new Error("malformed OpenAI response choice");
+  }
   const choices = json.choices as Array<Record<string, unknown>> | undefined;
+  const logicalChoiceIndices = new Set<number>();
+  for (let position = 0; position < (choices?.length ?? 0); position++) {
+    const choice = choices?.[position];
+    if (!choice || typeof choice !== "object" || Array.isArray(choice)) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const logicalIndex =
+      choice.index === undefined ? position : (choice.index as number);
+    if (
+      !Number.isSafeInteger(logicalIndex) ||
+      logicalIndex < 0 ||
+      logicalChoiceIndices.has(logicalIndex)
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    logicalChoiceIndices.add(logicalIndex);
+  }
+  for (const choice of choices ?? []) {
+    const choiceToolIdentities = new Set<string>();
+    if (
+      !choice ||
+      typeof choice !== "object" ||
+      Array.isArray(choice) ||
+      (choice.index !== undefined &&
+        (!Number.isSafeInteger(choice.index) ||
+          (choice.index as number) < 0)) ||
+      (choice.finish_reason !== undefined &&
+        choice.finish_reason !== null &&
+        typeof choice.finish_reason !== "string") ||
+      !choice.message ||
+      typeof choice.message !== "object" ||
+      Array.isArray(choice.message)
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const candidateMessage = choice.message as Record<string, unknown>;
+    if (
+      (candidateMessage.content !== undefined &&
+        candidateMessage.content !== null &&
+        typeof candidateMessage.content !== "string") ||
+      (candidateMessage.role !== undefined &&
+        typeof candidateMessage.role !== "string")
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const candidateCalls = candidateMessage?.tool_calls;
+    if (candidateCalls === undefined) continue;
+    if (!Array.isArray(candidateCalls)) {
+      throw new Error("malformed OpenAI response tool identity");
+    }
+    for (const call of candidateCalls) {
+      if (!call || typeof call !== "object" || Array.isArray(call)) {
+        throw new Error("malformed OpenAI response choice");
+      }
+      const typedCall = call as Record<string, unknown>;
+      const fn = typedCall.function;
+      if (
+        !fn ||
+        typeof fn !== "object" ||
+        Array.isArray(fn) ||
+        typeof (fn as Record<string, unknown>).name !== "string" ||
+        typeof (fn as Record<string, unknown>).arguments !== "string"
+      ) {
+        throw new Error("malformed OpenAI response choice");
+      }
+      const id = asString(typedCall.id);
+      if (!id || choiceToolIdentities.has(id)) {
+        throw new Error("malformed OpenAI response tool identity");
+      }
+      choiceToolIdentities.add(id);
+    }
+  }
   const firstChoice = choices?.[0];
   const message = firstChoice?.message as Record<string, unknown> | undefined;
 
@@ -7600,6 +11367,7 @@ export function accumulateOpenAINonStreamJSON(
       | Array<Record<string, unknown>>
       | undefined;
     if (toolCalls) {
+      const toolIdentities = new Set<string>();
       for (const tc of toolCalls) {
         const fn = tc.function as Record<string, unknown> | undefined;
         let input: unknown = {};
@@ -7610,9 +11378,14 @@ export function accumulateOpenAINonStreamJSON(
             input = fn.arguments;
           }
         }
+        const id = asString(tc.id);
+        if (!id || toolIdentities.has(id)) {
+          throw new Error("malformed OpenAI response tool identity");
+        }
+        toolIdentities.add(id);
         content.push({
           type: "tool_use",
-          id: asString(tc.id),
+          id,
           name: asString(fn?.name),
           input,
         });
@@ -7627,7 +11400,10 @@ export function accumulateOpenAINonStreamJSON(
   else if (finishReason === "length") stopReason = "max_tokens";
   else if (finishReason === "tool_calls") stopReason = "tool_use";
 
-  const usage = json.usage as Record<string, unknown> | undefined;
+  const usage = validateOpenAIUsage(
+    json.usage,
+    "malformed OpenAI response usage",
+  );
   const promptTokensDetails = usage?.prompt_tokens_details as
     | Record<string, number>
     | undefined;
@@ -7667,7 +11443,13 @@ export function accumulateResponsesNonStreamJSON(
   );
 
   if (replayableOutput) {
+    const identities = new Set<string>();
     for (const item of replayableOutput) {
+      const itemId = asString(item.id);
+      if (!itemId || identities.has(itemId)) {
+        throw new Error("malformed Responses response item identity");
+      }
+      identities.add(itemId);
       if (item.type === "message") {
         const msgContent = item.content as
           | Array<Record<string, unknown>>
@@ -7688,9 +11470,14 @@ export function accumulateResponsesNonStreamJSON(
             input = item.arguments;
           }
         }
+        const id = asString(item.call_id ?? item.id);
+        if (!id || identities.has(id)) {
+          throw new Error("malformed Responses response tool identity");
+        }
+        identities.add(id);
         content.push({
           type: "tool_use",
-          id: asString(item.call_id ?? item.id),
+          id,
           name: asString(item.name),
           input,
         });
@@ -7701,12 +11488,22 @@ export function accumulateResponsesNonStreamJSON(
   // Map Responses API status to gateway stop reason
   const status = json.status as string | undefined;
   let stopReason = "end_turn";
-  if (status === "incomplete") stopReason = "max_tokens";
+  if (status === "incomplete") {
+    const details = json.incomplete_details;
+    const reason =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? (details as Record<string, unknown>).reason
+        : undefined;
+    stopReason = reason === "content_filter" ? "content_filter" : "max_tokens";
+  }
   if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
     stopReason = "tool_use";
   }
 
-  const usage = json.usage as Record<string, unknown> | undefined;
+  const usage = validateResponsesUsage(
+    json.usage,
+    "malformed Responses response usage",
+  );
   // Responses API reports cache details under `input_tokens_details`; fall back
   // to `prompt_tokens_details` (Chat Completions shape) for resilience across
   // OpenAI-compatible providers.
@@ -7841,28 +11638,6 @@ export function responsesAnchorContext(
     ...visibleContent,
     ...responsesProvenanceContent(response, new Map(), stopBeforeToolUseId),
   ]);
-}
-
-/**
- * Accumulate a streaming upstream Anthropic SSE response into a GatewayResponse.
- *
- * Used for Anthropic requests where we need to convert the accumulated
- * response to another format before returning to the client.
- */
-async function _accumulateStreamResponse(
-  upstreamResponse: Response,
-): Promise<GatewayResponse> {
-  const accumulator = createStreamAccumulator();
-  if (!upstreamResponse.body) {
-    throw new Error("Upstream response has no body");
-  }
-  const reader = upstreamResponse.body.getReader();
-
-  for await (const { event, data } of parseSSEStream(reader)) {
-    accumulator.processEvent(event, data);
-  }
-
-  return accumulator.getResponse();
 }
 
 /**
@@ -8009,6 +11784,7 @@ export function recordCacheTurnUsage(
   requestBody?: string,
   /** Active gen_ai.chat span to enrich with divergence diagnostics. */
   genAiSpan?: Sentry.Span,
+  endSpan?: () => void,
 ): CacheBustCause | undefined {
   // Capture the idle-resume flag up front: it is consumed (set false) inside
   // the block below but is still needed afterwards by recordCacheUsage so a
@@ -8085,7 +11861,8 @@ export function recordCacheTurnUsage(
   // session-state bookkeeping that never touches the span, and ending the span
   // first means a throw in recordCacheUsage can't leak an unfinished span.
   if (genAiSpan) {
-    genAiSpan.end();
+    if (endSpan) endSpan();
+    else genAiSpan.end();
   }
 
   // --- Consecutive bust tracking for tier-based decisions ---
@@ -8119,7 +11896,7 @@ export function recordCacheTurnUsage(
  * is pure in-memory (temporal-adapter.ts) and MUST run BETWEEN the two stores —
  * the user message is stored with its ORIGINAL tool_result content, before
  * resolveToolResults strips it — so it stays inside the same savepoint. The
- * stores are idempotent UPSERTs keyed by message id, so the all-or-nothing
+ * stores are idempotent UPSERTs keyed by owned message identity, so the all-or-nothing
  * rollback on a mid-batch error is recoverable: the next turn re-includes and
  * re-stores these messages.
  *
@@ -8141,16 +11918,24 @@ export function storeTurnTemporal(input: {
 
   if (noStore) {
     // Still resolve tool results in-memory (needed downstream), but write nothing.
-    resolveToolResults(loreMessages);
+    resolveToolResults(
+      loreMessages,
+      (message) =>
+        temporal.storedMessageIdIfProjectExists({
+          projectPath,
+          sessionID: message.info.sessionID,
+          sourceID: message.info.id,
+          legacySourceID: message.legacySourceID,
+        }) ?? message.info.id,
+    );
     return;
   }
 
-  // Resolve (and, if needed, lazily backfill/merge) the project OUTSIDE the
-  // savepoint. `ensureProject` can reach `mergeProjectInternal`'s raw
-  // `BEGIN IMMEDIATE` on the NULL-git_remote backfill-with-conflict path, which
-  // would nest inside the savepoint's transaction and throw "cannot start a
-  // transaction within a transaction". Warming it here makes the `ensureProject`
-  // calls inside temporal.store / recordToolCalls cheap cache hits. (#1084.)
+  // Resolve (and, if needed, lazily backfill/merge) the project before the
+  // temporal savepoint. mergeProjectInternal is nested-savepoint safe, so this
+  // whole operation may itself run inside a larger transaction. Warming here
+  // makes the ensureProject calls inside temporal.store / recordToolCalls cheap
+  // cache hits. (#1084.)
   ensureProject(projectPath);
 
   withSavepoint("post_response_temporal", () => {
@@ -8163,6 +11948,7 @@ export function storeTurnTemporal(input: {
           projectPath,
           info: loreMessages[i].info,
           parts: loreMessages[i].parts,
+          legacySourceID: loreMessages[i].legacySourceID,
         });
         // The latest user message carries tool_result blocks that resolve the
         // PRIOR assistant turn's tool calls — record their outcomes
@@ -8171,6 +11957,7 @@ export function storeTurnTemporal(input: {
           projectPath,
           info: loreMessages[i].info,
           parts: loreMessages[i].parts,
+          legacySourceID: loreMessages[i].legacySourceID,
         });
         break;
       }
@@ -8179,7 +11966,14 @@ export function storeTurnTemporal(input: {
     // Resolve tool results for gradient transform (merges tool_result into
     // assistant parts, strips from user messages — needed for reconstruct-
     // after-eviction pattern but not for temporal storage above).
-    resolveToolResults(loreMessages);
+    resolveToolResults(loreMessages, (message) =>
+      temporal.storedMessageId({
+        projectPath,
+        sessionID: message.info.sessionID,
+        sourceID: message.info.id,
+        legacySourceID: message.legacySourceID,
+      }),
+    );
 
     // Build and store the assistant response message.
     // Strip recall marker text blocks — they contain the raw query string and
@@ -8190,6 +11984,7 @@ export function storeTurnTemporal(input: {
     const assistantMsg = gatewayMessagesToLore(
       [{ role: "assistant", content: assistantContent }],
       sessionID,
+      loreMessages.length,
     )[0];
     updateAssistantMessageTokens(assistantMsg, input.usage, input.model);
     if (assistantContent.length > 0) {
@@ -8197,6 +11992,7 @@ export function storeTurnTemporal(input: {
         projectPath,
         info: assistantMsg.info,
         parts: assistantMsg.parts,
+        legacySourceID: assistantMsg.legacySourceID,
       });
     }
     // Always record structured tool-call traces — even when the assistant
@@ -8207,15 +12003,44 @@ export function storeTurnTemporal(input: {
       projectPath,
       info: assistantMsg.info,
       parts: assistantMsg.parts,
+      legacySourceID: assistantMsg.legacySourceID,
     });
   });
+}
+
+function accountConversationUsage(
+  usage: GatewayUsage,
+  model: string,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+): AnthropicUsage {
+  const usageForSentry: AnthropicUsage = {
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cache_read_input_tokens: usage.cacheReadInputTokens,
+    cache_creation_input_tokens: usage.cacheCreationInputTokens,
+  };
+  setSentryCacheContext(usage);
+  emitCostMetric(
+    model,
+    usageForSentry,
+    "conversation",
+    resolvedConversationTTL,
+  );
+  recordConversationCost(
+    sessionID,
+    model,
+    usageForSentry,
+    resolvedConversationTTL,
+  );
+  return usageForSentry;
 }
 
 /**
  * Run after a successful response: calibrate, store temporal messages,
  * and schedule background work (distillation, curation).
  */
-function postResponse(
+function postResponseForTenant(
   req: GatewayRequest,
   resp: GatewayResponse,
   sessionState: SessionState,
@@ -8224,13 +12049,19 @@ function postResponse(
   requestBody?: string,
   /** Active gen_ai.chat span to finalize with usage attributes. */
   genAiSpan?: Sentry.Span,
-): void {
+  /** Storage policy captured when this turn resolved its session. */
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  postResponseStartObserver?.();
   const { sessionID, projectPath } = sessionState;
 
   // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
   const usage = resp.usage ?? ZERO_USAGE;
 
   try {
+    confirmKnownSessionHeader(req, sessionState, config);
+
     // --- Calibrate overhead from real token counts ---
     const actualInput =
       (usage.inputTokens ?? 0) +
@@ -8239,23 +12070,10 @@ function postResponse(
     calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
 
     // --- Sentry cache context + cost metric ---
-    setSentryCacheContext(usage);
-    const usageForSentry: AnthropicUsage = {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cache_read_input_tokens: usage.cacheReadInputTokens,
-      cache_creation_input_tokens: usage.cacheCreationInputTokens,
-    };
-    emitCostMetric(
+    const usageForSentry = accountConversationUsage(
+      usage,
       resp.model,
-      usageForSentry,
-      "conversation",
-      sessionState.resolvedConversationTTL,
-    );
-    recordConversationCost(
       sessionID,
-      resp.model,
-      usageForSentry,
       sessionState.resolvedConversationTTL,
     );
     if (genAiSpan) {
@@ -8269,14 +12087,33 @@ function postResponse(
     // the whole pipeline. The seam also enriches and ENDS genAiSpan (before its
     // own recordCacheUsage call) so the extraction is ordering-identical to the
     // original inlined block. See issue #928.
+    if (suppressTemporalStorage) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+      sessionState.cacheAnalytics.lastNormalizedBody = null;
+      sessionState.cacheAnalytics.lastRequestBodyLength = 0;
+    }
     recordCacheTurnUsage(
       sessionState,
       usage,
       resp.model,
       projectPath,
-      requestBody,
+      suppressTemporalStorage ? undefined : requestBody,
       genAiSpan,
+      endSpan,
     );
+    // Admin credentials are authorized at dispatch time and never retained in
+    // session snapshots. The idle warmer still receives gateway-global extras,
+    // so prevent it from replaying a cached body to a client-selected endpoint
+    // that is outside every configured trusted base.
+    if (
+      Object.keys(config.upstreamExtraHeaders).length > 0 &&
+      sessionState.lastUpstream &&
+      Object.keys(
+        extraHeadersForUpstream(config, sessionState.lastUpstream.url),
+      ).length === 0
+    ) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+    }
 
     // Capture previous stop reason before it's overwritten below (line ~1667).
     // Used to detect tool-use continuation turns for gap recording filtering.
@@ -8294,8 +12131,7 @@ function postResponse(
     // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
     // intentionally dropped — the seed row never exists, so the later
     // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
-    const noStore =
-      sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
+    const noStore = suppressTemporalStorage;
 
     // Persist (and tool-trace) this turn's messages, batched into one savepoint.
     // Extracted seam — see storeTurnTemporal (#1084).
@@ -8421,94 +12257,6 @@ function postResponse(
         }
       }
     }
-    // Capture the full routing snapshot from this request. Workers, cache
-    // warmer, and idle handler all read from this single source of truth
-    // instead of reconstructing from individual last* fields.
-    const lpProvider = extractProviderHeader(req.rawHeaders);
-    const lpRoute = lpProvider ? resolveProviderRoute(lpProvider) : null;
-    const lpHeaderUpstream = extractUpstreamUrlHeader(req.rawHeaders);
-    // MUST mirror `providerRouteUsable` in forwardToUpstream: self-URL-building
-    // routes (bedrock-mantle builds its region URL from config; vertex likewise)
-    // are usable with a null route url. Without this, a `X-Lore-Provider:
-    // bedrock` session would record the wrong base URL in the UpstreamSnapshot
-    // that workers/warmer/idle treat as source of truth.
-    const lpSelfUrlBuilding =
-      lpRoute?.bedrockMantle === true || lpRoute?.protocol === "vertex";
-    const lpRouteUsable =
-      lpRoute && (lpRoute.url != null || lpHeaderUpstream || lpSelfUrlBuilding)
-        ? lpRoute
-        : null;
-    const snapshotProtocol:
-      | "anthropic"
-      | "openai"
-      | "openai-responses"
-      | "vertex"
-      | "gemini" =
-      req.protocol === "openai-responses"
-        ? "openai-responses"
-        : req.protocol === "gemini"
-          ? // Mirror forwardToUpstream: native gemini ingress always stays gemini.
-            "gemini"
-          : (lpRouteUsable?.protocol ??
-            resolveUpstreamRoute(req.model)?.protocol ??
-            req.protocol);
-    // Mirror forwardToUpstream exactly (same shared predicate).
-    const lpBedrockMantle = isBedrockMantleDispatch(
-      lpRouteUsable,
-      snapshotProtocol,
-    );
-
-    // Self-URL-building routes derive their base from config (region) — mirror
-    // effectiveUpstreamBase so the snapshot url isn't empty/wrong. bedrock-mantle
-    // uses the regional mantle endpoint (wire protocol stays anthropic).
-    const lpSelfBuiltUrl = lpBedrockMantle
-      ? bedrockMantleUrl(config.bedrockRegion)
-      : snapshotProtocol === "vertex"
-        ? `https://${vertexHost(config.vertexRegion)}`
-        : null;
-
-    const upstreamSnapshot: UpstreamSnapshot = {
-      url: lpHeaderUpstream ?? lpSelfBuiltUrl ?? lpRoute?.url ?? "",
-      protocol: snapshotProtocol,
-      providerID: lpProvider || undefined,
-      model: req.model,
-      headers: forwardClientHeaders(req.rawHeaders),
-    };
-    // Apply LORE_UPSTREAM_EXTRA_HEADERS to the snapshot so cache-warming
-    // and other session-level follow-up requests inherit the user-supplied
-    // extra headers. (The per-request `forwardToUpstream` already overlays
-    // extras on the actual upstream call — this keeps the snapshot in sync
-    // for any consumer that reads it back.)
-    applyUpstreamExtraHeaders(
-      upstreamSnapshot.headers,
-      config.upstreamExtraHeaders,
-    );
-    // Detect provider switch: if the model or provider changed, the cached
-    // warmup body is stale (different model field at byte 10). Clear it to
-    // avoid false cache-bust warnings ("early divergence at byte 10") and
-    // wasted warmup requests that can never hit the cache prefix.
-    const prevUpstream = sessionState.lastUpstream;
-    if (
-      prevUpstream &&
-      (prevUpstream.model !== upstreamSnapshot.model ||
-        prevUpstream.providerID !== upstreamSnapshot.providerID)
-    ) {
-      sessionState.cacheAnalytics.lastRequestBody = null;
-    }
-
-    sessionState.lastUpstream = upstreamSnapshot;
-    saveSessionTracking(sessionID, {
-      lastUpstream: JSON.stringify({ ...upstreamSnapshot, headers: {} }),
-    });
-    // Store per-provider snapshot so workers/cache-warmer can look up the
-    // correct URL and credentials when the session uses multiple providers.
-    if (upstreamSnapshot.providerID) {
-      sessionState.upstreamByProvider.set(
-        upstreamSnapshot.providerID,
-        upstreamSnapshot,
-      );
-    }
-
     // Reset warming state if session was marked dead or had active warming.
     // Dead flag is cleared so the next break gets a fresh ROI analysis.
     // warmupCount is reset so the break-even cap starts from 0 on the next break.
@@ -8571,12 +12319,103 @@ function postResponse(
     }
 
     // --- Schedule background work (fire-and-forget) ---
+    saveSessionTracking(sessionID, {
+      messageCount: sessionState.messageCount,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+      projectPath: sessionState.projectPath || null,
+      projectPathProvisional: sessionState.projectPathProvisional === true,
+      ...(sessionState.compactionAnomalyPending
+        ? { compactionAnomalyPending: true }
+        : {}),
+    });
+    if (!sessionState.headerSessionId) {
+      const result = learnHeaders(
+        sessionState.candidateHeaders,
+        req.rawHeaders,
+      );
+      sessionState.candidateHeaders = result.updatedCandidates;
+    }
     if (!noStore) {
       scheduleBackgroundWork(sessionState, config);
     }
+    return true;
   } catch (e) {
     log.error("post-response processing failed:", e);
+    return false;
+  } finally {
+    endSpan?.();
   }
+}
+
+/** Record validated provider usage without publishing successful-turn state. */
+function accountUnsuccessfulResponse(
+  resp: GatewayResponse,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+  genAiSpan: Sentry.Span | undefined,
+  endSpan: () => void,
+  markDirty?: () => void,
+): void {
+  const usage = resp.usage ?? ZERO_USAGE;
+  const hasUsage = Object.values(usage).some(
+    (tokens) => typeof tokens === "number" && tokens > 0,
+  );
+  try {
+    if (hasUsage) {
+      markDirty?.();
+      const usageForSentry = accountConversationUsage(
+        usage,
+        resp.model,
+        sessionID,
+        resolvedConversationTTL,
+      );
+      if (genAiSpan) {
+        setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
+      }
+    }
+  } finally {
+    genAiSpan?.setStatus({
+      code: 2,
+      message: "upstream response did not complete",
+    });
+    endSpan();
+  }
+}
+
+function conversationTTLForAccounting(
+  sessionID: string,
+): "5m" | "1h" | undefined {
+  const liveTTL = sessions.get(sessionID)?.resolvedConversationTTL;
+  if (liveTTL === "5m" || liveTTL === "1h") return liveTTL;
+  const persistedTTL = loadSessionTracking(sessionID)?.resolvedConversationTTL;
+  return persistedTTL === "5m" || persistedTTL === "1h"
+    ? persistedTTL
+    : undefined;
+}
+
+function postResponse(
+  req: GatewayRequest,
+  resp: GatewayResponse,
+  sessionState: SessionState,
+  config: GatewayConfig,
+  requestBody?: string,
+  genAiSpan?: Sentry.Span,
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  return withTenant(sessionState.storageTenantId ?? "", () =>
+    postResponseForTenant(
+      req,
+      resp,
+      sessionState,
+      config,
+      requestBody,
+      genAiSpan,
+      suppressTemporalStorage,
+      endSpan,
+    ),
+  );
 }
 
 /**
@@ -8594,11 +12433,15 @@ function trackBackground(p: Promise<unknown>): void {
   void p.finally(() => inFlightBackground.delete(p));
 }
 
-function scheduleBackgroundWork(
+function scheduleBackgroundWorkForTenant(
   sessionState: SessionState,
   config: GatewayConfig,
 ): void {
   const { sessionID, projectPath } = sessionState;
+  const signal = AbortSignal.any([
+    pipelineGenerationAbort.signal,
+    sessionLifecycleSignal(sessionID),
+  ]);
 
   // Skip background work when the session's auth credential is stale and no
   // fresh fallback is available — worker LLM calls would just 401.
@@ -8632,7 +12475,11 @@ function scheduleBackgroundWork(
   if (
     !config.workerApiKey &&
     model &&
-    !resolveAuth(sessionID, model.providerID)
+    !hasWorkerSessionAuth(
+      sessionID,
+      model.providerID,
+      matchingProviderSnapshot(sessionState, model.providerID)?.protocol,
+    )
   )
     return;
 
@@ -8672,23 +12519,26 @@ function scheduleBackgroundWork(
   }
   if (urgentFromGradient || urgentFromCompaction) {
     trackBackground(
-      distillation
-        .run({
-          llm,
-          projectPath,
-          sessionID,
-          model,
-          force: true,
-          urgent: true,
-          callType: "direct",
-          // Never run meta-distillation while the conversation cache is warm.
-          // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
-          // synthetic distilled prefix at messages[0/1] on the next turn. That
-          // early-message rewrite is a real prompt-cache bust. Idle-time meta in
-          // idle.ts remains enabled because the cache is already cold there.
-          skipMeta: true,
-        })
-        .catch((e) => log.error("background distillation failed:", e)),
+      withTenant(sessionState.storageTenantId ?? "", () =>
+        distillation
+          .run({
+            llm,
+            projectPath,
+            sessionID,
+            model,
+            force: true,
+            urgent: true,
+            callType: "direct",
+            signal,
+            // Never run meta-distillation while the conversation cache is warm.
+            // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
+            // synthetic distilled prefix at messages[0/1] on the next turn. That
+            // early-message rewrite is a real prompt-cache bust. Idle-time meta in
+            // idle.ts remains enabled because the cache is already cold there.
+            skipMeta: true,
+          })
+          .catch((e) => log.error("background distillation failed:", e)),
+      ),
     );
   } else if (
     !isBackgroundPaused(workerProviderID) &&
@@ -8716,17 +12566,20 @@ function scheduleBackgroundWork(
         );
         runBackground(
           () =>
-            distillation.run({
-              llm,
-              projectPath,
-              sessionID,
-              model,
-              skipMeta: true,
-              callType: batchQueueEnabled ? "batch" : "direct",
-              workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-              // #627 Phase 1: stamp the session's gitHead on every distilled row.
-              metadata: buildSessionMetadata(sessionState.gitHead),
-            }),
+            withTenant(sessionState.storageTenantId ?? "", () =>
+              distillation.run({
+                llm,
+                projectPath,
+                sessionID,
+                model,
+                skipMeta: true,
+                callType: batchQueueEnabled ? "batch" : "direct",
+                workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+                signal,
+                // #627 Phase 1: stamp the session's gitHead on every distilled row.
+                metadata: buildSessionMetadata(sessionState.gitHead),
+              }),
+            ),
           `incremental-distill session=${sessionID.slice(0, 16)}`,
           workerProviderID,
         ).catch((e) => log.error("background distillation failed:", e));
@@ -8791,28 +12644,32 @@ function scheduleBackgroundWork(
     trackBackground(
       runBackground(
         () =>
-          Sentry.startSpan(
-            {
-              name: "lore.curator",
-              op: "lore.curation",
-              attributes: { trigger: "in-flight" },
-            },
-            () =>
-              curator.run({
-                llm,
-                projectPath,
-                sessionID,
-                model,
-                workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
-                // #627 Phase 1: stamp the session's gitHead on curator entries.
-                metadata: buildSessionMetadata(sessionState.gitHead),
-              }),
+          withTenant(sessionState.storageTenantId ?? "", () =>
+            Sentry.startSpan(
+              {
+                name: "lore.curator",
+                op: "lore.curation",
+                attributes: { trigger: "in-flight" },
+              },
+              () =>
+                curator.run({
+                  llm,
+                  projectPath,
+                  sessionID,
+                  model,
+                  workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                  signal,
+                  // #627 Phase 1: stamp the session's gitHead on curator entries.
+                  metadata: buildSessionMetadata(sessionState.gitHead),
+                }),
+            ),
           ),
         `in-flight-curation session=${sessionID.slice(0, 16)}`,
         workerProviderID,
       )
         .then((result) => {
           if (!result) return; // skipped by circuit breaker
+          signal.throwIfAborted();
           sessionState.turnsSinceCuration = 0;
           saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
           if (
@@ -8839,6 +12696,15 @@ function scheduleBackgroundWork(
         }),
     );
   }
+}
+
+export function scheduleBackgroundWork(
+  sessionState: SessionState,
+  config: GatewayConfig,
+): void {
+  withTenant(sessionState.storageTenantId ?? "", () =>
+    scheduleBackgroundWorkForTenant(sessionState, config),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -8870,9 +12736,12 @@ export async function generateCompactionSummary(opts: {
   config: GatewayConfig;
   previousSummary?: string;
   sessionUpstream?: { providerID?: string; modelID?: string };
+  signal?: AbortSignal;
+  trackOperation?: (operation: Promise<unknown>) => void;
 }): Promise<string | null> {
   const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
     opts;
+  opts.signal?.throwIfAborted();
 
   // 1. Bring distillations current. Compaction does NOT make a dedicated
   //    "compaction" LLM call anymore — its only LLM work is distilling the
@@ -8884,28 +12753,41 @@ export async function generateCompactionSummary(opts: {
   if (temporal.undistilledCount(projectPath, sessionID) > 0) {
     const llm = getLLMClient(config);
     const model = getWorkerModel(sessionUpstream);
-    await distillation.run({
-      llm,
-      projectPath,
-      sessionID,
-      model,
-      force: true,
-      urgent: true,
-      callType: "direct",
-      workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-      // #627 Phase 1: stamp the session's gitHead on urgent-compaction rows.
-      // Compaction is invoked via HTTP intercept or /v1/compact, so we look up
-      // the session by ID rather than threading state through the call.
-      metadata: buildSessionMetadata(sessions.get(sessionID)?.gitHead),
-    });
+    await promiseAgainstAbort(() => {
+      const operation = distillation.run({
+        llm,
+        projectPath,
+        sessionID,
+        model,
+        force: true,
+        urgent: true,
+        callType: "direct",
+        signal: opts.signal,
+        workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+        // #627 Phase 1: stamp the session's gitHead on urgent-compaction rows.
+        // Compaction is invoked via HTTP intercept or /v1/compact, so we look up
+        // the session by ID rather than threading state through the call.
+        metadata: buildSessionMetadata(sessions.get(sessionID)?.gitHead),
+      });
+      opts.trackOperation?.(operation);
+      return operation;
+    }, opts.signal);
   }
 
   // 2. Load distillation summaries + long-term knowledge.
   const distillations = distillation.loadForSession(projectPath, sessionID);
   const cfg = loreConfig();
   const entries = cfg.knowledge.enabled
-    ? await ltm.forProjectOffloaded(projectPath, cfg.crossProject)
+    ? await promiseAgainstAbort(() => {
+        const operation = ltm.forProjectOffloaded(
+          projectPath,
+          cfg.crossProject,
+        );
+        opts.trackOperation?.(operation);
+        return operation;
+      }, opts.signal)
     : [];
+  opts.signal?.throwIfAborted();
   const knowledge = entries.length
     ? formatKnowledge(
         entries.map((e) => ({
@@ -8938,29 +12820,65 @@ export async function generateCompactionSummary(opts: {
 // Case 1: Compaction interception
 // ---------------------------------------------------------------------------
 
-async function handleCompaction(
+async function handleCompactionInner(
   req: GatewayRequest,
   config: GatewayConfig,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
   if (!req.rawHeaders["x-lore-project"]) {
     const markerProject = extractProjectMarker(req.messages);
     if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
   }
   const pathResult = getProjectPath(req.system, req.rawHeaders);
-
-  const { sessionID } = await identifySession(req, pathResult.path);
-  stripContextMarkers(req.messages);
-  const sessionState = getOrCreateSession(
-    sessionID,
+  const credential = extractAuth(req.rawHeaders);
+  if (!credential) {
+    return errorResponse(401, "A provider credential is required");
+  }
+  const sessionState = resolveAuthenticatedDirectSession(
+    req,
     pathResult.path,
-    pathResult.source,
-    requestCredentialFingerprint(req.rawHeaders),
-  );
-  const projectPath = resolveSessionProjectPath(
-    pathResult,
-    sessionState,
     config,
+    false,
   );
+  if (
+    !sessionState ||
+    (!sessionState.lastUpstream &&
+      !streamingPostResponseFinalizers.has(sessionState.sessionID))
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (
+    sessionState.projectPathProvisional === true ||
+    (pathResult.source !== "cwd" &&
+      sessionState.projectPath !== pathResult.path)
+  ) {
+    return errorResponse(
+      403,
+      "Project path does not match the authenticated session",
+    );
+  }
+  const sessionID = sessionState.sessionID;
+  const authorizedProjectPath = sessionState.projectPath;
+  await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  await awaitStreamingPostResponse(sessionID, req.signal);
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (!isConfidentlyBoundToProject(sessionState, authorizedProjectPath)) {
+    return errorResponse(
+      403,
+      "Project path does not match the authenticated session",
+    );
+  }
+  stripContextMarkers(req.messages);
+  const projectPath = sessionState.projectPath;
+  setSessionAuth(sessionID, credential, sessionState.lastUpstream?.providerID);
   // NOTE: the project binding is NOT persisted here — compaction never changes
   // the binding, and the preceding normal turn already persisted it. A restart
   // between the last normal turn and a compaction-only turn rehydrates the
@@ -8969,7 +12887,14 @@ async function handleCompaction(
 
   // Initialize the project AFTER path correction so we never create a row for
   // the gateway's cwd / an unattributed bucket from a path-less probe request.
-  await initIfNeeded(projectPath, config, pathResult.gitRemote);
+  await initIfNeeded(
+    projectPath,
+    config,
+    pathResult.gitRemote,
+    req.signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   setSentryLightContext({ model: req.model, projectPath });
   log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
@@ -8988,7 +12913,10 @@ async function handleCompaction(
     config,
     previousSummary: extractPreviousSummary(req),
     sessionUpstream: sessionState.lastUpstream,
+    signal: req.signal,
+    trackOperation,
   });
+  trackOperation(summaryPromise);
 
   if (req.stream) {
     // Open the SSE stream immediately and emit keep-alive `ping`s while the
@@ -9018,13 +12946,19 @@ async function handleCompaction(
     // Always Anthropic SSE — wrap for OpenAI-protocol clients (their
     // translators skip pings).
     if (req.protocol === "openai") {
-      return translateAnthropicStreamToOpenAI(anthropicSSE);
+      return translateAnthropicStreamToOpenAI(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     if (req.protocol === "openai-responses") {
-      return translateAnthropicStreamToResponses(anthropicSSE);
+      return translateAnthropicStreamToResponses(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     if (req.protocol === "gemini") {
-      return translateAnthropicStreamToGemini(anthropicSSE);
+      return translateAnthropicStreamToGemini(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     return anthropicSSE;
   }
@@ -9034,9 +12968,25 @@ async function handleCompaction(
   const summary = await summaryPromise;
   if (summary == null) {
     log.warn(
-      `compaction summary empty for session ${sessionID.slice(0, 16)} — falling back to upstream`,
+      `compaction summary empty for session ${sessionID.slice(0, 16)} — using authenticated upstream`,
     );
-    return await handlePassthrough(req, config);
+    const trustedUpstream = extractUpstreamUrlHeader({
+      "x-lore-upstream-url": sessionState.lastUpstream?.url ?? "",
+    });
+    if (!trustedUpstream) {
+      return errorResponse(502, "No trusted upstream destination");
+    }
+    const fallbackHeaders = { ...req.rawHeaders };
+    fallbackHeaders["x-lore-upstream-url"] = trustedUpstream;
+    if (sessionState.lastUpstream?.providerID) {
+      fallbackHeaders["x-lore-provider"] = sessionState.lastUpstream.providerID;
+    } else {
+      delete fallbackHeaders["x-lore-provider"];
+    }
+    return await handlePassthrough(
+      { ...req, rawHeaders: fallbackHeaders },
+      config,
+    );
   }
   const resp = buildCompactionResponse(sessionID, summary, req.model);
   return nonStreamHttpResponse(
@@ -9048,9 +12998,142 @@ async function handleCompaction(
   );
 }
 
+async function handleCompaction(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
+): Promise<Response> {
+  const abortScope = createForegroundAbortScope(req.signal);
+  try {
+    const run = (signal: AbortSignal) => {
+      if (
+        pipelineResetInProgress ||
+        requestGeneration !== streamingPostResponseGeneration
+      ) {
+        return Promise.resolve(
+          errorResponse(503, "Gateway pipeline generation changed"),
+        );
+      }
+      return handleCompactionInner(
+        { ...req, signal },
+        config,
+        requestGeneration,
+        trackOperation,
+        claimSession,
+      );
+    };
+    const response =
+      req.stream && req.protocol === "openai-responses"
+        ? earlyFlushStreamingResponse(
+            run,
+            req.model,
+            abortScope.signal,
+            trackOperation,
+          )
+        : await run(abortScope.signal);
+    return wrapBodyWithCleanup(
+      response,
+      abortScope.dispose,
+      abortScope.signal,
+      (reason) =>
+        abortScope.abort(
+          reason ?? new DOMException("response cancelled", "AbortError"),
+        ),
+    );
+  } catch (error) {
+    abortScope.dispose();
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Case 1b: Explicit compaction endpoint (POST /v1/compact)
 // ---------------------------------------------------------------------------
+
+function directCompactionFailureResponse(
+  route: string,
+  error: unknown,
+): Response {
+  log.error(`${route} error:`, error);
+  const unavailable =
+    error instanceof StreamingPostResponseWaitCapacityError ||
+    error instanceof PipelineCapacityError;
+  const aborted =
+    error instanceof DOMException &&
+    (error.name === "AbortError" || error.name === "TimeoutError");
+  return new Response(
+    JSON.stringify({
+      error: "compaction_failed",
+      message: unavailable
+        ? "Compaction temporarily unavailable"
+        : "Compaction failed",
+    }),
+    {
+      status: unavailable ? 503 : aborted ? 502 : 500,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+function preflightDirectCompactionSession(
+  req: Request,
+  config: GatewayConfig,
+): Response | null {
+  const rawHeaders: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return errorResponse(
+      400,
+      "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+    );
+  }
+  if (!extractAuth(rawHeaders)) {
+    return new Response(
+      JSON.stringify({
+        error: "unauthorized",
+        message: "A provider credential is required",
+      }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
+  const minimalReq: GatewayRequest = {
+    protocol: "anthropic",
+    system: "",
+    messages: [],
+    tools: [],
+    model: "",
+    maxTokens: 0,
+    stream: false,
+    metadata: {},
+    rawHeaders,
+  };
+  const sessionID = findIndexedKnownSessionID(minimalReq, config);
+  if (!sessionID || (loadSessionTracking(sessionID)?.messageCount ?? 0) === 0) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  return null;
+}
+
+function directRequestCredentialFingerprint(
+  req: Request,
+  config: GatewayConfig,
+): string {
+  const rawHeaders: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    rawHeaders[key] = value;
+  });
+  return requestCredentialFingerprint(rawHeaders, config) ?? "";
+}
 
 /**
  * Cancel-when-fits decision for the explicit `/v1/compact` endpoint.
@@ -9147,10 +13230,38 @@ export function shouldCancelCompactionFromBudget(
  *                     `cfg.compaction = { auto: false, prune: false }` — the
  *                     gateway manages the window, not the host agent.
  */
-export async function handleCompactEndpoint(
+async function handleCompactEndpointInner(
   req: Request,
   config: GatewayConfig,
+  signal: AbortSignal,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
+  rawHeaders: Record<string, string>,
 ): Promise<Response> {
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message:
+          "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+  // Authenticate from headers before touching a potentially unbounded or
+  // stalled upload. This endpoint always requires a provider credential.
+  const credential = extractAuth(rawHeaders);
+  if (!credential) {
+    return new Response(
+      JSON.stringify({
+        error: "unauthorized",
+        message: "A provider credential is required",
+      }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
+
   let body: {
     project_path?: string;
     previous_summary?: string;
@@ -9158,8 +13269,9 @@ export async function handleCompactEndpoint(
   };
   try {
     // Decode any Content-Encoding (e.g. zstd) before JSON-parsing.
-    body = JSON.parse(await decodeRequestBody(req)) as typeof body;
+    body = JSON.parse(await decodeRequestBody(req, signal)) as typeof body;
   } catch {
+    signal.throwIfAborted();
     return new Response(
       JSON.stringify({
         error: "invalid_request",
@@ -9181,21 +13293,7 @@ export async function handleCompactEndpoint(
   }
 
   // Extract git remote from header if available (Pi plugin injects this).
-  const rawHeaders: Record<string, string> = {};
-  req.headers.forEach((value, key) => {
-    rawHeaders[key] = value;
-  });
   const gitRemote = extractGitRemoteHeader(rawHeaders);
-  const credential = extractAuth(rawHeaders);
-  if (!credential) {
-    return new Response(
-      JSON.stringify({
-        error: "unauthorized",
-        message: "A provider credential is required",
-      }),
-      { status: 401, headers: { "content-type": "application/json" } },
-    );
-  }
 
   // Build a minimal GatewayRequest for session identification.
   // Only rawHeaders and messages are used by identifySession().
@@ -9210,14 +13308,15 @@ export async function handleCompactEndpoint(
     stream: false,
     metadata: {},
     rawHeaders,
+    signal,
   };
 
-  const { sessionID, isNew } = await identifySession(minimalReq, projectPath);
-
-  if (isNew) {
-    // No prior session found — the caller's session header didn't match any
-    // existing session. This typically means no conversation turns have gone
-    // through the gateway yet, so there's nothing to compact.
+  const state = resolveAuthenticatedDirectSession(
+    minimalReq,
+    projectPath,
+    config,
+  );
+  if (!state) {
     return new Response(
       JSON.stringify({
         error: "session_not_found",
@@ -9229,14 +13328,38 @@ export async function handleCompactEndpoint(
     );
   }
 
-  const state = getOrCreateSession(
-    sessionID,
-    projectPath,
-    "header",
-    authFingerprint(credential),
-  );
+  if (!isConfidentlyBoundToProject(state, projectPath)) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project_path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  const sessionID = state.sessionID;
+  await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  await awaitStreamingPostResponse(sessionID, signal);
+  assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
   if (
-    !state ||
     state.projectPathProvisional === true ||
     state.projectPath !== projectPath
   ) {
@@ -9250,7 +13373,14 @@ export async function handleCompactEndpoint(
   }
   setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
 
-  await initIfNeeded(state.projectPath, config, gitRemote);
+  await initIfNeeded(
+    state.projectPath,
+    config,
+    gitRemote,
+    signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(signal, requestGeneration);
 
   // Cancel-when-fits policy. The gateway is the authoritative source for
   // "does this session's raw context fit in the layer-0 budget?" — the plugin
@@ -9301,7 +13431,10 @@ export async function handleCompactEndpoint(
           ? body.previous_summary
           : undefined,
       sessionUpstream: state?.lastUpstream,
+      signal,
+      trackOperation,
     });
+    assertCurrentPipelineGeneration(signal, requestGeneration);
 
     if (summary == null) {
       log.warn(
@@ -9328,13 +13461,58 @@ export async function handleCompactEndpoint(
       headers: { "content-type": "application/json" },
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Compaction failed";
     log.error("compact endpoint error:", err);
     return new Response(
-      JSON.stringify({ error: "compaction_failed", message: msg }),
+      JSON.stringify({
+        error: "compaction_failed",
+        message: "Compaction failed",
+      }),
       { status: 500, headers: { "content-type": "application/json" } },
     );
   }
+}
+
+export async function handleCompactEndpoint(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  const rawHeaders = requestHeaders(req.headers);
+  return withRequestStorageTenant(rawHeaders, config, async () => {
+    if (pipelineResetInProgress) {
+      return errorResponse(503, "Gateway pipeline is resetting");
+    }
+    const preflight = preflightDirectCompactionSession(req, config);
+    if (preflight) return preflight;
+    streamingPostResponsesAccepting = true;
+    const requestGeneration = streamingPostResponseGeneration;
+    const abortScope = createForegroundAbortScope(req.signal);
+    try {
+      const response = await runActivePipelineRequest(
+        abortScope.signal,
+        (signal, trackOperation, claimSession) =>
+          handleCompactEndpointInner(
+            req,
+            config,
+            signal,
+            requestGeneration,
+            trackOperation,
+            claimSession,
+            rawHeaders,
+          ),
+        undefined,
+        undefined,
+        directRequestCredentialFingerprint(req, config),
+      );
+      return wrapBodyWithCleanup(
+        response,
+        abortScope.dispose,
+        abortScope.signal,
+      );
+    } catch (error) {
+      abortScope.dispose();
+      return directCompactionFailureResponse("compact endpoint", error);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -9354,15 +13532,52 @@ export async function handleCompactEndpoint(
  *  3. On success: return a Responses-API-style compacted output.
  *  4. On failure: passthrough to the upstream OpenAI API.
  */
-export async function handleResponsesCompactEndpoint(
+async function handleResponsesCompactEndpointInner(
   req: Request,
   config: GatewayConfig,
+  signal: AbortSignal,
+  requestGeneration: number,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
+  rawHeaders: Record<string, string>,
 ): Promise<Response> {
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message:
+          "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+  const credential = extractAuth(rawHeaders);
+  if (!credential) {
+    return new Response(
+      JSON.stringify({
+        error: "unauthorized",
+        message: "A provider credential is required",
+      }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
   // Read the body as text so we can both parse it and replay it for passthrough.
   // Decode any Content-Encoding (Codex sends zstd by default) first — otherwise
   // the raw compressed bytes fail to JSON.parse and the passthrough replays
   // undecodable bytes upstream.
-  const bodyText = await decodeRequestBody(req);
+  let bodyText: string;
+  try {
+    bodyText = await decodeRequestBody(req, signal);
+  } catch {
+    signal.throwIfAborted();
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message: "Invalid JSON body",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
   let body: Record<string, unknown>;
   try {
     body = JSON.parse(bodyText) as Record<string, unknown>;
@@ -9376,113 +13591,397 @@ export async function handleResponsesCompactEndpoint(
     );
   }
 
-  const rawHeaders: Record<string, string> = {};
-  req.headers.forEach((value, key) => {
-    rawHeaders[key] = value;
-  });
-
   // Parse the body as a Responses API request to get messages for session
   // fingerprinting. The compact request body has the same shape as a normal
   // /v1/responses request (model, instructions, input, tools, etc.).
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = parseOpenAIResponsesRequest(body, rawHeaders);
+    gatewayReq.signal = signal;
   } catch {
-    // If parsing fails, still attempt passthrough — the upstream may accept it.
-    log.warn(
-      "responses/compact: failed to parse request body — falling back to upstream",
+    return new Response(
+      JSON.stringify({
+        error: "invalid_request",
+        message: "Invalid Responses compaction body",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
     );
-    return await passthroughResponsesCompact(bodyText, rawHeaders, config);
   }
 
   const pathResult = getProjectPath(gatewayReq.system, rawHeaders);
   const gitRemote = extractGitRemoteHeader(rawHeaders);
-
-  await initIfNeeded(pathResult.path, config, gitRemote);
-
-  const { sessionID, isNew } = await identifySession(
+  const state = resolveAuthenticatedDirectSession(
     gatewayReq,
     pathResult.path,
+    config,
   );
-
-  // If no prior session, skip Lore compaction and passthrough to upstream.
-  if (!isNew) {
-    log.info(
-      `responses/compact: generating Lore summary for session ${sessionID.slice(0, 16)}`,
-    );
-
-    try {
-      const summary = await generateCompactionSummary({
-        projectPath: pathResult.path,
-        sessionID,
+  if (!state) {
+    if (!extractKnownSessionHeader(rawHeaders)) {
+      return await passthroughResponsesCompact(
+        bodyText,
+        rawHeaders,
         config,
-      });
-
-      if (summary != null) {
-        // Clear cached warmup body — post-compaction messages will differ.
-        const sessionState = sessions.get(sessionID);
-        if (sessionState) {
-          sessionState.cacheAnalytics.lastRequestBody = null;
-        }
-
-        // Return in Codex's expected format: { output: ResponseItem[] }
-        // Must include id, status, and annotations to match the
-        // CompactHistoryResponse { output: Vec<ResponseItem> } struct.
-        return new Response(
-          JSON.stringify({
-            output: [
-              {
-                type: "message",
-                id: `msg_lore_compact_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
-                role: "assistant",
-                status: "completed",
-                content: [
-                  { type: "output_text", text: summary, annotations: [] },
-                ],
-              },
-            ],
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-
-      log.warn(
-        `responses/compact: Lore summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
-      );
-    } catch (err) {
-      log.warn(
-        "responses/compact: Lore compaction error, falling back to upstream:",
-        err,
+        signal,
+        undefined,
+        gatewayReq,
       );
     }
-  } else {
-    log.info(
-      "responses/compact: no prior session found — falling back to upstream",
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (!isConfidentlyBoundToProject(state, pathResult.path)) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  const sessionID = state.sessionID;
+  await claimSession(sessionID);
+  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  await awaitStreamingPostResponse(sessionID, signal);
+  assertCurrentPipelineGeneration(signal, requestGeneration);
+  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID, config)) {
+    return new Response(
+      JSON.stringify({
+        error: "session_not_found",
+        message: "No authenticated session found for the given headers",
+      }),
+      { status: 404, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (
+    state.projectPathProvisional === true ||
+    state.projectPath !== pathResult.path
+  ) {
+    return new Response(
+      JSON.stringify({
+        error: "project_mismatch",
+        message: "project path does not match the authenticated session",
+      }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
+
+  await initIfNeeded(
+    state.projectPath,
+    config,
+    gitRemote,
+    signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(signal, requestGeneration);
+
+  log.info(
+    `responses/compact: generating Lore summary for session ${sessionID.slice(0, 16)}`,
+  );
+
+  try {
+    const summary = await generateCompactionSummary({
+      projectPath: state.projectPath,
+      sessionID,
+      config,
+      sessionUpstream: state.lastUpstream,
+      signal,
+      trackOperation,
+    });
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+
+    if (summary != null) {
+      state.cacheAnalytics.lastRequestBody = null;
+
+      // Return in Codex's expected format: { output: ResponseItem[] }
+      // Must include id, status, and annotations to match the
+      // CompactHistoryResponse { output: Vec<ResponseItem> } struct.
+      return new Response(
+        JSON.stringify({
+          output: [
+            {
+              type: "message",
+              id: `msg_lore_compact_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+              role: "assistant",
+              status: "completed",
+              content: [
+                { type: "output_text", text: summary, annotations: [] },
+              ],
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    log.warn(
+      `responses/compact: Lore summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
+    );
+  } catch (err) {
+    signal.throwIfAborted();
+    log.warn(
+      "responses/compact: Lore compaction error, falling back to upstream:",
+      err,
     );
   }
 
-  // Fallback: passthrough to upstream OpenAI /v1/responses/compact
-  return await passthroughResponsesCompact(bodyText, rawHeaders, config);
+  // Fallback only to the destination previously authenticated by a normal turn.
+  return await passthroughResponsesCompact(
+    bodyText,
+    rawHeaders,
+    config,
+    signal,
+    state.lastUpstream?.url || null,
+    gatewayReq,
+  );
+}
+
+export async function handleResponsesCompactEndpoint(
+  req: Request,
+  config: GatewayConfig,
+): Promise<Response> {
+  const rawHeaders = requestHeaders(req.headers);
+  return withRequestStorageTenant(rawHeaders, config, async () => {
+    if (pipelineResetInProgress) {
+      return errorResponse(503, "Gateway pipeline is resetting");
+    }
+    streamingPostResponsesAccepting = true;
+    const requestGeneration = streamingPostResponseGeneration;
+    const abortScope = createForegroundAbortScope(req.signal);
+    try {
+      const response = await runActivePipelineRequest(
+        abortScope.signal,
+        (signal, trackOperation, claimSession) =>
+          handleResponsesCompactEndpointInner(
+            req,
+            config,
+            signal,
+            requestGeneration,
+            trackOperation,
+            claimSession,
+            rawHeaders,
+          ),
+        undefined,
+        undefined,
+        directRequestCredentialFingerprint(req, config),
+      );
+      return wrapBodyWithCleanup(
+        response,
+        abortScope.dispose,
+        abortScope.signal,
+      );
+    } catch (error) {
+      abortScope.dispose();
+      return directCompactionFailureResponse(
+        "responses/compact endpoint",
+        error,
+      );
+    }
+  });
 }
 
 /**
  * Forward a compaction request to the upstream OpenAI API as-is.
  */
-async function passthroughResponsesCompact(
+export async function passthroughResponsesCompact(
   bodyText: string,
   rawHeaders: Record<string, string>,
   config: GatewayConfig,
+  callerSignal?: AbortSignal,
+  trustedUpstreamBase?: string | null,
+  parsedRequest?: GatewayRequest,
 ): Promise<Response> {
-  const upstreamUrl = `${config.upstreamOpenAI}/v1/responses/compact`;
+  const abortScope = createForegroundAbortScope(callerSignal);
+  if (hasConflictingAuthHeaders(rawHeaders)) {
+    abortScope.dispose();
+    return errorResponse(
+      400,
+      "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+    );
+  }
+
+  // Resolve with the same provider/header/model priority chain as a normal
+  // Responses request. If parsing failed, an explicit validated URL override is
+  // the only safe custom route; an explicit provider without a compatible URL
+  // fails closed because model routing is unavailable.
+  const trustedUpstream =
+    trustedUpstreamBase === undefined
+      ? undefined
+      : trustedUpstreamBase
+        ? extractUpstreamUrlHeader({
+            "x-lore-upstream-url": trustedUpstreamBase,
+          })
+        : undefined;
+  if (trustedUpstreamBase !== undefined && !trustedUpstream) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_failed",
+        message: "No trusted upstream destination",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const headerUpstream =
+    trustedUpstreamBase === undefined
+      ? extractUpstreamUrlHeader(rawHeaders)
+      : undefined;
+  if (headerUpstream && !extractAuth(rawHeaders)) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: "An explicit upstream URL requires client authentication",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  let route: ResolvedRequestUpstreamRoute | undefined;
+  if (parsedRequest && trustedUpstreamBase === undefined) {
+    try {
+      route = resolveRequestUpstreamRoute(parsedRequest, config);
+    } catch (error) {
+      abortScope.dispose();
+      return new Response(
+        JSON.stringify({
+          error: "compaction_routing_failed",
+          message:
+            error instanceof Error ? error.message : "Invalid compact route",
+        }),
+        { status: 502, headers: { "content-type": "application/json" } },
+      );
+    }
+  }
+  const fallbackProviderID = route
+    ? route.providerID
+    : extractProviderHeader(rawHeaders);
+  if (
+    trustedUpstreamBase === undefined &&
+    rawHeaders["x-lore-provider"] &&
+    !fallbackProviderID
+  ) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: "Unsupported or invalid X-Lore-Provider",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (
+    trustedUpstreamBase === undefined &&
+    rawHeaders["x-lore-upstream-url"] &&
+    !headerUpstream
+  ) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: "Invalid X-Lore-Upstream-URL",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (headerUpstream && !isCallerUpstreamAllowed(config, headerUpstream)) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message:
+          "X-Lore-Upstream-URL origin is not allowed by this remote gateway",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const fallbackProviderRoute =
+    !route && fallbackProviderID
+      ? (resolveProviderRoute(fallbackProviderID) ??
+        lookupProviderRoute(fallbackProviderID, false))
+      : null;
+  if (
+    route?.providerID &&
+    !route.headerUpstream &&
+    (!route.providerRoute?.url ||
+      (route.providerRoute.protocol !== null &&
+        route.providerRoute.protocol !== "openai-responses"))
+  ) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: `Cannot safely resolve a Responses compact endpoint for provider "${route.providerID}"`,
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (
+    !route &&
+    fallbackProviderID &&
+    !headerUpstream &&
+    (!fallbackProviderRoute?.url ||
+      (fallbackProviderRoute.protocol !== null &&
+        fallbackProviderRoute.protocol !== "openai-responses"))
+  ) {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message: `Cannot safely resolve a Responses compact endpoint for provider "${fallbackProviderID}"`,
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const effectiveUpstreamBase =
+    trustedUpstream ??
+    route?.effectiveUpstreamBase ??
+    headerUpstream ??
+    fallbackProviderRoute?.url ??
+    config.upstreamOpenAI;
+  const effectiveProtocol = trustedUpstream
+    ? "openai-responses"
+    : (route?.effectiveProtocol ??
+      fallbackProviderRoute?.protocol ??
+      "openai-responses");
+  if (effectiveProtocol !== "openai-responses") {
+    abortScope.dispose();
+    return new Response(
+      JSON.stringify({
+        error: "compaction_routing_failed",
+        message:
+          "The resolved upstream does not support the OpenAI Responses compact protocol",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
+  const upstreamPath = extractUpstreamPathHeader(rawHeaders);
+  const compactPath = upstreamPath?.endsWith("/responses/compact")
+    ? upstreamPath
+    : undefined;
+  const upstreamUrl = compactPath
+    ? new URL(compactPath, `${effectiveUpstreamBase.replace(/\/+$/, "")}/`).href
+    : fallbackProviderID === "openai-codex"
+      ? `${effectiveUpstreamBase}/codex/responses/compact`
+      : `${effectiveUpstreamBase}/v1/responses/compact`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
 
-  // Forward auth headers (keys are lowercase — Fetch API normalizes them).
-  const auth = rawHeaders.authorization;
-  if (auth) headers.authorization = auth;
-  const apiKey = rawHeaders["x-api-key"];
-  if (apiKey) headers["x-api-key"] = apiKey;
+  // Preserve the one centrally-approved provider-auth scheme exactly.
+  Object.assign(headers, copyProviderAuthHeaders(rawHeaders));
 
   // Forward OpenAI-specific headers
   const openAiBeta = rawHeaders["openai-beta"];
@@ -9498,12 +13997,12 @@ async function passthroughResponsesCompact(
     bodyText,
     rawHeaders["content-encoding"],
     buildUpstreamRouteContext({
-      upstreamUrlHeader: undefined,
-      providerHeader: undefined,
+      upstreamUrlHeader: headerUpstream,
+      providerHeader: fallbackProviderID,
       ingressProtocol: "openai-responses",
-      effectiveProtocol: "openai-responses",
+      effectiveProtocol,
       ingressUpstreamBase: config.upstreamOpenAI,
-      effectiveUpstreamBase: config.upstreamOpenAI,
+      effectiveUpstreamBase,
     }),
   );
   if (contentEncoding) headers["content-encoding"] = contentEncoding;
@@ -9511,26 +14010,30 @@ async function passthroughResponsesCompact(
   // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as a final overlay so
   // corporate proxies / LiteLLM team-routing tokens / Cloudflare AI Gateway
   // / service-account scenarios work for compaction-passthrough calls too.
-  applyUpstreamExtraHeaders(headers, config.upstreamExtraHeaders);
+  applyUpstreamExtraHeaders(
+    headers,
+    extraHeadersForUpstream(config, upstreamUrl),
+  );
 
   try {
-    const upstream = await upstreamFetch(upstreamUrl, {
-      method: "POST",
-      headers,
-      body: passthroughBody,
-    });
-    return new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: new Headers(upstream.headers),
-    });
+    const upstream = await responseAgainstAbort(
+      () =>
+        upstreamFetch(upstreamUrl, {
+          method: "POST",
+          headers,
+          body: passthroughBody,
+          signal: abortScope.signal,
+        }),
+      abortScope.signal,
+    );
+    return wrapBodyWithCleanup(upstream, abortScope.dispose, abortScope.signal);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Upstream unreachable";
+    abortScope.dispose();
     log.error("responses/compact upstream passthrough error:", err);
     return new Response(
       JSON.stringify({
         error: "compaction_failed",
-        message: `Failed to reach upstream: ${msg}`,
+        message: "Failed to reach upstream",
       }),
       { status: 502, headers: { "content-type": "application/json" } },
     );
@@ -9541,14 +14044,473 @@ async function passthroughResponsesCompact(
 // Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
 // ---------------------------------------------------------------------------
 
+const FOREGROUND_REQUEST_TIMEOUT_MS = 300_000;
+
+export function abortAwareDelay(
+  delayMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (delayMs <= 0) return Promise.resolve();
+  signal?.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => signal?.removeEventListener("abort", onAbort);
+    const finish = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      operation();
+    };
+    const onAbort = (): void => finish(() => reject(signal?.reason));
+    const timer = setTimeout(() => finish(resolve), delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+export async function completeBudgetThrottleDelay(
+  delayMs: number,
+  signal: AbortSignal | undefined,
+  record: () => void,
+): Promise<void> {
+  await abortAwareDelay(delayMs, signal);
+  signal?.throwIfAborted();
+  record();
+}
+
+export function createForegroundAbortScope(caller?: AbortSignal): {
+  signal: AbortSignal;
+  abort: (reason?: unknown) => void;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  activeForegroundAbortControllers.add(controller);
+  const abort = (reason?: unknown) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const onCallerAbort = () => abort(caller?.reason);
+  caller?.addEventListener("abort", onCallerAbort, { once: true });
+  if (caller?.aborted) onCallerAbort();
+  const timer = setTimeout(
+    () =>
+      abort(new DOMException("foreground request timed out", "TimeoutError")),
+    FOREGROUND_REQUEST_TIMEOUT_MS,
+  );
+  return {
+    signal: controller.signal,
+    abort,
+    dispose: () => {
+      activeForegroundAbortControllers.delete(controller);
+      clearTimeout(timer);
+      caller?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
+export function wrapBodyWithCleanup(
+  response: Response,
+  cleanup: () => void,
+  signal?: AbortSignal,
+  onCancel?: (reason?: unknown) => void,
+): Response {
+  if (!response.body) {
+    cleanup();
+    return response;
+  }
+  const reader = response.body.getReader();
+  let finished = false;
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const onAbort = (): void => {
+    if (finished) return;
+    const reason = signal?.reason;
+    finish();
+    cancelAndReleaseReader(reader, reason);
+    try {
+      bodyController?.error(reason);
+    } catch {
+      // Already closed/cancelled.
+    }
+  };
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    signal?.removeEventListener("abort", onAbort);
+    cleanup();
+  };
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        bodyController = controller;
+      },
+      async pull(controller) {
+        try {
+          const { done, value } = signal
+            ? await readStreamChunk(reader, { signal })
+            : await reader.read();
+          if (done) {
+            finish();
+            try {
+              reader.releaseLock();
+            } catch {
+              // The stream completed with no pending read in normal runtimes.
+            }
+            controller.close();
+          } else if (value) {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          finish();
+          cancelAndReleaseReader(reader, error);
+          controller.error(error);
+        }
+      },
+      cancel(reason) {
+        onCancel?.(reason);
+        finish();
+        cancelAndReleaseReader(reader, reason);
+      },
+    },
+    // Do not read ahead while a terminal-aware downstream parser is handling
+    // the current chunk. It may cancel at that terminal while the transport
+    // remains open, and a speculative read can otherwise strand the wrapper.
+    { highWaterMark: 0 },
+  );
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+async function claimPipelineSession(
+  active: ActivePipelineRequest,
+  sessionID: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (active.sessionIDs.has(sessionID)) return;
+  signal.throwIfAborted();
+  if (pipelineSessionHasCapacity(sessionID)) {
+    active.sessionIDs.add(sessionID);
+    return;
+  }
+  if (
+    pendingSessionClaims.has(sessionID) ||
+    pendingSessionClaims.size >= MAX_PENDING_SESSION_CLAIMS ||
+    pendingSessionClaimsForAdmissionKey(active.admissionKey) >=
+      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
+  ) {
+    throw new PipelineCapacityError("session request queue full");
+  }
+
+  activePipelineRequests.delete(active);
+  return new Promise<void>((resolve, reject) => {
+    let claim: PendingSessionClaim;
+    const onAbort = () => {
+      if (pendingSessionClaims.get(sessionID) !== claim) return;
+      pendingSessionClaims.delete(sessionID);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason);
+      pumpPendingSessionClaims();
+    };
+    claim = { active, sessionID, signal, resolve, reject, onAbort };
+    pendingSessionClaims.set(sessionID, claim);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    else pumpPendingSessionClaims();
+  });
+}
+
+async function runActivePipelineRequest(
+  callerSignal: AbortSignal | undefined,
+  operation: (
+    signal: AbortSignal,
+    trackOperation: (operation: Promise<unknown>) => void,
+    claimSession: (sessionID: string) => Promise<void>,
+  ) => Promise<Response>,
+  onResponseBodySettled?: () => void,
+  onResponseBodyCancelled?: () => void,
+  admissionKey = "",
+): Promise<Response> {
+  if (
+    detachedPipelineRequests.size +
+      activePipelineRequests.size +
+      pendingSessionClaims.size >=
+      maxDetachedPipelineRequests ||
+    activePipelineRequests.size + streamingPostResponsePending >=
+      maxActivePipelineRequests ||
+    activePipelineRequestsForAdmissionKey(admissionKey) +
+      (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) >=
+      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
+  ) {
+    return errorResponse(503, "Gateway is busy");
+  }
+  const lifecycle = new AbortController();
+  const signal = callerSignal
+    ? AbortSignal.any([callerSignal, lifecycle.signal])
+    : lifecycle.signal;
+  let settle: (() => void) | undefined;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  const pendingOperations = new Set<Promise<void>>();
+  let finished = false;
+  let bodySettled = false;
+  let responseReturned = false;
+  let responseCancelled = false;
+  const markResponseCancelled = (): void => {
+    if (responseCancelled) return;
+    responseCancelled = true;
+    onResponseBodyCancelled?.();
+  };
+  function onAbort(): void {
+    if (responseReturned) {
+      if (callerSignal?.aborted) markResponseCancelled();
+      settleResponse();
+    }
+  }
+  const trackOperation = (operation: Promise<unknown>): void => {
+    const tracked = operation.then(
+      () => {},
+      () => {},
+    );
+    pendingOperations.add(tracked);
+    void tracked.finally(() => pendingOperations.delete(tracked));
+  };
+  async function finish(): Promise<void> {
+    if (finished) return;
+    finished = true;
+    signal.removeEventListener("abort", onAbort);
+    while (pendingOperations.size > 0) {
+      await Promise.all(pendingOperations);
+    }
+    activePipelineRequests.delete(active);
+    detachedPipelineRequests.delete(active);
+    pumpPendingSessionClaims();
+    settle?.();
+  }
+  function settleResponse(): void {
+    if (bodySettled) return;
+    bodySettled = true;
+    onResponseBodySettled?.();
+    void finish();
+  }
+  const active: ActivePipelineRequest = {
+    admissionKey,
+    abort: (reason) => {
+      lifecycle.abort(reason);
+      if (responseReturned) settleResponse();
+    },
+    settled,
+    sessionIDs: new Set(),
+  };
+  activePipelineRequests.add(active);
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const response = await operation(signal, trackOperation, (sessionID) =>
+      claimPipelineSession(active, sessionID, signal),
+    );
+    responseReturned = true;
+    if (signal.aborted) {
+      if (callerSignal?.aborted) markResponseCancelled();
+      settleResponse();
+    }
+    return wrapBodyWithCleanup(response, settleResponse, undefined, () => {
+      markResponseCancelled();
+      settleResponse();
+    });
+  } catch (error) {
+    onResponseBodySettled?.();
+    void finish();
+    throw error;
+  }
+}
+
+export function validatedMetaStream(
+  response: Response,
+  protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
+  codex: boolean,
+  signal?: AbortSignal,
+): Response {
+  if (protocol === "openai-responses") {
+    return streamResponsesPassthrough(
+      response,
+      () => {},
+      undefined,
+      codex ? "codex" : "public",
+      signal,
+    );
+  }
+  const abort = new AbortController();
+  let downstreamCancelled = false;
+  let externalAborted = false;
+  let pumpStarted = false;
+  let resumeDemand: (() => void) | undefined;
+  const cleanup = (): void => {
+    signal?.removeEventListener("abort", onAbort);
+  };
+  const onAbort = () => {
+    externalAborted = true;
+    resumeDemand?.();
+    resumeDemand = undefined;
+    abort.abort(signal?.reason);
+    if (!pumpStarted)
+      void response.body?.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let settled = false;
+      const waitForDemand = async (): Promise<void> => {
+        while (
+          !downstreamCancelled &&
+          !externalAborted &&
+          (controller.desiredSize ?? 1) <= 0
+        ) {
+          await new Promise<void>((resolve) => {
+            resumeDemand = resolve;
+          });
+        }
+        if (externalAborted) throw signal?.reason;
+      };
+      const forward = async (event: string, data: string): Promise<void> => {
+        await waitForDemand();
+        const wire =
+          event === "message"
+            ? `data: ${data}\n\n`
+            : formatSSEEvent(event, data);
+        controller.enqueue(encoder.encode(wire));
+      };
+      const safeClose = (): void => {
+        if (downstreamCancelled || settled) return;
+        settled = true;
+        cleanup();
+        try {
+          controller.close();
+        } catch {
+          // Already closed/cancelled.
+        }
+      };
+      const safeError = (error: unknown): void => {
+        if (downstreamCancelled || settled) return;
+        settled = true;
+        cleanup();
+        try {
+          controller.error(error);
+        } catch {
+          // Already closed/cancelled.
+        }
+      };
+      const pump = async (): Promise<void> => {
+        pumpStarted = true;
+        if (downstreamCancelled) return;
+        try {
+          if (protocol === "anthropic") {
+            if (!response.body)
+              throw new Error("Upstream response has no body");
+            const reader = response.body.getReader();
+            const validator = new AnthropicSSEValidator();
+            try {
+              for await (const { event, data } of parseSSEStream(reader, {
+                signal: abort.signal,
+                requireEventTerminator: true,
+                fatalUtf8: true,
+                maxFrames: DEFAULT_MAX_SSE_FRAMES,
+                maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
+              })) {
+                validator.process(event, data);
+                await forward(event, data);
+                if (validator.isDone()) break;
+              }
+              validator.assertDone();
+            } finally {
+              cancelAndReleaseReader(reader);
+            }
+          } else if (protocol === "openai") {
+            await accumulateOpenAISSEStream(response, {
+              signal: abort.signal,
+              strict: true,
+              stopAtTerminal: true,
+              consumeUntilDone: true,
+              onValidatedEvent: forward,
+            });
+          } else {
+            await accumulateGeminiSSEStream(response, {
+              signal: abort.signal,
+              strict: true,
+              stopAtTerminal: true,
+              onValidatedEvent: forward,
+            });
+          }
+          safeClose();
+        } catch (error) {
+          if (downstreamCancelled) {
+            cleanup();
+            return;
+          }
+          safeError(externalAborted ? (signal?.reason ?? error) : error);
+        }
+      };
+      queueMicrotask(() => void pump().catch((error) => safeError(error)));
+    },
+    pull() {
+      resumeDemand?.();
+      resumeDemand = undefined;
+    },
+    cancel(reason) {
+      resumeDemand?.();
+      resumeDemand = undefined;
+      downstreamCancelled = true;
+      abort.abort(new DOMException("client disconnected", "AbortError"));
+      cleanup();
+      if (!pumpStarted) void response.body?.cancel(reason).catch(() => {});
+    },
+  });
+  return new Response(stream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
   setSentryLightContext({ model: req.model });
 
-  const { response: upstreamResponse, effectiveProtocol } =
-    await forwardToUpstream(req, config);
+  const abortScope = createForegroundAbortScope(req.signal);
+  let forwarded: UpstreamResult;
+  try {
+    forwarded = await forwardToUpstream(
+      req,
+      config,
+      undefined,
+      undefined,
+      abortScope.signal,
+    );
+  } catch (error) {
+    abortScope.dispose();
+    throw error;
+  }
+  const effectiveProtocol = forwarded.effectiveProtocol;
+  const upstreamResponse = wrapBodyWithCleanup(
+    forwarded.response,
+    abortScope.dispose,
+    abortScope.signal,
+  );
+
+  // Meta/side-channel calls must preserve provider errors as ordinary HTTP
+  // responses. Running a 4xx/429 body through an SSE validator would launder
+  // it into status 200 or a synthetic stream failure.
+  if (!upstreamResponse.ok) {
+    return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
+  }
 
   // Vertex speaks the native Anthropic wire format (Anthropic SSE for streaming
   // and the native Anthropic JSON shape for non-streaming), so for passthrough
@@ -9566,15 +14528,24 @@ async function handlePassthrough(
   // to a different protocol (e.g., OpenAI client → Anthropic upstream).
   if (wireProtocol === req.protocol) {
     if (req.stream && upstreamResponse.body) {
-      return new Response(upstreamResponse.body, {
-        status: upstreamResponse.status,
-        headers: {
-          "content-type":
-            upstreamResponse.headers.get("content-type") ?? "text/event-stream",
-        },
-      });
+      return validatedMetaStream(
+        upstreamResponse,
+        wireProtocol,
+        req.codex === true,
+        abortScope.signal,
+      );
     }
-    const body = await upstreamResponse.text();
+    const body = await readForegroundBody(
+      upstreamResponse,
+      false,
+      undefined,
+      abortScope.signal,
+    );
+    if (wireProtocol === "openai-responses") {
+      parseResponsesNonStreamEnvelope(
+        JSON.parse(body) as Record<string, unknown>,
+      );
+    }
     return new Response(body, {
       status: upstreamResponse.status,
       headers: { "content-type": "application/json" },
@@ -9596,19 +14567,51 @@ async function handlePassthrough(
         },
       });
       if (req.protocol === "openai") {
-        return translateAnthropicStreamToOpenAI(anthropicSSE);
+        return translateAnthropicStreamToOpenAI(anthropicSSE, {
+          strict: true,
+          signal: abortScope.signal,
+        });
       }
       if (req.protocol === "openai-responses") {
-        return translateAnthropicStreamToResponses(anthropicSSE);
+        return translateAnthropicStreamToResponses(anthropicSSE, {
+          strict: true,
+          signal: abortScope.signal,
+        });
       }
       if (req.protocol === "gemini") {
-        return translateAnthropicStreamToGemini(anthropicSSE);
+        return translateAnthropicStreamToGemini(anthropicSSE, {
+          strict: true,
+          signal: abortScope.signal,
+        });
       }
     }
     // Other cross-protocol streaming combos: accumulate + re-emit
-    const resp = await accumulateNonStreamResponse(
-      upstreamResponse,
-      wireProtocol,
+    const resp = await preserveIncompleteResponsesTerminal(
+      wireProtocol === "openai"
+        ? accumulateOpenAISSEStream(upstreamResponse, {
+            signal: abortScope.signal,
+            strict: true,
+            stopAtTerminal: true,
+            consumeUntilDone: true,
+          })
+        : wireProtocol === "openai-responses"
+          ? accumulateResponsesSSEStream(upstreamResponse, {
+              signal: abortScope.signal,
+              validation: req.codex === true ? "codex" : "public",
+              stopAtTerminal: true,
+              requireCompletedTerminal: true,
+            })
+          : wireProtocol === "gemini"
+            ? accumulateGeminiSSEStream(upstreamResponse, {
+                signal: abortScope.signal,
+                strict: true,
+                stopAtTerminal: true,
+              })
+            : accumulateSSEResponse(upstreamResponse, {
+                signal: abortScope.signal,
+                strict: true,
+                stopAtTerminal: true,
+              }),
     );
     return nonStreamHttpResponse(
       resp,
@@ -9620,9 +14623,13 @@ async function handlePassthrough(
   }
 
   // Non-streaming cross-protocol: accumulate + re-emit
-  const resp = await accumulateNonStreamResponse(
-    upstreamResponse,
-    wireProtocol,
+  const resp = await preserveIncompleteResponsesTerminal(
+    accumulateNonStreamResponse(
+      upstreamResponse,
+      wireProtocol,
+      req.codex === true,
+      abortScope.signal,
+    ),
   );
   return nonStreamHttpResponse(
     resp,
@@ -9631,6 +14638,393 @@ async function handlePassthrough(
     undefined,
     requestEnablesLongContext(req),
   );
+}
+
+/**
+ * Validate a provisional session identity without touching session-owned state.
+ * The full Lore turn runs only on a later retry after this successful response
+ * confirms the presented header. Failed and incomplete attempts leave the
+ * adopted session, project rows, auth registries, and gradient state untouched.
+ */
+async function handleProvisionalConversationTurn(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  identified: IdentifiedSession,
+  pathResult: ProjectPathResult,
+  requestOrder: number,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+): Promise<Response> {
+  // Resolve and validate route intent once, but keep it private until the
+  // provisional identity is confirmed by a complete response and client EOF.
+  const requestUpstream = prepareRequestUpstream(req, config);
+  const abortScope = createForegroundAbortScope(req.signal);
+  let forwarded: UpstreamResult;
+  try {
+    forwarded = await forwardToUpstream(
+      req,
+      config,
+      undefined,
+      undefined,
+      abortScope.signal,
+      requestUpstream.route,
+    );
+  } catch (error) {
+    abortScope.dispose();
+    throw error;
+  }
+  const upstreamResponse = wrapBodyWithCleanup(
+    forwarded.response,
+    abortScope.dispose,
+    abortScope.signal,
+  );
+  if (!upstreamResponse.ok) {
+    return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
+  }
+
+  let accumulated: GatewayResponse;
+  try {
+    accumulated = req.stream
+      ? forwarded.effectiveProtocol === "openai-responses"
+        ? await accumulateResponsesSSEStream(upstreamResponse, {
+            signal: abortScope.signal,
+            validation: req.codex ? "codex" : "public",
+            stopAtTerminal: true,
+            requireCompletedTerminal: true,
+          })
+        : forwarded.effectiveProtocol === "openai"
+          ? await accumulateOpenAISSEStream(upstreamResponse, {
+              signal: abortScope.signal,
+              strict: true,
+              stopAtTerminal: true,
+              consumeUntilDone: true,
+            })
+          : forwarded.effectiveProtocol === "gemini"
+            ? await accumulateGeminiSSEStream(upstreamResponse, {
+                signal: abortScope.signal,
+                strict: true,
+                stopAtTerminal: true,
+              })
+            : await accumulateSSEResponse(upstreamResponse, {
+                signal: abortScope.signal,
+                strict: true,
+                stopAtTerminal: true,
+              })
+      : await accumulateNonStreamResponse(
+          upstreamResponse,
+          forwarded.effectiveProtocol,
+          req.codex === true,
+          abortScope.signal,
+          true,
+        );
+  } catch (error) {
+    abortScope.dispose();
+    if (!(error instanceof ResponsesTerminalError)) throw error;
+    scheduleStreamingPostResponse(
+      identified.sessionID,
+      requestGeneration,
+      async () => {
+        await downstreamSettled;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const pause = provisionalFinalizerPauseForTest;
+        if (pause) {
+          pause.onWait();
+          await pause.pause;
+        }
+        if (requestGeneration !== streamingPostResponseGeneration) return;
+        if (
+          identified.guardProject &&
+          conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+        ) {
+          dropOwnedProvisionalKey(
+            identified.provisionalKey,
+            identified.sessionID,
+          );
+          return;
+        }
+        accountUnsuccessfulResponse(
+          error.response,
+          identified.sessionID,
+          conversationTTLForAccounting(identified.sessionID),
+          undefined,
+          () => {},
+          () => {
+            const state = sessions.get(identified.sessionID);
+            if (state) state._dirty = true;
+          },
+        );
+      },
+      () => {},
+      true,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+    );
+    if (error.status === "incomplete" && !hasRecallToolUse(error.response)) {
+      return nonStreamHttpResponse(
+        error.response,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      );
+    }
+    return errorResponse(502, "Gateway request failed");
+  }
+  if (
+    forwarded.effectiveProtocol === "gemini" &&
+    !["end_turn", "max_tokens", "tool_use"].includes(accumulated.stopReason)
+  ) {
+    throw new Error("upstream Gemini request did not complete");
+  }
+  abortScope.dispose();
+  const response = nonStreamHttpResponse(
+    accumulated,
+    req.protocol,
+    req.stream,
+    undefined,
+    requestEnablesLongContext(req),
+  );
+
+  const commit = async (): Promise<boolean> => {
+    if (
+      requestGeneration !== streamingPostResponseGeneration ||
+      req.signal?.aborted ||
+      downstreamWasCancelled()
+    ) {
+      return false;
+    }
+    if (
+      identified.provisionalKey &&
+      !provisionalKeyOwned(identified.provisionalKey, identified.sessionID)
+    ) {
+      return false;
+    }
+    const credential = extractAuth(req.rawHeaders);
+    const persisted = loadSessionTracking(identified.sessionID);
+    const liveState = sessions.get(identified.sessionID);
+    let restoredUpstream:
+      | ReturnType<typeof deserializeUpstreamState>
+      | undefined;
+    if (!liveState && persisted?.lastUpstream) {
+      try {
+        restoredUpstream = deserializeUpstreamState(
+          persisted.lastUpstream,
+          config,
+        );
+      } catch {
+        log.warn(
+          `corrupt last upstream for session ${identified.sessionID.slice(0, 16)}, ignoring`,
+        );
+      }
+    }
+    const upstreamState: MutableUpstreamState = {
+      lastUpstream: liveState?.lastUpstream ?? restoredUpstream?.lastUpstream,
+      upstreamByProvider: new Map(
+        liveState?.upstreamByProvider ?? restoredUpstream?.upstreamByProvider,
+      ),
+      _upstreamRequestOrder: liveState?._upstreamRequestOrder,
+      _upstreamRequestOrderByProvider:
+        liveState?._upstreamRequestOrderByProvider
+          ? new Map(liveState._upstreamRequestOrderByProvider)
+          : undefined,
+    };
+    const upstreamUpdate = applyRequestUpstream(
+      upstreamState,
+      requestUpstream.snapshot,
+      requestOrder,
+      config,
+    );
+    // Reconstruct the binding exactly as the full pipeline does, but keep it
+    // private until this successful provisional turn is durably committed.
+    // This is what self-heals rows written to a cwd/unattributed bucket before
+    // publishing the newly adopted header and confident path.
+    postResponseStartObserver?.();
+    const noStore =
+      persisted?.amnesia === true ||
+      req.rawHeaders["x-lore-no-store"] === "true";
+    const loreMessages = gatewayMessagesToLore(
+      req.messages,
+      identified.sessionID,
+    );
+    const credentialFingerprint =
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "";
+    const known = knownSessionHeaderForRequest(
+      req,
+      identified.sessionID,
+      config,
+    );
+    let projectPath = pathResult.path;
+    let projectPathProvisional = pathResult.source === "cwd";
+    withSavepoint("commit_provisional_turn", () => {
+      if (
+        identified.expectedUnowned &&
+        !legacyAdoptionTargetIsUnowned(identified.sessionID)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("legacy session owner changed during adoption");
+      }
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("session project changed during provisional migration");
+      }
+      // Project creation/reattribution belongs to the same transaction as the
+      // turn, tracking, route, and header confirmation. A local write failure
+      // must leave the provisional project and identity wholly unchanged.
+      const pathState = {
+        sessionID: identified.sessionID,
+        projectPath: persisted?.projectPath ?? pathResult.path,
+        projectPathProvisional: persisted?.projectPath
+          ? persisted.projectPathProvisional
+          : pathResult.source === "cwd",
+        gitRemote: pathResult.gitRemote,
+      } as Partial<SessionState> as SessionState;
+      projectPath = resolveSessionProjectPath(pathResult, pathState, config);
+      projectPathProvisional = pathState.projectPathProvisional === true;
+      if (
+        projectPathProvisional &&
+        (pathResult.source === "header" || pathResult.source === "inferred")
+      ) {
+        throw new Error("provisional project re-attribution failed");
+      }
+      ensureProject(projectPath, undefined, pathResult.gitRemote);
+      storeTurnTemporal({
+        loreMessages,
+        assistantContentBlocks: accumulated.content,
+        usage: accumulated.usage ?? ZERO_USAGE,
+        model: accumulated.model,
+        projectPath,
+        sessionID: identified.sessionID,
+        noStore,
+      });
+      saveSessionTracking(identified.sessionID, {
+        messageCount: req.messages.length,
+        turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
+        consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
+        projectPath,
+        projectPathProvisional,
+        credentialFingerprint,
+        ...(identified.adoptionFingerprint
+          ? { fingerprint: identified.adoptionFingerprint }
+          : {}),
+        ...(upstreamUpdate.changed
+          ? { lastUpstream: serializeUpstreamState(upstreamState) }
+          : {}),
+        ...(known
+          ? {
+              headerSessionId: known.sessionId,
+              headerName: known.headerName,
+            }
+          : {}),
+      });
+    });
+    const state = getOrCreateSession(
+      identified.sessionID,
+      projectPath,
+      projectPathProvisional ? "cwd" : "header",
+      credentialFingerprint,
+      config,
+    );
+    if (upstreamUpdate.changed) {
+      if (upstreamState.lastUpstream) {
+        state.lastUpstream = upstreamState.lastUpstream;
+      } else {
+        delete state.lastUpstream;
+      }
+      state.upstreamByProvider = upstreamState.upstreamByProvider;
+      if (upstreamState._upstreamRequestOrder !== undefined) {
+        state._upstreamRequestOrder = upstreamState._upstreamRequestOrder;
+      } else {
+        delete state._upstreamRequestOrder;
+      }
+      if (upstreamState._upstreamRequestOrderByProvider) {
+        state._upstreamRequestOrderByProvider =
+          upstreamState._upstreamRequestOrderByProvider;
+      } else {
+        delete state._upstreamRequestOrderByProvider;
+      }
+      if (upstreamUpdate.resetCache) {
+        state.cacheAnalytics.lastRequestBody = null;
+      }
+    }
+    if (known) publishKnownSessionHeader(known, state, credentialFingerprint);
+    else state.credentialFingerprint = credentialFingerprint;
+    if (identified.tier === 3) observeHeaderValues(req.rawHeaders);
+    state.projectPath = projectPath;
+    state.projectPathProvisional = projectPathProvisional;
+    if (identified.adoptionFingerprint) {
+      state.fingerprint = identified.adoptionFingerprint;
+    }
+    if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
+    state.messageCount = req.messages.length;
+    state._dirty = true;
+    if (credential) {
+      captureLegacyGlobalAuth(req, config, credential);
+      setSessionAuth(
+        state.sessionID,
+        credential,
+        extractProviderHeader(req.rawHeaders) || undefined,
+      );
+    }
+    captureBillingPrefix(state.sessionID, req.system);
+    captureSessionHeaders(state.sessionID, req.rawHeaders);
+    return true;
+  };
+  scheduleStreamingPostResponse(
+    identified.sessionID,
+    requestGeneration,
+    async () => {
+      await downstreamSettled;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const pause = provisionalFinalizerPauseForTest;
+      if (pause) {
+        pause.onWait();
+        await pause.pause;
+      }
+      if (requestGeneration !== streamingPostResponseGeneration) return;
+      if (downstreamWasCancelled()) {
+        accountUnsuccessfulResponse(
+          accumulated,
+          identified.sessionID,
+          conversationTTLForAccounting(identified.sessionID),
+          undefined,
+          () => {},
+        );
+        return;
+      }
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        return;
+      }
+      if (!(await commit())) return;
+      accountConversationUsage(
+        accumulated.usage ?? ZERO_USAGE,
+        accumulated.model,
+        identified.sessionID,
+        conversationTTLForAccounting(identified.sessionID),
+      );
+      const state = sessions.get(identified.sessionID);
+      if (state) state._dirty = true;
+    },
+    () => {},
+    true,
+    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+  );
+  return response;
 }
 
 /**
@@ -9693,10 +15087,78 @@ export function decideSkipCompact(
 // Case 3: Normal conversation turn — full pipeline
 // ---------------------------------------------------------------------------
 
+export function mergeRecallUsage(
+  current: GatewayUsage,
+  continuation: GatewayUsage,
+): GatewayUsage {
+  const merged: GatewayUsage = {
+    inputTokens: safeTokenSum(
+      [current.inputTokens, continuation.inputTokens],
+      "recall usage token overflow",
+    ),
+    outputTokens: safeTokenSum(
+      [current.outputTokens, continuation.outputTokens],
+      "recall usage token overflow",
+    ),
+  };
+  if (
+    current.cacheReadInputTokens !== undefined ||
+    continuation.cacheReadInputTokens !== undefined
+  ) {
+    merged.cacheReadInputTokens = safeTokenSum(
+      [current.cacheReadInputTokens, continuation.cacheReadInputTokens],
+      "recall usage token overflow",
+    );
+  }
+  if (
+    current.cacheCreationInputTokens !== undefined ||
+    continuation.cacheCreationInputTokens !== undefined
+  ) {
+    merged.cacheCreationInputTokens = safeTokenSum(
+      [current.cacheCreationInputTokens, continuation.cacheCreationInputTokens],
+      "recall usage token overflow",
+    );
+  }
+  safeTokenSum(
+    [
+      merged.inputTokens,
+      merged.outputTokens,
+      merged.cacheReadInputTokens,
+      merged.cacheCreationInputTokens,
+    ],
+    "recall usage token overflow",
+  );
+  return merged;
+}
+
+function assertCurrentPipelineGeneration(
+  signal: AbortSignal | undefined,
+  requestGeneration: number,
+): void {
+  signal?.throwIfAborted();
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    throw new DOMException("gateway pipeline generation changed", "AbortError");
+  }
+}
+
 async function handleConversationTurn(
   req: GatewayRequest,
   config: GatewayConfig,
+  requestOrder: number,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
   // --- 1. Project path & init ---
   // Enrich headers with context markers injected by lore-hermes plugin.
   // This lets getProjectPath() pick up [lore:project=...] via the existing
@@ -9709,33 +15171,104 @@ async function handleConversationTurn(
 
   // --- 2. Capture auth credentials for background workers ---
   const cred = extractAuth(req.rawHeaders);
-  if (cred) {
-    // Tag the global fallback with the request's provider so a worker for a
-    // different provider can't borrow this credential (cross-contamination,
-    // #829). Falls back to the upstream destination URL when no x-lore-provider
-    // header is present — e.g. credentialed title/summary-gen requests that
-    // bypass the per-turn chat.headers hook (#942).
-    setLastSeenAuth(cred, resolveLastSeenProvider(req.rawHeaders));
-  }
 
   // --- 3. Session identification ---
-  const { sessionID, isNew, tier } = await identifySession(
-    req,
-    pathResult.path,
-  );
-
-  // Strip [lore:session-id=...] and [lore:project=...] context markers from
-  // user messages so they are not forwarded to the upstream LLM, stored in
-  // temporal storage, or visible to the model.
+  const admitted = await withIdentityAdmission(req, config, async () => {
+    const result = await identifySession(
+      req,
+      pathResult.path,
+      pathResult.source,
+      requestGeneration,
+      config,
+    );
+    const claimed = result.isNew || result.provisionalIdentity === true;
+    if (claimed) await claimSession(result.sessionID);
+    const revalidateConfirmedIdentity =
+      !result.isNew && result.provisionalIdentity !== true && result.tier !== 3;
+    return { identified: result, claimed, revalidateConfirmedIdentity };
+  });
+  const { identified } = admitted;
+  const { sessionID, isNew, tier } = identified;
+  if (!admitted.claimed) await claimSession(sessionID);
+  if (identified.expectedUnowned && !legacyAdoptionTargetIsUnowned(sessionID)) {
+    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (
+    admitted.revalidateConfirmedIdentity &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  if (
+    identified.guardProject &&
+    conflictsWithConfidentSessionProject(sessionID, pathResult)
+  ) {
+    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
+    throw new Error("session project changed during provisional migration");
+  }
+  await awaitStreamingPostResponse(sessionID, req.signal);
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  if (
+    admitted.revalidateConfirmedIdentity &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return errorResponse(404, "No authenticated session found");
+  }
+  // Marker-derived project/session data has already been copied into headers;
+  // strip it before either the provisional verifier or full pipeline forwards.
   stripContextMarkers(req.messages);
+  if (identified.provisionalIdentity) {
+    const preUpstreamPause = pipelinePreUpstreamPauseForTest;
+    if (preUpstreamPause) {
+      preUpstreamPause.onWait();
+      await preUpstreamPause.pause;
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
+    }
+    return handleProvisionalConversationTurn(
+      req,
+      config,
+      identified,
+      pathResult,
+      requestOrder,
+      requestGeneration,
+      downstreamSettled,
+      downstreamWasCancelled,
+    );
+  }
+  const legacyGlobalProvider = cred
+    ? captureLegacyGlobalAuth(req, config, cred)
+    : undefined;
 
   const sessionState = getOrCreateSession(
     sessionID,
     pathResult.path,
     pathResult.source,
-    cred ? authFingerprint(cred) : "",
+    requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+    config,
   );
+  await beforeUpstreamCaptureForTest?.(req, sessionState);
+  const sessionSignal = sessionLifecycleSignal(sessionID);
+  const suppressTemporalStorage =
+    sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
+  const preUpstreamPause = pipelinePreUpstreamPauseForTest;
+  if (preUpstreamPause) {
+    preUpstreamPause.onWait();
+    await preUpstreamPause.pause;
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  }
   let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
+
+  // Routing and policy are request intent, not a property of a successful
+  // response. Capture now so a failed policy-tightening request still governs
+  // workers, and use the order assigned synchronously in handleRequest so an
+  // older concurrent turn can never overwrite a newer one.
+  const requestUpstreamRoute = captureRequestUpstream(
+    req,
+    sessionState,
+    config,
+    requestOrder,
+  );
 
   // --- Synthetic project-resolution: capture a returning tool_result ---
   // If we previously injected a synthetic tool_use for project detection,
@@ -9785,7 +15318,10 @@ async function handleConversationTurn(
           const refRes = await ltm.validateProjectReferences(
             projectPath,
             resolver,
+            Date.now(),
+            req.signal,
           );
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           if (refRes.penalized > 0) {
             log.info(
               `reference drift (remote): penalized ${refRes.penalized}/${refRes.checked} ` +
@@ -9793,6 +15329,7 @@ async function handleConversationTurn(
             );
           }
         } catch (e) {
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           log.warn("synthetic reference-validation error (non-fatal):", e);
         }
         sessionState.refcheckInProbe = false;
@@ -9826,7 +15363,14 @@ async function handleConversationTurn(
   // Initialize the project AFTER path correction so a path-less probe request
   // never creates a project row for the gateway's cwd or an unattributed
   // bucket (provider-agnostic: applies to every protocol/client).
-  await initIfNeeded(projectPath, config, pathResult.gitRemote);
+  await initIfNeeded(
+    projectPath,
+    config,
+    pathResult.gitRemote,
+    req.signal,
+    requestGeneration,
+  );
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // Mark sub-agent sessions (x-parent-session-id present).
   // These get their own session but are flagged for cache warming exemption.
@@ -9836,8 +15380,13 @@ async function handleConversationTurn(
   // and a warning is logged.
   {
     const parentClientId = req.rawHeaders["x-parent-session-id"];
+    const credentialFingerprint = requestCredentialFingerprint(
+      req.rawHeaders,
+      config,
+    );
     if (
       parentClientId &&
+      credentialFingerprint !== null &&
       (!sessionState.isSubagent || !sessionState.parentSessionId)
     ) {
       if (!sessionState.isSubagent) {
@@ -9848,8 +15397,7 @@ async function handleConversationTurn(
       for (const [key, loreId] of headerSessionIndex) {
         const parsed = parseSessionIndexKey(key);
         if (
-          parsed?.credentialFingerprint ===
-            (sessionState.credentialFingerprint ?? "") &&
+          parsed?.credentialFingerprint === credentialFingerprint &&
           parsed.headerValue === parentClientId
         ) {
           resolvedParent = loreId;
@@ -9886,8 +15434,17 @@ async function handleConversationTurn(
   // cross-contamination when a session switches providers mid-conversation
   // (e.g. Anthropic → MiniMax → Anthropic).
   if (cred) {
-    const reqProviderID = extractProviderHeader(req.rawHeaders);
-    setSessionAuth(sessionID, cred, reqProviderID || undefined);
+    const reqProviderID =
+      requestUpstreamRoute.providerID ??
+      (requestUpstreamRoute.effectiveProtocol === "anthropic"
+        ? "anthropic"
+        : requestUpstreamRoute.effectiveProtocol === "openai" ||
+            requestUpstreamRoute.effectiveProtocol === "openai-responses"
+          ? "openai"
+          : requestUpstreamRoute.effectiveProtocol === "gemini"
+            ? "google"
+            : undefined);
+    setSessionAuth(sessionID, cred, reqProviderID);
     clearWarmupAuthDisabled(sessionID); // Re-enable cache warming on fresh credential
 
     // One-time "it's working" signal. A fresh user has no easy way to tell
@@ -9900,18 +15457,12 @@ async function handleConversationTurn(
       );
     }
 
-    // A credential just landed. If `lore run` deferred a conversation import
-    // (no credential existed at startup), run it now — this is the first
-    // authenticated turn. Forward the provider the GLOBAL fallback was tagged
-    // with — resolveLastSeenProvider (x-lore-provider ?? URL inference), the
-    // same value setLastSeenAuth used above — because the session-less import
-    // job resolves auth against that global. Using the bare header
-    // (extractProviderHeader) here would pass undefined when the provider was
-    // URL-inferred, re-introducing the silent cross-provider drop. One-shot and
-    // self-guarded; a no-op otherwise.
-    trackBackground(
-      flushPendingImport(resolveLastSeenProvider(req.rawHeaders)),
-    );
+    // A session-less import may use only the deliberately captured local,
+    // configured direct-provider credential. Remote/custom routes never expose
+    // their credential through the process-global fallback.
+    if (legacyGlobalProvider) {
+      trackBackground(flushPendingImport(legacyGlobalProvider));
+    }
   }
 
   // Capture billing header prefix for worker cch computation, scoped to
@@ -9928,26 +15479,19 @@ async function handleConversationTurn(
 
   // Track fingerprint for future correlation
   if (isNew) {
-    const fingerprint = await fingerprintMessages(
-      req.messages.map((m) => ({ role: m.role, content: m.content })),
-      {
-        authSuffix: cred ? authFingerprint(cred) : "",
-      },
-    );
-    sessionState.fingerprint = fingerprint;
-    // Persist fingerprint immediately — rare event (new session only)
-    saveSessionTracking(sessionID, { fingerprint });
-
-    // Seed header learning for new sessions (Tier 2 bootstrap).
-    // Even Tier 1 sessions don't need this, but it's harmless and
-    // avoids branching. For Tier 3 (fingerprinted) new sessions,
-    // this seeds the first round of candidate collection.
-    if (!sessionState.headerSessionId) {
-      const result = learnHeaders(
-        sessionState.candidateHeaders,
-        req.rawHeaders,
+    if (!suppressTemporalStorage) {
+      const credentialFingerprint =
+        requestCredentialFingerprint(req.rawHeaders, config) ?? "";
+      const fingerprint = await fingerprintMessages(
+        req.messages.map((m) => ({ role: m.role, content: m.content })),
+        usesRemoteSessionBinding(config)
+          ? { tenantFingerprint: credentialFingerprint }
+          : { authSuffix: cred ? authFingerprint(cred) : "" },
       );
-      sessionState.candidateHeaders = result.updatedCandidates;
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
+      sessionState.fingerprint = fingerprint;
+      // Persist fingerprint immediately — rare event (new session only)
+      saveSessionTracking(sessionID, { fingerprint, credentialFingerprint });
     }
 
     // Re-check knowledge files on new session start.  The file watcher
@@ -9998,6 +15542,7 @@ async function handleConversationTurn(
     consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
     projectPath: sessionState.projectPath || null,
     projectPathProvisional: sessionState.projectPathProvisional === true,
+    credentialFingerprint: sessionState.credentialFingerprint ?? "",
     // v37: persist the compaction anomaly flag so a gateway restart between
     // detection (this turn) and consumption (next turn's scheduleBackgroundWork)
     // doesn't lose the urgent-distillation signal.
@@ -10107,6 +15652,7 @@ async function handleConversationTurn(
   // getModelEntrySync sites — worker selection, cost metrics — intentionally
   // keep using the sync fallback on the very first turn; they self-correct.)
   await ensureModelDataReady();
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
   // Price the session model from the provider it is actually routed to (the
   // X-Lore-Provider header), not the flat last-write-wins entry — a bare id
   // published by several providers at different cache prices would otherwise
@@ -10313,7 +15859,14 @@ async function handleConversationTurn(
     req.messages,
     loreMessages,
   );
-  resolveToolResults(loreMessages);
+  resolveToolResults(loreMessages, (message) =>
+    temporal.storedMessageId({
+      projectPath,
+      sessionID: message.info.sessionID,
+      sourceID: message.info.id,
+      legacySourceID: message.legacySourceID,
+    }),
+  );
 
   // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
   // system[0]: Host prompt              [no cache_control]
@@ -10397,22 +15950,21 @@ async function handleConversationTurn(
         // catalog scan) independently, compounding the very latency that caused
         // the retries. Share one in-flight compute; the settled value lands in
         // stableLtmCache before the promise resolves, so re-reading is race-free.
-        const pending = stableLtmInFlight.get(sessionID);
-        if (pending) {
-          await pending;
-          stable = stableLtmCache.get(sessionID);
-        }
-        if (!stable) {
-          stable = await singleFlightStableLtm(sessionID, () =>
+        stable = await singleFlightStableLtm(
+          sessionID,
+          (signal) =>
             computeStableLtm(
               sessionID,
               projectPath,
               cfg,
               contextHint,
               prefBudget,
+              signal,
+              requestGeneration,
             ),
-          );
-        }
+          req.signal,
+        );
+        assertCurrentPipelineGeneration(req.signal, requestGeneration);
       }
       stableLtmText = stable?.formatted;
 
@@ -10486,6 +16038,7 @@ async function handleConversationTurn(
             sessionID,
             contextBudget,
             {
+              signal: req.signal,
               excludeCategories: ["preference"],
               ...(contextHint ? { contextHint } : {}),
               ...(stickyIds.size ? { stickyIds } : {}),
@@ -10495,6 +16048,7 @@ async function handleConversationTurn(
               overflowSink,
             },
           );
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           freshContextEntries = contextEntries;
           freshContextOverflow = overflowSink.map((e) => ({
             id: e.id,
@@ -10704,6 +16258,7 @@ async function handleConversationTurn(
       // budget, not the system cache budget), so it adds nothing here.
       setLtmTokens(stable?.tokenCount ?? 0, sessionID);
     } catch (e) {
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       log.error("LTM injection failed:", e);
       setLtmTokens(0, sessionID);
     } finally {
@@ -10747,7 +16302,13 @@ async function handleConversationTurn(
   // snapshot transform() reads, so its loadDistillationsCached hits the cache
   // instead of the DB. On a pool timeout it's a no-op and transform() falls back
   // to the identical in-process load.
-  await prewarmDistillationSnapshot(projectPath, sessionID, loreMessages);
+  await prewarmDistillationSnapshot(
+    projectPath,
+    sessionID,
+    loreMessages,
+    req.signal,
+  );
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
   const result = transform({
     messages: loreMessages,
     projectPath,
@@ -10808,6 +16369,7 @@ async function handleConversationTurn(
         sessionID,
         contextBudget,
         {
+          signal: req.signal,
           excludeCategories: ["preference"],
           ...(contextHint ? { contextHint } : {}),
           ...(stickyIds.size ? { stickyIds } : {}),
@@ -10817,6 +16379,7 @@ async function handleConversationTurn(
           overflowSink,
         },
       );
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       const contextOverflow = overflowSink.map((e) => ({
         id: e.id,
         category: e.category,
@@ -10997,6 +16560,7 @@ async function handleConversationTurn(
         }
       }
     } catch (e) {
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       // On error, leave the step-6 LTM state intact (cache, pin, text)
       // so the turn proceeds with the pre-refresh knowledge rather than
       // an inconsistent state. The next turn will retry via step 6.
@@ -11126,6 +16690,7 @@ async function handleConversationTurn(
           cfg.knowledge.referenceValidation
         ) {
           const peek = await ltm.peekProjectRefsOffloaded(projectPath);
+          assertCurrentPipelineGeneration(req.signal, requestGeneration);
           if (!peek.gated && peek.refs.length > 0) {
             block = buildCombinedResolveRefcheckBlock(
               target,
@@ -11313,6 +16878,11 @@ async function handleConversationTurn(
     distilledPrefixLength: result.distilledTokens > 0 ? 2 : 0,
   };
 
+  // The throttle is part of the foreground request's absolute lifetime. Start
+  // the shared scope before delaying so the 300-second deadline includes both
+  // the wait and every later upstream/recall phase.
+  const foregroundAbort = createForegroundAbortScope(modifiedReq.signal);
+
   // --- Daily budget + OAuth quota throttle ---
   // Apply an invisible proxy-level sleep to slow the agent when approaching
   // the daily budget OR the Anthropic OAuth quota. The sleep is capped to
@@ -11353,17 +16923,26 @@ async function handleConversationTurn(
             `spend=$${getDailySpend().spend.toFixed(2)} ` +
             `rate=$${getCostRate().toFixed(2)}/hr`,
         );
-        await new Promise((resolve) => setTimeout(resolve, actualDelay * 1000));
-
-        // Track throttle event on session costs
-        const costs = getSessionCosts(sessionID);
-        if (costs) {
-          costs.throttle.events++;
-          costs.throttle.totalDelayMs += actualDelay * 1000;
+        try {
+          await completeBudgetThrottleDelay(
+            actualDelay * 1000,
+            foregroundAbort.signal,
+            () => {
+              const costs = getSessionCosts(sessionID);
+              if (costs) {
+                costs.throttle.events++;
+                costs.throttle.totalDelayMs += actualDelay * 1000;
+              }
+            },
+          );
+        } catch (error) {
+          foregroundAbort.dispose();
+          throw error;
         }
       }
     }
   }
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // Start gen_ai.chat span before the upstream call so it captures real
   // wall-clock duration (including network latency and streaming time).
@@ -11374,48 +16953,98 @@ async function handleConversationTurn(
     attributes: {
       "gen_ai.operation.name": "chat",
       "gen_ai.request.model": req.model,
-      "gen_ai.provider.name": (() => {
-        if (req.protocol === "openai-responses") return "openai-responses";
-        // Apply the same providerRouteUsable guard as forwardToUpstream:
-        // only trust provider route protocol when it has a usable URL.
-        const pid = extractProviderHeader(req.rawHeaders);
-        const pr = pid ? resolveProviderRoute(pid) : null;
-        const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
-        const prUsable = pr && (pr.url != null || hdrUp) ? pr : null;
-        return (
-          prUsable?.protocol ??
-          resolveUpstreamRoute(req.model)?.protocol ??
-          "anthropic"
-        );
-      })(),
+      "gen_ai.provider.name":
+        requestUpstreamRoute.providerID ??
+        requestUpstreamRoute.effectiveProtocol,
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },
   });
+  let streamingFinalizerRegistered = false;
+  let genAiSpanEnded = false;
+  let recallPersistenceTransaction:
+    | { commit: () => void; rollback: () => void }
+    | undefined;
+  const rollbackRecallPersistence = (): void => {
+    recallPersistenceTransaction?.rollback();
+    recallPersistenceTransaction = undefined;
+  };
+  const endGenAiSpan = (): void => {
+    if (genAiSpanEnded) return;
+    genAiSpanEnded = true;
+    genAiSpan?.end();
+  };
+  const dropStreamingFinalizer = (): void => {
+    rollbackRecallPersistence();
+    streamingFinalizerRegistered = true;
+    genAiSpan?.setStatus({
+      code: 2,
+      message: "post-response finalizer dropped",
+    });
+    endGenAiSpan();
+  };
+  const releaseForeground = (): void => {
+    if (!streamingFinalizerRegistered && !genAiSpanEnded) {
+      genAiSpan?.setStatus({
+        code: 2,
+        message: req.stream
+          ? "stream cancelled before terminal response"
+          : "request ended before terminal response",
+      });
+      endGenAiSpan();
+    }
+    foregroundAbort.dispose();
+  };
 
-  const {
-    response: upstreamResponse,
-    serializedBody: requestBody,
-    effectiveProtocol,
-  } = await forwardToUpstream(modifiedReq, config, undefined, cacheOptions);
+  let upstreamResult: UpstreamResult;
+  try {
+    upstreamResult = await forwardToUpstream(
+      modifiedReq,
+      config,
+      undefined,
+      cacheOptions,
+      foregroundAbort.signal,
+      requestUpstreamRoute,
+    );
+  } catch (error) {
+    releaseForeground();
+    throw error;
+  }
+  const upstreamResponse = wrapBodyWithCleanup(
+    upstreamResult.response,
+    () => {},
+    foregroundAbort.signal,
+  );
+  let foregroundOwnershipTransferred = false;
+  const finishForeground = (response: Response): Response => {
+    if (foregroundOwnershipTransferred) return response;
+    foregroundOwnershipTransferred = true;
+    return wrapBodyWithCleanup(
+      response,
+      releaseForeground,
+      foregroundAbort.signal,
+    );
+  };
+  const awaitForeground = async <T>(operation: Promise<T>): Promise<T> => {
+    try {
+      return await operation;
+    } catch (error) {
+      if (!foregroundOwnershipTransferred) releaseForeground();
+      throw error;
+    }
+  };
+  const { serializedBody: requestBody, effectiveProtocol } = upstreamResult;
 
   if (!upstreamResponse.ok) {
-    const errorBody = await upstreamResponse.text();
-    // Friendly diagnostic suffix for a pass-through 429 misread as a Lore bug.
-    // 🔴 credScheme is the LOAD-BEARING exclusion for Bedrock: Bedrock also
-    // reports effectiveProtocol === "anthropic", so the protocol gate does NOT
-    // exclude it — only its "api-key" scheme (x-api-key) does. Never drop the
-    // credScheme arg or hardcode it, or Bedrock 429s would misfire the
-    // "your Anthropic subscription's rate limit" hint.
-    const errorHint = upstreamErrorHint({
-      status: upstreamResponse.status,
-      body: errorBody,
-      protocol: effectiveProtocol,
-      credScheme: resolveAuth(sessionID)?.scheme,
-    });
-    log.error(
-      `upstream error: ${upstreamResponse.status} ${errorBody.slice(0, 500)}${errorHint}`,
+    const errorBody = await awaitForeground(
+      readForegroundBody(
+        upstreamResponse,
+        true,
+        undefined,
+        foregroundAbort.signal,
+      ),
     );
+    log.error(`upstream error: ${upstreamResponse.status}`);
 
     // When the API rejects with a context-length error, escalate the compression
     // layer for the next turn so the session doesn't get stuck in a loop.
@@ -11459,11 +17088,13 @@ async function handleConversationTurn(
       code: 2,
       message: `HTTP ${upstreamResponse.status}`,
     });
-    genAiSpan.end();
-    return new Response(errorBody, {
-      status: upstreamResponse.status,
-      headers: { "content-type": "application/json" },
-    });
+    endGenAiSpan();
+    return finishForeground(
+      new Response(errorBody, {
+        status: upstreamResponse.status,
+        headers: { "content-type": "application/json" },
+      }),
+    );
   }
 
   // Run the recall-interception loop over an already-accumulated
@@ -11502,12 +17133,17 @@ async function handleConversationTurn(
       recallDepth++;
       const recallBlock = findRecallToolUse(currentResp);
       if (!recallBlock) break;
-      const { result, input } = await executeRecall(
-        recallBlock,
-        sessionState.projectPath,
-        sessionState.sessionID,
-        getLLMClient(config),
-        alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
+      const { result, input } = await promiseAgainstAbort(
+        () =>
+          executeRecall(
+            recallBlock,
+            sessionState.projectPath,
+            sessionState.sessionID,
+            getLLMClient(config),
+            alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
+            foregroundAbort.signal,
+          ),
+        foregroundAbort.signal,
       );
 
       // Store recall result for marker round-trip expansion
@@ -11526,20 +17162,22 @@ async function handleConversationTurn(
         const side: "before" | "after" = index < position ? "before" : "after";
         return [{ id: block.id, name: block.name, input: block.input, side }];
       });
-      addRecallStoreEntry(sessionState.recallStore, storeKey, {
-        toolUseId: recallBlock.id,
-        anchorId,
-        anchorContextId,
-        input,
-        position,
-        result,
-        ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
-      });
-      // Persist the store (v46) so the marker still expands byte-identically
-      // after a gateway restart instead of leaking raw marker text upstream.
-      saveSessionTracking(sessionState.sessionID, {
-        recallStore: serializeRecallStore(sessionState.recallStore),
-      });
+      if (!suppressTemporalStorage) {
+        addRecallStoreEntry(sessionState.recallStore, storeKey, {
+          toolUseId: recallBlock.id,
+          anchorId,
+          anchorContextId,
+          input,
+          position,
+          result,
+          ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
+        });
+        // Persist the store (v46) so the marker still expands byte-identically
+        // after a gateway restart instead of leaking raw marker text upstream.
+        saveSessionTracking(sessionState.sessionID, {
+          recallStore: serializeRecallStore(sessionState.recallStore),
+        });
+      }
 
       const markerText = buildAnchoredRecallMarker(
         input.query,
@@ -11564,14 +17202,20 @@ async function handleConversationTurn(
           `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         markerResp.usage = cumulativeUsage;
-        postResponse(
-          req,
-          markerResp,
-          sessionState,
-          config,
-          requestBody,
-          genAiSpan,
-        );
+        if (req.stream) {
+          finishStreaming(markerResp);
+        } else {
+          postResponse(
+            req,
+            markerResp,
+            sessionState,
+            config,
+            requestBody,
+            genAiSpan,
+            suppressTemporalStorage,
+            endGenAiSpan,
+          );
+        }
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -11601,13 +17245,27 @@ async function handleConversationTurn(
         `recall (non-stream, depth=${recallDepth}, codex=${followUpRequiresStream}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
       );
       const jsonRecallCtx: RecallFollowUpCtx = {
-        forward: (r) =>
-          forwardToUpstream(r, config, undefined, {
-            ...cacheOptions,
-            cacheConversation: false,
+        forward: (r, signal) =>
+          forwardToUpstream(
+            r,
+            config,
+            undefined,
+            {
+              ...cacheOptions,
+              cacheConversation: false,
+            },
+            signal,
+            requestUpstreamRoute,
+          ),
+        parseJSON: (response, protocol, signal) =>
+          accumulateNonStreamResponse(response, protocol, false, signal),
+        parseSSE: (response, signal) =>
+          accumulateResponsesSSEStream(response, {
+            signal,
+            validation: currentModifiedReq.codex ? "codex" : "public",
+            stopAtTerminal: true,
+            requireCompletedTerminal: true,
           }),
-        parseJSON: accumulateNonStreamResponse,
-        parseSSE: accumulateResponsesSSEStream,
       };
       let jsonFollowUp: Awaited<ReturnType<typeof runRecallFollowUpJSON>>;
       try {
@@ -11618,6 +17276,7 @@ async function handleConversationTurn(
               currentResp,
               result,
               recallBlock,
+              foregroundAbort.signal,
             )
           : await runRecallFollowUpJSON(
               jsonRecallCtx,
@@ -11625,22 +17284,43 @@ async function handleConversationTurn(
               currentResp,
               result,
               recallBlock,
+              foregroundAbort.signal,
             );
       } catch (fetchErr) {
+        if (
+          foregroundAbort.signal.aborted ||
+          (fetchErr instanceof Error && fetchErr.name === "AbortError")
+        ) {
+          throw fetchErr;
+        }
+        if (fetchErr instanceof ResponsesTerminalError) {
+          Object.assign(
+            cumulativeUsage,
+            mergeRecallUsage(
+              cumulativeUsage,
+              fetchErr.response.usage ?? ZERO_USAGE,
+            ),
+          );
+        }
         log.error(
-          `recall follow-up fetch error (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}:`,
-          fetchErr,
+          `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        postResponse(
-          req,
-          markerResp,
-          sessionState,
-          config,
-          requestBody,
-          genAiSpan,
-        );
+        if (req.stream) {
+          finishStreaming(markerResp);
+        } else {
+          postResponse(
+            req,
+            markerResp,
+            sessionState,
+            config,
+            requestBody,
+            genAiSpan,
+            suppressTemporalStorage,
+            endGenAiSpan,
+          );
+        }
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -11654,7 +17334,7 @@ async function handleConversationTurn(
 
       if (!jsonFollowUp.ok) {
         log.error(
-          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"} ${jsonFollowUp.detail}`,
+          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"}`,
           new Error(`recall follow-up upstream ${jsonFollowUp.status ?? "?"}`),
         );
         captureToolPairing400({
@@ -11669,14 +17349,20 @@ async function handleConversationTurn(
         });
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        postResponse(
-          req,
-          markerResp,
-          sessionState,
-          config,
-          requestBody,
-          genAiSpan,
-        );
+        if (req.stream) {
+          finishStreaming(markerResp);
+        } else {
+          postResponse(
+            req,
+            markerResp,
+            sessionState,
+            config,
+            requestBody,
+            genAiSpan,
+            suppressTemporalStorage,
+            endGenAiSpan,
+          );
+        }
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -11692,18 +17378,10 @@ async function handleConversationTurn(
 
       // Accumulate usage from this iteration
       const contUsage = continuationResp.usage ?? ZERO_USAGE;
-      cumulativeUsage.inputTokens += contUsage.inputTokens;
-      cumulativeUsage.outputTokens += contUsage.outputTokens;
-      if (contUsage.cacheReadInputTokens) {
-        cumulativeUsage.cacheReadInputTokens =
-          (cumulativeUsage.cacheReadInputTokens ?? 0) +
-          contUsage.cacheReadInputTokens;
-      }
-      if (contUsage.cacheCreationInputTokens) {
-        cumulativeUsage.cacheCreationInputTokens =
-          (cumulativeUsage.cacheCreationInputTokens ?? 0) +
-          contUsage.cacheCreationInputTokens;
-      }
+      Object.assign(
+        cumulativeUsage,
+        mergeRecallUsage(cumulativeUsage, contUsage),
+      );
 
       // Update for next iteration
       currentModifiedReq = followUp;
@@ -11729,14 +17407,20 @@ async function handleConversationTurn(
       };
     }
     currentResp.usage = cumulativeUsage;
-    postResponse(
-      req,
-      currentResp,
-      sessionState,
-      config,
-      requestBody,
-      genAiSpan,
-    );
+    if (req.stream) {
+      finishStreaming(currentResp);
+    } else {
+      postResponse(
+        req,
+        currentResp,
+        sessionState,
+        config,
+        requestBody,
+        genAiSpan,
+        suppressTemporalStorage,
+        endGenAiSpan,
+      );
+    }
     // Telemetry: flag a completion we're about to hand back with NO usable
     // content (no text, no tool_use) — the "no response data" class
     // (github-copilot #1052 follow-up). Checked on the model's response, before
@@ -11771,6 +17455,121 @@ async function handleConversationTurn(
       longContext,
     );
   };
+  const finishWithRecall = async (resp: GatewayResponse): Promise<Response> =>
+    finishForeground(await awaitForeground(finalizeWithRecall(resp)));
+  function finishStreaming(resp: GatewayResponse): void {
+    if (streamingFinalizerRegistered) return;
+    streamingFinalizerRegistered = true;
+    scheduleStreamingPostResponse(
+      sessionState.sessionID,
+      requestGeneration,
+      async () => {
+        await downstreamSettled;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (requestGeneration !== streamingPostResponseGeneration) {
+          dropStreamingFinalizer();
+          return;
+        }
+        if (sessionSignal.aborted) {
+          dropStreamingFinalizer();
+          return;
+        }
+        if (downstreamWasCancelled()) {
+          rollbackRecallPersistence();
+          accountUnsuccessfulResponse(
+            resp,
+            sessionState.sessionID,
+            sessionState.resolvedConversationTTL,
+            genAiSpan,
+            endGenAiSpan,
+            () => {
+              sessionState._dirty = true;
+            },
+          );
+          return;
+        }
+        try {
+          const postResponseFailed = new Error(
+            "Responses recall post-response persistence failed",
+          );
+          try {
+            withTenant(sessionState.storageTenantId ?? "", () =>
+              withSavepoint("responses_recall_post_response", () => {
+                const persisted = postResponseForTenant(
+                  req,
+                  resp,
+                  sessionState,
+                  config,
+                  requestBody,
+                  genAiSpan,
+                  suppressTemporalStorage,
+                  endGenAiSpan,
+                );
+                if (!persisted) throw postResponseFailed;
+                recallPersistenceTransaction?.commit();
+              }),
+            );
+            recallPersistenceTransaction = undefined;
+          } catch (error) {
+            rollbackRecallPersistence();
+            if (error !== postResponseFailed) throw error;
+          }
+        } catch (error) {
+          rollbackRecallPersistence();
+          throw error;
+        }
+      },
+      dropStreamingFinalizer,
+      true,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+    );
+  }
+  function finishUnsuccessfulStreaming(resp: GatewayResponse): void {
+    if (streamingFinalizerRegistered) return;
+    streamingFinalizerRegistered = true;
+    scheduleStreamingPostResponse(
+      sessionState.sessionID,
+      requestGeneration,
+      async () => {
+        await downstreamSettled;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        rollbackRecallPersistence();
+        if (
+          requestGeneration !== streamingPostResponseGeneration ||
+          sessionSignal.aborted
+        ) {
+          dropStreamingFinalizer();
+          return;
+        }
+        accountUnsuccessfulResponse(
+          resp,
+          sessionState.sessionID,
+          sessionState.resolvedConversationTTL,
+          genAiSpan,
+          endGenAiSpan,
+          () => {
+            sessionState._dirty = true;
+          },
+        );
+      },
+      dropStreamingFinalizer,
+      true,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+    );
+  }
+  async function captureUnsuccessfulResponses(
+    operation: Promise<GatewayResponse>,
+  ): Promise<{ response: GatewayResponse; successful: boolean } | undefined> {
+    try {
+      return { response: await operation, successful: true };
+    } catch (error) {
+      if (!(error instanceof ResponsesTerminalError)) throw error;
+      finishUnsuccessfulStreaming(error.response);
+      return error.status === "incomplete"
+        ? { response: error.response, successful: false }
+        : undefined;
+    }
+  }
 
   if (req.stream && upstreamResponse.body) {
     // Non-Anthropic upstream streaming responses need their own accumulator
@@ -11800,202 +17599,259 @@ async function handleConversationTurn(
         if (hasRecallTool) {
           let responsesRecallRequest = modifiedReq;
           const responsesVisibleContent: GatewayContentBlock[] = [];
-          return streamResponsesRecallAware(upstreamResponse, {
-            onComplete: (resp) =>
-              postResponse(
-                req,
-                resp,
-                sessionState,
-                config,
-                requestBody,
-                genAiSpan,
-              ),
-            sessionID: sessionState.sessionID,
-            maxRecallDepth: MAX_RECALL_DEPTH,
-            onRecall: async ({
-              query,
-              scope,
-              id,
-              toolUseId,
-              contentPosition,
-              acc,
-              signal,
-            }) => {
-              const alreadyInLtm = buildAlreadyInLtmIds(
-                stableLtmText,
-                pendingKnowledgeDelta,
-              );
-              const { result, input } = await executeRecall(
-                {
-                  type: "tool_use",
-                  id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
-                  name: RECALL_TOOL_NAME,
-                  input: { query, scope, id },
-                },
-                sessionState.projectPath,
-                sessionState.sessionID,
-                getLLMClient(config),
-                alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
-                signal,
-              );
-              const recallBlock = acc.content[contentPosition];
-              if (
-                recallBlock?.type !== "tool_use" ||
-                recallBlock.id !== toolUseId ||
-                recallBlock.name !== RECALL_TOOL_NAME
-              ) {
-                throw new Error(
-                  "recall execution: recall block not found in accumulated response",
-                );
-              }
-              const anchorId = crypto.randomUUID();
-              const position = contentPosition;
-              const anchorContextId = responsesAnchorContext(
-                recallClientMessages,
-                responsesVisibleContent,
-                acc,
-                recallBlock.id,
-              );
-              const companionToolUses = acc.content.flatMap((block, index) => {
-                if (block.type !== "tool_use" || block.id === toolUseId) {
-                  return [];
-                }
-                const side: "before" | "after" =
-                  index < position ? "before" : "after";
-                return [
-                  {
-                    id: block.id,
-                    name: block.name,
-                    input: block.input,
-                    side,
-                  },
-                ];
-              });
-              const storeKey = `anchor:${anchorId}`;
-              const storedRecall = {
+          return finishForeground(
+            streamResponsesRecallAware(upstreamResponse, {
+              validation: req.codex ? "codex" : "public",
+              onComplete: (response, successful) => {
+                if (successful) finishStreaming(response);
+                else finishUnsuccessfulStreaming(response);
+              },
+              onTransactionReady: (transaction) => {
+                rollbackRecallPersistence();
+                recallPersistenceTransaction = transaction;
+              },
+              sessionID: sessionState.sessionID,
+              maxRecallDepth: MAX_RECALL_DEPTH,
+              signal: foregroundAbort.signal,
+              onRecall: async ({
+                query,
+                scope,
+                id,
                 toolUseId,
-                anchorId,
-                anchorContextId,
-                input,
-                position,
-                result,
-                ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
-              } satisfies StoredRecall;
-              const persistStore = (): void => {
-                saveSessionTracking(sessionState.sessionID, {
-                  recallStore: serializeRecallStore(sessionState.recallStore),
-                });
-              };
-              const anchorText = buildRecallAnchor(anchorId);
-              responsesVisibleContent.push(
-                ...responsesProvenanceContent(
-                  acc,
-                  new Map([[toolUseId, anchorText]]),
-                ),
-              );
-              return {
-                anchorText,
-                resultText: result,
-                commit: () => {
-                  addRecallStoreEntry(
-                    sessionState.recallStore,
-                    storeKey,
-                    storedRecall,
-                  );
-                  persistStore();
-                },
-                rollback: () => {
-                  if (sessionState.recallStore.delete(storeKey)) persistStore();
-                },
-              };
-            },
-            runFollowUp: async ({
-              acc,
-              resultText,
-              toolUseId,
-              contentPosition,
-              signal,
-            }) => {
-              // Reconstruct the recall tool_use block for the follow-up request.
-              const recallBlock = acc.content[contentPosition];
-              if (
-                recallBlock?.type !== "tool_use" ||
-                recallBlock.id !== toolUseId ||
-                recallBlock.name !== RECALL_TOOL_NAME
-              ) {
-                throw new Error(
-                  "recall follow-up: recall block not found in accumulated response",
+                contentPosition,
+                acc,
+                signal,
+              }) => {
+                const alreadyInLtm = buildAlreadyInLtmIds(
+                  stableLtmText,
+                  pendingKnowledgeDelta,
                 );
-              }
-              const followUpCtx: RecallFollowUpCtx = {
-                forward: (r, followUpSignal) =>
-                  forwardToUpstream(
-                    r,
-                    config,
-                    undefined,
-                    {
-                      ...cacheOptions,
-                      cacheConversation: false,
-                    },
-                    followUpSignal,
-                  ),
-                parseJSON: () => {
+                const deferredTransferRecordings: Array<() => void> = [];
+                const { result, input } = await withTenant(
+                  sessionState.storageTenantId ?? "",
+                  () =>
+                    executeRecall(
+                      {
+                        type: "tool_use",
+                        id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
+                        name: RECALL_TOOL_NAME,
+                        input: { query, scope, id },
+                      },
+                      sessionState.projectPath,
+                      sessionState.sessionID,
+                      getLLMClient(config),
+                      alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
+                      signal,
+                      (record) => deferredTransferRecordings.push(record),
+                    ),
+                );
+                const recallBlock = acc.content[contentPosition];
+                if (
+                  recallBlock?.type !== "tool_use" ||
+                  recallBlock.id !== toolUseId ||
+                  recallBlock.name !== RECALL_TOOL_NAME
+                ) {
                   throw new Error(
-                    "parseJSON must not be called on the streaming recall path",
+                    "recall execution: recall block not found in accumulated response",
                   );
-                },
-              };
-              const follow = await runRecallFollowUpStreaming(
-                followUpCtx,
-                responsesRecallRequest,
+                }
+                const anchorId = crypto.randomUUID();
+                const position = contentPosition;
+                const anchorContextId = responsesAnchorContext(
+                  recallClientMessages,
+                  responsesVisibleContent,
+                  acc,
+                  recallBlock.id,
+                );
+                const companionToolUses = acc.content.flatMap(
+                  (block, index) => {
+                    if (block.type !== "tool_use" || block.id === toolUseId) {
+                      return [];
+                    }
+                    const side: "before" | "after" =
+                      index < position ? "before" : "after";
+                    return [
+                      {
+                        id: block.id,
+                        name: block.name,
+                        input: block.input,
+                        side,
+                      },
+                    ];
+                  },
+                );
+                const storeKey = `anchor:${anchorId}`;
+                const storedRecall = {
+                  toolUseId,
+                  anchorId,
+                  anchorContextId,
+                  input,
+                  position,
+                  result,
+                  ...(companionToolUses.length > 0
+                    ? { companionToolUses }
+                    : {}),
+                } satisfies StoredRecall;
+                const persistStore = (): void => {
+                  saveSessionTracking(sessionState.sessionID, {
+                    recallStore: serializeRecallStore(sessionState.recallStore),
+                  });
+                };
+                const anchorText = buildRecallAnchor(anchorId);
+                responsesVisibleContent.push(
+                  ...responsesProvenanceContent(
+                    acc,
+                    new Map([[toolUseId, anchorText]]),
+                  ),
+                );
+                return {
+                  anchorText,
+                  resultText: result,
+                  commit: () => {
+                    for (const record of deferredTransferRecordings) record();
+                    if (suppressTemporalStorage) return;
+                    addRecallStoreEntry(
+                      sessionState.recallStore,
+                      storeKey,
+                      storedRecall,
+                    );
+                    persistStore();
+                    recallPersistenceCommitObserver?.();
+                  },
+                  rollback: () => {
+                    if (suppressTemporalStorage) return;
+                    if (sessionState.recallStore.delete(storeKey))
+                      persistStore();
+                  },
+                };
+              },
+              runFollowUp: async ({
                 acc,
                 resultText,
-                recallBlock,
+                toolUseId,
+                contentPosition,
                 signal,
-              );
-              if (!follow.ok) {
-                throw new Error(
-                  `recall follow-up upstream error: ${follow.status ?? "?"}`,
+              }) => {
+                // Reconstruct the recall tool_use block for the follow-up request.
+                const recallBlock = acc.content[contentPosition];
+                if (
+                  recallBlock?.type !== "tool_use" ||
+                  recallBlock.id !== toolUseId ||
+                  recallBlock.name !== RECALL_TOOL_NAME
+                ) {
+                  throw new Error(
+                    "recall follow-up: recall block not found in accumulated response",
+                  );
+                }
+                const followUpCtx: RecallFollowUpCtx = {
+                  forward: (r, followUpSignal) =>
+                    forwardToUpstream(
+                      r,
+                      config,
+                      undefined,
+                      {
+                        ...cacheOptions,
+                        cacheConversation: false,
+                      },
+                      followUpSignal,
+                      requestUpstreamRoute,
+                    ),
+                  parseJSON: () => {
+                    throw new Error(
+                      "parseJSON must not be called on the streaming recall path",
+                    );
+                  },
+                };
+                const follow = await runRecallFollowUpStreaming(
+                  followUpCtx,
+                  responsesRecallRequest,
+                  acc,
+                  resultText,
+                  recallBlock,
+                  signal,
                 );
-              }
-              responsesRecallRequest = follow.followUp;
-              return { reader: follow.reader };
-            },
-          });
+                if (!follow.ok) {
+                  throw new Error(
+                    `recall follow-up upstream error: ${follow.status ?? "?"}`,
+                  );
+                }
+                responsesRecallRequest = follow.followUp;
+                return { reader: follow.reader };
+              },
+            }),
+          );
         }
         // No recall tool — plain passthrough.
-        return streamResponsesPassthrough(
-          upstreamResponse,
-          (resp) =>
-            postResponse(
-              req,
-              resp,
-              sessionState,
-              config,
-              requestBody,
-              genAiSpan,
-            ),
-          sessionState.sessionID,
+        return finishForeground(
+          streamResponsesPassthrough(
+            upstreamResponse,
+            (response, successful) => {
+              if (successful) finishStreaming(response);
+              else finishUnsuccessfulStreaming(response);
+            },
+            sessionState.sessionID,
+            req.codex ? "codex" : "public",
+            foregroundAbort.signal,
+          ),
         );
       }
       // Warning to inject, or a non-Responses client: buffer the full
       // upstream, run recall interception, then re-emit.
-      const resp = await accumulateResponsesSSEStream(upstreamResponse);
-      return finalizeWithRecall(resp);
+      const captured = await awaitForeground(
+        captureUnsuccessfulResponses(
+          accumulateResponsesSSEStream(upstreamResponse, {
+            signal: foregroundAbort.signal,
+            validation: req.codex ? "codex" : "public",
+            stopAtTerminal: true,
+            requireCompletedTerminal: true,
+          }),
+        ),
+      );
+      if (!captured) {
+        return finishForeground(errorResponse(502, "Gateway request failed"));
+      }
+      if (!captured.successful) {
+        if (hasRecallToolUse(captured.response)) {
+          return finishForeground(errorResponse(502, "Gateway request failed"));
+        }
+        return finishForeground(
+          nonStreamHttpResponse(
+            captured.response,
+            req.protocol,
+            req.stream,
+            undefined,
+            requestEnablesLongContext(req),
+          ),
+        );
+      }
+      return finishWithRecall(captured.response);
     }
 
     if (effectiveProtocol === "openai") {
       // OpenAI Chat Completions streaming — accumulate and return as
       // non-streaming Anthropic format (same pattern as non-stream path).
-      const resp = await accumulateOpenAISSEStream(upstreamResponse);
-      return finalizeWithRecall(resp);
+      const resp = await awaitForeground(
+        accumulateOpenAISSEStream(upstreamResponse, {
+          signal: foregroundAbort.signal,
+          strict: true,
+          stopAtTerminal: true,
+          consumeUntilDone: true,
+        }),
+      );
+      return finishWithRecall(resp);
     }
 
     if (effectiveProtocol === "gemini") {
       // Gemini native streaming — accumulate the SSE frames, then re-emit via
       // the recall-aware finalizer (same buffered pattern as the OpenAI paths).
-      const resp = await accumulateGeminiSSEStream(upstreamResponse);
-      return finalizeWithRecall(resp);
+      const resp = await awaitForeground(
+        accumulateGeminiSSEStream(upstreamResponse, {
+          signal: foregroundAbort.signal,
+          strict: true,
+          stopAtTerminal: true,
+        }),
+      );
+      return finishWithRecall(resp);
     }
 
     // Anthropic streaming: forward events and accumulate in parallel.
@@ -12005,8 +17861,7 @@ async function handleConversationTurn(
     );
     const anthropicSSE = buildStreamingResponse(
       upstreamResponse,
-      (resp) =>
-        postResponse(req, resp, sessionState, config, requestBody, genAiSpan),
+      finishStreaming,
       hasRecallTool
         ? {
             clientMessages: recallClientMessages,
@@ -12014,6 +17869,8 @@ async function handleConversationTurn(
             config,
             sessionState,
             cacheOptions,
+            upstreamRoute: requestUpstreamRoute,
+            noStore: suppressTemporalStorage,
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
@@ -12026,27 +17883,63 @@ async function handleConversationTurn(
       // else 200K — so a 1M-capable model the client meters against 200K can't
       // cross its ~167K auto-compact threshold (#910 regression; MiniMax-M3).
       maxReportedUsageForModelID(req.model, requestEnablesLongContext(req)),
+      foregroundAbort.signal,
     );
     // Translate to client's wire format if needed. When the upstream is
     // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
     if (req.protocol === "openai") {
-      return translateAnthropicStreamToOpenAI(anthropicSSE);
+      return finishForeground(
+        translateAnthropicStreamToOpenAI(anthropicSSE, {
+          signal: foregroundAbort.signal,
+        }),
+      );
     }
     if (req.protocol === "openai-responses") {
-      return translateAnthropicStreamToResponses(anthropicSSE);
+      return finishForeground(
+        translateAnthropicStreamToResponses(anthropicSSE, {
+          signal: foregroundAbort.signal,
+        }),
+      );
     }
     if (req.protocol === "gemini") {
-      return translateAnthropicStreamToGemini(anthropicSSE);
+      return finishForeground(
+        translateAnthropicStreamToGemini(anthropicSSE, {
+          signal: foregroundAbort.signal,
+        }),
+      );
     }
-    return anthropicSSE;
+    return finishForeground(anthropicSSE);
   }
 
   // Non-streaming: dispatch to correct accumulator based on upstream protocol.
-  const resp = await accumulateNonStreamResponse(
-    upstreamResponse,
-    effectiveProtocol,
+  const captured = await awaitForeground(
+    captureUnsuccessfulResponses(
+      accumulateNonStreamResponse(
+        upstreamResponse,
+        effectiveProtocol,
+        modifiedReq.codex === true,
+        foregroundAbort.signal,
+      ),
+    ),
   );
-  return finalizeWithRecall(resp);
+  if (!captured) {
+    return finishForeground(errorResponse(502, "Gateway request failed"));
+  }
+  if (!captured.successful) {
+    if (hasRecallToolUse(captured.response)) {
+      return finishForeground(errorResponse(502, "Gateway request failed"));
+    }
+    return finishForeground(
+      nonStreamHttpResponse(
+        captured.response,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      ),
+    );
+  }
+  return finishWithRecall(captured.response);
 }
 
 // ---------------------------------------------------------------------------
@@ -12145,6 +18038,7 @@ export function loreMessagesToGateway(
             type: "tool";
             tool: string;
             callID: string;
+            toolName?: string;
             state: {
               status: string;
               input?: unknown;
@@ -12158,6 +18052,7 @@ export function loreMessagesToGateway(
             content.push({
               type: "tool_result",
               toolUseId: toolPart.callID,
+              ...(toolPart.toolName ? { toolName: toolPart.toolName } : {}),
               content: toolResultContent(toolPart.state),
             });
           } else {
@@ -12175,12 +18070,14 @@ export function loreMessagesToGateway(
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
+                toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
               });
             } else if (toolPart.state.status === "error") {
               pendingToolResults.push({
                 type: "tool_result",
                 toolUseId: toolPart.callID,
+                toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
                 isError: true,
               });
@@ -12354,18 +18251,63 @@ async function handleLoreSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
   config: GatewayConfig,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response | null> {
   const text = lastUserTextTrimmed(req);
   if (!text.toLowerCase().startsWith("/lore:")) return null;
 
+  let state = findLiveSessionState(req, config, allSessions);
+  const indexedSessionID = findIndexedSessionID(req, config);
+  if (!state && indexedSessionID) {
+    const pathResult = getProjectPath(req.system, req.rawHeaders);
+    state = getOrCreateSession(
+      indexedSessionID,
+      pathResult.path,
+      pathResult.source,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+      config,
+    );
+  }
+  const sessionID = indexedSessionID ?? state?.sessionID;
+  if (sessionID) {
+    await claimSession(sessionID);
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
+    await awaitStreamingPostResponse(sessionID, req.signal);
+    req.signal?.throwIfAborted();
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
+  }
+
   // Route to specific handlers
-  const warmupResult = handleWarmupSlashCommand(req, allSessions);
+  const warmupResult = handleWarmupSlashCommand(req, allSessions, config);
   if (warmupResult) return warmupResult;
 
-  const curateResult = await handleCurateSlashCommand(req, allSessions, config);
+  const curateResult = await handleCurateSlashCommand(
+    req,
+    allSessions,
+    config,
+    claimSession,
+  );
   if (curateResult) return curateResult;
 
-  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions);
+  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions, config);
   if (amnesiaResult) return amnesiaResult;
 
   // Unknown /lore:* command — return error instead of forwarding upstream
@@ -12392,6 +18334,7 @@ async function handleLoreSlashCommand(
 function handleAmnesiaSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
 ): Response | null {
   const text = lastUserTextTrimmed(req);
   const lower = text.toLowerCase();
@@ -12400,26 +18343,22 @@ function handleAmnesiaSlashCommand(
   const isOff = lower === "/lore:amnesia:off";
   if (!isOn && !isOff) return null;
 
-  // Find the session
-  const known = extractKnownSessionHeader(req.rawHeaders);
-  let state: SessionState | undefined;
-  if (known) {
-    const indexKey = sessionIndexKey(
-      requestCredentialFingerprint(req.rawHeaders),
-      known.headerName,
-      known.sessionId,
+  const state = findLiveSessionState(req, config, allSessions);
+
+  if (!state) {
+    return slashResponse(
+      req,
+      "No active session found. Amnesia mode was not changed.",
+      `msg_lore_${Date.now()}`,
     );
-    const sid = headerSessionIndex.get(indexKey);
-    if (sid) state = allSessions.get(sid);
   }
 
-  if (state) {
-    state.amnesia = isOn;
-    log.info(
-      `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
-        `storage ${isOn ? "suppressed" : "resumed"}`,
-    );
-  }
+  state.amnesia = isOn;
+  saveSessionTracking(state.sessionID, { amnesia: isOn });
+  log.info(
+    `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
+      `storage ${isOn ? "suppressed" : "resumed"}`,
+  );
 
   const responseText = isOn
     ? "Amnesia mode on — memory storage suppressed. Recall still works."
@@ -12448,6 +18387,7 @@ function handleAmnesiaSlashCommand(
 function handleWarmupSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
 ): Response | null {
   const text = lastUserTextTrimmed(req);
   const lower = text.toLowerCase();
@@ -12460,8 +18400,35 @@ function handleWarmupSlashCommand(
   const isOn = lower === "/lore:warm:on";
   if (!isStop && !isKeep && !isAuto && !isReset && !isOff && !isOn) return null;
 
-  // Reset is a breaker-wide admin action — clear every tripped bucket and
-  // return immediately (it does not depend on resolving this session).
+  const state = findLiveSessionState(req, config, allSessions);
+
+  if (
+    (isReset || isOff || isOn) &&
+    (config.remoteGateway || config.hostedMode)
+  ) {
+    return errorResponse(
+      403,
+      "Global cache-warming administration is unavailable on remote gateways",
+    );
+  }
+
+  // Global controls require an authenticated, resolved session. Otherwise any
+  // network caller could persistently change warming for every tenant.
+  if (
+    (isReset || isOff || isOn) &&
+    (isHostedMode() ||
+      !state ||
+      !state.lastUpstream ||
+      !extractAuth(req.rawHeaders))
+  ) {
+    return slashResponse(
+      req,
+      "No authenticated active session found. Global cache warming was not changed.",
+      `msg_lore_${Date.now()}`,
+    );
+  }
+
+  // Reset is a breaker-wide admin action.
   if (isReset) {
     resetCircuitBreaker();
     log.info(
@@ -12474,8 +18441,7 @@ function handleWarmupSlashCommand(
     );
   }
 
-  // on/off are GLOBAL admin actions (persisted KV override) — apply and return
-  // immediately, independent of this session.
+  // on/off are GLOBAL admin actions (persisted KV override).
   if (isOff || isOn) {
     setWarmingEnabled(isOn);
     log.info(
@@ -12488,19 +18454,6 @@ function handleWarmupSlashCommand(
         : "Cache warming disabled globally.",
       `msg_lore_${Date.now()}`,
     );
-  }
-
-  // Find the session for this request (use the same header-based lookup)
-  const known = extractKnownSessionHeader(req.rawHeaders);
-  let state: SessionState | undefined;
-  if (known) {
-    const indexKey = sessionIndexKey(
-      requestCredentialFingerprint(req.rawHeaders),
-      known.headerName,
-      known.sessionId,
-    );
-    const sid = headerSessionIndex.get(indexKey);
-    if (sid) state = allSessions.get(sid);
   }
 
   // Update session warmup state
@@ -12556,42 +18509,25 @@ async function handleCurateSlashCommand(
   req: GatewayRequest,
   allSessions: Map<string, SessionState>,
   config: GatewayConfig,
+  claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response | null> {
   const text = lastUserTextTrimmed(req);
   if (text.toLowerCase() !== "/lore:curate") return null;
 
-  // Find the session
-  const known = extractKnownSessionHeader(req.rawHeaders);
-  let state: SessionState | undefined;
-  let sessionID: string | undefined;
-  if (known) {
-    const indexKey = sessionIndexKey(
-      requestCredentialFingerprint(req.rawHeaders),
-      known.headerName,
-      known.sessionId,
-    );
-    const sid = headerSessionIndex.get(indexKey);
-    if (sid) {
-      state = allSessions.get(sid);
-      sessionID = sid;
-    }
-  }
+  const indexedSessionID = findIndexedSessionID(req, config);
+  const pathResult = getProjectPath(req.system, req.rawHeaders);
+  let state = findLiveSessionState(req, config, allSessions);
+  let sessionID = state?.sessionID;
 
-  // Fall back to finding any recent session for this project
-  if (!sessionID) {
-    // Use the most recently active session
-    let latest: SessionState | undefined;
-    const credentialFingerprint = requestCredentialFingerprint(req.rawHeaders);
-    for (const s of allSessions.values()) {
-      if ((s.credentialFingerprint ?? "") !== credentialFingerprint) continue;
-      if (!latest || s.lastRequestTime > latest.lastRequestTime) {
-        latest = s;
-      }
-    }
-    if (latest) {
-      state = latest;
-      sessionID = latest.sessionID;
-    }
+  if (!state && indexedSessionID) {
+    state = getOrCreateSession(
+      indexedSessionID,
+      pathResult.path,
+      pathResult.source,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+      config,
+    );
+    sessionID = indexedSessionID;
   }
 
   if (!sessionID || !state) {
@@ -12602,8 +18538,37 @@ async function handleCurateSlashCommand(
     );
   }
 
-  const projectPath = state.projectPath;
+  await claimSession(sessionID);
+  if (
+    indexedSessionID &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return slashResponse(
+      req,
+      "No active session found for curation.",
+      "msg_lore_curate_none",
+    );
+  }
+  await awaitStreamingPostResponse(sessionID, req.signal);
+  req.signal?.throwIfAborted();
+  if (
+    indexedSessionID &&
+    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+  ) {
+    return slashResponse(
+      req,
+      "No active session found for curation.",
+      "msg_lore_curate_none",
+    );
+  }
+
+  const projectPath = resolveSessionProjectPath(pathResult, state, config);
+  saveSessionTracking(sessionID, {
+    projectPath: state.projectPath || null,
+    projectPathProvisional: state.projectPathProvisional === true,
+  });
   const { distillation, curator } = await import("@loreai/core");
+  req.signal?.throwIfAborted();
   const llm = getLLMClient(config);
   const model = getWorkerModel(state.lastUpstream);
 
@@ -12621,12 +18586,15 @@ async function handleCurateSlashCommand(
       skipMeta: true,
       urgent: true,
       callType: "direct",
+      signal: req.signal,
       workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
       // #627 Phase 1: stamp the session's gitHead on slash-curate rows.
       metadata: buildSessionMetadata(state.gitHead),
     });
+    req.signal?.throwIfAborted();
     distilled = dResult.distilled;
   } catch (e) {
+    req.signal?.throwIfAborted();
     log.error("/lore:curate distillation error:", e);
   }
 
@@ -12640,14 +18608,17 @@ async function handleCurateSlashCommand(
       projectPath,
       sessionID,
       model,
+      signal: req.signal,
       workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
       // #627 Phase 1: stamp the session's gitHead on slash-curate entries.
       metadata: buildSessionMetadata(state.gitHead),
     });
+    req.signal?.throwIfAborted();
     created = cResult.created;
     updated = cResult.updated;
     deleted = cResult.deleted;
   } catch (e) {
+    req.signal?.throwIfAborted();
     log.error("/lore:curate curation error:", e);
   }
 
@@ -12685,13 +18656,19 @@ function slashResponse(
     // Build Anthropic SSE, then translate to client's format if needed
     const anthropicSSE = streamHttpResponse(resp);
     if (req.protocol === "openai") {
-      return translateAnthropicStreamToOpenAI(anthropicSSE);
+      return translateAnthropicStreamToOpenAI(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     if (req.protocol === "openai-responses") {
-      return translateAnthropicStreamToResponses(anthropicSSE);
+      return translateAnthropicStreamToResponses(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     if (req.protocol === "gemini") {
-      return translateAnthropicStreamToGemini(anthropicSSE);
+      return translateAnthropicStreamToGemini(anthropicSSE, {
+        signal: req.signal,
+      });
     }
     return anthropicSSE;
   }
@@ -12759,11 +18736,17 @@ function errorResponse(status: number, message: string): Response {
  * treats it as a failed generation, not a dropped connection.
  */
 export function earlyFlushStreamingResponse(
-  run: () => Promise<Response>,
+  run: (signal: AbortSignal) => Promise<Response>,
   modelId: string,
+  signal?: AbortSignal,
+  trackOperation?: (operation: Promise<unknown>) => void,
 ): Response {
   const encoder = new TextEncoder();
   const keepalive = encoder.encode(`: lore preparing\n\n`);
+  const downstreamAbort = new AbortController();
+  const operationSignal = signal
+    ? AbortSignal.any([signal, downstreamAbort.signal])
+    : downstreamAbort.signal;
 
   /**
    * Emit a canonical `response.failed` envelope matching the shape used by
@@ -12790,79 +18773,88 @@ export function earlyFlushStreamingResponse(
     );
   }
 
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let responsePromise: Promise<Response> | undefined;
+  let cancelled = false;
+  let finished = false;
+
+  const finish = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+  ): void => {
+    if (finished) return;
+    finished = true;
+    if (reader) cancelAndReleaseReader(reader);
+    try {
+      controller.close();
+    } catch {
+      /* already closed */
+    }
+  };
+
   return new Response(
     new ReadableStream({
-      async start(controller) {
+      start(controller) {
+        // Fill the initial queue with only the keepalive. The pipeline starts
+        // from pull() after the downstream consumes it, preserving backpressure.
+        controller.enqueue(keepalive);
+      },
+      async pull(controller) {
+        if (cancelled || finished) return;
         try {
-          // Enqueue the keepalive comment FIRST so the server flushes headers
-          // before the (potentially slow) pipeline work below runs.
-          controller.enqueue(keepalive);
-          const inner = await run();
-          if (
-            !inner.body ||
-            !inner.headers.get("content-type")?.includes("text/event-stream")
-          ) {
-            // The inner response has no streamable SSE body (e.g. an error
-            // Response with a plain string body). Surface as response.failed.
-            const status = inner.status;
-            const text = await inner.text().catch(() => "");
-            try {
-              controller.enqueue(
-                emitFailed(`${status}: ${text.slice(0, 500)}`),
+          if (!reader) {
+            if (!responsePromise) {
+              responsePromise = run(operationSignal);
+              trackOperation?.(responsePromise);
+            }
+            const inner = await responseAgainstAbort(
+              () => responsePromise as Promise<Response>,
+              operationSignal,
+            );
+            if (cancelled) {
+              void inner.body?.cancel().catch(() => {});
+              return;
+            }
+            if (
+              !inner.body ||
+              !inner.headers.get("content-type")?.includes("text/event-stream")
+            ) {
+              // The inner response has no streamable SSE body (e.g. an error
+              // Response with a plain string body). Surface as response.failed.
+              log.error(
+                `early-flush inner response was not SSE (status=${inner.status})`,
               );
-            } catch {
-              /* client gone */
-            }
-            try {
-              controller.close();
-            } catch {
-              /* already closed */
-            }
-            return;
-          }
-          const reader = inner.body.getReader();
-          let cancelled = false;
-          try {
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (cancelled) continue;
-              try {
-                controller.enqueue(value);
-              } catch {
-                // Client disconnected — cancel the upstream stream so the
-                // gateway doesn't keep reading until the OS times out.
-                cancelled = true;
-                reader.cancel().catch(() => {});
-                break;
+              void inner.body?.cancel(operationSignal.reason).catch(() => {});
+              if (!cancelled) {
+                controller.enqueue(emitFailed("Gateway request failed"));
+                finish(controller);
               }
+              return;
             }
-          } finally {
-            try {
-              reader.cancel().catch(() => {});
-            } catch {
-              /* already released */
-            }
+            reader = inner.body.getReader();
           }
-          try {
-            controller.close();
-          } catch {
-            /* already closed */
-          }
+          const chunk = await readStreamChunk(reader, {
+            signal: operationSignal,
+          });
+          if (cancelled) return;
+          if (chunk.done) finish(controller);
+          else controller.enqueue(chunk.value);
         } catch (err) {
-          const message =
-            err instanceof Error ? err.message : "unknown gateway error";
-          try {
-            controller.enqueue(emitFailed(message));
-          } catch {
-            /* client gone */
-          }
-          try {
-            controller.close();
-          } catch {
-            /* already closed */
+          log.error("early-flush stream failed:", err);
+          if (!cancelled) {
+            controller.enqueue(emitFailed("Gateway request failed"));
+            finish(controller);
           }
         }
+      },
+      cancel(reason) {
+        cancelled = true;
+        finished = true;
+        if (!downstreamAbort.signal.aborted) {
+          downstreamAbort.abort(
+            reason ?? new DOMException("response cancelled", "AbortError"),
+          );
+        }
+        if (reader) cancelAndReleaseReader(reader, reason);
       },
     }),
     {
@@ -12878,11 +18870,54 @@ export function earlyFlushStreamingResponse(
  * Returns a standard `Response` object — either a streaming SSE response
  * or a JSON response, depending on the client's `stream` setting.
  */
-export async function handleRequest(
+async function handleRequestForTenant(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
+  if (!req?.rawHeaders) {
+    return errorResponse(400, "Malformed request: missing headers");
+  }
+  if (pipelineResetInProgress) {
+    return errorResponse(503, "Gateway pipeline is resetting");
+  }
+  streamingPostResponsesAccepting = true;
+  const requestGeneration = streamingPostResponseGeneration;
+  let resolveDownstreamSettled: (() => void) | undefined;
+  let downstreamCancelled = false;
+  const downstreamSettled = new Promise<void>((resolve) => {
+    resolveDownstreamSettled = resolve;
+  });
+  return runActivePipelineRequest(
+    req.signal,
+    (signal, trackOperation, claimSession) =>
+      handleRequestInner(
+        { ...req, signal },
+        config,
+        requestGeneration,
+        downstreamSettled,
+        () => downstreamCancelled,
+        trackOperation,
+        claimSession,
+      ),
+    () => resolveDownstreamSettled?.(),
+    () => {
+      downstreamCancelled = true;
+    },
+    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+  );
+}
+
+async function handleRequestInner(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+  trackOperation: (operation: Promise<unknown>) => void,
+  claimSession: (sessionID: string) => Promise<void>,
+): Promise<Response> {
   const requestStartMs = Date.now();
+  const requestOrder = ++upstreamRequestOrder;
   try {
     // Guard against malformed invocations (e.g. fuzzers / direct module calls
     // that pass an undefined or header-less request). The real server path
@@ -12892,31 +18927,44 @@ export async function handleRequest(
       return errorResponse(400, "Malformed request: missing headers");
     }
 
-    // Capture auth credentials early for background workers. Tag by the
-    // explicit x-lore-provider header, falling back to the upstream URL for
-    // header-less credentialed requests (#829/#942).
+    if (hasConflictingAuthHeaders(req.rawHeaders)) {
+      return errorResponse(
+        400,
+        "Conflicting authentication headers: send either x-api-key or Authorization, not both",
+      );
+    }
+
+    // Validate explicit provider/upstream selection before slash, side-channel,
+    // compaction, and meta branches can take alternate paths. This resolver is
+    // synchronous and performs no network I/O.
+    try {
+      resolveRequestUpstreamRoute(req, config);
+    } catch (error) {
+      return errorResponse(
+        400,
+        error instanceof Error ? error.message : "Invalid upstream route",
+      );
+    }
+
+    // Preserve the process-global legacy credential only for a local,
+    // header-less request to the exact configured provider base.
     const earlyAuth = extractAuth(req.rawHeaders);
     if (earlyAuth) {
-      setLastSeenAuth(earlyAuth, resolveLastSeenProvider(req.rawHeaders));
+      captureLegacyGlobalAuth(req, config, earlyAuth);
     }
 
     // --- Quick Tier-1 session lookup for structural compaction detection ---
     // O(1) header + map lookup — lets us compare message counts before routing.
-    let priorState: SessionState | undefined;
-    const known = extractKnownSessionHeader(req.rawHeaders);
-    if (known) {
-      const indexKey = sessionIndexKey(
-        earlyAuth ? authFingerprint(earlyAuth) : "",
-        known.headerName,
-        known.sessionId,
-      );
-      const sid = headerSessionIndex.get(indexKey);
-      if (sid) priorState = sessions.get(sid);
-    }
+    const priorState = activeSessionForKnownHeader(req, sessions, config);
 
     // --- Case 0: Slash command interception (/lore:*) ---
     // All /lore:* commands are intercepted here and never forwarded upstream.
-    const slashResult = await handleLoreSlashCommand(req, sessions, config);
+    const slashResult = await handleLoreSlashCommand(
+      req,
+      sessions,
+      config,
+      claimSession,
+    );
     if (slashResult) return slashResult;
 
     // --- Case 0.5: Claude Code side-channel → forward upstream untouched ---
@@ -12956,7 +19004,13 @@ export async function handleRequest(
       log.info(
         `compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`,
       );
-      return await handleCompaction(req, config);
+      return await handleCompaction(
+        req,
+        config,
+        requestGeneration,
+        trackOperation,
+        claimSession,
+      );
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
@@ -12977,14 +19031,31 @@ export async function handleRequest(
     // keepalive while the gateway prepares.
     if (req.stream && req.protocol === "openai-responses") {
       return earlyFlushStreamingResponse(
-        () => handleConversationTurn(req, config),
+        (signal) =>
+          handleConversationTurn(
+            { ...req, signal },
+            config,
+            requestOrder,
+            requestGeneration,
+            downstreamSettled,
+            downstreamWasCancelled,
+            claimSession,
+          ),
         req.model,
+        req.signal,
+        trackOperation,
       );
     }
-    return await handleConversationTurn(req, config);
+    return await handleConversationTurn(
+      req,
+      config,
+      requestOrder,
+      requestGeneration,
+      downstreamSettled,
+      downstreamWasCancelled,
+      claimSession,
+    );
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Unknown gateway error";
     // Client disconnect / abort is benign — downgrade from error to info.
     const isAbort = err instanceof DOMException && err.name === "AbortError";
     if (isAbort) {
@@ -12995,8 +19066,18 @@ export async function handleRequest(
         route: "request",
       });
     } else {
-      log.error("pipeline error:", err);
+      log.error("pipeline request failed");
     }
-    return errorResponse(502, message);
+    return errorResponse(502, "Gateway request failed");
   }
+}
+
+export async function handleRequest(
+  req: GatewayRequest,
+  config: GatewayConfig,
+): Promise<Response> {
+  if (!req?.rawHeaders) return handleRequestForTenant(req, config);
+  return withRequestStorageTenant(req.rawHeaders, config, () =>
+    handleRequestForTenant(req, config),
+  );
 }

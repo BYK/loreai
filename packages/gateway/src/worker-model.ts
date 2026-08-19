@@ -48,6 +48,7 @@ let cachedProviderModels: Map<string, string[]> | null = null;
 let cachedProviderRoutes: Map<string, ProviderRoute> | null = null;
 let cachedModelDataAt = 0;
 let inflightFetch: Promise<Map<string, ModelsDevEntry>> | null = null;
+let modelDataGeneration = 0;
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /**
@@ -349,7 +350,9 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
   // Deduplicate concurrent calls: return the in-flight promise if one exists
   if (inflightFetch) return inflightFetch;
 
-  inflightFetch = (async () => {
+  const generation = modelDataGeneration;
+  let request!: Promise<Map<string, ModelsDevEntry>>;
+  request = (async () => {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -360,13 +363,19 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       clearTimeout(timeout);
 
       if (!response.ok) {
-        log.warn(
-          `models.dev API failed: ${response.status} ${response.statusText}`,
-        );
+        log.warn(`models.dev API failed: ${response.status}`);
         return cachedModelData ?? new Map();
       }
 
-      const data = (await response.json()) as ModelsDevResponse;
+      let data: ModelsDevResponse;
+      try {
+        data = (await response.json()) as ModelsDevResponse;
+      } catch {
+        log.warn(
+          `models.dev API returned malformed JSON with status ${response.status}`,
+        );
+        return cachedModelData ?? new Map();
+      }
       const modelData = new Map<string, ModelsDevEntry>();
       const modelDataByProvider = new Map<string, ModelsDevEntry>();
       const providerModelsIndex = new Map<string, string[]>();
@@ -427,10 +436,11 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
       // Warn if core providers are missing (likely API change)
       for (const required of SUPPORTED_PROVIDERS) {
         if (!loadedProviders.includes(required)) {
-          log.warn(`models.dev API: no ${required} provider found`);
+          log.warn("models.dev API: required provider data missing");
         }
       }
 
+      if (generation !== modelDataGeneration) return modelData;
       cachedProviderRoutes = providerRoutes;
       cachedProviderModels = providerModelsIndex;
       cachedModelData = modelData;
@@ -441,15 +451,18 @@ export function fetchModelData(): Promise<Map<string, ModelsDevEntry>> {
         `models.dev: loaded data for ${modelData.size} models across ${loadedProviders.length} providers`,
       );
       return modelData;
-    } catch (e) {
-      log.warn("models.dev API error:", e);
+    } catch {
+      // Fetch errors can embed credential-bearing request URLs. The endpoint is
+      // fixed, so a categorical diagnostic is sufficient and safe.
+      log.warn("models.dev API request failed");
       return cachedModelData ?? new Map();
     } finally {
-      inflightFetch = null;
+      if (inflightFetch === request) inflightFetch = null;
     }
   })();
 
-  return inflightFetch;
+  inflightFetch = request;
+  return request;
 }
 
 /**
@@ -476,17 +489,20 @@ function npmToProtocol(
  * stale cache, triggers a background refresh and returns stale data (or
  * null) — never blocks the hot request path on a network call.
  */
-export function lookupProviderRoute(providerID: string): ProviderRoute | null {
+export function lookupProviderRoute(
+  providerID: string,
+  refreshOnMiss = true,
+): ProviderRoute | null {
   // Return from cache (fresh or stale) — never block the request.
   if (cachedProviderRoutes) {
     // If stale, trigger a background refresh (fire-and-forget).
-    if (Date.now() - cachedModelDataAt >= CACHE_TTL_MS) {
+    if (refreshOnMiss && Date.now() - cachedModelDataAt >= CACHE_TTL_MS) {
       fetchModelData().catch(() => {});
     }
     return cachedProviderRoutes.get(providerID) ?? null;
   }
   // No cache at all — trigger a background fetch for next request.
-  fetchModelData().catch(() => {});
+  if (refreshOnMiss) fetchModelData().catch(() => {});
   return null;
 }
 
@@ -590,6 +606,7 @@ export async function ensureModelDataReady(timeoutMs = 2_000): Promise<void> {
 
 /** Clear cached data (for testing). */
 export function clearModelDataCache(): void {
+  modelDataGeneration++;
   cachedModelData = null;
   cachedModelDataByProvider = null;
   cachedProviderModels = null;
@@ -615,6 +632,7 @@ export function _setModelDataForTest(
   byProvider?: Record<string, ModelsDevEntry>,
   providerModelsIndex?: Record<string, string[]>,
 ): void {
+  modelDataGeneration++;
   cachedModelData = new Map(Object.entries(entries));
   cachedModelDataByProvider = byProvider
     ? new Map(Object.entries(byProvider))
@@ -668,17 +686,16 @@ function lineageKey(family: string): string {
  *
  * This is the only robust discriminator: a ChatGPT-backend session reports the
  * same `providerID` ("openai") and `protocol` ("openai-responses") as a real
- * `api.openai.com` API-key session (config.ts PROVIDER_ROUTES) — only the host
- * differs.
+ * `api.openai.com` API-key session. The `/backend-api` path is preserved by
+ * compatible proxies, unlike the host.
  */
 function isChatGPTBackend(url: string | undefined): boolean {
   if (!url) return false;
   try {
     const u = new URL(url);
-    return u.hostname === "chatgpt.com" || u.pathname.includes("/backend-api");
+    return /(?:^|\/)backend-api(?:\/|$)/.test(u.pathname);
   } catch {
-    // Scheme-less or malformed URL — fall back to a substring check.
-    return url.includes("chatgpt.com") || url.includes("/backend-api");
+    return false;
   }
 }
 
@@ -803,11 +820,6 @@ function findCheaperSameProviderModel(
       // narrows the type without a non-null assertion.
       if (best) {
         const resolvedId = best.newestId;
-        log.info(
-          `dynamic worker model: ${providerID}/${resolvedId} ($${best.tierCost}/M, ` +
-            `lineage ${sessionLineage}, family ${best.family}, closest cheaper tier) ` +
-            `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
-        );
         memo.set(memoKey, resolvedId);
         return resolvedId;
       }
@@ -870,13 +882,6 @@ function findCheaperSameProviderModel(
       }
     }
   }
-
-  const resolvedCost = cachedModelData.get(resolvedId)?.cost?.input;
-  log.info(
-    `dynamic worker model: ${providerID}/${resolvedId} ($${resolvedCost}/M` +
-      `${cheapestFamily ? `, family ${cheapestFamily}` : ""}) ` +
-      `instead of ${sessionModelID} ($${sessionInputCost}/M)`,
-  );
 
   memo.set(memoKey, resolvedId);
   return resolvedId;
@@ -952,11 +957,6 @@ function resolveNewestInFamily(
     }
   }
 
-  if (bestId) {
-    log.info(
-      `worker model: newest in family ${providerID}/${family} → ${bestId}`,
-    );
-  }
   memo.set(memoKey, bestId);
   return bestId;
 }
@@ -1233,6 +1233,7 @@ const WORKER_MODEL_FALLBACKS: Record<string, string[]> = {
     "gpt-5-mini",
     "gpt-4o-mini",
     "claude-sonnet-4.6",
+    // Copilot's wire ID uses a dot; direct Anthropic uses claude-haiku-4-5.
     "claude-haiku-4.5",
   ],
 };

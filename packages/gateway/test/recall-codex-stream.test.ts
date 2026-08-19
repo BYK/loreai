@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 /** One Responses-API SSE event (`event:` + `data:` framing). */
 function sseEvent(event: string, data: unknown): string {
@@ -75,6 +76,9 @@ function codexRecallStream(): Response {
         id: "resp_recall",
         model: "gpt-5.5",
         status: "completed",
+        // ChatGPT may replace streamed items with terminal references. The
+        // output_item lifecycle above is the authoritative response content.
+        output: [{ type: "item_reference", id: "fc_recall" }],
         usage: { input_tokens: 100, output_tokens: 10 },
       },
     }) +
@@ -116,6 +120,7 @@ function codexFinalStream(): Response {
         id: "resp_final",
         model: "gpt-5.5",
         status: "completed",
+        output: [{ type: "item_reference", id: "msg_final" }],
         usage: { input_tokens: 120, output_tokens: 5 },
       },
     }) +
@@ -137,10 +142,10 @@ function codexStreamRequiredError(): Response {
   );
 }
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -196,11 +201,13 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     });
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
       for (const suffix of ["", "-shm", "-wal"]) {
@@ -218,7 +225,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/codex/responses`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/codex/responses`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -260,6 +267,115 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // The recall tool_use must NOT leak to the client.
     expect(bodyText).not.toContain('"name":"recall"');
     expect(bodyText).not.toContain('"name": "recall"');
+
+    const requestWithoutTools = async (
+      path: "/v1/codex/responses" | "/v1/responses",
+      upstream: Response,
+    ): Promise<string> => {
+      setUpstreamInterceptor(async () => upstream);
+      const response = await loopbackRequest(`${baseURL}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer test-token",
+          "x-lore-agent": "coder",
+          "x-lore-project": projectDir,
+        },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          stream: true,
+          input: "plain",
+        }),
+      });
+      return response.text();
+    };
+    const sparse = new Response(
+      sseEvent("response.output_item.added", {
+        item: { type: "message", id: "msg_sparse_real" },
+      }) +
+        sseEvent("response.output_text.done", {
+          item_id: "msg_sparse_real",
+          text: "sparse real caller",
+        }) +
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "message",
+            id: "msg_sparse_real",
+            content: [{ type: "output_text", text: "sparse real caller" }],
+          },
+        }) +
+        sseEvent("response.completed", {
+          response: {
+            status: "completed",
+            output: [{ type: "item_reference", id: "msg_sparse_real" }],
+          },
+        }),
+    );
+    const sparseCodex = await requestWithoutTools(
+      "/v1/codex/responses",
+      sparse,
+    );
+    expect(sparseCodex).toContain("sparse real caller");
+    expect(sparseCodex).not.toContain("server_error");
+
+    const sparsePublic = await requestWithoutTools(
+      "/v1/responses",
+      new Response(
+        sseEvent("response.output_item.added", {
+          item: { type: "message", id: "public-mismatch" },
+        }),
+      ),
+    );
+    expect(sparsePublic).not.toContain("public-mismatch");
+    expect(sparsePublic).toContain("response.failed");
+
+    const malformed = await requestWithoutTools(
+      "/v1/codex/responses",
+      new Response("event: response.created\ndata: {bad}\n\n"),
+    );
+    expect(malformed).not.toContain("{bad}");
+    expect(malformed).toContain("response.failed");
+
+    const duplicate = await requestWithoutTools(
+      "/v1/codex/responses",
+      new Response(
+        sseEvent("response.output_item.added", {
+          item: {
+            type: "function_call",
+            id: "one",
+            call_id: "duplicate",
+            name: "one",
+            arguments: "{}",
+          },
+        }) +
+          sseEvent("response.output_item.added", {
+            item: {
+              type: "function_call",
+              id: "two",
+              call_id: "duplicate",
+              name: "two",
+              arguments: "{}",
+            },
+          }),
+      ),
+    );
+    expect(duplicate).toContain('"id":"one"');
+    expect(duplicate).not.toContain('"id":"two"');
+    expect(duplicate).toContain("response.failed");
+
+    const failure = await requestWithoutTools(
+      "/v1/codex/responses",
+      new Response(
+        sseEvent("response.failed", {
+          response: {
+            status: "failed",
+            error: { type: "server_error", message: "provider terminal" },
+          },
+        }),
+      ),
+    );
+    expect(failure.match(/event: response\.failed/g)).toHaveLength(1);
+    expect(failure).toContain("provider terminal");
   });
 
   test("non-codex openai-responses also streams the follow-up", async () => {
@@ -308,11 +424,13 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     });
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
       for (const suffix of ["", "-shm", "-wal"]) {
@@ -330,7 +448,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/responses`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/responses`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

@@ -12,6 +12,7 @@
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
 import { fetchArgUrl } from "./helpers/fetch-url";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -41,6 +42,29 @@ function geminiUpstreamResponse(): Response {
   );
 }
 
+function geminiUpstreamStreamResponse(): Response {
+  return new Response(
+    `data: ${JSON.stringify({
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "ok" }] },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1,
+        candidatesTokenCount: 1,
+        totalTokenCount: 2,
+      },
+      modelVersion: "gemini-2.5-pro",
+    })}\n\n`,
+    {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    },
+  );
+}
+
 async function sendGemini(
   harness: Harness,
   path: string,
@@ -58,9 +82,13 @@ async function sendGemini(
     return makeReal();
   });
   mockFetch.mockReset();
-  mockFetch.mockResolvedValue(geminiUpstreamResponse());
+  mockFetch.mockResolvedValue(
+    path.includes(":streamGenerateContent")
+      ? geminiUpstreamStreamResponse()
+      : geminiUpstreamResponse(),
+  );
 
-  const res = await fetch(`${harness.baseURL}${path}`, {
+  const res = await harness.request(path, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -157,7 +185,7 @@ describe("native Gemini ingress → generativelanguage upstream (full pipeline)"
     mockFetch.mockResolvedValue(geminiUpstreamResponse());
 
     // REST/google-generativeai style: key in the query, NO x-goog-api-key header.
-    await fetch(
+    await loopbackRequest(
       `${harness.baseURL}/v1beta/models/gemini-2.5-pro:generateContent?key=qkey123`,
       {
         method: "POST",

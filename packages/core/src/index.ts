@@ -89,14 +89,27 @@ export type {
   LLMClient,
 } from "./types";
 export { isTextPart, isReasoningPart, isToolPart } from "./types";
+export {
+  WARMUP_HISTOGRAM_BIN_COUNT,
+  MAX_WARMUP_HISTOGRAM_TOTAL,
+  emptyWarmupHistogramCounts,
+  mergeWarmupHistogramCounts,
+  normalizeWarmupHistogram,
+  encodeWarmupHistogram,
+  decodeWarmupHistogram,
+} from "./warmup-histogram";
 
 export { dataDir } from "./data-dir";
+export { currentTenantId, withTenant, LOCAL_TENANT_ID } from "./tenant";
 export { isVecAvailable } from "./db/vec";
 export {
   checkVecWorker,
   type VecWorkerCheck,
   checkReadOffload,
   type ReadOffloadCheck,
+  shutdownVectorPool,
+  shutdownVectorPoolAsync,
+  DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
 } from "./vector-pool";
 export { load, config, type LoreConfig } from "./config";
 export {
@@ -107,10 +120,12 @@ export {
   setLastImportAt,
   isFirstRun,
   projectId,
+  canonicalProjectId,
   projectName,
   projectPath,
   projectKnownPaths,
   projectGitRemote,
+  projectTenantId,
   projectScope,
   setProjectScope,
   setProjectPromotionPolicy,
@@ -118,6 +133,9 @@ export {
   resolveWritableScope,
   scopeMemberRole,
   resolveProjectByRemoteOrPath,
+  onProjectMutation,
+  databaseInTransaction,
+  type ProjectMutation,
   mergeProjectInternal,
   convergeProjectsByRemote,
   UNATTRIBUTED_PROJECT_PREFIX,
@@ -184,6 +202,12 @@ export {
   getGitUser,
   clearGitUserCache,
 } from "./git";
+export {
+  GATEWAY_AUTH_HEADER,
+  KNOWN_SESSION_HEADERS,
+  isCredentialHeaderName,
+  redactCredentialHeaderAssignments,
+} from "./credential-headers";
 export {
   enableHostedMode,
   isHostedMode,

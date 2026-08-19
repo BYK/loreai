@@ -1,13 +1,13 @@
 ---
 title: Semantic linter (CI)
-description: Catch pull requests that contradict a documented invariant in your .lore.md, at CI time, as advisory annotations that never block the build.
+description: Catch pull requests that contradict a documented invariant in your .lore.md, with explicit health reporting and advisory or gate modes.
 sidebar:
   order: 7
 ---
 
 Your team's decisions, patterns, and gotchas live in [`.lore.md`](/docs/team-memory/), a version-controlled record of how this codebase is supposed to work. The **semantic linter** reads that record and, on every pull request, flags changes that appear to contradict it.
 
-It is a judge, not a rule engine. Instead of matching regexes, it asks an LLM whether a specific diff hunk conflicts with a specific documented invariant, and surfaces the ones that do as GitHub annotations. It is **advisory by default: it never fails a build.** A human decides what to do with each finding.
+It is a judge, not a rule engine. Instead of matching regexes, it asks an LLM whether a specific diff hunk conflicts with a specific documented invariant, and surfaces the ones that do as GitHub annotations. It is **advisory by default: findings and health failures do not fail the build.** A human decides what to do with each finding. Gate mode fails closed when the run is inconclusive.
 
 ```
 ✓ no suspected invariant violations (45 hunks × 67 invariants → 20 candidates → 20 judge calls)
@@ -23,7 +23,7 @@ It is **not** a replacement for tests, type checking, or a linter. It has no gro
 
 ## Quick start (GitHub Actions)
 
-The repository ships a reusable composite action and a reference workflow. The zero-secret path uses [GitHub Copilot](https://docs.github.com/en/copilot) via the built-in `GITHUB_TOKEN`, so there is nothing to configure on a repo with Copilot access — just grant the `copilot-requests: write` workflow permission and the token authenticates to `api.githubcopilot.com` directly as a Bearer credential.
+The repository ships a reusable composite action and a reference workflow. It uses the workflow's GitHub token with GitHub Copilot by default, or you can configure the custom credential and model pair described below.
 
 Add `.github/workflows/semantic-linter.yml`:
 
@@ -31,7 +31,7 @@ Add `.github/workflows/semantic-linter.yml`:
 name: Semantic linter (advisory)
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 concurrency:
@@ -41,7 +41,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
-  copilot-requests: write # lets GITHUB_TOKEN call GitHub Copilot as the default judge
+  copilot-requests: write
 
 jobs:
   lint:
@@ -51,7 +51,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 0 # full history so merge-base against the PR base resolves
+          # Execute only trusted base code. The PR head is fetched as diff data.
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - name: Fetch exact PR head for diffing
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          sha_re='^[0-9a-fA-F]{40}$'
+          [[ "$PR_HEAD_SHA" =~ $sha_re ]] || exit 1
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || exit 1
+          git fetch --no-tags --depth=1 origin \
+            "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/lore-pr-head"
+          test "$(git rev-parse refs/remotes/origin/lore-pr-head)" = "$PR_HEAD_SHA"
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -61,37 +75,54 @@ jobs:
       - name: Run Lore semantic linter
         uses: ./.github/actions/lint
         with:
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
           lore-command: "node packages/gateway/dist/bin.cjs"
-          model: ${{ vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || (secrets.LORE_WORKER_API_KEY == '' && 'github-copilot/gpt-5.6-luna' || '') }}
-          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && secrets.LORE_WORKER_API_KEY || github.token }}
+          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}
+          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && secrets.LORE_WORKER_API_KEY || '' }}
+          github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}
 ```
 
-That is the whole setup. Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. It exits `0` regardless of findings.
+Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
 
 :::caution
-`fetch-depth: 0` is required. The check diffs the PR against the merge-base with its target branch; a shallow clone forces a noisy tip-to-tip diff instead of the fork-point diff.
+Use `pull_request_target` only with the trusted-base checkout pattern above. The workflow executes the base revision's code and fetches the PR head solely as immutable diff data, so the judge secret is never exposed to code supplied by the pull request.
 :::
 
 ### Choosing a judge model and credential
 
-The credential and the model are chosen independently.
+The credential and model are selected as a pair to prevent sending one provider's key to another provider.
 
-**Credential** (the `worker-api-key` input):
+**Credential** (`worker-api-key` or `github-token`):
 
-- **Zero-secret (default).** The reference workflow falls back to the built-in `GITHUB_TOKEN` with `copilot-requests: write`, calling GitHub Copilot. The token is sent as a Bearer credential to `api.githubcopilot.com/responses` (the openai-responses worker adapter routes `gpt-5.6-*` via this endpoint — see PR #1582 / `isResponsesOnlyModel` in `llm-adapter.ts`) — no separate Copilot token exchange is needed in CI. On fork PRs the token is read-only and may lack inference quota; the judge then no-ops (advisory → still passes) rather than breaking CI.
-- **Dedicated key (busy repos).** Set a `LORE_WORKER_API_KEY` secret. It takes precedence over the token.
+- **Default.** The reference workflow passes `github.token` to the action's loopback-only official Copilot SDK bridge. The SDK resolves the Actions installation token and its billing identity; `copilot-requests: write` grants inference access. The token is not forwarded directly to `api.githubcopilot.com`.
+- **Custom provider.** Set `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` together. The custom pair takes precedence over the workflow token.
 
 **Model** (the `model` input, `provider/id`):
 
 | Situation | Model used |
 | --- | --- |
-| `LORE_INVARIANT_MODEL` repo variable is set | that value (with either credential) |
-| No dedicated key, no variable | `github-copilot/gpt-5.6-luna` |
-| Dedicated key, no variable | your repo's configured default worker model |
+| `LORE_WORKER_API_KEY` and `LORE_INVARIANT_MODEL` are set | the variable value, authenticated by the dedicated key |
+| Only one custom override is set | `github-copilot/gpt-5.6-luna`, authenticated by the workflow token |
+| Neither custom override is set | `github-copilot/gpt-5.6-luna`, authenticated by the workflow token |
 
 :::note
-The model id must match the credential. A GitHub token needs a `github-copilot/...` id (sent as a Bearer token to `api.githubcopilot.com`); pairing a dedicated Anthropic key with a forced `github-copilot` id would 401 and silently no-op. The precedence table above avoids that trap: leave `model` empty when using a dedicated key unless you set `LORE_INVARIANT_MODEL`.
+The model id must match the credential. The custom model and key are honored only when both are set; a partial override falls back atomically to the Copilot model and workflow token, so one provider's credential is never sent to another provider.
 :::
+
+#### Why use the Copilot SDK bridge?
+
+Lore already knows how to call GitHub Copilot's Chat Completions and Responses endpoints. The bridge exists for **credential handling, not model transport**.
+
+A bearer credential already accepted by the Copilot model API, such as the user OAuth credential stored by OpenCode, can use Lore's direct `github-copilot` provider path. The workflow's `github.token` is different: it is a short-lived GitHub App installation token. `copilot-requests: write` authorizes Copilot use through supported GitHub tooling, but does not turn that installation token into a supported bearer credential for direct requests to `api.githubcopilot.com`. Direct forwarding was tried before the bridge was introduced and produced HTTP 400 responses even after the request body was corrected.
+
+The official Copilot runtime handles GitHub's authentication, entitlement, repository policy, endpoint selection, and billing attribution for the installation token. The SDK gives the action structured control over that runtime: it creates tool-disabled sessions with Lore's exact judge prompt, propagates cancellation, and performs bounded cleanup. Lore still owns candidate selection, model routing, retries, verdict parsing, and reporting; the action token is never forwarded by Lore to the model endpoint.
+
+The SDK and CLI are installed from the isolated, integrity-locked `.github/actions/lint/copilot-sdk` package so this optional CI path does not add a platform-specific Copilot binary to every Lore installation. That runtime could be removed if the action required a bearer credential already accepted by the Copilot model API instead, or if GitHub published a supported direct API contract for Actions installation tokens. Reimplementing the CLI's private authentication and billing behavior in Lore would be brittle and unsupported.
+
+The `github-token` bridge currently accepts only `github-copilot/gpt-5.6-*`. This is a Lore bridge implementation constraint, not an official SDK model limitation: the SDK supports every model available in Copilot CLI. Supporting other Copilot models requires updating the bridge and its local gateway route together. Use `worker-api-key` until then for a different provider or direct Copilot credential.
+
+For a personally owned repository, Copilot usage is billed to the repository owner's Copilot seat. Organization-owned repositories must enable **Allow use of Copilot CLI billed to the organization** in their Copilot policy settings. These billing and policy requirements are separate from the workflow permission.
 
 ## How it works
 
@@ -149,9 +180,27 @@ With no arguments it auto-detects the range (the current branch against its base
 - `--model <provider/id>` sweeps a specific judge model.
 - `--effort <level>` sets reasoning effort, as above.
 - `--project <path>` checks a different working tree.
-- `--json` emits machine-readable output (what the CI reporter consumes).
+- `--json` emits the versioned machine-readable report on stdout for local tooling.
+- `--report-file <path>` atomically writes a validated, versioned JSON report. CI uses this owned channel instead of redirecting stdout.
+- `--deadline-ms <ms>` bounds the overall run (default: `1200000`).
+- `--candidate-timeout-ms <ms>` bounds each selected judge candidate (default: `90000`).
 
-In advisory mode the command always exits `0`; a genuine tooling error (for example, no resolvable range) exits `1`.
+The CLI exit contract is:
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Complete, non-blocking report |
+| `1` | Argument/usage failure before report setup |
+| `2` | Complete gate-mode report with blocking findings |
+| `3` | Partial or failed runtime report |
+
+The action always consumes and validates `--report-file`, regardless of the CLI exit. Missing, malformed, wrong-version, or internally inconsistent reports are health failures. Advisory actions show those failures but remain non-blocking; gate actions fail closed.
+
+### Report health
+
+The report distinguishes `complete`, `partial`, and `failed` runs. It records health for range resolution, diff parsing, invariant loading, invariant vectors, hunk vectors, and the judge. Every selected candidate is recorded as resolved, unresolved, or not attempted, and the report validator checks that candidate states and semantic/transport attempt totals match the funnel counters.
+
+“No suspected invariant violations” is shown only for a complete report with zero findings. Partial and failed reports remain visibly inconclusive even when they contain no findings.
 
 ## Enforcement tiers
 

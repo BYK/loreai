@@ -54,6 +54,10 @@ export interface BatchResult {
   text: string | null;
   usage: AnthropicUsage | null;
   model: string | null;
+  /** Non-content provider status for diagnostics. */
+  statusCode?: number;
+  /** Body-derived capability signal retained without retaining response text. */
+  temperatureUnsupported?: boolean;
   error?: string;
 }
 
@@ -127,6 +131,10 @@ interface PendingRequest {
   sessionID?: string;
   /** Worker ID for cost attribution (e.g. "lore-distill", "lore-curator"). */
   workerID?: string;
+  /** Dispatch-time route snapshot for synchronous fallback. */
+  upstreamUrl?: string;
+  upstreamProviderID?: string;
+  protocol?: NonNullable<Parameters<LLMClient["prompt"]>[2]>["protocol"];
 }
 
 /** A batch that has been submitted and is being polled for results. */
@@ -189,17 +197,10 @@ function groupKey(cred: AuthCredential, providerID: string): string {
 }
 
 /**
- * Extract a human-readable error string from an Anthropic batch errored result.
- *
- * Anthropic's `MessageBatchErroredResult.error` is an `ErrorResponse` envelope:
- * `{ type: "error", request_id, error: { type, message } }`. The real cause is
- * the nested `error.error` object; the envelope's own `type` is always the
- * literal "error" and it carries no `message`. Reading the envelope directly is
- * what produced the unhelpful `error: undefined` log lines.
- *
- * Falls back to a flattened `{ type, message }` shape (some proxies flatten the
- * envelope) and finally to the outcome string, so the result is never
- * `undefined`.
+ * Return a body-independent Anthropic batch error label. Upstream messages are
+ * intentionally ignored because BatchResult values flow through diagnostics.
+ * The body is inspected in-place for bounded capability classification before
+ * it is discarded.
  */
 export function extractAnthropicError(
   error:
@@ -212,10 +213,7 @@ export function extractAnthropicError(
     | undefined,
   fallbackOutcome: string,
 ): string {
-  const inner = error?.error;
-  if (inner?.message) return `${inner.type ?? "error"}: ${inner.message}`;
-  // Tolerate a flattened envelope where the message sits at the top level.
-  if (error?.message) return `${error.type ?? "error"}: ${error.message}`;
+  void error;
   return fallbackOutcome;
 }
 
@@ -259,9 +257,8 @@ export function createAnthropicBatchProvider(
       });
 
       if (!response.ok) {
-        const text = await response.text().catch(() => "(no body)");
         if (response.status === 401 || response.status === 403) {
-          log.warn(`anthropic batch auth error (${response.status}): ${text}`);
+          log.warn(`anthropic batch auth error (${response.status})`);
           return "auth-error";
         }
         if (response.status === 404) {
@@ -270,13 +267,17 @@ export function createAnthropicBatchProvider(
           );
           return "not-found";
         }
-        log.error(
-          `anthropic batch create failed: ${response.status} ${response.statusText} — ${text}`,
-        );
+        log.error(`anthropic batch create failed: ${response.status}`);
         return null;
       }
 
-      const data = (await response.json()) as { id: string };
+      const data = (await response.json().catch(() => null)) as {
+        id?: string;
+      } | null;
+      if (!data || typeof data.id !== "string") {
+        log.error("anthropic batch create returned malformed JSON");
+        return null;
+      }
       return data.id;
     },
 
@@ -290,16 +291,18 @@ export function createAnthropicBatchProvider(
       });
 
       if (!response.ok) {
-        log.error(
-          `anthropic batch poll failed for ${batchId}: ${response.status}`,
-        );
+        log.error(`anthropic batch poll failed: ${response.status}`);
         return { status: "pending" }; // Retry on next poll
       }
 
-      const data = (await response.json()) as {
+      const data = (await response.json().catch(() => null)) as {
         processing_status: string;
         results_url: string | null;
-      };
+      } | null;
+      if (!data) {
+        log.error("anthropic batch poll returned malformed JSON");
+        return { status: "pending" };
+      }
 
       if (data.processing_status !== "ended") return { status: "pending" };
 
@@ -315,7 +318,7 @@ export function createAnthropicBatchProvider(
 
       if (!resultsResponse.ok) {
         log.error(
-          `anthropic batch results fetch failed for ${batchId}: ${resultsResponse.status}`,
+          `anthropic batch results fetch failed: ${resultsResponse.status}`,
         );
         return { status: "pending" }; // Retry on next poll
       }
@@ -364,19 +367,29 @@ export function createAnthropicBatchProvider(
               model: msg?.model ?? null,
             });
           } else {
+            const outcome: BatchResult["outcome"] = [
+              "errored",
+              "canceled",
+              "expired",
+            ].includes(row.result.type)
+              ? row.result.type
+              : "errored";
+            const errorMessage =
+              row.result.error?.error?.message ?? row.result.error?.message;
             results.push({
               customId: row.custom_id,
-              outcome: row.result.type,
+              outcome,
               text: null,
               usage: null,
               model: null,
-              error: extractAnthropicError(row.result.error, row.result.type),
+              temperatureUnsupported:
+                typeof errorMessage === "string" &&
+                isTemperatureUnsupported400(errorMessage),
+              error: extractAnthropicError(row.result.error, outcome),
             });
           }
         } catch {
-          log.error(
-            `failed to parse anthropic batch result line: ${line.slice(0, 200)}`,
-          );
+          log.error("failed to parse anthropic batch result line");
         }
       }
 
@@ -413,24 +426,27 @@ async function uploadOpenAIBatchFile(
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => "(no body)");
     if (response.status === 401 || response.status === 403) {
-      log.warn(`openai file upload auth error (${response.status}): ${text}`);
+      log.warn(`openai file upload auth error (${response.status})`);
       return "auth-error";
     }
     // 404/405 means the upstream doesn't support the batch/files API at all
     // (e.g. vLLM, local models, MiniMax). Treat as permanent provider-level failure.
     if (response.status === 404 || response.status === 405) {
-      log.warn(
-        `openai file upload not supported (${response.status}): ${text}`,
-      );
+      log.warn(`openai file upload not supported (${response.status})`);
       return "not-found";
     }
-    log.error(`openai file upload failed: ${response.status} — ${text}`);
+    log.error(`openai file upload failed: ${response.status}`);
     return null;
   }
 
-  const data = (await response.json()) as { id: string };
+  const data = (await response.json().catch(() => null)) as {
+    id?: string;
+  } | null;
+  if (!data || typeof data.id !== "string") {
+    log.error("openai file upload returned malformed JSON");
+    return null;
+  }
   return data.id;
 }
 
@@ -479,7 +495,12 @@ async function downloadOpenAIResults(
         };
       };
 
-      if (row.response.status_code === 200) {
+      const statusCode =
+        typeof row.response.status_code === "number" &&
+        Number.isFinite(row.response.status_code)
+          ? Math.trunc(row.response.status_code)
+          : undefined;
+      if (statusCode === 200) {
         const body = row.response.body;
         results.push({
           customId: row.custom_id,
@@ -490,21 +511,22 @@ async function downloadOpenAIResults(
         });
       } else {
         const errBody = row.response.body?.error;
+        const errorMessage = errBody?.message;
         results.push({
           customId: row.custom_id,
           outcome: "errored",
           text: null,
           usage: null,
           model: null,
-          error: errBody?.message
-            ? `HTTP ${row.response.status_code} ${errBody.type ?? ""}: ${errBody.message}`.trim()
-            : `HTTP ${row.response.status_code}`,
+          statusCode,
+          temperatureUnsupported:
+            typeof errorMessage === "string" &&
+            isTemperatureUnsupported400(errorMessage),
+          error: statusCode == null ? "HTTP error" : `HTTP ${statusCode}`,
         });
       }
     } catch {
-      log.error(
-        `failed to parse openai batch result line: ${line.slice(0, 200)}`,
-      );
+      log.error("failed to parse openai batch result line");
     }
   }
 
@@ -623,24 +645,27 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
       });
 
       if (!response.ok) {
-        const text = await response.text().catch(() => "(no body)");
         if (response.status === 401 || response.status === 403) {
-          log.warn(`openai batch auth error (${response.status}): ${text}`);
+          log.warn(`openai batch auth error (${response.status})`);
           return "auth-error";
         }
         // 404/405 means the upstream doesn't support the batch API at all
         // (e.g. vLLM, local models, MiniMax). Treat as permanent provider-level failure.
         if (response.status === 404 || response.status === 405) {
-          log.warn(`openai batch not supported (${response.status}): ${text}`);
+          log.warn(`openai batch not supported (${response.status})`);
           return "not-found";
         }
-        log.error(
-          `openai batch create failed: ${response.status} ${response.statusText} — ${text}`,
-        );
+        log.error(`openai batch create failed: ${response.status}`);
         return null;
       }
 
-      const data = (await response.json()) as { id: string };
+      const data = (await response.json().catch(() => null)) as {
+        id?: string;
+      } | null;
+      if (!data || typeof data.id !== "string") {
+        log.error("openai batch create returned malformed JSON");
+        return null;
+      }
       return data.id;
     },
 
@@ -650,17 +675,19 @@ export function createOpenAIBatchProvider(upstreamUrl: string): BatchProvider {
       });
 
       if (!response.ok) {
-        log.error(
-          `openai batch poll failed for ${batchId}: ${response.status}`,
-        );
+        log.error(`openai batch poll failed: ${response.status}`);
         return { status: "pending" }; // Retry on next poll
       }
 
-      const data = (await response.json()) as {
+      const data = (await response.json().catch(() => null)) as {
         status: string;
         output_file_id?: string;
         error_file_id?: string;
-      };
+      } | null;
+      if (!data) {
+        log.error("openai batch poll returned malformed JSON");
+        return { status: "pending" };
+      }
 
       if (data.status === "completed" && data.output_file_id) {
         const results = await downloadOpenAIResults(
@@ -865,8 +892,8 @@ export function createBatchLLMClient(
 
       const pollTimer = setInterval(
         () =>
-          void pollBatch(batchId).catch((e) =>
-            log.error("batch poll error:", e),
+          void pollBatch(batchId).catch(() =>
+            log.error("batch poll failed unexpectedly"),
           ),
         pollIntervalMs,
       );
@@ -881,10 +908,10 @@ export function createBatchLLMClient(
       });
 
       log.info(
-        `batch created (${provider.name}): ${batchId} with ${items.length} requests`,
+        `batch created (${provider.name}) with ${items.length} requests`,
       );
-    } catch (e) {
-      log.error(`batch create error (${provider.name}):`, e);
+    } catch {
+      log.error(`batch create error (${provider.name})`);
       await fallbackAll(items);
     }
   }
@@ -960,7 +987,7 @@ export function createBatchLLMClient(
     // Uses provider-specific max age (1h Anthropic, 4h OpenAI)
     if (Date.now() - batch.submittedAt > batch.provider.maxBatchAgeMs) {
       log.warn(
-        `batch ${batchId} (${batch.provider.name}) exceeded max age — falling back to synchronous`,
+        `batch (${batch.provider.name}) exceeded max age — falling back to synchronous`,
       );
       clearInterval(batch.pollTimer);
       inflight.delete(batchId);
@@ -974,9 +1001,7 @@ export function createBatchLLMClient(
       if (pollResult.status === "pending") return;
 
       if (pollResult.status === "failed") {
-        log.error(
-          `batch ${batchId} (${batch.provider.name}) failed: ${pollResult.error}`,
-        );
+        log.error(`batch (${batch.provider.name}) failed`);
         clearInterval(batch.pollTimer);
         inflight.delete(batchId);
         await fallbackAll([...batch.requests.values()]);
@@ -985,7 +1010,7 @@ export function createBatchLLMClient(
 
       // status === "done" — resolve all results
       log.info(
-        `batch ${batchId} (${batch.provider.name}) completed — resolving ${pollResult.results.length} results`,
+        `batch (${batch.provider.name}) completed — resolving ${pollResult.results.length} results`,
       );
 
       for (const result of pollResult.results) {
@@ -1037,7 +1062,7 @@ export function createBatchLLMClient(
             // submits (batch AND single-request) omit `temperature` upfront for
             // this model instead of re-erroring every item. Feeds the same
             // shared set consulted by paramsWithSupportedTemperature().
-            if (result.error && isTemperatureUnsupported400(result.error)) {
+            if (result.temperatureUnsupported) {
               markTemperatureUnsupported({
                 providerID: pending.providerID,
                 modelID: pending.params.model,
@@ -1046,37 +1071,33 @@ export function createBatchLLMClient(
             pending.resolve(null); // Match inner client behavior (null on error)
             totalFailed++;
             log.error(
-              `batch item ${result.customId} errored: ${result.error ?? "unknown"}`,
+              `batch item failed (${batch.provider.name}` +
+                `${result.statusCode == null ? "" : `, HTTP ${result.statusCode}`}` +
+                ")",
             );
             // These are background jobs (distillation/curation/embeddings) that
             // fail silently to the caller (resolved null). Capture so the real
             // cause is tracked, not just logged. Grouped by provider to keep
-            // noise bounded; the actual error text is in `extra`.
+            // noise bounded; no provider response text is attached.
             if (Sentry.isInitialized()) {
-              Sentry.captureException(
-                new Error(`batch item errored: ${result.error ?? "unknown"}`),
-                {
-                  fingerprint: [
-                    "LOREAI-GATEWAY",
-                    "batch-item-errored",
-                    batch.provider.name,
-                  ],
-                  extra: {
-                    provider: batch.provider.name,
-                    customId: result.customId,
-                    model: pending.params.model,
-                    workerID: pending.workerID,
-                    error: result.error ?? "unknown",
-                  },
+              Sentry.captureException(new Error("Batch item failed"), {
+                fingerprint: [
+                  "LOREAI-GATEWAY",
+                  "batch-item-errored",
+                  batch.provider.name,
+                ],
+                extra: {
+                  provider: batch.provider.name,
+                  status: result.statusCode,
                 },
-              );
+              });
             }
             break;
           case "canceled":
           case "expired":
             pending.resolve(null);
             totalFailed++;
-            log.warn(`batch item ${result.customId} ${result.outcome}`);
+            log.warn(`batch item ${result.outcome}`);
             break;
         }
 
@@ -1093,10 +1114,10 @@ export function createBatchLLMClient(
       clearInterval(batch.pollTimer);
       inflight.delete(batchId);
       log.info(
-        `batch ${batchId} fully resolved (${totalResolved} ok, ${totalFailed} failed total)`,
+        `batch (${batch.provider.name}) fully resolved (${totalResolved} ok, ${totalFailed} failed total)`,
       );
-    } catch (e) {
-      log.error(`batch poll error for ${batchId} (${batch.provider.name}):`, e);
+    } catch {
+      log.error(`batch poll error (${batch.provider.name})`);
     }
   }
 
@@ -1134,14 +1155,21 @@ export function createBatchLLMClient(
             const result = await inner.prompt(system, user, {
               sessionID: item.sessionID,
               workerID: item.workerID,
+              model: {
+                providerID: item.providerID,
+                modelID: item.params.model,
+              },
+              upstreamUrl: item.upstreamUrl,
+              upstreamProviderID: item.upstreamProviderID,
+              protocol: item.protocol,
               maxTokens: item.params.max_tokens,
               ...(item.params.temperature != null && {
                 temperature: item.params.temperature,
               }),
             });
             item.resolve(result);
-          } catch (e) {
-            log.error(`batch fallback error for ${item.customId}:`, e);
+          } catch {
+            log.error("batch fallback error");
             item.resolve(null);
           }
         }),
@@ -1154,7 +1182,7 @@ export function createBatchLLMClient(
   // -------------------------------------------------------------------------
 
   flushTimer = setInterval(() => {
-    flush().catch((e) => log.error("batch flush timer error:", e));
+    flush().catch(() => log.error("batch flush timer error"));
   }, flushIntervalMs);
 
   // -------------------------------------------------------------------------
@@ -1236,12 +1264,15 @@ export function createBatchLLMClient(
           providerID: model.providerID,
           sessionID: opts?.sessionID,
           workerID: opts?.workerID,
+          upstreamUrl: opts?.upstreamUrl,
+          upstreamProviderID: opts?.upstreamProviderID,
+          protocol: opts?.protocol,
         });
       });
 
       // Auto-flush if queue is full
       if (queue.length >= maxQueueSize) {
-        flush().catch((e) => log.error("batch auto-flush error:", e));
+        flush().catch(() => log.error("batch auto-flush error"));
       }
 
       return promise;
@@ -1284,13 +1315,15 @@ export function createBatchLLMClient(
       }
 
       // Clean up inflight poll timers (batches will expire naturally)
-      for (const [batchId, batch] of inflight) {
+      for (const batch of inflight.values()) {
         clearInterval(batch.pollTimer);
         // Resolve all pending promises with null (callers handle null gracefully)
         for (const [, pending] of batch.requests) {
           pending.resolve(null);
         }
-        log.warn(`batch shutdown: abandoned inflight batch ${batchId}`);
+        log.warn(
+          `batch shutdown: abandoned inflight batch (${batch.provider.name})`,
+        );
       }
       inflight.clear();
     },

@@ -33,11 +33,24 @@ import { blocksToText } from "./translate/types";
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a deterministic UUID-like ID from message content.
- * Same message at the same position produces the same ID across requests,
- * which is critical for gradient prefix fingerprinting and cache-bust detection.
+ * Generate a deterministic UUID-like source ID from message content.
+ * Same message at the same position in the same session produces the same ID
+ * across requests, while another session gets an independent identity.
  */
 export function deterministicID(
+  sessionID: string,
+  role: string,
+  index: number,
+  content: GatewayContentBlock[],
+): string {
+  const h = createHash("sha256");
+  h.update(JSON.stringify(["lore-gateway-message-v2", sessionID, role, index]));
+  hashBlocks(h, content);
+  return h.digest("hex").slice(0, 32);
+}
+
+/** Pre-v82 source identity, retained only to find already-persisted local rows. */
+export function legacyDeterministicID(
   role: string,
   index: number,
   content: GatewayContentBlock[],
@@ -72,7 +85,7 @@ function hashBlocks(
         );
         break;
       case "tool_result":
-        h.update(`tool_result:${block.toolUseId}:`);
+        h.update(`tool_result:${block.toolUseId}:${block.toolName ?? ""}:`);
         hashBlocks(h, block.content);
         break;
       case "opaque": {
@@ -161,6 +174,7 @@ function contentBlockToPart(
         messageID,
         type: "tool",
         tool: "result",
+        ...(block.toolName ? { toolName: block.toolName } : undefined),
         callID: block.toolUseId,
         // Propagate the error flag so downstream consumers (structured
         // tool-call trace, gradient) can distinguish failed tool results.
@@ -211,13 +225,19 @@ function contentBlockToPart(
 export function gatewayMessagesToLore(
   messages: GatewayMessage[],
   sessionID: string,
+  startIndex = 0,
 ): LoreMessageWithParts[] {
   const out: LoreMessageWithParts[] = [];
   const now = Date.now();
 
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
-    const id = deterministicID(m.role, i, m.content);
+    const id = deterministicID(sessionID, m.role, startIndex + i, m.content);
+    // The old adapter hashed the index within the array passed to this call.
+    // Keep that exact invocation-relative index: full request histories use
+    // absolute indexes (startIndex=0), while the single assistant-response call
+    // historically used index 0 even though its modern ID uses startIndex.
+    const legacySourceID = legacyDeterministicID(m.role, i, m.content);
     const parts: LorePart[] = m.content.map((block, pi) =>
       contentBlockToPart(block, sessionID, id, pi),
     );
@@ -241,6 +261,7 @@ export function gatewayMessagesToLore(
       out.push({
         info,
         parts,
+        legacySourceID,
         ...(hiddenInputTokens ? { hiddenInputTokens } : {}),
       });
     } else {
@@ -265,6 +286,7 @@ export function gatewayMessagesToLore(
       out.push({
         info,
         parts,
+        legacySourceID,
         ...(hiddenInputTokens ? { hiddenInputTokens } : {}),
       });
     }
@@ -316,11 +338,19 @@ export function updateAssistantMessageTokens(
  *
  * Mutates messages in place.
  */
-export function resolveToolResults(messages: LoreMessageWithParts[]): void {
+export function resolveToolResults(
+  messages: LoreMessageWithParts[],
+  recallMessageId?: (message: LoreMessageWithParts) => string,
+): void {
   // --- Pass 1: Index all tool_result parts by callID ---
   const resultsByCallID = new Map<
     string,
-    { output: string; blocks?: LoreContentBlock[]; isError: boolean }
+    {
+      output: string;
+      blocks?: LoreContentBlock[];
+      toolName?: string;
+      isError: boolean;
+    }
   >();
 
   for (const msg of messages) {
@@ -330,12 +360,14 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
           resultsByCallID.set(part.callID, {
             output: part.state.output,
             blocks: part.state.blocks,
+            toolName: part.toolName,
             isError: false,
           });
         } else if (part.state.status === "error") {
           resultsByCallID.set(part.callID, {
             output: part.state.error,
             blocks: part.state.blocks,
+            toolName: part.toolName,
             isError: true,
           });
         }
@@ -354,6 +386,7 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
       ) {
         const result = resultsByCallID.get(part.callID);
         if (result) {
+          if (result.toolName) part.toolName = result.toolName;
           part.state = result.isError
             ? {
                 status: "error",
@@ -390,15 +423,17 @@ export function resolveToolResults(messages: LoreMessageWithParts[]): void {
     // add a recall-able placeholder so the model can fetch the original
     // tool output via recall using the temporal message ID (t:xxx).
     // The original content is stored in temporal BEFORE resolveToolResults
-    // runs, so `t:<messageID>` retrieves the full tool_result text.
+    // runs. The optional resolver maps the caller-facing source ID to the
+    // namespaced storage ID used by recall.
     if (msg.parts.length === 0 && before > 0) {
+      const messageID = recallMessageId?.(msg) ?? msg.info.id;
       msg.parts = [
         {
           id: randomUUID(),
           sessionID: "",
           messageID: msg.info.id,
           type: "text" as const,
-          text: `[tool results provided] (t:${msg.info.id})`,
+          text: `[tool results provided] (t:${messageID})`,
           time: { start: 0, end: 0 },
         } satisfies LoreTextPart,
       ];

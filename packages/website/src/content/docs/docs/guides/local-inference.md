@@ -7,7 +7,7 @@ sidebar:
 
 This guide is for the privacy-maximalist / tinkerer path. If you'd rather not have your conversations touch a third-party API — or you just want to experiment with smaller open-weight models — Lore can run against any OpenAI-compatible local server.
 
-Lore's gateway already runs locally. Your database lives at `~/.local/share/lore/lore.db` and never leaves your machine. With a local LLM server, even the distillation and curation calls stay on your hardware. There is no external API key required and no telemetry.
+Lore's gateway already runs locally. Your database lives at `~/.local/share/lore/lore.db` and never leaves your machine. With a local LLM server, even the distillation and curation calls stay on your hardware, and no external LLM API key is required. Production builds still send privacy-filtered operational telemetry by default; set `SENTRY_ENABLED=0` before starting Lore to disable it. Lore does not include prompts, response bodies, credentials, file paths, or project names in this telemetry. See [Operational telemetry](/docs/install/#operational-telemetry) for the metadata that can be sent.
 
 ## Server setup
 

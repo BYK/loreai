@@ -17,25 +17,35 @@ import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 
 const BUNDLE = resolve(process.cwd(), "packages/gateway/dist/bin.cjs");
+// The full suite can saturate CPU with large cache-stability fixtures. Give the
+// real bundled subprocess enough wall time to start instead of reporting a
+// synthetic `code === null` timeout under load.
+const BUNDLE_TIMEOUT_MS = 30_000;
+const TEST_TIMEOUT_MS = 45_000;
 
 async function runBundle(
   args: string[],
-  env: Record<string, string> = {},
+  env: NodeJS.ProcessEnv = {},
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
   if (!existsSync(BUNDLE)) {
     throw new Error(
       `Bundle not found at ${BUNDLE} — run \`pnpm --filter @loreai/gateway run bundle\` first.`,
     );
   }
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    // Suppress any background update check noise.
+    LORE_NO_UPDATE_CHECK: "1",
+  };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete childEnv[key];
+    else childEnv[key] = value;
+  }
+
   return new Promise((resolveRun, reject) => {
     const child = spawn(process.execPath, [BUNDLE, ...args], {
-      env: {
-        ...process.env,
-        // Suppress any background update check noise.
-        LORE_NO_UPDATE_CHECK: "1",
-        ...env,
-      },
-      timeout: 10_000,
+      env: childEnv,
+      timeout: BUNDLE_TIMEOUT_MS,
     });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -95,37 +105,72 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
     else process.env.LORE_NO_UPDATE_CHECK = origNoUpdateCheck;
   });
 
-  test("`lore version` through the bundle returns the build version", async () => {
-    const { stdout, code } = await runBundle(["version"]);
-    expect(code).toBe(0);
-    // The version is a semver string from build-injected VERSION.
-    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
-  }, 15_000);
+  test(
+    "`lore version` through the bundle returns the build version",
+    async () => {
+      const { stdout, code } = await runBundle(["version"]);
+      expect(code).toBe(0);
+      // The version is a semver string from build-injected VERSION.
+      expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+    },
+    TEST_TIMEOUT_MS,
+  );
 
-  test("`lore help --json` through the bundle returns the typed payload", async () => {
-    const { stdout, code } = await runBundle(["help", "--json"]);
-    expect(code).toBe(0);
-    const payload = JSON.parse(stdout.trim());
-    expect(payload.schemaVersion).toBe(1);
-    expect(payload.name).toBe("lore");
-  }, 15_000);
+  test(
+    "`lore --version` starts the production bundle with Sentry enabled by default",
+    async () => {
+      const { stdout, stderr, code } = await runBundle(["--version"], {
+        NODE_ENV: "production",
+        // Vitest sets SENTRY_ENABLED=0 globally. Remove it so this subprocess
+        // exercises the production bundle's default-enabled initialization.
+        SENTRY_ENABLED: undefined,
+        // If initialization ever emits an envelope, fail it quickly through a
+        // loopback-only proxy instead of making this regression depend on DNS
+        // or external network availability.
+        http_proxy: "http://127.0.0.1:1",
+        https_proxy: "http://127.0.0.1:1",
+        no_proxy: "",
+      });
 
-  test("`lore whoami` through the bundle returns the typed AuthError envelope when not logged in", async () => {
-    // Force the bundle to see no persisted session. The smoke test only
-    // verifies that the npm binary reaches the typed envelope shape, not
-    // the underlying supabase state.
-    const { stderr, code } = await runBundle(["whoami"], {
-      HOME: "/tmp/lore-bundle-smoke",
-      USERPROFILE: "/tmp/lore-bundle-smoke",
-      LORE_DATA_DIR: "/tmp/lore-bundle-smoke",
-    });
-    // When no session exists, the typed adapter throws AuthError(10)
-    // and the buildOutputCommand wrapper renders the human format with
-    // a `Try: lore login` recovery command.
-    expect(stderr).toContain("Not logged in");
-    expect(stderr).toContain("Try: lore login");
-    expect(code).toBe(10);
-  }, 15_000);
+      expect(code).toBe(0);
+      expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+      expect(stderr).toBe("");
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "`lore help --json` through the bundle returns the typed payload",
+    async () => {
+      const { stdout, code } = await runBundle(["help", "--json"]);
+      expect(code).toBe(0);
+      const payload = JSON.parse(stdout.trim());
+      expect(payload.schemaVersion).toBe(1);
+      expect(payload.name).toBe("lore");
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "`lore whoami` through the bundle returns the typed AuthError envelope when not logged in",
+    async () => {
+      // Force the bundle to see no persisted session. The smoke test only
+      // verifies that the npm binary reaches the typed envelope shape, not
+      // the underlying supabase state.
+      const { stderr, code } = await runBundle(["whoami"], {
+        HOME: "/tmp/lore-bundle-smoke",
+        USERPROFILE: "/tmp/lore-bundle-smoke",
+        LORE_DATA_DIR: "/tmp/lore-bundle-smoke",
+      });
+      // When no session exists, the typed adapter throws AuthError(10)
+      // and the buildOutputCommand wrapper renders the human format with
+      // a `Try: lore login` recovery command.
+      expect(stderr).toContain("Not logged in");
+      expect(stderr).toContain("Try: lore login");
+      expect(code).toBe(10);
+    },
+    TEST_TIMEOUT_MS,
+  );
 
   test.each([
     [[], "Please provide a search query."],
@@ -150,7 +195,7 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
         message,
       });
     },
-    15_000,
+    TEST_TIMEOUT_MS,
   );
 
   test.each([["--json"], ["--json=true"]])(
@@ -173,7 +218,7 @@ describe("Phase 1 — bundled CLI reaches the typed commands", () => {
         await stopRecallServer(server);
       }
     },
-    15_000,
+    TEST_TIMEOUT_MS,
   );
 
   test("`lore recall --json` preserves successful remote JSON output", async () => {

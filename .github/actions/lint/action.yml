@@ -1,82 +1,95 @@
-name: "Lore semantic linter (lint)"
+name: "Lore semantic linter"
 description: >-
-  Advisory-only: surfaces PR changes that contradict a documented invariant in
-  the repo's `.lore.md`. NEVER fails the build — reports findings as annotations
-  and a job summary; humans decide. Requires the caller to checkout with
-  `fetch-depth: 0` so merge-base resolution against the PR base has full history
-  (a shallow clone can force a noisy tip-to-tip diff instead of the fork-point diff).
+  Checks pull-request changes against documented invariants. Advisory by default;
+  gate mode fails closed on blocking findings or an inconclusive lint run.
 
 inputs:
   base:
-    description: "Base ref/SHA. Defaults to the PR base (auto-detected)."
+    description: "Base ref/SHA. Defaults to the PR base."
     required: false
     default: ""
   head:
-    description: "Head ref/SHA. Defaults to the PR head (auto-detected)."
+    description: "Head ref/SHA. Defaults to the PR head."
     required: false
     default: ""
   model:
-    description: >-
-      Judge model (provider/id). Defaults to `github-copilot/gpt-5.6-luna` when
-      the workflow uses the zero-secret GitHub Copilot path (the default).
-      In that case the CLI authenticates with the `github.token` built-in, no
-      additional configuration needed. The reference workflow's model-precedence
-      table still lets `LORE_INVARIANT_MODEL` (repo var) or a dedicated
-      `LORE_WORKER_API_KEY` override this.
+    description: "Judge model (provider/id)."
     required: false
     default: "github-copilot/gpt-5.6-luna"
   effort:
-    description: >-
-      Reasoning effort for the judge (off|low|medium|high|xhigh). A cost/depth
-      dial on reasoning-capable models; ignored by non-reasoning models.
-      Defaults to the `invariantCheck.effort` config value (off).
+    description: "Reasoning effort (off|low|medium|high|xhigh)."
     required: false
     default: ""
   worker-api-key:
+    description: "Judge credential (sets LORE_WORKER_API_KEY)."
+    required: false
+    default: ""
+  github-token:
     description: >-
-      Judge credential (sets LORE_WORKER_API_KEY). In CI the gateway has no
-      client session to borrow auth from, so a credential is required to run the
-      judge. The reference workflow defaults this to the built-in GITHUB_TOKEN
-      and uses GitHub Copilot (api.githubcopilot.com) with `github-copilot/...`
-      model ids — zero-secret onboarding — or a dedicated provider key when set.
+      Actions GITHUB_TOKEN for the official Copilot SDK bridge. Requires
+      copilot-requests: write; do not also set worker-api-key.
     required: false
     default: ""
   lore-command:
-    description: >-
-      How to invoke the lore CLI. Default `lore` (built binary on PATH). For an
-      un-built checkout, pass e.g. `pnpm tsx packages/gateway/src/cli/bin.ts`.
+    description: "Command used to invoke Lore."
     required: false
     default: "lore"
   gate:
-    description: >-
-      Opt into blocking mode. When "true", strict findings and un-overridden
-      soft findings FAIL the job (the CLI exits non-zero). Default "false" —
-      advisory only, never fails. Soft findings are cleared by a
-      `lore-override: <invariant> — <reason>` commit trailer; strict cannot be
-      overridden. Even in gate mode, an invariant only reaches strict/soft via
-      explicit `enforce:` metadata, so a repo with no opt-ins gates on nothing.
+    description: "Set true to fail on blocking findings and health failures."
     required: false
     default: "false"
+  deadline-seconds:
+    description: "Overall semantic lint deadline, in seconds."
+    required: false
+    default: "1200"
+  candidate-timeout-seconds:
+    description: "Per-candidate judge timeout, in seconds."
+    required: false
+    default: "90"
 
 runs:
   using: "composite"
   steps:
-    # ------------------------------------------------------------------
-    # Invariant source (see the coverage note below):
-    #   The check reads invariants from a lore DB at $LORE_DB_PATH. There is no
-    #   local DB in CI, so we DERIVE one from the repo's committed `.lore.md`
-    #   (plaintext title+content) and let the CLI's --import-lore-md embed it
-    #   in-process. That derivation (ONNX embed of ~all entries) is cached via
-    #   actions/cache and only re-runs when the knowledge or the embedding stack
-    #   changes — the cache key is versioned on the model, the onnxruntime-node
-    #   version, AND the .lore.md content hash so a stale embedding space can
-    #   never be silently reused (cosine drift = quiet recall rot).
-    #
-    #   COVERAGE CAVEAT: `.lore.md` omits cross_project=1 entries (global
-    #   invariants that span projects, ~16 in practice). A .lore.md-sourced
-    #   check therefore has slightly narrower coverage than a full local DB.
-    #   Acceptable for the advisory tier; do not rely on it for global rules.
-    # ------------------------------------------------------------------
+    - name: Validate judge credential inputs
+      shell: bash
+      env:
+        LORE_IC_MODEL: ${{ inputs.model }}
+        LORE_WORKER_API_KEY: ${{ inputs.worker-api-key }}
+        LORE_GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if [ -n "$LORE_GITHUB_TOKEN" ] && [ -n "$LORE_WORKER_API_KEY" ]; then
+          echo "github-token and worker-api-key are mutually exclusive" >&2
+          exit 1
+        fi
+        if [ -n "$LORE_GITHUB_TOKEN" ] && [[ ! "$LORE_IC_MODEL" =~ ^github-copilot/gpt-5\.6-[A-Za-z0-9._-]+$ ]]; then
+          echo "github-token requires a Responses-compatible github-copilot/gpt-5.6-* model" >&2
+          exit 1
+        fi
+
+    - name: Install official Copilot SDK bridge
+      if: inputs.github-token != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Lore already speaks Copilot's model APIs. This optional runtime handles
+        # the supported Actions installation-token and billing flow. See
+        # copilot-sdk/README.md for the architectural boundary.
+        install_dir="${GITHUB_ACTION_PATH}/copilot-sdk"
+        npm ci --prefix "$install_dir" --ignore-scripts --no-audit --no-fund
+
+    - name: Start official Copilot SDK bridge
+      id: copilot
+      if: inputs.github-token != ''
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        install_dir="${GITHUB_ACTION_PATH}/copilot-sdk"
+        node "${GITHUB_ACTION_PATH}/copilot-proxy.mjs" launch \
+          "$install_dir/node_modules/@github/copilot-sdk/dist/index.js"
+
     - name: Compute invariant-DB cache key
       id: key
       shell: bash
@@ -87,7 +100,6 @@ runs:
         ort=$(node -p "require('onnxruntime-node/package.json').version" 2>/dev/null || echo "na")
         lore_hash=$(git hash-object .lore.md 2>/dev/null || echo "none")
         model="${LORE_IC_MODEL:-default}"
-        # Slashes in the model id break nothing but read oddly in a key; keep raw.
         echo "key=lore-invariants-v1-${model}-ort${ort}-${lore_hash}" >> "$GITHUB_OUTPUT"
         echo "db=${RUNNER_TEMP}/lore-ci/lore.db" >> "$GITHUB_OUTPUT"
 
@@ -98,7 +110,7 @@ runs:
         path: ${{ runner.temp }}/lore-ci
         key: ${{ steps.key.outputs.key }}
 
-    - name: Resolve range + run lint
+    - name: Resolve range and run lint
       id: check
       shell: bash
       env:
@@ -106,96 +118,81 @@ runs:
         LORE_IC_HEAD: ${{ inputs.head }}
         LORE_IC_MODEL: ${{ inputs.model }}
         LORE_IC_EFFORT: ${{ inputs.effort }}
-        LORE_WORKER_API_KEY: ${{ inputs.worker-api-key }}
+        LORE_WORKER_API_KEY: ${{ inputs.worker-api-key != '' && inputs.worker-api-key || inputs.github-token != '' && 'copilot-sdk-bridge' || '' }}
+        LORE_WORKER_UPSTREAM: ${{ steps.copilot.outputs.url }}
         LORE_CMD: ${{ inputs.lore-command }}
-        # Point the whole lore stack (db(), forProject, loadInvariantVecs) at the
-        # cached/derived CI DB instead of ~/.local/share/lore/lore.db.
         LORE_DB_PATH: ${{ steps.key.outputs.db }}
-        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         LORE_IC_GATE: ${{ inputs.gate }}
-        # Enable log.info/log.warn to surface on stderr. The action's bash already
-        # captures stderr unconditionally (per PR #1555), but the @loreai/core
-        # logger is debug-gated — without LORE_DEBUG=1 the only stderr we ever see
-        # on a successful lint run is the per-call judging progress lines. When
-        # a judge call returns null text (routing miss, auth failure, encrypted
-        # content, etc.) the unparseable++ count surfaces in the report but the
-        # underlying cause stays silent. Surfacing it here lets the next CI run
-        # pinpoint which path failed, instead of treating "20/20 unparseable" as
-        # the symptom we guess about in PR comments.
+        LORE_DEADLINE_SECONDS: ${{ inputs.deadline-seconds }}
+        LORE_CANDIDATE_TIMEOUT_SECONDS: ${{ inputs.candidate-timeout-seconds }}
+        LORE_REPORT_FILE: ${{ runner.temp }}/lore-semantic-lint-report.json
         LORE_DEBUG: "1"
       run: |
         set -euo pipefail
         mkdir -p "$(dirname "$LORE_DB_PATH")"
+        rm -f "$LORE_REPORT_FILE"
+        echo "report_file=$LORE_REPORT_FILE" >> "$GITHUB_OUTPUT"
 
-        # Need full history for merge-base resolution.
+        if [[ ! "$LORE_DEADLINE_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+           [[ ! "$LORE_CANDIDATE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+          echo "::warning title=Lore semantic lint::deadline inputs must be positive integers"
+          echo "exit_code=1" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
         git fetch --no-tags --prune --depth=200 origin \
           "+refs/heads/*:refs/remotes/origin/*" 2>/dev/null || true
 
-        base="${LORE_IC_BASE}"
-        head="${LORE_IC_HEAD}"
+        base="$LORE_IC_BASE"
+        head="$LORE_IC_HEAD"
         if [ -z "$base" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
           base="origin/${GITHUB_BASE_REF}"
         fi
         if [ -z "$head" ]; then
-          head="${GITHUB_SHA}"
+          head="$GITHUB_SHA"
         fi
 
-        args=(lint --json)
+        args=(lint --report-file "$LORE_REPORT_FILE")
+        args+=(--deadline-ms "$((LORE_DEADLINE_SECONDS * 1000))")
+        args+=(--candidate-timeout-ms "$((LORE_CANDIDATE_TIMEOUT_SECONDS * 1000))")
         [ -n "$base" ] && args+=(--base "$base")
         [ -n "$head" ] && args+=(--head "$head")
-        [ -n "${LORE_IC_MODEL}" ] && args+=(--model "${LORE_IC_MODEL}")
-        [ -n "${LORE_IC_EFFORT}" ] && args+=(--effort "${LORE_IC_EFFORT}")
-        # On a cache MISS, seed the DB from .lore.md (imports + embeds, once).
-        # On a HIT the DB already exists; --import-lore-md fast-paths (mtime/hash
-        # match) and is a cheap no-op, so it is always safe to pass.
+        [ -n "$LORE_IC_MODEL" ] && args+=(--model "$LORE_IC_MODEL")
+        [ -n "$LORE_IC_EFFORT" ] && args+=(--effort "$LORE_IC_EFFORT")
         args+=(--import-lore-md)
-        # Blocking mode is opt-in. In gate mode the CLI exits 2 on a blocking
-        # finding; we let that propagate as a job failure below. In advisory
-        # mode (default) the CLI only ever exits non-zero on a TOOLING error.
-        if [ "${LORE_IC_GATE}" = "true" ]; then
+        if [ "$LORE_IC_GATE" = "true" ]; then
           args+=(--gate)
         fi
 
-        # Capture the exit so we can classify it. Exit 2 == a GATE BLOCK (a real,
-        # intended failure in gate mode). Any OTHER non-zero == a TOOLING failure
-        # (e.g. no range) which must NEVER fail the build — we log it and pass.
+        read -r -a command <<< "$LORE_CMD"
         set +e
-        # shellcheck disable=SC2086
-        $LORE_CMD "${args[@]}" > /tmp/lore-ic.json 2> /tmp/lore-ic.err
+        "${command[@]}" "${args[@]}"
         rc=$?
         set -e
-        # Always surface stderr from the CLI run as a collapsible group — on
-        # success (rc=0) this was previously hidden, which masked useful
-        # diagnostics like the models.dev pre-warm status (`[lore] models.dev:
-        # loaded data for N models across M providers`), the invariant-seed
-        # timing line, and judge-budget logs. On failure (rc != 0) it's the
-        # only signal we have to explain a TOOLING skip. Cheap on a green run
-        # (a few progress lines folded into a group), invaluable on red.
-        echo "::group::lore lint stderr"
-        cat /tmp/lore-ic.err || true
-        echo "::endgroup::"
-        if [ $rc -eq 2 ] && [ "${LORE_IC_GATE}" = "true" ]; then
-          # Gate block — report findings, then fail the job on purpose.
-          echo "skipped=false" >> "$GITHUB_OUTPUT"
-          echo "gate_blocked=true" >> "$GITHUB_OUTPUT"
-          exit 0
+        if [ "$rc" -lt 0 ] || [ "$rc" -gt 3 ]; then
+          echo "::warning title=Lore semantic lint::unexpected CLI exit $rc (classified as usage/runtime failure)"
+          rc=1
         fi
-        if [ $rc -ne 0 ]; then
-          echo "::notice title=Lore lint::skipped (tooling: exit $rc)"
-          echo "skipped=true" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        echo "skipped=false" >> "$GITHUB_OUTPUT"
-        echo "gate_blocked=false" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
-    - name: Report findings (annotations + summary)
-      if: steps.check.outputs.skipped == 'false'
+    - name: Report semantic lint outcome
+      if: always()
       shell: bash
-      run: node "${{ github.action_path }}/report.mjs" /tmp/lore-ic.json
+      env:
+        LORE_LINT_EXIT_CODE: ${{ steps.check.outputs.exit_code }}
+        LORE_LINT_GATE: ${{ inputs.gate }}
+        LORE_LINT_REPORT_FILE: ${{ steps.check.outputs.report_file }}
+      run: >-
+        node "${{ github.action_path }}/report.mjs"
+        "${LORE_LINT_REPORT_FILE:-${RUNNER_TEMP}/lore-semantic-lint-report.json}"
+        "${LORE_LINT_GATE:-false}"
+        "${LORE_LINT_EXIT_CODE:-1}"
 
-    - name: Fail on blocking findings (gate mode)
-      if: steps.check.outputs.gate_blocked == 'true'
+    - name: Stop official Copilot SDK bridge
+      if: always() && steps.copilot.outputs.pid != ''
       shell: bash
-      run: |
-        echo "::error title=Lore lint::blocking invariant contradiction(s) — see annotations. Override a SOFT finding with a 'lore-override: <invariant> — <reason>' commit trailer; STRICT cannot be overridden."
-        exit 1
+      env:
+        LORE_COPILOT_PROXY_PID: ${{ steps.copilot.outputs.pid }}
+      run: >-
+        node "${{ github.action_path }}/copilot-proxy.mjs"
+        stop "$LORE_COPILOT_PROXY_PID"

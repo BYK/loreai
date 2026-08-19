@@ -145,6 +145,8 @@ export type LoreToolPart = {
   messageID: string;
   type: "tool";
   tool: string;
+  /** Provider function name for result parts whose call ID is distinct. */
+  toolName?: string;
   callID: string;
   state: LoreToolState;
 };
@@ -193,6 +195,12 @@ export function isToolPart(p: LorePart): p is LoreToolPart {
 export type LoreMessageWithParts = {
   info: LoreMessage;
   parts: LorePart[];
+  /**
+   * Exact source ID produced by the gateway's pre-v82 identity algorithm.
+   * Transient migration metadata: storage may use it only to claim a migrated
+   * row under the same tenant/project/session, then persists the modern ID.
+   */
+  legacySourceID?: string;
   /** Transient provider bytes omitted from parts but counted by gradient. */
   hiddenInputTokens?: number;
 };

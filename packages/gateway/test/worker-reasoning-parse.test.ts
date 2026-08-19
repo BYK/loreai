@@ -16,6 +16,7 @@ import {
   createGatewayLLMClient,
   gatewayResponseToWorkerResult,
   parseOpenAIResponse,
+  parseResponsesWorkerResponse,
   parseAnthropicResponse,
 } from "../src/llm-adapter";
 import { upstreamFetch } from "../src/fetch";
@@ -94,17 +95,38 @@ describe("parseOpenAIResponse — reasoning-model fallback", () => {
     expect(r.text).toBe("fallback reasoning");
   });
 
-  test("ignores a non-string reasoning field", () => {
+  test("rejects a non-string reasoning field", () => {
+    expect(() =>
+      parseOpenAIResponse({
+        choices: [
+          {
+            message: {
+              reasoning_content: 42 as unknown as string,
+            },
+          },
+        ],
+      }),
+    ).toThrow("malformed OpenAI response body");
+  });
+
+  test("treats an official refusal as usable worker text", () => {
     const r = parseOpenAIResponse({
       choices: [
         {
-          message: {
-            reasoning_content: 42 as unknown as string,
-          },
+          message: { content: null as unknown as string, refusal: "refused" },
+          finish_reason: "stop",
         },
       ],
     });
-    expect(r.text).toBeNull();
+    expect(r.text).toBe("refused");
+  });
+
+  test("rejects a malformed message container", () => {
+    expect(() =>
+      parseOpenAIResponse({
+        choices: [{ message: [] as never, finish_reason: "stop" }],
+      }),
+    ).toThrow("malformed OpenAI response body");
   });
 
   test("negative: no choices returns null", () => {
@@ -112,6 +134,181 @@ describe("parseOpenAIResponse — reasoning-model fallback", () => {
     expect(r.text).toBeNull();
   });
 });
+
+test("parseResponsesWorkerResponse extracts a non-streaming refusal", () => {
+  const result = parseResponsesWorkerResponse({
+    status: "completed",
+    output_text: "",
+    output: [
+      {
+        type: "message",
+        id: "msg-refusal",
+        content: [{ type: "refusal", refusal: "cannot comply" }],
+      },
+    ],
+  });
+
+  expect(result.text).toBe("cannot comply");
+});
+
+test("non-SSE worker parsers reject missing and duplicate tool identities", () => {
+  expect(() =>
+    parseOpenAIResponse({
+      choices: [
+        {
+          message: {
+            tool_calls: [{ id: "call-shared" }, { id: "call-shared" }],
+          },
+        },
+      ],
+    }),
+  ).toThrow("malformed OpenAI response body");
+  expect(() =>
+    parseResponsesWorkerResponse({
+      output: [
+        {
+          type: "function_call",
+          id: "",
+          call_id: "",
+          name: "lookup",
+          arguments: "{}",
+        },
+      ],
+    }),
+  ).toThrow("malformed Responses response body");
+  expect(() =>
+    parseResponsesWorkerResponse({
+      output: [
+        {
+          type: "function_call",
+          id: "item-shared",
+          call_id: "call-a",
+          name: "a",
+          arguments: "{}",
+        },
+        {
+          type: "function_call",
+          id: "item-shared",
+          call_id: "call-b",
+          name: "b",
+          arguments: "{}",
+        },
+      ],
+    }),
+  ).toThrow("malformed Responses response body");
+  expect(() =>
+    parseAnthropicResponse({
+      content: [
+        { type: "tool_use", id: "tool-shared", name: "a", input: {} },
+        {
+          type: "server_tool_use",
+          id: "tool-shared",
+          name: "b",
+          input: {},
+        },
+      ],
+    }),
+  ).toThrow("malformed Anthropic response body");
+});
+
+test("OpenAI worker permits the same tool identity in independent choices", () => {
+  expect(() =>
+    parseOpenAIResponse({
+      choices: [
+        { index: 0, message: { tool_calls: [{ id: "call-shared" }] } },
+        { index: 1, message: { tool_calls: [{ id: "call-shared" }] } },
+      ],
+    }),
+  ).not.toThrow();
+});
+
+test("OpenAI worker rejects duplicate logical choice indices before tool validation", () => {
+  expect(() =>
+    parseOpenAIResponse({
+      choices: [
+        { index: 2, message: { content: "first" } },
+        { index: 2, message: { tool_calls: "malformed" as never } },
+      ],
+    }),
+  ).toThrow("malformed OpenAI response body");
+});
+
+test("OpenAI worker fallback indices cannot collide with explicit indices", () => {
+  expect(() =>
+    parseOpenAIResponse({
+      choices: [
+        { index: 1, message: { content: "first" } },
+        { message: { content: "second" } },
+      ],
+    }),
+  ).toThrow("malformed OpenAI response body");
+});
+
+test.each([{}, 7, ""])(
+  "Responses worker rejects non-string or empty item id %#",
+  (id) => {
+    expect(() =>
+      parseResponsesWorkerResponse({
+        output: [{ type: "message", id: id as never, content: [] }],
+      }),
+    ).toThrow("malformed Responses response body");
+  },
+);
+
+test("Responses worker validates incomplete_details against status", () => {
+  expect(
+    parseResponsesWorkerResponse({
+      status: "completed",
+      incomplete_details: null,
+      output_text: "ok",
+    }).text,
+  ).toBe("ok");
+  expect(
+    parseResponsesWorkerResponse({
+      status: "incomplete",
+      incomplete_details: null,
+      output: [],
+    }),
+  ).toMatchObject({ text: null, incompleteDetails: null });
+  expect(
+    parseResponsesWorkerResponse({
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [],
+    }).incompleteDetails,
+  ).toEqual({ reason: "max_output_tokens" });
+  expect(() =>
+    parseResponsesWorkerResponse({
+      status: "completed",
+      incomplete_details: { reason: "max_output_tokens" },
+    }),
+  ).toThrow("malformed Responses response body");
+  expect(() =>
+    parseResponsesWorkerResponse({
+      status: "incomplete",
+      incomplete_details: { reason: 7 as never },
+    }),
+  ).toThrow("malformed Responses response body");
+});
+
+test.each([{}, 7, ""])(
+  "Responses worker rejects non-string or empty call_id %#",
+  (call_id) => {
+    expect(() =>
+      parseResponsesWorkerResponse({
+        output: [
+          {
+            type: "function_call",
+            id: "item-call",
+            call_id: call_id as never,
+            name: "lookup",
+            arguments: "{}",
+          },
+        ],
+      }),
+    ).toThrow("malformed Responses response body");
+  },
+);
 
 describe("parseAnthropicResponse — thinking-block fallback", () => {
   test("positive: normal text block still parses unchanged", () => {
@@ -208,6 +405,23 @@ describe("gatewayResponseToWorkerResult — streaming thinking-block fallback (#
       content: [],
     });
     expect(r.text).toBeNull();
+  });
+
+  test("projects a Responses refusal as usable worker text", () => {
+    const r = gatewayResponseToWorkerResult({
+      ...base,
+      content: [
+        {
+          type: "opaque",
+          responsesItem: true,
+          raw: {
+            type: "message",
+            content: [{ type: "refusal", refusal: "cannot comply" }],
+          },
+        },
+      ],
+    });
+    expect(r.text).toBe("cannot comply");
   });
 });
 

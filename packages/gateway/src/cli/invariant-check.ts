@@ -1,20 +1,5 @@
-/**
- * `lore lint` — the "semantic linter" PoC.
- *
- * Surfaces changes that violate a documented team invariant, at change time.
- * This is a MEASUREMENT TOOL: it NEVER exits non-zero on findings — the whole
- * idea hinges on the false-positive rate, so the job is to print per-candidate
- * verdicts + cost so we can point it at real merged PRs and get an honest TP/FP
- * number before anyone gates a build on it.
- *
- * Base/head are auto-detected (Craft-style) from git + CI env, or overridden
- * with --base/--head. --model sweeps a specific worker model for the eval.
- *
- * Usage:
- *   lore lint [--base <sha>] [--head <sha>] [--model <provider/id>]
- *             [--project <path>] [--json]
- */
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   config as loreConfig,
   embedding,
@@ -23,288 +8,419 @@ import {
   parseReasoningEffort,
   type ReasoningEffort,
 } from "@loreai/core";
-import { createGatewayLLMClient } from "../llm-adapter";
+import {
+  createGatewayInvariantJudge,
+  createGatewayLLMClient,
+} from "../llm-adapter";
 import { type AuthCredential, resolveAuth, workerKeyScheme } from "../auth";
 import { startGateway, type StartOptions } from "./start";
+import {
+  buildSemanticLintReport,
+  failedSemanticLintReport,
+  renderSemanticLintReport,
+  semanticLintExitCode,
+  type LintPhaseHealth,
+  type SemanticLintReport,
+} from "./lint-report";
 
-type CheckResult = invariantCheck.CheckResult;
-
-/** Parse a `provider/modelID` (or bare `modelID`) into the model shape. */
-function parseModel(
-  spec: string | undefined,
-): { providerID: string; modelID: string } | undefined {
-  if (!spec) return undefined;
-  const slash = spec.indexOf("/");
-  if (slash === -1) {
-    // Bare model id — default provider to anthropic (worker routing still
-    // applies its guardrails downstream).
-    return { providerID: "anthropic", modelID: spec };
-  }
-  return { providerID: spec.slice(0, slash), modelID: spec.slice(slash + 1) };
+export interface SemanticLintOptions {
+  base?: string;
+  head?: string;
+  model?: string;
+  project: string;
+  effort?: ReasoningEffort;
+  gate: boolean;
+  importLoreMd: boolean;
+  deadlineMs: number;
+  candidateTimeoutMs: number;
+  onDiagnostic?: (message: string) => void;
+  onJudge?: (current: number, total: number) => void;
+  /** Called after validation and before gateway cleanup. */
+  publishReport?: (report: SemanticLintReport) => void | Promise<void>;
 }
 
+type Model = { providerID: string; modelID: string };
+
+function parseModel(spec: string | undefined): Model | undefined {
+  if (!spec) return undefined;
+  const slash = spec.indexOf("/");
+  return slash === -1
+    ? { providerID: "anthropic", modelID: spec }
+    : { providerID: spec.slice(0, slash), modelID: spec.slice(slash + 1) };
+}
+
+function boundedMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return (message.replace(/[\r\n\t]+/g, " ").trim() || fallback).slice(0, 400);
+}
+
+function failedReport(input: {
+  options: SemanticLintOptions;
+  startedAt: number;
+  model: Model;
+  effort: ReasoningEffort;
+  range?: SemanticLintReport["range"];
+  phase: Parameters<typeof failedSemanticLintReport>[0]["failedPhase"];
+  code: string;
+  error: unknown;
+}): SemanticLintReport {
+  return failedSemanticLintReport({
+    model: `${input.model.providerID}/${input.model.modelID}`,
+    effort: input.effort,
+    elapsedMs: Date.now() - input.startedAt,
+    range: input.range,
+    failedPhase: input.phase,
+    failure: {
+      code: input.code,
+      message: boundedMessage(input.error, "Semantic lint failed"),
+    },
+    gateMode: input.options.gate ? "gate" : "advisory",
+  });
+}
+
+/** Process-I/O-free semantic lint orchestration boundary. */
+export async function runSemanticLint(
+  options: SemanticLintOptions,
+): Promise<SemanticLintReport> {
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + options.deadlineMs;
+  const deadlineController = new AbortController();
+  const deadlineTimer = setTimeout(
+    () =>
+      deadlineController.abort(
+        new DOMException("Semantic lint deadline exceeded", "TimeoutError"),
+      ),
+    options.deadlineMs,
+  );
+  deadlineTimer.unref?.();
+  const projectPath = resolve(options.project);
+  const modelOverride = parseModel(options.model);
+  let model = modelOverride ?? {
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4-6",
+  };
+  let effort: ReasoningEffort = options.effort ?? "off";
+  let phase: Parameters<typeof failedSemanticLintReport>[0]["failedPhase"] =
+    "range";
+  let range: SemanticLintReport["range"] | undefined;
+  let owned = false;
+  let shutdown: (() => Promise<void>) | undefined;
+  let report: SemanticLintReport;
+
+  const throwIfDeadlineExceeded = (): void => {
+    deadlineController.signal.throwIfAborted();
+    if (Date.now() < deadlineAt) return;
+    const reason = new DOMException(
+      "Semantic lint deadline exceeded",
+      "TimeoutError",
+    );
+    deadlineController.abort(reason);
+    throw reason;
+  };
+
+  try {
+    const cfg = loreConfig();
+    model = modelOverride ?? cfg.model ?? model;
+    effort = options.effort ?? cfg.invariantCheck.effort;
+    throwIfDeadlineExceeded();
+    range = invariantCheck.resolveRange(projectPath, {
+      base: options.base,
+      head: options.head,
+    });
+    if (!range) {
+      throwIfDeadlineExceeded();
+      report = failedReport({
+        options,
+        startedAt,
+        model,
+        effort,
+        phase: "range",
+        code: "range-resolution-failed",
+        error:
+          "Could not resolve a commit range. Pass --base <sha> --head <sha>.",
+      });
+      await options.publishReport?.(report);
+      return report;
+    }
+    phase = "diff";
+    throwIfDeadlineExceeded();
+    options.onDiagnostic?.(
+      `invariant-check: ${range.base.slice(0, 12)}..${range.head.slice(0, 12)} (${range.source})`,
+    );
+
+    const diff = invariantCheck.parseDiffResult(
+      projectPath,
+      range.base,
+      range.head,
+    );
+    throwIfDeadlineExceeded();
+    if (diff.kind === "failure") {
+      report = failedReport({
+        options,
+        startedAt,
+        model,
+        effort,
+        range,
+        phase,
+        code: diff.failure.code,
+        error: diff.failure.message,
+      });
+      await options.publishReport?.(report);
+      return report;
+    }
+
+    const invariantSource: LintPhaseHealth = { status: "healthy" };
+    if (diff.hunks.length === 0) {
+      // No changed code can violate an invariant. Preserve core's zero-work
+      // contract without starting the gateway, importing .lore.md, or requiring
+      // an embedding provider merely because the action requested import.
+      phase = "invariantVectors";
+      const result = await invariantCheck.checkInvariants({
+        projectPath,
+        diff,
+        range,
+        model,
+        effort,
+        sessionID: `invariant-check-${Date.now()}`,
+        signal: deadlineController.signal,
+        deadlineMs: Math.max(0, deadlineAt - Date.now()),
+      });
+      throwIfDeadlineExceeded();
+      const gate = invariantCheck.gateDecision(
+        result.findings,
+        [],
+        options.gate ? "gate" : "advisory",
+      );
+      report = buildSemanticLintReport({
+        result,
+        gate,
+        model: `${model.providerID}/${model.modelID}`,
+        effort,
+        elapsedMs: Date.now() - startedAt,
+        invariantSource,
+      });
+      throwIfDeadlineExceeded();
+      await options.publishReport?.(report);
+      return report;
+    }
+
+    phase = "invariantSource";
+    throwIfDeadlineExceeded();
+    if (options.importLoreMd && !existsSync(join(projectPath, ".lore.md"))) {
+      report = failedReport({
+        options,
+        startedAt,
+        model,
+        effort,
+        range,
+        phase,
+        code: "invariant-source-import-failed",
+        error: "Requested invariant source .lore.md does not exist",
+      });
+      await options.publishReport?.(report);
+      return report;
+    }
+    const startOpts: StartOptions = { quiet: true, local: true };
+    const gateway = await startGateway(startOpts);
+    owned = gateway.owned;
+    shutdown = gateway.shutdown;
+    throwIfDeadlineExceeded();
+    if (options.importLoreMd) {
+      try {
+        await embedding.ensureEmbeddingReady({
+          signal: deadlineController.signal,
+          deadlineMs: Math.max(1, deadlineAt - Date.now()),
+        });
+        throwIfDeadlineExceeded();
+      } catch (error) {
+        throwIfDeadlineExceeded();
+        report = failedReport({
+          options,
+          startedAt,
+          model,
+          effort,
+          range,
+          phase,
+          code: "embedding-provider-readiness-failed",
+          error,
+        });
+        await options.publishReport?.(report);
+        return report;
+      }
+      try {
+        importLoreFile(projectPath);
+        const remainingMs = Math.max(1, deadlineAt - Date.now());
+        await embedding.settleDocumentEmbeds({
+          signal: deadlineController.signal,
+          deadlineMs: remainingMs,
+        });
+        const embedded = await embedding.backfillEmbeddings({
+          signal: deadlineController.signal,
+          deadlineMs: Math.max(1, deadlineAt - Date.now()),
+        });
+        options.onDiagnostic?.(
+          `seeded invariants from .lore.md (backfilled ${embedded} embeddings)`,
+        );
+      } catch (error) {
+        // Overall cancellation outranks an import-specific failure so callers
+        // retain the typed deadline-exceeded outcome.
+        throwIfDeadlineExceeded();
+        report = failedReport({
+          options,
+          startedAt,
+          model,
+          effort,
+          range,
+          phase,
+          code: "invariant-source-import-failed",
+          error,
+        });
+        await options.publishReport?.(report);
+        return report;
+      }
+    }
+    throwIfDeadlineExceeded();
+
+    const workerKey = gateway.config.workerApiKey;
+    const judgeAuth: (
+      sessionID?: string,
+      providerID?: string,
+    ) => AuthCredential | null = workerKey
+      ? (_sessionID, providerID) => ({
+          scheme: workerKeyScheme(providerID ?? model.providerID),
+          value: workerKey,
+        })
+      : resolveAuth;
+    const judgeUpstreams = gateway.config.workerUpstream
+      ? {
+          anthropic: gateway.config.workerUpstream,
+          openai: gateway.config.workerUpstream,
+        }
+      : {
+          anthropic: gateway.config.upstreamAnthropic,
+          openai: gateway.config.upstreamOpenAI,
+        };
+    const client = createGatewayLLMClient(judgeUpstreams, judgeAuth, model, {
+      dedicatedWorkerKey: !!workerKey,
+      disableModelFallbacks: workerKey === "copilot-sdk-bridge",
+    });
+    const judge = createGatewayInvariantJudge({
+      client,
+      model,
+      upstreamUrl: gateway.config.workerUpstream,
+      effort,
+      sessionID: `invariant-check-${Date.now()}`,
+      candidateTimeoutMs: options.candidateTimeoutMs,
+      signal: deadlineController.signal,
+    });
+
+    // Core returns typed health for expected vector/judge failures. If it throws,
+    // the exact internal phase is unknown, so fail at the first uncompleted
+    // mandatory phase rather than claiming later phases were healthy.
+    phase = "invariantVectors";
+    throwIfDeadlineExceeded();
+    const result = await invariantCheck.checkInvariants({
+      projectPath,
+      diff,
+      range,
+      judge,
+      model,
+      effort,
+      sessionID: `invariant-check-${Date.now()}`,
+      signal: deadlineController.signal,
+      deadlineMs: Math.max(0, deadlineAt - Date.now()),
+      onJudge: options.onJudge,
+    });
+    // Preserve a typed core failure returned at the cancellation boundary.
+    // Successful/partial work still must not cross the overall deadline.
+    const preserveFailedAtDeadline =
+      result.status === "failed" &&
+      (deadlineController.signal.aborted || Date.now() >= deadlineAt);
+    if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
+    const overrides = preserveFailedAtDeadline
+      ? []
+      : invariantCheck.parseOverrides(
+          invariantCheck.collectCommitMessages(
+            projectPath,
+            range.base,
+            range.head,
+          ),
+        );
+    if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
+    const gate = invariantCheck.gateDecision(
+      result.findings,
+      overrides,
+      options.gate ? "gate" : "advisory",
+    );
+    report = buildSemanticLintReport({
+      result,
+      gate,
+      model: `${model.providerID}/${model.modelID}`,
+      effort,
+      elapsedMs: Date.now() - startedAt,
+      invariantSource,
+    });
+    // Publication is the externally visible clean-result boundary. Re-check
+    // immediately before it so no expired run can publish as complete.
+    if (report.status === "complete") throwIfDeadlineExceeded();
+    await options.publishReport?.(report);
+    return report;
+  } catch (error) {
+    report = failedReport({
+      options,
+      startedAt,
+      model,
+      effort,
+      range,
+      phase,
+      code:
+        deadlineController.signal.aborted || Date.now() >= deadlineAt
+          ? "deadline-exceeded"
+          : "runtime-error",
+      error,
+    });
+    await options.publishReport?.(report);
+    return report;
+  } finally {
+    clearTimeout(deadlineTimer);
+    if (owned && shutdown) {
+      try {
+        await shutdown();
+      } catch (error) {
+        options.onDiagnostic?.(
+          `gateway cleanup failed after report publication: ${boundedMessage(error, "unknown cleanup error")}`,
+        );
+      }
+    }
+  }
+}
+
+/** Legacy programmatic dispatcher entry; the Stricli route does not use it. */
 export async function commandInvariantCheck(
   _positionals: string[],
   values: Record<string, unknown>,
 ): Promise<void> {
-  const projectPath = resolve((values.project as string) ?? process.cwd());
-  const asJson = !!values.json;
-  const modelOverride = parseModel(values.model as string | undefined);
-  // Reasoning effort: --effort overrides the `invariantCheck.effort` config,
-  // which defaults to "off". An unrecognized --effort value is a hard error
-  // (fail fast on a typo rather than silently running with the wrong dial).
   const effortRaw = values.effort as string | undefined;
-  const effortOverride = parseReasoningEffort(effortRaw);
-  if (effortRaw != null && effortOverride == null) {
-    console.error(
-      `[lore] Invalid --effort "${effortRaw}". Use one of: off, low, medium, high, xhigh.`,
-    );
-    process.exit(1);
-  }
-  // CI flow: no local lore.db exists, so seed the active DB (LORE_DB_PATH,
-  // typically an actions/cache path) from the repo's `.lore.md`. Deriving
-  // embeddings is fire-and-forget, so we drain them below before the funnel —
-  // otherwise the cosine prefilter runs against a DB with no vectors.
-  const importLoreMd =
-    values["import-lore-md"] === true || values.importLoreMd === true;
-  // Enforcement mode. Default `advisory` — nothing ever blocks (exit 0). `--gate`
-  // opts into blocking: strict findings and un-overridden soft findings fail
-  // (exit 2). Even in gate mode, an invariant only reaches strict/soft via
-  // explicit `enforce:` metadata, so a repo with no opt-ins gates on nothing.
-  const gateMode: invariantCheck.GateMode =
-    values.gate === true ? "gate" : "advisory";
-
-  const range = invariantCheck.resolveRange(projectPath, {
+  const effort = parseReasoningEffort(effortRaw);
+  if (effortRaw && !effort)
+    throw new TypeError(`Invalid reasoning effort: ${effortRaw}`);
+  const report = await runSemanticLint({
     base: values.base as string | undefined,
     head: values.head as string | undefined,
+    model: values.model as string | undefined,
+    project: resolve((values.project as string | undefined) ?? process.cwd()),
+    effort: effort ?? undefined,
+    gate: values.gate === true,
+    importLoreMd: values["import-lore-md"] === true,
+    deadlineMs: Number(values["deadline-ms"] ?? 1_200_000),
+    candidateTimeoutMs: Number(values["candidate-timeout-ms"] ?? 90_000),
+    onDiagnostic: (message) => console.error(`[lore] ${message}`),
+    onJudge: (current, total) =>
+      process.stderr.write(`\r[lore]   judging ${current}/${total}...`),
   });
-
-  if (!range) {
-    console.error(
-      "[lore] Could not resolve a commit range to check. Pass --base <sha> --head <sha>.",
-    );
-    // A tooling failure (can't find a range) is a real error — exit 1. Findings
-    // never do; this isn't a finding.
-    process.exit(1);
-  }
-
-  console.error(
-    `[lore] invariant-check: ${range.base.slice(0, 12)}..${range.head.slice(0, 12)} (${range.source})`,
-  );
-
-  // Local gateway for LLM access (mirrors `lore import`).
-  const startOpts: StartOptions = { quiet: true, local: true };
-  const { config, owned, shutdown } = await startGateway(startOpts);
-  // The pre-warm race against an empty models.dev cache is closed by the
-  // caller's self-contained `JUDGE_VERDICT_MIN_BUDGET` floor
-  // (packages/core/src/invariant-check.ts:106) — the budget no longer depends
-  // on the worker's reasoning-headroom lookup, so we don't need to await
-  // `fetchModelData()` here. If a future reasoning-budget caller reintroduces
-  // the dependency, re-mirror the `cli/import.ts:1394-1401` fallback pattern.
-  const cfg = loreConfig();
-
-  // Seed invariants from `.lore.md` when asked (CI). importLoreFile upserts
-  // entries into the active DB. The create-path embeds are fire-and-forget AND
-  // can silently fail during an unstable ONNX worker init (errors swallowed) —
-  // so we do NOT trust them. Instead, after import we run backfillEmbeddings(),
-  // which SYNCHRONOUSLY embeds every current+live entry still missing a vector,
-  // in token-budget batches. It is idempotent (only fills gaps), so a partial
-  // failure on one run is fully recovered on the next — no silent recall rot.
-  // On a cache HIT the DB already matches `.lore.md` (mtime/hash fast-path) and
-  // every vector is present, so both calls are cheap no-ops.
-  // NOTE: `.lore.md` omits cross_project=1 entries (~16 global invariants), so a
-  // `.lore.md`-sourced check has slightly narrower coverage than a full local
-  // DB — acceptable for the advisory tier.
-  if (importLoreMd) {
-    const before = Date.now();
-    importLoreFile(projectPath);
-    await embedding.settleDocumentEmbeds();
-    const embedded = await embedding.backfillEmbeddings();
-    console.error(
-      `[lore] invariant-check: seeded invariants from .lore.md (backfilled ${embedded} embeddings) in ${((Date.now() - before) / 1000).toFixed(1)}s`,
-    );
-  }
-  const defaultModel = modelOverride ??
-    cfg.model ?? { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
-  const effectiveEffort: ReasoningEffort =
-    effortOverride ?? cfg.invariantCheck.effort;
-
-  // Judge auth. In CI there is no client session, so bare resolveAuth() returns
-  // null and every judge call is skipped as "no-auth". Honor LORE_WORKER_API_KEY
-  // (the GHA sets it to the judge credential) the same way the pipeline's
-  // getWorkerAuth does. Scheme is provider-aware via the shared workerKeyScheme:
-  // GitHub Copilot needs the key as `Authorization: Bearer`; every other provider
-  // uses api-key (x-api-key). Resolve per call on the worker model's provider,
-  // falling back to the judge's default provider.
-  const workerKey = config.workerApiKey;
-  const judgeAuth: (
-    sessionID?: string,
-    providerID?: string,
-  ) => AuthCredential | null = workerKey
-    ? (_sessionID, providerID) => ({
-        scheme: workerKeyScheme(providerID ?? defaultModel.providerID),
-        value: workerKey,
-      })
-    : resolveAuth;
-
-  const llm = createGatewayLLMClient(
-    { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
-    judgeAuth,
-    defaultModel,
-    { dedicatedWorkerKey: !!workerKey },
-  );
-
-  const startedAt = Date.now();
-  let result: CheckResult;
-  try {
-    const hunks = invariantCheck.parseDiff(projectPath, range.base, range.head);
-    result = await invariantCheck.checkInvariants({
-      projectPath,
-      hunks,
-      range,
-      llm,
-      model: defaultModel,
-      effort: effectiveEffort,
-      sessionID: `invariant-check-${Date.now()}`,
-      onJudge: (n, total) => {
-        process.stderr.write(`\r[lore]   judging ${n}/${total}...`);
-      },
-    });
-    process.stderr.write("\n");
-  } finally {
-    if (owned) await shutdown();
-  }
-
-  const elapsedMs = Date.now() - startedAt;
-
-  // Gate decision. Overrides come from `lore-override:` trailers in the commit
-  // messages of the range under review — always available from git, no API/token
-  // and works on forks. In advisory mode the exitCode is always 0; we still
-  // compute the classification so the report can show what WOULD block under
-  // --gate (lets a team tune the FP rate before flipping the switch).
-  const overrides = invariantCheck.parseOverrides(
-    invariantCheck.collectCommitMessages(projectPath, range.base, range.head),
-  );
-  const gate = invariantCheck.gateDecision(
-    result.findings,
-    overrides,
-    gateMode,
-  );
-
-  if (asJson) {
-    console.log(
-      JSON.stringify(
-        {
-          model: `${defaultModel.providerID}/${defaultModel.modelID}`,
-          effort: effectiveEffort,
-          elapsedMs,
-          gate,
-          ...result,
-        },
-        null,
-        2,
-      ),
-    );
-    // Set exitCode and RETURN — never process.exit() here. A synchronous
-    // process.exit() right after a buffered stdout write can truncate the JSON
-    // when stdout is redirected (the GHA does `... > lore-ic.json`), dropping
-    // the very payload the reporter parses to explain a blocked build. Letting
-    // the process drain naturally guarantees the write completes.
-    process.exitCode = gate.exitCode;
-    return;
-  }
-
-  printReport(result, defaultModel, elapsedMs, gate, effectiveEffort);
-  process.exitCode = gate.exitCode;
-}
-
-function printReport(
-  result: CheckResult,
-  model: { providerID: string; modelID: string },
-  elapsedMs: number,
-  gate: invariantCheck.GateResult,
-  effort: ReasoningEffort,
-): void {
-  const { findings } = result;
-  console.log("");
-  console.log("─".repeat(64));
-  console.log(
-    `Funnel: ${result.hunks} hunks × ${result.invariants} invariants → ` +
-      `${result.candidates} candidates → ${result.judgeCalls} judge calls`,
-  );
-  console.log(
-    `Model: ${model.providerID}/${model.modelID}   Effort: ${effort}   Time: ${(elapsedMs / 1000).toFixed(1)}s   Mode: ${gate.mode}`,
-  );
-  console.log("─".repeat(64));
-
-  // Judge-health warning: a high unparseable rate means the model is failing the
-  // JSON contract, so results (clean OR with findings) are unreliable. Printed
-  // regardless of the findings branch so the mixed case isn't silent.
-  if (
-    result.judgeCalls > 0 &&
-    result.unparseable / result.judgeCalls >
-      invariantCheck.UNPARSEABLE_WARN_RATIO
-  ) {
-    console.log(
-      `\n⚠ ${result.unparseable}/${result.judgeCalls} judge responses were unparseable — ` +
-        `results may be unreliable. The judge model is likely returning prose ` +
-        `instead of the required JSON verdict; try a more capable --model.`,
-    );
-  }
-
-  if (findings.length === 0) {
-    console.log("\n✓ No suspected invariant violations.\n");
-    console.log(
-      "(Advisory only — this check never fails a build. It reports; humans decide.)",
-    );
-    return;
-  }
-
-  console.log(
-    `\n⚠ ${findings.length} suspected invariant violation${findings.length === 1 ? "" : "s"} (review, do not auto-trust):\n`,
-  );
-  for (const [i, f] of findings.entries()) {
-    console.log(
-      `${i + 1}. [${f.severity}] ${f.invariantTitle}  [${f.file}]  ${f.refHit ? "ref-hit" : `sim=${f.similarity.toFixed(2)}`}`,
-    );
-    console.log(`   invariant: ${f.invariantContent}`);
-    if (f.reason) console.log(`   why: ${f.reason}`);
-    console.log("");
-  }
-
-  // Gate summary.
-  if (gate.overridden.length > 0) {
-    console.log(
-      `↪ ${gate.overridden.length} soft finding${gate.overridden.length === 1 ? "" : "s"} overridden by the author:`,
-    );
-    for (const { finding, override } of gate.overridden) {
-      console.log(`   • ${finding.invariantTitle} — "${override.reason}"`);
-    }
-    console.log("");
-  }
-
-  if (gate.mode === "gate") {
-    if (gate.blocking.length > 0) {
-      console.log(
-        `✗ ${gate.blocking.length} blocking finding${gate.blocking.length === 1 ? "" : "s"} (--gate). Build fails (exit ${gate.exitCode}).`,
-      );
-      console.log(
-        "  Override a SOFT finding with a commit trailer: `lore-override: <invariant title> — <reason>`.",
-      );
-      console.log("  STRICT findings cannot be overridden.");
-    } else {
-      console.log("✓ Gate passed — no blocking findings.");
-    }
-  } else {
-    // Advisory: show what WOULD block if gated, but never fail.
-    const wouldBlock = gate.blocking.length;
-    console.log(
-      "(Advisory — this check never fails a build. It reports; humans decide.)",
-    );
-    if (wouldBlock > 0) {
-      console.log(
-        `  Note: ${wouldBlock} finding${wouldBlock === 1 ? "" : "s"} would block under --gate.`,
-      );
-    }
-  }
+  const output = values.json
+    ? `${JSON.stringify(report, null, 2)}\n`
+    : `${renderSemanticLintReport(report)}\n`;
+  process.stdout.write(output);
+  process.exitCode = semanticLintExitCode(report);
 }

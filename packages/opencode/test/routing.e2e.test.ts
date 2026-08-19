@@ -103,6 +103,8 @@ describe("opencode plugin — e2e routing against a real gateway", () => {
     const config = gw.loadConfig();
     config.port = 0;
     config.hosts = ["127.0.0.1"];
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await gw.startServer(config);
     stopServer = () => server.stop();
     baseURL = `http://127.0.0.1:${server.port}`;

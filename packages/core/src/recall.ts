@@ -15,6 +15,7 @@ import * as temporal from "./temporal";
 import * as embedding from "./embedding";
 import { ReadPathTimer } from "./read-telemetry";
 import * as entities from "./entities";
+import { currentTenantId } from "./tenant";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
 import { db, ensureProject, projectName } from "./db";
@@ -84,6 +85,13 @@ export type RecallInput = {
    * don't inflate counts. Default false.
    */
   recordTransfers?: boolean;
+  /**
+   * Defer transfer-counter writes until the caller commits a larger persistence
+   * unit. When omitted, transfers retain their existing immediate-write
+   * behavior. The callback is synchronous so callers can run it inside their
+   * own SQLite savepoint.
+   */
+  deferTransferRecording?: (record: () => void) => void;
   /**
    * Set of knowledge entry IDs (`019fxxxx-...` UUIDs — the canonical form
    * without the `k:` prefix) that are already present in the model's visible
@@ -1659,9 +1667,12 @@ export function recallById(id: string): string {
     case "d": {
       const row = db()
         .query(
-          "SELECT id, observations, generation, created_at, session_id, c_norm, r_compression FROM distillations WHERE id = ?",
+          `SELECT d.id, d.observations, d.generation, d.created_at, d.session_id,
+                  d.c_norm, d.r_compression
+             FROM distillations d JOIN projects p ON p.id = d.project_id
+            WHERE p.tenant_id = ? AND d.id = ?`,
         )
-        .get(rawId) as Distillation | null;
+        .get(currentTenantId(), rawId) as Distillation | null;
       if (!row) return `No entry found for id: ${id}`;
       return [
         `## Recall Detail: ${id}`,
@@ -1673,9 +1684,12 @@ export function recallById(id: string): string {
     case "t": {
       const row = db()
         .query(
-          "SELECT id, project_id, session_id, role, content, tokens, distilled, created_at, metadata FROM temporal_messages WHERE id = ?",
+          `SELECT t.id, t.project_id, t.session_id, t.role, t.content, t.tokens,
+                  t.distilled, t.created_at, t.metadata
+             FROM temporal_messages t JOIN projects p ON p.id = t.project_id
+            WHERE p.tenant_id = ? AND t.id = ?`,
         )
-        .get(rawId) as temporal.TemporalMessage | null;
+        .get(currentTenantId(), rawId) as temporal.TemporalMessage | null;
       if (!row) return `No entry found for id: ${id}`;
       return [
         `## Recall Detail: ${id}`,
@@ -1689,9 +1703,12 @@ export function recallById(id: string): string {
     case "lat": {
       const row = db()
         .query(
-          "SELECT id, project_id, file, heading, depth, content, content_hash, first_paragraph, updated_at FROM lat_sections WHERE id = ?",
+          `SELECT l.id, l.project_id, l.file, l.heading, l.depth, l.content,
+                  l.content_hash, l.first_paragraph, l.updated_at
+             FROM lat_sections l JOIN projects p ON p.id = l.project_id
+            WHERE p.tenant_id = ? AND l.id = ?`,
         )
-        .get(rawId) as latReader.LatSection | null;
+        .get(currentTenantId(), rawId) as latReader.LatSection | null;
       if (!row) return `No entry found for id: ${id}`;
       return [
         `## Recall Detail: ${id}`,
@@ -1743,27 +1760,34 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
   //   - "knowledge": promoted cross_project=1 entries whose project_id is a
   //     DIFFERENT non-null project than the current one.
   if (input.recordTransfers) {
-    try {
-      const pid = ensureProject(input.projectPath);
-      for (const { item: tagged } of fused) {
-        if (
-          tagged.source !== "cross-knowledge" &&
-          tagged.source !== "knowledge"
-        )
-          continue;
-        const entry = tagged.item;
-        // For same-source knowledge results, only promoted cross-project entries
-        // from another project count as transfers.
-        if (tagged.source === "knowledge" && entry.cross_project !== 1)
-          continue;
-        if (!entry.project_id || entry.project_id === pid) continue;
-        ltm.recordTransfer({
-          knowledgeId: entry.logical_id,
-          recalledInProjectId: pid,
-        });
+    const recordTransfers = (): void => {
+      try {
+        const pid = ensureProject(input.projectPath);
+        for (const { item: tagged } of fused) {
+          if (
+            tagged.source !== "cross-knowledge" &&
+            tagged.source !== "knowledge"
+          )
+            continue;
+          const entry = tagged.item;
+          // For same-source knowledge results, only promoted cross-project entries
+          // from another project count as transfers.
+          if (tagged.source === "knowledge" && entry.cross_project !== 1)
+            continue;
+          if (!entry.project_id || entry.project_id === pid) continue;
+          ltm.recordTransfer({
+            knowledgeId: entry.logical_id,
+            recalledInProjectId: pid,
+          });
+        }
+      } catch (err) {
+        log.warn("recall: transfer recording failed (non-fatal):", err);
       }
-    } catch (err) {
-      log.warn("recall: transfer recording failed (non-fatal):", err);
+    };
+    if (input.deferTransferRecording) {
+      input.deferTransferRecording(recordTransfers);
+    } else {
+      recordTransfers();
     }
   }
 

@@ -16,6 +16,7 @@
  */
 import { describe, test, expect, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 /** A non-streaming Anthropic message response (mantle returns native shape). */
 function mantleJSONResponse(): Response {
@@ -33,10 +34,10 @@ function mantleJSONResponse(): Response {
   );
 }
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -68,11 +69,13 @@ describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
     });
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
       delete process.env.LORE_BEDROCK_REGION;
@@ -86,7 +89,7 @@ describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

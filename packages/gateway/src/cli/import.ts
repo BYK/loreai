@@ -34,7 +34,11 @@ import {
 } from "../worker-model";
 import { resolveProviderRoute, providerForUpstreamOrigin } from "../config";
 import { hasRecentAuthRejectedFailure } from "../worker-health";
-import { AGENTS, captureUserEnvCredential } from "./agents";
+import {
+  AGENTS,
+  captureUserEnvCredential,
+  InvalidEnvCredentialUpstreamError,
+} from "./agents";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
 import {
@@ -62,6 +66,19 @@ const {
 type StructuredSourceName = conversationImport.StructuredSourceName;
 type AgentResolvedAuth =
   import("@loreai/core").conversationImport.AgentResolvedAuth;
+
+function reportInvalidEnvCredentialUpstream(
+  error: unknown,
+  agentDisplayName: string,
+): boolean {
+  if (!(error instanceof InvalidEnvCredentialUpstreamError)) return false;
+  console.error(
+    `[lore] Can't import ${agentDisplayName}: ${error.envVarName} contains an unsafe or invalid upstream URL.\n` +
+      `[lore] Fix or unset ${error.envVarName}, then retry.`,
+  );
+  process.exitCode = 1;
+  return true;
+}
 
 /**
  * OpenAI-compatible aggregator providers that proxy model requests to any
@@ -1353,11 +1370,18 @@ export async function commandImport(
       // Tier-1 (explicit LORE_WORKER_API_KEY) is a deliberate user override —
       // single-shot, no fallback. Every other path goes through the
       // auto-fallback chain below.
-      const tier1 = resolveAgentImportAuth(
-        result.agentName,
-        workerApiKey,
-        cfgModel,
-      );
+      let tier1: ReturnType<typeof resolveAgentImportAuth>;
+      try {
+        tier1 = resolveAgentImportAuth(
+          result.agentName,
+          workerApiKey,
+          cfgModel,
+        );
+      } catch (error) {
+        if (!reportInvalidEnvCredentialUpstream(error, result.agentDisplayName))
+          throw error;
+        continue;
+      }
       if (tier1 === null) {
         console.log(
           `[lore] Skipping ${result.agentDisplayName}: no usable credential found ` +
@@ -1399,9 +1423,16 @@ export async function commandImport(
         // empty-cache path (which still tries WORKER_DEFAULTS
         // providers correctly).
       }
-      const chain = workerApiKey
-        ? []
-        : buildAuthFallbackChain(result.agentName, cfgModel);
+      let chain: AuthCandidate[];
+      try {
+        chain = workerApiKey
+          ? []
+          : buildAuthFallbackChain(result.agentName, cfgModel);
+      } catch (error) {
+        if (!reportInvalidEnvCredentialUpstream(error, result.agentDisplayName))
+          throw error;
+        continue;
+      }
       const candidates: Candidate[] = workerApiKey
         ? [{ auth: tier1, label: "LORE_WORKER_API_KEY" }]
         : chain.map((c) => ({

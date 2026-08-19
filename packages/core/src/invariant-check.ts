@@ -36,8 +36,11 @@ import { anthropicThinkingBudget, type ReasoningEffort } from "./effort";
 import * as embedding from "./embedding";
 import * as ltm from "./ltm";
 import type { KnowledgeEntry } from "./ltm";
-import * as log from "./log";
-import { INVARIANT_JUDGE_SYSTEM, invariantJudgeUser } from "./prompt";
+import {
+  INVARIANT_JUDGE_SYSTEM,
+  invariantJudgeRepairUser,
+  invariantJudgeUser,
+} from "./prompt";
 import { extractReferences } from "./references";
 import type { LLMClient } from "./types";
 
@@ -104,18 +107,22 @@ const JUDGE_VERDICT_HEADROOM = 8192;
 // Cheap for non-reasoning models (a floor, never a charge — they bill only
 // what they emit), strict for reasoning ones.
 const JUDGE_VERDICT_MIN_BUDGET = 25_600;
-function judgeMaxTokens(effort: ReasoningEffort | undefined): number {
+export function judgeMaxTokens(effort: ReasoningEffort | undefined): number {
   const budget = anthropicThinkingBudget(effort) ?? 0;
   const thinking =
     budget > 0 ? budget + JUDGE_VERDICT_HEADROOM : JUDGE_VERDICT_TOKENS;
   return Math.max(thinking, JUDGE_VERDICT_MIN_BUDGET);
 }
 
-// If more than this fraction of judge calls come back unparseable, warn: the
-// judge model is likely failing the JSON output contract, so a "clean" result is
-// untrustworthy. High on purpose — a single stray malformed response on an
-// otherwise-healthy run must not cry wolf. Exported so the CLI report and the
-// GHA reporter share one threshold (the reporter mirrors it as a literal).
+export {
+  INVARIANT_JUDGE_SYSTEM,
+  invariantJudgeRepairUser,
+  invariantJudgeUser,
+} from "./prompt";
+
+// Legacy reporter compatibility. New callers must use `health.judge` and the
+// typed candidate outcomes instead of treating unresolved checks as clean.
+// Remove this once the gateway's report renderer consumes the health result.
 export const UNPARSEABLE_WARN_RATIO = 0.5;
 
 /** Never send more than this many pairs to the judge in one run. Surviving
@@ -258,11 +265,16 @@ export function enforcementLevel(entry: {
 // Git range auto-detection (Craft-style: resolve base/head automatically)
 // ---------------------------------------------------------------------------
 
+// Node's 1 MiB child-process default is too small for ordinary large PR diffs.
+// Keep Git output bounded because pull-request diff content is untrusted.
+export const MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024;
+
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf8",
     timeout: 10_000,
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
 }
@@ -390,6 +402,47 @@ export interface DiffHunk {
   text: string;
 }
 
+export type DiffFailureCode = "diff-command-failed" | "diff-too-large";
+
+export interface DiffFailure {
+  code: DiffFailureCode;
+  message: string;
+}
+
+export type DiffResult =
+  | { kind: "success"; hunks: DiffHunk[] }
+  | {
+      kind: "failure";
+      failure: DiffFailure;
+    };
+
+/** Downstream bounds for untrusted pull-request diff content. */
+export const MAX_DIFF_HUNKS = 1_000;
+export const MAX_DIFF_TEXT_BYTES = 4 * 1024 * 1024;
+export const MAX_HUNK_TEXT_BYTES = 32 * 1024;
+const HUNK_TRUNCATION_MARKER = "\n... [hunk truncated by Lore] ...\n";
+
+class DiffLimitError extends Error {
+  override name = "DiffLimitError";
+}
+
+function truncateHunkText(text: string): string {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= MAX_HUNK_TEXT_BYTES) return text;
+
+  const markerBytes = Buffer.byteLength(HUNK_TRUNCATION_MARKER);
+  const available = MAX_HUNK_TEXT_BYTES - markerBytes;
+  const headBudget = Math.ceil(available / 2);
+  const tailBudget = Math.floor(available / 2);
+  let headEnd = headBudget;
+  while (headEnd > 0 && (bytes[headEnd] & 0xc0) === 0x80) headEnd--;
+  let tailStart = bytes.length - tailBudget;
+  while (tailStart < bytes.length && (bytes[tailStart] & 0xc0) === 0x80)
+    tailStart++;
+
+  return `${bytes.subarray(0, headEnd).toString("utf8")}${HUNK_TRUNCATION_MARKER}${bytes.subarray(tailStart).toString("utf8")}`;
+}
+
 /**
  * Files whose changes are NEVER judged: they are machine-authored or are lore's
  * own knowledge file — not human-written source/docs the invariants govern.
@@ -444,14 +497,40 @@ export function isIgnoredFile(path: string): boolean {
  * Ignored files (see {@link isIgnoredFile}) are dropped here.
  */
 export function parseDiff(cwd: string, base: string, head: string): DiffHunk[] {
+  const result = parseDiffResult(cwd, base, head);
+  return result.kind === "success" ? result.hunks : [];
+}
+
+/**
+ * Typed diff loader for health-aware callers. Unlike {@link parseDiff}, a git
+ * failure cannot be confused with a genuine empty diff.
+ */
+export function parseDiffResult(
+  cwd: string,
+  base: string,
+  head: string,
+): DiffResult {
   // `-U3`: 3 lines of context per hunk (enough for the judge to see scope).
   // `--no-color`, `--no-ext-diff`: deterministic machine-readable output.
-  const raw = gitOrNull(
-    ["diff", "--no-color", "--no-ext-diff", "-U3", `${base}..${head}`],
-    cwd,
-  );
-  if (!raw) return [];
-  return splitDiff(raw);
+  try {
+    const raw = git(
+      ["diff", "--no-color", "--no-ext-diff", "-U3", `${base}..${head}`],
+      cwd,
+    );
+    return { kind: "success", hunks: raw ? splitDiff(raw) : [] };
+  } catch (error) {
+    const limited = error instanceof DiffLimitError;
+    return {
+      kind: "failure",
+      failure: {
+        code: limited ? "diff-too-large" : "diff-command-failed",
+        message: boundedMessage(
+          error,
+          limited ? "Diff exceeds semantic lint limits" : "git diff failed",
+        ),
+      },
+    };
+  }
 }
 
 /** Pure diff splitter — extracted so it's unit-testable without a real repo.
@@ -459,6 +538,7 @@ export function parseDiff(cwd: string, base: string, head: string): DiffHunk[] {
  *  call (or manufactures a false positive) on non-code changes. */
 export function splitDiff(raw: string): DiffHunk[] {
   const hunks: DiffHunk[] = [];
+  let textBytes = 0;
   const lines = raw.split("\n");
   let file = "";
   // Fallback path from the `--- a/` line, used for DELETED files whose `+++`
@@ -469,8 +549,21 @@ export function splitDiff(raw: string): DiffHunk[] {
   let cur: string[] | null = null;
   const flush = () => {
     const f = file || oldFile;
-    if (cur && f && cur.length && !isIgnoredFile(f))
-      hunks.push({ file: f, text: cur.join("\n") });
+    if (cur && f && cur.length && !isIgnoredFile(f)) {
+      if (hunks.length >= MAX_DIFF_HUNKS) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
+        );
+      }
+      const text = truncateHunkText(cur.join("\n"));
+      textBytes += Buffer.byteLength(text);
+      if (textBytes > MAX_DIFF_TEXT_BYTES) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
+        );
+      }
+      hunks.push({ file: f, text });
+    }
     cur = null;
   };
   for (const line of lines) {
@@ -478,9 +571,9 @@ export function splitDiff(raw: string): DiffHunk[] {
       flush();
       file = "";
       oldFile = "";
-    } else if (line.startsWith("--- a/")) {
+    } else if (cur === null && line.startsWith("--- a/")) {
       oldFile = line.slice("--- a/".length).trim();
-    } else if (line.startsWith("+++ b/")) {
+    } else if (cur === null && line.startsWith("+++ b/")) {
       file = line.slice("+++ b/".length).trim();
     } else if (line.startsWith("@@")) {
       flush();
@@ -502,6 +595,8 @@ export function changedFiles(hunks: DiffHunk[]): Set<string> {
 // Verdict parsing (mirrors parseContradictionVerdict)
 // ---------------------------------------------------------------------------
 
+export type Verdict = "violates" | "fixes" | "satisfies" | "unrelated";
+
 export interface InvariantVerdict {
   /**
    * The judge's classification. One of four mutually exclusive outcomes:
@@ -522,92 +617,47 @@ export interface InvariantVerdict {
    * "violates" because the binary verdict space had no "this is the fix"
    * option. With `fixes` available the judge can return the correct answer.
    */
-  verdict: "violates" | "fixes" | "satisfies" | "unrelated";
-  reason: string | null;
+  verdict: Verdict;
+  reason: string;
 }
 
 /**
- * Extract the first balanced top-level `{...}` object from a string, or null.
- *
- * Cheap/instruction-light models sometimes wrap the required JSON in prose
- * ("Sure! Here's my analysis: {\"violates\": false}") — see the GLM 5.2 finding
- * in Warden's benchmark where clean chunks returned prose instead of the
- * required JSON and were mis-counted as parser failures. Rather than drop those
- * (which is indistinguishable from a genuine no-finding), we pull the embedded
- * object out. String-aware brace matching so braces inside string literals do
- * not throw off the balance.
+ * Validate one complete judge response. The response must be exactly one JSON
+ * object, optionally wrapped in one complete `json` fence. Arbitrary prose,
+ * embedded objects, legacy boolean verdicts, extra keys, and missing/empty
+ * reasons are rejected so only a validated verdict completes a check.
  */
-export function extractFirstJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null; // unbalanced — no complete object
-}
-
 export function parseInvariantVerdict(
   text: string | null,
 ): InvariantVerdict | null {
   if (!text) return null;
-  const cleaned = text
-    .trim()
-    .replace(/^```json?\s*/i, "")
-    .replace(/\s*```$/i, "");
-  // Try the whole (fenced-stripped) payload first — the common clean-JSON path.
-  // Fall back to the first embedded {...} object for chatty models that wrap the
-  // verdict in prose. Both feed the same shape validation.
-  for (const candidate of [cleaned, extractFirstJsonObject(cleaned)]) {
-    if (!candidate) continue;
-    try {
-      const parsed = JSON.parse(candidate);
-      if (!parsed || typeof parsed !== "object") continue;
-      // Accept the new {verdict: string} shape. The old {violates: boolean}
-      // shape is no longer emitted by the prompt but we still parse it for
-      // backward compatibility with stale logs / test fixtures — mapping
-      // `true` to `violates` and `false` to the conservative `unrelated`
-      // (NOT `satisfies`, since the binary framing couldn't distinguish a fix
-      // from a neutral change).
-      let verdict: InvariantVerdict["verdict"] | null = null;
-      if (typeof parsed.verdict === "string") {
-        if (
-          parsed.verdict === "violates" ||
-          parsed.verdict === "fixes" ||
-          parsed.verdict === "satisfies" ||
-          parsed.verdict === "unrelated"
-        ) {
-          verdict = parsed.verdict;
-        }
-      } else if (typeof parsed.violates === "boolean") {
-        verdict = parsed.violates ? "violates" : "unrelated";
-      }
-      if (verdict !== null) {
-        const reason =
-          typeof parsed.reason === "string"
-            ? parsed.reason.slice(0, 400)
-            : null;
-        return { verdict, reason };
-      }
-    } catch {
-      // not valid JSON — try the next candidate
+  let payload = text.trim();
+  const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
+  if (fenced) payload = fenced[1];
+  else if (payload.startsWith("```") || payload.endsWith("```")) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
     }
+    const record = parsed as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    if (keys.length !== 2 || keys[0] !== "reason" || keys[1] !== "verdict") {
+      return null;
+    }
+    if (!isVerdict(record.verdict)) return null;
+    if (
+      typeof record.reason !== "string" ||
+      record.reason.trim().length === 0 ||
+      record.reason.length > 400
+    ) {
+      return null;
+    }
+    return { verdict: record.verdict, reason: record.reason };
+  } catch {
+    return null;
   }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -752,20 +802,148 @@ export function selectCandidates(
 // Detection
 // ---------------------------------------------------------------------------
 
+export interface JudgeStats {
+  /** Logical semantic model calls, including an invalid-verdict repair. */
+  semanticCalls: number;
+  /** Actual HTTP/provider dispatches across retries and fallbacks. */
+  transportAttempts: number;
+}
+
+export type JudgeFailureScope = "candidate" | "run";
+
+export type JudgeFailureCode =
+  | "no-auth"
+  | "auth-rejected"
+  | "route-unavailable"
+  | "protocol-mismatch"
+  | "model-unsupported"
+  | "api-unsupported"
+  | "rate-limit"
+  | "timeout"
+  | "network"
+  | "invalid-body"
+  | "response-too-large"
+  | "incomplete-response"
+  | "empty-response"
+  | "abort"
+  | "transport-error"
+  | "invalid-verdict"
+  | "judge-contract-error"
+  | "semantic-budget-exhausted";
+
+export interface JudgeFailure {
+  code: JudgeFailureCode;
+  message: string;
+  scope: JudgeFailureScope;
+  retryable?: boolean;
+}
+
+export type JudgeOutcome =
+  | {
+      kind: "verdict";
+      verdict: Verdict;
+      reason: string;
+      stats: JudgeStats;
+    }
+  | {
+      kind: "unresolved";
+      failure: JudgeFailure;
+      stats: JudgeStats;
+    };
+
+export interface InvariantJudgeInput {
+  invariant: { id: string; title: string; content: string };
+  file: string;
+  hunk: string;
+  /** Remaining budget available to this candidate (normally one or two). */
+  semanticCallBudget: number;
+}
+
+/**
+ * Typed semantic judge boundary. Implementations own transport retries and one
+ * optional invalid-verdict repair, and must report every logical call/dispatch.
+ */
+export interface InvariantJudge {
+  judge(input: InvariantJudgeInput): Promise<JudgeOutcome>;
+}
+
+interface CandidateOutcomeBase {
+  id: string;
+  file: string;
+  hunkIndex: number;
+  invariantId: string;
+  invariantTitle: string;
+  similarity: number;
+  refHit: boolean;
+  stats: JudgeStats;
+}
+
+export type CandidateOutcome =
+  | (CandidateOutcomeBase & {
+      state: "resolved";
+      verdict: Verdict;
+      reason: string;
+    })
+  | (CandidateOutcomeBase & {
+      state: "unresolved";
+      failure: JudgeFailure;
+    })
+  | (CandidateOutcomeBase & {
+      state: "not-attempted";
+      failure: JudgeFailure;
+    });
+
+export type HealthStatus = "healthy" | "degraded" | "failed" | "not-run";
+
+export interface DiffHealth {
+  status: Extract<HealthStatus, "healthy" | "failed">;
+  hunks: number;
+  failure?: DiffFailure;
+}
+
+export interface VectorHealth {
+  status: HealthStatus;
+  expected: number;
+  available: number;
+  missing: number;
+  failure?: { code: string; message: string };
+}
+
+export interface JudgeHealth {
+  status: HealthStatus;
+  selected: number;
+  resolved: number;
+  unresolved: number;
+  notAttempted: number;
+}
+
+export interface CheckHealth {
+  diff: DiffHealth;
+  invariantVectors: VectorHealth;
+  hunkVectors: VectorHealth;
+  judge: JudgeHealth;
+}
+
 export interface CheckResult {
   range: ResolvedRange;
+  status: "complete" | "partial" | "failed";
+  health: CheckHealth;
   hunks: number;
   invariants: number;
   candidates: number;
-  judged: number;
+  attempted: number;
+  resolved: number;
+  unresolved: number;
+  notAttempted: number;
+  semanticCalls: number;
+  transportAttempts: number;
+  candidateOutcomes: CandidateOutcome[];
   findings: Finding[];
-  /** Judge calls actually made (== cost units). */
+  /** @deprecated Use `attempted`. Kept for the current gateway renderer. */
+  judged: number;
+  /** @deprecated Use `semanticCalls`. Kept for the current gateway renderer. */
   judgeCalls: number;
-  /** Judge calls whose response could not be parsed into a verdict (prose
-   *  instead of JSON, etc.). These degrade safely to "no finding", but a HIGH
-   *  rate means the judge model is systemically failing the output contract and
-   *  the clean result is not trustworthy — surfaced so it is not silent
-   *  recall-rot (cf. the GLM 5.2 prose-not-JSON failure in Warden's benchmark). */
+  /** @deprecated Use `unresolved` and candidate failure codes. */
   unparseable: number;
 }
 
@@ -950,50 +1128,234 @@ export function parseOverrides(messages: string[]): Override[] {
   return out;
 }
 
-export async function checkInvariants(input: {
-  projectPath: string;
-  /** Pre-parsed diff hunks. The CLI produces these via {@link parseDiff}; tests
-   *  pass them directly. Kept separate from parsing so the funnel is unit-
-   *  testable without a real git repo. */
-  hunks: DiffHunk[];
-  range: ResolvedRange;
+export interface LLMInvariantJudgeOptions {
   llm: LLMClient;
+  model?: { providerID: string; modelID: string };
+  effort?: ReasoningEffort;
+  sessionID: string;
+}
+
+/**
+ * Compatibility judge for the existing `LLMClient` surface. New gateway code
+ * should implement {@link InvariantJudge} directly from its detailed prompt
+ * outcome so `transportAttempts` includes internal retries and fallbacks.
+ */
+export function createLLMInvariantJudge(
+  options: LLMInvariantJudgeOptions,
+): InvariantJudge {
+  const prompt = async (user: string): Promise<string | null> =>
+    options.llm.prompt(INVARIANT_JUDGE_SYSTEM, user, {
+      model: options.model,
+      workerID: "lore-invariant-check",
+      thinking: false,
+      reasoningEffort: options.effort,
+      urgent: true,
+      sessionID: options.sessionID,
+      maxTokens: judgeMaxTokens(options.effort),
+      temperature: 0,
+    });
+
+  return {
+    async judge(input): Promise<JudgeOutcome> {
+      let semanticCalls = 0;
+      let transportAttempts = 0;
+      const call = async (user: string): Promise<string | null> => {
+        semanticCalls++;
+        // LLMClient does not expose retries. Count the visible dispatch as one;
+        // direct InvariantJudge integrations must report every hidden attempt.
+        transportAttempts++;
+        return prompt(user);
+      };
+      const stats = (): JudgeStats => ({ semanticCalls, transportAttempts });
+
+      let response: string | null;
+      try {
+        response = await call(
+          invariantJudgeUser({
+            invariant: input.invariant,
+            file: input.file,
+            hunk: input.hunk,
+          }),
+        );
+      } catch (error) {
+        return judgeErrorOutcome(error, stats());
+      }
+
+      if (response === null || response.trim().length === 0) {
+        return {
+          kind: "unresolved",
+          failure: {
+            code: "empty-response",
+            message: "Judge returned no response text",
+            scope: "candidate",
+            retryable: true,
+          },
+          stats: stats(),
+        };
+      }
+
+      const verdict = parseInvariantVerdict(response);
+      if (verdict) return { kind: "verdict", ...verdict, stats: stats() };
+
+      if (input.semanticCallBudget < 2) {
+        return invalidVerdictOutcome(stats());
+      }
+
+      try {
+        response = await call(
+          invariantJudgeRepairUser({
+            invariant: input.invariant,
+            file: input.file,
+            hunk: input.hunk,
+            invalidResponse: response.slice(0, 2_000),
+          }),
+        );
+      } catch (error) {
+        return judgeErrorOutcome(error, stats());
+      }
+
+      if (response === null || response.trim().length === 0) {
+        return {
+          kind: "unresolved",
+          failure: {
+            code: "empty-response",
+            message: "Judge repair returned no response text",
+            scope: "candidate",
+            retryable: true,
+          },
+          stats: stats(),
+        };
+      }
+      const repaired = parseInvariantVerdict(response);
+      return repaired
+        ? { kind: "verdict", ...repaired, stats: stats() }
+        : invalidVerdictOutcome(stats());
+    },
+  };
+}
+
+export interface CheckInvariantsInput {
+  projectPath: string;
+  /** Preferred health-aware diff input. */
+  diff?: DiffResult;
+  /** Legacy pre-parsed input. Use `diff` to preserve command failures. */
+  hunks?: DiffHunk[];
+  range: ResolvedRange;
+  /** Preferred typed judge boundary. */
+  judge?: InvariantJudge;
+  /** @deprecated Gateway compatibility; use `judge`. */
+  llm?: LLMClient;
   model?: { providerID: string; modelID: string };
   /** Reasoning effort for the judge call. `off`/undefined leaves reasoning off
    *  (the default). Higher effort trades cost for depth on reasoning-capable
    *  models — a knob for tuning recall vs. spend. */
   effort?: ReasoningEffort;
   sessionID: string;
+  /** Overall orchestration cancellation boundary, including hunk embedding. */
+  signal?: AbortSignal;
+  /** Remaining duration available to hunk embedding. */
+  deadlineMs?: number;
   /** onProgress for CLI heartbeat. */
   onJudge?: (n: number, total: number) => void;
-}): Promise<CheckResult> {
-  const hunks = input.hunks;
-  const files = changedFiles(hunks);
+}
 
-  const empty: CheckResult = {
-    range: input.range,
-    hunks: hunks.length,
-    invariants: 0,
-    candidates: 0,
-    judged: 0,
-    findings: [],
-    judgeCalls: 0,
-    unparseable: 0,
+export async function checkInvariants(
+  input: CheckInvariantsInput,
+): Promise<CheckResult> {
+  if (input.diff && input.hunks) {
+    throw new TypeError(
+      "checkInvariants accepts either diff or hunks, not both",
+    );
+  }
+  // Zero-hunk and zero-invariant fast paths are valid only for a live run. An
+  // already-cancelled caller must never receive an all-healthy result.
+  input.signal?.throwIfAborted();
+  const diff: DiffResult = input.diff ?? {
+    kind: "success",
+    hunks: input.hunks ?? [],
   };
-  if (hunks.length === 0) return empty;
+  if (diff.kind === "failure") {
+    return emptyCheckResult(input.range, {
+      diff: { status: "failed", hunks: 0, failure: diff.failure },
+      invariantVectors: notRunVectorHealth(),
+      hunkVectors: notRunVectorHealth(),
+      judge: notRunJudgeHealth(),
+    });
+  }
+
+  const hunks = diff.hunks;
+  const files = changedFiles(hunks);
+  const diffHealth: DiffHealth = { status: "healthy", hunks: hunks.length };
+  if (hunks.length === 0) {
+    return emptyCheckResult(input.range, {
+      diff: diffHealth,
+      invariantVectors: healthyVectorHealth(0, 0),
+      hunkVectors: healthyVectorHealth(0, 0),
+      judge: healthyJudgeHealth(0),
+    });
+  }
 
   // Load invariants (confidence DESC), gate on confidence + enforceability,
   // cap the scan. The enforceability filter is the fix the model sweep
   // demanded: descriptive gotchas/prefs are not rules a diff can "violate".
-  const allEntries = ltm
-    .forProject(input.projectPath, true)
-    .filter((e) => e.confidence >= MIN_CONFIDENCE)
-    .filter((e) => isEnforceableInvariant(e))
-    .slice(0, MAX_INVARIANTS_SCAN);
-  if (allEntries.length === 0) return empty;
+  let allEntries: KnowledgeEntry[];
+  try {
+    allEntries = ltm
+      .forProject(input.projectPath, true)
+      .filter((e) => e.confidence >= MIN_CONFIDENCE)
+      .filter((e) => isEnforceableInvariant(e))
+      .slice(0, MAX_INVARIANTS_SCAN);
+  } catch (error) {
+    return emptyCheckResult(input.range, {
+      diff: diffHealth,
+      invariantVectors: {
+        status: "failed",
+        expected: 0,
+        available: 0,
+        missing: 0,
+        failure: {
+          code: "invariant-source-read-failed",
+          message: boundedMessage(error, "Could not load invariants"),
+        },
+      },
+      hunkVectors: notRunVectorHealth(),
+      judge: notRunJudgeHealth(),
+    });
+  }
+  input.signal?.throwIfAborted();
+  if (allEntries.length === 0) {
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: diffHealth,
+        invariantVectors: healthyVectorHealth(0, 0),
+        hunkVectors: healthyVectorHealth(0, 0),
+        judge: healthyJudgeHealth(0),
+      },
+      { hunks: hunks.length },
+    );
+  }
+
+  // Never compare vectors produced by different provider/model/dimension
+  // configurations. This clears stale rows before they can yield a false-clean
+  // cosine result; normal startup/import backfill repopulates the missing rows.
+  embedding.checkConfigChange();
 
   // Load invariant embeddings (same helper contradiction.ts uses).
-  const vecById = loadInvariantVecs(allEntries);
+  const invariantVecResult = loadInvariantVecs(allEntries);
+  if (invariantVecResult.health.status === "failed") {
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: diffHealth,
+        invariantVectors: invariantVecResult.health,
+        hunkVectors: notRunVectorHealth(),
+        judge: notRunJudgeHealth(),
+      },
+      { hunks: hunks.length, invariants: allEntries.length },
+    );
+  }
+  const vecById = invariantVecResult.vecs;
 
   // Stage 0: for each invariant, which changed files do its refs touch?
   const invariants: InvariantVec[] = allEntries.map((entry) => {
@@ -1016,7 +1378,23 @@ export async function checkInvariants(input: {
   });
 
   // Stage 1: embed the hunks once, cosine-match against invariant vecs.
-  const hunkVecs = await embedHunks(hunks);
+  const hunkVecResult = await embedHunks(hunks, {
+    signal: input.signal,
+    deadlineMs: input.deadlineMs,
+  });
+  if (hunkVecResult.health.status === "failed") {
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: diffHealth,
+        invariantVectors: invariantVecResult.health,
+        hunkVectors: hunkVecResult.health,
+        judge: notRunJudgeHealth(),
+      },
+      { hunks: hunks.length, invariants: allEntries.length },
+    );
+  }
+  const hunkVecs = hunkVecResult.vecs;
 
   // Diversify: cluster near-identical hunks so the budget covers DISTINCT
   // changes. Only each cluster's representative is judged; members inherit.
@@ -1035,87 +1413,116 @@ export async function checkInvariants(input: {
   // Dedup key = `${invariantId}\x1f${file}`: one drift per (invariant, file),
   // regardless of how many hunks or judge calls surface it.
   const seenFindings = new Set<string>();
-  let judged = 0;
-  let judgeCalls = 0;
-  let unparseable = 0;
-  const toJudge = selected;
-  for (const c of toJudge) {
+  const candidateOutcomes: CandidateOutcome[] = [];
+  let semanticCalls = 0;
+  let transportAttempts = 0;
+  let stopFailure: JudgeFailure | null = null;
+  const judge =
+    input.judge ??
+    (input.llm
+      ? createLLMInvariantJudge({
+          llm: input.llm,
+          model: input.model,
+          effort: input.effort,
+          sessionID: input.sessionID,
+        })
+      : null);
+
+  for (
+    let candidateIndex = 0;
+    candidateIndex < selected.length;
+    candidateIndex++
+  ) {
+    const c = selected[candidateIndex];
     const inv = invariants[c.invariantIdx];
     const hunk = hunks[c.hunkIdx];
-    judged++;
-    input.onJudge?.(judged, toJudge.length);
-    let responseText: string | null;
-    try {
-      responseText = await input.llm.prompt(
-        INVARIANT_JUDGE_SYSTEM,
-        invariantJudgeUser({
-          invariant: { title: inv.entry.title, content: inv.entry.content },
+    const base = candidateOutcomeBase(candidateIndex, c, inv, hunk);
+
+    if (stopFailure) {
+      candidateOutcomes.push({
+        ...base,
+        state: "not-attempted",
+        failure: stopFailure,
+      });
+      continue;
+    }
+
+    const remainingSemanticCalls = MAX_JUDGE_CALLS - semanticCalls;
+    if (remainingSemanticCalls === 0) {
+      candidateOutcomes.push({
+        ...base,
+        state: "not-attempted",
+        failure: semanticBudgetFailure(),
+      });
+      continue;
+    }
+
+    input.onJudge?.(candidateIndex + 1, selected.length);
+    let outcome: JudgeOutcome;
+    if (!judge) {
+      outcome = {
+        kind: "unresolved",
+        failure: {
+          code: "judge-contract-error",
+          message: "No InvariantJudge was provided",
+          scope: "run",
+        },
+        stats: { semanticCalls: 0, transportAttempts: 0 },
+      };
+    } else {
+      try {
+        outcome = await judge.judge({
+          invariant: {
+            id: inv.entry.id,
+            title: inv.entry.title,
+            content: inv.entry.content,
+          },
           file: hunk.file,
           hunk: hunk.text,
-        }),
-        {
-          model: input.model,
-          workerID: "lore-invariant-check",
-          thinking: false,
-          reasoningEffort: input.effort,
-          // Interactive CLI: must return this turn, not defer to the batch queue.
-          urgent: true,
-          sessionID: input.sessionID,
-          // The verdict JSON is tiny (256 is ample without reasoning). With
-          // effort ON, reasoning tokens count against the output budget, so the
-          // model would exhaust 256 before emitting the verdict — give it room.
-          maxTokens: judgeMaxTokens(input.effort),
-          temperature: 0,
-        },
-      );
-    } catch (err) {
-      log.info(
-        `invariant-check: judge call failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+          semanticCallBudget: Math.min(2, remainingSemanticCalls),
+        });
+      } catch (error) {
+        outcome = {
+          kind: "unresolved",
+          failure: {
+            code: "judge-contract-error",
+            message: boundedMessage(error, "InvariantJudge threw"),
+            scope: "run",
+          },
+          stats: { semanticCalls: 0, transportAttempts: 0 },
+        };
+      }
+    }
+
+    outcome = validateJudgeOutcome(outcome, remainingSemanticCalls);
+    semanticCalls += outcome.stats.semanticCalls;
+    transportAttempts += outcome.stats.transportAttempts;
+
+    if (outcome.kind === "unresolved") {
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure: outcome.failure,
+        stats: outcome.stats,
+      });
+      if (outcome.failure.scope === "run") stopFailure = outcome.failure;
       continue;
     }
-    judgeCalls++;
-    if (responseText === null) {
-      // Worker returned no text at all. This is the silent failure mode that
-      // bit PR #1587's CI run (20/20 unparseable on github-copilot/gpt-5.6-luna):
-      // the call completed (no exception) but the parser got nothing back,
-      // usually because the model is not accessible on the protocol the worker
-      // routed to (e.g. github-copilot/gpt-5.6-* on /chat/completions instead
-      // of /responses → upstream returns `unsupported_api_for_model`), or auth
-      // was rejected (non-Copilot bearer on api.githubcopilot.com → 400 plain
-      // text), or the response was entirely encrypted. None of these surface
-      // through `log.info` because the logger is debug-gated, so a successful
-      // CI run reporting "20/20 unparseable" used to give us no actionable
-      // signal. Log at `notice` (always visible on stderr, sink warn severity)
-      // — never `error` (this is expected failure-mode recovery, not an outage).
-      log.notice(
-        `invariant-check: judge returned null text for ${input.model?.providerID ?? "?"}/${input.model?.modelID ?? "?"} — likely cause: model not accessible on the routed protocol, auth rejected, or encrypted-only response (no parseable text in any output item)`,
-      );
-      unparseable++;
-      continue;
-    }
-    const verdict = parseInvariantVerdict(responseText);
-    if (!verdict) {
-      // Response was a string but not parseable into a verdict (prose instead of
-      // JSON, a truncated object, a fenced markdown wrapper the heuristic
-      // couldn't peel, etc.). Degrade safely to "no finding" — but COUNT it, so
-      // a systemically-broken judge is visible rather than silently
-      // indistinguishable from a genuine clean run. Debug-gated because this
-      // is a model-behavior signal, not actionable for the operator — once
-      // LORE_DEBUG=1 is set the truncated text is logged for offline triage.
-      log.info(
-        `invariant-check: judge returned unparseable text for ${input.model?.providerID ?? "?"}/${input.model?.modelID ?? "?"}: ${responseText.slice(0, 200)}`,
-      );
-      unparseable++;
-      continue;
-    }
+
+    candidateOutcomes.push({
+      ...base,
+      state: "resolved",
+      verdict: outcome.verdict,
+      reason: outcome.reason,
+      stats: outcome.stats,
+    });
     // Only "violates" produces a finding. "fixes", "satisfies", and "unrelated"
     // are all non-finding verdicts — the four-category frame exists precisely to
     // let the judge say "this is the fix" or "this hunk isn't actually related"
     // without flagging. The old binary verdict space could not express either,
     // which is what produced the dominant false-positive class (a fix being read
     // as a violation).
-    if (verdict.verdict !== "violates") continue;
+    if (outcome.verdict !== "violates") continue;
     // Fan out the verdict to every hunk in the representative's cluster: a
     // repeated change (e.g. one rename across N files) is flagged in all N.
     // Dedup per (invariant, file): the same invariant flagged against several
@@ -1135,42 +1542,324 @@ export async function checkInvariants(input: {
         file: hunks[mi].file,
         similarity: c.similarity,
         refHit: c.refHit,
-        reason: verdict.reason,
+        reason: outcome.reason,
         hunk: hunks[mi].text,
         severity,
       });
     }
   }
 
-  // Visibility for the GLM-style failure mode: if a large share of judge calls
-  // came back unparseable, the "clean" result is not trustworthy — the model is
-  // failing the output contract, not finding nothing. Warn loudly (still never
-  // fails the build; the caller decides). Threshold is deliberately high so a
-  // stray malformed response on an otherwise-healthy run stays quiet.
-  if (judgeCalls > 0 && unparseable / judgeCalls > UNPARSEABLE_WARN_RATIO) {
-    log.warn(
-      `invariant-check: ${unparseable}/${judgeCalls} judge responses were unparseable ` +
-        `(model=${input.model?.providerID ?? "?"}/${input.model?.modelID ?? "?"}). ` +
-        `The "no violation" result may be unreliable — the judge model is likely ` +
-        `returning prose instead of the required JSON verdict.`,
-    );
-  }
+  const resolved = candidateOutcomes.filter(
+    (o) => o.state === "resolved",
+  ).length;
+  const unresolved = candidateOutcomes.filter(
+    (o) => o.state === "unresolved",
+  ).length;
+  const notAttempted = candidateOutcomes.filter(
+    (o) => o.state === "not-attempted",
+  ).length;
+  const attempted = resolved + unresolved;
+  const judgeHealth = calculateJudgeHealth(
+    selected.length,
+    resolved,
+    unresolved,
+    notAttempted,
+  );
+  const health: CheckHealth = {
+    diff: diffHealth,
+    invariantVectors: invariantVecResult.health,
+    hunkVectors: hunkVecResult.health,
+    judge: judgeHealth,
+  };
+
+  input.signal?.throwIfAborted();
 
   return {
     range: input.range,
+    status: overallStatus(health),
+    health,
     hunks: hunks.length,
     invariants: allEntries.length,
     candidates: selected.length,
-    judged,
+    attempted,
+    resolved,
+    unresolved,
+    notAttempted,
+    semanticCalls,
+    transportAttempts,
+    candidateOutcomes,
     findings,
-    judgeCalls,
-    unparseable,
+    judged: attempted,
+    judgeCalls: semanticCalls,
+    unparseable: unresolved,
   };
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const VERDICTS = new Set<Verdict>([
+  "violates",
+  "fixes",
+  "satisfies",
+  "unrelated",
+]);
+
+const JUDGE_FAILURE_CODES = new Set<JudgeFailureCode>([
+  "no-auth",
+  "auth-rejected",
+  "route-unavailable",
+  "protocol-mismatch",
+  "model-unsupported",
+  "api-unsupported",
+  "rate-limit",
+  "timeout",
+  "network",
+  "invalid-body",
+  "response-too-large",
+  "incomplete-response",
+  "empty-response",
+  "abort",
+  "transport-error",
+  "invalid-verdict",
+  "judge-contract-error",
+  "semantic-budget-exhausted",
+]);
+
+function isVerdict(value: unknown): value is Verdict {
+  return typeof value === "string" && VERDICTS.has(value as Verdict);
+}
+
+function boundedMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const sanitized = message.replace(/[\r\n\t]+/g, " ").trim();
+  return (sanitized || fallback).slice(0, 400);
+}
+
+function judgeErrorOutcome(error: unknown, stats: JudgeStats): JudgeOutcome {
+  const name = error instanceof Error ? error.name : "";
+  const code: JudgeFailureCode =
+    name === "AbortError"
+      ? "abort"
+      : name === "TimeoutError"
+        ? "timeout"
+        : "transport-error";
+  return {
+    kind: "unresolved",
+    failure: {
+      code,
+      message: boundedMessage(error, "Judge transport failed"),
+      scope: "candidate",
+      retryable: code !== "abort",
+    },
+    stats,
+  };
+}
+
+function invalidVerdictOutcome(stats: JudgeStats): JudgeOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "invalid-verdict",
+      message:
+        "Judge response did not match the exact {verdict, reason} schema",
+      scope: "candidate",
+      retryable: false,
+    },
+    stats,
+  };
+}
+
+function semanticBudgetFailure(): JudgeFailure {
+  return {
+    code: "semantic-budget-exhausted",
+    message: `Run-wide semantic-call budget of ${MAX_JUDGE_CALLS} was exhausted`,
+    scope: "run",
+    retryable: false,
+  };
+}
+
+function validateJudgeOutcome(
+  outcome: unknown,
+  remainingSemanticCalls: number,
+): JudgeOutcome {
+  if (!outcome || typeof outcome !== "object") {
+    return judgeContractFailure();
+  }
+  const record = outcome as Record<string, unknown>;
+  if (!record.stats || typeof record.stats !== "object") {
+    return judgeContractFailure();
+  }
+  const stats = record.stats as Record<string, unknown>;
+  const statsValid =
+    Number.isSafeInteger(stats.semanticCalls) &&
+    (stats.semanticCalls as number) >= 0 &&
+    (stats.semanticCalls as number) <= Math.min(2, remainingSemanticCalls) &&
+    Number.isSafeInteger(stats.transportAttempts) &&
+    (stats.transportAttempts as number) >= 0;
+  if (!statsValid) return judgeContractFailure();
+
+  if (record.kind === "verdict") {
+    if (
+      isVerdict(record.verdict) &&
+      typeof record.reason === "string" &&
+      record.reason.trim().length > 0 &&
+      record.reason.length <= 400
+    ) {
+      return outcome as JudgeOutcome;
+    }
+    return judgeContractFailure();
+  }
+
+  if (record.kind === "unresolved") {
+    if (!record.failure || typeof record.failure !== "object") {
+      return judgeContractFailure();
+    }
+    const failure = record.failure as Record<string, unknown>;
+    if (
+      typeof failure.code === "string" &&
+      JUDGE_FAILURE_CODES.has(failure.code as JudgeFailureCode) &&
+      typeof failure.message === "string" &&
+      failure.message.trim().length > 0 &&
+      failure.message.length <= 400 &&
+      (failure.scope === "candidate" || failure.scope === "run") &&
+      (failure.retryable === undefined ||
+        typeof failure.retryable === "boolean")
+    ) {
+      return outcome as JudgeOutcome;
+    }
+  }
+  return judgeContractFailure();
+}
+
+function judgeContractFailure(): JudgeOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "judge-contract-error",
+      message:
+        "InvariantJudge returned an invalid outcome or exceeded its budget",
+      scope: "run",
+      retryable: false,
+    },
+    stats: { semanticCalls: 0, transportAttempts: 0 },
+  };
+}
+
+function healthyVectorHealth(
+  expected: number,
+  available: number,
+): VectorHealth {
+  return {
+    status: "healthy",
+    expected,
+    available,
+    missing: expected - available,
+  };
+}
+
+function notRunVectorHealth(): VectorHealth {
+  return {
+    status: "not-run",
+    expected: 0,
+    available: 0,
+    missing: 0,
+  };
+}
+
+function healthyJudgeHealth(selected: number): JudgeHealth {
+  return {
+    status: "healthy",
+    selected,
+    resolved: selected,
+    unresolved: 0,
+    notAttempted: 0,
+  };
+}
+
+function notRunJudgeHealth(): JudgeHealth {
+  return {
+    status: "not-run",
+    selected: 0,
+    resolved: 0,
+    unresolved: 0,
+    notAttempted: 0,
+  };
+}
+
+function calculateJudgeHealth(
+  selected: number,
+  resolved: number,
+  unresolved: number,
+  notAttempted: number,
+): JudgeHealth {
+  const status: JudgeHealth["status"] =
+    selected === 0 || resolved === selected
+      ? "healthy"
+      : resolved === 0
+        ? "failed"
+        : "degraded";
+  return { status, selected, resolved, unresolved, notAttempted };
+}
+
+function overallStatus(health: CheckHealth): CheckResult["status"] {
+  const statuses: HealthStatus[] = [
+    health.diff.status,
+    health.invariantVectors.status,
+    health.hunkVectors.status,
+    health.judge.status,
+  ];
+  if (statuses.some((status) => status === "failed" || status === "not-run")) {
+    return "failed";
+  }
+  if (statuses.includes("degraded")) return "partial";
+  return "complete";
+}
+
+function emptyCheckResult(
+  range: ResolvedRange,
+  health: CheckHealth,
+  counts: { hunks?: number; invariants?: number } = {},
+): CheckResult {
+  return {
+    range,
+    status: overallStatus(health),
+    health,
+    hunks: counts.hunks ?? health.diff.hunks,
+    invariants: counts.invariants ?? 0,
+    candidates: 0,
+    attempted: 0,
+    resolved: 0,
+    unresolved: 0,
+    notAttempted: 0,
+    semanticCalls: 0,
+    transportAttempts: 0,
+    candidateOutcomes: [],
+    findings: [],
+    judged: 0,
+    judgeCalls: 0,
+    unparseable: 0,
+  };
+}
+
+function candidateOutcomeBase(
+  candidateIndex: number,
+  candidate: Candidate,
+  invariant: InvariantVec,
+  hunk: DiffHunk,
+): CandidateOutcomeBase {
+  return {
+    id: `candidate-${String(candidateIndex + 1).padStart(2, "0")}`,
+    file: hunk.file,
+    hunkIndex: candidate.hunkIdx,
+    invariantId: invariant.entry.id,
+    invariantTitle: invariant.entry.title,
+    similarity: candidate.similarity,
+    refHit: candidate.refHit,
+    stats: { semanticCalls: 0, transportAttempts: 0 },
+  };
+}
 
 function basename(p: string): string {
   const i = p.lastIndexOf("/");
@@ -1181,23 +1870,43 @@ function basename(p: string): string {
  *  exact pattern — reuse embeddingByIdSource so storage-mode differences are
  *  handled once). A corrupt/missing blob just omits that invariant from the
  *  cosine prefilter (it can still be admitted by a Stage-0 ref hit). */
-function loadInvariantVecs(
-  entries: KnowledgeEntry[],
-): Map<string, Float32Array> {
+function loadInvariantVecs(entries: KnowledgeEntry[]): {
+  vecs: Map<string, Float32Array>;
+  health: VectorHealth;
+} {
   const out = new Map<string, Float32Array>();
-  if (entries.length === 0) return out;
+  if (entries.length === 0) {
+    return { vecs: out, health: healthyVectorHealth(0, 0) };
+  }
   const ids = entries.map((e) => e.id);
   const placeholders = ids.map(() => "?").join(",");
-  const src = embeddingByIdSource(
-    "knowledge",
-    readStorageMode(db()),
-    "knowledge_current",
-  );
-  const rows = db()
-    .query(
-      `SELECT id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
-    )
-    .all(...ids) as Array<{ id: string; embedding: Buffer }>;
+  let rows: Array<{ id: string; embedding: Buffer }>;
+  try {
+    const src = embeddingByIdSource(
+      "knowledge",
+      readStorageMode(db()),
+      "knowledge_current",
+    );
+    rows = db()
+      .query(
+        `SELECT id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
+      )
+      .all(...ids) as Array<{ id: string; embedding: Buffer }>;
+  } catch (error) {
+    return {
+      vecs: out,
+      health: {
+        status: "failed",
+        expected: entries.length,
+        available: 0,
+        missing: entries.length,
+        failure: {
+          code: "invariant-vector-load-failed",
+          message: boundedMessage(error, "Could not load invariant vectors"),
+        },
+      },
+    };
+  }
   for (const r of rows) {
     try {
       out.set(r.id, embedding.fromBlob(r.embedding));
@@ -1205,14 +1914,22 @@ function loadInvariantVecs(
       // corrupt blob — skip (Stage-0 ref hit can still admit this invariant)
     }
   }
-  return out;
+  const missing = entries.length - out.size;
+  return {
+    vecs: out,
+    health: {
+      status: missing === 0 ? "healthy" : "degraded",
+      expected: entries.length,
+      available: out.size,
+      missing,
+    },
+  };
 }
 
 /** Max characters of a single hunk fed to the embedder. A giant hunk (e.g. a
  *  generated/docs file) posts an oversized ONNX tensor → OOM (#1072 class). We
- *  only need enough text to gauge TOPICAL similarity for the prefilter, so the
- *  embed input is capped; the JUDGE still receives the full hunk. Mirrors the
- *  worker's own truncateTexts fallback. */
+ *  only need enough text to gauge TOPICAL similarity for the prefilter. Parsed
+ *  hunks already have a separate byte cap for judging and reporting. */
 export const MAX_EMBED_CHARS_PER_HUNK = 8_000;
 
 /** Embed all hunks (local ONNX → free), OOM-safely. Each hunk's embed text is
@@ -1220,19 +1937,129 @@ export const MAX_EMBED_CHARS_PER_HUNK = 8_000;
  *  through {@link embedding.embedInTokenBatches}, the project-standard batcher
  *  that bounds each ONNX call by TOKEN AREA (not just count) — ONNX pads every
  *  text in a batch to the longest sequence, so area, not count, is what OOMs
- *  (#1072 class; knowledge 019f1a88). Vectors come back in input order. On any
- *  embed failure the whole set degrades to nulls; those hunks can still be
- *  admitted by Stage-0 ref hits, so the funnel stays correct (just less recall
- *  on the cosine stage for that run). */
-async function embedHunks(hunks: DiffHunk[]): Promise<(Float32Array | null)[]> {
-  if (hunks.length === 0) return [];
+ *  (#1072 class; knowledge 019f1a88). Vectors come back in input order. A
+ *  partial result is degraded; an exception or zero vectors for non-empty
+ *  hunks is failed so retrieval loss can never look like a clean judge run. */
+async function embedHunks(
+  hunks: DiffHunk[],
+  options: { signal?: AbortSignal; deadlineMs?: number },
+): Promise<{ vecs: (Float32Array | null)[]; health: VectorHealth }> {
+  if (hunks.length === 0) {
+    return { vecs: [], health: healthyVectorHealth(0, 0) };
+  }
   const texts = hunks.map((h) =>
     `${h.file}\n${h.text}`.slice(0, MAX_EMBED_CHARS_PER_HUNK),
   );
+  const deadlineAt =
+    options.deadlineMs === undefined
+      ? undefined
+      : Date.now() + options.deadlineMs;
   try {
-    const vecs = await embedding.embedInTokenBatches(texts, "document");
-    return hunks.map((_, i) => vecs[i] ?? null);
-  } catch {
-    return hunks.map(() => null);
+    await embedding.ensureEmbeddingReady(options);
+    const vecs = await awaitHunkEmbedding(
+      () => embedding.embedInTokenBatches(texts, "document"),
+      {
+        ...options,
+        deadlineMs:
+          deadlineAt === undefined
+            ? undefined
+            : Math.max(0, deadlineAt - Date.now()),
+      },
+    );
+    const aligned = hunks.map((_, i) => vecs[i] ?? null);
+    const available = aligned.filter((vec) => vec !== null).length;
+    const missing = hunks.length - available;
+    return {
+      vecs: aligned,
+      health: {
+        status:
+          missing === 0 ? "healthy" : available === 0 ? "failed" : "degraded",
+        expected: hunks.length,
+        available,
+        missing,
+        ...(available === 0
+          ? {
+              failure: {
+                code: "hunk-vectors-all-missing",
+                message: "Embedding returned no vectors for non-empty hunks",
+              },
+            }
+          : {}),
+      },
+    };
+  } catch (error) {
+    return {
+      vecs: hunks.map(() => null),
+      health: {
+        status: "failed",
+        expected: hunks.length,
+        available: 0,
+        missing: hunks.length,
+        failure: {
+          code: "hunk-vector-embedding-failed",
+          message: boundedMessage(error, "Could not embed diff hunks"),
+        },
+      },
+    };
   }
+}
+
+/** Bound hunk embedding by the lint orchestration lifetime. The embedding API
+ * cannot interrupt an in-flight local ONNX batch, so on cancellation we return
+ * promptly and explicitly observe that batch's eventual rejection. */
+async function awaitHunkEmbedding<T>(
+  start: () => Promise<T>,
+  options: { signal?: AbortSignal; deadlineMs?: number },
+): Promise<T> {
+  const { signal, deadlineMs } = options;
+  if (
+    deadlineMs !== undefined &&
+    (!Number.isFinite(deadlineMs) || deadlineMs < 0)
+  ) {
+    throw new RangeError("hunk embedding deadlineMs must be non-negative");
+  }
+  if (signal?.aborted) throw abortReason(signal);
+  if (deadlineMs === 0) {
+    throw new DOMException("Hunk embedding deadline exceeded", "TimeoutError");
+  }
+
+  const work = start();
+  if (!signal && deadlineMs === undefined) return await work;
+  // Promise.race observes `work`, and this explicit handler documents and
+  // preserves that guarantee if orchestration returns before inference does.
+  void work.catch(() => {});
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const stopped = new Promise<never>((_resolve, reject) => {
+    if (signal) {
+      onAbort = () => reject(abortReason(signal));
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (deadlineMs !== undefined) {
+      timer = setTimeout(
+        () =>
+          reject(
+            new DOMException(
+              "Hunk embedding deadline exceeded",
+              "TimeoutError",
+            ),
+          ),
+        deadlineMs,
+      );
+    }
+  });
+
+  try {
+    return await Promise.race([work, stopped]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ?? new DOMException("Hunk embedding aborted", "AbortError")
+  );
 }

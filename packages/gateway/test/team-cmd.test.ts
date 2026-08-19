@@ -917,12 +917,14 @@ describe("discover --invite (E-5-d-2)", () => {
     await commandTeam(["discover"], {});
     // The 3rd arg is `repos` — undefined when no explicit positional AND no git remote in cwd;
     // some test CWDs DO have a remote, in which case it's a one-element array. Accept either.
-    expect(vi.mocked(team.discoverGitHubContributors)).toHaveBeenCalledWith(
-      FAKE_CLIENT,
-      "gho_x",
-      expect.anything(),
-      undefined,
-    );
+    const call = vi.mocked(team.discoverGitHubContributors).mock.lastCall;
+    expect(call?.[0]).toBe(FAKE_CLIENT);
+    expect(call?.[1]).toBe("gho_x");
+    expect(
+      call?.[2] === undefined ||
+        (Array.isArray(call[2]) && call[2].length === 1),
+    ).toBe(true);
+    expect(call?.[3]).toBeUndefined();
     expect(logs.join("\n")).toMatch(/already on Lore/);
   });
 

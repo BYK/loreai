@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 // SSE chunk for OpenAI chat-completions streaming.
 function sseChunk(obj: unknown): string {
@@ -88,10 +89,10 @@ function openAIFinalJSON(): Response {
   });
 }
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -132,11 +133,13 @@ describe("recall interception — OpenAI streaming path", () => {
     });
 
     const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = false;
     const server = await startServer(config);
     const baseURL = `http://127.0.0.1:${server.port}`;
 
-    teardownFn = () => {
-      server.stop();
+    teardownFn = async () => {
+      await server.stop();
       closeDB();
       setUpstreamInterceptor(undefined);
       for (const suffix of ["", "-shm", "-wal"]) {
@@ -154,7 +157,7 @@ describe("recall interception — OpenAI streaming path", () => {
       }
     };
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

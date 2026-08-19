@@ -1,4 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Import a fresh copy of the log module with a controlled `LORE_DEBUG` value.
@@ -138,3 +150,304 @@ describe("log stderr silencing (embedded/TUI mode)", () => {
     expect(stderr).toHaveBeenCalledWith("[lore]", "now visible");
   });
 });
+
+describe("local log credential redaction", () => {
+  it("redacts credential assignments, headers, tokens, and private keys", async () => {
+    const log = await freshLog(undefined);
+    const redacted = log.redactSensitiveLogText(
+      "operation failed clientSecret=client-secret-value " +
+        'payload={"apiKey":"json-api-key-value"}\n' +
+        "Authorization: Bearer bearer-value\n" +
+        "ocp-apim-subscription-key=azure-subscription-secret\n" +
+        "cf-access-client-id: cloudflare-client-secret\n" +
+        "Cookie: session=cookie-value; refresh=refresh-cookie-value\n" +
+        "token=plain-token-value\n" +
+        "-----BEGIN PRIVATE KEY-----\nprivate-key-bytes\n-----END PRIVATE KEY-----",
+    );
+
+    expect(redacted).toContain("operation failed");
+    for (const secret of [
+      "client-secret-value",
+      "json-api-key-value",
+      "bearer-value",
+      "azure-subscription-secret",
+      "cloudflare-client-secret",
+      "cookie-value",
+      "refresh-cookie-value",
+      "plain-token-value",
+      "private-key-bytes",
+    ]) {
+      expect(redacted).not.toContain(secret);
+    }
+    expect(redacted).toContain("[Filtered]");
+  });
+
+  it.each([
+    {
+      name: "a quoted scalar containing whitespace",
+      input: 'request failed: token = "quoted secret value" status=401',
+      secrets: ["quoted secret value"],
+      expected: 'request failed: token = "[Filtered]" status=401',
+    },
+    {
+      name: "an unquoted scalar containing whitespace",
+      input: "request failed: token = unquoted secret value status=401",
+      secrets: ["unquoted secret value"],
+      expected: "request failed: token = [Filtered] status=401",
+    },
+    {
+      name: "an unquoted JSON scalar",
+      input: 'request failed: {"token":12345,"status":401}',
+      secrets: ["12345"],
+      expected: 'request failed: {"token":[Filtered],"status":401}',
+    },
+    {
+      name: "a boolean JSON scalar",
+      input: 'request failed: {"token":true,"status":401}',
+      secrets: ["true"],
+      expected: 'request failed: {"token":[Filtered],"status":401}',
+    },
+    {
+      name: "a null JSON scalar",
+      input: 'request failed: {"token":null,"status":401}',
+      secrets: ["null"],
+      expected: 'request failed: {"token":[Filtered],"status":401}',
+    },
+    {
+      name: "a JSON array",
+      input:
+        'request failed: credentials=["array-secret",{"nested":"object-secret"}] status=401',
+      secrets: ["array-secret", "object-secret"],
+      expected: "request failed: credentials=[Filtered] status=401",
+    },
+    {
+      name: "a JSON object",
+      input:
+        'request failed: credentials={"refreshToken":"refresh-secret","nested":["nested-secret"]} status=401',
+      secrets: ["refresh-secret", "nested-secret"],
+      expected: "request failed: credentials=[Filtered] status=401",
+    },
+    {
+      name: "a Cookie compound value",
+      input:
+        "request failed: Cookie: session=cookie-secret; refresh=refresh-secret, oauth=oauth-secret status=401",
+      secrets: ["cookie-secret", "refresh-secret", "oauth-secret"],
+      expected: "request failed: Cookie: [Filtered] status=401",
+    },
+    {
+      name: "a Cookie2 compound value",
+      input:
+        "request failed: Cookie2: session=cookie-secret; refresh=refresh-secret, oauth=oauth-secret status=401",
+      secrets: ["cookie-secret", "refresh-secret", "oauth-secret"],
+      expected: "request failed: Cookie2: [Filtered] status=401",
+    },
+    {
+      name: "a non-cookie compound header value",
+      input:
+        "request failed: x-auth-token: foo=first-secret; bar=second-secret status=401",
+      secrets: ["first-secret", "second-secret"],
+      expected: "request failed: x-auth-token: [Filtered] status=401",
+    },
+  ])(
+    "redacts the complete value of $name after arbitrary text",
+    async (testCase) => {
+      const log = await freshLog(undefined);
+      const redacted = log.redactSensitiveLogText(testCase.input);
+
+      for (const secret of testCase.secrets) {
+        expect(redacted).not.toContain(secret);
+      }
+      expect(redacted).toBe(testCase.expected);
+    },
+  );
+
+  it.each([
+    "xapikey",
+    "x-authsessionid",
+    "x-oauthsessionid",
+    "x-secretsessionid",
+    "x-tokensessionid",
+    "x-keysessionid",
+  ])(
+    "redacts collapsed credential alias %s in local free text",
+    async (name) => {
+      const log = await freshLog(undefined);
+      const secret = "collapsed-alias-secret";
+
+      expect(
+        log.redactSensitiveLogText(`request failed: ${name}=${secret}`),
+      ).toBe(`request failed: ${name}=[Filtered]`);
+    },
+  );
+
+  it("preserves bearer scheme diagnostics", async () => {
+    const log = await freshLog(undefined);
+
+    for (const diagnostic of [
+      "routing decision scheme=bearer provider=anthropic",
+      "routing decision scheme=bearer selected upstream",
+    ]) {
+      expect(log.redactSensitiveLogText(diagnostic)).toBe(diagnostic);
+    }
+  });
+});
+
+describe.skipIf(process.platform === "win32")(
+  "persistent log filesystem security",
+  () => {
+    let base: string;
+    let savedNodeEnv: string | undefined;
+    let savedXdg: string | undefined;
+
+    beforeEach(() => {
+      savedNodeEnv = process.env.NODE_ENV;
+      savedXdg = process.env.XDG_DATA_HOME;
+      base = mkdtempSync(join(tmpdir(), "lore-log-test-"));
+      process.env.NODE_ENV = "production";
+      process.env.XDG_DATA_HOME = base;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedNodeEnv;
+      if (savedXdg === undefined) delete process.env.XDG_DATA_HOME;
+      else process.env.XDG_DATA_HOME = savedXdg;
+      vi.resetModules();
+      rmSync(base, { recursive: true, force: true });
+    });
+
+    async function freshPersistentLog() {
+      vi.resetModules();
+      return import("../src/log");
+    }
+
+    it("creates the data directory and log as owner-only", async () => {
+      const log = await freshPersistentLog();
+      log.info("owner-only");
+
+      const dir = join(base, "lore");
+      const path = join(dir, "lore.log");
+      expect(lstatSync(dir).mode & 0o777).toBe(0o700);
+      expect(lstatSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    it("redacts credentials before writing persistent log bytes", async () => {
+      const log = await freshPersistentLog();
+      log.error(
+        "request failed",
+        "clientSecret=persistent-client-secret",
+        "Authorization: Bearer persistent-bearer-secret",
+        'payload={"refreshToken":"persistent-refresh-token"}',
+      );
+
+      const content = readFileSync(join(base, "lore", "lore.log"), "utf8");
+      expect(content).toContain("request failed");
+      expect(content).toContain("[Filtered]");
+      expect(content).not.toContain("persistent-client-secret");
+      expect(content).not.toContain("persistent-bearer-secret");
+      expect(content).not.toContain("persistent-refresh-token");
+    });
+
+    it("tightens existing directory and log permissions before appending", async () => {
+      const dir = join(base, "lore");
+      const path = join(dir, "lore.log");
+      mkdirSync(dir, { mode: 0o777 });
+      chmodSync(dir, 0o777);
+      writeFileSync(path, "before\n", { mode: 0o666 });
+      chmodSync(path, 0o666);
+
+      const log = await freshPersistentLog();
+      log.info("after");
+
+      expect(readFileSync(path, "utf8")).toContain("after");
+      expect(lstatSync(dir).mode & 0o777).toBe(0o700);
+      expect(lstatSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    it("clears special and group bits while tightening the data directory", async () => {
+      const dir = join(base, "lore");
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(dir, 0o2770);
+
+      const log = await freshPersistentLog();
+      log.info("preserve setgid");
+
+      expect(lstatSync(dir).mode & 0o7777).toBe(0o700);
+      expect(lstatSync(join(dir, "lore.log")).mode & 0o777).toBe(0o600);
+    });
+
+    it("tightens a legacy rotated log immediately", async () => {
+      const dir = join(base, "lore");
+      const backup = join(dir, "lore.log.1");
+      mkdirSync(dir, { mode: 0o700 });
+      writeFileSync(backup, "old sensitive logs", { mode: 0o666 });
+      chmodSync(backup, 0o666);
+
+      const log = await freshPersistentLog();
+      log.info("new log");
+
+      expect(readFileSync(backup, "utf8")).toBe("old sensitive logs");
+      expect(lstatSync(backup).mode & 0o777).toBe(0o600);
+    });
+
+    it("rotates an oversized legacy log into an owner-only backup", async () => {
+      const dir = join(base, "lore");
+      const path = join(dir, "lore.log");
+      const backup = `${path}.1`;
+      mkdirSync(dir, { mode: 0o700 });
+      writeFileSync(path, Buffer.alloc(5 * 1024 * 1024 + 1), { mode: 0o666 });
+      chmodSync(path, 0o666);
+
+      const log = await freshPersistentLog();
+      for (let i = 0; i < 1_000; i++) log.info("rotation check");
+
+      expect(lstatSync(backup).mode & 0o777).toBe(0o600);
+      expect(lstatSync(path).mode & 0o777).toBe(0o600);
+    });
+
+    it("does not replace a symlink used as the rotation backup", async () => {
+      const dir = join(base, "lore");
+      const path = join(dir, "lore.log");
+      const target = join(base, "victim-backup.log");
+      mkdirSync(dir, { mode: 0o700 });
+      writeFileSync(path, Buffer.alloc(5 * 1024 * 1024 + 1), { mode: 0o600 });
+      writeFileSync(target, "do not replace");
+      symlinkSync(target, `${path}.1`);
+
+      const log = await freshPersistentLog();
+      for (let i = 0; i < 1_000; i++) log.info("rotation check");
+
+      expect(readFileSync(target, "utf8")).toBe("do not replace");
+      expect(lstatSync(`${path}.1`).isSymbolicLink()).toBe(true);
+    });
+
+    it("does not follow a symlink used as the persistent log", async () => {
+      const dir = join(base, "lore");
+      const target = join(base, "victim.log");
+      mkdirSync(dir, { mode: 0o700 });
+      writeFileSync(target, "do not append");
+      symlinkSync(target, join(dir, "lore.log"));
+
+      const log = await freshPersistentLog();
+      log.info("credential-bearing message");
+
+      expect(readFileSync(target, "utf8")).toBe("do not append");
+    });
+
+    it("does not write through a data path reported as another owner", async () => {
+      if (typeof process.getuid !== "function") return;
+      const dir = join(base, "lore");
+      const path = join(dir, "lore.log");
+      mkdirSync(dir, { mode: 0o700 });
+      writeFileSync(path, "before");
+      const uid = process.getuid();
+      vi.spyOn(process, "getuid").mockReturnValue(uid + 1);
+
+      const log = await freshPersistentLog();
+      log.info("must not append");
+
+      expect(readFileSync(path, "utf8")).toBe("before");
+    });
+  },
+);

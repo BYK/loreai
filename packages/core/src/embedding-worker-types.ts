@@ -454,8 +454,10 @@ export interface WorkerInitData {
    *  process-global can't reach it — we pass the value explicitly instead. When
    *  true (the plugin/in-process-gateway TUI mode), the worker must not write a
    *  single byte to stderr, which would corrupt the host's full-screen render.
-   *  The worker gates its `console.warn` diagnostics on this flag inline (it runs
-   *  as raw .ts and can't value-import siblings — see embedding-worker.ts). */
+   *  The worker gates its own diagnostics on this flag inline (it runs as raw
+   *  .ts and can't value-import siblings — see embedding-worker.ts). The parent
+   *  also owns and continuously drains both worker streams, routing any native
+   *  dependency output through the TUI-safe logger. */
   stderrSilenced?: boolean;
   /** Force the bundled WASM ONNX Runtime, skipping native-addon resolution
    *  entirely. Set by the main thread ONLY when respawning after the previous

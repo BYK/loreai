@@ -53,7 +53,7 @@ async function readSseChunks(response: Response): Promise<unknown[]> {
 // ---------------------------------------------------------------------------
 
 describe("buildOpenAIResponse (Chat Completions) — non-stream usage (#1475)", () => {
-  test("emits cache_creation_tokens when cacheCreationInputTokens is set", async () => {
+  test("emits cache_write_tokens when cacheCreationInputTokens is set", async () => {
     const resp = baseResp({
       usage: {
         inputTokens: 100,
@@ -66,10 +66,11 @@ describe("buildOpenAIResponse (Chat Completions) — non-stream usage (#1475)", 
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
     const details = usage.prompt_tokens_details as Record<string, number>;
-    expect(details.cache_creation_tokens).toBe(50);
+    expect(details.cache_write_tokens).toBe(50);
+    expect(usage.prompt_tokens).toBe(150);
   });
 
-  test("emits both cached_tokens and cache_creation_tokens together", async () => {
+  test("emits both cached_tokens and cache_write_tokens together", async () => {
     const resp = baseResp({
       usage: {
         inputTokens: 100,
@@ -84,7 +85,8 @@ describe("buildOpenAIResponse (Chat Completions) — non-stream usage (#1475)", 
     const usage = body.usage as Record<string, unknown>;
     const details = usage.prompt_tokens_details as Record<string, number>;
     expect(details.cached_tokens).toBe(80);
-    expect(details.cache_creation_tokens).toBe(20);
+    expect(details.cache_write_tokens).toBe(20);
+    expect(usage.prompt_tokens).toBe(200);
   });
 
   test("omits prompt_tokens_details when neither cache field is set", async () => {
@@ -110,7 +112,7 @@ describe("buildOpenAIResponse (Chat Completions) — non-stream usage (#1475)", 
     const response = buildOpenAIResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.prompt_tokens).toBe(100);
+    expect(usage.prompt_tokens).toBe(180);
     expect(usage.completion_tokens).toBe(20);
     const details = usage.prompt_tokens_details as Record<string, number>;
     expect(details.cached_tokens).toBe(80);
@@ -129,7 +131,7 @@ describe("buildOpenAIResponse (Chat Completions) — non-stream usage (#1475)", 
     const response = buildOpenAIResponse(resp, false);
     const body = (await response.json()) as Record<string, unknown>;
     const usage = body.usage as Record<string, unknown>;
-    expect(usage.total_tokens).toBe(120);
+    expect(usage.total_tokens).toBe(220);
   });
 });
 
@@ -178,7 +180,7 @@ describe("buildOpenAIResponse (Chat Completions) — stream usage (#1475)", () =
     expect(details.cached_tokens).toBe(80);
   });
 
-  test("stream terminal usage includes cache_creation_tokens when cacheCreationInputTokens is set", async () => {
+  test("stream terminal usage includes cache_write_tokens when cacheCreationInputTokens is set", async () => {
     const resp = baseResp({
       usage: {
         inputTokens: 100,
@@ -192,7 +194,8 @@ describe("buildOpenAIResponse (Chat Completions) — stream usage (#1475)", () =
     const penultimate = chunks[chunks.length - 2] as Record<string, unknown>;
     const usage = penultimate.usage as Record<string, unknown>;
     const details = usage.prompt_tokens_details as Record<string, number>;
-    expect(details.cache_creation_tokens).toBe(50);
+    expect(details.cache_write_tokens).toBe(50);
+    expect(usage.prompt_tokens).toBe(150);
   });
 
   test("stream terminal usage includes both cache fields together", async () => {
@@ -211,7 +214,8 @@ describe("buildOpenAIResponse (Chat Completions) — stream usage (#1475)", () =
     const usage = penultimate.usage as Record<string, unknown>;
     const details = usage.prompt_tokens_details as Record<string, number>;
     expect(details.cached_tokens).toBe(80);
-    expect(details.cache_creation_tokens).toBe(20);
+    expect(details.cache_write_tokens).toBe(20);
+    expect(usage.prompt_tokens).toBe(200);
   });
 
   test("stream emits usage chunk even when resp.usage is undefined (ZERO_USAGE fallback)", async () => {

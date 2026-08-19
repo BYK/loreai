@@ -5,17 +5,14 @@ import { describe, expect, it } from "vitest";
 const SOURCE_PATH = join(import.meta.dirname, "../src/embedding-worker.ts");
 const SOURCE = readFileSync(SOURCE_PATH, "utf-8");
 
-// Lint CLI regression: lore CI runs (e.g. 31192441316, 31156866927) emit
-// `unreadable result (SyntaxError: Unexpected token 'e', "[embedding-"…`
-// when the embedding worker's `console.warn` leaks through the legacy-bridge
-// shim that captures `console.error` into the CLI's stdout stream. The lint
-// CLI's `toJson` lambda then fails to extract the trailing JSON envelope and
-// `report.mjs` sees `[embedding-…]` where it expects `{hunks: …}`.
+// Lint CLI regression: older lore CI runs emitted `unreadable result` when an
+// embedding worker diagnostic reached the redirected report stdout before its
+// JSON envelope. Worker stdout/stderr are now parent-owned and drained (covered
+// by embedding-worker-stdio.test.ts); these checks retain the independent
+// severity invariant for recoverable diagnostics.
 //
-// `console.warn` is Node-aliased to `console.error`, which the legacy-bridge
-// captures. `console.debug` is NOT aliased and passes through stderr untouched.
-// So the fix is: any recoverable-path diagnostic (auto-heals, no user action)
-// must use `console.debug`, not `console.warn`.
+// A recoverable auto-heal has no user action and must use `console.debug`, not
+// warning severity. Both streams remain contained regardless of console method.
 
 /** Strip single-line `// …` comments so rationale text in comments doesn't
  *  trigger a false positive on a `console.X` substring match. */
@@ -75,7 +72,7 @@ function expectDebugBefore(source: string, spec: SectionSpec): void {
   ).toBe(true);
   expect(
     warnIdx < 0 || warnIdx < debugIdx,
-    `${spec.label}: a console.warn( call sits AFTER the console.debug( call (or no console.debug exists) — Node aliases warn to error and the lint CLI captures it into stdout`,
+    `${spec.label}: a console.warn( call sits AFTER the console.debug( call (or no console.debug exists)`,
   ).toBe(true);
 }
 
@@ -92,7 +89,7 @@ describe("embedding-worker recoverable-path logging", () => {
     const warnCalls = (stripped.match(/console\.warn\(/g) ?? []).length;
     expect(
       warnCalls,
-      "embedding-worker.ts should not call console.warn — every recoverable-path diagnostic must use console.debug (the lint CLI's legacy-bridge shim captures console.error into stdout, and Node aliases console.warn to console.error)",
+      "embedding-worker.ts should not call console.warn — every recoverable-path diagnostic must use console.debug",
     ).toBe(0);
   });
 });

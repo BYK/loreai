@@ -32,6 +32,7 @@ import { dirname, join } from "node:path";
 import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import { findOrtWebDir } from "./ort-web-plugin";
 import { ortNpmDualPlugin } from "./ort-npm-plugin";
+import { jsoncParserEsmPlugin } from "./jsonc-parser-plugin";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -106,7 +107,7 @@ await esbuild.build({
   minify: true,
   logLevel: "info",
   legalComments: "none",
-  plugins: [sentryNodePlugin],
+  plugins: [sentryNodePlugin, jsoncParserEsmPlugin(packageDir)],
   // Inject ESM/CJS interop shim so `import.meta.url` can be rewritten
   // via `define` (the static `import.meta` token would otherwise be
   // dropped to empty in CJS output, triggering esbuild's
@@ -171,7 +172,7 @@ await esbuild.build({
   minify: true,
   logLevel: "info",
   legalComments: "none",
-  plugins: [sentryNodePlugin],
+  plugins: [sentryNodePlugin, jsoncParserEsmPlugin(packageDir)],
   define: {
     LORE_CLI_VERSION: JSON.stringify(pkg.version),
     __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
@@ -493,7 +494,7 @@ export declare function loadConfig(): GatewayConfig;
  * port file management, and existing-instance reuse automatically.
  */
 export declare function startServer(config: GatewayConfig): Promise<{
-  stop: () => void;
+  stop: () => Promise<void>;
   port: number;
   hosts: string[];
   /** Resolves when all bound servers are listening. */

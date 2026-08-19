@@ -36,6 +36,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   buildProviderRegistrations,
+  gatewayAccessHeadersForRemote,
   resolveGatewayUrl,
   runCompaction,
   type SessionBeforeCompactResult,
@@ -115,6 +116,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   let projectPath = process.cwd();
   let currentSessionID = sessionIDFor(undefined);
   let compactAuthHeaders: Record<string, string> = {};
+  const gatewayAccessHeaders = gatewayAccessHeadersForRemote(gatewayBase);
 
   let cachedGitRemote = getGitRemote(projectPath) ?? "";
 
@@ -131,6 +133,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       gatewayBase,
       getHeaders: () => {
         const headers: Record<string, string> = {
+          ...gatewayAccessHeaders,
           "x-lore-session-id": currentSessionID,
           "x-lore-project": projectPath,
         };
@@ -145,12 +148,15 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
           return;
         }
         const apiKey = headers.get("x-api-key");
+        const googleApiKey = headers.get("x-goog-api-key");
         const authorization = headers.get("authorization");
         compactAuthHeaders = apiKey
           ? { "x-api-key": apiKey }
-          : authorization
-            ? { authorization }
-            : {};
+          : googleApiKey
+            ? { "x-goog-api-key": googleApiKey }
+            : authorization
+              ? { authorization }
+              : {};
       },
     });
     fetchInterceptorInstalled = true;
@@ -215,7 +221,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
         previousSummary: event.preparation.previousSummary,
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
-        authHeaders: compactAuthHeaders,
+        authHeaders: { ...gatewayAccessHeaders, ...compactAuthHeaders },
       }),
   );
 }

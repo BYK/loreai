@@ -9,6 +9,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { loopbackRequest } from "./helpers/loopback-request";
 import {
   afterAll,
   beforeAll,
@@ -71,7 +72,7 @@ function clientFor(uid: string): SupabaseClient {
         : input instanceof URL
           ? input.toString()
           : input.url;
-    return fetch(url.replace("/rest/v1", ""), init);
+    return loopbackRequest(url.replace("/rest/v1", ""), init);
   };
   return createClient(h.restUrl as string, jwt, {
     auth: { persistSession: false, autoRefreshToken: false },

@@ -131,7 +131,7 @@ describe("getManyWithAliasesOffloaded chunks unbounded IN (#1022)", () => {
 
     // Both scans must actually have split into multiple chunks.
     const entityScans = RecordingReadWorker.specs.filter((s) =>
-      /FROM entities WHERE id IN/.test(s.sql),
+      /FROM entities WHERE tenant_id = .*id IN/.test(s.sql),
     );
     const aliasScans = RecordingReadWorker.specs.filter((s) =>
       /FROM entity_aliases WHERE entity_id IN/.test(s.sql),
@@ -140,7 +140,9 @@ describe("getManyWithAliasesOffloaded chunks unbounded IN (#1022)", () => {
     expect(aliasScans.length).toBe(Math.ceil(1801 / CHUNK)); // 3
 
     // Chunks must partition the id set: union of entity-scan params === all ids.
-    const scanned = new Set(entityScans.flatMap((s) => s.params as string[]));
+    const scanned = new Set(
+      entityScans.flatMap((s) => (s.params as string[]).slice(1)),
+    );
     expect(scanned.size).toBe(1801);
     for (const id of ids) expect(scanned.has(id)).toBe(true);
   });

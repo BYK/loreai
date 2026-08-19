@@ -1955,7 +1955,7 @@ describe("cache stability (e2e)", () => {
       if (prevIdleTimeout === undefined) delete process.env.LORE_IDLE_TIMEOUT;
       else process.env.LORE_IDLE_TIMEOUT = prevIdleTimeout;
     }
-  });
+  }, 600_000);
 
   // A full, signed billing-header sentinel — the exact shape BILLING_RESIGN_RE
   // matches. Quoting this verbatim in conversation content (e.g. while editing

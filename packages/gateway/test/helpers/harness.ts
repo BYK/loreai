@@ -5,15 +5,24 @@
  * temporary DB, wires in a replay interceptor from a fixture array, and
  * provides helper methods for sending requests and asserting DB state.
  *
+ * Harnesses are serial-only within a process: they intentionally replace
+ * process-wide DB and pipeline singletons. Concurrent create/teardown is not a
+ * supported architecture; use separate Vitest workers for parallel isolation.
+ *
  * Usage:
  *   const harness = await createHarness({ fixtures });
  *   const resp = await harness.chat(body);
- *   harness.teardown();
+ *   await harness.teardown();
  */
 import { unlinkSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { FixtureEntry } from "../../src/recorder";
+import type { GatewayConfig } from "../../src/config";
 import type { SimulatedCacheTurn } from "./simulated-cache";
+import { loopbackRequest } from "./loopback-request";
+
+export const TEST_GATEWAY_AUTH_TOKEN =
+  "test-gateway-access-token-32-bytes-minimum";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -22,7 +31,7 @@ import type { SimulatedCacheTurn } from "./simulated-cache";
 export interface HarnessOptions {
   fixtures: FixtureEntry[];
   /** Override any config values */
-  configOverrides?: Partial<{ port: number; debug: boolean }>;
+  configOverrides?: Partial<GatewayConfig>;
   /**
    * Compute realistic prompt-cache usage (cache_read / cache_creation) from the
    * actual upstream body prefix-stability and inject it into each replayed
@@ -53,10 +62,19 @@ export interface Harness {
   baseURL: string;
   /** Path to the isolated temp DB */
   dbPath: string;
+  /** Send a loopback request without WHATWG fetch's browser-only port blocklist. */
+  request(
+    path: string,
+    init?: {
+      method?: string;
+      headers?: HeadersInit;
+      body?: string | Uint8Array;
+    },
+  ): Promise<Response>;
   /** Send a POST /v1/messages request, return the raw Response */
   chat(
     requestBody: unknown,
-    apiKey?: string,
+    apiKey?: string | null,
     extraHeaders?: Record<string, string>,
   ): Promise<Response>;
   /** Query the temporal DB directly via a read-only SQLite connection */
@@ -112,6 +130,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   const { withSimulatedCache } = await import("./simulated-cache");
   const { setUpstreamInterceptor, resetPipelineState } =
     await import("../../src/pipeline");
+  const { _resetAuthForTest } = await import("../../src/auth");
   const { startServer } = await import("../../src/server");
   const { loadConfig } = await import("../../src/config");
   // Import close() so we can reset the DB singleton between harnesses.
@@ -122,6 +141,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // Must close the DB BEFORE resetting pipeline state (which may use the DB).
   closeDB();
   await resetPipelineState();
+  _resetAuthForTest();
 
   // --- 4. Wire in replay interceptor (streaming-aware: emits SSE for
   // streaming turns, JSON otherwise), wrapped to capture the exact upstream
@@ -165,7 +185,14 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
 
   // --- 5. Start gateway ---
   opts.beforeConfigLoad?.();
-  const config = loadConfig();
+  const config = {
+    ...loadConfig(),
+    // Harnesses are local unless a test opts into remote/hosted semantics.
+    // This keeps the suite independent of the developer machine's bind env.
+    remoteGateway: false,
+    hostedMode: false,
+    ...opts.configOverrides,
+  };
   // Vitest files share process.env within a worker. Another file can clobber
   // LORE_LISTEN_PORT between the assignment above and this loadConfig() call,
   // so pin the requested harness port on the config object itself.
@@ -173,7 +200,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   config.portExplicit = port !== 0;
   const server = await startServer(config);
   if (server.port <= 0) {
-    server.stop();
+    await server.stop();
     throw new Error(`test gateway resolved invalid port ${server.port}`);
   }
 
@@ -200,36 +227,54 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     }
   }
 
-  // --- 7. chat() helper ---
+  // --- 7. Loopback request helpers ---
+  async function request(
+    path: string,
+    init: {
+      method?: string;
+      headers?: HeadersInit;
+      body?: string | Uint8Array;
+    } = {},
+  ): Promise<Response> {
+    // WHATWG fetch rejects a browser-defined list of "bad ports". Port 0 can
+    // legitimately assign one of those ports to the local test server, making
+    // an otherwise valid harness request fail nondeterministically. Use Node's
+    // HTTP transport for all loopback endpoints while retaining a web
+    // Response and streaming body for callers.
+    return loopbackRequest(`${baseURL}${path}`, init);
+  }
+
   async function chat(
     requestBody: unknown,
-    apiKey = "test-key",
+    apiKey: string | null = "test-key",
     extraHeaders?: Record<string, string>,
   ): Promise<Response> {
-    return fetch(`${baseURL}/v1/messages`, {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "anthropic-version": "2023-06-01",
+      // Provide a confident project binding by default so the synthetic
+      // project-resolution probe is never triggered in harness-based tests.
+      // Tests that intentionally test path-less sessions can override this
+      // via extraHeaders (set to empty string to suppress).
+      "x-lore-project": projectPath,
+    };
+    if (apiKey !== null) headers["x-api-key"] = apiKey;
+    Object.assign(headers, extraHeaders);
+    return request("/v1/messages", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        // Provide a confident project binding by default so the synthetic
-        // project-resolution probe is never triggered in harness-based tests.
-        // Tests that intentionally test path-less sessions can override this
-        // via extraHeaders (set to empty string to suppress).
-        "x-lore-project": projectPath,
-        ...extraHeaders,
-      },
+      headers,
       body: JSON.stringify(requestBody),
     });
   }
 
   // --- 8. teardown() ---
   async function teardown(): Promise<void> {
-    server.stop();
+    await server.stop();
     // Close the core DB singleton first so the next harness can open a fresh
     // DB at its own LORE_DB_PATH.
     closeDB();
     await resetPipelineState();
+    _resetAuthForTest();
     setUpstreamInterceptor(undefined);
 
     // Delete DB files (main + WAL + SHM)
@@ -254,12 +299,16 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   async function restartPipeline(): Promise<void> {
     closeDB();
     await resetPipelineState({ fast: true });
+    // A real process restart loses the in-memory credential registry. Clear it
+    // here too so restart regressions cannot pass on a stale pre-restart key.
+    _resetAuthForTest();
     installReplayInterceptor();
   }
 
   return {
     baseURL,
     dbPath,
+    request,
     chat,
     queryDB,
     upstreamBodies,

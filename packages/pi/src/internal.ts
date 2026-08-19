@@ -10,7 +10,10 @@
  * relying on the `NODE_ENV=test` inert path.
  */
 import { createHash } from "node:crypto";
+import { GATEWAY_AUTH_HEADER } from "@loreai/core";
 import { log } from "@loreai/core";
+import * as http from "node:http";
+import * as https from "node:https";
 
 /**
  * Pi-side shape of a `session_before_compact` result. Pi doesn't re-export
@@ -95,6 +98,51 @@ export const GATEWAY_PROVIDERS: readonly string[] = [
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 export const KNOWN_GATEWAY_PORTS = [3207, 5673];
 
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname
+      .replace(/^\[/, "")
+      .replace(/\]$/, "")
+      .toLowerCase();
+    return (
+      hostname === "localhost" ||
+      hostname === "localhost." ||
+      hostname === "::1" ||
+      /^127(?:\.\d{1,3}){3}$/.test(hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function probeLoopback(url: string, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const request = (parsed.protocol === "https:" ? https : http).request(
+      parsed,
+      { method: "GET", signal },
+      (response) => {
+        response.resume();
+        const status = response.statusCode ?? 0;
+        resolve(status >= 200 && status < 300);
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+/** Strip URL components that may carry credentials before diagnostics. */
+function gatewayUrlForLog(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "invalid";
+    return url.origin + (url.pathname === "/" ? "" : url.pathname);
+  } catch {
+    return "invalid";
+  }
+}
+
 /** A provider registration as passed to `pi.registerProvider`. */
 export interface ProviderRegistration {
   provider: string;
@@ -110,14 +158,16 @@ export async function probeGateway(
   baseURL: string,
   timeoutMs = 1500,
 ): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`${baseURL}/health`, { signal: controller.signal });
-    clearTimeout(timer);
-    return res.ok;
+    const url = `${baseURL}/health`;
+    if (isLoopbackUrl(url)) return await probeLoopback(url, controller.signal);
+    return (await fetch(url, { signal: controller.signal })).ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -131,8 +181,10 @@ export async function probeGateway(
 export async function resolveGatewayUrl(): Promise<string | null> {
   // 0. Remote gateway — skip local discovery/startup entirely.
   if (process.env.LORE_REMOTE_URL) {
-    const url = process.env.LORE_REMOTE_URL.replace(/\/$/, "");
-    if (await probeGateway(url)) return url;
+    const url = gatewayUrlForLog(
+      process.env.LORE_REMOTE_URL.replace(/\/$/, ""),
+    );
+    if (url !== "invalid" && (await probeGateway(url))) return url;
     log.info(
       `pi: remote gateway at ${url} not reachable, falling through to local discovery`,
     );
@@ -140,8 +192,10 @@ export async function resolveGatewayUrl(): Promise<string | null> {
 
   // 1. Explicit env var — probe it to verify it's actually reachable.
   if (process.env.LORE_GATEWAY_URL) {
-    const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
-    if (await probeGateway(url)) return url;
+    const url = gatewayUrlForLog(
+      process.env.LORE_GATEWAY_URL.replace(/\/$/, ""),
+    );
+    if (url !== "invalid" && (await probeGateway(url))) return url;
     // env var set but gateway unreachable — fall through to discovery
   }
 
@@ -187,13 +241,12 @@ export async function startInProcess(): Promise<string | null> {
     const url = `http://127.0.0.1:${handle.port}`;
 
     if (!handle.owned) {
-      log.info(`pi: reusing existing gateway at ${url}`);
+      log.info(`pi: reusing existing gateway at ${gatewayUrlForLog(url)}`);
     }
 
     return url;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    log.warn("pi: failed to start gateway in-process:", msg);
+  } catch {
+    log.warn("pi: failed to start gateway in-process");
     return null;
   }
 }
@@ -205,6 +258,18 @@ export async function startInProcess(): Promise<string | null> {
 export function sessionIDFor(sessionFile: string | undefined): string {
   if (!sessionFile) return `pi-ephemeral-${process.pid}`;
   return `pi-${createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)}`;
+}
+
+/** Access headers are injected only for the URL selected by LORE_REMOTE_URL. */
+export function gatewayAccessHeadersForRemote(
+  gatewayBase: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const remoteUrl = env.LORE_REMOTE_URL?.replace(/\/+$/, "");
+  const token = env.LORE_GATEWAY_AUTH_TOKEN;
+  return remoteUrl === gatewayBase.replace(/\/+$/, "") && token
+    ? { [GATEWAY_AUTH_HEADER]: token }
+    : {};
 }
 
 /**
@@ -242,6 +307,7 @@ export function buildProviderRegistrations(opts: {
   const registrations: ProviderRegistration[] = [];
   for (const provider of GATEWAY_PROVIDERS) {
     const headers: Record<string, string> = {
+      ...gatewayAccessHeadersForRemote(gatewayBase, env),
       "x-lore-session-id": sessionID,
       "x-lore-project": projectPath,
       // Inject provider ID so the gateway uses provider-based routing
@@ -331,19 +397,24 @@ export async function runCompaction(opts: {
 
     if (!res.ok) {
       // Gateway returned an error — fall back to Pi's default compaction.
-      const errBody = await res.text().catch(() => "");
+      const sessionNotFound =
+        res.status === 404 &&
+        (await res
+          .text()
+          .then((body) => body.includes("session_not_found"))
+          .catch(() => false));
       // A 404 `session_not_found` is expected when this session was never
       // routed through Lore (e.g. a provider Lore doesn't proxy, or a
       // websocket-only transport that bypassed the gateway). That's not a
       // failure — log it quietly and let Pi's default compaction run.
-      if (res.status === 404 && errBody.includes("session_not_found")) {
+      if (sessionNotFound) {
         log.info(
           "pi: lore compaction unavailable — this session was not routed " +
             "through Lore; falling back to Pi compaction.",
         );
         return undefined;
       }
-      log.warn(`pi: compaction endpoint returned ${res.status}: ${errBody}`);
+      log.warn(`pi: compaction endpoint returned HTTP ${res.status}`);
       return undefined;
     }
 
@@ -368,8 +439,8 @@ export async function runCompaction(opts: {
         tokensBefore,
       },
     };
-  } catch (err) {
-    log.warn("pi: custom compaction failed, falling back to default:", err);
+  } catch {
+    log.warn("pi: custom compaction failed, falling back to default");
     return undefined;
   }
 }

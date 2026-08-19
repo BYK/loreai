@@ -12,6 +12,14 @@
  */
 
 import { asString } from "@loreai/core";
+import {
+  GATEWAY_AUTH_HEADER,
+  isCredentialHeaderName,
+  KNOWN_SESSION_HEADERS,
+} from "../credential-headers";
+import { hasConflictingAuthHeaders, PROVIDER_AUTH_HEADER_NAMES } from "../auth";
+
+export { isCredentialHeaderName } from "../credential-headers";
 
 // ---------------------------------------------------------------------------
 // Content blocks — discriminated union on `type`
@@ -41,6 +49,8 @@ export type GatewayToolResultBlock = {
   type: "tool_result";
   /** ID of the tool_use block this result corresponds to. */
   toolUseId: string;
+  /** Provider function name when identity and name are distinct (Gemini). */
+  toolName?: string;
   /**
    * Structured tool-result content. Anthropic `tool_result` content can be a
    * string or an array of blocks (text, image, etc.). We always normalize to
@@ -204,6 +214,8 @@ export type GatewayProtocol =
 
 /** Normalized request after ingress translation from either protocol. */
 export type GatewayRequest = {
+  /** Caller disconnect/cancellation propagated from the ingress Request. */
+  signal?: AbortSignal;
   /** Which protocol the request arrived as — determines egress translation. */
   protocol: GatewayProtocol;
   /** Model identifier (e.g. `claude-sonnet-4-20250514`, `gpt-4o`). */
@@ -238,6 +250,8 @@ export type GatewayRequest = {
     user?: string;
     logprobs?: boolean;
     top_logprobs?: number;
+    /** OpenRouter provider routing preferences, preserved verbatim. */
+    provider?: unknown;
     /** OpenAI Responses API: previous response ID for conversation continuation. */
     previous_response_id?: string;
     /** OpenAI Responses API: reasoning configuration. */
@@ -313,16 +327,12 @@ export const ZERO_USAGE: GatewayUsage = Object.freeze({
  * check misses them and `JSON.parse`-ing the SSE body throws
  * (`Unexpected token 'e', "event: res"...` — LOREAI-GATEWAY-38 / -1P).
  *
- * Only `data:`/`event:` are sniffed (not `id:`/`retry:`/`:` comments): those two
- * are the only prefixes a completion stream opens with, and the narrower set
- * avoids false-positives on plaintext error bodies (e.g. a body starting with
- * `retry: later`). The caller feeds a detected SSE body to a stream accumulator,
- * which tolerates any subsequent field.
+ * Recognizes every legal field/comment that may precede the first data event.
  */
 export function looksLikeSSE(contentType: string, body: string): boolean {
   if (contentType.includes("text/event-stream")) return true;
   const head = body.replace(/^\uFEFF/, "").trimStart();
-  return /^(?:data|event):/.test(head);
+  return /^(?:(?:data|event|id|retry):|:)/.test(head);
 }
 
 /** Accumulated response from the upstream provider. */
@@ -456,7 +466,7 @@ export type CacheAnalytics = {
   probePrefixSha?: string;
 };
 
-/** Routing snapshot captured from the last successful session request.
+/** Routing snapshot captured from a session request before upstream dispatch.
  *  Workers (distillation, curation) and the cache warmer use this
  *  to route through the same upstream with matching credentials.
  *  Single source of truth — replaces lastModel, lastProtocol,
@@ -464,6 +474,8 @@ export type CacheAnalytics = {
 export interface UpstreamSnapshot {
   /** Resolved upstream base URL (e.g., "https://api.minimax.io/anthropic"). */
   url: string;
+  /** Whether X-Lore-Upstream-URL, rather than administrator routing, selected it. */
+  callerSelected?: boolean;
   /** Wire protocol used for the request. */
   protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini";
   /** Provider ID from X-Lore-Provider header (for worker model selection). */
@@ -472,6 +484,41 @@ export interface UpstreamSnapshot {
   model: string;
   /** Non-managed headers to forward upstream (anthropic-beta, etc.). */
   headers: Record<string, string>;
+  /** OpenRouter routing preferences inherited by same-provider workers. */
+  providerOptions?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Resolve OpenRouter's top-level `provider` value without losing presence.
+ * OpenAI ingress stores it in `extras`; Anthropic ingress stores unknown fields
+ * in `metadata`. An explicitly present extras property wins even when its value
+ * is null (or undefined in a directly constructed test request).
+ */
+export function providerRoutingValue(
+  req: GatewayRequest,
+): { present: true; value: unknown } | { present: false } {
+  if (req.extras && Object.hasOwn(req.extras, "provider")) {
+    return { present: true, value: req.extras.provider };
+  }
+  if (Object.hasOwn(req.metadata, "provider")) {
+    return { present: true, value: req.metadata.provider };
+  }
+  return { present: false };
+}
+
+/** Whether an OpenAI-compatible request is actually routed to OpenRouter. */
+export function requestTargetsOpenRouter(
+  req: GatewayRequest,
+  upstreamBase: string,
+): boolean {
+  if (req.rawHeaders["x-lore-provider"]?.toLowerCase() === "openrouter") {
+    return true;
+  }
+  try {
+    return new URL(upstreamBase).hostname.toLowerCase() === "openrouter.ai";
+  } catch {
+    return false;
+  }
 }
 
 /** Per-session state tracked by the gateway for Lore pipeline decisions. */
@@ -560,8 +607,12 @@ export type SessionState = {
   headerSessionId?: string;
   /** Name of the header that provided `headerSessionId`. */
   headerName?: string;
-  /** Privacy-safe credential scope for header/marker session identity. */
+  /** Privacy-safe credential scope for header/marker session identity. Remote
+   *  gateways must use the full domain-separated tenant fingerprint; local
+   *  gateways retain the historical short diagnostic fingerprint. */
   credentialFingerprint?: string;
+  /** Opaque server-derived owner used to re-enter tenant scope in delayed work. */
+  storageTenantId?: string;
   /** Candidate headers being tracked during the Tier 2 learning phase.
    *  Key: header name. Value: last seen value + consecutive stable turn count. */
   candidateHeaders?: Map<string, { value: string; seenCount: number }>;
@@ -587,7 +638,7 @@ export type SessionState = {
   warmup?: WarmupState;
   /** Per-session survival model (inter-turn gap histogram). */
   survivalModel?: InterTurnHistogram;
-  /** Routing snapshot from the most recent session request.
+  /** Routing snapshot from the most recent session request start.
    *  Used by cache warmer (targets the most-recent provider) and as
    *  a convenience accessor. For provider-specific lookups (workers,
    *  auth), use `upstreamByProvider` instead. */
@@ -597,6 +648,10 @@ export type SessionState = {
    *  this to find the correct URL/credentials when the session has used
    *  multiple providers within the same conversation. */
   upstreamByProvider: Map<string, UpstreamSnapshot>;
+  /** Request-start order of the current `lastUpstream` (transient). */
+  _upstreamRequestOrder?: number;
+  /** Request-start order per raw provider ID (transient). */
+  _upstreamRequestOrderByProvider?: Map<string, number>;
 
   // --- Synthetic project-resolution probe ---
 
@@ -722,6 +777,10 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   // upstream request to match the bytes it actually sends. Forwarding the
   // client's raw value would mislabel the re-serialized body (issue #1032).
   "content-encoding",
+  // Origin-bound browser credentials, including Lore's management cookie.
+  // Never forward these to a model-provider origin.
+  "cookie",
+  "proxy-authorization",
   // Lore-specific (injected by fetch interceptor / plugin hooks)
   "x-lore-provider",
   "x-lore-upstream-url",
@@ -731,15 +790,16 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "x-lore-git-remote",
   "x-lore-agent",
   "x-lore-no-store",
+  GATEWAY_AUTH_HEADER,
   "x-lore-recall-invoked",
   // Protocol version — set explicitly by each builder
   "anthropic-version",
   // Session identification — consumed by gateway, not meaningful to upstream
   "x-parent-session-id",
-  "x-session-affinity",
-  "x-claude-code-session-id",
+  ...KNOWN_SESSION_HEADERS,
   // Auth — handled separately by each builder (extractAuth + authHeaders)
   "x-api-key",
+  "x-goog-api-key",
   "authorization",
 ]);
 
@@ -749,7 +809,8 @@ const GATEWAY_MANAGED_HEADERS = new Set([
  * The fetch interceptor preserves all original headers (including provider-
  * specific ones like `anthropic-beta`, `OpenAI-Organization`, etc.) on the
  * request to the gateway. This function extracts them for forwarding to the
- * upstream, filtering out headers the gateway sets itself.
+ * upstream, filtering out headers the gateway sets itself and any credentials
+ * whose destination cannot be safely inferred here.
  *
  * User-supplied `extraHeaders` (from `LORE_UPSTREAM_EXTRA_HEADERS`) are
  * applied separately at the end of each request builder so they overlay
@@ -764,7 +825,11 @@ export function forwardClientHeaders(
   const forwarded: Record<string, string> = {};
   for (const [key, value] of Object.entries(rawHeaders)) {
     const lower = key.toLowerCase();
-    if (!lower.startsWith("x-lore-") && !GATEWAY_MANAGED_HEADERS.has(lower)) {
+    if (
+      !lower.startsWith("x-lore-") &&
+      !GATEWAY_MANAGED_HEADERS.has(lower) &&
+      !isCredentialHeaderName(lower)
+    ) {
       forwarded[lower] = value;
     }
   }
@@ -776,10 +841,8 @@ export function forwardClientHeaders(
  * built upstream `headers` object. Keys are already lowercased by
  * `parseCurlHeaders`. Empty input is a no-op.
  *
- * Used by every upstream-headers construction site (anthropic/openai/openai-
- * responses builders, the upstream snapshot in `pipeline.ts`, and the
- * passthrough endpoints in `server.ts` / `cache-warmer.ts` /
- * `passthroughResponsesCompact`) to keep precedence consistent:
+ * Used by upstream dispatch sites (anthropic/openai/openai-responses builders
+ * and passthrough/cache-warmer paths) to keep precedence consistent:
  * client-forwarded headers → gateway-managed overlay → user extras.
  */
 export function applyUpstreamExtraHeaders(
@@ -787,7 +850,38 @@ export function applyUpstreamExtraHeaders(
   extras?: Record<string, string>,
 ): void {
   if (!extras) return;
-  for (const [key, value] of Object.entries(extras)) {
+  const normalized = new Map(
+    Object.entries(extras).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  if (normalized.has(GATEWAY_AUTH_HEADER)) {
+    throw new Error(
+      "Configured upstream headers cannot contain the gateway access header",
+    );
+  }
+  if (hasConflictingAuthHeaders(extras)) {
+    throw new Error(
+      "Configured upstream headers contain conflicting authentication mechanisms",
+    );
+  }
+  const authHeaders = new Set<string>(PROVIDER_AUTH_HEADER_NAMES);
+  const replacesAuth = [...normalized.keys()].some((key) =>
+    authHeaders.has(key),
+  );
+
+  for (const key of Object.keys(headers)) {
+    const lower = key.toLowerCase();
+    if (normalized.has(lower) || (replacesAuth && authHeaders.has(lower))) {
+      delete headers[key];
+    }
+  }
+  for (const [key, value] of normalized) {
     headers[key] = value;
   }
+}
+
+/** Build the credential-safe client-header snapshot reused by workers/warmers. */
+export function buildUpstreamSnapshotHeaders(
+  rawHeaders: Record<string, string>,
+): Record<string, string> {
+  return forwardClientHeaders(rawHeaders);
 }

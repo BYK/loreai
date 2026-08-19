@@ -10,9 +10,8 @@
  * compatibility layer at `/v1beta/openai/...`). Key differences:
  *   - roles are `user` / `model` (not `assistant`);
  *   - the system prompt lives in `systemInstruction` (a `{parts:[{text}]}`);
- *   - tool calls are `functionCall` parts; tool results are `functionResponse`
- *     parts. Gemini has NO per-call id — calls/results are paired by function
- *     NAME, so we synthesize the internal tool-use id from the name;
+ *   - tool calls are `functionCall` parts; modern Gemini responses may include
+ *     a per-call `id`. Legacy responses are paired by function NAME only;
  *   - tools are `[{functionDeclarations:[{name,description,parameters}]}]`;
  *   - generation params live under `generationConfig`;
  *   - auth is an API key via the `x-goog-api-key` header. Clients that use the
@@ -29,6 +28,8 @@ import type {
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
 import { asString } from "@loreai/core";
+import { extractAuth } from "../auth";
+import { safeTokenSum, validateGeminiUsageMetadata } from "../usage-validation";
 
 /** Default Gemini API version segment used when building upstream URLs. */
 const GEMINI_API_VERSION = "v1beta";
@@ -37,6 +38,99 @@ const GEMINI_API_VERSION = "v1beta";
 const DEFAULT_GEMINI_MAX_TOKENS = 8192;
 
 type GeminiPart = Record<string, unknown>;
+
+export interface GeminiFunctionCall {
+  id?: string;
+  name: string;
+  args?: Record<string, unknown>;
+}
+
+export function validateGeminiFunctionCallIdentity(
+  value: unknown,
+  identities: Set<string>,
+  diagnostic: string,
+): GeminiFunctionCall {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(diagnostic);
+  }
+  const call = value as Record<string, unknown>;
+  if (
+    typeof call.name !== "string" ||
+    call.name.length === 0 ||
+    (call.id !== undefined &&
+      (typeof call.id !== "string" || call.id.length === 0)) ||
+    (call.args !== undefined &&
+      (!call.args || typeof call.args !== "object" || Array.isArray(call.args)))
+  ) {
+    throw new Error(diagnostic);
+  }
+  const identity = call.id ?? call.name;
+  if (identities.has(identity)) throw new Error(diagnostic);
+  identities.add(identity);
+  return call as unknown as GeminiFunctionCall;
+}
+
+export function validateGeminiCandidateToolIdentities(
+  candidates: unknown[],
+  diagnostic: string,
+): void {
+  for (const candidate of candidates) {
+    // Tool identities are local to each independent candidate.
+    const identities = new Set<string>();
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
+      throw new Error(diagnostic);
+    }
+    const typedCandidate = candidate as Record<string, unknown>;
+    if (
+      (typedCandidate.index !== undefined &&
+        (!Number.isSafeInteger(typedCandidate.index) ||
+          (typedCandidate.index as number) < 0)) ||
+      (typedCandidate.finishReason !== undefined &&
+        typedCandidate.finishReason !== null &&
+        typeof typedCandidate.finishReason !== "string")
+    ) {
+      throw new Error(diagnostic);
+    }
+    const content = typedCandidate.content;
+    if (content === undefined) continue;
+    if (!content || typeof content !== "object" || Array.isArray(content)) {
+      throw new Error(diagnostic);
+    }
+    const parts = (content as Record<string, unknown>).parts;
+    const role = (content as Record<string, unknown>).role;
+    if (role !== undefined && typeof role !== "string") {
+      throw new Error(diagnostic);
+    }
+    if (parts === undefined) continue;
+    if (!Array.isArray(parts)) throw new Error(diagnostic);
+    for (const part of parts) {
+      if (!part || typeof part !== "object" || Array.isArray(part)) {
+        throw new Error(diagnostic);
+      }
+      const functionCall = (part as Record<string, unknown>).functionCall;
+      const text = (part as Record<string, unknown>).text;
+      const thought = (part as Record<string, unknown>).thought;
+      if (
+        (text !== undefined && typeof text !== "string") ||
+        (thought !== undefined && typeof thought !== "boolean") ||
+        (text !== undefined && functionCall !== undefined)
+      ) {
+        throw new Error(diagnostic);
+      }
+      if (functionCall !== undefined) {
+        validateGeminiFunctionCallIdentity(
+          functionCall,
+          identities,
+          diagnostic,
+        );
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Gemini generateContent request → GatewayRequest
@@ -65,17 +159,30 @@ function partToBlock(part: GeminiPart): GatewayContentBlock | null {
     return { type: "text", text: part.text };
   }
   if (part.functionCall && typeof part.functionCall === "object") {
-    const fc = part.functionCall as { name?: unknown; args?: unknown };
+    const fc = part.functionCall as {
+      id?: unknown;
+      name?: unknown;
+      args?: unknown;
+    };
     const name = asString(fc.name);
-    // Gemini has no per-call id; pair by NAME (see file header).
-    return { type: "tool_use", id: name, name, input: fc.args ?? {} };
+    return {
+      type: "tool_use",
+      id: asString(fc.id) || name,
+      name,
+      input: fc.args ?? {},
+    };
   }
   if (part.functionResponse && typeof part.functionResponse === "object") {
-    const fr = part.functionResponse as { name?: unknown; response?: unknown };
+    const fr = part.functionResponse as {
+      id?: unknown;
+      name?: unknown;
+      response?: unknown;
+    };
     const name = asString(fr.name);
     return {
       type: "tool_result",
-      toolUseId: name,
+      toolUseId: asString(fr.id) || name,
+      toolName: name,
       content: [{ type: "text", text: JSON.stringify(fr.response ?? {}) }],
     };
   }
@@ -188,7 +295,15 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
       // visible answer text.
       return block.thinking ? [{ text: block.thinking, thought: true }] : [];
     case "tool_use":
-      return [{ functionCall: { name: block.name, args: block.input ?? {} } }];
+      return [
+        {
+          functionCall: {
+            id: block.id,
+            name: block.name,
+            args: block.input ?? {},
+          },
+        },
+      ];
     case "tool_result": {
       const text = blocksToText(block.content);
       let response: unknown;
@@ -199,7 +314,15 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
       } catch {
         response = { output: text };
       }
-      return [{ functionResponse: { name: block.toolUseId, response } }];
+      return [
+        {
+          functionResponse: {
+            id: block.toolUseId,
+            name: block.toolName ?? block.toolUseId,
+            response,
+          },
+        },
+      ];
     }
     case "opaque":
       return [block.raw];
@@ -222,6 +345,12 @@ export function buildGeminiUpstreamRequest(
     ...forwardClientHeaders(req.rawHeaders),
     "content-type": "application/json",
   };
+  const credential = extractAuth(req.rawHeaders);
+  if (credential?.scheme === "api-key") {
+    headers["x-goog-api-key"] = credential.value;
+  } else if (credential?.scheme === "bearer") {
+    headers.authorization = `Bearer ${credential.value}`;
+  }
 
   const contents: Array<Record<string, unknown>> = [];
   for (const msg of req.messages) {
@@ -308,30 +437,45 @@ export function mapGeminiFinishReason(
  * INCLUDES thinking). Omitting it undercounts output for the gateway's
  * cost-aware routing and understates the client's total.
  */
-export function geminiUsageFromMetadata(
-  um: Record<string, unknown> | undefined,
-): GatewayUsage {
+export function geminiUsageFromMetadata(value: unknown): GatewayUsage {
+  const um = validateGeminiUsageMetadata(
+    value,
+    "malformed Gemini usage metadata",
+  );
   if (!um) return { ...ZERO_USAGE };
   const candidates =
     typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : 0;
   const thoughts =
     typeof um.thoughtsTokenCount === "number" ? um.thoughtsTokenCount : 0;
+  const cached =
+    typeof um.cachedContentTokenCount === "number"
+      ? um.cachedContentTokenCount
+      : 0;
+  const toolPrompt =
+    typeof um.toolUsePromptTokenCount === "number"
+      ? um.toolUsePromptTokenCount
+      : 0;
   const usage: GatewayUsage = {
     inputTokens:
-      typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0,
-    outputTokens: candidates + thoughts,
+      Math.max(
+        0,
+        (typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0) -
+          cached,
+      ) + toolPrompt,
+    outputTokens: safeTokenSum(
+      [candidates, thoughts],
+      "malformed Gemini usage metadata",
+    ),
   };
   if (typeof um.cachedContentTokenCount === "number") {
-    usage.cacheReadInputTokens = um.cachedContentTokenCount;
+    usage.cacheReadInputTokens = cached;
   }
   return usage;
 }
 
 /** Parse Gemini `usageMetadata` into `GatewayUsage`. */
 function parseGeminiUsage(json: Record<string, unknown>): GatewayUsage {
-  return geminiUsageFromMetadata(
-    json.usageMetadata as Record<string, unknown> | undefined,
-  );
+  return geminiUsageFromMetadata(json.usageMetadata);
 }
 
 /**
@@ -342,6 +486,10 @@ export function parseGeminiResponseJSON(
   json: Record<string, unknown>,
 ): GatewayResponse {
   const candidates = Array.isArray(json.candidates) ? json.candidates : [];
+  validateGeminiCandidateToolIdentities(
+    candidates,
+    "malformed Gemini response tool identity",
+  );
   // LIMITATION: the internal model holds a single response, so when a client
   // requests `candidateCount > 1` only candidates[0] is surfaced. Multi-candidate
   // fan-out is a documented follow-up, not currently supported.
@@ -356,7 +504,9 @@ export function parseGeminiResponseJSON(
   for (const p of parts) {
     const block = partToBlock(p);
     if (!block) continue;
-    if (block.type === "tool_use") hasToolCall = true;
+    if (block.type === "tool_use") {
+      hasToolCall = true;
+    }
     blocks.push(block);
   }
 
@@ -407,13 +557,24 @@ export function buildGeminiResponseBody(
   resp: GatewayResponse,
 ): Record<string, unknown> {
   const usage = resp.usage ?? ZERO_USAGE;
+  const inclusiveInputTokens = safeTokenSum(
+    [
+      usage.inputTokens,
+      usage.cacheReadInputTokens,
+      usage.cacheCreationInputTokens,
+    ],
+    "Gemini response usage overflow",
+  );
   const parts: GeminiPart[] = [];
   for (const block of resp.content) parts.push(...blockToGeminiParts(block));
 
   const usageMetadata: Record<string, unknown> = {
-    promptTokenCount: usage.inputTokens,
+    promptTokenCount: inclusiveInputTokens,
     candidatesTokenCount: usage.outputTokens,
-    totalTokenCount: usage.inputTokens + usage.outputTokens,
+    totalTokenCount: safeTokenSum(
+      [inclusiveInputTokens, usage.outputTokens],
+      "Gemini response usage overflow",
+    ),
   };
   if (usage.cacheReadInputTokens != null) {
     usageMetadata.cachedContentTokenCount = usage.cacheReadInputTokens;

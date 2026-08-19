@@ -30,6 +30,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loopbackRequest } from "./helpers/loopback-request";
 
 // ---------------------------------------------------------------------------
 // Helpers: build Anthropic SSE events for fixtures
@@ -151,10 +152,10 @@ function anthropicFinalStream(text: string): Response {
 // Test lifecycle
 // ---------------------------------------------------------------------------
 
-let teardownFn: (() => void) | undefined;
+let teardownFn: (() => Promise<void>) | undefined;
 
-afterEach(() => {
-  teardownFn?.();
+afterEach(async () => {
+  await teardownFn?.();
   teardownFn = undefined;
 });
 
@@ -171,6 +172,8 @@ async function spinUpGateway(projectDir: string) {
   await loadLoreConfig(projectDir);
 
   const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
   const server = await startServer(config);
   return {
     baseURL: `http://127.0.0.1:${server.port}`,
@@ -180,14 +183,14 @@ async function spinUpGateway(projectDir: string) {
   };
 }
 
-function teardownAll(
+async function teardownAll(
   dbPath: string,
   projectDir: string,
-  server: { stop: () => void },
+  server: { stop: () => Promise<void> },
   closeDB: () => void,
   setUpstreamInterceptor: (i: undefined) => void,
-) {
-  server.stop();
+): Promise<void> {
+  await server.stop();
   closeDB();
   setUpstreamInterceptor(undefined);
   for (const suffix of ["", "-shm", "-wal"]) {
@@ -235,7 +238,7 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
     teardownFn = () =>
       teardownAll(dbPath, projectDir, server, closeDB, setUpstreamInterceptor);
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -313,7 +316,7 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
     teardownFn = () =>
       teardownAll(dbPath, projectDir, server, closeDB, setUpstreamInterceptor);
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -376,7 +379,7 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
     teardownFn = () =>
       teardownAll(dbPath, projectDir, server, closeDB, setUpstreamInterceptor);
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -492,7 +495,7 @@ describe("Streaming recall marker — non-Anthropic (inline + translated)", () =
     // stream/openai.ts converts the Anthropic SSE to OpenAI Chat Completions
     // chunks — including the inline marker, which arrives as a
     // delta.content chunk.
-    const resp = await fetch(`${baseURL}/v1/chat/completions`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -681,7 +684,7 @@ describe("Streaming recall marker — mixed tools (recall + Read)", () => {
     teardownFn = () =>
       teardownAll(dbPath, projectDir, server, closeDB, setUpstreamInterceptor);
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -871,7 +874,7 @@ describe("Streaming recall marker — non-Anthropic mixed tools (recall + Read)"
     // pipeline.ts:4824 takeHeldBackEvents() path which forwards the
     // preamble's message_delta + message_stop to the OpenAI translator
     // so it can emit finish_reason="tool_calls" + [DONE].
-    const resp = await fetch(`${baseURL}/v1/chat/completions`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -981,7 +984,7 @@ describe("Streaming recall marker — multi-recall drill-down", () => {
     teardownFn = () =>
       teardownAll(dbPath, projectDir, server, closeDB, setUpstreamInterceptor);
 
-    const resp = await fetch(`${baseURL}/v1/messages`, {
+    const resp = await loopbackRequest(`${baseURL}/v1/messages`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

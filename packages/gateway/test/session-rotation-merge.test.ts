@@ -20,6 +20,7 @@
  * tests in session.test.ts.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { DatabaseSync } from "node:sqlite";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import {
@@ -28,6 +29,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_SYSTEM,
 } from "./helpers/fixtures";
+import { enableHostedMode, _resetHostedModeForTest } from "@loreai/core";
 
 // A faithful Claude Code coding turn carries the anchored OAuth billing header
 // at system[0] (Claude Code emits it whenever `_CLAUDE_CODE_ASSUME_FIRST_PARTY_
@@ -67,6 +69,7 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
 
   afterEach(async () => {
     if (harness) await harness.teardown();
+    _resetHostedModeForTest();
   });
 
   it("does NOT merge two distinct Claude Code conversations into one session", async () => {
@@ -229,7 +232,7 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
   });
 });
 
-describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates safely", () => {
+describe("x-session-affinity restart adoption", () => {
   let harness: Harness;
 
   afterEach(async () => {
@@ -278,31 +281,64 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     );
   });
 
-  it("allows rotation when the project is unchanged (genuine restart)", async () => {
-    // Same project, new nanoid → legitimate OpenCode restart → resume the
-    // SAME session (the original purpose of Tier 1b).
+  it("resumes a genuine restart only with project-scoped multi-message overlap", async () => {
+    // A new nanoid is not continuity evidence by itself. A genuine OpenCode
+    // restart resumes only after fingerprint adoption confirms at least two
+    // leading user messages in the same project.
     harness = await createHarness({
-      fixtures: [
-        ...makeConversationFixtures([
-          { userMessage: "restart one", assistantText: "S1." },
-        ]),
-        ...makeConversationFixtures([
-          { userMessage: "restart two", assistantText: "S2." },
-        ]),
-      ],
+      fixtures: makeConversationFixtures([
+        { userMessage: "restart one", assistantText: "S1." },
+        { userMessage: "restart two", assistantText: "S2." },
+        { userMessage: "restart three", assistantText: "S3." },
+      ]),
     });
 
-    const r1 = await harness.chat(body("restart one"), "key-A", {
+    let r1 = await harness.chat(body("restart one"), "key-A", {
       "x-session-affinity": "nanoid-before-restart",
       "x-lore-project": "/proj/oc-same",
     });
     expect(r1.status).toBe(200);
     await r1.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
 
-    const r2 = await harness.chat(body("restart two"), "key-A", {
-      "x-session-affinity": "nanoid-after-restart",
-      "x-lore-project": "/proj/oc-same",
-    });
+    r1 = await harness.chat(
+      {
+        ...body("restart two"),
+        messages: [
+          { role: "user", content: "restart one" },
+          { role: "assistant", content: "S1." },
+          { role: "user", content: "restart two" },
+        ],
+      },
+      "key-A",
+      {
+        "x-session-affinity": "nanoid-before-restart",
+        "x-lore-project": "/proj/oc-same",
+      },
+    );
+    expect(r1.status).toBe(200);
+    await r1.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const r2 = await harness.chat(
+      {
+        ...body("restart three"),
+        messages: [
+          { role: "user", content: "restart one" },
+          { role: "assistant", content: "S1." },
+          { role: "user", content: "restart two" },
+          { role: "assistant", content: "S2." },
+          { role: "user", content: "restart three" },
+        ],
+      },
+      "key-A",
+      {
+        "x-session-affinity": "nanoid-after-restart",
+        "x-lore-project": "/proj/oc-same",
+      },
+    );
     expect(r2.status).toBe(200);
     await r2.text();
 
@@ -315,9 +351,9 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     expect(sessions[0].project_path).toBe("/proj/oc-same");
   });
 
-  it("allows rotation when no X-Lore-Project header is sent (Fix 2 is a no-op)", async () => {
-    // When the incoming request has no confident project header, Fix 2 cannot
-    // compare projects → rotation proceeds as before (benign restart).
+  it("does not let an arbitrary pathless fresh affinity take over", async () => {
+    // The same credential and header name are not continuity proof. With no
+    // project-scoped content overlap, a pathless fresh affinity stays isolated.
     harness = await createHarness({
       fixtures: [
         ...makeConversationFixtures([
@@ -350,8 +386,124 @@ describe("Tier 1b rotation: x-session-affinity (OpenCode nanoid) still rotates s
     const sessions = harness.queryDB<SessionRow>(
       "SELECT session_id, project_path FROM session_state WHERE header_name = 'x-session-affinity'",
     );
-    // ONE session — rotation proceeded (Fix 2 was a no-op, no incoming project).
-    expect(sessions.length).toBe(1);
+    expect(sessions.length).toBe(2);
+    expect(new Set(sessions.map((session) => session.session_id)).size).toBe(2);
+  });
+
+  it("does not bypass project-scoped overlap through a conflicting remote", async () => {
+    enableHostedMode();
+    const projectPath = "/client/projects/rotation-backfill";
+    const conflictingPath = "/client/projects/rotation-backfill-clone";
+    const remote = `github.com/test/rotation-${crypto.randomUUID()}`;
+    harness = await createHarness({
+      fixtures: makeConversationFixtures([
+        { userMessage: "rotation merge first", assistantText: "First." },
+        { userMessage: "rotation merge second", assistantText: "Second." },
+        { userMessage: "rotation merge third", assistantText: "Third." },
+      ]),
+    });
+
+    let response = await harness.chat(body("rotation merge first"), "key-A", {
+      "x-session-affinity": "rotation-merge-before",
+      "x-lore-project": projectPath,
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    response = await harness.chat(
+      {
+        ...body("rotation merge second"),
+        messages: [
+          { role: "user", content: "rotation merge first" },
+          { role: "assistant", content: "First." },
+          { role: "user", content: "rotation merge second" },
+        ],
+      },
+      "key-A",
+      {
+        "x-session-affinity": "rotation-merge-before",
+        "x-lore-project": projectPath,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Adversarial order: the path-only project already exists, then a clone
+    // carrying its remote arrives before the provisional rotation commits.
+    // Backfilling projectPath now has to merge this conflicting remote row.
+    const conflictingId = crypto.randomUUID();
+    const database = new DatabaseSync(harness.dbPath);
+    try {
+      database
+        .prepare(
+          "INSERT INTO projects (id, path, name, git_remote, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          conflictingId,
+          conflictingPath,
+          "rotation-backfill-clone",
+          remote,
+          Date.now(),
+        );
+    } finally {
+      database.close();
+    }
+
+    response = await harness.chat(
+      {
+        ...body("rotation merge third"),
+        messages: [
+          { role: "user", content: "rotation merge first" },
+          { role: "assistant", content: "First." },
+          { role: "user", content: "rotation merge second" },
+          { role: "assistant", content: "Second." },
+          { role: "user", content: "rotation merge third" },
+        ],
+      },
+      "key-A",
+      {
+        "x-session-affinity": "rotation-merge-after",
+        "x-lore-project": projectPath,
+        "x-lore-git-remote": remote,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const sessions = harness.queryDB<SessionRow & { message_count: number }>(
+      `SELECT session_id, header_session_id, header_name, project_path,
+              project_path_provisional, credential_fingerprint, message_count
+         FROM session_state
+        WHERE header_name = 'x-session-affinity'`,
+    );
+    expect(sessions).toHaveLength(2);
+    const rotated = sessions.find(
+      (session) => session.header_session_id === "rotation-merge-after",
+    );
+    expect(rotated).toMatchObject({
+      header_session_id: "rotation-merge-after",
+      project_path: projectPath,
+      project_path_provisional: 0,
+      message_count: 5,
+    });
+    expect(
+      harness.queryDB<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ? AND content LIKE ?",
+        [rotated?.session_id, "%rotation merge third%"],
+      )[0]?.count,
+    ).toBeGreaterThan(0);
+    expect(
+      harness.queryDB<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM projects WHERE id = ?",
+        [conflictingId],
+      )[0]?.count,
+    ).toBe(0);
   });
 });
 

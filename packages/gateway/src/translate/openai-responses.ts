@@ -17,9 +17,46 @@ import type {
   GatewayRequest,
   GatewayResponse,
   GatewayTool,
+  GatewayUsage,
 } from "./types";
-import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
+import {
+  blocksToText,
+  forwardClientHeaders,
+  providerRoutingValue,
+  requestTargetsOpenRouter,
+  ZERO_USAGE,
+} from "./types";
 import { extractAuth } from "../auth";
+import { safeTokenSum } from "../usage-validation";
+
+function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
+  const inclusiveInputTokens = safeTokenSum(
+    [
+      usage.inputTokens,
+      usage.cacheReadInputTokens,
+      usage.cacheCreationInputTokens,
+    ],
+    "Responses usage overflow",
+  );
+  const result: Record<string, unknown> = {
+    input_tokens: inclusiveInputTokens,
+    output_tokens: usage.outputTokens,
+    total_tokens: safeTokenSum(
+      [inclusiveInputTokens, usage.outputTokens],
+      "Responses usage overflow",
+    ),
+  };
+  if (
+    usage.cacheReadInputTokens != null ||
+    usage.cacheCreationInputTokens != null
+  ) {
+    result.input_tokens_details = {
+      cached_tokens: usage.cacheReadInputTokens ?? 0,
+      cache_write_tokens: usage.cacheCreationInputTokens ?? 0,
+    };
+  }
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // OpenAI Responses API → GatewayRequest
@@ -71,6 +108,9 @@ export function parseOpenAIResponsesRequest(
   if (typeof raw.user === "string") {
     extras.user = raw.user;
   }
+  if (Object.hasOwn(raw, "provider")) {
+    extras.provider = raw.provider;
+  }
   // Responses API-specific extras
   if (raw.previous_response_id !== undefined) {
     extras.previous_response_id = raw.previous_response_id as string;
@@ -91,10 +131,7 @@ export function parseOpenAIResponsesRequest(
     stream,
     maxTokens,
     metadata: {},
-    rawHeaders: {
-      ...headers,
-      "x-api-key": headers["x-api-key"] ?? "",
-    },
+    rawHeaders: { ...headers },
     extras,
   };
 }
@@ -532,6 +569,15 @@ export function buildOpenAIResponsesUpstreamRequest(
     }
   }
 
+  const providerRouting = providerRoutingValue(req);
+  if (
+    !req.codex &&
+    providerRouting.present &&
+    requestTargetsOpenRouter(req, upstreamBase)
+  ) {
+    body.provider = providerRouting.value;
+  }
+
   // Codex (ChatGPT) is the OpenAI Responses wire format plus a small, cohesive
   // delta. Keep ALL Codex-specific differences in `applyCodexResponsesDelta`
   // (and the worker-side `buildCodexWorkerRequest`) so the shared builder stays
@@ -676,62 +722,59 @@ function buildOpenAIResponsesNonStreamResponse(
   resp: GatewayResponse,
 ): Response {
   const usage = resp.usage ?? ZERO_USAGE;
-  const output: Array<Record<string, unknown>> = [];
+  const output: Array<Record<string, unknown>> = resp.rawOutputItems
+    ? [...resp.rawOutputItems]
+    : [];
   let textContent = "";
   const functionCalls: Array<Record<string, unknown>> = [];
 
-  for (const block of resp.content) {
-    if (block.type === "text") {
-      textContent += block.text;
-    } else if (block.type === "tool_use") {
-      functionCalls.push({
-        type: "function_call",
-        id: `fc_${block.id}`,
-        call_id: block.id,
-        name: block.name,
-        arguments: JSON.stringify(block.input),
+  if (!resp.rawOutputItems) {
+    for (const block of resp.content) {
+      if (block.type === "text") {
+        textContent += block.text;
+      } else if (block.type === "tool_use") {
+        functionCalls.push({
+          type: "function_call",
+          id: `fc_${block.id}`,
+          call_id: block.id,
+          name: block.name,
+          arguments: JSON.stringify(block.input),
+          status: "completed",
+        });
+      }
+    }
+
+    if (textContent) {
+      output.push({
+        type: "message",
+        id: `msg_${resp.id}`,
+        role: "assistant",
         status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: textContent,
+            annotations: [],
+          },
+        ],
       });
     }
+
+    output.push(...functionCalls);
   }
 
-  if (textContent) {
-    output.push({
-      type: "message",
-      id: `msg_${resp.id}`,
-      role: "assistant",
-      status: "completed",
-      content: [
-        {
-          type: "output_text",
-          text: textContent,
-          annotations: [],
-        },
-      ],
-    });
-  }
-
-  output.push(...functionCalls);
-
+  const status = mapStopReasonToStatus(resp.stopReason);
   const response = {
     id: resp.id.startsWith("resp_") ? resp.id : `resp_${resp.id}`,
     object: "response",
     created_at: Math.floor(Date.now() / 1000),
     model: resp.model,
-    status: mapStopReasonToStatus(resp.stopReason),
+    status,
+    ...(status === "incomplete"
+      ? { incomplete_details: incompleteDetails(resp.stopReason) }
+      : {}),
     output,
-    usage: {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      total_tokens: usage.inputTokens + usage.outputTokens,
-      ...(usage.cacheReadInputTokens != null
-        ? {
-            prompt_tokens_details: {
-              cached_tokens: usage.cacheReadInputTokens,
-            },
-          }
-        : {}),
-    },
+    usage: responsesUsage(usage),
   };
 
   return new Response(JSON.stringify(response), {
@@ -748,12 +791,20 @@ function mapStopReasonToStatus(reason: string): string {
       return "completed";
     case "max_tokens":
     case "length":
+    case "content_filter":
       return "incomplete";
     case "tool_use":
       return "completed";
     default:
       return "completed";
   }
+}
+
+function incompleteDetails(stopReason: string): { reason: string } {
+  return {
+    reason:
+      stopReason === "content_filter" ? "content_filter" : "max_output_tokens",
+  };
 }
 
 function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
@@ -940,15 +991,20 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
         }
       }
 
-      // response.completed
-      emit("response.completed", {
-        type: "response.completed",
+      const status = mapStopReasonToStatus(resp.stopReason);
+      const terminalEvent =
+        status === "incomplete" ? "response.incomplete" : "response.completed";
+      emit(terminalEvent, {
+        type: terminalEvent,
         response: {
           id: respId,
           object: "response",
           created_at: created,
           model: resp.model,
-          status: mapStopReasonToStatus(resp.stopReason),
+          status,
+          ...(status === "incomplete"
+            ? { incomplete_details: incompleteDetails(resp.stopReason) }
+            : {}),
           output: resp.content
             .map((block, i) => {
               if (block.type === "text") {
@@ -975,18 +1031,7 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
               return null;
             })
             .filter(Boolean),
-          usage: {
-            input_tokens: usage.inputTokens,
-            output_tokens: usage.outputTokens,
-            total_tokens: usage.inputTokens + usage.outputTokens,
-            ...(usage.cacheReadInputTokens != null
-              ? {
-                  prompt_tokens_details: {
-                    cached_tokens: usage.cacheReadInputTokens,
-                  },
-                }
-              : {}),
-          },
+          usage: responsesUsage(usage),
         },
       });
 
