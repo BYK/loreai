@@ -24,6 +24,7 @@ import { logCommand, diffCommand } from "./commands/log";
 import { doctorCommand } from "./commands/doctor";
 import { lintCommand } from "./commands/lint";
 import { loginCommand, logoutCommand } from "./commands/auth";
+import { startCommand } from "./commands/start";
 import { syncCommand } from "./commands/sync";
 import { teamCommand } from "./commands/team";
 import { adminCommand } from "./commands/admin";
@@ -41,7 +42,6 @@ import { uninstallCommand } from "./commands/uninstall";
  * handles them through the orchestrator in `cli.ts`.
  */
 export const LEGACY_ROUTES: ReadonlySet<string> = new Set([
-  "start",
   "run",
   "setup",
   "upgrade",
@@ -121,6 +121,7 @@ export const routes = buildRouteMap({
     lint: lintCommand,
     login: loginCommand,
     logout: logoutCommand,
+    start: startCommand,
     sync: syncCommand,
     team: teamCommand,
     admin: adminCommand,
