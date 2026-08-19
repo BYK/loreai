@@ -15152,6 +15152,7 @@ async function handleConversationTurn(
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
   claimSession: (sessionID: string) => Promise<void>,
+  onSessionIdentified?: (sessionID: string) => void,
 ): Promise<Response> {
   if (
     pipelineResetInProgress ||
@@ -15189,6 +15190,11 @@ async function handleConversationTurn(
   });
   const { identified } = admitted;
   const { sessionID, isNew, tier } = identified;
+  try {
+    onSessionIdentified?.(sessionID);
+  } catch (error) {
+    log.warn("session diagnostic failed:", error);
+  }
   if (!admitted.claimed) await claimSession(sessionID);
   if (identified.expectedUnowned && !legacyAdoptionTargetIsUnowned(sessionID)) {
     dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
@@ -18741,6 +18747,7 @@ export function earlyFlushStreamingResponse(
   signal?: AbortSignal,
   trackOperation?: (operation: Promise<unknown>) => void,
   keepaliveMs = 5_000,
+  diagnosticContext?: () => string,
 ): Response {
   const encoder = new TextEncoder();
   const keepalive = encoder.encode(`: lore preparing\n\n`);
@@ -18872,7 +18879,16 @@ export function earlyFlushStreamingResponse(
           if (chunk.done) finish(controller);
           else controller.enqueue(chunk.value);
         } catch (err) {
-          log.error("early-flush stream failed:", err);
+          let context = "";
+          try {
+            context = diagnosticContext?.() ?? "";
+          } catch (contextError) {
+            log.warn("early-flush failure diagnostic failed:", contextError);
+          }
+          log.error(
+            `early-flush stream failed${context ? ` (${context})` : ""}:`,
+            err,
+          );
           if (!cancelled) {
             controller.enqueue(emitFailed("Gateway request failed"));
             finish(controller);
@@ -19063,6 +19079,7 @@ async function handleRequestInner(
     // within 10s; this guarantees they flush immediately and the client sees a
     // keepalive while the gateway prepares.
     if (req.stream && req.protocol === "openai-responses") {
+      let sessionID: string | undefined;
       return earlyFlushStreamingResponse(
         (signal) =>
           handleConversationTurn(
@@ -19073,10 +19090,16 @@ async function handleRequestInner(
             downstreamSettled,
             downstreamWasCancelled,
             claimSession,
+            (identifiedSessionID) => {
+              sessionID = identifiedSessionID;
+            },
           ),
         req.model,
         req.signal,
         trackOperation,
+        undefined,
+        () =>
+          `request=${requestOrder} session=${sessionID?.slice(0, 16) ?? "pending"} upstream=${upstreamUrlForLog(resolveRequestUpstreamRoute(req, config).effectiveUpstreamBase)}`,
       );
     }
     return await handleConversationTurn(
