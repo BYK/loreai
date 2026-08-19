@@ -1,0 +1,100 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>The Semantic Linter: Automating reviews without losing touch | Lore</title><meta name="description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><!-- Open Graph --><meta property="og:title" content="The Semantic Linter: Automating reviews without losing touch | Lore"><meta property="og:description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><meta property="og:image" content="https://withlore.ai/_preview/pr-1649/og-image-c43f89de.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="Lore.AI — Shared Context for AI Agents"><meta property="og:url" content="https://withlore.ai/_preview/pr-1649/blog/review-with-memory/"><meta property="og:type" content="article"><meta property="og:site_name" content="Lore.AI"><!-- Twitter Card --><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="The Semantic Linter: Automating reviews without losing touch | Lore"><meta name="twitter:description" content="You can't write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review."><meta name="twitter:image" content="https://withlore.ai/_preview/pr-1649/og-image-c43f89de.png"><meta name="twitter:site" content="@withLoreAI"><!-- RSS feed autodiscovery --><link rel="alternate" type="application/rss+xml" title="Lore Blog" href="https://withlore.ai/_preview/pr-1649/rss.xml"><!--
+  standard.site publication discovery hint. This is a hint only; the
+  authoritative check is the /.well-known/site.standard.publication endpoint.
+--><link rel="site.standard.publication" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.publication/self"><link rel="site.standard.document" href="at://did:plc:mnccz4sthqjuyugmzlfacnv7/site.standard.document/review-with-memory"><link rel="icon" type="image/svg+xml" href="/_preview/pr-1649/favicon.svg"><link rel="icon" type="image/png" sizes="32x32" href="/_preview/pr-1649/favicon-32.png"><link rel="apple-touch-icon" sizes="180x180" href="/_preview/pr-1649/apple-touch-icon.png"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:wght@200;300;400;500;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="/_preview/pr-1649/theme.css"><style>.blog-body{background:var(--bg);cursor:auto;min-height:100svh}.blog-body:after{z-index:0}.blog-nav{z-index:20;background:var(--nav-bg);color:var(--inverse-text);justify-content:space-between;align-items:center;gap:2rem;padding:.6rem 3rem;display:flex;position:sticky;top:0}.blog-brand img{width:auto;height:64px;display:block}.blog-nav nav{align-items:center;gap:1.5rem;font-size:.9rem;display:flex}.blog-hero,.blog-list,.blog-post{width:min(980px,100% - 2rem);margin:0 auto}.blog-hero{padding:7rem 0 4rem}.blog-hero h1,.blog-post h1{font-family:var(--serif);color:var(--heading);font-weight:400}.blog-hero h1{max-width:760px;font-size:clamp(2.6rem,6vw,5rem);line-height:1.05}.blog-hero p:not(.eyebrow),.blog-card p,.blog-post header p{max-width:68ch;color:var(--text-muted)}.blog-list{border:1px solid var(--border);background:var(--border);gap:1px;padding-bottom:6rem;display:grid}.blog-card{background:var(--surface);padding:2rem}.blog-card time,.blog-post time,.blog-back{color:var(--eyebrow);letter-spacing:.1em;text-transform:uppercase;font-size:.78rem}.blog-card h2{font-family:var(--serif);margin:.7rem 0 .6rem;font-size:1.8rem;font-weight:400}.blog-card ul{flex-wrap:wrap;gap:.5rem;margin-top:1rem;list-style:none;display:flex}.blog-card li{border:1px solid var(--border);color:var(--link);border-radius:3px;padding:.15rem .5rem;font-size:.78rem}.blog-post{width:min(720px,100% - 3rem);padding:5rem 0 7rem}.blog-post header{margin:2rem 0 3.5rem}.blog-post h1{font-size:clamp(2.4rem,5vw,4rem);line-height:1.08}.blog-post .blog-subtitle{max-width:none;font-family:var(--serif);color:var(--heading-accent);margin:.8rem 0 0;font-size:clamp(1.3rem,3vw,1.9rem);font-style:italic;font-weight:400;line-height:1.2}.blog-post time{margin:1.6rem 0 .5rem;display:block}.blog-post header p:not(.blog-subtitle){margin:0;font-size:1.1rem;line-height:1.6}.blog-prose{max-width:none}.blog-prose p,.blog-prose li{color:var(--text);font-size:1.05rem;line-height:1.75}.blog-prose p,.blog-prose ul,.blog-prose ol,.blog-prose blockquote,.blog-prose pre,.blog-prose table{margin:0 0 1.4rem}.blog-prose>:first-child{margin-top:0}.blog-prose h2{font-family:var(--serif);color:var(--heading);margin:2.8rem 0 1rem;font-size:1.75rem;font-weight:500;line-height:1.2}.blog-prose h3{font-family:var(--serif);color:var(--heading);margin:2.2rem 0 .8rem;font-size:1.3rem;font-weight:500;line-height:1.25}.blog-prose ul,.blog-prose ol{padding-left:1.3rem}.blog-prose li{margin-bottom:.5rem}.blog-prose li:last-child{margin-bottom:0}.blog-prose a{color:var(--emphasis);text-underline-offset:2px;text-decoration:underline 1px}.blog-prose a:hover{color:var(--link-hover)}.blog-prose :not(pre)>code{background:var(--bg-alt);border-radius:3px;padding:.12em .35em;font-size:.9em}.blog-prose blockquote{border-left:3px solid var(--eyebrow);color:var(--emphasis);font-family:var(--serif);padding:.4rem 0 .4rem 1.3rem;font-size:1.45rem;font-style:italic;line-height:1.3}.blog-prose blockquote p{margin:0}.blog-prose table{border-collapse:collapse;width:100%;font-size:1rem}.blog-prose th,.blog-prose td{border:1px solid var(--border);text-align:left;vertical-align:top;padding:.7rem .9rem;line-height:1.55}.blog-prose thead th{background:var(--surface-alt);color:var(--heading);font-weight:600}.blog-prose tbody tr:nth-child(2n) td{background:var(--surface-alt)}.blog-prose pre{border-radius:4px;padding:1rem;font-size:.92em;overflow-x:auto}@media (prefers-color-scheme:light){.blog-prose pre{color:#24292f;background:#fff;border:1px solid #d0d7de}.blog-prose pre span[style*="--0:#82AAFF"]{color:#0550ae}.blog-prose pre span[style*="--0:#D6DEEB"]{color:#24292f}.blog-prose pre span[style*="--0:#ECC48D"]{color:#0a3069}.blog-prose pre span[style*="--0:#7FDBCA"]{color:#116329}}@media (width<=780px){.blog-nav{flex-direction:column;align-items:flex-start;padding:.8rem 1rem 1rem}.blog-nav nav{flex-wrap:wrap}}
+</style><script type="module" src="/_preview/pr-1649/_astro/page.D168NPJH.js"></script></head><body class="blog-body"><header class="blog-nav"><a href="/_preview/pr-1649/" class="logo" data-theme="dark" aria-label="Lore.AI — home"><img src="/_preview/pr-1649/_astro/loreai-dark.BoECdKok.svg" class="logo-img" alt="" width="48" height="48" style="height: 48px; width: 48px;"><span class="logo-text">Lore<span class="logo-dot">.</span>AI</span></a><nav aria-label="Primary navigation"><a href="/_preview/pr-1649/docs/">Docs</a><a href="/_preview/pr-1649/blog/">Blog</a><a href="/_preview/pr-1649/different/">Why Lore</a><a href="/_preview/pr-1649/rss.xml">RSS</a><a href="https://github.com/byk/loreai" target="_blank" rel="noopener noreferrer">GitHub</a></nav></header><main><article class="blog-post"><a class="blog-back" href="/_preview/pr-1649/blog/">Back to blog</a><header><p class="eyebrow">Burak Yigit Kaya</p><h1>The Semantic Linter: Automating reviews without losing touch</h1><p class="blog-subtitle">Why AI code reviews need grounding with team context</p><time datetime="2026-07-26T00:00:00.000Z">July 26, 2026</time><p>You can&#39;t write down your taste. But you keep working by it, and Lore learns it the way an apprentice would, then helps enforce it in code review.</p></header><div class="blog-prose"><p>About ten years ago, when machine learning got good enough that you could train a real classifier
+without a research lab, I had a specific project in mind. I wanted to train something that reviewed
+code the way I did, so I could step back from reviewing every change without the codebase drifting.
+I never built it. I never had enough of the right data, and I never had the time.</p>
+<p>The debate about review has finally caught up with the project I never built, and I think both
+sides are half right.</p>
+<h2 id="the-same-complaint-from-two-sides">The same complaint from two sides</h2>
+<p>One camp says the whole point of writing code with agents is that a human still reads every line
+before it ships. Slow down, look closely, stay in control. The other camp, often the same people
+on a different day, says the job has turned into something worse: you don’t write much anymore, you
+sit and read change after change the machine produced, and it is dull and a little soul-crushing.
+Reviewing slop, they call it.</p>
+<p>Those are two views of one loss. Review used to be where judgment happened and where the
+team learned how the codebase was meant to work. Now it has shrunk to a checkpoint you sign off on.
+The “read every line” camp wants to protect what review was. The “this is soul-crushing” camp is
+telling you it has already gone. Both are reacting to one loss.</p>
+<p>A colleague told me the human side of this a few months ago. When he joined the team, he said, he
+learned a lot from getting detailed reviews from me, the kind where you explain not just what to
+change but why the team works this way. What he picked up wasn’t a list of rules. It was a way of
+working. Now we mostly work on our own, agents write and review most of the code, and he misses it.
+He wasn’t complaining about speed. He was noticing that something had stopped passing between us.</p>
+<p>Armin Ronacher <a href="https://lucumr.pocoo.org/2026/7/13/the-tower/">wrote about this</a> from the other
+end. The shared understanding a team keeps of its own system used to be a byproduct of the friction
+in working together, and agents have quietly removed the friction. My colleague felt that up close.</p>
+<h2 id="what-review-was-really-passing-along">What review was really passing along</h2>
+<p>A review was never only a gate. It was how one person’s standard reached everyone else. You don’t
+mock the database in integration tests, and here’s the migration bug that taught us why. Deploys go
+from the release branch, because of the time they didn’t. The standard arrived with its reason, at
+the moment it mattered, to whoever was on the change.</p>
+<p>When that stops, the standards don’t disappear. They stop showing up when they’re needed, and six
+months later a pull request quietly brings back the exact thing the team decided against. Nobody
+used bad judgment. The change looks reasonable on its own. What was missing was a reviewer who knew
+the standard and noticed, right then, that the change cut against it.</p>
+<h2 id="you-are-what-you-do-not-what-you-write-down">You are what you do, not what you write down</h2>
+<p>That is the hard part, and it’s why the project I never got to needed data I never had. A review
+teaches the person reading it, but it’s a poor thing to learn from at scale. It’s the verdict, not
+the reasoning: “don’t do this here” lands, and the thinking that led me there stays in my head. Most
+of what makes a good reviewer good is taste, built from years of doing the work, and you can’t write
+it down. Ask someone to put their standards in a document and you get a thin, lifeless version of
+what they actually do. But you keep doing it, review after review, and the standard is real even
+when the document isn’t.</p>
+<p>That’s the shift that makes this possible now. Lore watches the work the way an apprentice does. It
+sits alongside your sessions, distills what you decide and why, and writes it down for you as
+<a href="/_preview/pr-1649/docs/team-memory/"><code>.lore.md</code></a>, a version-controlled file of the team’s decisions and gotchas,
+reviewed in pull requests like any other file. We’ve written before about
+<a href="/_preview/pr-1649/blog/distill-your-own-knowledge/">why knowledge lives in text</a>. You don’t write docs that go
+stale in a few weeks. You work, and it learns.</p>
+<p>An apprentice is not you, and I want to be honest about the ceiling. It won’t learn your deepest
+judgment, the calls that come from taste you couldn’t explain if you tried. But it learns the
+standards you set often enough, and that turns out to be a lot of them.</p>
+<h2 id="the-apprentice-reviews-the-code">The apprentice reviews the code</h2>
+<p>This is the thing I wanted ten years ago, and it turns out the achievable part was the part that
+mattered. Not a machine that thinks like me. One that learned the standards and speaks up when a
+change goes against one.</p>
+<p>So we built a check that reads the diff against what Lore has learned. On every pull request, the
+<a href="/_preview/pr-1649/docs/guides/semantic-linter/">semantic linter</a> takes the changes and the standards from
+<code>.lore.md</code> and asks, for the pairs that look related, one question: does this change go against
+something the team decided? When the answer looks like yes, it says so, as an annotation next to
+the line, with the reason attached. The reason is the point. It’s the part of the review that used
+to pass from person to person and stopped.</p>
+<p>It’s a judge, not a rule engine. “Never mock the database in integration tests” isn’t a pattern you
+can match with a regex, and any lint rule that tried would be brittle and easy to route around. It’s
+a meaning, and you can only check it by understanding what the change does and what the standard
+intends. The honest cost is that a judge produces suspicions, not verdicts. It can be wrong, and we
+designed around that instead of pretending otherwise.</p>
+<h2 id="the-boring-part-handled">The boring part, handled</h2>
+<p>If you’re in the “read every line” camp, what you’re rightly afraid of is a noisy check that blocks
+work on a bad guess. We share that fear, so the linter ships advisory only. It never fails a build.
+It leaves a note and a human decides. A check that guesses and can break CI would teach everyone to
+ignore it inside a week.</p>
+<p>And if you’re in the “this is soul-crushing” camp, look at what it takes off you: the dull part,
+checking every change against every standard the team ever set, which is the work no human does well
+or enjoys. What’s left is the judgment, the taste, whether this is even the right change. The part
+worth doing.</p>
+<p>A ladder above advisory is designed in. Once a team has watched how often the check is wrong, a
+rule can graduate to a gate, with an override for the author who knows better. That part is still
+coming. Today everything stays advisory on purpose, because the system should earn trust before it
+can block anything.</p>
+<h2 id="wheres-the-limit">Where’s the limit?</h2>
+<p>I’m not claiming the reviewer goes away. On the contrary, we’re lightening the reviewer’s load so
+they can do more of what’s valuable: real judgment and taste. Here’s the line: no reviewer can hold
+every standard the team ever set and apply the right one at the right moment. That one job a system
+does well, and handing it over costs you none of the taste you were afraid to lose. It gives you
+back the attention for the parts that need a person, and brings back, a little, what used to pass
+between people when they reviewed each other’s work.</p>
+<p>That’s the version of automated review I’d ask a doubter to try. Not a bot that approves or rejects
+your PRs. An apprentice that learned how you work and speaks up when a change breaks from that, and
+otherwise stays quiet.</p>
+<h2 id="try-it">Try it</h2>
+<p>Install Lore and let it learn from a few sessions:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/_preview/pr-1649/_astro/ec.w36nc.css"><script type="module" src="/_preview/pr-1649/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">curl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-fsSL</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">https://withlore.ai/install</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#7FDBCA;--1:#096E72">|</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">bash</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">lore</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">run</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="curl -fsSL https://withlore.ai/install | bashlore run"><div></div></button></div></figure></div>
+<p>Then run the check against any range and see what it flags:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">lore</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">lint</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--base</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">main</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--head</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">HEAD</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="lore lint --base main --head HEAD"><div></div></button></div></figure></div>
+<p>With no arguments it auto-detects the range. When you’re ready for CI, the
+<a href="/_preview/pr-1649/docs/guides/semantic-linter/">semantic linter guide</a> has a copy-paste GitHub Action.</p>
+</div></article></main><footer><div class="foot-bottom"><small>&copy; 2026 Lore.AI</small></div></footer></body></html>
