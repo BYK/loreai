@@ -39,6 +39,12 @@ function innerStream(
 
 async function drain(resp: Response): Promise<string> {
   const reader = resp.body!.getReader();
+  return drainReader(reader);
+}
+
+async function drainReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<string> {
   const decoder = new TextDecoder();
   let out = "";
   for (;;) {
@@ -96,6 +102,70 @@ describe("earlyFlushStreamingResponse", () => {
     const keepaliveIdx = out.indexOf(KEEPALIVE);
     const createdIdx = out.indexOf("event: response.output_item.added");
     expect(keepaliveIdx).toBeLessThan(createdIdx);
+  });
+
+  test("keeps the connection active while waiting for a slow inner response", async () => {
+    let resolveInner!: (response: Response) => void;
+    const resp = earlyFlushStreamingResponse(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveInner = resolve;
+        }),
+      "gpt-5.6-terra",
+      undefined,
+      undefined,
+      5,
+    );
+    const reader = resp.body!.getReader();
+
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+      KEEPALIVE,
+    );
+    for (let index = 0; index < 3; index++) {
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+        KEEPALIVE,
+      );
+    }
+    resolveInner(innerStream(["event: response.completed\n\n"], 0));
+    const out = await drainReader(reader);
+    expect(out).toContain("event: response.completed");
+  });
+
+  test("keeps the connection active while waiting for a stalled upstream chunk", async () => {
+    let emitChunk!: () => void;
+    const response = earlyFlushStreamingResponse(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              emitChunk = () => {
+                controller.enqueue(
+                  new TextEncoder().encode("event: response.completed\n\n"),
+                );
+                controller.close();
+              };
+            },
+          }),
+          { headers: SSE },
+        ),
+      "gpt-5.6-terra",
+      undefined,
+      undefined,
+      5,
+    );
+    const reader = response.body!.getReader();
+
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+      KEEPALIVE,
+    );
+    for (let index = 0; index < 3; index++) {
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(
+        KEEPALIVE,
+      );
+    }
+    emitChunk();
+    const out = await drainReader(reader);
+    expect(out).toContain("event: response.completed");
   });
 
   test("emits a canonical response.failed envelope when the inner pipeline rejects", async () => {
