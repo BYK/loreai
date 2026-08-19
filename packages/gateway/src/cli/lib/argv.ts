@@ -35,6 +35,7 @@ export const STRICLI_ROUTES: ReadonlySet<string> = new Set([
   "lint",
   "login",
   "logout",
+  "start",
   "sync",
   "team",
   "admin",
