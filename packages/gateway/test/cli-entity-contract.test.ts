@@ -569,4 +569,33 @@ describe("Phase 3D.4 — typed lore entity", () => {
     expect(calls[0]?.values.yes).toBeUndefined();
     vi.resetModules();
   });
+
+  test("entity delete --dry-run still requires --yes in JSON mode", async () => {
+    vi.resetModules();
+    const entityImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = [
+      "node",
+      "lore",
+      "entity",
+      "delete",
+      "entry-id",
+      "--dry-run",
+      "--json",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+
+    expect(entityImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
 });

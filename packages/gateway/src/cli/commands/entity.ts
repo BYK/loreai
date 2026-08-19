@@ -197,7 +197,9 @@ export const entityCommand = buildOutputCommand<
     // the legacy handlers do not prompt.
     const sub = subcommand ?? "";
     const destructive = isDestructive(sub, subArgs);
-    const dryRun = flags["dry-run"];
+    // Only dedup has a preview mode. Other entity writers ignore
+    // --dry-run, so it MUST NOT weaken their confirmation gate.
+    const dryRun = sub === "dedup" && flags["dry-run"];
     const willWrite =
       destructive && !dryRun && (sub === "dedup" ? flags.yes === true : true);
     if (willWrite && !flags.yes && (!process.stdin.isTTY || !!jsonFlag)) {
