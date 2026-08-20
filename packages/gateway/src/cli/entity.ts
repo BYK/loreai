@@ -834,7 +834,7 @@ Subcommands:
   relation add <a-id> <b-id> --relation <type>  Add a relation
   relation rm <relation-id>            Remove a relation
   merge <target-id> <source-id>        Merge two entities
-  dedup                                Find/merge duplicate entities
+  dedup                                Preview with --dry-run; apply with --yes
   search <query>                       Search entities
   delete <id>                          Delete an entity
 
@@ -852,7 +852,7 @@ Options:
   --interactive, -i  Accept/reject each cluster (dedup)
 
 Examples:
-  lore entity dedup                    # dry-run: show duplicate clusters
+  lore entity dedup --dry-run          # show duplicate clusters without changes
   lore entity dedup --yes              # apply: auto-merge high-confidence dupes
   lore entity dedup --interactive --yes # decide per cluster
 `.trim();

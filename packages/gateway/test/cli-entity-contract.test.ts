@@ -96,6 +96,21 @@ describe("Phase 3D.4 — typed lore entity", () => {
     }
   });
 
+  test("entity help explains explicit dedup preview and apply flags", async () => {
+    const { commandEntity } = await import("../src/cli/entity");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let help = "";
+    try {
+      await commandEntity(["help"], {});
+      help = logSpy.mock.calls.flat().join("\n");
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(help).toContain("lore entity dedup --dry-run");
+    expect(help).toContain("lore entity dedup --yes");
+    expect(help).not.toMatch(/lore entity dedup\s+# dry-run/);
+  });
+
   test("entity forwards subcommand + flags to legacy handler", async () => {
     vi.resetModules();
     const calls: EntityCall[] = [];
