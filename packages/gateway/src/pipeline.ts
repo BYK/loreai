@@ -231,6 +231,7 @@ import {
   AnthropicSSEValidator,
   cancelAndReleaseReader,
   readStreamChunk,
+  SSEStreamTransportError,
   DEFAULT_MAX_SSE_FRAMES,
   type StreamAccumulator,
   type RecallAwareAccumulator,
@@ -7589,6 +7590,8 @@ export function streamResponsesRecallAware(
       signal: AbortSignal;
     }) => Promise<{
       reader: ReadableStreamDefaultReader<Uint8Array>;
+      /** Advance request state only after this continuation starts another recall. */
+      commit?: () => void;
     }>;
   },
 ): Response {
@@ -7766,6 +7769,7 @@ export function streamResponsesRecallAware(
   const maxSSEFrames = opts.maxSSEFrames ?? 100_000;
   const frameCounter = { count: 0 };
   const sseInactivityMs = FOREGROUND_SSE_INACTIVITY_MS;
+  const maxRecallContinuationTransportRetries = 1;
 
   const parseRecallArguments = (
     value: unknown,
@@ -10025,8 +10029,28 @@ export function streamResponsesRecallAware(
                       signal,
                     });
                     let recallDepth = pendingRecalls.length;
+                    let recallContinuationTransportRetries = 0;
+                    let continuationFollowUpInput: Parameters<
+                      typeof opts.runFollowUp
+                    >[0] = {
+                      anchorText: executed.anchorText,
+                      resultText: executed.resultText,
+                      acc: recallAcc,
+                      toolUseId: recall.toolUseId,
+                      contentPosition,
+                      signal,
+                    };
+                    let continuationRetryBaseline = {
+                      transactionalEvents: transactionalEvents.length,
+                      transactionalBytes,
+                      retainedStateBytes,
+                      hiddenRecallBytes,
+                      outputIdentities: new Set(outputIdentities),
+                      referenceIdentities: new Set(referenceIdentities),
+                    };
                     for (;;) {
                       activeReader = follow.reader;
+                      let retryFollowUp = false;
                       const contState = makeResponsesAccState();
                       const contRecallIndices = new Set<number>();
                       const contReferenceIndices = new Map<
@@ -10420,8 +10444,44 @@ export function streamResponsesRecallAware(
                             } else queueTransactional(chunk);
                           }
                         }
+                      } catch (error) {
+                        if (
+                          error instanceof SSEStreamTransportError &&
+                          recallContinuationTransportRetries <
+                            maxRecallContinuationTransportRetries
+                        ) {
+                          recallContinuationTransportRetries++;
+                          transactionalEvents.length =
+                            continuationRetryBaseline.transactionalEvents;
+                          transactionalBytes =
+                            continuationRetryBaseline.transactionalBytes;
+                          retainedStateBytes =
+                            continuationRetryBaseline.retainedStateBytes;
+                          hiddenRecallBytes =
+                            continuationRetryBaseline.hiddenRecallBytes;
+                          outputIdentities.clear();
+                          for (const identity of continuationRetryBaseline.outputIdentities) {
+                            outputIdentities.add(identity);
+                          }
+                          referenceIdentities.clear();
+                          for (const identity of continuationRetryBaseline.referenceIdentities) {
+                            referenceIdentities.add(identity);
+                          }
+                          log.warn(
+                            `retrying recall continuation after ${error.kind} transport failure${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+                          );
+                          retryFollowUp = true;
+                        } else {
+                          throw error;
+                        }
                       } finally {
                         cancelAndReleaseReader(follow.reader, signal.reason);
+                      }
+                      if (retryFollowUp) {
+                        follow = await settleFollowUp(
+                          continuationFollowUpInput,
+                        );
+                        continue;
                       }
                       const mergeContinuation = (): void => {
                         for (const item of contState.rawItems.values()) {
@@ -10532,61 +10592,84 @@ export function streamResponsesRecallAware(
                       let nextAcc: GatewayResponse | undefined;
                       if (contPending.length === 1) {
                         if (recallDepth >= maxRecallDepth) {
-                          throw new Error(
-                            `recall depth exhausted (${maxRecallDepth}) in Responses continuation`,
+                          const exhaustedRecall = contPending[0];
+                          const shiftedRecallIndex = shiftedOutputIndex(
+                            exhaustedRecall.outputIndex,
+                            contIndex,
                           );
-                        }
-                        recallDepth++;
-                        nextAcc = finalizeResponsesAcc(contState);
-                        const pendingNextRecall = contPending[0];
-                        const contentPosition = nextAcc.content.findIndex(
-                          (block) =>
-                            block.type === "tool_use" &&
-                            block.id === pendingNextRecall.toolUseId,
-                        );
-                        if (contentPosition < 0) {
-                          throw new Error(
-                            "recall block not found in finalized continuation",
-                          );
-                        }
-                        nextRecall = {
-                          ...pendingNextRecall,
-                          contentPosition,
-                        };
-                        const shiftedRecallIndex = shiftedOutputIndex(
-                          nextRecall.outputIndex,
-                          contIndex,
-                        );
-                        const nextSyntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
-                        reserveSyntheticIdentity(nextSyntheticId, [
-                          state,
-                          contState,
-                        ]);
-                        nextExecuted = await settleRecall({
-                          ...nextRecall,
-                          acc: nextAcc,
-                          signal,
-                        });
-                        if (nextExecuted.commit) {
-                          pendingCommits.push(nextExecuted.commit);
-                        }
-                        if (nextExecuted.rollback) {
-                          transactionRollbacks.push(nextExecuted.rollback);
-                        }
-                        const nextRecallIndex = nextRecall.outputIndex;
-                        contState.items.set(nextRecallIndex, {
-                          type: "text",
-                          id: nextSyntheticId,
-                          text: nextExecuted.anchorText,
-                        });
-                        queueTransactional(
-                          encoder.encode(
-                            emitTextItem(
-                              shiftedRecallIndex,
-                              nextExecuted.anchorText,
+                          const marker = `Recall depth limit reached (${maxRecallDepth}).`;
+                          const syntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
+                          reserveSyntheticIdentity(syntheticId, [
+                            state,
+                            contState,
+                          ]);
+                          contState.items.set(exhaustedRecall.outputIndex, {
+                            type: "text",
+                            id: syntheticId,
+                            text: marker,
+                          });
+                          queueTransactional(
+                            encoder.encode(
+                              emitTextItem(
+                                shiftedRecallIndex,
+                                marker,
+                                syntheticId,
+                              ),
                             ),
-                          ),
-                        );
+                          );
+                        } else {
+                          recallDepth++;
+                          nextAcc = finalizeResponsesAcc(contState);
+                          const pendingNextRecall = contPending[0];
+                          const contentPosition = nextAcc.content.findIndex(
+                            (block) =>
+                              block.type === "tool_use" &&
+                              block.id === pendingNextRecall.toolUseId,
+                          );
+                          if (contentPosition < 0) {
+                            throw new Error(
+                              "recall block not found in finalized continuation",
+                            );
+                          }
+                          nextRecall = {
+                            ...pendingNextRecall,
+                            contentPosition,
+                          };
+                          const shiftedRecallIndex = shiftedOutputIndex(
+                            nextRecall.outputIndex,
+                            contIndex,
+                          );
+                          const nextSyntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
+                          reserveSyntheticIdentity(nextSyntheticId, [
+                            state,
+                            contState,
+                          ]);
+                          nextExecuted = await settleRecall({
+                            ...nextRecall,
+                            acc: nextAcc,
+                            signal,
+                          });
+                          if (nextExecuted.commit) {
+                            pendingCommits.push(nextExecuted.commit);
+                          }
+                          if (nextExecuted.rollback) {
+                            transactionRollbacks.push(nextExecuted.rollback);
+                          }
+                          const nextRecallIndex = nextRecall.outputIndex;
+                          contState.items.set(nextRecallIndex, {
+                            type: "text",
+                            id: nextSyntheticId,
+                            text: nextExecuted.anchorText,
+                          });
+                          queueTransactional(
+                            encoder.encode(
+                              emitTextItem(
+                                shiftedRecallIndex,
+                                nextExecuted.anchorText,
+                              ),
+                            ),
+                          );
+                        }
                       }
                       for (const held of heldContinuationEvents) {
                         queueTransactional(held.chunk);
@@ -10601,14 +10684,25 @@ export function streamResponsesRecallAware(
                         state.terminalResponse = contState.terminalResponse;
                         break;
                       }
-                      follow = await settleFollowUp({
+                      follow.commit?.();
+                      continuationFollowUpInput = {
                         anchorText: nextExecuted.anchorText,
                         resultText: nextExecuted.resultText,
                         acc: nextAcc ?? finalizeResponsesAcc(contState),
                         toolUseId: nextRecall.toolUseId,
                         contentPosition: nextRecall.contentPosition,
                         signal,
-                      });
+                      };
+                      continuationRetryBaseline = {
+                        transactionalEvents: transactionalEvents.length,
+                        transactionalBytes,
+                        retainedStateBytes,
+                        hiddenRecallBytes,
+                        outputIdentities: new Set(outputIdentities),
+                        referenceIdentities: new Set(referenceIdentities),
+                      };
+                      follow = await settleFollowUp(continuationFollowUpInput);
+                      recallContinuationTransportRetries = 0;
                     }
                     state.items.set(recall.outputIndex, {
                       type: "text",
@@ -10617,8 +10711,7 @@ export function streamResponsesRecallAware(
                     });
                   } catch (err) {
                     log.error(
-                      `recall follow-up stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
-                      err,
+                      `recall follow-up stream failed${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
                     );
                     throw err;
                   }
@@ -10753,8 +10846,7 @@ export function streamResponsesRecallAware(
             }
           } else {
             log.error(
-              `openai-responses recall-aware stream error${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}:`,
-              err,
+              `openai-responses recall-aware stream failed${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
             );
           }
           const failedResponse = finalizeResponsesAcc(state);
@@ -17768,9 +17860,10 @@ async function handleConversationTurn(
                     );
                   },
                 };
+                const followUpBaseRequest = responsesRecallRequest;
                 const follow = await runRecallFollowUpStreaming(
                   followUpCtx,
-                  responsesRecallRequest,
+                  followUpBaseRequest,
                   acc,
                   resultText,
                   recallBlock,
@@ -17781,8 +17874,12 @@ async function handleConversationTurn(
                     `recall follow-up upstream error: ${follow.status ?? "?"}`,
                   );
                 }
-                responsesRecallRequest = follow.followUp;
-                return { reader: follow.reader };
+                return {
+                  reader: follow.reader,
+                  commit: () => {
+                    responsesRecallRequest = follow.followUp;
+                  },
+                };
               },
             }),
           );

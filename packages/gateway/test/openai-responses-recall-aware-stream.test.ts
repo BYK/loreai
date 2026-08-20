@@ -692,6 +692,161 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("{not-json}");
   });
 
+  test("retries a dropped recall continuation before exposing any output", async () => {
+    const droppedFollowUp = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_dropped_followup", "gpt-5.6-terra") +
+                sseEvent("response.output_item.added", {
+                  output_index: 0,
+                  item: {
+                    type: "message",
+                    id: "msg_retry_identity",
+                    role: "assistant",
+                  },
+                }),
+            ),
+          );
+          controller.error(new Error("socket reset"));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const recoveredFollowUp = streamFrom([
+      created("resp_recovered_followup", "gpt-5.6-terra"),
+      textItem(0, "recovered answer", "msg_retry_identity"),
+      completed("resp_recovered_followup"),
+    ]);
+    let followUps = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_retry_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "retry continuation" }),
+        completed("resp_retry_principal"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: buildAnchor("retry continuation"),
+          resultText: "memory",
+        }),
+        runFollowUp: async () => ({
+          reader: (followUps++ === 0
+            ? droppedFollowUp
+            : recoveredFollowUp
+          ).body!.getReader(),
+        }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(followUps).toBe(2);
+    expect(out).toContain("recovered answer");
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(
+      out.match(
+        /event: response\.output_text\.delta\ndata: [^\n]*"delta":"recovered answer"/g,
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("counts failed continuation bytes against the request-wide stream limit", async () => {
+    const principal = [
+      created("resp_retry_limit_principal", "gpt-5.6-terra"),
+      recallCall(0, { query: "retry byte budget" }),
+      completed("resp_retry_limit_principal"),
+    ];
+    const dropped = created("resp_retry_limit_dropped", "gpt-5.6-terra");
+    const recovered = [
+      created("resp_retry_limit_recovered", "gpt-5.6-terra"),
+      textItem(0, "recovered after budget", "msg_retry_limit"),
+      completed("resp_retry_limit_recovered"),
+    ];
+    const droppedFollowUp = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(dropped));
+          controller.error(new Error("socket reset"));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const recoveredFollowUp = streamFrom(recovered);
+    let followUps = 0;
+    const client = streamResponsesRecallAware(streamFrom(principal), {
+      maxStreamBytes:
+        new TextEncoder().encode(recovered.join("")).byteLength + 1,
+      onComplete: () => {},
+      onRecall: async () => ({
+        anchorText: buildAnchor("retry byte budget"),
+        resultText: "memory",
+      }),
+      runFollowUp: async () => ({
+        reader: (followUps++ === 0
+          ? droppedFollowUp
+          : recoveredFollowUp
+        ).body!.getReader(),
+      }),
+    });
+
+    const out = await drain(client);
+    expect(followUps).toBe(2);
+    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain("recovered after budget");
+  });
+
+  test("counts failed continuation frames against the request-wide frame limit", async () => {
+    const droppedFollowUp = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_retry_frame_dropped", "gpt-5.6-terra"),
+            ),
+          );
+          controller.error(new Error("socket reset"));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const recoveredFollowUp = streamFrom([
+      created("resp_retry_frame_recovered", "gpt-5.6-terra"),
+      textItem(0, "recovered after frames", "msg_retry_frame"),
+      completed("resp_retry_frame_recovered"),
+    ]);
+    let followUps = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_retry_frame_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "retry frame budget" }),
+        completed("resp_retry_frame_principal"),
+      ]),
+      {
+        // Principal (5 frames) + dropped continuation (1 frame) exhaust the
+        // budget before the retried continuation can emit its first frame.
+        maxSSEFrames: 6,
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: buildAnchor("retry frame budget"),
+          resultText: "memory",
+        }),
+        runFollowUp: async () => ({
+          reader: (followUps++ === 0
+            ? droppedFollowUp
+            : recoveredFollowUp
+          ).body!.getReader(),
+        }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(followUps).toBe(2);
+    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain("recovered after frames");
+  });
+
   test("rejects one content index changing type", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([
@@ -1929,6 +2084,69 @@ describe("streamResponsesRecallAware", () => {
         ?.filter((item) => item.type === "reasoning")
         .map((item) => item.encrypted_content),
     ).toEqual(["ciphertext-B", "ciphertext-D"]);
+  });
+
+  test("retries the current follow-up in a chained recall", async () => {
+    const droppedSecondFollowUp = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_chained_retry_dropped", "gpt-5.6-terra"),
+            ),
+          );
+          controller.error(new Error("socket reset"));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const firstFollowUp = streamFrom([
+      created("resp_chained_retry_first", "gpt-5.6-terra"),
+      textItem(0, "first continuation preamble"),
+      recallCall(1, { query: "second recall" }, "fc_second", "call_second"),
+      completed("resp_chained_retry_first"),
+    ]);
+    const recoveredSecondFollowUp = streamFrom([
+      created("resp_chained_retry_recovered", "gpt-5.6-terra"),
+      textItem(0, "chained recovered answer", "msg_chained_retry_recovered"),
+      completed("resp_chained_retry_recovered"),
+    ]);
+    const inputs: string[] = [];
+    let followUps = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_chained_retry_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "first recall" }, "fc_first", "call_first"),
+        completed("resp_chained_retry_principal"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async ({ query }) => ({
+          anchorText: buildAnchor(query),
+          resultText: `${query} result`,
+        }),
+        runFollowUp: async (input) => {
+          inputs.push(input.resultText);
+          const followUp = [
+            firstFollowUp,
+            droppedSecondFollowUp,
+            recoveredSecondFollowUp,
+          ][followUps++];
+          if (!followUp) throw new Error("unexpected extra follow-up");
+          return { reader: followUp.body!.getReader() };
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("first continuation preamble");
+    expect(out).toContain("chained recovered answer");
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(inputs).toEqual([
+      "first recall result",
+      "second recall result",
+      "second recall result",
+    ]);
   });
 
   test("rejects terminal omission of added-only provisional reasoning in Codex recall-aware mode", async () => {
@@ -4001,6 +4219,42 @@ describe("streamResponsesRecallAware", () => {
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
   });
 
+  test("replaces an exhausted continuation recall with a marker", async () => {
+    const followUp = streamFrom([
+      created("resp_depth_exhausted_followup", "gpt-5.6-terra"),
+      recallCall(0, { query: "more detail" }, "fc_depth", "call_depth"),
+      completed("resp_depth_exhausted_followup"),
+    ]);
+    let recalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_depth_exhausted_principal", "gpt-5.6-terra"),
+        recallCall(
+          0,
+          { query: "architecture" },
+          "fc_principal",
+          "call_principal",
+        ),
+        completed("resp_depth_exhausted_principal"),
+      ]),
+      {
+        maxRecallDepth: 1,
+        onComplete: () => {},
+        onRecall: async ({ query }) => {
+          recalls++;
+          return { anchorText: buildAnchor(query), resultText: "results" };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(recalls).toBe(1);
+    expect(out).toContain("Recall depth limit reached (1).");
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+  });
+
   test("recall-only: emits marker, pipes the continuation inline, rebuilds completed", async () => {
     // The follow-up stream includes its OWN lifecycle/terminal events
     // (response.created, response.in_progress, response.completed). These must
@@ -5133,6 +5387,58 @@ describe("streamResponsesRecallAware", () => {
     await cancelled;
     await followUpCancelled.promise;
     expect(cancelCalls).toBe(1);
+  });
+
+  test("does not retry when cancellation races a dropped continuation", async () => {
+    const foreground = new AbortController();
+    const followUpStarted = Promise.withResolvers<void>();
+    const droppedStarted = Promise.withResolvers<void>();
+    const releaseDrop = Promise.withResolvers<void>();
+    let followUps = 0;
+    let cancelCalls = 0;
+    const droppedFollowUp = new Response(
+      new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          droppedStarted.resolve();
+          await releaseDrop.promise;
+          controller.error(new Error("socket reset"));
+        },
+        cancel() {
+          cancelCalls++;
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_abort_retry", "gpt-5.6-terra"),
+        recallCall(0, { query: "cancel retry" }),
+        completed("resp_abort_retry"),
+      ]),
+      {
+        signal: foreground.signal,
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: buildAnchor("cancel retry"),
+          resultText: "memory",
+        }),
+        runFollowUp: async () => {
+          followUps++;
+          followUpStarted.resolve();
+          return { reader: droppedFollowUp.body!.getReader() };
+        },
+      },
+    );
+
+    const pending = drain(client);
+    await followUpStarted.promise;
+    await droppedStarted.promise;
+    foreground.abort(new DOMException("caller aborted", "AbortError"));
+    releaseDrop.resolve();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(followUps).toBe(1);
+    expect(cancelCalls).toBe(1);
+    expect(droppedFollowUp.body?.locked).toBe(false);
   });
 
   test("cancellation never waits for non-settling follow-up setup", async () => {
