@@ -2188,8 +2188,7 @@ describe("accumulateResponsesSSEStream", () => {
           },
         },
       ];
-      for (const output of [
-        [],
+      const invalidOutputs = [
         [{ type: "message", id: "", content: [] }],
         [{ type: "item_reference", id: "unknown-item" }],
         [{ type: "item_reference", id: itemId, content: [] }],
@@ -2198,7 +2197,9 @@ describe("accumulateResponsesSSEStream", () => {
           { type: "item_reference", id: itemId },
           { type: "item_reference", id: itemId },
         ],
-      ]) {
+      ];
+      if (validation === "public") invalidOutputs.unshift([]);
+      for (const output of invalidOutputs) {
         await expect(
           accumulateResponsesSSEStream(
             buildSSEResponse([
@@ -2232,6 +2233,123 @@ describe("accumulateResponsesSSEStream", () => {
       }
     },
   );
+
+  test("codex retains completed streamed items with an empty terminal output snapshot", async () => {
+    const itemId = "codex-empty-terminal-output";
+    const callId = "call_empty_terminal";
+    const result = await accumulateResponsesSSEStream(
+      buildSSEResponse([
+        {
+          event: "response.output_item.added",
+          data: { item: { type: "message", id: itemId } },
+        },
+        {
+          event: "response.output_text.done",
+          data: { item_id: itemId, content_index: 0, text: "final text" },
+        },
+        {
+          event: "response.content_part.added",
+          data: {
+            item_id: itemId,
+            content_index: 0,
+            part: { type: "output_text", text: "" },
+          },
+        },
+        {
+          event: "response.content_part.done",
+          data: {
+            item_id: itemId,
+            content_index: 0,
+            part: { type: "output_text", text: "final text" },
+          },
+        },
+        {
+          event: "response.output_item.done",
+          data: {
+            item: {
+              type: "message",
+              id: itemId,
+              content: [{ type: "output_text", text: "final text" }],
+            },
+          },
+        },
+        {
+          event: "response.output_item.added",
+          data: {
+            item: {
+              type: "function_call",
+              id: "fc_empty_terminal",
+              call_id: callId,
+              name: "read",
+              arguments: '{"path":"README.md"}',
+            },
+          },
+        },
+        {
+          event: "response.output_item.done",
+          data: {
+            item: {
+              type: "function_call",
+              id: "fc_empty_terminal",
+              call_id: callId,
+              name: "read",
+              arguments: '{"path":"README.md"}',
+            },
+          },
+        },
+        {
+          event: "response.completed",
+          data: { response: { status: "completed", output: [] } },
+        },
+      ]),
+      { validation: "codex", stopAtTerminal: true },
+    );
+
+    expect(result.stopReason).toBe("tool_use");
+    expect(result.content).toEqual([
+      { type: "text", text: "final text" },
+      {
+        type: "tool_use",
+        id: callId,
+        name: "read",
+        input: { path: "README.md" },
+      },
+    ]);
+    expect(result.rawOutputItems).toEqual([
+      {
+        type: "message",
+        id: itemId,
+        content: [{ type: "output_text", text: "final text" }],
+      },
+      {
+        type: "function_call",
+        id: "fc_empty_terminal",
+        call_id: callId,
+        name: "read",
+        arguments: '{"path":"README.md"}',
+      },
+    ]);
+  });
+
+  test("codex rejects an empty terminal output snapshot with unfinished items", async () => {
+    await expect(
+      accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              item: { type: "message", id: "codex-empty-terminal-pending" },
+            },
+          },
+          {
+            event: "response.completed",
+            data: { response: { status: "completed", output: [] } },
+          },
+        ]),
+        { validation: "codex", stopAtTerminal: true },
+      ),
+    ).rejects.toThrow("malformed Responses terminal event");
+  });
 
   for (const validation of ["public", "codex"] as const) {
     test(`${validation} rejects wrapper snapshots contradicting terminal arguments`, async () => {
