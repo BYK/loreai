@@ -351,7 +351,10 @@ function managementCorsOrigin(
       if (loopbackOrigin) return false;
       const requestHost = req.headers.get("host");
       if (!requestHost) return false;
-      const requestOrigin = new URL(`http://${requestHost}`);
+      // Use the origin scheme only to normalize default ports. The scheme is
+      // not trusted for authorization; remote access is still gated by the
+      // socket peer and the origin/Host host-port match below.
+      const requestOrigin = new URL(`${parsed.protocol}//${requestHost}`);
       if (
         requestOrigin.username ||
         requestOrigin.password ||

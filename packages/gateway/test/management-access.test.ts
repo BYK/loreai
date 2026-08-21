@@ -168,6 +168,38 @@ describe("management route access control", () => {
     expect(response.allowOrigin).toBe(origin);
   });
 
+  test("normalizes an explicit HTTPS default port", async () => {
+    const host = "labs.sheep-fir.ts.net:443";
+    const origin = `https://${host}`;
+    const response = await new Promise<{
+      status: number;
+      allowOrigin: string | undefined;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port: remoteManagementPeer.port,
+          path: "/api/v1/projects",
+          headers: { host, origin },
+        },
+        (res) => {
+          res.resume();
+          res.once("end", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              allowOrigin: res.headers["access-control-allow-origin"],
+            }),
+          );
+        },
+      );
+      req.once("error", reject);
+      req.end();
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.allowOrigin).toBe(origin);
+  });
+
   test("keeps the external host when redirecting the dashboard root", async () => {
     const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
     const response = await new Promise<{
