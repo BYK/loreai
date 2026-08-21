@@ -2245,9 +2245,23 @@ export async function accumulateResponsesSSEStream(
             }
             state.rawItems.set(outputIndex, { ...accumulated, ...snapshot });
           }
+          const hasUnfinishedItems = Array.from(state.rawItems.keys()).some(
+            (index) => !doneItems.has(index),
+          );
+          // ChatGPT Codex sometimes sends an empty terminal snapshot after completing every item.
+          const emptyCodexSnapshotAfterCompletedItems =
+            opts.validation === "codex" &&
+            terminal.output.length === 0 &&
+            !hasUnfinishedItems;
           if (
-            snapshotIndices.size !== doneItems.size ||
-            Array.from(doneItems).some((index) => !snapshotIndices.has(index))
+            (opts.validation === "codex" &&
+              terminal.output.length === 0 &&
+              hasUnfinishedItems) ||
+            (!emptyCodexSnapshotAfterCompletedItems &&
+              (snapshotIndices.size !== doneItems.size ||
+                Array.from(doneItems).some(
+                  (index) => !snapshotIndices.has(index),
+                )))
           ) {
             throw new Error("malformed Responses terminal event");
           }
