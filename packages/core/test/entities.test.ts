@@ -962,6 +962,25 @@ describe("entities", () => {
       );
       expect(githubAliases.length).toBe(1);
     });
+
+    test("merge rejects incompatible entity types", () => {
+      const target = entities.create({
+        projectPath: PROJECT,
+        entityType: "person",
+        canonicalName: "MergePerson",
+      });
+      const source = entities.create({
+        projectPath: PROJECT,
+        entityType: "service",
+        canonicalName: "MergeService",
+      });
+
+      expect(() => entities.merge(target.id, source.id)).toThrow(
+        "cannot merge service entity into person entity",
+      );
+      expect(entities.get(target.id)).not.toBeNull();
+      expect(entities.get(source.id)).not.toBeNull();
+    });
   });
 
   // ---------------------------------------------------------------------------

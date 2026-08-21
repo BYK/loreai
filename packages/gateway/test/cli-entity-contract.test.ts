@@ -13,7 +13,7 @@
  *   - F-3: -i alias added for --interactive
  *   - F-4: --json forwarded to legacy values.json (was missing —
  *     legacy cmdList gates JSON output on flags.json)
- *   - F-5: flag-count strings corrected to 10 (+ --json)
+ *   - F-5: flag-count strings corrected to 11 (+ --json)
  *   - F-6: --metadata changed to parsed String (was boolean; legacy
  *           parses it as JSON.stringify)
  *   - F-7: dead defensive positionals.filter removed (ARGS = string[]
@@ -94,6 +94,21 @@ describe("Phase 3D.4 — typed lore entity", () => {
     for (const flag of expected) {
       expect(seen.has(flag), `entity help should advertise ${flag}`).toBe(true);
     }
+  });
+
+  test("entity help explains explicit dedup preview and apply flags", async () => {
+    const { commandEntity } = await import("../src/cli/entity");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let help = "";
+    try {
+      await commandEntity(["help"], {});
+      help = logSpy.mock.calls.flat().join("\n");
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(help).toContain("lore entity dedup --dry-run");
+    expect(help).toContain("lore entity dedup --yes");
+    expect(help).not.toMatch(/lore entity dedup\s+# dry-run/);
   });
 
   test("entity forwards subcommand + flags to legacy handler", async () => {
@@ -492,7 +507,74 @@ describe("Phase 3D.4 — typed lore entity", () => {
     vi.resetModules();
   });
 
-  test("entity dedup without --yes runs in preview mode and reaches legacy handler", async () => {
+  test("entity --json --interactive rejects before any legacy handler", async () => {
+    vi.resetModules();
+    const entityImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "entity", "add", "--json", "--interactive"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(entityImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("entity alias remove requires --yes before legacy handler", async () => {
+    vi.resetModules();
+    const entityImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "entity", "alias", "remove", "alias-id"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(entityImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("entity --dry-run is limited to dedup", async () => {
+    vi.resetModules();
+    const entityImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = [
+      "node",
+      "lore",
+      "entity",
+      "delete",
+      "entry-id",
+      "--dry-run",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(entityImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("entity dedup requires --yes before reaching the legacy handler", async () => {
     vi.resetModules();
     const calls: EntityCall[] = [];
     const entityImpl = vi.fn(
@@ -505,18 +587,109 @@ describe("Phase 3D.4 — typed lore entity", () => {
     process.argv = ["node", "lore", "entity", "dedup"];
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(calls).toHaveLength(0);
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("entity dedup --interactive requires --yes before reaching the legacy handler", async () => {
+    vi.resetModules();
+    const entityImpl = vi.fn(async () => {});
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "entity", "dedup", "--interactive"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    let capturedExitCode: number | undefined;
+    try {
+      await runCli();
+      capturedExitCode = process.exitCode;
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+    expect(entityImpl).not.toHaveBeenCalled();
+    expect(capturedExitCode).toBe(20);
+    vi.resetModules();
+  });
+
+  test("entity dedup --dry-run is allowed without --yes", async () => {
+    vi.resetModules();
+    const calls: EntityCall[] = [];
+    const entityImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = ["node", "lore", "entity", "dedup", "--dry-run"];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
     try {
       await runCli();
     } finally {
       process.exitCode = priorExitCode;
     }
-    // dedup without --yes is a preview-only operation; the legacy
-    // handler applies apply=false (dry-run) internally. The wrapper
-    // passes it through because dedup is non-mutating by default.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.values.yes).toBeUndefined();
+    expect(calls[0]?.values["dry-run"]).toBe(true);
+    vi.resetModules();
+  });
+
+  test("entity dedup --interactive --yes reaches the legacy handler", async () => {
+    vi.resetModules();
+    const calls: EntityCall[] = [];
+    const entityImpl = vi.fn(
+      async (positionals: string[], values: Record<string, unknown>) => {
+        calls.push({ positionals: [...positionals], values: { ...values } });
+      },
+    );
+    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
+    const { runCli } = await import("../src/cli/cli");
+    process.argv = [
+      "node",
+      "lore",
+      "entity",
+      "dedup",
+      "--interactive",
+      "--yes",
+    ];
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      await runCli();
+    } finally {
+      process.exitCode = priorExitCode;
+    }
     expect(calls).toHaveLength(1);
     expect(calls[0]?.positionals).toEqual(["dedup"]);
-    expect(calls[0]?.values.yes).toBeUndefined();
+    expect(calls[0]?.values.interactive).toBe(true);
+    expect(calls[0]?.values.yes).toBe(true);
     vi.resetModules();
+  });
+
+  test("direct legacy _cli enforces entity policy before dispatch", async () => {
+    vi.resetModules();
+    const priorArgv = process.argv;
+    process.argv = ["node", "lore", "entity", "dedup", "--interactive"];
+    try {
+      const { _cli } = await import("../src/cli/main");
+      await expect(_cli()).rejects.toMatchObject({
+        name: "UsageError",
+        exitCode: 20,
+        message: "Refusing destructive `lore entity dedup` without --yes.",
+      });
+    } finally {
+      process.argv = priorArgv;
+      vi.resetModules();
+    }
   });
 
   test("entity dedup --yes forwards apply path to legacy handler", async () => {
@@ -537,16 +710,13 @@ describe("Phase 3D.4 — typed lore entity", () => {
     } finally {
       process.exitCode = priorExitCode;
     }
-    // `dedup --yes` IS the explicit non-interactive apply path — the
-    // wrapper must not block it. The legacy handler enforces its own
-    // gate (calibrated threshold).
     expect(calls).toHaveLength(1);
     expect(calls[0]?.values.yes).toBe(true);
     expect(calls[0]?.values.json).toBe(true);
     vi.resetModules();
   });
 
-  test("entity dedup --dry-run overrides --yes before legacy dispatch", async () => {
+  test("entity dedup --dry-run overrides --yes in legacy handler", async () => {
     vi.resetModules();
     const calls: EntityCall[] = [];
     const entityImpl = vi.fn(
@@ -564,38 +734,10 @@ describe("Phase 3D.4 — typed lore entity", () => {
     } finally {
       process.exitCode = priorExitCode;
     }
-
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.values.yes).toBeUndefined();
-    vi.resetModules();
-  });
-
-  test("entity delete --dry-run still requires --yes in JSON mode", async () => {
-    vi.resetModules();
-    const entityImpl = vi.fn(async () => {});
-    vi.doMock("../src/cli/entity", () => ({ commandEntity: entityImpl }));
-    const { runCli } = await import("../src/cli/cli");
-    process.argv = [
-      "node",
-      "lore",
-      "entity",
-      "delete",
-      "entry-id",
-      "--dry-run",
-      "--json",
-    ];
-    const priorExitCode = process.exitCode;
-    process.exitCode = undefined;
-    let capturedExitCode: number | undefined;
-    try {
-      await runCli();
-      capturedExitCode = process.exitCode;
-    } finally {
-      process.exitCode = priorExitCode;
-    }
-
-    expect(entityImpl).not.toHaveBeenCalled();
-    expect(capturedExitCode).toBe(20);
+    expect(calls[0]?.values.yes).toBe(true);
+    expect(calls[0]?.values["dry-run"]).toBe(true);
+    expect(calls[0]?.values.dryRun).toBe(true);
     vi.resetModules();
   });
 });

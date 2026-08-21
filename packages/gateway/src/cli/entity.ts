@@ -15,6 +15,8 @@
  *   delete <id>                  Delete an entity
  */
 import { resolve } from "node:path";
+import { UsageError } from "./lib/errors";
+import { entityOperationPolicy } from "./lib/entity-policy";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -485,6 +487,14 @@ async function cmdMerge(
     console.error(`Source entity not found: ${sourceId}`);
     process.exit(1);
   }
+  const selfPersonMerge =
+    (target.entity_type === "self" || target.entity_type === "person") &&
+    (source.entity_type === "self" || source.entity_type === "person");
+  if (target.entity_type !== source.entity_type && !selfPersonMerge) {
+    throw new UsageError({
+      message: `Cannot merge ${source.entity_type} entity into ${target.entity_type} entity.`,
+    });
+  }
 
   entities.merge(targetId, sourceId);
   console.log(
@@ -624,24 +634,26 @@ async function cmdDedup(
     projectId: getProjectId,
   } = await import("@loreai/core");
 
-  const apply = !!flags.yes;
-  const interactive = !!flags.interactive;
+  const dryRun = flags["dry-run"] === true || flags.dryRun === true;
+  // A dry-run is always a non-interactive preview, even if callers supplied
+  // both flags. This prevents the prompt branch from mutating state.
+  const interactive = !!flags.interactive && !dryRun;
+  // In interactive mode --yes confirms that the destructive flow is allowed;
+  // it must not bypass the per-cluster prompts or trigger auto-apply setup.
+  const apply = !!flags.yes && !dryRun && !interactive;
   const asJson = !!flags.json;
   const projectPath = flags.all
     ? undefined
     : resolve((flags.project as string) ?? process.cwd());
 
-  if (interactive && apply) {
-    console.error("--interactive and --yes are mutually exclusive.");
-    process.exit(1);
-  }
   if (interactive && !process.stdin.isTTY) {
     console.error("--interactive requires a TTY.");
     process.exit(1);
   }
 
-  // Preflight: backfill missing entity embeddings so similarity has vectors.
-  if (emb.isAvailable()) {
+  // Applying dedup may need a preflight backfill. Preview paths must never
+  // write embeddings as a side effect of inspecting duplicate candidates.
+  if (apply && emb.isAvailable()) {
     try {
       const n = await emb.backfillEntityEmbeddings();
       if (n > 0) console.log(`Re-indexed ${n} entit${n === 1 ? "y" : "ies"}.`);
@@ -651,7 +663,7 @@ async function cmdDedup(
         err,
       );
     }
-  } else {
+  } else if (apply) {
     console.log(
       "Note: no embedding provider available — using name/alias signals only.",
     );
@@ -822,7 +834,7 @@ Subcommands:
   relation add <a-id> <b-id> --relation <type>  Add a relation
   relation rm <relation-id>            Remove a relation
   merge <target-id> <source-id>        Merge two entities
-  dedup                                Find/merge duplicate entities
+  dedup                                Preview with --dry-run; apply with --yes
   search <query>                       Search entities
   delete <id>                          Delete an entity
 
@@ -836,19 +848,39 @@ Options:
   --metadata <json>  JSON metadata (add, edit, relation add)
   --name <name>      New name (edit only)
   --cross            Cross-project flag (add, edit)
-  --yes, -y          Apply auto-merges (dedup)
+  --yes, -y          Confirm destructive operations / apply auto-merges
   --interactive, -i  Accept/reject each cluster (dedup)
 
 Examples:
-  lore entity dedup                    # dry-run: show duplicate clusters
+  lore entity dedup --dry-run          # show duplicate clusters without changes
   lore entity dedup --yes              # apply: auto-merge high-confidence dupes
-  lore entity dedup --interactive      # decide per cluster
+  lore entity dedup --interactive --yes # decide per cluster
 `.trim();
 
 export async function commandEntity(
   args: string[],
   values: Record<string, unknown>,
 ): Promise<void> {
+  const policy = entityOperationPolicy(args, values);
+  if (policy.invalidDryRun) {
+    throw new UsageError({
+      message: "`--dry-run` is supported only by `lore entity dedup`.",
+      tryCommand: "lore entity dedup --dry-run",
+    });
+  }
+  if (policy.jsonInteractive) {
+    throw new UsageError({
+      message: `Refusing \`--json --interactive\` for \`${policy.operation}\`.`,
+      tryCommand: `${policy.operation} --json`,
+    });
+  }
+  if (policy.requiresYes && values.yes !== true) {
+    throw new UsageError({
+      message: `Refusing destructive \`${policy.operation}\` without --yes.`,
+      tryCommand: `${policy.operation} --yes`,
+    });
+  }
+
   const subcommand = args[0];
   const subArgs = args.slice(1);
 

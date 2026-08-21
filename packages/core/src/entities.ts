@@ -6,7 +6,14 @@
  * formatting for system prompt injection and recall query expansion.
  */
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject, getKV, setKV, withTransaction } from "./db";
+import {
+  db,
+  ensureProject,
+  getKV,
+  projectId,
+  setKV,
+  withTransaction,
+} from "./db";
 import { embeddingByIdSource, readStorageMode } from "./db/vec-store";
 import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
 import {
@@ -1003,6 +1010,10 @@ export function forProject(
   includeCross = true,
 ): EntityWithAliases[] {
   const pid = ensureProject(projectPath);
+  return forProjectId(pid, includeCross);
+}
+
+function forProjectId(pid: string, includeCross: boolean): EntityWithAliases[] {
   const { sql, params } = forProjectEntityQuery(pid, includeCross);
   const rows = db()
     .query(sql)
@@ -1353,8 +1364,18 @@ export async function searchCrossProjectReposAsync(input: {
  * from `sourceId`, then delete `sourceId`.
  */
 export function merge(targetId: string, sourceId: string): void {
-  if (!get(targetId) || !get(sourceId)) {
+  const target = get(targetId);
+  const source = get(sourceId);
+  if (!target || !source) {
     throw new Error("cannot merge entities across tenant boundaries");
+  }
+  const selfPersonMerge =
+    (target.entity_type === "self" || target.entity_type === "person") &&
+    (source.entity_type === "self" || source.entity_type === "person");
+  if (target.entity_type !== source.entity_type && !selfPersonMerge) {
+    throw new Error(
+      `cannot merge ${source.entity_type} entity into ${target.entity_type} entity`,
+    );
   }
   const d = db();
   d.exec("BEGIN IMMEDIATE");
@@ -2372,7 +2393,18 @@ export async function deduplicateEntities(
   opts?: { dryRun?: boolean; threshold?: number },
 ): Promise<EntityDedupResult> {
   const dryRun = opts?.dryRun ?? true;
-  const entities = projectPath ? forProject(projectPath) : listAll();
+  const pid = projectPath
+    ? dryRun
+      ? projectId(projectPath)
+      : ensureProject(projectPath)
+    : undefined;
+  // A preview must never create or reconcile project rows merely to inspect
+  // entities. Unknown project paths therefore have no candidates.
+  const entities = projectPath
+    ? pid
+      ? forProjectId(pid, true)
+      : []
+    : listAll();
   const names = new Map(entities.map((e) => [e.id, e.canonical_name]));
 
   const empty: EntityDedupResult = {
@@ -2385,9 +2417,7 @@ export async function deduplicateEntities(
 
   const dedupThreshold =
     opts?.threshold ??
-    loadEntityCalibratedThreshold(
-      projectPath ? ensureProject(projectPath) : null,
-    ) ??
+    loadEntityCalibratedThreshold(pid ?? null) ??
     ENTITY_EMBEDDING_DEDUP_THRESHOLD;
 
   // --- Load embeddings for the candidate entities (if available) ---
