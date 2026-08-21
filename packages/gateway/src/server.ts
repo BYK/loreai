@@ -357,7 +357,7 @@ function managementCorsOrigin(
         requestOrigin.pathname !== "/" ||
         requestOrigin.search ||
         requestOrigin.hash ||
-        parsed.origin !== requestOrigin.origin
+        parsed.host !== requestOrigin.host
       ) {
         return false;
       }
