@@ -60,6 +60,7 @@ describe("daemon arguments", () => {
         hosts: ["127.0.0.1", "100.64.0.1"],
         debug: true,
         local: true,
+        allowRemoteManagement: true,
         remoteUrl: "http://remote:3207",
       }),
     ).toEqual([
@@ -72,6 +73,7 @@ describe("daemon arguments", () => {
       "100.64.0.1",
       "--debug",
       "--local",
+      "--allow-remote-management",
       "--remote",
       "http://remote:3207",
     ]);

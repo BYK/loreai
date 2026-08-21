@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { data, ensureProject, ltm } from "@loreai/core";
 import { connect } from "node:net";
+import { request } from "node:http";
 import { loadConfig, type GatewayConfig } from "../src/config";
 import { isLoopbackAddress, startServer } from "../src/server";
 
@@ -21,6 +22,7 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
 describe("management route access control", () => {
   let wideListener: ServerHandle;
   let remotePeer: ServerHandle;
+  let remoteManagementPeer: ServerHandle;
   let mappedLoopbackPeer: ServerHandle;
 
   beforeAll(async () => {
@@ -33,6 +35,10 @@ describe("management route access control", () => {
       // node:http bridge; requests still traverse a real TCP socket and server.
       peerAddressForRequest: () => "192.0.2.10",
     });
+    remoteManagementPeer = await startServer(
+      makeConfig({ allowRemoteManagement: true }),
+      { peerAddressForRequest: () => "192.0.2.10" },
+    );
     mappedLoopbackPeer = await startServer(makeConfig(), {
       peerAddressForRequest: () => "::ffff:127.0.0.1",
     });
@@ -42,6 +48,7 @@ describe("management route access control", () => {
     await Promise.all([
       wideListener.stop(),
       remotePeer.stop(),
+      remoteManagementPeer.stop(),
       mappedLoopbackPeer.stop(),
     ]);
   });
@@ -82,6 +89,110 @@ describe("management route access control", () => {
     expect(response.headers.get("content-security-policy")).toContain(
       "frame-ancestors 'none'",
     );
+  });
+
+  test.each(["/api/v1/projects", "/ui", "/"])(
+    "allows remote management route %s only with the explicit override",
+    async (path) => {
+      const response = await fetch(urlFor(remoteManagementPeer, path), {
+        redirect: "manual",
+      });
+
+      expect(response.status).not.toBe(404);
+      expect(response.status).not.toBe(500);
+    },
+  );
+
+  test("allows the external dashboard's exact browser origin", async () => {
+    const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
+    const origin = `http://${host}`;
+    const response = await new Promise<{
+      status: number;
+      allowOrigin: string | undefined;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port: remoteManagementPeer.port,
+          path: "/api/v1/projects",
+          headers: { host, origin },
+        },
+        (res) => {
+          res.resume();
+          res.once("end", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              allowOrigin: res.headers["access-control-allow-origin"],
+            }),
+          );
+        },
+      );
+      req.once("error", reject);
+      req.end();
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.allowOrigin).toBe(origin);
+    expect(response.allowOrigin).not.toBe("*");
+  });
+
+  test("keeps the external host when redirecting the dashboard root", async () => {
+    const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
+    const response = await new Promise<{
+      status: number;
+      location: string | undefined;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port: remoteManagementPeer.port,
+          path: "/",
+          headers: { host },
+        },
+        (res) => {
+          res.resume();
+          res.once("end", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              location: res.headers.location,
+            }),
+          );
+        },
+      );
+      req.once("error", reject);
+      req.end();
+    });
+
+    expect(response.status).toBe(302);
+    expect(response.location).toBe("/ui");
+  });
+
+  test("still hides remote management from a different browser origin", async () => {
+    const host = `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`;
+    const response = await fetch(
+      urlFor(remoteManagementPeer, "/api/v1/projects"),
+      { headers: { host, origin: "https://attacker.example" } },
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  test("does not trust a loopback Origin from a remote peer", async () => {
+    const response = await fetch(
+      urlFor(remoteManagementPeer, "/api/v1/projects"),
+      {
+        headers: {
+          host: `labs.sheep-fir.ts.net:${remoteManagementPeer.port}`,
+          origin: `http://localhost:${remoteManagementPeer.port}`,
+        },
+      },
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
   });
 
   test("allows IPv4-mapped IPv6 loopback peers", async () => {
