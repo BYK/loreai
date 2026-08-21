@@ -227,6 +227,41 @@ describe("management route access control", () => {
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
   });
 
+  test("does not trust matching forged loopback Host and Origin headers", async () => {
+    const origin = `http://localhost:${remoteManagementPeer.port}`;
+    const response = await new Promise<{
+      status: number;
+      body: string;
+    }>((resolve, reject) => {
+      const req = request(
+        {
+          host: "127.0.0.1",
+          port: remoteManagementPeer.port,
+          path: "/api/v1/projects",
+          headers: {
+            host: `localhost:${remoteManagementPeer.port}`,
+            origin,
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.once("end", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString(),
+            }),
+          );
+        },
+      );
+      req.once("error", reject);
+      req.end();
+    });
+
+    expect(response.status).toBe(404);
+    expect(response.body).toBe("");
+  });
+
   test("allows IPv4-mapped IPv6 loopback peers", async () => {
     const response = await fetch(
       urlFor(mappedLoopbackPeer, "/api/v1/projects"),

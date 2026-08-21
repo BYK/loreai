@@ -348,6 +348,7 @@ function managementCorsOrigin(
       hostname === "localhost" || isLoopbackAddress(hostname);
     if (!isLoopbackAddress(peerAddress)) {
       if (!allowRemoteManagement) return false;
+      if (loopbackOrigin) return false;
       const requestHost = req.headers.get("host");
       if (!requestHost) return false;
       const requestOrigin = new URL(`http://${requestHost}`);
