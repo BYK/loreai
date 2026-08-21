@@ -318,10 +318,15 @@ function withoutGatewayAccessHeader(req: Request): Request {
 
 /**
  * Return an allowed CORS origin, null when Origin is absent, or false when an
- * untrusted web origin supplied the header. Only numeric loopback hosts and the
- * special-use `localhost` name are valid browser origins for management.
+ * untrusted web origin supplied the header. Loopback peers may use numeric
+ * loopback hosts or the special-use `localhost` name. Non-loopback peers must
+ * supply an origin that exactly matches Host.
  */
-function managementCorsOrigin(req: Request): string | null | false {
+function managementCorsOrigin(
+  req: Request,
+  allowRemoteManagement: boolean,
+  peerAddress: string | undefined,
+): string | null | false {
   const origin = req.headers.get("origin");
   if (!origin) return null;
   try {
@@ -339,7 +344,26 @@ function managementCorsOrigin(req: Request): string | null | false {
       return false;
     }
     const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
-    if (hostname !== "localhost" && !isLoopbackAddress(hostname)) return false;
+    const loopbackOrigin =
+      hostname === "localhost" || isLoopbackAddress(hostname);
+    if (!isLoopbackAddress(peerAddress)) {
+      if (!allowRemoteManagement) return false;
+      const requestHost = req.headers.get("host");
+      if (!requestHost) return false;
+      const requestOrigin = new URL(`http://${requestHost}`);
+      if (
+        requestOrigin.username ||
+        requestOrigin.password ||
+        requestOrigin.pathname !== "/" ||
+        requestOrigin.search ||
+        requestOrigin.hash ||
+        parsed.origin !== requestOrigin.origin
+      ) {
+        return false;
+      }
+    } else if (!loopbackOrigin) {
+      return false;
+    }
     return origin;
   } catch {
     return false;
@@ -755,6 +779,11 @@ export async function startServer(
     config = { ...config, port: DEFAULT_PORT };
   }
   assertGatewayAccessConfigured(config);
+  if (config.allowRemoteManagement) {
+    log.notice(
+      "warning: remote management access is enabled; every client accepted by the listener can access /ui and /api",
+    );
+  }
 
   // Bootstrap the daily spend counter from DB (recovers today's spend after restart)
   if (getDailyBudget() > 0) {
@@ -794,9 +823,15 @@ export async function startServer(
       // Authorize from node:http's socket metadata, never from Forwarded,
       // X-Forwarded-For, Host, or another client-controlled header. Keep this
       // before preflight handling, lazy imports, and request body consumption.
-      if (!isLoopbackAddress(peerAddress)) return hiddenManagementResponse();
+      if (!config.allowRemoteManagement && !isLoopbackAddress(peerAddress)) {
+        return hiddenManagementResponse();
+      }
 
-      const origin = managementCorsOrigin(req);
+      const origin = managementCorsOrigin(
+        req,
+        config.allowRemoteManagement,
+        peerAddress,
+      );
       if (origin === false) return hiddenManagementResponse();
       allowedManagementOrigin = origin;
 
@@ -1048,7 +1083,7 @@ export async function startServer(
         return withManagementCors(
           new Response(null, {
             status: 302,
-            headers: { location: new URL("/ui", url).toString() },
+            headers: { location: "/ui" },
           }),
           allowedManagementOrigin,
         );

@@ -48,6 +48,11 @@ export interface GatewayConfig {
    * CLI: --host (can be specified multiple times, or comma-separated).
    */
   hosts: string[];
+  /**
+   * Allow non-loopback socket peers to access the dashboard and management API.
+   * Disabled by default. Env: LORE_ALLOW_REMOTE_MANAGEMENT.
+   */
+  allowRemoteManagement: boolean;
   /** Upstream Anthropic API URL. Default: "https://api.anthropic.com". Env: LORE_UPSTREAM_ANTHROPIC */
   upstreamAnthropic: string;
   /** Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI */
@@ -240,6 +245,7 @@ export function loadConfig(): GatewayConfig {
     port: parsePort(env.LORE_LISTEN_PORT, DEFAULT_PORT),
     portExplicit: !!env.LORE_LISTEN_PORT,
     hosts,
+    allowRemoteManagement: isTruthy(env.LORE_ALLOW_REMOTE_MANAGEMENT),
     upstreamAnthropic,
     upstreamOpenAI,
     callerUpstreamAllowlist,

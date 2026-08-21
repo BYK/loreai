@@ -50,6 +50,7 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
     remoteGateway: false,
     upstreamExtraHeaders: {},
     ...overrides,
+    allowRemoteManagement: overrides?.allowRemoteManagement ?? false,
   };
 }
 

@@ -92,6 +92,8 @@ export interface StartOptions {
    * CLI: `--local` / `-l`.
    */
   local?: boolean;
+  /** Allow non-loopback peers to access the dashboard and management API. */
+  allowRemoteManagement?: boolean;
   /**
    * When true, `lore start` daemonizes: it re-spawns itself detached, polls
    * the gateway until healthy, prints the address + PID + log path, and exits 0.
@@ -444,6 +446,7 @@ export function buildStartChildArgs(opts: StartOptions): string[] {
   }
   if (opts.debug) args.push("--debug");
   if (opts.local) args.push("--local");
+  if (opts.allowRemoteManagement) args.push("--allow-remote-management");
   if (opts.remoteUrl) args.push("--remote", opts.remoteUrl);
   return args;
 }
@@ -897,6 +900,9 @@ async function startGatewayLocked(
   }
   if (opts.hosts?.length) config.hosts = opts.hosts;
   if (opts.debug !== undefined) config.debug = opts.debug;
+  if (opts.allowRemoteManagement !== undefined) {
+    config.allowRemoteManagement = opts.allowRemoteManagement;
+  }
 
   // Hosted mode: `--local` CLI flag takes precedence, then env var,
   // then the caller-provided default. `lore start` leaves `opts.local`
