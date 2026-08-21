@@ -13,6 +13,7 @@ const ENV_KEYS = [
   "LORE_GATEWAY_AUTH_TOKEN",
   "LORE_HOSTED_MODE",
   "LORE_LISTEN_HOST",
+  "LORE_ALLOW_REMOTE_MANAGEMENT",
   "LORE_REMOTE_GATEWAY",
   "LORE_UPSTREAM_EXTRA_HEADERS",
 ] as const;
@@ -89,6 +90,15 @@ describe("gateway access configuration", () => {
         gatewayAuthToken: undefined,
       }),
     ).not.toThrow();
+  });
+
+  test("keeps remote management disabled unless explicitly enabled", () => {
+    const disabled = loadConfig();
+    expect(disabled.allowRemoteManagement).toBe(false);
+
+    process.env.LORE_ALLOW_REMOTE_MANAGEMENT = "1";
+    const enabled = loadConfig();
+    expect(enabled.allowRemoteManagement).toBe(true);
   });
 
   test("rejects a weak token supplied through a programmatic config", () => {

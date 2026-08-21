@@ -43,6 +43,7 @@ describe("Phase 3B.2 - typed lore start", () => {
       "--remote",
       "https://gateway.example",
       "--local",
+      "--allow-remote-management",
       "--bg",
     ];
     try {
@@ -57,6 +58,7 @@ describe("Phase 3B.2 - typed lore start", () => {
       debug: true,
       remoteUrl: "https://gateway.example",
       local: true,
+      allowRemoteManagement: true,
       bg: true,
     });
   });

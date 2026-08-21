@@ -150,6 +150,7 @@ const OPTIONS = {
   // `lore start --bg` / `--daemon` — run the gateway detached in the background
   bg: { type: "boolean" as const },
   daemon: { type: "boolean" as const },
+  "allow-remote-management": { type: "boolean" as const },
   // `lore login` / `lore whoami` flags
   email: { type: "string" as const },
   role: { type: "string" as const },
@@ -203,6 +204,7 @@ function buildStartOptions(values: {
   local?: boolean;
   bg?: boolean;
   daemon?: boolean;
+  "allow-remote-management"?: boolean;
 }): StartOptions {
   // Flatten: each --host value may itself be comma-separated
   const hosts = values.host?.flatMap((h) =>
@@ -218,6 +220,7 @@ function buildStartOptions(values: {
     remoteUrl: values.remote ?? undefined,
     local: values.local ?? undefined,
     bg: values.bg || values.daemon || undefined,
+    allowRemoteManagement: values["allow-remote-management"] ?? undefined,
   };
 }
 

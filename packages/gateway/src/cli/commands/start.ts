@@ -10,6 +10,8 @@
  *   opts.debug      — verbose banner (boolean, optional)
  *   opts.remoteUrl  — remote gateway URL (string, optional)
  *   opts.local      — disable hosted mode (boolean, optional)
+ *   opts.allowRemoteManagement — expose management routes to non-loopback
+ *                                peers (boolean, optional)
  *   opts.bg         — daemonize and exit (boolean, optional; aliased to
  *                     `--daemon`)
  *
@@ -28,6 +30,7 @@ type StartFlags = {
   debug?: boolean;
   remote?: string;
   local?: boolean;
+  allowRemoteManagement?: boolean;
   bg?: boolean;
   daemon?: boolean;
 };
@@ -39,7 +42,7 @@ export const startCommand = buildCommand<StartFlags, []>({
     "in the foreground until SIGINT/SIGTERM. With `--bg` (or `--daemon`) " +
     "the process detaches, prints the gateway address + PID + log path, " +
     "and exits 0. Flags: --port/-p, --host (repeatable), --debug/-d, " +
-    "--remote/-r, --local/-l, --bg/--daemon.",
+    "--remote/-r, --local/-l, --allow-remote-management, --bg/--daemon.",
   parameters: {
     // -H is reserved by Stricli for help, so --host has no short alias.
     // The remaining legacy aliases are retained.
@@ -74,6 +77,11 @@ export const startCommand = buildCommand<StartFlags, []>({
         brief: "Disable hosted mode even for lore start (alias: -l)",
         optional: true,
       },
+      allowRemoteManagement: {
+        kind: "boolean",
+        brief: "Allow non-loopback peers to access the dashboard and API",
+        optional: true,
+      },
       bg: {
         kind: "boolean",
         brief: "Detach and run as a background daemon",
@@ -98,6 +106,7 @@ export const startCommand = buildCommand<StartFlags, []>({
       debug: flags.debug,
       remoteUrl: flags.remote,
       local: flags.local,
+      allowRemoteManagement: flags.allowRemoteManagement,
       bg: flags.bg || flags.daemon || undefined,
     };
     // Foreground path returns Promise<never>; Stricli waits for handler

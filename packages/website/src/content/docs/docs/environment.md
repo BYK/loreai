@@ -54,6 +54,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
+| `LORE_ALLOW_REMOTE_MANAGEMENT`<br>**Parser:** `isTruthy` | Allow non-loopback socket peers to access the dashboard and management API. Disabled by default. Env: LORE_ALLOW_REMOTE_MANAGEMENT. |
 | `LORE_BEDROCK_REGION` | AWS Bedrock region. Selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint. Resolves from `LORE_BEDROCK_REGION` first, then falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`, finally defaulting to `"us-east-1"`. Env: LORE_BEDROCK_REGION |
 | `LORE_CALLER_UPSTREAM_ALLOWLIST` | Normalized HTTPS origins that remote/hosted clients may select with `X-Lore-Upstream-URL`. Empty by default, so caller-selected upstreams are denied unless the gateway administrator explicitly allows their origins. Local gateways do not consult this list. Env: LORE_CALLER_UPSTREAM_ALLOWLIST (comma-separated origins). |
 | `LORE_DEBUG`<br>**Parser:** `isTruthy` | Whether to log requests. Default: false. Env: LORE_DEBUG |

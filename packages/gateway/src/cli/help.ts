@@ -59,6 +59,9 @@ Options:
   -l, --local         Disable hosted mode AND remote-gateway mode for
                       \`lore start\` (keep FS ops active; bucket cwd fallback)
                       (env: LORE_HOSTED_MODE=0)
+      --allow-remote-management
+                       Allow non-loopback access to /ui and /api
+                       (env: LORE_ALLOW_REMOTE_MANAGEMENT=1)
       --bg, --daemon  \`lore start\`: run the gateway detached in the background,
                       then print its address, PID, and log path and exit
   -d, --debug         Enable debug logging (env: LORE_DEBUG=1)
