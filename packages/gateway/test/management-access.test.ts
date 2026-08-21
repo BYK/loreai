@@ -15,6 +15,7 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     debug: false,
     remoteGateway: false,
     hostedMode: false,
+    allowRemoteManagement: false,
     ...overrides,
   };
 }

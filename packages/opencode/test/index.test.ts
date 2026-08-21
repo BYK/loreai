@@ -170,6 +170,43 @@ describe("LorePlugin config hook", () => {
     expect(options.defaultHeaders).toEqual({ "X-Custom": "value" });
   });
 
+  test("disables OpenCode's default OpenAI header timeout when Lore routes the provider", () => {
+    const cfg: Record<string, unknown> = {
+      provider: {
+        openai: { options: { apiKey: "test-key" } },
+        "openai-codex": { options: {} },
+        anthropic: { options: { headerTimeout: 10_000 } },
+      },
+    };
+
+    applyLoreProviderConfig(cfg, "http://127.0.0.1:3207");
+
+    const provider = cfg.provider as Record<string, Record<string, unknown>>;
+    expect(
+      (provider.openai.options as Record<string, unknown>).headerTimeout,
+    ).toBe(false);
+    expect(
+      (provider["openai-codex"].options as Record<string, unknown>)
+        .headerTimeout,
+    ).toBe(false);
+    expect(
+      (provider.anthropic.options as Record<string, unknown>).headerTimeout,
+    ).toBe(10_000);
+  });
+
+  test("overrides OpenCode's inherited OpenAI header timeout", () => {
+    const cfg: Record<string, unknown> = {
+      provider: { openai: { options: { headerTimeout: 30_000 } } },
+    };
+
+    applyLoreProviderConfig(cfg, "http://127.0.0.1:3207");
+
+    const provider = cfg.provider as Record<string, Record<string, unknown>>;
+    expect(
+      (provider.openai.options as Record<string, unknown>).headerTimeout,
+    ).toBe(false);
+  });
+
   test("is a no-op when gatewayBase is empty (test env / startup failure)", () => {
     // In NODE_ENV=test the plugin's init skips gateway start, so
     // gatewayBase is "". We must not overwrite the user's provider config
@@ -183,10 +220,15 @@ describe("LorePlugin config hook", () => {
     expect(openai.options).toBeUndefined();
   });
 
-  test("is a no-op when cfg.provider is empty or absent", () => {
+  test("adds a routed OpenAI provider config when cfg.provider is absent", () => {
     const cfg: Record<string, unknown> = {};
     applyLoreProviderConfig(cfg, "http://127.0.0.1:3207");
-    expect(cfg.provider).toBeUndefined();
+
+    const provider = cfg.provider as Record<string, Record<string, unknown>>;
+    expect(provider.openai.options).toEqual({
+      baseURL: "http://127.0.0.1:3207/v1",
+      headerTimeout: false,
+    });
   });
 
   test("skips non-object provider entries (defensive against malformed config)", () => {

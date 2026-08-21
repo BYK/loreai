@@ -156,7 +156,7 @@ describe("routing log credential redaction", () => {
     const response = await handleRequest(request, loadConfig());
 
     expect(response.status).toBe(500);
-    expect(await response.text()).toContain(privateBodyMarker);
+    expect(await response.text()).not.toContain(privateBodyMarker);
     expect(messages.join("\n")).not.toContain(privateBodyMarker);
   });
 
@@ -196,6 +196,39 @@ describe("routing log credential redaction", () => {
     expect(output).toContain("pipeline request failed");
     expect(output).not.toContain(privateBodyMarker);
     expect(output).not.toContain("PRIVATE_FOREGROUND_REASON_MARKER");
+  });
+
+  it("logs a fixed transport failure without exposing upstream content", async () => {
+    const messages: string[] = [];
+    log.registerSink({
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: (message) => messages.push(message),
+      captureException: vi.fn(),
+    });
+    setUpstreamInterceptor(async () => {
+      throw new TypeError("fetch failed");
+    });
+
+    const response = await handleRequest(
+      {
+        protocol: "anthropic",
+        model: "claude-test",
+        system: "You are a coding assistant.",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+        ],
+        tools: [],
+        stream: false,
+        maxTokens: 64,
+        metadata: {},
+        rawHeaders: { "x-lore-agent": "coder" },
+      },
+      loadConfig(),
+    );
+
+    expect(response.status).toBe(502);
+    expect(messages).toContain("pipeline request failed: fetch failed");
   });
 
   it("sanitizes the configured worker initialization URL", async () => {

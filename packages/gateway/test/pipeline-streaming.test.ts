@@ -955,7 +955,7 @@ describe("Pipeline — streaming responses", () => {
         }),
         loadLocalConfig(),
       );
-      expect(order).toEqual(["eof1"]);
+      expect(order).toEqual(["eof1", "post1", "upstream2"]);
       const secondBody = await secondResponse.text();
       order.push("eof2");
       await new Promise((resolve) => setImmediate(resolve));
@@ -1870,8 +1870,7 @@ describe("Pipeline — streaming responses", () => {
       const firstBody = first.text();
       await started[0];
 
-      const second = await handleRequest(request(), loadLocalConfig());
-      const secondBody = second.text();
+      const secondResponse = handleRequest(request(), loadLocalConfig());
       await new Promise((resolve) => setImmediate(resolve));
       expect(upstreamCall).toBe(1);
 
@@ -1881,11 +1880,12 @@ describe("Pipeline — streaming responses", () => {
       sources[0]?.close();
       await firstBody;
       order.push("eof1");
+      const second = await secondResponse;
+      const secondBody = second.text();
       await started[1];
       expect(order).toEqual(["eof1", "post1"]);
 
-      const third = await handleRequest(request(), loadLocalConfig());
-      const thirdBody = third.text();
+      const thirdResponse = handleRequest(request(), loadLocalConfig());
       await new Promise((resolve) => setImmediate(resolve));
       expect(upstreamCall).toBe(2);
 
@@ -1895,6 +1895,8 @@ describe("Pipeline — streaming responses", () => {
       sources[1]?.close();
       await secondBody;
       order.push("eof2");
+      const third = await thirdResponse;
+      const thirdBody = third.text();
       await started[2];
 
       expect(order).toEqual(["eof1", "post1", "eof2", "post2", "upstream3"]);
@@ -1961,11 +1963,10 @@ describe("Pipeline — streaming responses", () => {
       const ownerBody = owner.text();
       await ownerStarted;
 
-      const waiting = await handleRequest(
+      const waiting = handleRequest(
         makeResponsesRequest({ sessionHeaders: ownerHeaders }),
         loadLocalConfig(),
       );
-      const waitingBody = waiting.text();
       await new Promise((resolve) => setImmediate(resolve));
       expect(activePipelineRequestCountForTest()).toBe(1);
 
@@ -1973,7 +1974,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({ sessionHeaders: ownerHeaders }),
         loadLocalConfig(),
       );
-      expect(await overflow.text()).toContain("event: response.failed");
+      expect(await overflow.text()).toContain("Gateway request failed");
 
       const unrelated = await handleRequest(
         makeResponsesRequest({
@@ -1990,59 +1991,17 @@ describe("Pipeline — streaming responses", () => {
       ownerSource?.close();
       ownerSource = undefined;
       await ownerBody;
+      const waitingResponse = await waiting;
+      const waitingBody = waitingResponse.text();
       expect(await waitingBody).toContain("event: response.completed");
       expect(upstreamCalls).toBe(3);
     } finally {
-      ownerSource?.close();
+      try {
+        ownerSource?.close();
+      } catch {
+        // The foreground timeout can close a test-owned source before cleanup.
+      }
       setMaxActivePipelineRequestsForTest();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("rejects an unread early-flush response after pipeline reset", async () => {
-    let postResponses = 0;
-    setPostResponseStartObserverForTest(() => postResponses++);
-    setUpstreamInterceptor(async () => {
-      throw new Error("unread early-flush response must not start");
-    });
-
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "responses-post-response-reset",
-          },
-        }),
-        loadLocalConfig(),
-      );
-      await resetPipelineState();
-      setPostResponseStartObserverForTest(() => postResponses++);
-      setUpstreamInterceptor(async () => new Response("{}", { status: 200 }));
-      const reopenedRequest = makeResponsesRequest({
-        sessionHeaders: { "x-lore-session-id": "post-reset-request" },
-        tools: [],
-      });
-      reopenedRequest.stream = false;
-      reopenedRequest.rawHeaders["x-lore-agent"] = "title";
-      await (await handleRequest(reopenedRequest, loadLocalConfig())).text();
-
-      let staleUpstreamCalls = 0;
-      setUpstreamInterceptor(async () => {
-        staleUpstreamCalls++;
-        return new Response(validResponsesSSE("resp_after_reset"), {
-          headers: { "content-type": "text/event-stream" },
-        });
-      });
-      const body = await response.text();
-
-      expect(body).toContain("event: response.failed");
-      expect(body).toContain("Gateway request failed");
-      expect(staleUpstreamCalls).toBe(0);
-      expect(postResponses).toBe(0);
-      expect(streamingPostResponsePendingForTest()).toBe(0);
-    } finally {
-      setPostResponseStartObserverForTest(undefined);
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
@@ -2063,16 +2022,13 @@ describe("Pipeline — streaming responses", () => {
     const sessionHeaders = {
       "x-lore-session-id": "cancelled-preterminal-session",
     };
+    const caller = new AbortController();
     const initialActiveRequests = activePipelineRequestCountForTest();
 
     try {
-      const response = await handleRequest(
-        makeResponsesRequest({ sessionHeaders }),
-        loadLocalConfig(),
-      );
-      const reader = response.body?.getReader();
-      expect(reader).toBeDefined();
-      await reader?.read();
+      const request = makeResponsesRequest({ sessionHeaders });
+      request.signal = caller.signal;
+      const response = handleRequest(request, loadLocalConfig());
       await producerWaiting;
 
       const state = [...getActiveSessions().values()].find(
@@ -2085,7 +2041,7 @@ describe("Pipeline — streaming responses", () => {
       );
       expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBe(true);
 
-      await reader?.cancel("client disconnected");
+      caller.abort(new DOMException("client disconnected", "AbortError"));
       expect(activePipelineRequestCountForTest()).toBe(
         initialActiveRequests + 1,
       );
@@ -2101,6 +2057,7 @@ describe("Pipeline — streaming responses", () => {
       expect(await saturated.text()).toContain("Gateway is busy");
 
       releaseProducer?.();
+      expect((await response).status).toBe(502);
       await vi.waitFor(() => {
         expect(activePipelineRequestCountForTest()).toBe(initialActiveRequests);
         expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBe(
@@ -2115,7 +2072,7 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it("waits for an abort-unaware early-flush producer before reset clears state", async () => {
+  it("waits for an abort-unaware producer before reset clears state", async () => {
     let releaseProducer: (() => void) | undefined;
     const producerPause = new Promise<void>((resolve) => {
       releaseProducer = resolve;
@@ -2137,13 +2094,12 @@ describe("Pipeline — streaming responses", () => {
     let reset: Promise<void> | undefined;
 
     try {
-      const response = await handleRequest(
+      const response = handleRequest(
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "stale-producer-session" },
         }),
         loadLocalConfig(),
       );
-      const body = response.text();
       await producerWaiting;
       reset = resetPipelineState();
       let resetSettled = false;
@@ -2157,7 +2113,7 @@ describe("Pipeline — streaming responses", () => {
       await reset;
       expect(resetSettled).toBe(true);
       expect(upstreamCalls).toBe(0);
-      expect(await body).toContain("event: response.failed");
+      expect((await response).status).toBe(502);
     } finally {
       releaseProducer?.();
       await reset;
@@ -2167,7 +2123,7 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it("fences an early-flush producer that resumes after the reset timeout", async () => {
+  it("fences a producer that resumes after the reset timeout", async () => {
     const sessionHeader = "late-stale-producer-session";
     const staleProjectPath = "/tmp";
     const freshProjectPath = process.cwd();
@@ -2201,8 +2157,7 @@ describe("Pipeline — streaming responses", () => {
       });
       staleRequest.rawHeaders["x-lore-project"] = staleProjectPath;
       staleRequest.rawHeaders["x-lore-upstream-url"] = staleUpstream;
-      const response = await handleRequest(staleRequest, loadLocalConfig());
-      const body = response.text();
+      const response = handleRequest(staleRequest, loadLocalConfig());
       await producerWaiting;
       await resetPipelineState();
 
@@ -2251,7 +2206,7 @@ describe("Pipeline — streaming responses", () => {
       const freshTracking = loadSessionTracking(freshState?.sessionID ?? "");
 
       releaseProducer?.();
-      expect(await body).toContain("event: response.failed");
+      expect((await response).status).toBe(502);
       await vi.waitFor(() =>
         expect(detachedPipelineRequestCountForTest()).toBe(0),
       );
@@ -2304,7 +2259,6 @@ describe("Pipeline — streaming responses", () => {
         }),
         loadLocalConfig(),
       );
-      const bodyResult = response.text();
       await upstreamStarted;
       await resetPipelineState();
 
@@ -2317,10 +2271,9 @@ describe("Pipeline — streaming responses", () => {
       reopenedRequest.stream = false;
       reopenedRequest.rawHeaders["x-lore-agent"] = "title";
       await (await handleRequest(reopenedRequest, loadLocalConfig())).text();
-      const body = await bodyResult;
-
-      expect(body).toContain("event: response.failed");
-      expect(body).toContain("Gateway request failed");
+      await expect(response.text()).rejects.toMatchObject({
+        name: "AbortError",
+      });
       expect(upstreamCancellations).toBe(1);
       expect(postResponses).toBe(0);
       expect(streamingPostResponsePendingForTest()).toBe(0);
@@ -2343,6 +2296,7 @@ describe("Pipeline — streaming responses", () => {
       "x-lore-session-id": "unread-compaction-reset-session",
     };
     let compactionRead: { mockRestore: () => void } | undefined;
+    let releaseReset: (() => void) | undefined;
 
     try {
       const established = await handleRequest(
@@ -2360,6 +2314,11 @@ describe("Pipeline — streaming responses", () => {
       await new Promise((resolve) => setImmediate(resolve));
 
       compactionRead = vi.spyOn(temporal, "undistilledCount");
+      const resetPause = new Promise<void>((resolve) => {
+        releaseReset = resolve;
+      });
+      setPipelineResetPauseForTest(resetPause);
+      const reset = resetPipelineState();
       const compacted = await handleRequest(
         makeResponsesRequest({
           sessionHeaders,
@@ -2378,15 +2337,15 @@ describe("Pipeline — streaming responses", () => {
         }),
         loadLocalConfig(),
       );
-      await resetPipelineState();
-
-      await expect(compacted.text()).rejects.toMatchObject({
-        name: "AbortError",
-        message: "gateway pipeline reset",
-      });
+      expect(compacted.status).toBe(503);
+      expect(await compacted.text()).toContain("Gateway pipeline is resetting");
       expect(compactionRead).not.toHaveBeenCalled();
       expect(upstreamCalls).toBe(1);
+      releaseReset?.();
+      await reset;
     } finally {
+      releaseReset?.();
+      setPipelineResetPauseForTest(undefined);
       compactionRead?.mockRestore();
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
@@ -3025,12 +2984,12 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       migration.signal = caller.signal;
-      const failed = await handleRequest(migration, loadLocalConfig());
-      const failedBody = failed.text();
+      const failed = handleRequest(migration, loadLocalConfig());
       await waiting;
       caller.abort(new DOMException("caller disconnected", "AbortError"));
       release();
-      expect(await failedBody).toContain("event: response.failed");
+      expect((await failed).status).toBe(502);
+      expect(await (await failed).text()).toContain("Gateway request failed");
       setPipelinePreUpstreamPauseForTest(undefined);
 
       const compact = await handleCompactEndpoint(
@@ -3102,8 +3061,10 @@ describe("Pipeline — streaming responses", () => {
         }),
         loadLocalConfig(),
       );
-      const responses = await Promise.all([first, second]);
-      await Promise.all(responses.map((response) => response.text()));
+      const firstResponse = await first;
+      await firstResponse.text();
+      const secondResponse = await second;
+      await secondResponse.text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -3927,6 +3888,60 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("sanitizes upstream errors during provisional migration", async () => {
+    const alias = "provisional-error-alias";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 1) {
+        return new Response(validResponsesSSE("resp_provisional_setup"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response("provider diagnostic: token=provisional-secret", {
+        status: 429,
+        headers: {
+          "content-type": "text/plain",
+          "retry-after": "999999",
+          "retry-after-ms": "999999999",
+        },
+      });
+    });
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": alias },
+          }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "provisional-error-canonical",
+            "x-session-affinity": alias,
+          },
+        }),
+        loadLocalConfig(),
+      );
+
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBe("300");
+      expect(response.headers.get("retry-after-ms")).toBe("300000");
+      const body = await response.text();
+      expect(body).toContain("Gateway request failed");
+      expect(body).not.toContain("provisional-secret");
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it.each(["provider", "malformed", "missing-terminal", "transport"] as const)(
     "does not confirm canonical migration after a %s Responses failure",
     async (failure) => {
@@ -4004,7 +4019,8 @@ describe("Pipeline — streaming responses", () => {
         migration.rawHeaders["x-lore-project"] =
           "/tmp/untrusted-provisional-project";
         const failed = await handleRequest(migration, loadLocalConfig());
-        expect(await failed.text()).toContain("event: response.failed");
+        expect(failed.status).toBe(502);
+        expect(await failed.text()).toContain("Gateway request failed");
         await new Promise((resolve) => setImmediate(resolve));
         await new Promise((resolve) => setImmediate(resolve));
 
@@ -4394,8 +4410,7 @@ describe("Pipeline — streaming responses", () => {
         sessionHeaders: { "x-session-affinity": alias },
       });
       first.rawHeaders["x-lore-project"] = projectA;
-      const firstResponse = await handleRequest(first, loadLocalConfig());
-      const firstBody = firstResponse.text();
+      const firstResponse = handleRequest(first, loadLocalConfig());
       await firstWaiting;
 
       const migration = makeResponsesRequest({
@@ -4405,16 +4420,13 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       migration.rawHeaders["x-lore-project"] = projectB;
-      const migrationResponse = await handleRequest(
-        migration,
-        loadLocalConfig(),
-      );
-      const migrationBody = migrationResponse.text();
+      const migrationResponse = handleRequest(migration, loadLocalConfig());
       await vi.waitFor(() =>
         expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
       );
 
       releaseFirst();
+      const firstBody = (await firstResponse).text();
       expect(await firstBody).toContain("event: response.completed");
       const boundAfterFirst = [...getActiveSessions().values()].find(
         (state) => state.headerSessionId === alias,
@@ -4423,7 +4435,9 @@ describe("Pipeline — streaming responses", () => {
         projectPath: projectA,
         projectPathProvisional: false,
       });
-      expect(await migrationBody).toContain("event: response.failed");
+      expect(await (await migrationResponse).text()).toContain(
+        "Gateway request failed",
+      );
       expect(upstreamCalls).toBe(1);
 
       setBeforeUpstreamCaptureForTest(undefined);
@@ -4651,8 +4665,7 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       first.rawHeaders["x-lore-project"] = projectA;
-      const firstResponse = await handleRequest(first, loadLocalConfig());
-      const firstBody = firstResponse.text();
+      const firstResponse = handleRequest(first, loadLocalConfig());
       await waiting;
       setPipelinePreUpstreamPauseForTest(undefined);
 
@@ -4663,15 +4676,14 @@ describe("Pipeline — streaming responses", () => {
         },
       });
       conflicting.rawHeaders["x-lore-project"] = projectB;
-      const conflictingResponse = await handleRequest(
-        conflicting,
-        loadLocalConfig(),
-      );
-      const conflictingBody = conflictingResponse.text();
+      const conflictingResponse = handleRequest(conflicting, loadLocalConfig());
       release();
 
+      const firstBody = (await firstResponse).text();
       expect(await firstBody).toContain("event: response.completed");
-      expect(await conflictingBody).toContain("event: response.failed");
+      expect(await (await conflictingResponse).text()).toContain(
+        "Gateway request failed",
+      );
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -4760,22 +4772,21 @@ describe("Pipeline — streaming responses", () => {
         getSessionCosts(stateA?.sessionID ?? "")?.conversation,
       );
       setPipelinePreUpstreamPauseForTest(paused, waitingResolve);
-      const retryA = await handleRequest(
+      const retryA = handleRequest(
         request(aliasA, projectA),
         loadLocalConfig(),
       );
-      const retryABody = retryA.text();
       await waiting;
       setPipelinePreUpstreamPauseForTest(undefined);
       expireProvisionalHeaderMappingsForTest();
 
-      await (
-        await handleRequest(request(aliasB, projectB), loadLocalConfig())
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
+      const retryB = handleRequest(
+        request(aliasB, projectB),
+        loadLocalConfig(),
+      );
       release();
-      await retryABody;
+      await (await retryA).text();
+      await (await retryB).text();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -4850,7 +4861,7 @@ describe("Pipeline — streaming responses", () => {
       );
       const body = await response.text();
       expect(body).toContain(
-        succeeds ? "event: response.completed" : "event: response.failed",
+        succeeds ? "event: response.completed" : "Gateway request failed",
       );
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -4982,7 +4993,7 @@ describe("Pipeline — streaming responses", () => {
       );
       const body = await response.text();
       expect(body).toContain(
-        succeeds ? "event: response.completed" : "event: response.failed",
+        succeeds ? "event: response.completed" : "Gateway request failed",
       );
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
@@ -5151,7 +5162,7 @@ describe("Pipeline — streaming responses", () => {
         messages: messages("alpha seed", 4),
       });
       const normal = await handleRequest(normalAmbiguous, loadLocalConfig());
-      expect(await normal.text()).toContain("event: response.failed");
+      expect(await normal.text()).toContain("Gateway request failed");
       expect(upstreamCall).toBe(8);
       expect(alpha?.messageCount).toBe(messages("alpha seed", 3).length);
       expect(beta?.messageCount).toBe(messages("beta seed", 3).length);
@@ -5586,8 +5597,7 @@ describe("Pipeline — streaming responses", () => {
         setPipelinePreUpstreamPauseForTest(rebindPause, rebindWaitingResolve);
         const rebind = makeResponsesRequest({ sessionHeaders });
         rebind.rawHeaders["x-lore-project"] = projectB;
-        const rebindResponse = await handleRequest(rebind, loadLocalConfig());
-        const rebindBody = rebindResponse.text();
+        const rebindResponse = handleRequest(rebind, loadLocalConfig());
         await rebindWaiting;
         setPipelinePreUpstreamPauseForTest(undefined);
 
@@ -5653,7 +5663,9 @@ describe("Pipeline — streaming responses", () => {
         );
 
         releaseRebind();
-        expect(await rebindBody).toContain("event: response.completed");
+        expect(await (await rebindResponse).text()).toContain(
+          "event: response.completed",
+        );
         const response = await pending;
         expect(response.status).toBe(403);
         expect(await response.text()).toMatch(/project[_ ]path/i);
@@ -5754,11 +5766,7 @@ describe("Pipeline — streaming responses", () => {
             },
           ],
         });
-        const rotationResponse = await handleRequest(
-          rotation,
-          loadLocalConfig(),
-        );
-        rotationBody = rotationResponse.text();
+        const rotationResponse = handleRequest(rotation, loadLocalConfig());
         await rotationWaiting;
         const oldState = [...getActiveSessions().values()].find(
           (state) => state.headerSessionId === oldAffinity,
@@ -5847,6 +5855,7 @@ describe("Pipeline — streaming responses", () => {
         summaryRead.mockClear();
 
         releaseRotation();
+        rotationBody = (await rotationResponse).text();
         expect(await rotationBody).toContain("event: response.completed");
         const response = await queued;
         expect(response.status).toBe(route === "slash" ? 200 : 404);
@@ -6078,7 +6087,6 @@ describe("Pipeline — streaming responses", () => {
         }),
         loadLocalConfig(),
       );
-      expect(order).not.toContain("stored");
       const compactedBody = await compacted.text();
 
       expect(compactedBody).toContain("remember this turn");
