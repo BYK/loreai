@@ -131,6 +131,25 @@ function codexFinalStream(): Response {
   });
 }
 
+/** A follow-up that sends headers and then loses its SSE body. */
+function droppedCodexFollowUpStream(): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            sseEvent("response.created", {
+              response: { id: "resp_dropped", model: "gpt-5.5" },
+            }),
+          ),
+        );
+        controller.error(new Error("socket reset"));
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
 /** Mimic ChatGPT's backend rejecting a non-streaming request. */
 function codexStreamRequiredError(): Response {
   return new Response(
@@ -181,7 +200,8 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     // fix) → final text. A non-streaming upstream request always 400s, exactly
     // like the real backend.
     let upstreamCalls = 0;
-    let followUpStreamFlag: boolean | undefined;
+    const followUpBodies: unknown[] = [];
+    const followUpStreamFlags: boolean[] = [];
     const parallelToolCallFlags: unknown[] = [];
     setUpstreamInterceptor(async (upstreamBody) => {
       const body = upstreamBody as {
@@ -195,9 +215,14 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
         // Initial request — Pi's codex provider always streams.
         return streaming ? codexRecallStream() : codexStreamRequiredError();
       }
-      // Recall follow-up — record the stream flag the gateway sent upstream.
-      followUpStreamFlag = streaming;
-      return streaming ? codexFinalStream() : codexStreamRequiredError();
+      // The first follow-up loses its SSE body after headers. Retry must send
+      // this exact request again, not append another recall result.
+      followUpBodies.push(structuredClone(upstreamBody));
+      followUpStreamFlags.push(streaming);
+      if (!streaming) return codexStreamRequiredError();
+      return upstreamCalls === 2
+        ? droppedCodexFollowUpStream()
+        : codexFinalStream();
     });
 
     const config = loadConfig();
@@ -255,11 +280,13 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
     expect(resp.ok).toBe(true);
     const bodyText = await resp.text();
 
-    // The follow-up must have been issued AND streamed (the fix). Pre-fix it
-    // was sent with stream:false and ChatGPT 400'd.
-    expect(upstreamCalls).toBe(2);
-    expect(followUpStreamFlag).toBe(true);
-    expect(parallelToolCallFlags).toEqual([false, false]);
+    // The follow-up must be streamed, and an SSE-body retry must replay its
+    // already-built request exactly once rather than duplicating recall state.
+    expect(upstreamCalls).toBe(3);
+    expect(followUpStreamFlags).toEqual([true, true]);
+    expect(followUpBodies).toHaveLength(2);
+    expect(followUpBodies[1]).toEqual(followUpBodies[0]);
+    expect(parallelToolCallFlags).toEqual([false, false, false]);
 
     // The continuation must reach the client — proving the follow-up succeeded
     // instead of falling back to the bare recall marker.
