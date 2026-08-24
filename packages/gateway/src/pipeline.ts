@@ -967,6 +967,7 @@ async function resetPipelineStateInner(opts?: {
   postResponseStartObserver = undefined;
   recallPersistenceCommitObserver = undefined;
   provisionalFinalizerPauseForTest = undefined;
+  foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
   if (stopFileWatcher) {
     stopFileWatcher();
     stopFileWatcher = null;
@@ -10953,6 +10954,66 @@ export function streamResponsesRecallAware(
 const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
 const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
+const FOREGROUND_ERROR_BODY_TIMEOUT_MS = 10_000;
+const MAX_RELAY_RETRY_AFTER_MS = 300_000;
+let foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
+
+/** Test-only override for a bounded upstream error-body read. */
+export function setForegroundErrorBodyTimeoutForTest(timeoutMs?: number): void {
+  foregroundErrorBodyTimeoutMs = timeoutMs ?? FOREGROUND_ERROR_BODY_TIMEOUT_MS;
+}
+
+function boundedRetryAfter(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return String(
+      Math.min(Math.ceil(seconds), Math.ceil(MAX_RELAY_RETRY_AFTER_MS / 1_000)),
+    );
+  }
+  const timestamp = Date.parse(trimmed);
+  if (Number.isNaN(timestamp)) return undefined;
+  return String(
+    Math.min(
+      Math.max(0, Math.ceil((timestamp - Date.now()) / 1_000)),
+      Math.ceil(MAX_RELAY_RETRY_AFTER_MS / 1_000),
+    ),
+  );
+}
+
+function boundedRetryAfterMs(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const milliseconds = Number(trimmed);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return undefined;
+  return String(Math.min(Math.ceil(milliseconds), MAX_RELAY_RETRY_AFTER_MS));
+}
+
+function sanitizedUpstreamErrorResponse(response: Response): Response {
+  const headers = new Headers({ "content-type": "application/json" });
+  const retryAfter = response.headers.get("retry-after");
+  const retryAfterMs = response.headers.get("retry-after-ms");
+  const boundedRetryAfterValue = retryAfter
+    ? boundedRetryAfter(retryAfter)
+    : undefined;
+  const boundedRetryAfterMsValue = retryAfterMs
+    ? boundedRetryAfterMs(retryAfterMs)
+    : undefined;
+  if (boundedRetryAfterValue) {
+    headers.set("retry-after", boundedRetryAfterValue);
+  }
+  if (boundedRetryAfterMsValue) {
+    headers.set("retry-after-ms", boundedRetryAfterMsValue);
+  }
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "server_error", message: "Gateway request failed" },
+    }),
+    { status: response.status, headers },
+  );
+}
 
 export async function readForegroundBody(
   response: Response,
@@ -13116,15 +13177,7 @@ async function handleCompaction(
         claimSession,
       );
     };
-    const response =
-      req.stream && req.protocol === "openai-responses"
-        ? earlyFlushStreamingResponse(
-            run,
-            req.model,
-            abortScope.signal,
-            trackOperation,
-          )
-        : await run(abortScope.signal);
+    const response = await run(abortScope.signal);
     return wrapBodyWithCleanup(
       response,
       abortScope.dispose,
@@ -14772,7 +14825,10 @@ async function handleProvisionalConversationTurn(
     abortScope.signal,
   );
   if (!upstreamResponse.ok) {
-    return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
+    // A provisional request cannot use provider diagnostics for recovery, and
+    // must never expose them while proving a session identity.
+    void upstreamResponse.body?.cancel().catch(() => {});
+    return sanitizedUpstreamErrorResponse(upstreamResponse);
   }
 
   let accumulated: GatewayResponse;
@@ -17134,14 +17190,25 @@ async function handleConversationTurn(
   const { serializedBody: requestBody, effectiveProtocol } = upstreamResult;
 
   if (!upstreamResponse.ok) {
-    const errorBody = await awaitForeground(
-      readForegroundBody(
+    const errorBodySignal = AbortSignal.any([
+      foregroundAbort.signal,
+      AbortSignal.timeout(foregroundErrorBodyTimeoutMs),
+    ]);
+    let errorBody = "";
+    try {
+      errorBody = await readForegroundBody(
         upstreamResponse,
         true,
         undefined,
-        foregroundAbort.signal,
-      ),
-    );
+        errorBodySignal,
+      );
+    } catch (error) {
+      if (foregroundAbort.signal.aborted) {
+        releaseForeground();
+        throw error;
+      }
+      log.warn("upstream error body read timed out");
+    }
     log.error(`upstream error: ${upstreamResponse.status}`);
 
     // When the API rejects with a context-length error, escalate the compression
@@ -17187,12 +17254,7 @@ async function handleConversationTurn(
       message: `HTTP ${upstreamResponse.status}`,
     });
     endGenAiSpan();
-    return finishForeground(
-      new Response(errorBody, {
-        status: upstreamResponse.status,
-        headers: { "content-type": "application/json" },
-      }),
-    );
+    return finishForeground(sanitizedUpstreamErrorResponse(upstreamResponse));
   }
 
   // Run the recall-interception loop over an already-accumulated
@@ -18810,207 +18872,6 @@ function errorResponse(status: number, message: string): Response {
 // ---------------------------------------------------------------------------
 
 /**
- * Early-flush wrapper for streaming Requests/Codex responses.
- *
- * The gateway's pre-upstream pipeline (LTM injection, gradient transform,
- * cache-TTL resolution) can take tens of seconds on a cold post-restart
- * session with a large transcript. opencode's client aborts with
- * `ProviderHeaderTimeoutError` if no response headers arrive within 10s, and
- * its retries fire concurrent identical turns — each re-running the same slow
- * pre-upstream path.
- *
- * `handleConversationTurn` only constructs the streaming `Response` AFTER that
- * work completes (it needs `modifiedReq`/`cacheOptions` to build the stream),
- * so no headers go out until the upstream is already streaming. This wrapper
- * breaks that ordering: it returns a `Response` whose body is a `ReadableStream`
- * SYNCHRONOUSLY, so the server flushes `HTTP/1.1 200 OK` + `text/event-stream`
- * immediately. The actual pipeline (including the pre-upstream work) runs
- * inside the stream's `start()`; an SSE keepalive comment keeps the connection
- * alive while it prepares, then the inner streaming response's bytes are
- * re-piped to the client.
- *
- * A keepalive comment (": lore preparing\n\n") is enqueued as the FIRST chunk —
- * this forces the header flush and gives the client a live signal during the
- * pre-upstream window. SSE comment lines are a no-op for every OpenAI/Responses
- * SSE parser (they are skipped), so the client sees a clean event stream.
- *
- * When the pipeline fails before producing a stream, emit a `response.failed`
- * event (Responses protocol) or an SSE error comment and close — the client
- * treats it as a failed generation, not a dropped connection.
- */
-export function earlyFlushStreamingResponse(
-  run: (signal: AbortSignal) => Promise<Response>,
-  modelId: string,
-  signal?: AbortSignal,
-  trackOperation?: (operation: Promise<unknown>) => void,
-  keepaliveMs = 5_000,
-  diagnosticContext?: () => string,
-): Response {
-  const encoder = new TextEncoder();
-  const keepalive = encoder.encode(`: lore preparing\n\n`);
-  const downstreamAbort = new AbortController();
-  const operationSignal = signal
-    ? AbortSignal.any([signal, downstreamAbort.signal])
-    : downstreamAbort.signal;
-
-  /**
-   * Emit a canonical `response.failed` envelope matching the shape used by
-   * stream/openai-responses.ts and the recall-aware streamer:
-   *   { type: "response.failed", response: { id, object, created_at, model,
-   *     status: "failed", output: [], usage: null, error: { type, message } } }
-   */
-  function emitFailed(message: string): Uint8Array {
-    const envelope = {
-      type: "response.failed",
-      response: {
-        id: `resp_error_${Date.now()}`,
-        object: "response",
-        created_at: Math.floor(Date.now() / 1000),
-        model: modelId,
-        status: "failed",
-        output: [],
-        usage: null,
-        error: { type: "server_error", message },
-      },
-    };
-    return encoder.encode(
-      `event: response.failed\ndata: ${JSON.stringify(envelope)}\n\n`,
-    );
-  }
-
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  let responsePromise: Promise<Response> | undefined;
-  let innerPromise: Promise<Response> | undefined;
-  let readPromise: ReturnType<typeof readStreamChunk> | undefined;
-  let cancelled = false;
-  let finished = false;
-
-  async function awaitWithKeepalive<T>(
-    operation: Promise<T>,
-  ): Promise<{ value: T } | { keepalive: true }> {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        operation.then((value) => ({ value }) as const),
-        new Promise<{ keepalive: true }>((resolve) => {
-          timeout = setTimeout(() => resolve({ keepalive: true }), keepaliveMs);
-        }),
-      ]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
-  }
-
-  const finish = (
-    controller: ReadableStreamDefaultController<Uint8Array>,
-  ): void => {
-    if (finished) return;
-    finished = true;
-    if (reader) cancelAndReleaseReader(reader);
-    try {
-      controller.close();
-    } catch {
-      /* already closed */
-    }
-  };
-
-  return new Response(
-    new ReadableStream({
-      start(controller) {
-        // Fill the initial queue with only the keepalive. The pipeline starts
-        // from pull() after the downstream consumes it, preserving backpressure.
-        controller.enqueue(keepalive);
-      },
-      async pull(controller) {
-        if (cancelled || finished) return;
-        try {
-          if (!reader) {
-            if (!responsePromise) {
-              responsePromise = run(operationSignal);
-              trackOperation?.(responsePromise);
-            }
-            innerPromise ??= responseAgainstAbort(
-              () => responsePromise as Promise<Response>,
-              operationSignal,
-            );
-            const pendingInner = awaitWithKeepalive(innerPromise);
-            const innerResult = await pendingInner;
-            if ("keepalive" in innerResult) {
-              controller.enqueue(keepalive);
-              return;
-            }
-            const inner = innerResult.value;
-            if (cancelled) {
-              void inner.body?.cancel().catch(() => {});
-              return;
-            }
-            if (
-              !inner.body ||
-              !inner.headers.get("content-type")?.includes("text/event-stream")
-            ) {
-              // The inner response has no streamable SSE body (e.g. an error
-              // Response with a plain string body). Surface as response.failed.
-              log.error(
-                `early-flush inner response was not SSE (status=${inner.status})`,
-              );
-              void inner.body?.cancel(operationSignal.reason).catch(() => {});
-              if (!cancelled) {
-                controller.enqueue(emitFailed("Gateway request failed"));
-                finish(controller);
-              }
-              return;
-            }
-            reader = inner.body.getReader();
-          }
-          const pendingRead = (readPromise ??= readStreamChunk(reader, {
-            signal: operationSignal,
-          }));
-          const chunkResult = await awaitWithKeepalive(pendingRead);
-          if ("keepalive" in chunkResult) {
-            controller.enqueue(keepalive);
-            return;
-          }
-          readPromise = undefined;
-          const chunk = chunkResult.value;
-          if (cancelled) return;
-          if (chunk.done) finish(controller);
-          else controller.enqueue(chunk.value);
-        } catch (err) {
-          let context = "";
-          try {
-            context = diagnosticContext?.() ?? "";
-          } catch (contextError) {
-            log.warn("early-flush failure diagnostic failed:", contextError);
-          }
-          log.error(
-            `early-flush stream failed${context ? ` (${context})` : ""}:`,
-            err,
-          );
-          if (!cancelled) {
-            controller.enqueue(emitFailed("Gateway request failed"));
-            finish(controller);
-          }
-        }
-      },
-      cancel(reason) {
-        cancelled = true;
-        finished = true;
-        if (!downstreamAbort.signal.aborted) {
-          downstreamAbort.abort(
-            reason ?? new DOMException("response cancelled", "AbortError"),
-          );
-        }
-        if (reader) cancelAndReleaseReader(reader, reason);
-      },
-    }),
-    {
-      status: 200,
-      headers: { "content-type": "text/event-stream" },
-    },
-  );
-}
-
-/**
  * Process an incoming gateway request through the full Lore pipeline.
  *
  * Returns a standard `Response` object — either a streaming SSE response
@@ -19169,36 +19030,6 @@ async function handleRequestInner(
     }
 
     // --- Case 3: Normal conversation turn → full pipeline ---
-    // For streaming openai-responses (codex/ChatGPT) requests, wrap the
-    // pipeline in an early-flush stream so response headers reach the client
-    // before the (potentially slow) pre-upstream LTM/gradient work completes.
-    // opencode aborts with ProviderHeaderTimeoutError when no headers arrive
-    // within 10s; this guarantees they flush immediately and the client sees a
-    // keepalive while the gateway prepares.
-    if (req.stream && req.protocol === "openai-responses") {
-      let sessionID: string | undefined;
-      return earlyFlushStreamingResponse(
-        (signal) =>
-          handleConversationTurn(
-            { ...req, signal },
-            config,
-            requestOrder,
-            requestGeneration,
-            downstreamSettled,
-            downstreamWasCancelled,
-            claimSession,
-            (identifiedSessionID) => {
-              sessionID = identifiedSessionID;
-            },
-          ),
-        req.model,
-        req.signal,
-        trackOperation,
-        undefined,
-        () =>
-          `request=${requestOrder} session=${sessionID?.slice(0, 16) ?? "pending"} upstream=${upstreamUrlForLog(resolveRequestUpstreamRoute(req, config).effectiveUpstreamBase)}`,
-      );
-    }
     return await handleConversationTurn(
       req,
       config,
@@ -19219,7 +19050,20 @@ async function handleRequestInner(
         route: "request",
       });
     } else {
-      log.error("pipeline request failed");
+      // Only log fixed internal failures. Arbitrary parser/fetch messages can
+      // contain upstream response content, which must never reach the log.
+      const detail =
+        err instanceof Error &&
+        [
+          "fetch failed",
+          "malformed OpenAI stream event",
+          "missing OpenAI finish_reason terminal",
+          "missing OpenAI [DONE] terminal",
+          "Upstream response has no body",
+        ].includes(err.message)
+          ? `: ${err.message}`
+          : "";
+      log.error(`pipeline request failed${detail}`);
     }
     return errorResponse(502, "Gateway request failed");
   }

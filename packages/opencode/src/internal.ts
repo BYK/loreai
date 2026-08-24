@@ -113,12 +113,25 @@ export function applyLoreProviderConfig(
     const existingOptions = (p.options ?? {}) as Record<string, unknown>;
     pinned[id] = {
       ...p,
-      options: { ...existingOptions, baseURL: baseUrl },
+      options: {
+        ...existingOptions,
+        baseURL: baseUrl,
+        // Lore can take longer than OpenCode's Codex 10s header deadline while
+        // it prepares context. OpenCode installs its own default before this
+        // hook runs, so Lore must override it rather than preserve that value.
+        // The gateway owns the foreground request deadline.
+        ...(id === "openai" || id === "openai-codex"
+          ? { headerTimeout: false }
+          : {}),
+      },
     };
   }
-  if (Object.keys(pinned).length > 0) {
-    cfg.provider = { ...existingProvider, ...pinned };
+  if (!pinned.openai) {
+    pinned.openai = {
+      options: { baseURL: baseUrl, headerTimeout: false },
+    };
   }
+  cfg.provider = { ...existingProvider, ...pinned };
 }
 
 /**
