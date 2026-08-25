@@ -291,6 +291,44 @@ describe("strict hosted receipt identity", () => {
       standaloneInstallProvenance(executable, { seaBinary: true, home }),
     ).toEqual({ hostedInstall: false });
   });
+
+  it("establishes a missing receipt for a genuine standalone binary", () => {
+    const home = temporaryDirectory();
+    const installDir = join(home, "bin");
+    const stateDir = join(home, ".lore");
+    const executable = join(installDir, "lore");
+    mkdirSync(installDir);
+    mkdirSync(stateDir, { mode: 0o700 });
+    writeFileSync(executable, "binary");
+    // No install-path receipt exists yet.
+    expect(existsSync(join(stateDir, "install-path"))).toBe(false);
+    const provenance = standaloneInstallProvenance(executable, {
+      seaBinary: true,
+      home,
+    });
+    expect(provenance.hostedInstall).toBe(true);
+    expect(provenance.receiptPath).toBe(join(stateDir, "install-path"));
+    expect(provenance.pathInstallDir).toBe(installDir);
+    // The receipt was persisted so subsequent invocations read it directly.
+    expect(
+      parseInstallReceipt(readFileSync(provenance.receiptPath!, "utf8"))
+        ?.version,
+    ).toBe(3);
+    expect(
+      standaloneInstallProvenance(executable, { seaBinary: true, home }),
+    ).toMatchObject({ hostedInstall: true });
+  });
+
+  it("does not establish a receipt outside the home directory", () => {
+    const home = temporaryDirectory();
+    const executable = join(tmpdir(), "lore");
+    mkdirSync(join(home, ".lore"), { mode: 0o700 });
+    writeFileSync(executable, "binary");
+    expect(
+      standaloneInstallProvenance(executable, { seaBinary: true, home }),
+    ).toEqual({ hostedInstall: false });
+    expect(existsSync(join(home, ".lore", "install-path"))).toBe(false);
+  });
 });
 
 describe("generation-bound deletion", () => {
