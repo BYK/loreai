@@ -699,11 +699,6 @@ export function standaloneInstallProvenance(
   const statePath = join(home, ".lore", "install-path");
 
   try {
-    const state = lstatSync(statePath);
-    if (!state.isFile() || state.isSymbolicLink()) {
-      return { hostedInstall: false };
-    }
-    if (uid !== undefined && state.uid !== uid) return { hostedInstall: false };
     const canonicalHome = realpathSync.native(home);
     const canonicalParent = realpathSync.native(dirname(statePath));
     const expectedCanonicalParent = join(canonicalHome, ".lore");
@@ -720,6 +715,29 @@ export function standaloneInstallProvenance(
       return { hostedInstall: false };
     }
 
+    let state: ReturnType<typeof lstatSync>;
+    try {
+      state = lstatSync(statePath);
+    } catch (error) {
+      // A missing receipt on a genuine SEA binary means the binary was
+      // installed by an installer that predates the receipt protocol.
+      // Establish the v3 receipt instead of treating it as package-managed.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return establishStandaloneInstallReceipt(executable, {
+          home,
+          uid,
+          platform,
+        });
+      }
+      return { hostedInstall: false };
+    }
+    if (state.isSymbolicLink()) {
+      return { hostedInstall: false };
+    }
+    if (!state.isFile()) {
+      return { hostedInstall: false };
+    }
+    if (uid !== undefined && state.uid !== uid) return { hostedInstall: false };
     const capturedReceipt = captureFile(statePath, uid);
     if (capturedReceipt === null) return { hostedInstall: false };
     const receipt = parseInstallReceipt(
@@ -752,6 +770,77 @@ export function standaloneInstallProvenance(
       pathInstallDir: receipt.pathInstallDir,
       executableIdentity: fileIdentity(capturedExecutable),
     };
+  } catch {
+    return { hostedInstall: false };
+  }
+}
+
+/**
+ * Establish the install receipt for a genuine standalone (SEA) binary that
+ * lacks one. This recovers binaries installed before the receipt protocol
+ * existed, and lets `lore upgrade`/`lore uninstall` treat them as hosted
+ * installs instead of refusing or treating them as package-managed.
+ *
+ * Only call this for a SEA binary owned by the invoking user and located
+ * inside their home directory; the receipt is published atomically via
+ * link, mirroring the hosted installer.
+ */
+export function establishStandaloneInstallReceipt(
+  executable: string,
+  options: {
+    home?: string;
+    uid?: number;
+    platform?: NodeJS.Platform;
+  } = {},
+): StandaloneInstallProvenance {
+  const home = options.home ?? homedir();
+  const uid = options.uid ?? process.getuid?.();
+  const platform = options.platform ?? process.platform;
+  const statePath = join(home, ".lore", "install-path");
+  try {
+    const canonicalHome = realpathSync.native(home);
+    if (!pathIsInside(resolve(executable), canonicalHome)) {
+      return { hostedInstall: false };
+    }
+    const capturedExecutable = captureFile(executable, uid);
+    if (capturedExecutable === null) return { hostedInstall: false };
+    const installDir = dirname(resolve(executable));
+    const content = formatStandaloneInstallReceipt({
+      executable: resolve(executable),
+      pathInstallDir: installDir,
+      executableIdentity: capturedExecutable,
+      platform,
+    });
+    const temp = join(
+      dirname(statePath),
+      `.${basename(statePath)}.establish-${process.pid}-${randomBytes(8).toString("hex")}`,
+    );
+    writeFileSync(temp, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    try {
+      if (!fileStillMatches(executable, capturedExecutable)) {
+        return { hostedInstall: false };
+      }
+      linkSync(temp, statePath);
+      const published = captureFile(statePath, uid);
+      if (
+        published === null ||
+        published.sha256 !== createHash("sha256").update(content).digest("hex")
+      ) {
+        return { hostedInstall: false };
+      }
+      if (!fileStillMatches(executable, capturedExecutable)) {
+        return { hostedInstall: false };
+      }
+      return {
+        hostedInstall: true,
+        receiptPath: statePath,
+        receiptIdentity: fileIdentity(published),
+        pathInstallDir: installDir,
+        executableIdentity: fileIdentity(capturedExecutable),
+      };
+    } finally {
+      rmSync(temp, { force: true });
+    }
   } catch {
     return { hostedInstall: false };
   }
