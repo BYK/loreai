@@ -96,6 +96,20 @@ jobs:
         # in workflow schema validation, not shell style.
         run: ./actionlint -color -config-file .github/actionlint.yaml
 
+  # ---------------------------------------------------------------------------
+  # Lint the install script for bash-4.x-only constructs.
+  # The installer runs on macOS via `curl ... | bash`, where the default
+  # /bin/bash is 3.2. Named file descriptors (bash 4.1+) and other 4.0+/4.1+
+  # features break there, so gate them in CI. Runs unconditionally — it is
+  # sub-second and a regression here blocks every macOS install.
+  # ---------------------------------------------------------------------------
+  install-script-bash-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check installer bash-3.2 compatibility
+        run: bash packages/website/scripts/check-install-script-bashisms.sh
+
   test:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
