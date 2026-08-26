@@ -512,7 +512,8 @@ secure_lifecycle_state_dir() {
     die "Refusing installer state directory owned by another user: ${state_dir}"
   fi
   before=$(require_file_identity "$state_dir" "installer state directory")
-  if ! exec {lifecycle_state_dir_fd}<"$state_dir"; then
+  lifecycle_state_dir_fd=8
+  if ! exec 8<"$state_dir"; then
     die "Could not open installer state directory safely: ${state_dir}"
   fi
   lifecycle_state_dir_fd_path="/dev/fd/${lifecycle_state_dir_fd}"
@@ -856,12 +857,13 @@ quarantine_definitively_stale_lifecycle_lock() {
   # Pin the stale directory before adding a compatibility guard. An older Bash
   # reclaimer that already reserved claim/lock must not be able to wake later
   # and move a canonical successor beneath the archived token claim.
-  if ! exec {stale_fd}<"$lock_path"; then
+  if ! exec 10<"$lock_path"; then
     return 1
   fi
+  stale_fd=10
   stale_fd_path="/dev/fd/${stale_fd}"
   if [[ "$(stable_followed_file_identity "$stale_fd_path" 2>/dev/null || true)" != "$expected_dir" ]]; then
-    exec {stale_fd}<&-
+    exec 10<&-
     return 1
   fi
   # Portable mv treats an existing directory as a parent. Reserve the source
@@ -870,14 +872,14 @@ quarantine_definitively_stale_lifecycle_lock() {
   portable_guard="$stale_fd_path/lifecycle.lock"
   if [[ -e "$portable_guard" || -L "$portable_guard" ]]; then
     if ! lifecycle_portable_reclaim_guard_is_valid "$portable_guard"; then
-      exec {stale_fd}<&-
+      exec 10<&-
       return 1
     fi
   else
     set -o noclobber
     if ! : > "$portable_guard"; then
       set +o noclobber
-      exec {stale_fd}<&-
+      exec 10<&-
       return 1
     fi
     set +o noclobber
@@ -887,7 +889,7 @@ quarantine_definitively_stale_lifecycle_lock() {
   if [[ "$os" != "darwin" ]]; then
     if [[ -e "$stale_fd_path/lock" || -L "$stale_fd_path/lock" ]]; then
       if ! lifecycle_reclaim_guard_is_valid "$stale_fd_path/lock"; then
-        exec {stale_fd}<&-
+        exec 10<&-
         return 1
       fi
     else
@@ -899,12 +901,12 @@ quarantine_definitively_stale_lifecycle_lock() {
         rmdir "$guard_tmp/lifecycle.lock/sentinel" 2>/dev/null || true
         rmdir "$guard_tmp/lifecycle.lock" 2>/dev/null || true
         rmdir "$guard_tmp" 2>/dev/null || true
-        exec {stale_fd}<&-
+        exec 10<&-
         return 1
       fi
     fi
   fi
-  exec {stale_fd}<&-
+  exec 10<&-
   same_inspected_lifecycle_generation \
     "$expected_token" "$expected_pid" "$expected_process_identity" \
     "$expected_dir" "$expected_owner" "$expected_content" "$lock_path" || return 1
@@ -1097,11 +1099,12 @@ acquire_lifecycle_lock() {
   # tokenized initialization claim is published before the canonical directory
   # can exist, leaving only mkdir -> hard-link as the crash-sensitive window.
   set -o noclobber
-  if ! exec {owner_fd}>"$lifecycle_initialization_stage_path"; then
+  if ! exec 9>"$lifecycle_initialization_stage_path"; then
     set +o noclobber
     die "Could not stage Lore lifecycle lock owner"
   fi
   set +o noclobber
+  owner_fd=9
   owner_fd_path="/dev/fd/${owner_fd}"
   if ! chmod 600 "$owner_fd_path" ||
      ! printf '%s\n' "$owner_content" >&"$owner_fd" ||
@@ -1109,19 +1112,19 @@ acquire_lifecycle_lock() {
      [[ "$(stable_file_identity "$lifecycle_initialization_stage_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]] ||
      { [[ "$os" != "windows" && ! -O "$lifecycle_initialization_stage_path" ]] ||
         ! followed_path_has_exact_mode "$owner_fd_path" 600; }; then
-    exec {owner_fd}>&- 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
     remove_lifecycle_initialization_stage
     die "Could not stage Lore lifecycle lock owner"
   fi
   sync_path "$owner_fd_path" 2>/dev/null || true
   if ! lifecycle_state_dir_is_trusted ||
      [[ "$(stable_file_identity "$lifecycle_initialization_stage_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]]; then
-    exec {owner_fd}>&- 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
     remove_lifecycle_initialization_stage
     die "Lifecycle owner generation changed before claim publication"
   fi
   if ! ln "$lifecycle_initialization_stage_path" "$lifecycle_initialization_claim_path"; then
-    exec {owner_fd}>&- 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
     remove_lifecycle_initialization_stage
     die "Could not publish Lore lifecycle initialization claim"
   fi
@@ -1134,13 +1137,13 @@ acquire_lifecycle_lock() {
         "$inspected_lock_process_identity" != "$process_identity" ||
         "$inspected_lock_owner_content" != "$owner_content" ||
         "$(stable_file_identity "$lifecycle_initialization_claim_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]]; then
-    exec {owner_fd}>&- 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
     release_lifecycle_initialization_claim
     remove_lifecycle_initialization_stage
     die "Lore lifecycle initialization claim changed during publication"
   fi
   lifecycle_initialization_claim_identity="$inspected_lock_owner_identity"
-  exec {owner_fd}>&-
+  exec 9>&-
   sync_path "$lifecycle_initialization_claim_path" 2>/dev/null || true
 
   while true; do
@@ -1392,7 +1395,7 @@ cleanup_installer() {
   release_lifecycle_initialization_claim
   remove_lifecycle_initialization_stage
   if [[ -n "$lifecycle_state_dir_fd" ]]; then
-    exec {lifecycle_state_dir_fd}<&-
+    exec 8<&-
     lifecycle_state_dir_fd=""
     lifecycle_state_dir_fd_path=""
   fi
@@ -2071,7 +2074,7 @@ if ! lifecycle_lock_is_owned; then
 fi
 release_lifecycle_lock
 if [[ -n "$lifecycle_state_dir_fd" ]]; then
-  exec {lifecycle_state_dir_fd}<&-
+  exec 8<&-
   lifecycle_state_dir_fd=""
   lifecycle_state_dir_fd_path=""
 fi
