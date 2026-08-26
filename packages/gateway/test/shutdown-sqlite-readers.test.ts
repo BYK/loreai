@@ -29,7 +29,12 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { close as closeDb, db, embedding } from "@loreai/core";
+import {
+  close as closeDb,
+  db,
+  embedding,
+  temporalEmbeddingQueue,
+} from "@loreai/core";
 
 const tempDirs: string[] = [];
 // Snapshot the process-start LORE_DB_PATH so the integrity_check test can
@@ -54,6 +59,10 @@ async function mockCoreShutdown(): Promise<{
 }> {
   const core = await import("@loreai/core");
   vi.spyOn(core, "shutdownVectorPoolAsync").mockResolvedValue(undefined);
+  vi.spyOn(
+    temporalEmbeddingQueue,
+    "settleTemporalEmbeddingScheduler",
+  ).mockResolvedValue(true);
   vi.spyOn(embedding, "settleDocumentEmbeds").mockResolvedValue(undefined);
   vi.spyOn(embedding, "resetProvider").mockResolvedValue(undefined);
   return { core };
@@ -95,6 +104,21 @@ describe("startGateway shutdown — strict order (#1599)", () => {
   it("runs pipeline stop → embedding drain → embedding reset → vector readers closed → writer close", async () => {
     const order: string[] = [];
     const { core } = await mockCoreShutdown();
+    vi.spyOn(
+      temporalEmbeddingQueue,
+      "stopTemporalEmbeddingScheduler",
+    ).mockImplementation(() => {
+      order.push("scheduler-stop");
+    });
+    vi.spyOn(
+      temporalEmbeddingQueue,
+      "settleTemporalEmbeddingScheduler",
+    ).mockImplementation(async (deadlineMs?: number) => {
+      order.push("scheduler-settle");
+      expect(deadlineMs).toBeGreaterThan(0);
+      expect(Number.isFinite(deadlineMs)).toBe(true);
+      return true;
+    });
     vi.spyOn(embedding, "settleDocumentEmbeds").mockImplementation(
       async (
         _deadline?: Parameters<typeof embedding.settleDocumentEmbeds>[0],
@@ -128,7 +152,14 @@ describe("startGateway shutdown — strict order (#1599)", () => {
     // reader WAL read-marks, so vector-pool shutdown MUST run before close.
     // Likewise the embedding worker must be gone before vector-pool shutdown
     // so an in-flight embedding can't keep the reader pool alive.
-    expect(order).toEqual(["drain", "reset", "pool", "close"]);
+    expect(order).toEqual([
+      "scheduler-stop",
+      "scheduler-settle",
+      "drain",
+      "reset",
+      "pool",
+      "close",
+    ]);
   });
 });
 

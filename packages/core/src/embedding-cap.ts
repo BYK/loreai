@@ -332,16 +332,9 @@ export const BACKFILL_MIN_AUTO_DUTY = 0.4;
 export const BACKFILL_THROTTLE_MAX_SLEEP_MS = 2_000;
 
 /**
- * Resolve the duty cycle (0.1–1.0) for the temporal re-chunk backfill: the
- * fraction of wall-clock time it may spend embedding, sleeping the rest so a
- * background migration doesn't peg a core on a weak host.
- *
- * An explicit `configured` value (from `search.embeddings.backfillCpuDuty` or
- * `LORE_BACKFILL_CPU_DUTY`) always wins, clamped to [0.1, 1]. Otherwise it
- * auto-scales by logical CPU count: full speed (1.0) at
- * {@link BACKFILL_FULLSPEED_CORES}+ cores, scaling down linearly to a
- * {@link BACKFILL_MIN_AUTO_DUTY} floor on smaller hosts. Non-finite/≤0 core
- * counts fall back to the floor (fail-safe: throttle rather than peg).
+ * Legacy temporal backfill duty setting (`LORE_BACKFILL_CPU_DUTY`) retained for
+ * configuration compatibility. Durable temporal admission no longer performs
+ * inference; the bounded scheduler controls embedding concurrency.
  */
 export function resolveBackfillCpuDuty(
   configured: number | undefined,

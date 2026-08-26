@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
   embed,
+  EmbeddingRequestAbortedError,
   ensureEmbeddingReady,
   isAvailable,
   LocalProviderUnavailableError,
@@ -217,6 +218,33 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes).toHaveLength(1);
     fakes[0].completeAll();
     expect(await p2).toHaveLength(1);
+  });
+
+  it("retires only an aborted request's assigned worker before releasing it", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const abort = new AbortController();
+    const abandoned = settle(embed(["abandoned"], "document", abort.signal));
+    const sibling = embed(["sibling"], "document");
+    await flush();
+    expect(fakes).toHaveLength(2);
+    expect(fakes[0].embedIds).toHaveLength(1);
+    expect(fakes[1].embedIds).toHaveLength(1);
+
+    abort.abort();
+    const outcome = await abandoned;
+    expect(outcome).toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    expect(fakes[0].gotShutdown).toBe(true);
+    expect(fakes[1].gotShutdown).toBe(false);
+
+    fakes[1].completeAll();
+    await expect(sibling).resolves.toHaveLength(1);
   });
 
   it("stays at a single worker under concurrency when memory is tight", async () => {

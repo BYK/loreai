@@ -338,6 +338,16 @@ describe("SYNCED_TABLES local-only secondary UNIQUE → convergence handling (#1
 });
 
 describe("server-internal tables are intentionally NOT synced", () => {
+  test("the temporal embedding queue is absent from every tier's registry", () => {
+    for (const tier of ["basic", "pro", "max"] as const)
+      expect(
+        SYNCED_TABLES[tier].find(
+          (metadata) => metadata.table === "temporal_embedding_queue",
+        ),
+        `temporal_embedding_queue must NOT be in SYNCED_TABLES.${tier} — it is local scheduler state and must never expose message identities or content-derived hashes`,
+      ).toBeUndefined();
+  });
+
   // pending_invites (E-5-c, #827) is written/read ONLY by the SECURITY DEFINER RPCs
   // (create_scope_invite / accept_scope_invite) and has no local mirror — it is deny-all under RLS
   // and never leaves the server. It MUST stay out of SYNCED_TABLES: registering it would install a

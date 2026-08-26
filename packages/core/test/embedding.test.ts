@@ -119,7 +119,7 @@ describe("embed() enforces the L2-normalization invariant", () => {
 describe("formatTemporalRechunkProgress", () => {
   test("reports a cumulative one-decimal percentage", () => {
     expect(formatTemporalRechunkProgress(30688, 226527, 18)).toBe(
-      "temporal re-chunk: 13.5% complete (30688/226527 messages) · +18 re-chunked this run",
+      "temporal re-chunk: 13.5% complete (30688/226527 messages) · +18 scheduled this run",
     );
   });
 

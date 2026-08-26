@@ -13,7 +13,7 @@
  * back silently to FTS-only when unavailable.
  */
 
-import { availableParallelism, freemem } from "node:os";
+import { freemem } from "node:os";
 import { performance } from "node:perf_hooks";
 import {
   databaseInTransaction,
@@ -38,17 +38,11 @@ import {
   resolveReadMode,
   setStorageMode,
   storeEmbedding,
-  storeTemporalChunks,
   TEMPORAL_PARTITION_MODE_KEY,
 } from "./db/vec-store";
 import { config } from "./config";
 import * as log from "./log";
 import { recordVecReadLatency } from "./vec-latency";
-import {
-  buildEmbeddingText,
-  buildEmbeddingUnits,
-  MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
-} from "./embedding-units";
 import { vendorModelInfo } from "./embedding-vendor";
 import { nativeIntraOpThreads } from "./ort-native";
 import {
@@ -56,14 +50,12 @@ import {
   MODEL_MAX_TOKENS,
   PER_WORKER_MEM_BUDGET_BYTES,
   EMBED_POOL_ABS_MAX,
-  backfillThrottleSleepMs,
   backoffEmbedCap,
   clampFreeToContainerLimit,
   desiredEmbedPoolSize,
   memoryModelEmbedCap,
   reconcileEmbedCap,
   reprobeEmbedCap,
-  resolveBackfillCpuDuty,
   shouldReprobeEmbedCap,
   type PersistedEmbedCap,
 } from "./embedding-cap";
@@ -84,6 +76,11 @@ import {
 } from "./vector-query";
 import { tryPoolVectorSearch, VECTOR_SEARCH_TIMED_OUT } from "./vector-pool";
 import { currentTenantId } from "./tenant";
+import {
+  enqueueTemporalEmbedding,
+  invalidateTemporalEmbedding,
+} from "./temporal-embedding-admission";
+import { TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH } from "./embedding-units";
 
 // The cosine/BLOB helpers moved to ./vector-query (a leaf module the read
 // worker can import without pulling in the provider chain). Re-exported here so
@@ -498,6 +495,7 @@ export interface EmbeddingProvider {
   embed(
     texts: string[],
     inputType: "document" | "query",
+    signal?: AbortSignal,
   ): Promise<Float32Array[]>;
   readonly maxBatchSize: number;
 }
@@ -529,6 +527,7 @@ class VoyageProvider implements EmbeddingProvider {
   async embed(
     texts: string[],
     inputType: "document" | "query",
+    signal?: AbortSignal,
   ): Promise<Float32Array[]> {
     let res: Response;
     try {
@@ -544,7 +543,9 @@ class VoyageProvider implements EmbeddingProvider {
           input_type: inputType,
           output_dimension: this.dimensions,
         }),
-        signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(EMBED_TIMEOUT_MS)])
+          : AbortSignal.timeout(EMBED_TIMEOUT_MS),
       });
     } catch {
       throw new Error("Voyage embeddings API request failed");
@@ -592,6 +593,7 @@ class OpenAIProvider implements EmbeddingProvider {
   async embed(
     texts: string[],
     _inputType: "document" | "query",
+    signal?: AbortSignal,
   ): Promise<Float32Array[]> {
     const body: Record<string, unknown> = {
       input: texts,
@@ -609,7 +611,9 @@ class OpenAIProvider implements EmbeddingProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(EMBED_TIMEOUT_MS)])
+        : AbortSignal.timeout(EMBED_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -642,6 +646,16 @@ export class LocalProviderUnavailableError extends Error {
     this.name = "LocalProviderUnavailableError";
     if (cause !== undefined)
       (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+/** A caller cancelled one local worker request. The pool retires only the
+ * assigned worker before surfacing this error, so no abandoned inference or
+ * pending-map entry survives behind a released admission slot. */
+export class EmbeddingRequestAbortedError extends Error {
+  constructor() {
+    super("Embedding request aborted");
+    this.name = "EmbeddingRequestAbortedError";
   }
 }
 
@@ -1644,7 +1658,9 @@ class LocalProvider implements EmbeddingProvider {
   async embed(
     texts: string[],
     inputType: "document" | "query",
+    signal?: AbortSignal,
   ): Promise<Float32Array[]> {
+    if (signal?.aborted) throw new EmbeddingRequestAbortedError();
     await this.ensureWorker();
     const worker = this.worker;
     if (this.closing || !worker) {
@@ -1684,7 +1700,37 @@ class LocalProvider implements EmbeddingProvider {
     };
 
     return new Promise<Float32Array[]>((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject, payload });
+      let settled = false;
+      const cleanup = (): void => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+      };
+      const resolveRequest = (vectors: Float32Array[]): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(vectors);
+      };
+      const rejectRequest = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const onAbort = (): void => {
+        if (!this.pendingRequests.delete(id)) return;
+        this.updateWorkerRef();
+        rejectRequest(new EmbeddingRequestAbortedError());
+      };
+      this.pendingRequests.set(id, {
+        resolve: resolveRequest,
+        reject: rejectRequest,
+        payload,
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
       this.updateWorkerRef();
       try {
         worker.postMessage(payload satisfies WorkerInbound);
@@ -1766,11 +1812,9 @@ export function _configuredEmbedPoolSize(): number | undefined {
   return configuredEmbedPoolSize();
 }
 
-/** Resolve the configured backfill CPU duty cycle: `LORE_BACKFILL_CPU_DUTY`
- *  wins, then `search.embeddings.backfillCpuDuty`, else `undefined` (auto-scaled
- *  by CPU count — full speed on roomy hosts, gentler on small ones). Invalid
- *  values are ignored (fall through). Read per-call so config reloads take
- *  effect. */
+/** Resolve the legacy backfill CPU-duty setting for configuration compatibility.
+ *  The durable temporal scheduler now bounds inference directly, so this value
+ *  no longer throttles temporal backfill work. Invalid values fall through. */
 function configuredBackfillCpuDuty(): number | undefined {
   const raw = process.env.LORE_BACKFILL_CPU_DUTY;
   if (raw !== undefined) {
@@ -1783,23 +1827,9 @@ function configuredBackfillCpuDuty(): number | undefined {
   return undefined;
 }
 
-/** Test seam: exposes the env/config resolution for {@link backfillThrottleSleepMs}. */
+/** Test seam for the retained legacy configuration resolution. */
 export function _configuredBackfillCpuDuty(): number | undefined {
   return configuredBackfillCpuDuty();
-}
-
-/** The inter-row throttle sleep used by the temporal backfill. Indirected behind
- *  a module variable so tests can observe it (and skip the real timer) without
- *  wall-clock flakiness. */
-let backfillSleep: (ms: number) => Promise<void> = (ms) =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Test seam: replace the backfill throttle sleep (null restores the default). */
-export function _setBackfillSleepForTest(
-  fn: ((ms: number) => Promise<void>) | null,
-): void {
-  backfillSleep =
-    fn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 }
 
 /** Test-only override of the embedding-pool ceiling (null clears). Sets the
@@ -1970,7 +2000,9 @@ class EmbeddingPool implements EmbeddingProvider {
       this.modelId,
       this.dimensions,
       this.ceiling,
-      () => this.retireSlot(slot),
+      () => {
+        void this.retireSlot(slot);
+      },
     );
     slot = {
       // Pass the pool ceiling as the memory divisor so every worker sizes its
@@ -1987,14 +2019,15 @@ class EmbeddingPool implements EmbeddingProvider {
     return slot;
   }
 
-  private retireSlot(slot: EmbedSlot): void {
+  private retireSlot(slot: EmbedSlot): Promise<void> {
     const index = this.slots.indexOf(slot);
-    if (index === -1) return;
+    if (index === -1) return Promise.resolve();
     this.slots.splice(index, 1);
     this.preserveHealthyServiceAfterExhaustion();
     const retirement = slot.provider.shutdown().catch(() => {});
     this.retiredShutdowns.add(retirement);
     void retirement.finally(() => this.retiredShutdowns.delete(retirement));
+    return retirement;
   }
 
   private preserveHealthyServiceAfterExhaustion(): void {
@@ -2013,11 +2046,12 @@ class EmbeddingPool implements EmbeddingProvider {
   async embed(
     texts: string[],
     inputType: "document" | "query",
+    signal?: AbortSignal,
   ): Promise<Float32Array[]> {
     const slot = this.pickSlot();
     slot.inflight++;
     try {
-      const vectors = await slot.provider.embed(texts, inputType);
+      const vectors = await slot.provider.embed(texts, inputType, signal);
       slot.healthy = true;
       if (
         slot.recoveryGeneration !== null &&
@@ -2043,11 +2077,14 @@ class EmbeddingPool implements EmbeddingProvider {
       }
       return vectors;
     } catch (error) {
-      if (error instanceof LocalProviderUnavailableError) {
+      if (
+        error instanceof LocalProviderUnavailableError ||
+        error instanceof EmbeddingRequestAbortedError
+      ) {
         // A transient init failure belongs to this worker, not every slot in the
         // pool. Retire it so a sibling's successful recovery cannot leave the
         // failed slot eligible for later backfill or lint requests.
-        this.retireSlot(slot);
+        await this.retireSlot(slot);
       }
       throw error;
     } finally {
@@ -2588,6 +2625,7 @@ export function _setRecallEmbedsInFlightForTest(n: number): void {
 export async function embed(
   texts: string[],
   inputType: "document" | "query",
+  signal?: AbortSignal,
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
@@ -2600,7 +2638,7 @@ export async function embed(
   const isRecall = isRecallEmbed(texts, inputType);
   if (isRecall) _recallEmbedsInFlight++;
   try {
-    const vecs = await provider.embed(texts, inputType);
+    const vecs = await provider.embed(texts, inputType, signal);
     // Enforce the L2-normalization invariant at the single chokepoint so the JS
     // dot-product path and sqlite-vec's vec_distance_cosine() always agree. See
     // l2Normalize() for the full rationale.
@@ -2991,6 +3029,7 @@ export { MAX_TEMPORAL_CHUNKS_PER_MESSAGE } from "./embedding-units";
 export async function embedInTokenBatches(
   texts: string[],
   inputType: "document" | "query",
+  signal?: AbortSignal,
 ): Promise<Float32Array[]> {
   const items = texts.map((text) => ({ text }));
   const out: Float32Array[] = [];
@@ -3000,6 +3039,7 @@ export async function embedInTokenBatches(
     const vecs = await embed(
       batch.map((b) => b.text),
       inputType,
+      signal,
     );
     if (vecs.length !== batch.length) {
       throw new Error("embedding provider returned an unexpected vector count");
@@ -3007,93 +3047,6 @@ export async function embedInTokenBatches(
     out.push(...vecs);
   }
   return out;
-}
-
-/**
- * Build the part-aware multi-vector chunk set for one temporal message and
- * write it to `temporal_vec`. Awaitable so the fire-and-forget write path
- * ({@link embedTemporalMessage}) and the resumable re-chunk backfill
- * ({@link backfillTemporalEmbeddings}) share one implementation.
- *
- * vec0 only — the caller guarantees vec0 mode. Splits the stored content back
- * into its units (prose, reasoning, reduced tool envelopes), drops empties,
- * caps the per-message chunk fan-out (#1072), sub-batches the embeds, then
- * stores the COMPLETE set. `storeTemporalChunks` DELETEs-then-INSERTs by exact
- * `chunk_id`, so a re-embed replaces the whole set and the chunk count may
- * shrink or grow. Returns the number of chunks written (0 when the message has
- * no embeddable units — in which case nothing is stored OR deleted, so an
- * existing chunk set is never wiped without a replacement).
- */
-async function embedAndStoreTemporalChunks(
-  id: string,
-  content: string,
-): Promise<number> {
-  let texts = buildEmbeddingUnits(content)
-    .map((u) => u.text)
-    .filter((t) => t.trim().length > 0);
-  if (!texts.length) return 0;
-  // Bound the per-message chunk fan-out (#1072): past the cap, fold the
-  // overflow tail into the final chunk so the chunk count stays bounded
-  // without dropping any unit's text from the vector.
-  if (texts.length > MAX_TEMPORAL_CHUNKS_PER_MESSAGE) {
-    texts = [
-      ...texts.slice(0, MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1),
-      texts.slice(MAX_TEMPORAL_CHUNKS_PER_MESSAGE - 1).join("\n"),
-    ];
-  }
-  // Sub-batch the unit embeds so a many-unit message never posts one oversized
-  // tensor to the worker; accumulate all vectors, then store the complete set.
-  const vecs = await embedInTokenBatches(texts, "document");
-  storeTemporalChunks(db(), id, vecs);
-  return vecs.length;
-}
-
-/**
- * Embed a temporal message and store the result in the DB.
- * Fire-and-forget — errors are logged, never thrown.
- *
- * Called at message-write time (temporal.store) for the message's current
- * content. Distilled messages KEEP their embeddings — they stay in the vector
- * search path (markDistilled only flips the flag; nothing clears the vector),
- * so this is the only place a message's vector is created at write time. The
- * resumable backfill ({@link backfillTemporalEmbeddings}) re-chunks pre-policy
- * survivors of the whole corpus.
- */
-export function embedTemporalMessage(id: string, content: string): void {
-  if (!isAvailable()) return;
-  // Skip very short messages — they don't carry enough semantic signal
-  // to be useful in vector search and would waste embedding capacity.
-  if (content.length < 50) return;
-
-  // Part-aware embedding: split the stored content back into its units (prose,
-  // reasoning, reduced tool envelopes — see buildEmbeddingUnits). Large
-  // `[tool:…]` outputs keep only header + first line so they can no longer evict
-  // prose/reasoning from the head or dilute the vector. The full content stays
-  // in `content` + FTS for keyword recall regardless.
-  //
-  // vec0 stores each unit as its OWN chunk in `temporal_vec` (multi-vector): a
-  // tool output or a specific reasoning step can then match on its own without
-  // diluting prose, and the read collapses chunks back to one hit per message.
-  // The blob layout has a single `embedding` column per row, so it falls back to
-  // ONE vector over the joined units (the prior single part-selective vector).
-  if (readStorageMode(db()) === "vec0") {
-    embedAndStoreTemporalChunks(id, content).catch((err) => {
-      if (err instanceof LocalProviderUnavailableError) return;
-      log.error("embedding failed for temporal message", id, ":", err);
-    });
-    return;
-  }
-
-  const text = buildEmbeddingText(content);
-  if (!text) return;
-  embed([text], "document")
-    .then(([vec]) => {
-      storeEmbedding(db(), "temporal", id, vec);
-    })
-    .catch((err) => {
-      if (err instanceof LocalProviderUnavailableError) return;
-      log.error("embedding failed for temporal message", id, ":", err);
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -3419,7 +3372,13 @@ export async function runStartupBackfill(
           "(recall will use FTS-only search)",
       );
     }
-    return emptyBackfillStats();
+    const stats = emptyBackfillStats();
+    // Durable temporal admission is provider-independent. Preserve recovery
+    // progress even while vector recall is temporarily FTS-only.
+    stats.temporalRechunked = await backfillTemporalEmbeddings({
+      shouldPause: opts.shouldPause,
+    });
+    return stats;
   }
 
   // Handle an embedding-config change, then attempt the one-time blob→vec0
@@ -3862,51 +3821,19 @@ export async function backfillEntityEmbeddings(): Promise<number> {
 const TEMPORAL_RECHUNK_CURSOR_KEY = "lore:temporal_rechunk.cursor";
 /** KV key: "1" once the walk has reached the end of the corpus. */
 const TEMPORAL_RECHUNK_DONE_KEY = "lore:temporal_rechunk.done";
-/** KV key: how many passes have ended with a still-unembeddable row. */
-const TEMPORAL_RECHUNK_ATTEMPTS_KEY = "lore:temporal_rechunk.attempts";
 /**
  * Rows fetched per page of the resumable temporal re-chunk walk. Bounds the
  * working-set memory (the corpus is 100k+ rows with large tool-output content)
  * and the redo cost of a crash mid-page.
  */
 const TEMPORAL_RECHUNK_PAGE = 256;
-/**
- * Cap on passes that end with a row still failing to embed. A transient remote
- * failure (429/5xx surfaces as a plain Error, not LocalProviderUnavailableError)
- * makes the walk rewind and retry on the next startup rather than latch done
- * over the gap; this bounds that so a genuinely un-embeddable row can't loop
- * forever (it keeps its legacy single vector + FTS, so recall still works).
- */
-const MAX_TEMPORAL_RECHUNK_RETRY_PASSES = 3;
-/**
- * KV key: the id of the row currently being embedded, set just before the embed
- * and cleared the instant it settles (success OR any catchable error). If it
- * survives a process restart, the previous process died *inside* that row's
- * embed — an uncatchable crash (the native ONNX OOM is an OS SIGKILL, so the
- * ×0.7 in-worker backoff can't catch it) that the per-row cursor checkpoint
- * cannot protect against: the cursor only advances AFTER a successful embed, so
- * the same row is re-fetched and re-crashes on every restart, forever.
- */
+const TEMPORAL_RECHUNK_ELIGIBLE_SQL = `length(CAST(content AS BLOB)) >= ${TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH}`;
+/** Legacy keys retained only so reset clears state written by pre-v85 builds. */
+const TEMPORAL_RECHUNK_ATTEMPTS_KEY = "lore:temporal_rechunk.attempts";
 const TEMPORAL_RECHUNK_INFLIGHT_KEY = "lore:temporal_rechunk.inflight";
-/** KV key: how many times the in-flight row above has taken the process down. */
 const TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY = "lore:temporal_rechunk.row_attempts";
-/**
- * KV key: a poison row the walk has decided to permanently step over. DURABLE
- * (unlike the in-memory `poisonSkipId`) so the skip survives restart even when
- * the persisted cursor is pinned BEHIND the poison row — which happens when an
- * earlier row hit a transient failure this pass (its `retryFrom` pins the cursor
- * to its predecessor). Without a durable record the per-row checkpoint keeps
- * writing that pinned cursor, so the poison row is re-fetched and re-crashes the
- * process on every restart until the transient row's retry passes are exhausted.
- */
 const TEMPORAL_RECHUNK_SKIP_KEY = "lore:temporal_rechunk.skip";
-/**
- * How many times a single row may crash the whole process before the walk skips
- * it (advances the cursor past it) instead of retrying forever. The row keeps
- * its legacy single vector + FTS, exactly like the transient-retry giveup — a
- * bounded, self-healing liveness guard rather than a permanent wedge.
- */
-const MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS = 2;
+const TEMPORAL_RECHUNK_MAX_ROWID_KEY = "lore:temporal_rechunk.max_rowid";
 /**
  * Poll interval while the temporal walk is parked waiting for the host to go
  * idle. Short enough to resume promptly once traffic stops; a parked walk is
@@ -3950,10 +3877,9 @@ async function awaitBackfillIdle(
 }
 
 /**
- * Reset the temporal re-chunk progress so the next {@link runStartupBackfill}
- * walks the whole corpus again. Called when an embedding-config change clears
- * all vectors — the temporal corpus has no other repopulation path, so the
- * walk is what refills it under the new model/dimension.
+ * Reset durable scheduling progress so the next startup walks the corpus again.
+ * Called when an embedding config change clears all vectors; the scheduler then
+ * repopulates them from the queue under the new fingerprint.
  */
 export function resetTemporalRechunkProgress(): void {
   setKV(TEMPORAL_RECHUNK_DONE_KEY, "0");
@@ -3962,13 +3888,14 @@ export function resetTemporalRechunkProgress(): void {
   setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
   setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
   setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
+  setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, "0");
 }
 
 /**
  * Cumulative-progress line for the temporal re-chunk walk. `done`/`total` count
  * embeddable (>=50 char) messages across ALL runs, so the percentage keeps
  * climbing over restarts — unlike the per-process counters, which reset to zero
- * on every boot. `thisRun` is what the current invocation re-chunked. A zero
+ * on every boot. `thisRun` is what the current invocation scheduled. A zero
  * `total` reads as 100% (nothing to do). The percentage is clamped to 100 and
  * rendered to one decimal. Exported for testing. See {@link
  * backfillTemporalEmbeddings} for how `done = baseDone + scanned` is derived.
@@ -3980,51 +3907,44 @@ export function formatTemporalRechunkProgress(
 ): string {
   const pct =
     total > 0 ? Math.min(100, Math.round((done / total) * 1000) / 10) : 100;
-  return `temporal re-chunk: ${pct}% complete (${done}/${total} messages) · +${thisRun} re-chunked this run`;
+  return `temporal re-chunk: ${pct}% complete (${done}/${total} messages) · +${thisRun} scheduled this run`;
 }
 
 /**
- * Re-chunk existing temporal messages into the multi-vector vec0 layout.
+ * Durably schedule existing temporal messages for the multi-vector vec0 layout.
  *
  * New messages are embedded part-aware at write time, but messages written
  * before the multi-vector policy — and every survivor of the blob→vec0 cutover,
  * which copies a single legacy vector as one `#0` chunk — still carry a single
- * vector. Distilled messages KEEP their embeddings and stay in the vector
- * search path, so the legacy set is the WHOLE corpus, not just the undistilled
- * tail. This walks it and re-embeds each message through the same multi-vector
- * path the write path uses.
+ * vector. Distilled messages stay in the vector search path, so the legacy set
+ * is the whole corpus. This walk only admits work; the bounded durable scheduler
+ * is the sole temporal inference and vector-write owner.
  *
  * Properties:
  *  - vec0-only: in blob mode there is one vector per row regardless, so this is
  *    a no-op and does NOT latch the done flag — it runs after a future cutover.
- *  - resumable: a KV cursor advances as the walk progresses; an interrupted run
- *    resumes from the last persisted id. `storeTemporalChunks` replaces the
- *    whole chunk set per message, so re-doing rows is idempotent.
+ *  - resumable: each queue upsert, stale-vector invalidation, and cursor advance
+ *    share one savepoint. An interrupted run resumes from the last admitted id.
+ *  - finite snapshot: the first run persists the maximum eligible base rowid;
+ *    live rows inserted later are owned only by the scheduler and never extend
+ *    or get invalidated by this migration.
  *  - stable order, not chronological: temporal ids come from the upstream agent
  *    (not lore), so `id` may not be time-ordered. The walk only needs a stable,
  *    unique key — `id TEXT PRIMARY KEY`, `ORDER BY id ASC` (BINARY) — to visit
  *    every pre-existing row exactly once. New rows inserted below the cursor are
  *    already correct from write time, so skipping them is harmless.
- *  - never wedges, never latches over a gap: a row that throws a plain Error
- *    (e.g. a remote 429/5xx — local worker failures surface as
- *    LocalProviderUnavailableError and stop the walk cleanly) is skipped so the
- *    100k+ walk keeps converging, but the pass rewinds the cursor to the first
- *    such row so the next startup retries it instead of latching done over the
- *    gap. Bounded by {@link MAX_TEMPORAL_RECHUNK_RETRY_PASSES} so an
- *    un-embeddable row can't loop forever.
+ *  - provider-independent: admission never calls an embedding provider, so a
+ *    worker crash or remote failure cannot poison or pin migration progress.
  *  - bounded memory: pages the scan instead of loading the whole corpus.
  *  - converges once: a done flag latches at the end of a clean walk; subsequent
  *    startups skip it. {@link resetTemporalRechunkProgress} re-arms it after a
  *    model/dimension change.
  *
- * Returns the number of messages re-chunked (successfully) in this invocation.
+ * Returns the number of messages durably scheduled in this invocation.
  */
 export async function backfillTemporalEmbeddings(
   opts: { shouldPause?: () => boolean } = {},
 ): Promise<number> {
-  const provider = getProvider();
-  if (!provider) return 0;
-
   // Multi-vector chunking only exists in vec0 mode. Skip WITHOUT latching done
   // so a later cutover to vec0 still triggers the walk.
   //
@@ -4038,79 +3958,19 @@ export async function backfillTemporalEmbeddings(
   if (getKV(TEMPORAL_RECHUNK_DONE_KEY) === "1") return 0;
 
   let cursor = getKV(TEMPORAL_RECHUNK_CURSOR_KEY) ?? "";
-
-  // Poison-row liveness guard. If the in-flight marker survived a restart, the
-  // previous process died mid-embed on that row — an uncatchable crash the
-  // per-row cursor checkpoint can't cover (the cursor advances only AFTER a
-  // successful embed, so a row that reliably OOM-SIGKILLs the process is
-  // re-fetched and re-crashes forever). Count the crash; once a row has taken
-  // the process down MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS times, arm a
-  // one-shot skip so the walk steps over it (by id, when it reaches it) and
-  // makes progress. The skipped row keeps its legacy single vector + FTS,
-  // exactly like the transient-retry giveup.
-  //
-  // We skip by matching the row id in the loop rather than jumping the cursor:
-  // the persisted cursor may be pinned earlier than the poison row (at a
-  // transient failure's `retryFrom`), and jumping straight to the poison row
-  // would also skip those earlier, still-pending rows — abandoning their retries
-  // and any not-yet-embedded work between the pin and the poison row.
-  let poisonSkipId = "";
-
-  // Re-arm a previously-recorded durable skip. This is what makes the skip
-  // survive restarts when the cursor is pinned behind the poison row: the KV
-  // outlives the in-memory `poisonSkipId`, so the row is stepped over on every
-  // pass until the cursor durably moves past it (then the marker is retired).
-  const durableSkip = getKV(TEMPORAL_RECHUNK_SKIP_KEY) ?? "";
-  if (durableSkip) {
-    if (durableSkip > cursor) poisonSkipId = durableSkip;
-    else setKV(TEMPORAL_RECHUNK_SKIP_KEY, ""); // cursor passed it → retire
+  let maxRowid = Number(getKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY) ?? "0");
+  if (!Number.isSafeInteger(maxRowid) || maxRowid <= 0) {
+    maxRowid = (
+      db()
+        .query(
+          `SELECT COALESCE(MAX(rowid), 0) AS n FROM temporal_messages WHERE ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
+        )
+        .get() as { n: number }
+    ).n;
+    setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, String(maxRowid));
   }
-
-  const crashedRow = getKV(TEMPORAL_RECHUNK_INFLIGHT_KEY) ?? "";
-  if (crashedRow) {
-    // `crashedRow > cursor`: a genuine mid-embed crash always leaves the marker
-    // AHEAD of the persisted cursor (the cursor only advances after a row
-    // completes). A marker at/behind the cursor names an already-passed row —
-    // it can only arise from a manual cursor edit or a reset race, never a real
-    // crash — so treat it as stale: clear it WITHOUT counting a crash, otherwise
-    // a phantom count would bleed into the next genuine poison row. NOTE: this
-    // ordering compares in JS (string `>`) while the walk pages in SQLite
-    // (`id > ? ORDER BY id`, BINARY collation); the two agree for the ASCII ids
-    // temporal_messages uses (agent-supplied session/message ids).
-    if (crashedRow > cursor) {
-      const rowAttempts =
-        Number(getKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY) ?? "0") + 1;
-      if (rowAttempts >= MAX_TEMPORAL_RECHUNK_ROW_CRASH_ATTEMPTS) {
-        log.warn(
-          `temporal re-chunk: row ${crashedRow} crashed the process ` +
-            `${rowAttempts}× — skipping it (keeps its legacy vector + FTS)`,
-        );
-        poisonSkipId = crashedRow;
-        // Record the skip durably so a cursor pinned behind it (transient
-        // retryFrom) can't cause the row to be re-embedded — and re-crash — on
-        // the next restart.
-        setKV(TEMPORAL_RECHUNK_SKIP_KEY, crashedRow);
-        setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
-      } else {
-        // Below the threshold: give the row another chance on this run, but
-        // remember the crash count so a repeat death eventually trips the skip.
-        setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, String(rowAttempts));
-      }
-    } else {
-      // Stale marker at/behind the cursor — not a live poison candidate.
-      setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
-    }
-    setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
-  }
-
-  let processed = 0;
+  let scheduled = 0;
   let scanned = 0;
-  // Resume point of the FIRST row that hit a transient error this pass. We keep
-  // walking past it (so one hiccup never stalls the whole corpus) but rewind
-  // here at the end so the next startup retries it rather than latching done
-  // over the gap. Holds the cursor value from BEFORE that row (its predecessor),
-  // so `id > retryFrom` re-includes the failed row.
-  let retryFrom: string | null = null;
 
   // Up-front backlog so a long walk is explainable from the logs. The corpus is
   // 100k+ rows and, under embed-pool contention, converges at single-digit
@@ -4121,15 +3981,16 @@ export async function backfillTemporalEmbeddings(
     db()
       .query(
         `SELECT COUNT(*) AS n FROM temporal_messages
-         WHERE id > ? AND length(content) >= 50`,
+         WHERE id > ? AND rowid <= ? AND ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
       )
-      .get(cursor) as { n: number }
+      .get(cursor, maxRowid) as { n: number }
   ).n;
   // Denominator for cumulative progress: ALL embeddable messages, not just the
   // remaining backlog, so the heartbeat shows a percentage that keeps climbing
   // across restarts instead of the per-process tally that resets to zero on every
   // boot. `baseDone` is what prior runs already covered (rows at/below the resume
-  // cursor); the walk's SELECT is itself filtered to `length >= 50`, so `scanned`
+  // cursor); the walk's SELECT uses the same byte-length eligibility predicate,
+  // so `scanned`
   // counts embeddable rows and `baseDone + scanned` reaches exactly `total` on a
   // clean pass (→ 100%). Gated on `backlog > 0`: when nothing remains the loop
   // latches done without iterating, so `total`/`baseDone` are never read — no
@@ -4140,9 +4001,9 @@ export async function backfillTemporalEmbeddings(
     total = (
       db()
         .query(
-          `SELECT COUNT(*) AS n FROM temporal_messages WHERE length(content) >= 50`,
+          `SELECT COUNT(*) AS n FROM temporal_messages WHERE rowid <= ? AND ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
         )
-        .get() as { n: number }
+        .get(maxRowid) as { n: number }
     ).n;
     baseDone = Math.max(0, total - backlog);
     const basePct = total > 0 ? Math.round((baseDone / total) * 1000) / 10 : 0;
@@ -4157,149 +4018,61 @@ export async function backfillTemporalEmbeddings(
   const PROGRESS_INTERVAL_MS = 30_000;
   let lastProgressAt = Date.now();
 
-  // CPU duty cycle for this walk: after each row we sleep a fraction of the
-  // time the embed took so a one-time background migration doesn't peg a core on
-  // a weak host. Resolved once per walk (full speed on roomy hosts).
-  const backfillDuty = resolveBackfillCpuDuty(
-    configuredBackfillCpuDuty(),
-    availableParallelism(),
-  );
-
   for (;;) {
-    // `length(content) >= 50` mirrors embedTemporalMessage's short-message skip,
-    // so the walk never embeds a message the write path would have ignored.
+    // Keep the legacy walk aligned with scheduler eligibility.
     const rows = db()
       .query(
         `SELECT id, content FROM temporal_messages
-         WHERE id > ? AND length(content) >= 50
+         WHERE id > ? AND rowid <= ? AND ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}
          ORDER BY id ASC LIMIT ?`,
       )
-      .all(cursor, TEMPORAL_RECHUNK_PAGE) as Array<{
+      .all(cursor, maxRowid, TEMPORAL_RECHUNK_PAGE) as Array<{
       id: string;
       content: string;
     }>;
 
     if (!rows.length) {
-      if (retryFrom === null) {
-        // Clean pass reached the end — latch done; subsequent startups skip it.
-        setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
-        setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
-        setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
-      } else {
-        // Some rows failed this pass. Rewind to the first of them so the next
-        // startup retries — up to a bounded number of passes, after which we
-        // latch done and leave the stragglers on their legacy single vector.
-        const attempts =
-          Number(getKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY) ?? "0") + 1;
-        if (attempts >= MAX_TEMPORAL_RECHUNK_RETRY_PASSES) {
-          log.warn(
-            `temporal re-chunk giving up after ${attempts} passes with unembeddable rows`,
-          );
-          setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
-          setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
-          setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
-        } else {
-          setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, String(attempts));
-          setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom);
-        }
-      }
+      setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
+      setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+      setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
+      setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
+      setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
       break;
     }
 
-    let stop = false;
     for (const row of rows) {
-      // Poison row (armed above): step over it WITHOUT embedding — it keeps its
-      // legacy vector + FTS. One-shot: clear the sentinel so only this single
-      // row is skipped and the walk resumes normally. The cursor still advances
-      // here, so the poison row is durably passed.
-      if (poisonSkipId && row.id === poisonSkipId) {
-        poisonSkipId = "";
+      // Admission performs synchronous SQLite work only. Keep the host gate so a
+      // one-time full-corpus walk still yields between rows under request load.
+      await awaitBackfillIdle(opts.shouldPause);
+      withSavepoint("schedule_temporal_rechunk", () => {
+        const current = db()
+          .query("SELECT content FROM temporal_messages WHERE id = ?")
+          .get(row.id) as { content: string } | null;
+        if (current) {
+          const enqueued = enqueueTemporalEmbedding(row.id, current.content);
+          if (enqueued) {
+            invalidateTemporalEmbedding(row.id);
+            scheduled++;
+          }
+        }
         cursor = row.id;
         scanned++;
-        setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom ?? cursor);
-        continue;
-      }
-      // Idle-gate before starting this row's embed so the walk yields the shared
-      // embed pool to live traffic. Parking here is safe: the previous row is
-      // already checkpointed, so a park (or a crash while parked) resumes from
-      // the last durable cursor.
-      await awaitBackfillIdle(opts.shouldPause);
-      // Mark this row in-flight so an uncatchable crash mid-embed (native OOM
-      // SIGKILL) is detectable on the next startup and eventually skipped. It's
-      // cleared the moment the embed settles — success or catchable error — so
-      // only a hard process death ever leaves it set.
-      setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, row.id);
-      const embedStartedAt = Date.now();
-      try {
-        // Count only messages that actually got a chunk set written. A row that
-        // reduces to zero embeddable units (store() never persists one, but the
-        // walk reads rows directly) still advances the cursor below — it just
-        // isn't counted so the "re-chunked N" tally stays honest.
-        const chunks = await embedAndStoreTemporalChunks(row.id, row.content);
-        if (chunks > 0) processed++;
-      } catch (err) {
-        // Provider went away mid-run — stop WITHOUT advancing past this row or
-        // latching done; the next startup resumes from the persisted cursor.
-        // Clear the in-flight marker: the provider being down is not this row's
-        // fault, so it must not count toward the poison-row skip.
-        if (err instanceof LocalProviderUnavailableError) {
-          setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
-          log.info("temporal embedding backfill stopped: provider unavailable");
-          stop = true;
-          break;
-        }
-        // A transient/row-specific failure (e.g. a remote 429/5xx). Keep walking
-        // so one bad row never stalls the corpus, but remember the earliest
-        // failure (its predecessor cursor) so the pass doesn't latch over it.
-        log.error("temporal embedding backfill row failed", row.id, ":", err);
-        if (retryFrom === null) retryFrom = cursor;
-      }
-      // The row settled without taking the process down: clear the in-flight
-      // marker and reset the crash counter. The counter is a single KV (not
-      // per-row), so this reset bounds it to deaths NOT separated by a clean
-      // row. A pinned cursor (transient retryFrom) plus adjacent crashes can
-      // still let one genuine poison row inherit a count of 1 and be skipped a
-      // crash early — always safe (the row keeps its legacy vector + FTS).
-      setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
-      setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
-      cursor = row.id;
-      scanned++;
-
-      // Checkpoint after EVERY row, not once per page. At the observed
-      // throughput a 256-row page can take ~an hour; per-page checkpointing
-      // loses the whole page on any restart in that window, so on a machine
-      // that restarts more often than a page takes the walk never converges —
-      // it re-does the same leading rows forever. Once a row has failed this
-      // pass, pin the persisted cursor at the first failure (`retryFrom`) so a
-      // later crash still resumes there and retries it; the in-memory `cursor`
-      // keeps advancing so the current pass finishes the corpus. Re-doing a row
-      // is idempotent (storeTemporalChunks replaces the whole chunk set).
-      setKV(TEMPORAL_RECHUNK_CURSOR_KEY, retryFrom ?? cursor);
+        setKV(TEMPORAL_RECHUNK_CURSOR_KEY, cursor);
+      });
 
       if (Date.now() - lastProgressAt >= PROGRESS_INTERVAL_MS) {
         log.info(
-          formatTemporalRechunkProgress(baseDone + scanned, total, processed),
+          formatTemporalRechunkProgress(baseDone + scanned, total, scheduled),
         );
         lastProgressAt = Date.now();
       }
-
-      // CPU throttle: sleep a fraction of the embed time so this one-time
-      // migration doesn't peg a core on a weak host. After the checkpoint, so a
-      // crash while sleeping resumes cleanly. Skipped entirely at full duty.
-      const throttleMs = backfillThrottleSleepMs(
-        Date.now() - embedStartedAt,
-        backfillDuty,
-      );
-      if (throttleMs > 0) await backfillSleep(throttleMs);
     }
-
-    if (stop) break;
   }
 
-  if (processed > 0) {
+  if (scheduled > 0) {
     log.info(
-      formatTemporalRechunkProgress(baseDone + scanned, total, processed),
+      formatTemporalRechunkProgress(baseDone + scanned, total, scheduled),
     );
   }
-  return processed;
+  return scheduled;
 }

@@ -324,7 +324,7 @@ describe("storeTurnTemporal (#1084)", () => {
       `);
       close();
       expect(db().query("SELECT version FROM schema_version").get()).toEqual({
-        version: 84,
+        version: 85,
       });
 
       const noStoreLore = gatewayMessagesToLore(conversation, sessionID);
