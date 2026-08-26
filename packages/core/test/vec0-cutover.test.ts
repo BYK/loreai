@@ -6,7 +6,15 @@
 // All run against the real vec0-capable test connection (the vendored sqlite-vec
 // loads in the node test runtime). The suite is skipped if the extension is
 // somehow unavailable so a vec-less CI lane stays green.
-import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { config } from "../src/config";
 import {
   close,
@@ -44,6 +52,7 @@ import {
   _saveAndClearProvider,
   backfillTemporalEmbeddings,
   checkConfigChange,
+  embedInTokenBatches,
   embedTemporalMessage,
   LocalProviderUnavailableError,
   MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
@@ -114,6 +123,37 @@ function unit4(rng: () => number): Float32Array {
 
 let pid: string;
 
+const passthroughSink: log.LogSink = {
+  info() {},
+  warn() {},
+  error() {},
+  captureException() {},
+};
+
+function recordSql(calls: string[]): log.LogSink {
+  return {
+    ...passthroughSink,
+    withDbSpan<T>(sql: string, fn: () => T): T {
+      calls.push(sql);
+      return fn();
+    },
+  };
+}
+
+function expectExactTemporalDeletes(calls: string[], count: number): void {
+  const deletes = calls.filter((sql) =>
+    sql.startsWith("DELETE FROM temporal_vec WHERE "),
+  );
+  expect(deletes).toHaveLength(count);
+  deletes.forEach((sql) => {
+    expect(sql).not.toContain("message_id");
+    expect(sql).not.toContain(" IN ");
+    expect(sql.match(/chunk_id = \?/g)).toHaveLength(
+      MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
+    );
+  });
+}
+
 /** Return every test to a clean blob-layout state: drop vec0 tables, re-add any
  *  base `embedding` column a cutover test dropped, clear kv flags + base rows. */
 function resetToBlob(): void {
@@ -137,8 +177,13 @@ function resetToBlob(): void {
 }
 
 beforeEach(() => {
+  log.registerSink(passthroughSink);
   pid = ensureProject(PROJECT);
   resetToBlob();
+});
+
+afterEach(() => {
+  log.registerSink(passthroughSink);
 });
 
 afterAll(() => {
@@ -852,8 +897,11 @@ describeVec("delete maintenance + GC", () => {
     storeEmbedding(db(), "knowledge", "k1", v(1, 0, 0, 0));
     storeEmbedding(db(), "temporal", "t1", v(1, 0, 0, 0));
 
+    const calls: string[] = [];
+    log.registerSink(recordSql(calls));
     deleteEmbeddings(db(), "knowledge", ["k1"]);
-    deleteEmbeddings(db(), "temporal", ["t1"]); // by message_id (aux)
+    deleteEmbeddings(db(), "temporal", ["t1"]);
+    expectExactTemporalDeletes(calls, 1);
     expect(
       (
         db().query("SELECT COUNT(*) n FROM knowledge_vec").get() as {
@@ -871,6 +919,39 @@ describeVec("delete maintenance + GC", () => {
     expect(() =>
       deleteEmbeddings(db(), "knowledge", ["whatever"]),
     ).not.toThrow();
+  });
+
+  test("deleteEmbeddings removes legacy temporal chunks beyond the current cap", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("legacy-over-cap", "s", 1);
+    const insert = db().query(
+      "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, 's', ?)",
+    );
+    Array.from(
+      { length: MAX_TEMPORAL_CHUNKS_PER_MESSAGE + 1 },
+      (_, ord) => ord,
+    ).forEach((ord) =>
+      insert.run(
+        `legacy-over-cap#${ord}`,
+        "legacy-over-cap",
+        pid,
+        toBlob(v(1, 0, 0, 0)),
+      ),
+    );
+    db()
+      .query("DELETE FROM temporal_messages WHERE id = ?")
+      .run("legacy-over-cap");
+
+    const calls: string[] = [];
+    log.registerSink(recordSql(calls));
+    deleteEmbeddings(db(), "temporal", ["legacy-over-cap"]);
+
+    expectExactTemporalDeletes(calls, 2);
+    expect(
+      (db().query("SELECT COUNT(*) n FROM temporal_vec").get() as { n: number })
+        .n,
+    ).toBe(0);
   });
 
   test("gcVec0DanglingRows reclaims vec0 rows whose base row is gone", () => {
@@ -1579,8 +1660,111 @@ describeVec("multi-vector temporal writes (storeTemporalChunks)", () => {
       v(0, 0, 1, 0),
     ]);
     // Re-embed to FEWER chunks: #1 and #2 must be deleted, not left dangling.
+    const calls: string[] = [];
+    log.registerSink(recordSql(calls));
     storeTemporalChunks(db(), "m1", [v(0, 0, 0, 1)]);
+    expectExactTemporalDeletes(calls, 1);
     expect(chunkIds("m1")).toEqual(["m1#0"]);
+  });
+
+  test("empty replacement preserves the prior complete chunk set", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    storeTemporalChunks(db(), "m1", [
+      v(1, 0, 0, 0),
+      v(0, 1, 0, 0),
+      v(0, 0, 1, 0),
+    ]);
+
+    const calls: string[] = [];
+    log.registerSink(recordSql(calls));
+    storeTemporalChunks(db(), "m1", []);
+
+    expect(
+      calls.some((sql) => sql.startsWith("DELETE FROM temporal_vec")),
+    ).toBe(false);
+    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1", "m1#2"]);
+  });
+
+  test("re-embed restores the prior complete chunk set when an insert fails", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    storeTemporalChunks(db(), "m1", [
+      v(1, 0, 0, 0),
+      v(0, 1, 0, 0),
+      v(0, 0, 1, 0),
+    ]);
+
+    let inserts = 0;
+    log.registerSink({
+      ...passthroughSink,
+      withDbSpan<T>(sql: string, fn: () => T): T {
+        if (sql.startsWith("INSERT INTO temporal_vec")) {
+          inserts++;
+          if (inserts === 2)
+            throw new Error("injected temporal insert failure");
+        }
+        return fn();
+      },
+    });
+
+    expect(() =>
+      storeTemporalChunks(db(), "m1", [v(0, 0, 0, 1), v(1, 1, 0, 0)]),
+    ).toThrow("injected temporal insert failure");
+    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1", "m1#2"]);
+  });
+
+  test("rejects chunk sets that cleanup cannot address", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+
+    expect(() =>
+      storeTemporalChunks(
+        db(),
+        "m1",
+        Array.from({ length: MAX_TEMPORAL_CHUNKS_PER_MESSAGE + 1 }, () =>
+          v(1, 0, 0, 0),
+        ),
+      ),
+    ).toThrow(
+      `storeTemporalChunks: ${MAX_TEMPORAL_CHUNKS_PER_MESSAGE + 1} chunks exceeds the ${MAX_TEMPORAL_CHUNKS_PER_MESSAGE}-chunk limit`,
+    );
+    expect(chunkIds("m1")).toEqual([]);
+  });
+
+  test("rejects incomplete provider output before replacing a complete chunk set", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    storeTemporalChunks(db(), "m1", [
+      v(1, 0, 0, 0),
+      v(0, 1, 0, 0),
+      v(0, 0, 1, 0),
+    ]);
+
+    const token = _saveAndClearProvider();
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed() {
+            return [v(0, 0, 0, 1)];
+          },
+        },
+      });
+      await expect(
+        embedInTokenBatches(["first chunk", "second chunk"], "document"),
+      ).rejects.toThrow(
+        "embedding provider returned an unexpected vector count",
+      );
+    } finally {
+      _saveAndClearProvider();
+      _restoreProvider(token);
+    }
+    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1", "m1#2"]);
   });
 
   test("is a no-op (and never throws) outside vec0 mode", () => {
@@ -1602,6 +1786,30 @@ describeVec("multi-vector temporal writes (storeTemporalChunks)", () => {
       storeTemporalChunks(db(), "ghost", [v(1, 0, 0, 0)]),
     ).not.toThrow();
     expect(chunkIds("ghost")).toEqual([]);
+  });
+
+  test("does not recreate chunks when base-row deletion finishes before replacement starts", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insTemporal("m1", "sX", 1000);
+    storeTemporalChunks(db(), "m1", [v(1, 0, 0, 0)]);
+
+    let raced = false;
+    log.registerSink({
+      ...passthroughSink,
+      withDbSpan<T>(sql: string, fn: () => T): T {
+        if (!raced && sql === "SAVEPOINT store_temporal_chunks") {
+          raced = true;
+          db().query("DELETE FROM temporal_messages WHERE id = ?").run("m1");
+          deleteEmbeddings(db(), "temporal", ["m1"]);
+        }
+        return fn();
+      },
+    });
+
+    storeTemporalChunks(db(), "m1", [v(0, 1, 0, 0)]);
+    expect(raced).toBe(true);
+    expect(chunkIds("m1")).toEqual([]);
   });
 
   test("embedTemporalMessage (vec0) embeds each part-aware unit and stores one chunk per unit", async () => {

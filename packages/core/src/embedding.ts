@@ -44,7 +44,11 @@ import {
 import { config } from "./config";
 import * as log from "./log";
 import { recordVecReadLatency } from "./vec-latency";
-import { buildEmbeddingText, buildEmbeddingUnits } from "./embedding-units";
+import {
+  buildEmbeddingText,
+  buildEmbeddingUnits,
+  MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
+} from "./embedding-units";
 import { vendorModelInfo } from "./embedding-vendor";
 import { nativeIntraOpThreads } from "./ort-native";
 import {
@@ -2971,7 +2975,7 @@ export function warmupEmbedding(): void {
  * by max-sim (then widen-retry over) — stays bounded, without silently dropping
  * any unit's text from the vector (FTS indexes the full content regardless).
  */
-export const MAX_TEMPORAL_CHUNKS_PER_MESSAGE = 64;
+export { MAX_TEMPORAL_CHUNKS_PER_MESSAGE } from "./embedding-units";
 
 /**
  * Embed `texts` in token-area-bounded sub-batches (via {@link nextBatch}) and
@@ -2997,6 +3001,9 @@ export async function embedInTokenBatches(
       batch.map((b) => b.text),
       inputType,
     );
+    if (vecs.length !== batch.length) {
+      throw new Error("embedding provider returned an unexpected vector count");
+    }
     out.push(...vecs);
   }
   return out;
@@ -3011,8 +3018,8 @@ export async function embedInTokenBatches(
  * vec0 only — the caller guarantees vec0 mode. Splits the stored content back
  * into its units (prose, reasoning, reduced tool envelopes), drops empties,
  * caps the per-message chunk fan-out (#1072), sub-batches the embeds, then
- * stores the COMPLETE set. `storeTemporalChunks` DELETEs-then-INSERTs by
- * `message_id`, so a re-embed replaces the whole set and the chunk count may
+ * stores the COMPLETE set. `storeTemporalChunks` DELETEs-then-INSERTs by exact
+ * `chunk_id`, so a re-embed replaces the whole set and the chunk count may
  * shrink or grow. Returns the number of chunks written (0 when the message has
  * no embeddable units — in which case nothing is stored OR deleted, so an
  * existing chunk set is never wiped without a replacement).
