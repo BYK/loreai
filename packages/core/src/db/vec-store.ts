@@ -23,6 +23,7 @@
 // vector-query.ts). It takes the connection as a parameter.
 
 import { toBlob } from "../vector-query";
+import { MAX_TEMPORAL_CHUNKS_PER_MESSAGE } from "../embedding-units";
 
 /** How a DB file physically stores embeddings. Recorded in `kv_meta`. */
 export type VecStorageMode = "blob" | "vec0";
@@ -79,6 +80,11 @@ export const TEMPORAL_CHUNK_SIZE_KEY = "vec.temporal_chunk_size";
 
 /** sqlite-vec slots per temporal chunk (~192 KB at 768 dims). */
 export const TEMPORAL_CHUNK_SIZE = 64;
+
+const DELETE_TEMPORAL_CHUNKS_SQL = `DELETE FROM temporal_vec WHERE ${Array.from(
+  { length: MAX_TEMPORAL_CHUNKS_PER_MESSAGE },
+  () => "chunk_id = ?",
+).join(" OR ")}`;
 
 /** Logical table → physical base table name. */
 const BASE_TABLE: Record<EmbeddingTable, string> = {
@@ -335,14 +341,12 @@ function storeEmbeddingVec0(
  * via {@link storeEmbedding}. NO-OP outside vec0 mode.
  *
  * Re-embed semantics: a content update calls this again, so it first DELETEs
- * ALL chunks of the message (by the aux `message_id`) then re-inserts the new
- * set — vec0 has no upsert, and the chunk count can change between embeds, so a
- * per-`chunk_id` replace would orphan now-removed ords. Partition (and aux)
- * values come from the just-written base row; if it is gone (a delete raced the
- * fire-and-forget embed) there is nothing to index — skip. The DELETE + N
- * INSERTs are left unguarded (matching {@link storeEmbedding}'s vec0 path): a
- * crash mid-loop leaves the message with fewer chunks until its next re-embed —
- * bounded, non-corrupting, and the read collapses whatever chunks exist.
+ * every possible exact `chunk_id`, then inserts the new set. vec0 has no upsert,
+ * and the chunk count can shrink between embeds. Partition and auxiliary values
+ * come from the just-written base row; if it is gone (a delete raced the
+ * fire-and-forget embed) there is nothing to index. The replacement runs in a
+ * savepoint so readers never observe a partial chunk set. An empty replacement
+ * is a no-op because there is no complete new set to install.
  */
 export function storeTemporalChunks(
   conn: EmbeddingWriteConn,
@@ -350,26 +354,62 @@ export function storeTemporalChunks(
   vecs: Float32Array[],
 ): void {
   if (readStorageMode(conn) !== "vec0") return;
-  const row = conn
-    .query("SELECT project_id, session_id FROM temporal_messages WHERE id = ?")
-    .get(messageId) as
-    | { project_id: string; session_id: string }
-    | null
-    | undefined;
-  if (!row) return;
-  conn.query("DELETE FROM temporal_vec WHERE message_id = ?").run(messageId);
-  const insert = conn.query(
-    "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
-  );
-  for (let ord = 0; ord < vecs.length; ord++) {
-    insert.run(
-      `${messageId}#${ord}`,
-      messageId,
-      row.project_id,
-      row.session_id,
-      toBlob(vecs[ord]),
+  if (!vecs.length) return;
+  if (vecs.length > MAX_TEMPORAL_CHUNKS_PER_MESSAGE) {
+    throw new Error(
+      `storeTemporalChunks: ${vecs.length} chunks exceeds the ${MAX_TEMPORAL_CHUNKS_PER_MESSAGE}-chunk limit`,
     );
   }
+  withSavepointOn(conn, "store_temporal_chunks", () => {
+    const row = conn
+      .query(
+        "SELECT project_id, session_id FROM temporal_messages WHERE id = ?",
+      )
+      .get(messageId) as
+      | { project_id: string; session_id: string }
+      | null
+      | undefined;
+    if (!row) return;
+    deleteTemporalChunks(conn, [messageId]);
+    const insert = conn.query(
+      "INSERT INTO temporal_vec(chunk_id, message_id, project_id, session_id, embedding) VALUES (?, ?, ?, ?, ?)",
+    );
+    for (let ord = 0; ord < vecs.length; ord++) {
+      insert.run(
+        `${messageId}#${ord}`,
+        messageId,
+        row.project_id,
+        row.session_id,
+        toBlob(vecs[ord]),
+      );
+    }
+  });
+}
+
+function deleteTemporalChunks(
+  conn: EmbeddingWriteConn,
+  messageIds: readonly string[],
+): void {
+  const del = conn.query(DELETE_TEMPORAL_CHUNKS_SQL);
+  const hasChunk = conn.query(
+    "SELECT chunk_id FROM temporal_vec WHERE chunk_id = ?",
+  );
+  messageIds.forEach((messageId) => {
+    let firstOrd = 0;
+    do {
+      del.run(
+        ...Array.from(
+          { length: MAX_TEMPORAL_CHUNKS_PER_MESSAGE },
+          (_, offset) => `${messageId}#${firstOrd + offset}`,
+        ),
+      );
+      firstOrd += MAX_TEMPORAL_CHUNKS_PER_MESSAGE;
+      // Older remote providers trusted response cardinality, so malformed
+      // overlong responses could persist a canonical contiguous legacy tail
+      // beyond the current cap. Probe the next exact key and clean only when it
+      // exists. Sparse or malformed keys require a separate repair path.
+    } while (hasChunk.get(`${messageId}#${firstOrd}`));
+  });
 }
 
 /**
@@ -377,9 +417,9 @@ export function storeTemporalChunks(
  *
  * NO-OP in blob layout: the embedding lives on the base row, so whatever deleted
  * the base row already removed it. Only the `vec0` layout keeps a separate index
- * row that must be deleted explicitly. `temporal_vec` is chunk-keyed, so it is
- * deleted by the aux `message_id` column (removes every chunk of each message).
- * Chunked under SQLite's bound-variable ceiling.
+ * row that must be deleted explicitly. `temporal_vec` is chunk-keyed, so cleanup
+ * probes every canonical contiguous `chunk_id`, including legacy tails beyond
+ * the current per-message chunk cap.
  */
 export function deleteEmbeddings(
   conn: EmbeddingWriteConn,
@@ -388,13 +428,16 @@ export function deleteEmbeddings(
 ): void {
   if (!ids.length) return;
   if (readStorageMode(conn) !== "vec0") return;
+  if (table === "temporal") {
+    deleteTemporalChunks(conn, ids);
+    return;
+  }
   const vt = VEC_TABLE[table];
-  const keyCol = table === "temporal" ? "message_id" : "id";
   const CHUNK = 900;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const batch = ids.slice(i, i + CHUNK);
     const ph = batch.map(() => "?").join(",");
-    conn.query(`DELETE FROM ${vt} WHERE ${keyCol} IN (${ph})`).run(...batch);
+    conn.query(`DELETE FROM ${vt} WHERE id IN (${ph})`).run(...batch);
   }
 }
 
