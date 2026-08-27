@@ -48,6 +48,7 @@ import { VERSION } from "./src/cli/version";
 import { eventHasTransientError } from "./src/transient-errors";
 import {
   SENTRY_DATA_COLLECTION,
+  isolateRecallContinuationEvent,
   scrubTelemetryEvent,
   scrubTelemetryValue,
   wrapTelemetryTransport,
@@ -175,6 +176,9 @@ export function buildSentryOptions(
     // Each exception in the chain is tested independently so a real bug
     // wrapping a transient cause isn't accidentally silenced.
     beforeSend(event) {
+      if (event.message === "Recall continuation failed") {
+        return isolateRecallContinuationEvent(event);
+      }
       return eventHasTransientError(event) ? null : scrubTelemetryEvent(event);
     },
 

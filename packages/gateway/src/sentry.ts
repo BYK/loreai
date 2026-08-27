@@ -11,6 +11,10 @@ import { getInstanceId, embedding } from "@loreai/core";
 import { createHash } from "node:crypto";
 import { freemem } from "node:os";
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
+import {
+  setRecallContinuationFailureHook,
+  type RecallContinuationFailureCategory,
+} from "./recall-continuation-failure";
 
 // ---------------------------------------------------------------------------
 // Scope enrichment
@@ -691,6 +695,38 @@ export function setupVecReadLatencyCapture(): void {
       // Telemetry must never break the read path.
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Recall continuation failures (#1682)
+// ---------------------------------------------------------------------------
+
+/** Wire allowlisted recall-continuation failures to a fixed Sentry event. */
+export function setupRecallContinuationFailureCapture(): void {
+  setRecallContinuationFailureHook(
+    (category: RecallContinuationFailureCategory) => {
+      if (!Sentry.isInitialized()) return;
+      try {
+        const currentScope = new Sentry.Scope();
+        const isolationScope = new Sentry.Scope();
+        currentScope.setClient(Sentry.getClient());
+        Sentry.captureEvent({
+          level: "warning",
+          message: "Recall continuation failed",
+          fingerprint: ["recall-continuation-failure", category],
+          contexts: {
+            recall_continuation_failure: { category },
+          },
+          sdkProcessingMetadata: {
+            capturedSpanScope: currentScope,
+            capturedSpanIsolationScope: isolationScope,
+          },
+        });
+      } catch {
+        // Telemetry never affects the response path.
+      }
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

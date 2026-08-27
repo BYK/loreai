@@ -34,6 +34,7 @@ import {
   setupEmbeddingFailureCapture,
   setupBustSpiralCapture,
   setupReadPathTimingCapture,
+  setupRecallContinuationFailureCapture,
   setupVecReadLatencyCapture,
 } from "./sentry";
 import type { GatewayRequest } from "./translate/types";
@@ -809,6 +810,10 @@ export async function startServer(
   // Wire vector KNN read-latency to Sentry (#1065 — confirm the vec0 win). Same
   // idempotency guarantee — the hook is assigned, not stacked.
   setupVecReadLatencyCapture();
+
+  // Report only the allowlisted recall-continuation failure category. The
+  // hook is assignment-based and never captures request or provider content.
+  setupRecallContinuationFailureCapture();
 
   // Shared fetch handler for all server instances.
   const fetch = async (
