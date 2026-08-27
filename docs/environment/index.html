@@ -312,7 +312,7 @@
 <tbody>
 <tr>
 <td><code dir="auto">LORE_BACKFILL_CPU_DUTY</code></td>
-<td>Resolve the configured backfill CPU duty cycle: <code dir="auto">LORE_BACKFILL_CPU_DUTY</code> wins, then <code dir="auto">search.embeddings.backfillCpuDuty</code>, else <code dir="auto">undefined</code> (auto-scaled by CPU count — full speed on roomy hosts, gentler on small ones). Invalid values are ignored (fall through). Read per-call so config reloads take effect.</td>
+<td>Legacy temporal backfill duty setting (<code dir="auto">LORE_BACKFILL_CPU_DUTY</code>) retained for configuration compatibility. Durable temporal admission no longer performs inference; the bounded scheduler controls embedding concurrency.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_DISABLE_VEC</code></td>
