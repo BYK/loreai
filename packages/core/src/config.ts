@@ -688,18 +688,16 @@ export const LoreConfig = z.object({
             .describe(
               "Number of local embedding worker threads (each loads its own ~137MB model). Default: memory-gated (1–2). Override with LORE_EMBED_POOL_SIZE.",
             ),
-          /** Duty cycle (0.1–1.0) for the one-time temporal re-chunk backfill:
-           *  the fraction of wall-clock time it may spend embedding, sleeping the
-           *  rest so it doesn't peg a core on weak hosts. 1.0 = full speed (no
-           *  throttle). Omit to auto-scale by CPU count (full speed on roomy
-           *  hosts, gentler on small ones). Override with LORE_BACKFILL_CPU_DUTY. */
+          /** Legacy temporal backfill duty setting retained for configuration
+           *  compatibility. Durable temporal admission no longer performs
+           *  inference; the bounded scheduler controls embedding concurrency. */
           backfillCpuDuty: z
             .number()
             .min(0.1)
             .max(1)
             .optional()
             .describe(
-              "Duty cycle (0.1–1.0) for the one-time temporal re-chunk backfill — the fraction of time it may spend embedding, sleeping the rest so it doesn't peg a core on weak hosts. 1.0 = full speed. Default: auto-scaled by CPU count. Override with LORE_BACKFILL_CPU_DUTY.",
+              "Legacy temporal backfill duty setting. Durable temporal admission no longer performs inference; the bounded scheduler controls embedding concurrency.",
             ),
         })
         .default({

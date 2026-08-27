@@ -52,6 +52,9 @@ export const TOOL_FIRST_LINE_MAX = 200;
 /** Maximum logical vec0 chunks stored for one temporal message. */
 export const MAX_TEMPORAL_CHUNKS_PER_MESSAGE = 64;
 
+/** Stored content shorter than this has too little semantic signal to index. */
+export const TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH = 50;
+
 export type EmbedUnitKind = "text" | "reasoning" | "tool";
 
 export interface EmbedUnit {

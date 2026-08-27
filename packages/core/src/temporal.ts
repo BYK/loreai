@@ -1,11 +1,21 @@
 import { createHash } from "node:crypto";
-import { db, ensureProject, projectId, withSyncApplying } from "./db";
+import {
+  db,
+  ensureProject,
+  projectId,
+  withSavepoint,
+  withSyncApplying,
+} from "./db";
 import { deleteEmbeddings } from "./db/vec-store";
 import { runRelaxedSearch, runRelaxedSearchAsync } from "./search";
 import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
 import { sanitizeSurrogates } from "./markdown";
 import * as log from "./log";
-import * as embedding from "./embedding";
+import {
+  enqueueTemporalEmbedding,
+  hasTemporalEmbedding,
+  invalidateTemporalEmbedding,
+} from "./temporal-embedding-admission";
 import {
   classifyToolError,
   extractFilePaths,
@@ -188,56 +198,56 @@ export function store(input: {
     input.info.id,
     input.legacySourceID,
   );
-  const existing = db()
-    .query(
-      "SELECT id FROM temporal_messages WHERE id = ? AND project_id = ? AND session_id = ?",
-    )
-    .get(storageId, pid, input.info.sessionID);
-  if (existing) {
-    db()
+  withSavepoint("store_temporal_message", () => {
+    const existing = db()
       .query(
-        `UPDATE temporal_messages
+        "SELECT content FROM temporal_messages WHERE id = ? AND project_id = ? AND session_id = ?",
+      )
+      .get(storageId, pid, input.info.sessionID) as { content: string } | null;
+    if (existing) {
+      db()
+        .query(
+          `UPDATE temporal_messages
             SET content = ?, tokens = ?, metadata = ?,
                 source_id = ?
           WHERE id = ? AND project_id = ? AND session_id = ?`,
+        )
+        .run(
+          content,
+          estimateTokens(content),
+          messageMetadata(input.info, input.parts),
+          input.info.id,
+          storageId,
+          pid,
+          input.info.sessionID,
+        );
+      if (existing.content !== content) {
+        invalidateTemporalEmbedding(storageId);
+        enqueueTemporalEmbedding(storageId, content);
+      } else if (!hasTemporalEmbedding(storageId)) {
+        enqueueTemporalEmbedding(storageId, content);
+      }
+      return;
+    }
+
+    db()
+      .query(
+        `INSERT INTO temporal_messages (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       )
       .run(
-        content,
-        estimateTokens(content),
-        messageMetadata(input.info, input.parts),
-        input.info.id,
         storageId,
+        input.info.id,
         pid,
         input.info.sessionID,
+        input.info.role,
+        content,
+        estimateTokens(content),
+        input.info.time.created,
+        messageMetadata(input.info, input.parts),
       );
-    // Re-embed on content update (fire-and-forget)
-    if (embedding.isAvailable()) {
-      embedding.embedTemporalMessage(storageId, content);
-    }
-    return storageId;
-  }
-
-  db()
-    .query(
-      `INSERT INTO temporal_messages (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-    )
-    .run(
-      storageId,
-      input.info.id,
-      pid,
-      input.info.sessionID,
-      input.info.role,
-      content,
-      estimateTokens(content),
-      input.info.time.created,
-      messageMetadata(input.info, input.parts),
-    );
-
-  // Embed new message for vector search (fire-and-forget)
-  if (embedding.isAvailable()) {
-    embedding.embedTemporalMessage(storageId, content);
-  }
+    enqueueTemporalEmbedding(storageId, content);
+  });
   return storageId;
 }
 

@@ -25,6 +25,7 @@ import {
 import {
   dataDir,
   embedding,
+  temporalEmbeddingQueue,
   log,
   close as closeDb,
   shutdownVectorPoolAsync,
@@ -1150,6 +1151,15 @@ async function startGatewayLocked(
             shutdownError ??= listenerCloseError;
             // Preserve current-main embed/vector/DB ordering while the
             // lifecycle lock excludes a successor start.
+            temporalEmbeddingQueue.stopTemporalEmbeddingScheduler();
+            try {
+              shutdownLock.assertOwned();
+              await temporalEmbeddingQueue.settleTemporalEmbeddingScheduler(
+                EMBED_DRAIN_DEADLINE_MS,
+              );
+            } catch (error) {
+              shutdownError ??= error;
+            }
             try {
               shutdownLock.assertOwned();
               await embedding.settleDocumentEmbeds(EMBED_DRAIN_DEADLINE_MS);

@@ -26,6 +26,7 @@ import {
   onProjectRemoteBackfilled,
   setKV,
   setTeamConfig,
+  withSavepoint,
   withSyncApplying,
   withTransaction,
 } from "./db";
@@ -36,6 +37,11 @@ import {
   rematerializeConfidence,
 } from "./ltm";
 import { currentTenantId, LOCAL_TENANT_ID } from "./tenant";
+import {
+  enqueueTemporalEmbedding,
+  hasTemporalEmbedding,
+  invalidateTemporalEmbedding,
+} from "./temporal-embedding-admission";
 
 // The stable per-device id (also used by the confidence CRDT) doubles as the device id
 // for sync's server-side reaper watermark (#909). Re-exported so the gateway can report
@@ -2024,9 +2030,51 @@ export function applyRemoteTemporal(row: Record<string, unknown>): void {
       : "DO NOTHING";
   const sql = `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders}) ON CONFLICT(${conflict}) ${onConflict}`;
   withApplying(() => {
-    db()
-      .query(sql)
-      .run(...cols.map((c) => insertRow[c] as never));
+    withSavepoint("apply_remote_temporal", () => {
+      const messageId = insertRow.id;
+      if (typeof messageId !== "string") {
+        throw new Error("remote temporal row is missing embedding identity");
+      }
+      const previous = db()
+        .query(
+          `SELECT project_id, session_id, content
+           FROM temporal_messages WHERE id = ?`,
+        )
+        .get(messageId) as {
+        project_id: string;
+        session_id: string;
+        content: string;
+      } | null;
+      if (
+        previous &&
+        (previous.project_id !== insertRow.project_id ||
+          previous.session_id !== insertRow.session_id)
+      ) {
+        throw new Error("remote temporal row ownership mismatch");
+      }
+      const applied = db()
+        .query(sql)
+        .run(...cols.map((c) => insertRow[c] as never));
+      if (applied.changes !== 1) {
+        throw new Error("remote temporal row ownership mismatch");
+      }
+      const current = db()
+        .query("SELECT content FROM temporal_messages WHERE id = ?")
+        .get(messageId) as { content: string } | null;
+      if (!current) {
+        throw new Error("remote temporal row is missing embedding identity");
+      }
+      if (previous && previous.content !== current.content) {
+        invalidateTemporalEmbedding(messageId);
+      }
+      if (
+        !previous ||
+        previous.content !== current.content ||
+        !hasTemporalEmbedding(messageId)
+      ) {
+        enqueueTemporalEmbedding(messageId, current.content);
+      }
+    });
   });
 }
 

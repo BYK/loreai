@@ -53,13 +53,15 @@ import {
   backfillTemporalEmbeddings,
   checkConfigChange,
   embedInTokenBatches,
-  embedTemporalMessage,
-  LocalProviderUnavailableError,
   MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
   maybeCutoverToVec0,
   resetTemporalRechunkProgress,
 } from "../src/embedding";
 import * as log from "../src/log";
+import {
+  drainTemporalEmbeddingQueueOnce,
+  enqueueTemporalEmbedding,
+} from "../src/temporal-embedding-queue";
 import * as ltm from "../src/ltm";
 import {
   clearDistillations,
@@ -70,8 +72,7 @@ import {
   deleteSession,
   moveSessions,
 } from "../src/data";
-import { partsToText, prune } from "../src/temporal";
-import type { LorePart } from "../src/types";
+import { prune } from "../src/temporal";
 import {
   fromBlob,
   runVectorQuery,
@@ -662,9 +663,9 @@ describeVec("blob → vec0 cutover", () => {
       ).n,
     ).toBe(0);
 
-    // Recreated: backfillTemporalEmbeddings walks the full corpus and rebuilds
-    // the row's vectors from `content`. Clear the walk's KV flags so it is
-    // un-armed, then run it under a deterministic DIM-length mock provider.
+    // Recreated durably: the legacy walk admits the row without invoking a
+    // provider, then the bounded scheduler drains it under a deterministic
+    // DIM-length provider.
     db()
       .query("DELETE FROM kv_meta WHERE key IN (?, ?, ?)")
       .run(
@@ -673,7 +674,9 @@ describeVec("blob → vec0 cutover", () => {
         "lore:temporal_rechunk.attempts",
       );
     const token = _saveAndClearProvider();
+    const configuredDimensions = config().search.embeddings.dimensions;
     try {
+      config().search.embeddings.dimensions = DIM;
       _restoreProvider({
         provider: {
           maxBatchSize: 8,
@@ -683,7 +686,16 @@ describeVec("blob → vec0 cutover", () => {
         },
       });
       expect(await backfillTemporalEmbeddings()).toBe(1);
+      expect(
+        db()
+          .query(
+            "SELECT message_id FROM temporal_embedding_queue WHERE message_id = 't_stale'",
+          )
+          .get(),
+      ).toEqual({ message_id: "t_stale" });
+      expect(await drainTemporalEmbeddingQueueOnce()).toBe(1);
     } finally {
+      config().search.embeddings.dimensions = configuredDimensions;
       _restoreProvider(token);
     }
 
@@ -1594,20 +1606,6 @@ describe("mode-aware detection predicates", () => {
 });
 
 // --- Phase 2 multi-vector temporal writes -----------------------------------
-// Part fixtures mirror temporal.partsToText so content is byte-identical to prod.
-function textPart(text: string): LorePart {
-  return { type: "text", text };
-}
-function reasoningPart(text: string): LorePart {
-  return { type: "reasoning", text };
-}
-function toolPart(tool: string, output: string): LorePart {
-  return {
-    type: "tool",
-    tool,
-    state: { status: "completed", output },
-  };
-}
 function chunkIds(messageId: string): string[] {
   return (
     db()
@@ -1811,260 +1809,24 @@ describeVec("multi-vector temporal writes (storeTemporalChunks)", () => {
     expect(raced).toBe(true);
     expect(chunkIds("m1")).toEqual([]);
   });
-
-  test("embedTemporalMessage (vec0) embeds each part-aware unit and stores one chunk per unit", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporal("m1", "sX", 1000);
-    const content = partsToText([
-      textPart("Investigating the failure."),
-      reasoningPart("Likely the parser."),
-      toolPart("read", `src/parse.ts\n${"BODY ".repeat(2000)}`),
-    ]);
-
-    let captured: string[] | null = null;
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            captured = texts;
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      embedTemporalMessage("m1", content);
-      // Fire-and-forget: poll until the embed → storeTemporalChunks chain lands.
-      for (let i = 0; i < 100; i++) {
-        if (
-          (
-            db()
-              .query(
-                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
-              )
-              .get() as { n: number }
-          ).n >= 3
-        ) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 5));
-      }
-    } finally {
-      _restoreProvider(token);
-    }
-
-    // One embed text per unit; the tool BODY is dropped (header + first line).
-    expect(captured).toEqual([
-      "Investigating the failure.",
-      "[reasoning] Likely the parser.",
-      "[tool:read] src/parse.ts",
-    ]);
-    expect((captured as unknown as string[]).join("\n")).not.toContain("BODY");
-    // And exactly three chunks were written, one per unit.
-    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1", "m1#2"]);
-  });
-
-  test("embedTemporalMessage (vec0) drops empty/whitespace units — no empty chunk", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporal("m1", "sX", 1000);
-    // A whitespace-only text part sits between two real units; it must be
-    // filtered out so the embedder never sees an empty string and no empty
-    // chunk is written (ords stay dense over the surviving units).
-    const content = partsToText([
-      textPart("   "),
-      textPart("Investigating the parser bug in detail."),
-      toolPart("read", "src/parse.ts\nirrelevant body"),
-    ]);
-
-    let captured: string[] | null = null;
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            captured = texts;
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      embedTemporalMessage("m1", content);
-      for (let i = 0; i < 100; i++) {
-        if (
-          (
-            db()
-              .query(
-                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
-              )
-              .get() as { n: number }
-          ).n >= 2
-        ) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 5));
-      }
-    } finally {
-      _restoreProvider(token);
-    }
-
-    // The whitespace unit is gone: only the two real units are embedded/stored.
-    expect(captured).toEqual([
-      "Investigating the parser bug in detail.",
-      "[tool:read] src/parse.ts",
-    ]);
-    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1"]);
-  });
-
-  test("embedTemporalMessage (vec0) sub-batches the unit embeds — never one oversized worker request", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporal("m1", "sX", 1000);
-    // 9 units > MAX_BACKFILL_CHUNK (8) so nextBatch must split into >1 worker
-    // request; if the path ever reverts to a single embed() call this drops to
-    // one batch and the assertion below fails.
-    const units = Array.from(
-      { length: 9 },
-      (_, i) => `Investigating step ${i} of the parser regression.`,
-    );
-    const content = partsToText(units.map((u) => textPart(u)));
-
-    const calls: string[][] = [];
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            calls.push([...texts]);
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      embedTemporalMessage("m1", content);
-      for (let i = 0; i < 200; i++) {
-        if (
-          (
-            db()
-              .query(
-                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
-              )
-              .get() as { n: number }
-          ).n >= 9
-        ) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 5));
-      }
-    } finally {
-      _restoreProvider(token);
-    }
-
-    // The embed was split across multiple worker requests...
-    expect(calls.length).toBeGreaterThan(1);
-    // ...yet every unit was embedded exactly once, in order, and stored.
-    expect(calls.flat()).toEqual(units);
-    expect(chunkIds("m1").length).toBe(9);
-  });
-
-  test("embedTemporalMessage (vec0) caps chunk fan-out, folding the overflow tail into the final chunk", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporal("m1", "sX", 1000);
-    const cap = MAX_TEMPORAL_CHUNKS_PER_MESSAGE;
-    // One more unit than the cap allows → exactly `cap` chunks, with the last
-    // two units merged into the final chunk (nothing dropped from the vector).
-    const units = Array.from(
-      { length: cap + 1 },
-      (_, i) => `unit-${i}-distinct-payload`,
-    );
-    const content = partsToText(units.map((u) => textPart(u)));
-
-    const calls: string[][] = [];
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            calls.push([...texts]);
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      embedTemporalMessage("m1", content);
-      for (let i = 0; i < 400; i++) {
-        if (
-          (
-            db()
-              .query(
-                "SELECT COUNT(*) n FROM temporal_vec WHERE message_id = 'm1'",
-              )
-              .get() as { n: number }
-          ).n >= cap
-        ) {
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 5));
-      }
-    } finally {
-      _restoreProvider(token);
-    }
-
-    const flat = calls.flat();
-    // Fan-out is bounded at the cap, not cap+1.
-    expect(flat.length).toBe(cap);
-    expect(chunkIds("m1").length).toBe(cap);
-    // The final chunk's text merges the two overflow units — neither is dropped.
-    const last = flat[flat.length - 1];
-    expect(last).toContain(`unit-${cap - 1}-`);
-    expect(last).toContain(`unit-${cap}-`);
-  });
 });
 
-describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
+describeVec("temporal re-chunk durable admission", () => {
   const DONE_KEY = "lore:temporal_rechunk.done";
   const CURSOR_KEY = "lore:temporal_rechunk.cursor";
-  const ATTEMPTS_KEY = "lore:temporal_rechunk.attempts";
+  const MAX_ROWID_KEY = "lore:temporal_rechunk.max_rowid";
   const CONFIG_KEY = "lore:embedding_config";
+  const LONG =
+    "A temporal message with enough semantic content for durable embedding admission.";
 
-  // kv_meta persists across cases within a file; resetToBlob() only clears the
-  // storage-mode/dimension keys, so clear the walk's flags (+ the embedding
-  // config fingerprint) here so each case starts un-armed.
   beforeEach(() => {
     db()
       .query("DELETE FROM kv_meta WHERE key IN (?, ?, ?, ?)")
-      .run(DONE_KEY, CURSOR_KEY, ATTEMPTS_KEY, CONFIG_KEY);
+      .run(DONE_KEY, CURSOR_KEY, MAX_ROWID_KEY, CONFIG_KEY);
+    db().query("DELETE FROM temporal_embedding_queue").run();
   });
 
-  // A 3-unit message (prose + reasoning + reduced tool envelope), well over the
-  // 50-char embed threshold; the tool BODY never reaches the embedder.
-  const MULTI = partsToText([
-    textPart("Investigating the parser regression in detail."),
-    reasoningPart("Likely the tokenizer boundary."),
-    toolPart("read", `src/parse.ts\n${"BODY ".repeat(200)}`),
-  ]);
-  const MULTI_UNITS = [
-    "Investigating the parser regression in detail.",
-    "[reasoning] Likely the tokenizer boundary.",
-    "[tool:read] src/parse.ts",
-  ];
-
-  // A single-unit message (one prose part, no reasoning/tool parts) comfortably
-  // over the 50-char embed floor, so each row triggers exactly ONE embed call —
-  // the per-embed cursor snapshots then line up one-to-one with rows.
-  const LONG = partsToText([
-    textPart(
-      "A single prose unit comfortably over the fifty character embed floor.",
-    ),
-  ]);
-
-  function insTemporalContent(
-    id: string,
-    content: string,
-    distilled = 0,
-  ): void {
+  function insertContent(id: string, content = LONG, distilled = 0): void {
     db()
       .query(
         "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES (?, ?, 'sX', 'user', ?, 0, ?, 0)",
@@ -2072,440 +1834,56 @@ describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
       .run(id, pid, content, distilled);
   }
 
-  // Run `body` with a deterministic mock provider; `calls` records each worker
-  // request so the tests can assert what was (and wasn't) embedded. `shouldThrow`
-  // lets a case simulate a transient remote failure (a plain Error, NOT
-  // LocalProviderUnavailableError) on batches whose text matches.
-  async function withProviderThrowing(
-    shouldThrow: (texts: string[]) => boolean,
-    body: (calls: string[][]) => Promise<void>,
-  ): Promise<void> {
-    const calls: string[][] = [];
+  function queuedIds(): string[] {
+    return (
+      db()
+        .query(
+          "SELECT message_id FROM temporal_embedding_queue ORDER BY message_id",
+        )
+        .all() as Array<{ message_id: string }>
+    ).map((row) => row.message_id);
+  }
+
+  test("schedules the whole legacy corpus without invoking a provider and invalidates stale vectors", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1", LONG, 1);
+    storeTemporalChunks(db(), "m1", [v(1, 0, 0, 0)]);
     const token = _saveAndClearProvider();
+    const embed = vi.fn(async () => [v(1, 0, 0, 0)]);
     try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            calls.push([...texts]);
-            if (shouldThrow(texts)) throw new Error("simulated remote 429");
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      await body(calls);
+      _restoreProvider({ provider: { maxBatchSize: 8, embed } });
+      expect(await backfillTemporalEmbeddings()).toBe(1);
     } finally {
       _restoreProvider(token);
     }
-  }
 
-  function withProvider(
-    body: (calls: string[][]) => Promise<void>,
-  ): Promise<void> {
-    return withProviderThrowing(() => false, body);
-  }
-
-  // A single-unit message whose text carries a POISON marker the throwing
-  // provider keys on.
-  const POISON = partsToText([
-    textPart("This message triggers a simulated remote failure POISON."),
-  ]);
-  const isPoison = (texts: string[]) => texts.some((t) => t.includes("POISON"));
-
-  test("re-chunks legacy single-vector messages (incl. distilled) into the multi-vector set, then latches done", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    // A DISTILLED row — it keeps its embedding and stays in the search path, so
-    // the walk must re-chunk it too (this is the whole point of "full corpus").
-    insTemporalContent("m1", MULTI, /* distilled */ 1);
-    storeTemporalChunks(db(), "m1", [v(1, 0, 0, 0)]); // legacy: a single #0 chunk
-    expect(chunkIds("m1")).toEqual(["m1#0"]);
-
-    await withProvider(async (calls) => {
-      expect(await backfillTemporalEmbeddings()).toBe(1);
-      // The three part-aware units were embedded; the tool BODY was dropped.
-      expect(calls.flat()).toEqual(MULTI_UNITS);
-      expect(calls.flat().join("\n")).not.toContain("BODY");
-    });
-
-    // The single legacy chunk was replaced by the complete multi-vector set.
-    expect(chunkIds("m1")).toEqual(["m1#0", "m1#1", "m1#2"]);
-    // Walk reached the end → latched done, cursor at the last id.
-    expect(getKV(DONE_KEY)).toBe("1");
-    expect(getKV(CURSOR_KEY)).toBe("m1");
-  });
-
-  test("is a no-op in blob mode and does NOT latch done (a later cutover must still run it)", async () => {
-    // resetToBlob() left us in blob layout (no temporal_vec table at all).
-    insTemporalContent("m1", MULTI);
-    await withProvider(async (calls) => {
-      expect(await backfillTemporalEmbeddings()).toBe(0);
-      expect(calls).toEqual([]); // provider never touched
-    });
-    expect(getKV(DONE_KEY)).toBeNull(); // NOT latched
-  });
-
-  test("does nothing once done is latched (one-shot)", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("m1", MULTI);
-    setKV(DONE_KEY, "1");
-    await withProvider(async (calls) => {
-      expect(await backfillTemporalEmbeddings()).toBe(0);
-      expect(calls).toEqual([]);
-    });
-    expect(chunkIds("m1")).toEqual([]); // nothing embedded
-  });
-
-  test("resumes from the persisted cursor — rows at or below it are skipped", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("m1", MULTI);
-    insTemporalContent("m2", MULTI);
-    insTemporalContent("m3", MULTI);
-    setKV(CURSOR_KEY, "m2"); // resume strictly after m2
-
-    await withProvider(async () => {
-      expect(await backfillTemporalEmbeddings()).toBe(1); // only m3
-    });
-
-    expect(chunkIds("m1")).toEqual([]); // below the cursor — untouched
-    expect(chunkIds("m2")).toEqual([]); // == cursor — excluded (id > cursor)
-    expect(chunkIds("m3").length).toBe(3); // re-chunked
-    expect(getKV(CURSOR_KEY)).toBe("m3");
-    expect(getKV(DONE_KEY)).toBe("1");
-  });
-
-  test("skips messages below the 50-char embed threshold", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("a_short", "too short"); // < 50 chars — skipped
-    insTemporalContent("b_long", MULTI);
-
-    await withProvider(async () => {
-      expect(await backfillTemporalEmbeddings()).toBe(1);
-    });
-
-    expect(chunkIds("a_short")).toEqual([]);
-    expect(chunkIds("b_long").length).toBe(3);
-  });
-
-  test("resetTemporalRechunkProgress re-arms the walk after it has converged", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("m1", MULTI);
-
-    await withProvider(async () => {
-      expect(await backfillTemporalEmbeddings()).toBe(1);
-    });
-    expect(getKV(DONE_KEY)).toBe("1");
-
-    // Already done → a second walk is a no-op.
-    await withProvider(async (calls) => {
-      expect(await backfillTemporalEmbeddings()).toBe(0);
-      expect(calls).toEqual([]);
-    });
-
-    // Re-arm (as checkConfigChange does after clearing vectors).
-    resetTemporalRechunkProgress();
-    expect(getKV(DONE_KEY)).toBe("0");
-    expect(getKV(CURSOR_KEY)).toBe("");
-
-    // Now it walks the corpus again.
-    await withProvider(async () => {
-      expect(await backfillTemporalEmbeddings()).toBe(1);
-    });
-    expect(chunkIds("m1").length).toBe(3);
-  });
-
-  test("checkConfigChange re-arms the temporal walk after a detected config change", () => {
-    setStorageMode(db(), "vec0");
-    // Build the vec0 store at the REAL config dimension so checkConfigChange's
-    // ensureVec0Store(configDim) is a no-op (no DROP/recreate) — the wiring
-    // assertion is then independent of the model's embedding dimension.
-    ensureVec0Store(db(), config().search.embeddings.dimensions);
-    setKV(DONE_KEY, "1"); // pretend a prior session converged
-    setKV(CONFIG_KEY, "stale-fingerprint"); // force a detected change
-
-    expect(checkConfigChange()).toBe(true);
-
-    // The clear wiped temporal vectors, so the walk is re-armed to refill them.
-    expect(getKV(DONE_KEY)).toBe("0");
-    expect(getKV(CURSOR_KEY)).toBe("");
-  });
-
-  test("counts only messages that actually got chunks — a no-unit row advances but isn't counted", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    // A >=50-char row that reduces to zero embeddable units (all whitespace →
-    // the lone text unit trims empty and is filtered). store() never persists
-    // such a row, but the walk reads rows directly, so it must advance the
-    // cursor + latch done WITHOUT being counted or writing a chunk.
-    insTemporalContent("m1", " ".repeat(60));
-    insTemporalContent("m2", MULTI);
-
-    await withProvider(async (calls) => {
-      expect(await backfillTemporalEmbeddings()).toBe(1); // only m2 counted
-      expect(calls.flat()).toEqual(MULTI_UNITS); // embedder never saw the empty row
-    });
-
-    expect(chunkIds("m1")).toEqual([]); // no chunk written for the empty row
-    expect(chunkIds("m2").length).toBe(3);
-    expect(getKV(DONE_KEY)).toBe("1"); // walk still reached the end
-    expect(getKV(CURSOR_KEY)).toBe("m2"); // and advanced past the empty row
-  });
-
-  test("a transient row error skips forward but does NOT latch done — the next startup retries it", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("m1", POISON); // fails on this pass (simulated 429)
-    insTemporalContent("m2", MULTI); // succeeds
-
-    // Pass 1: m1 throws a plain Error, the walk skips forward to embed m2, but
-    // rewinds the cursor to retry m1 instead of latching done over the gap.
-    await withProviderThrowing(isPoison, async () => {
-      expect(await backfillTemporalEmbeddings()).toBe(1); // only m2 succeeded
-    });
-    expect(chunkIds("m1")).toEqual([]); // errored — left on its legacy vector
-    expect(chunkIds("m2").length).toBe(3); // re-chunked
-    expect(getKV(DONE_KEY)).toBeNull(); // NOT latched — there was a gap
-    expect(getKV(ATTEMPTS_KEY)).toBe("1");
-    expect(getKV(CURSOR_KEY)).toBe(""); // rewound to before the first failure
-
-    // Pass 2: the transient error is gone; the walk resumes from the rewind,
-    // re-chunks m1, and now latches done.
-    await withProvider(async () => {
-      expect(await backfillTemporalEmbeddings()).toBe(2); // m1 + m2 (idempotent)
-    });
-    expect(chunkIds("m1")).toEqual(["m1#0"]); // POISON is one unit → one chunk
-    expect(getKV(DONE_KEY)).toBe("1");
-    expect(getKV(ATTEMPTS_KEY)).toBe("0");
-  });
-
-  test("a permanently un-embeddable row is given up on after the bounded passes", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("m1", POISON); // always fails
-
-    // Each pass rewinds and retries; after MAX_TEMPORAL_RECHUNK_RETRY_PASSES the
-    // walk gives up and latches done (m1 stays on its legacy single vector).
-    await withProviderThrowing(isPoison, async () => {
-      expect(await backfillTemporalEmbeddings()).toBe(0);
-      expect(getKV(DONE_KEY)).toBeNull();
-      expect(getKV(ATTEMPTS_KEY)).toBe("1");
-
-      expect(await backfillTemporalEmbeddings()).toBe(0);
-      expect(getKV(DONE_KEY)).toBeNull();
-      expect(getKV(ATTEMPTS_KEY)).toBe("2");
-
-      // Third pass hits the cap → give up, latch done, clear the counter.
-      expect(await backfillTemporalEmbeddings()).toBe(0);
-      expect(getKV(DONE_KEY)).toBe("1");
-      expect(getKV(ATTEMPTS_KEY)).toBe("0");
-    });
+    expect(embed).not.toHaveBeenCalled();
     expect(chunkIds("m1")).toEqual([]);
-
-    // Done is latched, so further startups are a no-op even while still failing.
-    await withProviderThrowing(isPoison, async (calls) => {
-      expect(await backfillTemporalEmbeddings()).toBe(0);
-      expect(calls).toEqual([]);
-    });
-  });
-
-  test("checkpoints the cursor after each row, not once per page (mid-page progress is durable)", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    // Three single-unit rows land in one page (< TEMPORAL_RECHUNK_PAGE). Each
-    // embed call snapshots the persisted cursor: with per-row checkpointing,
-    // row K sees row K-1's id already durable; with per-page checkpointing all
-    // three snapshots would still be null (nothing is persisted until the page
-    // ends), so a restart mid-page would redo the whole page and — on a machine
-    // that restarts more often than a page takes — never converge.
-    insTemporalContent("r1", LONG);
-    insTemporalContent("r2", LONG);
-    insTemporalContent("r3", LONG);
-
-    const seen: (string | null)[] = [];
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            seen.push(getKV(CURSOR_KEY));
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      expect(await backfillTemporalEmbeddings()).toBe(3);
-    } finally {
-      _restoreProvider(token);
-    }
-
-    // By the time row K is embedded, row K-1's id is already durable.
-    expect(seen).toEqual([null, "r1", "r2"]);
-    expect(getKV(CURSOR_KEY)).toBe("r3");
+    expect(queuedIds()).toEqual(["m1"]);
+    expect(getKV(CURSOR_KEY)).toBe("m1");
     expect(getKV(DONE_KEY)).toBe("1");
   });
 
-  test("mid-page checkpoint pins at the retry point after a transient failure (crash-safe gap)", async () => {
+  test("schedules legacy content past an embedded NUL with consistent progress counts", async () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);
-    insTemporalContent("p1", POISON); // transient-fails this pass
-    insTemporalContent("p2", LONG); // succeeds after the failure
-    insTemporalContent("p3", LONG); // succeeds
-
-    // Snapshot the persisted cursor at each embed. Once p1 fails, retryFrom is
-    // pinned at its predecessor (""), and EVERY subsequent per-row checkpoint
-    // must persist that retry point — not the advancing cursor — so a crash
-    // before the pass ends still resumes at the gap (p1) rather than skipping
-    // it. If the checkpoint wrote the bare `cursor`, p2/p3 would observe "p1"/
-    // "p2" and a crash would latch done over the un-retried gap.
-    const seen: (string | null)[] = [];
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            seen.push(getKV(CURSOR_KEY));
-            if (texts.some((t) => t.includes("POISON"))) {
-              throw new Error("simulated remote 429");
-            }
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      await backfillTemporalEmbeddings();
-    } finally {
-      _restoreProvider(token);
-    }
-
-    expect(seen).toEqual([null, "", ""]);
-    // End-of-pass rewind leaves the durable cursor at the gap, un-latched.
-    expect(getKV(CURSOR_KEY)).toBe("");
-    expect(getKV(DONE_KEY)).toBeNull();
-  });
-
-  test("a mid-page provider outage stops at the last completed row without latching done", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("r1", LONG);
-    insTemporalContent("r2", LONG); // provider goes away on this row
-    insTemporalContent("r3", LONG);
-
-    // The per-row checkpoint moved WHERE the outage stop persists its cursor, so
-    // guard it directly: the break must fire before the row's cursor advance and
-    // before its checkpoint, leaving the durable cursor at the last COMPLETED row
-    // (r1) so the next startup resumes and retries the outage row — never latches
-    // done over the gap.
-    let call = 0;
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            call++;
-            if (call === 2) throw new LocalProviderUnavailableError();
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      expect(await backfillTemporalEmbeddings()).toBe(1); // only r1 completed
-    } finally {
-      _restoreProvider(token);
-    }
-
-    expect(getKV(CURSOR_KEY)).toBe("r1"); // not advanced past the outage row
-    expect(getKV(DONE_KEY)).toBeNull(); // walk didn't reach the end
-    expect(chunkIds("r1").length).toBe(1); // completed before the outage
-    expect(chunkIds("r2")).toEqual([]); // outage row — untouched
-    expect(chunkIds("r3")).toEqual([]); // never reached
-  });
-
-  test("idle-gate: parks before each row's embed and resumes when it clears", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("r1", LONG);
-
-    // shouldPause is consulted BEFORE the embed and re-polled until it clears.
-    // Busy on the first check, idle after → the row parks once, then embeds.
-    const events: string[] = [];
-    let checks = 0;
-    const shouldPause = () => {
-      const paused = checks === 0;
-      checks++;
-      events.push(paused ? "pause" : "go");
-      return paused;
-    };
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            events.push("embed");
-            return texts.map((_t, i) => v(1, i, 0, 0));
-          },
-        },
-      });
-      expect(await backfillTemporalEmbeddings({ shouldPause })).toBe(1);
-    } finally {
-      _restoreProvider(token);
-    }
-
-    // Gate checked → park → gate checked → clear → embed. Without gating the
-    // sequence would be just ["embed"].
-    expect(events).toEqual(["pause", "go", "embed"]);
-  });
-
-  test("idle-gate: a throwing shouldPause never bricks the walk", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("r1", LONG);
-
-    // A buggy host predicate must be treated as "not paused" so the walk still
-    // converges (rather than rejecting out of the fire-and-forget backfill).
-    const shouldPause = () => {
-      throw new Error("host predicate blew up");
-    };
-    await withProvider(async () => {
-      expect(await backfillTemporalEmbeddings({ shouldPause })).toBe(1);
-    });
-    expect(chunkIds("r1").length).toBe(1);
-    expect(getKV(DONE_KEY)).toBe("1");
-  });
-
-  test("logs the up-front backlog so a long walk is visible in the logs", async () => {
-    setStorageMode(db(), "vec0");
-    ensureVec0Store(db(), DIM);
-    insTemporalContent("m1", MULTI);
-    insTemporalContent("m2", MULTI);
-    insTemporalContent("short", "tiny"); // < 50 chars — excluded from the count
-
+    insertContent("nul-row", `x\0${"a".repeat(100)}`);
     const info = vi.spyOn(log, "info");
     try {
-      await withProvider(async () => {
-        expect(await backfillTemporalEmbeddings()).toBe(2);
-      });
-      const lines = info.mock.calls.map((c: unknown[]) =>
-        c.map(String).join(" "),
-      );
-      // Startup line surfaces the backlog AND the cumulative baseline (fresh run
-      // ⇒ 0/2 done). `short` (<50 chars) is excluded from both counts.
+      expect(await backfillTemporalEmbeddings()).toBe(1);
+      expect(queuedIds()).toEqual(["nul-row"]);
+      expect(getKV(CURSOR_KEY)).toBe("nul-row");
+      expect(getKV(DONE_KEY)).toBe("1");
+      const lines = info.mock.calls.map((call) => call.map(String).join(" "));
       expect(
-        lines.some((l) =>
-          /temporal re-chunk: 2 messages to scan \(0\/2 already done, 0%\)/.test(
-            l,
-          ),
+        lines.some((line) =>
+          /1 messages to scan \(0\/1 already done, 0%\)/.test(line),
         ),
       ).toBe(true);
-      // On a clean completion `baseDone + scanned === total`, so the final line
-      // reads exactly 100% — the cumulative metric, not a per-process tally.
       expect(
-        lines.some((l) =>
-          /temporal re-chunk: 100% complete \(2\/2 messages\)/.test(l),
+        lines.some((line) =>
+          /100% complete \(1\/1 messages\) · \+1 scheduled this run/.test(line),
         ),
       ).toBe(true);
     } finally {
@@ -2513,38 +1891,159 @@ describeVec("temporal re-chunk backfill (backfillTemporalEmbeddings)", () => {
     }
   });
 
-  test("cumulative progress counts prior runs (resuming), not just this process", async () => {
+  test("preserves a valid vector when identical work is already queued", async () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);
-    insTemporalContent("m1", MULTI);
-    insTemporalContent("m2", MULTI);
-    insTemporalContent("m3", MULTI);
-    insTemporalContent("m4", MULTI);
-    setKV(CURSOR_KEY, "m2"); // pretend m1,m2 were re-chunked in a prior run
+    insertContent("m1");
+    storeTemporalChunks(db(), "m1", [v(1, 0, 0, 0)]);
+    enqueueTemporalEmbedding("m1", LONG);
 
+    expect(await backfillTemporalEmbeddings()).toBe(0);
+
+    expect(queuedIds()).toEqual(["m1"]);
+    expect(chunkIds("m1")).toEqual(["m1#0"]);
+    expect(getKV(CURSOR_KEY)).toBe("m1");
+    expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test("is a no-op in blob mode and never latches done", async () => {
+    insertContent("m1");
+    expect(await backfillTemporalEmbeddings()).toBe(0);
+    expect(queuedIds()).toEqual([]);
+    expect(getKV(DONE_KEY)).toBeNull();
+  });
+
+  test("does nothing after durable admission is complete", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    setKV(DONE_KEY, "1");
+    expect(await backfillTemporalEmbeddings()).toBe(0);
+    expect(queuedIds()).toEqual([]);
+  });
+
+  test("resumes strictly after the persisted cursor and skips short rows", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("a_short", "tiny");
+    insertContent("m1");
+    insertContent("m2");
+    insertContent("m3");
+    setKV(CURSOR_KEY, "m2");
+
+    expect(await backfillTemporalEmbeddings()).toBe(1);
+    expect(queuedIds()).toEqual(["m3"]);
+    expect(getKV(CURSOR_KEY)).toBe("m3");
+    expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test("resetTemporalRechunkProgress re-arms durable admission", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    expect(await backfillTemporalEmbeddings()).toBe(1);
+    db().query("DELETE FROM temporal_embedding_queue").run();
+    expect(await backfillTemporalEmbeddings()).toBe(0);
+
+    resetTemporalRechunkProgress();
+    expect(await backfillTemporalEmbeddings()).toBe(1);
+    expect(queuedIds()).toEqual(["m1"]);
+  });
+
+  test("checkConfigChange re-arms durable admission after clearing vectors", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), config().search.embeddings.dimensions);
+    setKV(DONE_KEY, "1");
+    setKV(CONFIG_KEY, "stale-fingerprint");
+    expect(checkConfigChange()).toBe(true);
+    expect(getKV(DONE_KEY)).toBe("0");
+    expect(getKV(CURSOR_KEY)).toBe("");
+  });
+
+  test("atomically commits queue admission, vector invalidation, and cursor progress", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    storeTemporalChunks(db(), "m1", [v(1, 0, 0, 0)]);
+
+    db().exec(`CREATE TRIGGER reject_temporal_admission
+      BEFORE INSERT ON temporal_embedding_queue
+      BEGIN SELECT RAISE(ABORT, 'reject temporal admission'); END`);
+    await expect(backfillTemporalEmbeddings()).rejects.toThrow(
+      "reject temporal admission",
+    );
+    db().exec("DROP TRIGGER reject_temporal_admission");
+    expect(queuedIds()).toEqual([]);
+    expect(chunkIds("m1")).toEqual(["m1#0"]);
+    expect(getKV(CURSOR_KEY)).toBeNull();
+  });
+
+  test("parks before admission and ignores a throwing host gate", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    let checks = 0;
+    expect(
+      await backfillTemporalEmbeddings({
+        shouldPause: () => checks++ === 0,
+      }),
+    ).toBe(1);
+    expect(checks).toBeGreaterThanOrEqual(2);
+
+    resetTemporalRechunkProgress();
+    db().query("DELETE FROM temporal_embedding_queue").run();
+    expect(
+      await backfillTemporalEmbeddings({
+        shouldPause: () => {
+          throw new Error("host predicate failed");
+        },
+      }),
+    ).toBe(1);
+  });
+
+  test("does not chase live rows inserted after its durable snapshot", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    let inserted = false;
+
+    expect(
+      await backfillTemporalEmbeddings({
+        shouldPause: () => {
+          if (inserted) return false;
+          inserted = true;
+          insertContent("m2");
+          enqueueTemporalEmbedding("m2", LONG);
+          return false;
+        },
+      }),
+    ).toBe(1);
+
+    expect(queuedIds()).toEqual(["m1", "m2"]);
+    expect(getKV(CURSOR_KEY)).toBe("m1");
+    expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test("reports cumulative scheduling progress across restarts", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    insertContent("m2");
+    insertContent("m3");
+    insertContent("m4");
+    setKV(CURSOR_KEY, "m2");
     const info = vi.spyOn(log, "info");
     try {
-      await withProvider(async () => {
-        expect(await backfillTemporalEmbeddings()).toBe(2); // only m3,m4 this run
-      });
-      const lines = info.mock.calls.map((c: unknown[]) =>
-        c.map(String).join(" "),
-      );
-      // startup: 2 remain, but 2 of 4 are already done (50%) — resuming
+      expect(await backfillTemporalEmbeddings()).toBe(2);
+      const lines = info.mock.calls.map((call) => call.map(String).join(" "));
       expect(
-        lines.some((l) =>
-          /temporal re-chunk: 2 messages to scan \(2\/4 already done, 50%\), resuming/.test(
-            l,
-          ),
+        lines.some((line) =>
+          /2 messages to scan \(2\/4 already done, 50%\), resuming/.test(line),
         ),
       ).toBe(true);
-      // completion: cumulative 4/4 (100%), NOT the per-process 2/4 — this is what
-      // distinguishes `baseDone + scanned` from `processed`.
       expect(
-        lines.some((l) =>
-          /temporal re-chunk: 100% complete \(4\/4 messages\) · \+2 re-chunked this run/.test(
-            l,
-          ),
+        lines.some((line) =>
+          /100% complete \(4\/4 messages\) · \+2 scheduled this run/.test(line),
         ),
       ).toBe(true);
     } finally {

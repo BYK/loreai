@@ -147,6 +147,65 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
+  test("v85 creates the local temporal queue without re-arming completed legacy progress", () => {
+    const database = db();
+    database.exec(`
+      DELETE FROM temporal_embedding_queue;
+      DROP TABLE temporal_embedding_queue;
+      INSERT INTO kv_meta (key, value)
+        VALUES ('lore:temporal_rechunk.done', '1')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      INSERT INTO kv_meta (key, value)
+        VALUES ('lore:temporal_rechunk.cursor', 'legacy-complete-cursor')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      UPDATE schema_version SET version = 84;
+    `);
+    close();
+
+    const migrated = db();
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    expect(
+      migrated
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'temporal_embedding_queue'",
+        )
+        .get(),
+    ).toEqual({ name: "temporal_embedding_queue" });
+    expect(
+      migrated
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get("lore:temporal_rechunk.done"),
+    ).toEqual({ value: "1" });
+    expect(
+      migrated
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get("lore:temporal_rechunk.cursor"),
+    ).toEqual({ value: "legacy-complete-cursor" });
+
+    migrated.exec("DROP TABLE temporal_embedding_queue");
+    close();
+    const recovered = db();
+    expect(
+      recovered
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_temporal_embedding_queue_enqueued'",
+        )
+        .get(),
+    ).toEqual({ name: "idx_temporal_embedding_queue_enqueued" });
+    expect(
+      recovered
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get("lore:temporal_rechunk.done"),
+    ).toEqual({ value: "1" });
+    expect(
+      recovered
+        .query("SELECT value FROM kv_meta WHERE key = ?")
+        .get("lore:temporal_rechunk.cursor"),
+    ).toEqual({ value: "legacy-complete-cursor" });
+  });
+
   test("v81 quarantines sync bookkeeping that predates tenant provenance", () => {
     const database = db();
     database.exec("DELETE FROM sync_outbox; DELETE FROM sync_state;");
@@ -2198,6 +2257,35 @@ describe("db", () => {
         )
         .get(),
     ).toEqual({ name: "project_id_aliases" });
+  });
+
+  test("recoverMissingObjects creates the temporal embedding queue and index when missing", () => {
+    const d = db();
+    d.exec("DROP TABLE IF EXISTS temporal_embedding_queue");
+    expect(
+      d
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='temporal_embedding_queue'",
+        )
+        .get(),
+    ).toBeNull();
+
+    close();
+    const fresh = db();
+    expect(
+      fresh
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='temporal_embedding_queue'",
+        )
+        .get(),
+    ).toEqual({ name: "temporal_embedding_queue" });
+    expect(
+      fresh
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_temporal_embedding_queue_enqueued'",
+        )
+        .get(),
+    ).toEqual({ name: "idx_temporal_embedding_queue_enqueued" });
   });
 
   test("saveSessionCosts and loadSessionCosts round-trip", () => {

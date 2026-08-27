@@ -76,6 +76,7 @@ import {
   resolveAgentsFileName,
   latReader,
   embedding,
+  temporalEmbeddingQueue,
   saveSessionTracking,
   loadSessionTracking,
   appendSessionPromptDelta,
@@ -4188,11 +4189,17 @@ async function initIfNeeded(
     // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
     // pool to live traffic: park while the breaker is tripped or a live recall
     // embed is in flight, resume the instant the worker drains.
-    spanStartupBackfill(() =>
-      embedding.runStartupBackfill({
+    const startupBackfill = spanStartupBackfill(() => {
+      const backfill = embedding.runStartupBackfill({
         shouldPause: buildTemporalBackfillGate(),
-      }),
-    ).catch((e) => {
+      });
+      // When embeddings are available, runStartupBackfill synchronously
+      // reconciles config and attempts vec0 cutover before its first await.
+      // Start durable live-message scheduling after those transitions.
+      temporalEmbeddingQueue.startTemporalEmbeddingScheduler();
+      return backfill;
+    });
+    startupBackfill.catch((e) => {
       log.error("embedding backfill failed:", e);
     });
   }

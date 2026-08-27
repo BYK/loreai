@@ -5,6 +5,7 @@
  * sync-invisible prune. The pull/restore side (residency exemption, encrypted
  * round-trip) is covered by the Tier-2 integration suite (D-4).
  */
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   db,
@@ -247,6 +248,16 @@ describe("restore residency: pulled temporal survives prune (#826/D, D-4)", () =
     expect(row?.distilled).toBe(1); // archival — never re-distilled
     expect(row?.created_at).toBe(origin); // origin preserved for ordering/recall
     expect(row?.restored_at).toBeGreaterThan(origin); // residency clock stamped ~now
+    const queued = db()
+      .query(
+        "SELECT content_hash, fingerprint FROM temporal_embedding_queue WHERE message_id = ?",
+      )
+      .get("r1") as { content_hash: string; fingerprint: string } | null;
+    expect(queued).toEqual({
+      content_hash: createHash("sha256").update("hello").digest("hex"),
+      fingerprint: expect.stringMatching(/temporal-embedding-policy-v\d+$/),
+    });
+    expect(JSON.stringify(queued)).not.toContain("hello");
   });
 
   test("applyRemoteTemporal PRESERVES a self-pull-back row's native flags (no clock reset)", () => {
@@ -289,7 +300,7 @@ describe("restore residency: pulled temporal survives prune (#826/D, D-4)", () =
       project_id: pid,
       session_id: "s",
       role: "user",
-      content: "orig",
+      content: "new remote content",
       tokens: 1,
       metadata: "{}",
       created_at: origin,
@@ -297,6 +308,115 @@ describe("restore residency: pulled temporal survives prune (#826/D, D-4)", () =
     const row = readTemporal("act");
     expect(row?.distilled).toBe(0); // NOT flipped active → archival
     expect(row?.restored_at).toBeNull(); // NOT stamped
+    expect(
+      db()
+        .query("SELECT content FROM temporal_messages WHERE id = ?")
+        .get("act"),
+    ).toEqual({ content: "new remote content" });
+    const queued = db()
+      .query(
+        "SELECT content_hash FROM temporal_embedding_queue WHERE message_id = ?",
+      )
+      .get("act") as { content_hash: string } | null;
+    expect(queued?.content_hash).toBe(
+      createHash("sha256").update("new remote content").digest("hex"),
+    );
+  });
+
+  test("applyRemoteTemporal rejects an ID owned by another project or session atomically", () => {
+    const projectA = ensureProject(`${PROJECT}/ownership-a`);
+    const projectB = ensureProject(`${PROJECT}/ownership-b`);
+    const messageId = "remote-ownership-collision";
+    const vector = new Uint8Array([1, 2, 3, 4]);
+    db()
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata, embedding)
+         VALUES (?, ?, 'session-a', 'user', 'original content', 1, 0, ?, '{}', ?)`,
+      )
+      .run(messageId, projectA, now(), vector);
+    db()
+      .query(
+        `INSERT INTO temporal_embedding_queue
+         (message_id, content_hash, fingerprint, enqueued_at)
+         VALUES (?, 'original-hash', 'original-fingerprint', 123)`,
+      )
+      .run(messageId);
+    setSyncState("temporal_messages", messageId, {
+      content_hash: "synced-hash",
+      revision: 7,
+      remote_updated_at: "2026-08-27T08:00:00.000Z",
+    });
+    const originalQueue = db()
+      .query(
+        "SELECT content_hash, fingerprint, enqueued_at FROM temporal_embedding_queue WHERE message_id = ?",
+      )
+      .get(messageId);
+    const originalSyncState = getSyncState("temporal_messages", messageId);
+
+    let error: unknown;
+    try {
+      applyRemoteTemporal({
+        id: messageId,
+        project_id: projectB,
+        session_id: "session-b",
+        role: "assistant",
+        content: "attacker-controlled replacement",
+        tokens: 99,
+        metadata: '{"remote":true}',
+        created_at: 789,
+      });
+    } catch (cause) {
+      error = cause;
+    }
+
+    const current = db()
+      .query(
+        `SELECT project_id, session_id, role, content, tokens, created_at,
+                metadata, embedding
+         FROM temporal_messages WHERE id = ?`,
+      )
+      .get(messageId) as {
+      project_id: string;
+      session_id: string;
+      role: string;
+      content: string;
+      tokens: number;
+      created_at: number;
+      metadata: string;
+      embedding: Uint8Array | null;
+    };
+    expect.soft(error).toEqual(expect.any(Error));
+    expect.soft(current).toMatchObject({
+      project_id: projectA,
+      session_id: "session-a",
+      role: "user",
+      content: "original content",
+      tokens: 1,
+      metadata: "{}",
+    });
+    const currentEmbedding = current.embedding;
+    expect
+      .soft(
+        Array.from(
+          currentEmbedding instanceof Uint8Array
+            ? currentEmbedding
+            : new Uint8Array(currentEmbedding ?? 0),
+        ),
+      )
+      .toEqual(Array.from(vector));
+    expect
+      .soft(
+        db()
+          .query(
+            "SELECT content_hash, fingerprint, enqueued_at FROM temporal_embedding_queue WHERE message_id = ?",
+          )
+          .get(messageId),
+      )
+      .toEqual(originalQueue);
+    expect
+      .soft(getSyncState("temporal_messages", messageId))
+      .toEqual(originalSyncState);
   });
 });
 

@@ -1,5 +1,13 @@
+import { createHash } from "node:crypto";
 import { describe, test, expect, beforeAll, beforeEach } from "vitest";
-import { db, ensureProject } from "../src/db";
+import { db, ensureProject, withSavepoint } from "../src/db";
+import {
+  ensureVec0Store,
+  readStorageMode,
+  setStorageMode,
+  storeTemporalChunks,
+} from "../src/db/vec-store";
+import { config } from "../src/config";
 import * as temporal from "../src/temporal";
 import { ftsQuery } from "../src/search";
 import type { LoreMessage, LorePart } from "../src/types";
@@ -79,18 +87,25 @@ describe("temporal", () => {
   });
 
   test("store and retrieve messages", () => {
+    const project = "/test/temporal/store-retrieve";
     const info = makeMessage("msg-1", "user");
     const parts = makeParts("msg-1", "How do I set up authentication?");
-    temporal.store({ projectPath: PROJECT, info, parts });
+    temporal.store({ projectPath: project, info, parts });
 
-    const all = temporal.bySession(PROJECT, "sess-1");
+    const all = temporal.bySession(project, "sess-1");
     expect(all.length).toBe(1);
     expect(all[0].content).toContain("authentication");
   });
 
   test("stores multiple messages", () => {
+    const project = "/test/temporal/store-multiple";
     temporal.store({
-      projectPath: PROJECT,
+      projectPath: project,
+      info: makeMessage("msg-1", "user"),
+      parts: makeParts("msg-1", "How do I set up authentication?"),
+    });
+    temporal.store({
+      projectPath: project,
       info: makeMessage("msg-2", "assistant"),
       parts: makeParts(
         "msg-2",
@@ -98,18 +113,24 @@ describe("temporal", () => {
       ),
     });
     temporal.store({
-      projectPath: PROJECT,
+      projectPath: project,
       info: makeMessage("msg-3", "user"),
       parts: makeParts("msg-3", "What about the redirect middleware?"),
     });
 
-    const all = temporal.bySession(PROJECT, "sess-1");
+    const all = temporal.bySession(project, "sess-1");
     expect(all.length).toBe(3);
   });
 
   test("updates existing message on re-store", () => {
+    const project = "/test/temporal/store-update";
     temporal.store({
-      projectPath: PROJECT,
+      projectPath: project,
+      info: makeMessage("msg-1", "user"),
+      parts: makeParts("msg-1", "How do I set up authentication?"),
+    });
+    temporal.store({
+      projectPath: project,
       info: makeMessage("msg-1", "user"),
       parts: makeParts(
         "msg-1",
@@ -117,13 +138,279 @@ describe("temporal", () => {
       ),
     });
 
-    const all = temporal.bySession(PROJECT, "sess-1");
-    expect(all.length).toBe(3); // still 3, not 4
+    const all = temporal.bySession(project, "sess-1");
+    expect(all.length).toBe(1);
     expect(all[0].content).toContain("OAuth");
   });
 
+  test("durably enqueues one content-safe embedding job per message", () => {
+    const project = "/test/temporal/embedding-queue";
+    const content = "queue this temporal message without copying its content";
+    const storedId = temporal.store({
+      projectPath: project,
+      info: makeMessage("msg-queue", "user", "sess-queue"),
+      parts: makeParts("msg-queue", content),
+    });
+    if (!storedId) throw new Error("expected stored message id");
+
+    const columns = db()
+      .query("PRAGMA table_info(temporal_embedding_queue)")
+      .all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "message_id",
+      "content_hash",
+      "fingerprint",
+      "enqueued_at",
+    ]);
+
+    const rows = db()
+      .query("SELECT * FROM temporal_embedding_queue WHERE message_id = ?")
+      .all(storedId) as Array<{
+      message_id: string;
+      content_hash: string;
+      fingerprint: string;
+      enqueued_at: number;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content_hash).toBe(
+      createHash("sha256").update(content).digest("hex"),
+    );
+    expect(rows[0].fingerprint).toMatch(/temporal-embedding-policy-v\d+$/);
+    expect(rows[0].enqueued_at).toBeGreaterThan(0);
+    expect(JSON.stringify(rows[0])).not.toContain(content);
+  });
+
+  test("re-store coalesces the durable embedding job to the newest content", () => {
+    const project = "/test/temporal/embedding-coalesce";
+    const info = makeMessage("msg-coalesce", "user", "sess-coalesce");
+    const firstId = temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("msg-coalesce", "first content to become stale"),
+    });
+    if (!firstId) throw new Error("expected stored message id");
+    db()
+      .query(
+        "UPDATE temporal_embedding_queue SET enqueued_at = 1 WHERE message_id = ?",
+      )
+      .run(firstId);
+
+    const latest = "newest content must supersede the old embedding job";
+    const secondId = temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("msg-coalesce", latest),
+    });
+    expect(secondId).toBe(firstId);
+
+    const rows = db()
+      .query(
+        "SELECT content_hash, enqueued_at FROM temporal_embedding_queue WHERE message_id = ?",
+      )
+      .all(firstId) as Array<{ content_hash: string; enqueued_at: number }>;
+    expect(rows).toEqual([
+      {
+        content_hash: createHash("sha256").update(latest).digest("hex"),
+        enqueued_at: expect.any(Number),
+      },
+    ]);
+    expect(rows[0].enqueued_at).toBeGreaterThan(1);
+  });
+
+  test("idempotent re-store preserves queue age and an existing blob vector", () => {
+    const project = "/test/temporal/embedding-idempotent";
+    const info = makeMessage("msg-idempotent", "user", "sess-idempotent");
+    const content = "identical content must preserve a valid temporal vector";
+    const storedId = temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("msg-idempotent", content),
+    });
+    if (!storedId) throw new Error("expected stored message id");
+    db()
+      .query(
+        "UPDATE temporal_embedding_queue SET enqueued_at = 1 WHERE message_id = ?",
+      )
+      .run(storedId);
+    const vector = new Uint8Array([1, 2, 3, 4]);
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id = ?")
+      .run(vector, storedId);
+
+    expect(
+      temporal.store({
+        projectPath: project,
+        info,
+        parts: makeParts("msg-idempotent", content),
+      }),
+    ).toBe(storedId);
+
+    expect(
+      db()
+        .query(
+          "SELECT enqueued_at FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(storedId),
+    ).toEqual({ enqueued_at: 1 });
+    const row = db()
+      .query("SELECT embedding FROM temporal_messages WHERE id = ?")
+      .get(storedId) as { embedding: Uint8Array | null };
+    expect(row.embedding).toEqual(vector);
+  });
+
+  test("idempotent re-store recreates durable work when its vector is missing", () => {
+    const project = "/test/temporal/embedding-idempotent-missing";
+    const info = makeMessage(
+      "msg-idempotent-missing",
+      "user",
+      "sess-idempotent-missing",
+    );
+    const content = "identical replay must recover a missing temporal vector";
+    const storedId = temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("msg-idempotent-missing", content),
+    });
+    if (!storedId) throw new Error("expected stored message id");
+    db()
+      .query("DELETE FROM temporal_embedding_queue WHERE message_id = ?")
+      .run(storedId);
+
+    temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("msg-idempotent-missing", content),
+    });
+
+    expect(
+      db()
+        .query(
+          "SELECT content_hash FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(storedId),
+    ).toEqual({
+      content_hash: createHash("sha256").update(content).digest("hex"),
+    });
+  });
+
+  test("changed re-store invalidates a vec0 set and rollback restores vector, queue, and content", () => {
+    const originalMode = readStorageMode(db());
+    ensureVec0Store(db(), config().search.embeddings.dimensions);
+    setStorageMode(db(), "vec0");
+    const project = "/test/temporal/embedding-invalidation-atomic";
+    const info = makeMessage("msg-invalidation", "user", "sess-invalidation");
+    const original = "original content owns the currently stored vec0 chunks";
+    const storedId = temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("msg-invalidation", original),
+    });
+    if (!storedId) throw new Error("expected stored message id");
+    const vector = new Float32Array(config().search.embeddings.dimensions);
+    vector[0] = 1;
+    storeTemporalChunks(db(), storedId, [vector]);
+    const originalQueue = db()
+      .query(
+        "SELECT content_hash, fingerprint, enqueued_at FROM temporal_embedding_queue WHERE message_id = ?",
+      )
+      .get(storedId);
+
+    expect(() =>
+      withSavepoint("rollback_changed_temporal", () => {
+        temporal.store({
+          projectPath: project,
+          info,
+          parts: makeParts(
+            "msg-invalidation",
+            "changed content must invalidate old vectors atomically",
+          ),
+        });
+        expect(
+          db()
+            .query("SELECT chunk_id FROM temporal_vec WHERE message_id = ?")
+            .get(storedId),
+        ).toBeNull();
+        throw new Error("rollback changed temporal store");
+      }),
+    ).toThrow("rollback changed temporal store");
+
+    expect(
+      db()
+        .query("SELECT content FROM temporal_messages WHERE id = ?")
+        .get(storedId),
+    ).toEqual({ content: original });
+    expect(
+      db()
+        .query("SELECT chunk_id FROM temporal_vec WHERE message_id = ?")
+        .get(storedId),
+    ).toEqual({ chunk_id: `${storedId}#0` });
+    expect(
+      db()
+        .query(
+          "SELECT content_hash, fingerprint, enqueued_at FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(storedId),
+    ).toEqual(originalQueue);
+    setStorageMode(db(), originalMode);
+  });
+
+  test("base deletion cascades pending temporal embedding work", () => {
+    const storedId = temporal.store({
+      projectPath: "/test/temporal/embedding-cascade",
+      info: makeMessage("msg-cascade", "user", "sess-cascade"),
+      parts: makeParts("msg-cascade", "pending work removed with its base row"),
+    });
+    if (!storedId) throw new Error("expected stored message id");
+
+    db().query("DELETE FROM temporal_messages WHERE id = ?").run(storedId);
+    expect(
+      db()
+        .query(
+          "SELECT message_id FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(storedId),
+    ).toBeNull();
+  });
+
+  test("outer savepoint rolls back the message and its embedding job", () => {
+    const project = "/test/temporal/embedding-atomic";
+    let storedId: string | undefined;
+    expect(() =>
+      withSavepoint("test_temporal_embedding_atomic", () => {
+        storedId = temporal.store({
+          projectPath: project,
+          info: makeMessage("msg-atomic", "user", "sess-atomic"),
+          parts: makeParts(
+            "msg-atomic",
+            "message and queue must commit together",
+          ),
+        });
+        throw new Error("rollback temporal store");
+      }),
+    ).toThrow("rollback temporal store");
+    if (!storedId) throw new Error("expected derived storage id");
+
+    expect(
+      db().query("SELECT id FROM temporal_messages WHERE id = ?").get(storedId),
+    ).toBeNull();
+    expect(
+      db()
+        .query(
+          "SELECT message_id FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(storedId),
+    ).toBeNull();
+  });
+
   test("full-text search works", () => {
-    const results = temporal.search({ projectPath: PROJECT, query: "OAuth" });
+    const project = "/test/temporal/full-text-search";
+    temporal.store({
+      projectPath: project,
+      info: makeMessage("msg-search", "assistant"),
+      parts: makeParts("msg-search", "Authentication uses OAuth2 with PKCE"),
+    });
+
+    const results = temporal.search({ projectPath: project, query: "OAuth" });
     expect(results.length).toBeGreaterThan(0);
     expect(results[0].content).toContain("OAuth");
   });
@@ -161,8 +448,9 @@ describe("temporal", () => {
   });
 
   test("search respects session scope", () => {
+    const project = "/test/temporal/search-session-scope";
     temporal.store({
-      projectPath: PROJECT,
+      projectPath: project,
       info: makeMessage("msg-other", "user", "sess-2"),
       parts: makeParts(
         "msg-other",
@@ -171,21 +459,29 @@ describe("temporal", () => {
     });
 
     const scoped = temporal.search({
-      projectPath: PROJECT,
+      projectPath: project,
       query: "databases",
       sessionID: "sess-1",
     });
     expect(scoped.length).toBe(0);
 
     const global = temporal.search({
-      projectPath: PROJECT,
+      projectPath: project,
       query: "databases",
     });
     expect(global.length).toBeGreaterThan(0);
   });
 
   test("undistilled returns only non-distilled messages", () => {
-    const pending = temporal.undistilled(PROJECT, "sess-1");
+    const project = "/test/temporal/undistilled";
+    for (const id of ["msg-1", "msg-2", "msg-3"]) {
+      temporal.store({
+        projectPath: project,
+        info: makeMessage(id, "user"),
+        parts: makeParts(id, `undistilled content for ${id}`),
+      });
+    }
+    const pending = temporal.undistilled(project, "sess-1");
     expect(pending.length).toBe(3);
 
     temporal.markDistilled(
@@ -196,35 +492,59 @@ describe("temporal", () => {
         .map((message) => message.id),
     );
 
-    const after = temporal.undistilled(PROJECT, "sess-1");
+    const after = temporal.undistilled(project, "sess-1");
     expect(after.length).toBe(1);
     expect(after[0].source_id).toBe("msg-3");
   });
 
   test("search finds distilled messages", () => {
-    // msg-1 and msg-2 were marked distilled in the previous test
+    const project = "/test/temporal/search-distilled";
+    const id = temporal.store({
+      projectPath: project,
+      info: makeMessage("msg-distilled", "assistant"),
+      parts: makeParts(
+        "msg-distilled",
+        "OAuth2 remains searchable after distillation",
+      ),
+    });
+    if (!id) throw new Error("expected stored message id");
+    temporal.markDistilled([id]);
+
     const results = temporal.search({
-      projectPath: PROJECT,
+      projectPath: project,
       query: "OAuth",
     });
     expect(results.length).toBeGreaterThan(0);
-    // msg-2 contains "OAuth2" and is distilled — must still appear
-    expect(results.some((r) => r.source_id === "msg-2")).toBe(true);
+    expect(results.some((r) => r.source_id === "msg-distilled")).toBe(true);
   });
 
   test("count and undistilledCount", () => {
-    expect(temporal.count(PROJECT, "sess-1")).toBe(3);
-    expect(temporal.undistilledCount(PROJECT, "sess-1")).toBe(1);
+    const project = "/test/temporal/count";
+    const first = temporal.store({
+      projectPath: project,
+      info: makeMessage("msg-count-1", "user"),
+      parts: makeParts("msg-count-1", "first count message"),
+    });
+    temporal.store({
+      projectPath: project,
+      info: makeMessage("msg-count-2", "assistant"),
+      parts: makeParts("msg-count-2", "second count message"),
+    });
+    if (!first) throw new Error("expected stored message id");
+    temporal.markDistilled([first]);
+
+    expect(temporal.count(project, "sess-1")).toBe(2);
+    expect(temporal.undistilledCount(project, "sess-1")).toBe(1);
   });
 
   test("skips empty content messages", () => {
+    const project = "/test/temporal/empty-content";
     temporal.store({
-      projectPath: PROJECT,
+      projectPath: project,
       info: makeMessage("msg-empty", "user"),
       parts: [],
     });
-    // Should not increase count since content is empty
-    expect(temporal.count(PROJECT, "sess-1")).toBe(3);
+    expect(temporal.count(project, "sess-1")).toBe(0);
   });
 
   describe("prune", () => {

@@ -46,6 +46,7 @@ export {
 export * as curator from "./curator";
 export type { ChangedEntry } from "./curator";
 export * as embedding from "./embedding";
+export * as temporalEmbeddingQueue from "./temporal-embedding-queue";
 export * as embeddingVendor from "./embedding-vendor";
 export * as latReader from "./lat-reader";
 export * as entities from "./entities";

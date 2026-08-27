@@ -93,7 +93,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
-| `LORE_BACKFILL_CPU_DUTY` | Resolve the configured backfill CPU duty cycle: `LORE_BACKFILL_CPU_DUTY` wins, then `search.embeddings.backfillCpuDuty`, else `undefined` (auto-scaled by CPU count — full speed on roomy hosts, gentler on small ones). Invalid values are ignored (fall through). Read per-call so config reloads take effect. |
+| `LORE_BACKFILL_CPU_DUTY` | Legacy temporal backfill duty setting (`LORE_BACKFILL_CPU_DUTY`) retained for configuration compatibility. Durable temporal admission no longer performs inference; the bounded scheduler controls embedding concurrency. |
 | `LORE_DISABLE_VEC` | LORE_DISABLE_VEC=1 forces the JS brute-force vector-search path. Useful as a production kill-switch if the native extension causes issues, and as a test seam for the JS fallback. Set before the first `db()` call — once attempted=true is sticky for the connection lifetime, the env var won't be re-read until resetVecState() runs (in close()). |
 | `LORE_DISABLE_VEC_WORKER` | Kill switch: force the in-process vector-search path, disabling the off-thread read-worker pool. Default-on escape hatch, not opt-in. |
 | `LORE_EMBED_POOL_SIZE` | Resolve the configured embedding-pool ceiling: `LORE_EMBED_POOL_SIZE` wins (the escape hatch — `=1` forces today's single worker), then `search.embeddings.embedPoolSize`, else `undefined` (memory-gated default). Read per-construction (not cached) so config reloads / env changes take effect on the next provider. Invalid values are ignored (fall through). |

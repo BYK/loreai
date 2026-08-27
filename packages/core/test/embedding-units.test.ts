@@ -6,11 +6,6 @@ import {
 } from "../src/embedding-units";
 import { partsToText } from "../src/temporal";
 import type { LorePart } from "../src/types";
-import {
-  embedTemporalMessage,
-  _saveAndClearProvider,
-  _restoreProvider,
-} from "../src/embedding";
 
 // Part fixtures — mirror the producers in temporal.partsToText (and the helpers
 // in distillation.test.ts) so content strings are byte-identical to production.
@@ -154,47 +149,5 @@ describe("partsToText → buildEmbeddingUnits round trip", () => {
       "[tool:grep] gamma",
       "delta",
     ]);
-  });
-});
-
-describe("embedTemporalMessage wiring", () => {
-  test("embeds the reduced text, not the raw content", async () => {
-    const body = "X".repeat(5000);
-    const content = partsToText([
-      textPart("Debugging the failing test."),
-      toolPart("read", `src/foo.ts\n${body}`),
-    ]);
-
-    let captured: string[] | null = null;
-    let resolveCaptured!: () => void;
-    const captureDone = new Promise<void>((r) => (resolveCaptured = r));
-
-    const token = _saveAndClearProvider();
-    try {
-      _restoreProvider({
-        provider: {
-          maxBatchSize: 8,
-          async embed(texts: string[]) {
-            captured = texts;
-            resolveCaptured();
-            return texts.map(() => new Float32Array([1, 0, 0]));
-          },
-        },
-      });
-      embedTemporalMessage("wiring-msg-1", content);
-      await captureDone;
-
-      expect(captured).not.toBeNull();
-      const sent = captured?.[0];
-      // Exactly the part-selective reduction — embed() passes text through
-      // untouched, so this is byte-identical to buildEmbeddingText(content).
-      expect(sent).toBe(buildEmbeddingText(content));
-      expect(sent).toContain("Debugging the failing test.");
-      expect(sent).toContain("[tool:read] src/foo.ts");
-      // The 5 KB tool body never reaches the embedder (it stays in FTS only).
-      expect(sent).not.toContain("XX");
-    } finally {
-      _restoreProvider(token);
-    }
   });
 });

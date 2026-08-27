@@ -2045,6 +2045,19 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   CREATE INDEX IF NOT EXISTS idx_project_id_aliases_project
     ON project_id_aliases(project_id);
   `,
+  `
+  -- Version 85: durable local scheduling for temporal embeddings.
+  -- Content remains authoritative in temporal_messages; this queue stores only
+  -- validation metadata and is never synchronized.
+  CREATE TABLE IF NOT EXISTS temporal_embedding_queue (
+    message_id TEXT PRIMARY KEY REFERENCES temporal_messages(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    enqueued_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_enqueued
+    ON temporal_embedding_queue(enqueued_at, message_id);
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4087,6 +4100,18 @@ function recoverMissingObjects(database: Database) {
     );
     CREATE INDEX IF NOT EXISTS idx_project_id_aliases_project
       ON project_id_aliases(project_id);
+  `);
+  // Version 85: local durable temporal-embedding queue. The base row owns the
+  // content and cascades pending work on deletion.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS temporal_embedding_queue (
+      message_id TEXT PRIMARY KEY REFERENCES temporal_messages(id) ON DELETE CASCADE,
+      content_hash TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      enqueued_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_enqueued
+      ON temporal_embedding_queue(enqueued_at, message_id);
   `);
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
   // The verdict-keyed index MUST be created here, AFTER the column is ensured —
