@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { Event } from "@sentry/bun";
 import { buildSentryOptions } from "../instrument";
 import {
   SENTRY_DATA_COLLECTION,
+  isolateRecallContinuationEvent,
   scrubTelemetryEvent,
   scrubTelemetryEnvelope,
   scrubTelemetryText,
@@ -143,6 +145,62 @@ describe("telemetry privacy boundary", () => {
       expect(serialized).not.toContain(marker);
     expect(serialized).not.toContain('"type":"log"');
     expect(serialized).toContain("Application error");
+  });
+
+  it("reduces recall-continuation events to the fixed allowlist", () => {
+    const input: Event = {
+      event_id: "event-id",
+      timestamp: 1,
+      platform: "javascript",
+      level: "warning",
+      message: "Recall continuation failed",
+      fingerprint: ["private-fingerprint"],
+      user: { id: SECRETS[0] },
+      tags: { model: SECRETS[1] },
+      transaction: SECRETS[2],
+      request: { url: `https://example.invalid/?secret=${SECRETS[3]}` },
+      contexts: {
+        trace: { trace_id: SECRETS[4], span_id: SECRETS[5] },
+        recall_continuation_failure: { category: "follow_up_protocol" },
+      },
+      extra: { diagnostic: SECRETS[6] },
+      breadcrumbs: [{ message: SECRETS[7] }],
+      sdkProcessingMetadata: { private: SECRETS[8] },
+    };
+    const event = isolateRecallContinuationEvent(input);
+
+    expect(event).toEqual({
+      event_id: "event-id",
+      timestamp: 1,
+      platform: "javascript",
+      level: "warning",
+      message: "Recall continuation failed",
+      fingerprint: ["recall-continuation-failure", "follow_up_protocol"],
+      contexts: {
+        recall_continuation_failure: { category: "follow_up_protocol" },
+      },
+    });
+    expectNoSecrets(event);
+    expect(scrubTelemetryEvent(input)).toEqual(event);
+
+    const options = buildSentryOptions();
+    expect(
+      options.beforeSend?.(
+        input as Parameters<NonNullable<typeof options.beforeSend>>[0],
+        {},
+      ),
+    ).toEqual(event);
+  });
+
+  it("drops invalid recall categories at the isolated boundary", () => {
+    expect(
+      isolateRecallContinuationEvent({
+        message: "Recall continuation failed",
+        contexts: {
+          recall_continuation_failure: { category: SECRETS[0] },
+        },
+      }),
+    ).toBeNull();
   });
 
   it("scrubs request data, breadcrumbs, contexts, and span attributes", () => {

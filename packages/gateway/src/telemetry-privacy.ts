@@ -3,6 +3,7 @@ import {
   isCredentialHeaderName,
   redactCredentialHeaderAssignments,
 } from "./credential-headers";
+import { RECALL_CONTINUATION_FAILURE_CATEGORIES } from "./recall-continuation-failure";
 
 export const SENTRY_DATA_COLLECTION = {
   userInfo: false,
@@ -51,6 +52,7 @@ const SAFE_ERROR_TELEMETRY_MESSAGES = [
   /^Client abort under host pressure$/,
   /^Empty completion returned to client \(no content blocks\)$/,
   /^Embedding worker OOM:/,
+  /^Recall continuation failed$/,
   /^Worker health critical: sustained worker failure$/,
   /^Worker health degraded$/,
   /^Worker upstream auth error: HTTP \d+$/,
@@ -58,6 +60,30 @@ const SAFE_ERROR_TELEMETRY_MESSAGES = [
   /^cch: multiple billing-header sentinels in request body/,
   /^tool-pairing 400 \(tool_use\/tool_result concurrency\)$/,
 ];
+
+export function isolateRecallContinuationEvent<T extends Event>(
+  event: T,
+): T | null {
+  if (event.message !== "Recall continuation failed") return null;
+  const category = event.contexts?.recall_continuation_failure?.category;
+  if (
+    typeof category !== "string" ||
+    !RECALL_CONTINUATION_FAILURE_CATEGORIES.includes(
+      category as (typeof RECALL_CONTINUATION_FAILURE_CATEGORIES)[number],
+    )
+  ) {
+    return null;
+  }
+  return {
+    event_id: event.event_id,
+    timestamp: event.timestamp,
+    platform: event.platform,
+    level: "warning",
+    message: "Recall continuation failed",
+    fingerprint: ["recall-continuation-failure", category],
+    contexts: { recall_continuation_failure: { category } },
+  } as unknown as T;
+}
 
 function canonicalKey(key: string): { words: string[]; canonical: string } {
   const words = key
@@ -262,6 +288,9 @@ export function scrubTelemetryValue<T>(value: T): T {
 
 /** Apply event-specific privacy rules while retaining non-sensitive diagnostics. */
 export function scrubTelemetryEvent<T extends Event>(event: T): T {
+  if (event.message === "Recall continuation failed") {
+    return isolateRecallContinuationEvent(event) ?? ({} as T);
+  }
   const originalMessage = event.message;
   const originalExceptions = event.exception?.values;
   const scrubbed = scrubTelemetryValue(event);

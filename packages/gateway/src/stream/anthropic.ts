@@ -197,7 +197,9 @@ export async function* parseSSEStream(
   const countFrame = (): void => {
     frameCounter.count++;
     if (frameCounter.count > maxFrames) {
-      throw new Error(`SSE stream exceeded ${maxFrames} frame limit`);
+      throw new SSEStreamLimitError(
+        `SSE stream exceeded ${maxFrames} frame limit`,
+      );
     }
   };
 
@@ -250,7 +252,9 @@ export async function* parseSSEStream(
     if (payload && payload.byteLength > 0) {
       totalBytes += payload.byteLength;
       if (totalBytes > (opts.maxTotalBytes ?? Number.POSITIVE_INFINITY)) {
-        throw new Error("SSE stream exceeded aggregate byte limit");
+        throw new SSEStreamLimitError(
+          "SSE stream exceeded aggregate byte limit",
+        );
       }
       bufferedBytes += payload.byteLength;
       try {
@@ -286,7 +290,9 @@ export async function* parseSSEStream(
         countFrame();
         const blockBytes = Buffer.byteLength(block);
         if (blockBytes > maxEventBytes) {
-          throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
+          throw new SSEStreamLimitError(
+            `SSE event exceeded ${maxEventBytes} byte limit`,
+          );
         }
         consumedChars = boundary.index + boundary[0].length;
         consumedBytes += blockBytes + boundary[0].length;
@@ -320,7 +326,9 @@ export async function* parseSSEStream(
     }
 
     if (bufferedBytes > maxEventBytes) {
-      throw new Error(`SSE event exceeded ${maxEventBytes} byte limit`);
+      throw new SSEStreamLimitError(
+        `SSE event exceeded ${maxEventBytes} byte limit`,
+      );
     }
 
     if (done) {

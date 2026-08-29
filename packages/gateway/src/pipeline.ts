@@ -232,6 +232,7 @@ import {
   AnthropicSSEValidator,
   cancelAndReleaseReader,
   readStreamChunk,
+  SSEStreamLimitError,
   SSEStreamTransportError,
   DEFAULT_MAX_SSE_FRAMES,
   type StreamAccumulator,
@@ -333,6 +334,11 @@ import {
   captureEmptyCompletion,
   type AnthropicUsage,
 } from "./sentry";
+import {
+  RecallContinuationFailure,
+  reportRecallContinuationFailure,
+  type RecallContinuationFailureCategory,
+} from "./recall-continuation-failure";
 import {
   recordConversationCost,
   updateShadowContext,
@@ -8880,10 +8886,14 @@ export function streamResponsesRecallAware(
       lifecycle.terminal = true;
     }
   };
-  const assertOutputLifecyclesComplete = (acc: ResponsesAccState): void => {
+  const assertOutputLifecyclesComplete = (
+    acc: ResponsesAccState,
+    allowedIncompleteIndices: ReadonlySet<number> = new Set(),
+  ): void => {
     const lifecycles = lifecyclesFor(acc);
     for (const index of acc.rawItems.keys()) {
       if (lifecycles.get(index)?.outputDone) continue;
+      if (allowedIncompleteIndices.has(index)) continue;
       if (opts.validation !== "codex") {
         throw new Error(
           `Responses stream ended before output_item.done for index ${index}`,
@@ -9609,6 +9619,18 @@ export function streamResponsesRecallAware(
         };
         let principalReader: ReadableStreamDefaultReader<Uint8Array> | null =
           null;
+        let continuationAttempted = false;
+        let continuationFailureCategory:
+          | RecallContinuationFailureCategory
+          | undefined;
+        let continuationFailureReported = false;
+        const reportContinuationFailure = (
+          category: RecallContinuationFailureCategory,
+        ): void => {
+          if (continuationFailureReported) return;
+          continuationFailureReported = true;
+          reportRecallContinuationFailure(category);
+        };
         // Recall items are gateway-internal and must stay hidden on every exit,
         // including failures raised before marker replacement.
         const recallIndices = new Set<number>();
@@ -9937,14 +9959,10 @@ export function streamResponsesRecallAware(
 
               // Recall was detected. Drive the recall loop.
               if (pendingRecalls.length > 1) {
-                throw new Error(
-                  "parallel recall calls require a multi-result continuation",
-                );
+                throw new RecallContinuationFailure("parallel_recall");
               }
               if (pendingRecalls.length > maxRecallDepth) {
-                throw new Error(
-                  `recall depth exhausted (${maxRecallDepth}) in Responses stream`,
-                );
+                throw new RecallContinuationFailure("depth_exhausted");
               }
               const anchorTexts: string[] = [];
               transactionBaseline = {
@@ -9960,9 +9978,7 @@ export function streamResponsesRecallAware(
               const queueTransactional = (chunk: Uint8Array): void => {
                 transactionalBytes += chunk.byteLength;
                 if (transactionalBytes > maxDeferredBytes) {
-                  throw new Error(
-                    "recall continuation exceeded deferred event limit",
-                  );
+                  throw new RecallContinuationFailure("resource_limit");
                 }
                 transactionalEvents.push(chunk);
               };
@@ -9975,20 +9991,24 @@ export function streamResponsesRecallAware(
                     block.type === "tool_use" && block.id === recall.toolUseId,
                 );
                 if (contentPosition < 0) {
-                  throw new Error(
-                    "recall block not found in finalized response",
-                  );
+                  throw new RecallContinuationFailure("missing_recall_block");
                 }
-                const executed = await settleRecall({
-                  query: recall.query,
-                  scope: recall.scope,
-                  id: recall.id,
-                  outputIndex: recall.outputIndex,
-                  toolUseId: recall.toolUseId,
-                  contentPosition,
-                  acc: recallAcc,
-                  signal,
-                });
+                let executed: Awaited<ReturnType<typeof settleRecall>>;
+                try {
+                  executed = await settleRecall({
+                    query: recall.query,
+                    scope: recall.scope,
+                    id: recall.id,
+                    outputIndex: recall.outputIndex,
+                    toolUseId: recall.toolUseId,
+                    contentPosition,
+                    acc: recallAcc,
+                    signal,
+                  });
+                } catch (error) {
+                  if (signal.aborted) throw error;
+                  throw new RecallContinuationFailure("recall_execution");
+                }
                 anchorTexts.push(executed.anchorText);
                 if (executed.commit) pendingCommits.push(executed.commit);
                 if (executed.rollback) {
@@ -10027,6 +10047,8 @@ export function streamResponsesRecallAware(
                   // Recall-only: run the streaming follow-up and pipe the
                   // continuation inline before the final completion.
                   try {
+                    continuationAttempted = true;
+                    continuationFailureCategory = "follow_up_setup";
                     signal.throwIfAborted();
                     let follow = await settleFollowUp({
                       anchorText: executed.anchorText,
@@ -10056,6 +10078,7 @@ export function streamResponsesRecallAware(
                       outputIdentities: new Set(outputIdentities),
                       referenceIdentities: new Set(referenceIdentities),
                     };
+                    continuationFailureCategory = "follow_up_protocol";
                     for (;;) {
                       activeReader = follow.reader;
                       let retryFollowUp = false;
@@ -10083,9 +10106,7 @@ export function streamResponsesRecallAware(
                       ): void => {
                         heldContinuationBytes += chunk.byteLength;
                         if (heldContinuationBytes > maxDeferredBytes) {
-                          throw new Error(
-                            "recall continuation exceeded deferred event limit",
-                          );
+                          throw new RecallContinuationFailure("resource_limit");
                         }
                         heldContinuationEvents.push({
                           chunk,
@@ -10130,9 +10151,7 @@ export function streamResponsesRecallAware(
                           continuationRecallBytes > maxDeferredBytes ||
                           hiddenRecallBytes > maxHiddenRecallBytes
                         ) {
-                          throw new Error(
-                            "recall continuation exceeded deferred event limit",
-                          );
+                          throw new RecallContinuationFailure("resource_limit");
                         }
                       };
                       let contOtherTool = false;
@@ -10162,8 +10181,8 @@ export function streamResponsesRecallAware(
                             formatResponsesEvent(ce, cd),
                           ).byteLength;
                           if (streamBytes > maxStreamBytes) {
-                            throw new Error(
-                              "Responses stream exceeded byte limit",
+                            throw new RecallContinuationFailure(
+                              "resource_limit",
                             );
                           }
                           let cparsed: Record<string, unknown>;
@@ -10225,8 +10244,8 @@ export function streamResponsesRecallAware(
                           if (ci !== undefined) {
                             retainedStateBytes += encoder.encode(cd).byteLength;
                             if (retainedStateBytes > maxRetainedStateBytes) {
-                              throw new Error(
-                                "Responses retained state exceeded byte limit",
+                              throw new RecallContinuationFailure(
+                                "resource_limit",
                               );
                             }
                             const implicitItem = contState.rawItems.get(ci);
@@ -10322,8 +10341,8 @@ export function streamResponsesRecallAware(
                               continuationRecallBytes > maxDeferredBytes ||
                               hiddenRecallBytes > maxHiddenRecallBytes
                             ) {
-                              throw new Error(
-                                "recall continuation exceeded deferred event limit",
+                              throw new RecallContinuationFailure(
+                                "resource_limit",
                               );
                             }
                             if (
@@ -10358,6 +10377,15 @@ export function streamResponsesRecallAware(
                           ) {
                             const terminalParsed =
                               stripHiddenReferenceOutput(cparsed);
+                            const incompleteRecallIndices = new Set(
+                              [...contRecallIndices].filter(
+                                (outputIndex) =>
+                                  !contPending.some(
+                                    (recall) =>
+                                      recall.outputIndex === outputIndex,
+                                  ),
+                              ),
+                            );
                             if (opts.validation === "codex") {
                               assertTerminalOutputMatches(
                                 contState,
@@ -10386,9 +10414,15 @@ export function streamResponsesRecallAware(
                                   }
                                 },
                               );
-                              assertOutputLifecyclesComplete(contState);
+                              assertOutputLifecyclesComplete(
+                                contState,
+                                incompleteRecallIndices,
+                              );
                             } else {
-                              assertOutputLifecyclesComplete(contState);
+                              assertOutputLifecyclesComplete(
+                                contState,
+                                incompleteRecallIndices,
+                              );
                               assertTerminalOutputMatches(
                                 contState,
                                 terminalParsed,
@@ -10454,6 +10488,16 @@ export function streamResponsesRecallAware(
                         }
                       } catch (error) {
                         if (
+                          error instanceof SSEStreamLimitError ||
+                          frameCounter.count > maxSSEFrames ||
+                          (error instanceof Error &&
+                            /^SSE stream exceeded \d+ frame limit$/.test(
+                              error.message,
+                            ))
+                        ) {
+                          throw new RecallContinuationFailure("resource_limit");
+                        }
+                        if (
                           error instanceof SSEStreamTransportError &&
                           recallContinuationTransportRetries <
                             maxRecallContinuationTransportRetries
@@ -10480,15 +10524,24 @@ export function streamResponsesRecallAware(
                           );
                           retryFollowUp = true;
                         } else {
-                          throw error;
+                          if (error instanceof SSEStreamTransportError) {
+                            continuationFailureCategory = "follow_up_transport";
+                          }
+                          throw error instanceof RecallContinuationFailure
+                            ? error
+                            : new RecallContinuationFailure(
+                                continuationFailureCategory ?? "unexpected",
+                              );
                         }
                       } finally {
                         cancelAndReleaseReader(follow.reader, signal.reason);
                       }
                       if (retryFollowUp) {
+                        continuationFailureCategory = "follow_up_setup";
                         follow = await settleFollowUp(
                           continuationFollowUpInput,
                         );
+                        continuationFailureCategory = "follow_up_protocol";
                         continue;
                       }
                       const mergeContinuation = (): void => {
@@ -10557,34 +10610,30 @@ export function streamResponsesRecallAware(
                       );
                       mergeUsage(transactionProviderUsage, contState.usage);
                       if (continuationFailed) {
-                        throw new Error(
-                          "recall follow-up returned response.failed",
-                        );
+                        throw new RecallContinuationFailure("follow_up_failed");
                       }
                       if (
                         !continuationCompleted ||
                         contState.rawItems.size === 0
                       ) {
-                        throw new Error(
-                          "recall follow-up ended without a completed response containing output",
+                        throw new RecallContinuationFailure(
+                          "follow_up_missing_output",
                         );
                       }
                       if (contRecallIndices.size !== contPending.length) {
-                        throw new Error(
-                          "recall follow-up ended before function arguments completed",
+                        throw new RecallContinuationFailure(
+                          "follow_up_incomplete_arguments",
                         );
                       }
                       if (contPending.length > 1) {
-                        throw new Error(
-                          "parallel recall calls require a multi-result continuation",
-                        );
+                        throw new RecallContinuationFailure("parallel_recall");
                       }
                       if (
                         contState.terminalEvent === "response.incomplete" &&
                         contPending.length > 0
                       ) {
-                        throw new Error(
-                          "incomplete recall continuation cannot execute another recall",
+                        throw new RecallContinuationFailure(
+                          "nested_recall_incomplete",
                         );
                       }
                       assertUsageMergeable(state.usage, contState.usage);
@@ -10635,8 +10684,8 @@ export function streamResponsesRecallAware(
                               block.id === pendingNextRecall.toolUseId,
                           );
                           if (contentPosition < 0) {
-                            throw new Error(
-                              "recall block not found in finalized continuation",
+                            throw new RecallContinuationFailure(
+                              "missing_recall_block",
                             );
                           }
                           nextRecall = {
@@ -10652,11 +10701,21 @@ export function streamResponsesRecallAware(
                             state,
                             contState,
                           ]);
-                          nextExecuted = await settleRecall({
-                            ...nextRecall,
-                            acc: nextAcc,
-                            signal,
-                          });
+                          continuationFailureCategory =
+                            "nested_recall_execution";
+                          try {
+                            nextExecuted = await settleRecall({
+                              ...nextRecall,
+                              acc: nextAcc,
+                              signal,
+                            });
+                          } catch (error) {
+                            if (signal.aborted) throw error;
+                            throw new RecallContinuationFailure(
+                              "nested_recall_execution",
+                            );
+                          }
+                          continuationFailureCategory = "follow_up_protocol";
                           if (nextExecuted.commit) {
                             pendingCommits.push(nextExecuted.commit);
                           }
@@ -10709,7 +10768,9 @@ export function streamResponsesRecallAware(
                         outputIdentities: new Set(outputIdentities),
                         referenceIdentities: new Set(referenceIdentities),
                       };
+                      continuationFailureCategory = "follow_up_setup";
                       follow = await settleFollowUp(continuationFollowUpInput);
+                      continuationFailureCategory = "follow_up_protocol";
                       recallContinuationTransportRetries = 0;
                     }
                     state.items.set(recall.outputIndex, {
@@ -10721,7 +10782,12 @@ export function streamResponsesRecallAware(
                     log.error(
                       `recall follow-up stream failed${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
                     );
-                    throw err;
+                    throw err instanceof RecallContinuationFailure ||
+                      signal.aborted
+                      ? err
+                      : new RecallContinuationFailure(
+                          continuationFailureCategory ?? "unexpected",
+                        );
                   }
                 }
               }
@@ -10742,6 +10808,9 @@ export function streamResponsesRecallAware(
                   };
                 }),
               };
+              if (continuationAttempted) {
+                continuationFailureCategory = "delivery";
+              }
               clearKeepalive();
               for (const chunk of transactionalEvents) {
                 if (!(await safeEnqueue(chunk))) {
@@ -10835,6 +10904,13 @@ export function streamResponsesRecallAware(
             return;
           }
           if (terminalDelivered) {
+            if (continuationAttempted && !signal.aborted) {
+              reportContinuationFailure(
+                err instanceof RecallContinuationFailure
+                  ? err.category
+                  : (continuationFailureCategory ?? "unexpected"),
+              );
+            }
             safeClose();
             return;
           }
@@ -10856,6 +10932,15 @@ export function streamResponsesRecallAware(
             log.error(
               `openai-responses recall-aware stream failed${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
             );
+          }
+          if (!signal.aborted) {
+            if (err instanceof RecallContinuationFailure) {
+              reportContinuationFailure(err.category);
+            } else if (continuationAttempted) {
+              reportContinuationFailure(
+                continuationFailureCategory ?? "unexpected",
+              );
+            }
           }
           const failedResponse = finalizeResponsesAcc(state);
           try {
