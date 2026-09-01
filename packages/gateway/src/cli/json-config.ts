@@ -298,6 +298,8 @@ function trustedRealPath(file: string): string {
   }
   if (!stats.isSymbolicLink()) return file;
 
+  inspectTrustedDirectory(dirname(file));
+
   let real: string;
   try {
     real = realpathSync.native(file);
