@@ -11,6 +11,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -270,6 +271,55 @@ function inspectTrustedDirectory(
   return directoryIdentity(stats);
 }
 
+/**
+ * Resolve a same-owner symlink to its real path, otherwise return the path
+ * unchanged. Personal dotfile managers (GNU Stow, chezmoi, etc.) routinely
+ * replace a config file with a symlink into a separately version-controlled
+ * location; rejecting every symlink outright makes setup unusable for that
+ * (very common) layout.
+ *
+ * Only a symlink whose entire chain resolves to a regular file owned by the
+ * same uid as the process is followed — anything else (broken link, a
+ * directory, a device, a target owned by someone else) still fails closed
+ * with the same "unsafe path" error as before. Following is safe here
+ * because every trusted-file operation below re-resolves and re-validates
+ * this path on every check, so a same-owner symlink is no more trustworthy
+ * than the real file it points to, and nothing ever performs a rename/link
+ * against the symlink itself (which would silently sever it from its
+ * target).
+ */
+function trustedRealPath(file: string): string {
+  let stats: ReturnType<typeof lstatBigInt>;
+  try {
+    stats = lstatBigInt(file);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return file;
+    throw error;
+  }
+  if (!stats.isSymbolicLink()) return file;
+
+  let real: string;
+  try {
+    real = realpathSync.native(file);
+  } catch {
+    throw unsafePath(file, "symbolic link does not resolve");
+  }
+  let target: ReturnType<typeof lstatBigInt>;
+  try {
+    target = lstatBigInt(real);
+  } catch {
+    throw unsafePath(file, "symbolic link does not resolve");
+  }
+  if (!target.isFile()) {
+    throw unsafePath(file, "symbolic link target is not a regular file");
+  }
+  const expected = currentUid();
+  if (expected === null || stats.uid !== expected || target.uid !== expected) {
+    throw unsafePath(file, "symbolic link is not owned by the current user");
+  }
+  return real;
+}
+
 function inspectTrustedFile(file: string): TrustedFileIdentity | null {
   let stats: ReturnType<typeof lstatBigInt>;
   try {
@@ -384,6 +434,7 @@ export function ensureTrustedDirectory(directory: string): void {
 
 /** Return whether a trusted regular file exists, without following it. */
 export function trustedFileExists(file: string): boolean {
+  file = trustedRealPath(file);
   if (!inspectTrustedDirectory(dirname(file), true)) return false;
   return inspectTrustedFile(file) !== null;
 }
@@ -396,6 +447,7 @@ export function readTrustedTextFile(
   file: string,
   options: { allowMissing?: boolean } = {},
 ): TrustedTextFile | null {
+  file = trustedRealPath(file);
   const parent = inspectTrustedDirectory(dirname(file), options.allowMissing);
   if (!parent) return null;
   const before = inspectTrustedFile(file);
@@ -465,6 +517,7 @@ export function atomicWriteTrustedFile(
     preserveDisplaced?: (artifact: TrustedFileArtifact) => void;
   } = {},
 ): TrustedFileIdentity {
+  file = trustedRealPath(file);
   const parent = inspectTrustedDirectory(dirname(file));
   if (!parent) throw unsafePath(file, "parent directory does not exist");
   const current = inspectTrustedFile(file);
@@ -617,6 +670,7 @@ export function removeTrustedFile(
   expectedIdentity?: TrustedFileIdentity | null,
   preserveRemoved?: (artifact: TrustedFileArtifact) => void,
 ): boolean {
+  file = trustedRealPath(file);
   const parent = inspectTrustedDirectory(dirname(file), true);
   if (!parent) return false;
   const current = inspectTrustedFile(file);
@@ -689,6 +743,7 @@ function restoreTrustedFileSnapshot(
   expectedIdentity: TrustedFileIdentity | null,
   artifacts: TrustedFileArtifact[],
 ): void {
+  file = trustedRealPath(file);
   const current = readTrustedTextFile(file, { allowMissing: true });
   if (!sameFileIdentity(current?.identity ?? null, expectedIdentity)) {
     throw unsafePath(file, "file changed before transaction rollback");
@@ -823,7 +878,7 @@ export function withTrustedFileTransaction<T>(
       requireSnapshot(file);
       if (
         !sameFileIdentity(
-          inspectTrustedFile(file),
+          inspectTrustedFile(trustedRealPath(file)),
           currentIdentities.get(file) ?? null,
         )
       ) {
@@ -929,7 +984,11 @@ export function stageTrustedFileMutation<T>(
   if (files.length === 0) {
     throw new Error("Staged trusted file mutation requires at least one file.");
   }
-  const paths = [...new Set(files)];
+  // Resolved once, up front: every other file in this function is keyed by
+  // this same `paths` array, and staged backup artifacts are created
+  // alongside it (`dirname(file)`), which must be the file's real directory
+  // for the same-directory rename/link operations below to stay atomic.
+  const paths = [...new Set(files.map(trustedRealPath))];
   const snapshots = new Map(
     paths.map((file) => [file, snapshotTrustedFile(file)] as const),
   );

@@ -200,16 +200,39 @@ describe("commandSetup — Claude Code", () => {
     expect(existsSync(`${claudePath()}.lore-backup`)).toBe(true);
   });
 
-  it("rejects a symlinked config without overwriting its target", async () => {
+  it("follows a same-owner symlinked config to its target (GNU Stow, chezmoi, ...)", async () => {
     mkdirSync(join(home, ".claude"), { recursive: true });
     const target = join(home, "claude-target.json");
     writeFileSync(target, '{"secret":"untouched"}\n');
     symlinkSync(target, claudePath());
 
+    await commandSetup(["claude-code"], { port: 3299 });
+
+    // The link itself is never touched — only its target is rewritten.
+    expect(lstatSync(claudePath()).isSymbolicLink()).toBe(true);
+    const cfg = JSON.parse(readFileSync(target, "utf8"));
+    expect(cfg.secret).toBe("untouched");
+    expect(cfg.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:3299");
+  });
+
+  it("rejects a symlinked config whose target is not a regular file", async () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const targetDir = join(home, "claude-target-dir");
+    mkdirSync(targetDir);
+    symlinkSync(targetDir, claudePath());
+
     await expect(commandSetup(["claude-code"], { port: 3299 })).rejects.toThrow(
-      "symbolic links are not allowed",
+      "symbolic link target is not a regular file",
     );
-    expect(readFileSync(target, "utf8")).toBe('{"secret":"untouched"}\n');
+  });
+
+  it("rejects a symlinked config that does not resolve", async () => {
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    symlinkSync(join(home, "does-not-exist.json"), claudePath());
+
+    await expect(commandSetup(["claude-code"], { port: 3299 })).rejects.toThrow(
+      "symbolic link does not resolve",
+    );
   });
 
   it("preserves config mode and creates a private sidecar", async () => {
