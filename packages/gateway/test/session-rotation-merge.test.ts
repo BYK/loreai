@@ -33,23 +33,31 @@ import { enableHostedMode, _resetHostedModeForTest } from "@loreai/core";
 
 // A faithful Claude Code coding turn carries the anchored OAuth billing header
 // at system[0] (Claude Code emits it whenever `_CLAUDE_CODE_ASSUME_FIRST_PARTY_
-// BASE_URL=1`, which `lore run`/`lore setup` always set). Without it — and
-// without a "Working directory:" line — a request bearing an
-// `x-claude-code-session-id` is indistinguishable from a Claude Code
-// side-channel call (auto-mode classifier / title gen), which the pipeline
-// now forwards upstream untouched (see side-channel.test.ts). These
+// BASE_URL=1`, which `lore run`/`lore setup` always set) AND a "Working
+// directory:" line. Since Claude Code 2.1.258 the auto-mode classifier is built
+// with `forceAttributionHeader: true`, so the billing header ALONE is no longer
+// a reliable coding-turn discriminator — the side-channel detector relies on
+// the `Working directory:` marker instead (see side-channel.test.ts). These
 // session-identification regression tests exercise REAL coding turns, so they
-// must present the coding-turn system prompt.
+// must present the coding-turn system prompt (billing header + cwd line). The
+// cwd line is passed per-request so it agrees with the `x-lore-project` header
+// under test.
 const CC_BILLING_HEADER =
   "x-anthropic-billing-header: cc_version=2.1.186; cc_entrypoint=cli; cch=a75d0;\n";
 const CC_CODING_SYSTEM = CC_BILLING_HEADER + DEFAULT_SYSTEM;
 
-function body(userMessage: string): Record<string, unknown> {
+function body(
+  userMessage: string,
+  workingDir?: string,
+): Record<string, unknown> {
+  const system = workingDir
+    ? `${CC_CODING_SYSTEM}\nWorking directory: ${workingDir}`
+    : CC_CODING_SYSTEM;
   return {
     model: DEFAULT_MODEL,
     max_tokens: 1024,
     stream: false,
-    system: CC_CODING_SYSTEM,
+    system,
     messages: [{ role: "user", content: userMessage }],
     tools: STANDARD_TOOLS,
   };
@@ -85,20 +93,28 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
     });
 
     // First conversation: fresh claude-code session id + project /proj/alpha.
-    const r1 = await harness.chat(body("conversation one alpha"), "key-A", {
-      "x-claude-code-session-id": "11111111-1111-1111-1111-111111111111",
-      "x-lore-project": "/proj/alpha",
-    });
+    const r1 = await harness.chat(
+      body("conversation one alpha", "/proj/alpha"),
+      "key-A",
+      {
+        "x-claude-code-session-id": "11111111-1111-1111-1111-111111111111",
+        "x-lore-project": "/proj/alpha",
+      },
+    );
     expect(r1.status).toBe(200);
     await r1.text();
 
     // Second conversation: DIFFERENT claude-code session id + project /proj/beta.
     // Pre-fix, Tier 1b would "resume" the first session and rebind it to
     // /proj/beta. Post-fix, this MUST create a second, independent session.
-    const r2 = await harness.chat(body("conversation two beta"), "key-B", {
-      "x-claude-code-session-id": "22222222-2222-2222-2222-222222222222",
-      "x-lore-project": "/proj/beta",
-    });
+    const r2 = await harness.chat(
+      body("conversation two beta", "/proj/beta"),
+      "key-B",
+      {
+        "x-claude-code-session-id": "22222222-2222-2222-2222-222222222222",
+        "x-lore-project": "/proj/beta",
+      },
+    );
     expect(r2.status).toBe(200);
     await r2.text();
 
@@ -147,7 +163,7 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
 
     const sameId = "33333333-3333-3333-3333-333333333333";
 
-    const r1 = await harness.chat(body("turn one"), "key-A", {
+    const r1 = await harness.chat(body("turn one", "/proj/gamma"), "key-A", {
       "x-claude-code-session-id": sameId,
       "x-lore-project": "/proj/gamma",
     });
@@ -156,16 +172,12 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
 
     const r2 = await harness.chat(
       {
-        model: DEFAULT_MODEL,
-        max_tokens: 1024,
-        stream: false,
-        system: DEFAULT_SYSTEM,
+        ...body("turn two", "/proj/gamma"),
         messages: [
           { role: "user", content: "turn one" },
           { role: "assistant", content: "T1." },
           { role: "user", content: "turn two" },
         ],
-        tools: STANDARD_TOOLS,
       },
       "key-A",
       {
@@ -211,7 +223,7 @@ describe("Tier 1b session-merge regression (x-claude-code-session-id)", () => {
     const msgs = ["msg one", "msg two", "msg three"];
     for (let i = 0; i < ids.length; i++) {
       const [id, proj] = ids[i];
-      const r = await harness.chat(body(msgs[i]), `key-${i}`, {
+      const r = await harness.chat(body(msgs[i], proj), `key-${i}`, {
         "x-claude-code-session-id": id,
         "x-lore-project": proj,
       });
