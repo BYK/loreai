@@ -142,6 +142,7 @@ import {
   MESSAGE_COUNT_PROXIMITY_THRESHOLD,
   KNOWN_SESSION_HEADERS,
   extractKnownSessionHeader,
+  isClaudeCodeSubagent,
   learnHeaders,
   observeHeaderValues,
   isCredentialHeaderName,
@@ -5625,7 +5626,8 @@ async function adoptByFingerprint(input: {
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
   }
 
-  const reqIsSubagent = !!headers["x-parent-session-id"];
+  const reqIsSubagent =
+    !!headers["x-parent-session-id"] || isClaudeCodeSubagent(headers);
   const candidates = findSessionStatesByFingerprint(fingerprint, {
     credentialFingerprint,
   }).map((candidate) => ({ ...candidate, credentialBound: true }));
@@ -15618,33 +15620,45 @@ async function handleConversationTurn(
   );
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
-  // Mark sub-agent sessions (x-parent-session-id present).
-  // These get their own session but are flagged for cache warming exemption.
-  // Resolve the client-side parent ID to a Lore internal session ID via the
-  // headerSessionIndex (searches all indexed headers, including Tier 2 learned).
-  // Tier 3 (fingerprint-only) parents have no index entry — resolution will fail
-  // and a warning is logged.
+  // Mark sub-agent sessions (x-parent-session-id OR x-claude-code-agent-id
+  // present). These get their own session but are flagged for cache warming
+  // exemption. Resolve the client-side parent ID to a Lore internal session ID
+  // via the headerSessionIndex (searches all indexed headers, including Tier 2
+  // learned). Tier 3 (fingerprint-only) parents have no index entry — resolution
+  // will fail and a warning is logged.
+  //
+  // Claude Code sub-agents do NOT carry x-parent-session-id (that header is
+  // OpenCode-only); they carry x-claude-code-agent-id. Their parent session is
+  // the one that shares the x-claude-code-session-id with this request, so we
+  // resolve it through the index by that shared session-id value.
   {
+    const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
     const parentClientId = req.rawHeaders["x-parent-session-id"];
+    const sharedSessionId = req.rawHeaders["x-claude-code-session-id"];
     const credentialFingerprint = requestCredentialFingerprint(
       req.rawHeaders,
       config,
     );
-    if (
-      parentClientId &&
+    const shouldResolveParent =
       credentialFingerprint !== null &&
-      (!sessionState.isSubagent || !sessionState.parentSessionId)
-    ) {
+      (!sessionState.isSubagent || !sessionState.parentSessionId) &&
+      (isClaudeSubagent || !!parentClientId);
+    if (shouldResolveParent) {
       if (!sessionState.isSubagent) {
         sessionState.isSubagent = true;
       }
+      // Resolve by the OpenCode parent-session-id, or — for Claude Code — by
+      // the parent's shared x-claude-code-session-id (the only stable link back
+      // to the parent session; x-claude-code-parent-agent-id identifies the
+      // parent *agent*, not its session).
+      const parentLookupValue = parentClientId ?? sharedSessionId;
       // Search the full headerSessionIndex — covers Tier 1 (known) and Tier 2 (learned) headers.
       let resolvedParent: string | undefined;
       for (const [key, loreId] of headerSessionIndex) {
         const parsed = parseSessionIndexKey(key);
         if (
           parsed?.credentialFingerprint === credentialFingerprint &&
-          parsed.headerValue === parentClientId
+          parsed.headerValue === parentLookupValue
         ) {
           resolvedParent = loreId;
           break;
@@ -15663,11 +15677,11 @@ async function handleConversationTurn(
         // Dedup the log: a child agent with an unresolvable parent fires this
         // branch on every turn. Without dedup, a single parent-less agent
         // produces 50+ identical log lines per session.
-        const pendingKey = `${sessionID}:${parentClientId}`;
+        const pendingKey = `${sessionID}:${parentLookupValue}`;
         if (!subagentParentPendingLogged.has(pendingKey)) {
           subagentParentPendingLogged.add(pendingKey);
           log.info(
-            `session ${sessionID.slice(0, 16)}: subagent parent resolution pending for client ID ${parentClientId.slice(0, 16)}`,
+            `session ${sessionID.slice(0, 16)}: subagent parent resolution pending for client ID ${parentLookupValue.slice(0, 16)}`,
           );
         }
         saveSessionTracking(sessionID, { isSubagent: true });
@@ -19084,9 +19098,22 @@ async function handleRequestInner(
 
     // --- Case 1: Compaction request → intercept ---
     // Structural detection (session-aware) first, pattern matching as fallback.
-    // Sub-agents now get their own sessions (separate x-session-affinity), so
-    // priorState is the sub-agent's own state — structural detection is safe.
-    const structuralCompaction = isStructuralCompaction(req, priorState);
+    // Sub-agents now get their own sessions (separate x-session-affinity /
+    // x-claude-code-agent-id), so priorState is the sub-agent's own state —
+    // structural detection is safe.
+    //
+    // IMPORTANT: a Claude Code sub-agent still shares the parent's
+    // `x-claude-code-session-id`. Before x-claude-code-agent-id was added to the
+    // known-header priority (see credential-headers.ts), `activeSessionForKnownHeader`
+    // resolved it to the PARENT session, whose large message count made the
+    // sub-agent's short first request (1 user message + tool-schema attachments)
+    // look like a structural compaction. The gateway then intercepted it and
+    // returned the offline "# Session Summary" block as the sub-agent's
+    // task_result. Guarding structural detection on the sub-agent signal closes
+    // that hole regardless of which header resolved the session.
+    const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
+    const structuralCompaction =
+      !isClaudeSubagent && isStructuralCompaction(req, priorState);
     const patternDetection = structuralCompaction
       ? undefined
       : detectCompactionRequest(req);

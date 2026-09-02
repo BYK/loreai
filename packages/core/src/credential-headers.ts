@@ -3,8 +3,29 @@
 /** Internal gateway access credential. Never forward, learn, persist, or log. */
 export const GATEWAY_AUTH_HEADER = "x-lore-gateway-token";
 
+/**
+ * Claude Code sub-agent (Task/Agent tool) correlation headers.
+ *
+ * A sub-agent request carries its own `x-claude-code-agent-id` (a fresh id per
+ * sub-agent invocation) AND the parent's `x-claude-code-session-id`. The main
+ * agent emits only the session-id (`x-claude-code-agent-id` is absent).
+ * `x-claude-code-parent-agent-id` carries the parent *agent* id (not the parent
+ * session id) and is never emitted by the main agent, so it never appears in
+ * the header session index.
+ */
+export const CLAUDE_CODE_AGENT_ID_HEADER = "x-claude-code-agent-id";
+export const CLAUDE_CODE_PARENT_AGENT_ID_HEADER =
+  "x-claude-code-parent-agent-id";
+
 export const KNOWN_SESSION_HEADERS = [
   "x-lore-session-id",
+  // Claude Code sub-agents emit their own id AND the parent's
+  // `x-claude-code-session-id`. The agent-id must win priority over the shared
+  // session-id so a sub-agent gets its own session rather than merging into the
+  // parent (whose message history then makes the sub-agent's short first request
+  // look like a structural compaction — see pipeline.ts). Main-agent requests
+  // carry only the session-id, so they are unaffected.
+  CLAUDE_CODE_AGENT_ID_HEADER,
   "x-claude-code-session-id",
   "x-session-id",
   "x-session-affinity",
