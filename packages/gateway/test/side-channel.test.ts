@@ -72,9 +72,21 @@ const BILLING_PREFIX =
 // ---------------------------------------------------------------------------
 
 describe("hasClaudeCodeCodingPrompt", () => {
-  test("true when the billing header is present at system[0]", () => {
+  test("false when only the billing header is present (no coding-prompt marker)", () => {
+    // Regression: since Claude Code 2.1.258 the auto-mode classifier is built
+    // with `forceAttributionHeader: true`, so it carries the billing header at
+    // system[0] even though it is a skipSystemPromptPrefix side-channel call.
+    // The header alone must NOT count as a coding prompt.
     expect(
       hasClaudeCodeCodingPrompt(`${BILLING_PREFIX}You are Claude Code.`),
+    ).toBe(false);
+  });
+
+  test("true when the billing header accompanies a Working directory marker", () => {
+    expect(
+      hasClaudeCodeCodingPrompt(
+        `${BILLING_PREFIX}You are Claude Code.\nWorking directory: /home/user/project\n`,
+      ),
     ).toBe(true);
   });
 
@@ -134,6 +146,27 @@ describe("isClaudeCodeSideChannel", () => {
         makeRequest({
           rawHeaders: { ...CC_SESSION_HEADERS },
           system: CLASSIFIER_SYSTEM,
+          maxTokens: 8192,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "action: rm -rf build" }],
+            },
+          ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test("true: classifier prompt carrying a forced attribution (billing) header", () => {
+    // Regression: Claude Code 2.1.258 builds the classifier with
+    // `forceAttributionHeader: true`, anchoring the billing header at system[0]
+    // even though there is no coding prompt. It must STILL bypass the pipeline.
+    expect(
+      isClaudeCodeSideChannel(
+        makeRequest({
+          rawHeaders: { ...CC_SESSION_HEADERS },
+          system: `${BILLING_PREFIX}${CLASSIFIER_SYSTEM}`,
           maxTokens: 8192,
           messages: [
             {
@@ -228,6 +261,14 @@ function sideChannelBody(): Record<string, unknown> {
   };
 }
 
+/** A classifier-shaped body carrying the forced attribution (billing) header. */
+function forcedAttributionBody(): Record<string, unknown> {
+  return {
+    ...sideChannelBody(),
+    system: `${BILLING_PREFIX}${CLASSIFIER_SYSTEM}`,
+  };
+}
+
 async function assistantText(resp: Response): Promise<string> {
   const body = (await resp.json()) as {
     content: Array<{ type: string; text?: string }>;
@@ -273,6 +314,44 @@ describe("handleRequest — Claude Code side-channel routing", () => {
     expect(sentSystem).not.toContain("Long-term Knowledge");
 
     // Passthrough stores nothing in temporal memory.
+    const [{ n }] = harness.queryDB<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM temporal_messages",
+    );
+    expect(n).toBe(0);
+  });
+
+  it("forwards a forced-attribution classifier (billing header) upstream verbatim", async () => {
+    // Regression: since Claude Code 2.1.258 the classifier carries the billing
+    // header at system[0] (forceAttributionHeader). It must STILL bypass the
+    // pipeline — no LTM injection, no compaction mis-route, nothing stored.
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [],
+          responseText: "<action>allow</action>",
+        }),
+      ],
+    });
+
+    const resp = await harness.chat(forcedAttributionBody(), "test-key", {
+      ...CC_SESSION_HEADERS,
+    });
+    expect(resp.status).toBe(200);
+    expect(await assistantText(resp)).toBe("<action>allow</action>");
+
+    // Passthrough forwards the ORIGINAL system prompt — no LTM injection.
+    const bodies = harness.upstreamBodies();
+    expect(bodies.length).toBe(1);
+    const sent = JSON.parse(bodies[0]) as { system?: unknown };
+    const sentSystem =
+      typeof sent.system === "string"
+        ? sent.system
+        : JSON.stringify(sent.system);
+    expect(sentSystem).toContain("x-anthropic-billing-header");
+    expect(sentSystem).toContain("<action> verdict");
+    expect(sentSystem).not.toContain("Long-term Knowledge");
+
     const [{ n }] = harness.queryDB<{ n: number }>(
       "SELECT COUNT(*) AS n FROM temporal_messages",
     );
