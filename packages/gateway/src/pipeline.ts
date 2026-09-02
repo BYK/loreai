@@ -15639,19 +15639,21 @@ async function handleConversationTurn(
       req.rawHeaders,
       config,
     );
+    // Resolve by the OpenCode parent-session-id, or — for Claude Code — by
+    // the parent's shared x-claude-code-session-id (the only stable link back
+    // to the parent session; x-claude-code-parent-agent-id identifies the
+    // parent *agent*, not its session). May be undefined for a malformed or
+    // adversarial sub-agent request that carries neither header.
+    const parentLookupValue = parentClientId ?? sharedSessionId;
     const shouldResolveParent =
       credentialFingerprint !== null &&
       (!sessionState.isSubagent || !sessionState.parentSessionId) &&
-      (isClaudeSubagent || !!parentClientId);
+      (isClaudeSubagent || !!parentClientId) &&
+      !!parentLookupValue;
     if (shouldResolveParent) {
       if (!sessionState.isSubagent) {
         sessionState.isSubagent = true;
       }
-      // Resolve by the OpenCode parent-session-id, or — for Claude Code — by
-      // the parent's shared x-claude-code-session-id (the only stable link back
-      // to the parent session; x-claude-code-parent-agent-id identifies the
-      // parent *agent*, not its session).
-      const parentLookupValue = parentClientId ?? sharedSessionId;
       // Search the full headerSessionIndex — covers Tier 1 (known) and Tier 2 (learned) headers.
       let resolvedParent: string | undefined;
       for (const [key, loreId] of headerSessionIndex) {
