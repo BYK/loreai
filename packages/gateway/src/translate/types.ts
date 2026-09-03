@@ -14,6 +14,8 @@
 import { asString } from "@loreai/core";
 import {
   GATEWAY_AUTH_HEADER,
+  CLAUDE_CODE_AGENT_ID_HEADER,
+  CLAUDE_CODE_PARENT_AGENT_ID_HEADER,
   isCredentialHeaderName,
   KNOWN_SESSION_HEADERS,
 } from "../credential-headers";
@@ -591,13 +593,15 @@ export type SessionState = {
   // --- Sub-agent detection ---
 
   /** True when a request in this session carried an `x-parent-session-id`
-   *  header, indicating it belongs to an ephemeral sub-agent (e.g. OpenCode
-   *  explore). Sub-agent sessions are exempt from cache warming — they are
-   *  too short-lived (1-3 turns) for warming to be profitable. */
+   *  header (OpenCode) or an `x-claude-code-agent-id` header (Claude Code),
+   *  indicating it belongs to an ephemeral sub-agent. Sub-agent sessions are
+   *  exempt from cache warming — they are too short-lived (1-3 turns) for
+   *  warming to be profitable. */
   isSubagent?: boolean;
 
   /** Lore internal session ID of the parent session (resolved from the
-   *  `x-parent-session-id` header value via the headerSessionIndex).
+   *  `x-parent-session-id` header value — or, for Claude Code, the shared
+   *  `x-claude-code-session-id` — via the headerSessionIndex).
    *  NULL/undefined for root (non-sub-agent) sessions. */
   parentSessionId?: string;
 
@@ -796,6 +800,8 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "anthropic-version",
   // Session identification — consumed by gateway, not meaningful to upstream
   "x-parent-session-id",
+  CLAUDE_CODE_AGENT_ID_HEADER,
+  CLAUDE_CODE_PARENT_AGENT_ID_HEADER,
   ...KNOWN_SESSION_HEADERS,
   // Auth — handled separately by each builder (extractAuth + authHeaders)
   "x-api-key",

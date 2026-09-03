@@ -29,11 +29,16 @@
  */
 
 import {
+  CLAUDE_CODE_AGENT_ID_HEADER,
   isCredentialHeaderName,
   KNOWN_SESSION_HEADERS,
 } from "./credential-headers";
 
-export { isCredentialHeaderName, KNOWN_SESSION_HEADERS };
+export {
+  isCredentialHeaderName,
+  KNOWN_SESSION_HEADERS,
+  CLAUDE_CODE_AGENT_ID_HEADER,
+};
 
 // ---------------------------------------------------------------------------
 // Base62 encoding
@@ -289,6 +294,24 @@ const ROTATION_ELIGIBLE_HEADERS: ReadonlySet<string> = new Set([
  */
 export function isRotationEligible(headerName: string): boolean {
   return ROTATION_ELIGIBLE_HEADERS.has(headerName);
+}
+
+/**
+ * True when the request is a Claude Code sub-agent turn — i.e. it carries a
+ * non-empty `x-claude-code-agent-id` header.
+ *
+ * Claude Code (2.1.258+) emits `x-claude-code-agent-id` only for Task/Agent
+ * sub-agents; the main conversation loop emits `x-claude-code-session-id`
+ * with NO agent-id. This is the only reliable Claude Code sub-agent signal:
+ * the `x-claude-code-parent-agent-id` header is correlated with agent lineage,
+ * not the shared session, and the `x-parent-session-id` header that the
+ * OpenCode plugin injects is never emitted by Claude Code.
+ */
+export function isClaudeCodeSubagent(
+  rawHeaders: Record<string, string>,
+): boolean {
+  const value = rawHeaders[CLAUDE_CODE_AGENT_ID_HEADER];
+  return typeof value === "string" && value.length > 0;
 }
 
 /**

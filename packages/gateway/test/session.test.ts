@@ -7,6 +7,7 @@ import {
   scanForMarker,
   fingerprintMessages,
   extractKnownSessionHeader,
+  isClaudeCodeSubagent,
   findRotationPredecessor,
   isRotationEligible,
   KNOWN_SESSION_HEADERS,
@@ -449,6 +450,21 @@ describe("extractKnownSessionHeader", () => {
     });
   });
 
+  test("prefers x-claude-code-agent-id over the shared x-claude-code-session-id", () => {
+    // A Claude Code sub-agent carries BOTH its own agent-id and the parent's
+    // session-id. The agent-id must win so the sub-agent gets its own session
+    // (regression: otherwise the sub-agent merges into the parent and its short
+    // first request is misdetected as a structural compaction).
+    const result = extractKnownSessionHeader({
+      "x-claude-code-agent-id": "agent-abc",
+      "x-claude-code-session-id": "parent-session-uuid",
+    });
+    expect(result).toEqual({
+      sessionId: "agent-abc",
+      headerName: "x-claude-code-agent-id",
+    });
+  });
+
   test("prefers x-session-id over x-session-affinity", () => {
     const result = extractKnownSessionHeader({
       "x-session-id": "standard-id",
@@ -484,6 +500,34 @@ describe("extractKnownSessionHeader", () => {
 // ===========================================================================
 // Tier 2: Header learning helpers
 // ===========================================================================
+
+describe("isClaudeCodeSubagent", () => {
+  test("true when x-claude-code-agent-id present", () => {
+    expect(
+      isClaudeCodeSubagent({
+        "x-claude-code-agent-id": "agent-abc",
+        "x-claude-code-session-id": "parent-session-uuid",
+      }),
+    ).toBe(true);
+  });
+
+  test("false for the main agent (session-id only, no agent-id)", () => {
+    expect(
+      isClaudeCodeSubagent({ "x-claude-code-session-id": "main-session-uuid" }),
+    ).toBe(false);
+  });
+
+  test("false for empty agent-id value", () => {
+    expect(isClaudeCodeSubagent({ "x-claude-code-agent-id": "" })).toBe(false);
+  });
+
+  test("false when no Claude Code headers present", () => {
+    expect(isClaudeCodeSubagent({})).toBe(false);
+    expect(
+      isClaudeCodeSubagent({ "x-parent-session-id": "opencode-parent" }),
+    ).toBe(false);
+  });
+});
 
 describe("isSessionHeaderName", () => {
   test("matches session-related header names", () => {
