@@ -1,8 +1,12 @@
 /**
- * Build @loreai/pi into a publishable ESM bundle for Node.
+ * Build @loreai/pi into a publishable ESM bundle for the Bun-based Pi runtime.
  *
- * Pi runs on Node exclusively (unlike OpenCode which is Bun), so we only
- * build one target with `node:sqlite` imports preserved via `conditions: ["node"]`.
+ * Pi 0.84.x is a Bun-compiled binary (embedded Bun, jiti loader for .ts
+ * extensions). Bun does NOT implement `node:sqlite`, so the bundle must select
+ * core's `bun` target (`bun:sqlite`) via `conditions: ["bun"]`. The earlier
+ * "Pi runs on Node exclusively" comment was true of the old Node-based Pi and
+ * broke the extension at load time on the Bun runtime:
+ *   ResolveMessage: No such built-in module: node:sqlite
  *
  * External — all of these are resolved at consumer install time, NOT bundled:
  *
@@ -30,6 +34,7 @@ mkdirSync(distDir, { recursive: true });
 
 const external = [
   "node:*",
+  "bun:*",
   "@loreai/gateway",
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",
@@ -41,7 +46,7 @@ await esbuild.build({
   format: "esm",
   target: "node22",
   platform: "node",
-  conditions: ["node"],
+  conditions: ["bun"],
   external,
   outfile: join(distDir, "index.js"),
   sourcemap: true,
