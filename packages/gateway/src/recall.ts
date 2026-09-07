@@ -1036,6 +1036,16 @@ export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
     )
   )
     return false;
+  // A usable sibling must not hide an undispatchable tool call. Validate every
+  // name without changing the provider's tool names or cached tool definitions.
+  if (
+    resp.content.some(
+      (block) =>
+        block.type === "tool_use" &&
+        (typeof block.name !== "string" || block.name.trim().length === 0),
+    )
+  )
+    return false;
   return (
     resp.content.some((block) => {
       if (block.type === "text") return block.text.trim().length > 0;

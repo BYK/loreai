@@ -3231,6 +3231,66 @@ describe("replaceRecallWithMarker", () => {
 });
 
 describe("final recall continuation output", () => {
+  test.each(["Read", "custom.namespace_tool", " Read "])(
+    "preserves the nonblank tool name %j",
+    (name) => {
+      const block = Object.freeze({
+        type: "tool_use" as const,
+        id: "ordinary",
+        name,
+        input: {},
+      });
+      const response = makeResponse([block]);
+      Object.freeze(response.content);
+      expect(isUsableRecallContinuation(response)).toBe(true);
+      expect(response.content[0]).toBe(block);
+      expect(block.name).toBe(name);
+    },
+  );
+  test.each(["", " \t\n", null, undefined, 7])(
+    "rejects malformed name %j even beside usable output",
+    (name) => {
+      const malformed = {
+        type: "tool_use" as const,
+        id: "invalid",
+        name: name as string,
+        input: {},
+      };
+      const companions = [
+        [],
+        [{ type: "text" as const, text: "Useful answer" }],
+        [
+          {
+            type: "tool_use" as const,
+            id: "ordinary",
+            name: "Read",
+            input: {},
+          },
+        ],
+        [
+          {
+            type: "opaque" as const,
+            responsesItem: true,
+            raw: {
+              type: "message",
+              content: [{ type: "refusal", refusal: "Cannot help" }],
+            },
+          },
+        ],
+      ];
+      for (const companion of companions) {
+        for (const content of [
+          [malformed, ...companion],
+          [...companion, malformed],
+        ]) {
+          const response = makeResponse(content);
+          Object.freeze(response.content);
+          for (const block of response.content) Object.freeze(block);
+          expect(isUsableRecallContinuation(response)).toBe(false);
+        }
+      }
+    },
+  );
   test.each([
     ["I cannot help with that.", true],
     ["", false],

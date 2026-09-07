@@ -7073,6 +7073,7 @@ export function buildStreamingResponse(
                         getLLMClient(recallContext.config),
                         alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
                         streamSignal,
+                        recallContext.noStore ? () => {} : undefined,
                       ),
                   ),
                 streamSignal,
@@ -18211,6 +18212,7 @@ async function handleConversationTurn(
       return finishForeground(
         translateAnthropicStreamToOpenAI(anthropicSSE, {
           signal: foregroundAbort.signal,
+          propagateErrors: true,
         }),
       );
     }

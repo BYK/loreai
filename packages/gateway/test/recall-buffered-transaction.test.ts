@@ -341,7 +341,7 @@ function providerResponse(
     ? toolCalls
     : [{ type: "text", text: "Completed answer" }];
   if (protocol === "anthropic") {
-    return Response.json({
+    const response = {
       id: `msg_${round}`,
       model: "claude-test",
       type: "message",
@@ -349,7 +349,8 @@ function providerResponse(
       content,
       stop_reason: invalid ? null : recalling ? "tool_use" : "end_turn",
       usage: { input_tokens: input, output_tokens: output },
-    });
+    };
+    return stream ? anthropicStream(response) : Response.json(response);
   }
   if (protocol === "openai") {
     return Response.json({
@@ -413,6 +414,11 @@ function providerResponse(
     usage: { input_tokens: input, output_tokens: output },
   };
   if (!stream) return Response.json(response);
+  return responsesStream(response);
+}
+
+function responsesStream(response: Record<string, unknown>): Response {
+  const items = response.output as Array<Record<string, unknown>>;
   const event = (type: string, data: object) =>
     `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
   return new Response(
@@ -450,13 +456,230 @@ function providerResponse(
             event("response.output_item.done", { output_index: index, item }),
         )
         .join("") +
-      event(invalid ? "response.failed" : "response.completed", { response }),
+      event(
+        response.status === "failed" ? "response.failed" : "response.completed",
+        { response },
+      ),
     { headers: { "content-type": "text/event-stream" } },
   );
 }
 
+function anthropicStream(json: Record<string, unknown>): Response {
+  const event = (type: string, data: object) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  const usage = json.usage as Record<string, unknown>;
+  return new Response(
+    event("message_start", {
+      message: {
+        ...json,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: usage.input_tokens, output_tokens: 0 },
+      },
+    }) +
+      (json.content as Array<Record<string, unknown>>)
+        .map(
+          (block, index) =>
+            event("content_block_start", {
+              index,
+              content_block:
+                block.type === "tool_use"
+                  ? { ...block, input: {} }
+                  : { type: "text", text: "" },
+            }) +
+            event("content_block_delta", {
+              index,
+              delta:
+                block.type === "tool_use"
+                  ? {
+                      type: "input_json_delta",
+                      partial_json: JSON.stringify(block.input),
+                    }
+                  : { type: "text_delta", text: block.text },
+            }) +
+            event("content_block_stop", { index }),
+        )
+        .join("") +
+      event("message_delta", {
+        delta: { stop_reason: json.stop_reason, stop_sequence: null },
+        usage: { output_tokens: usage.output_tokens },
+      }) +
+      event("message_stop", {}),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
+  "Anthropic streaming transfer retention for %s client",
+  (client) => {
+    test.each([true, false])("no-store=%s", async (noStore) => {
+      const id = knowledge();
+      const alias = crypto.randomUUID();
+      const req = request(client, alias);
+      req.stream = true;
+      req.rawHeaders["x-lore-provider"] = "anthropic";
+      req.rawHeaders["x-lore-upstream-url"] = "https://api.anthropic.com";
+      req.rawHeaders["x-api-key"] = "test-key";
+      delete req.rawHeaders.authorization;
+      if (noStore) req.rawHeaders["x-lore-no-store"] = "true";
+      let calls = 0;
+      setUpstreamInterceptor(async () =>
+        providerResponse(
+          "anthropic",
+          ++calls,
+          calls === 1 ? "recall" : "answer",
+          true,
+        ),
+      );
+      const response = await handleRequest(req, config());
+      expect(await response.text()).toContain("Completed answer");
+      await settled();
+      expect(calls).toBe(2);
+      expect(ltm.transferCount(id)).toBe(noStore ? 0 : 1);
+      expect(stateFor(alias).recallStore.size).toBe(noStore ? 0 : 1);
+    });
+  },
+);
+
+describe.each([
+  ["anthropic", false, "anthropic"],
+  ["openai", false, "openai"],
+  ["openai-responses", false, "openai-responses"],
+  ["anthropic", true, "anthropic"],
+  ["openai", true, "anthropic"],
+  ["openai-responses", true, "anthropic"],
+  ["gemini", true, "anthropic"],
+  ["openai-responses", true, "openai-responses"],
+] as const)(
+  "blank final tool name: %s stream=%s upstream=%s",
+  (client, stream, upstreamProtocol) => {
+    test.each(["", " \t\n"])(
+      "rejects name %j alone or with valid text",
+      async (name) => {
+        for (const withText of [false, true]) {
+          const alias = crypto.randomUUID();
+          const req = request(client, alias);
+          req.stream = stream;
+          if (upstreamProtocol === "anthropic") {
+            req.rawHeaders["x-lore-provider"] = "anthropic";
+            req.rawHeaders["x-lore-upstream-url"] = "https://api.anthropic.com";
+            req.rawHeaders["x-api-key"] = "test-key";
+            delete req.rawHeaders.authorization;
+          }
+          let calls = 0;
+          setUpstreamInterceptor(async (body) => {
+            calls++;
+            const upstreamStream =
+              (body as Record<string, unknown>).stream === true;
+            if (calls < 11)
+              return providerResponse(
+                upstreamProtocol,
+                calls,
+                "recall",
+                upstreamStream,
+              );
+            const json = await providerResponse(
+              upstreamProtocol,
+              calls,
+              "mixed",
+            ).json();
+            if (upstreamProtocol === "anthropic") {
+              json.content = [
+                { ...json.content[0], name },
+                ...(withText
+                  ? [{ type: "text", text: "Completed answer" }]
+                  : []),
+              ];
+            } else if (upstreamProtocol === "openai") {
+              const message = json.choices[0].message;
+              message.tool_calls = [
+                {
+                  ...message.tool_calls[0],
+                  function: { ...message.tool_calls[0].function, name },
+                },
+              ];
+              message.content = withText ? "Completed answer" : null;
+            } else {
+              json.output = [
+                { ...json.output[0], name },
+                ...(withText
+                  ? [
+                      {
+                        type: "message",
+                        id: "msg_final_text",
+                        role: "assistant",
+                        status: "completed",
+                        content: [
+                          { type: "output_text", text: "Completed answer" },
+                        ],
+                      },
+                    ]
+                  : []),
+              ];
+            }
+            return upstreamStream
+              ? upstreamProtocol === "anthropic"
+                ? anthropicStream(json)
+                : responsesStream(json)
+              : Response.json(json);
+          });
+          const response = await handleRequest(req, config());
+          if (stream) {
+            const reader = response.body!.getReader();
+            let received = "";
+            let failure: unknown;
+            try {
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                received += new TextDecoder().decode(value);
+              }
+            } catch (error) {
+              failure = error;
+            } finally {
+              reader.releaseLock();
+            }
+            // Responses may represent failure on the wire; neither failure
+            // form may deliver a successful terminal to an incremental reader.
+            if (
+              client === "openai-responses" &&
+              received.includes("event: response.failed")
+            ) {
+              expect(received.match(/^event: response.failed$/gm)).toHaveLength(
+                1,
+              );
+            } else expect(failure).toBeInstanceOf(Error);
+            if (client === "anthropic") {
+              expect(received.match(/^event: message_stop$/gm)).toHaveLength(
+                20,
+              );
+            } else {
+              expect(received).not.toContain("data: [DONE]");
+              expect(received).not.toContain("event: response.completed");
+              expect(received).not.toMatch(/"finish_reason":"|"finishReason":/);
+            }
+          } else {
+            expect(response.status).toBe(502);
+            await response.text();
+          }
+          await settled();
+          expect(calls).toBe(11);
+          expect(
+            db()
+              .query(
+                "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ? AND role = 'assistant'",
+              )
+              .get(stateFor(alias).sessionID),
+          ).toEqual({ count: 0 });
+        }
+      },
+    );
+  },
+);
+
 function request(
-  protocol: Protocol,
+  protocol: Protocol | "gemini",
   alias: string,
   codex = false,
 ): GatewayRequest {

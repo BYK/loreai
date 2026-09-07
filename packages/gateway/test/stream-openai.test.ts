@@ -529,59 +529,68 @@ describe("accumulateOpenAISSEStream", () => {
   });
 });
 
-test("Anthropic translator completes at message_stop and cancels an open source", async () => {
-  const event = (type: string, data: Record<string, unknown>) =>
-    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
-  const wire =
-    event("message_start", {
-      message: {
-        id: "msg-open",
-        type: "message",
-        role: "assistant",
-        model: "claude-test",
-        content: [],
-        stop_reason: null,
-        stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 0 },
-      },
-    }) +
-    event("content_block_start", {
-      index: 0,
-      content_block: { type: "text", text: "" },
-    }) +
-    event("content_block_delta", {
-      index: 0,
-      delta: { type: "text_delta", text: "done" },
-    }) +
-    event("content_block_stop", { index: 0 }) +
-    event("message_delta", {
-      delta: { stop_reason: "end_turn", stop_sequence: null },
-      usage: { output_tokens: 1 },
-    }) +
-    event("message_stop", {});
-  let cancelled = false;
-  const upstream = new Response(
-    new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode(wire));
-      },
-      pull() {
-        return new Promise(() => {});
-      },
-      cancel() {
-        cancelled = true;
-        return new Promise<void>(() => {});
-      },
-    }),
-  );
-  const translated = translateAnthropicStreamToOpenAI(upstream);
-  await new Promise((resolve) => setImmediate(resolve));
-  const output = await translated.text();
-  expect(output).toContain("done");
-  expect(output.match(/data: \[DONE\]/g)).toHaveLength(1);
-  expect(cancelled).toBe(true);
-  expect(upstream.body?.locked).toBe(false);
-});
+test.each([false, true])(
+  "Anthropic translator completes and cancels an open source (large=%s)",
+  async (large) => {
+    const text = large ? "z".repeat(2 * 1024 * 1024) : "done";
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const wire =
+      event("message_start", {
+        message: {
+          id: "msg-open",
+          type: "message",
+          role: "assistant",
+          model: "claude-test",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }) +
+      event("content_block_start", {
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }) +
+      Array.from({ length: large ? 3 : 1 }, () =>
+        event("content_block_delta", {
+          index: 0,
+          delta: { type: "text_delta", text },
+        }),
+      ).join("") +
+      event("content_block_stop", { index: 0 }) +
+      event("message_delta", {
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      }) +
+      event("message_stop", {});
+    let cancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(wire));
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      }),
+    );
+    const translated = translateAnthropicStreamToOpenAI(upstream, {
+      propagateErrors: true,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const output = await translated.text();
+    expect(output).toContain(text);
+    if (large) expect(output.length).toBeGreaterThan(4 * 1024 * 1024);
+    expect(output.match(/data: \[DONE\]/g)).toHaveLength(1);
+    expect(cancelled).toBe(true);
+    expect(upstream.body?.locked).toBe(false);
+  },
+);
 
 test("Anthropic translator emits inclusive OpenAI cache usage", async () => {
   const event = (type: string, data: Record<string, unknown>) =>
