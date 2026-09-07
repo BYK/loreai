@@ -263,6 +263,8 @@ describe.each([
         calls++;
         const requestBody = body as Record<string, unknown>;
         firstBody ??= structuredClone(requestBody);
+        expect(requestBody.tools).toEqual(firstBody.tools);
+        expect(requestBody.tool_choice).toEqual(firstBody.tool_choice);
         if (calls === 11) {
           lastBody = requestBody;
           if (mode === "failed")

@@ -1013,7 +1013,13 @@ export interface RecallFollowUpCtx {
 }
 
 /** A final recall continuation must give the client an answer or a tool handoff. */
-export function hasRecallContinuationOutput(resp: GatewayResponse): boolean {
+export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
+  if (
+    ["max_tokens", "pause_turn", "model_context_window_exceeded"].includes(
+      resp.stopReason,
+    )
+  )
+    return false;
   return resp.content.some((block) => {
     if (block.type === "text") return block.text.trim().length > 0;
     if (block.type === "tool_use") return block.name !== RECALL_TOOL_NAME;

@@ -18,7 +18,7 @@ import {
   responsesAnchorContext,
 } from "../src/pipeline";
 import {
-  hasRecallContinuationOutput,
+  isUsableRecallContinuation,
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
   MAX_RECALL_DEPTH,
@@ -3134,7 +3134,7 @@ describe("final recall continuation output", () => {
     ],
   ] as const)("requires client-usable output: %j", (content, expected) => {
     expect(
-      hasRecallContinuationOutput(
+      isUsableRecallContinuation(
         makeResponse(
           structuredClone(content) as unknown as GatewayContentBlock[],
         ),
@@ -3142,3 +3142,14 @@ describe("final recall continuation output", () => {
     ).toBe(expected);
   });
 });
+
+test.each(["max_tokens", "pause_turn", "model_context_window_exceeded"])(
+  "unfinished final recall stop %s is not usable even with text",
+  (stopReason) => {
+    expect(
+      isUsableRecallContinuation(
+        makeResponse([{ type: "text", text: "partial answer" }], stopReason),
+      ),
+    ).toBe(false);
+  },
+);

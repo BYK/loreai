@@ -234,6 +234,8 @@ describe.each([true, false])(
       "http-error",
       "empty",
       "incomplete",
+      "pause_turn",
+      "model_context_window_exceeded",
     ] as const)("last continuation: %s", async (mode) => {
       mockedRecall.mockResolvedValue({
         result: "recall results",
@@ -286,7 +288,13 @@ describe.each([true, false])(
             event("content_block_stop", { index: 0 }) +
             event("message_delta", {
               delta: {
-                stop_reason: mode === "incomplete" ? "max_tokens" : "end_turn",
+                stop_reason:
+                  mode === "incomplete"
+                    ? "max_tokens"
+                    : mode === "pause_turn" ||
+                        mode === "model_context_window_exceeded"
+                      ? mode
+                      : "end_turn",
                 stop_sequence: null,
               },
               usage: { output_tokens: 2 },
@@ -344,8 +352,9 @@ describe.each([true, false])(
         expect(failed).toHaveBeenCalledTimes(1);
         const tokens = mode === "recall" ? 11 : 10;
         expect(failed.mock.calls[0][0].usage).toMatchObject({
-          inputTokens: mode === "empty" || mode === "incomplete" ? 13 : tokens,
-          outputTokens: mode === "empty" || mode === "incomplete" ? 12 : tokens,
+          inputTokens: mode !== "recall" && mode !== "http-error" ? 13 : tokens,
+          outputTokens:
+            mode !== "recall" && mode !== "http-error" ? 12 : tokens,
         });
       }
       expect(calls).toBe(10);

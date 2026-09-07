@@ -370,7 +370,7 @@ import {
   executeRecall,
   findRecallToolUse,
   hasRecallToolUse,
-  hasRecallContinuationOutput,
+  isUsableRecallContinuation,
   hasOtherToolUse,
   clientHasRecallTool,
   runRecallFollowUpStreaming,
@@ -7472,10 +7472,7 @@ export function buildStreamingResponse(
               if (recallDepth === MAX_RECALL_DEPTH) {
                 if (contAccum.hasRecall())
                   throw new RecallContinuationFailure("depth_exhausted");
-                if (
-                  continuationResp.stopReason === "max_tokens" ||
-                  !hasRecallContinuationOutput(continuationResp)
-                )
+                if (!isUsableRecallContinuation(continuationResp))
                   throw new RecallContinuationFailure("follow_up_failed");
               }
 
@@ -10714,7 +10711,7 @@ export function streamResponsesRecallAware(
                       if (
                         continuationFollowUpInput.finalRecallRound &&
                         contPending.length === 0 &&
-                        !hasRecallContinuationOutput(
+                        !isUsableRecallContinuation(
                           finalizeResponsesAcc(contState),
                         )
                       ) {
@@ -17639,8 +17636,7 @@ async function handleConversationTurn(
     if (hasRecallToolUse(currentResp)) return failRecall("depth_exhausted");
     if (
       recallDepth === MAX_RECALL_DEPTH &&
-      (currentResp.stopReason === "max_tokens" ||
-        !hasRecallContinuationOutput(currentResp))
+      !isUsableRecallContinuation(currentResp)
     )
       return failRecall("follow_up_failed");
     currentResp.usage = cumulativeUsage;
