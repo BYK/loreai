@@ -3116,10 +3116,15 @@ describe("final recall continuation output", () => {
         },
       ],
     });
-    expect(response.content).toEqual([]);
+    expect(response.content).toEqual(
+      typeof refusal === "string" ? [{ type: "text", text: refusal }] : [],
+    );
     const original = structuredClone(response);
     Object.freeze(response.rawOutputItems);
     expect(isUsableRecallContinuation(response)).toBe(expected);
+    expect(isUsableRecallContinuation({ ...response, content: [] })).toBe(
+      expected,
+    );
     expect(response).toEqual(original);
 
     for (const stopReason of [
@@ -3130,7 +3135,49 @@ describe("final recall continuation output", () => {
       expect(isUsableRecallContinuation({ ...response, stopReason })).toBe(
         false,
       );
+      expect(
+        isUsableRecallContinuation({ ...response, content: [], stopReason }),
+      ).toBe(false);
     }
+  });
+
+  test("buffered refusal provenance does not duplicate its normalized text", () => {
+    const refusal = {
+      type: "message",
+      id: "msg_refusal",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "refusal", refusal: "I cannot help with that." }],
+    };
+    const response = accumulateResponsesNonStreamJSON({
+      id: "resp_refusal",
+      model: "gpt-test",
+      status: "completed",
+      output: [refusal, { ...refusal, id: "msg_empty", content: [] }],
+    });
+    expect(responsesProvenanceContent(response)).toEqual([
+      { type: "opaque", raw: refusal, responsesItem: true },
+    ]);
+  });
+
+  test("opaque refusal provenance preserves the next normalized text fallback", () => {
+    const refusal = {
+      type: "message",
+      id: "msg_refusal",
+      role: "assistant",
+      content: [{ type: "refusal", refusal: "I cannot help with that." }],
+    };
+    const opaque = {
+      type: "opaque" as const,
+      raw: refusal,
+      responsesItem: true,
+    };
+    const text = { type: "text" as const, text: "fallback text" };
+    const response = {
+      ...makeResponse([opaque, text]),
+      rawOutputItems: [refusal, { ...refusal, id: "msg_empty", content: [] }],
+    };
+    expect(responsesProvenanceContent(response)).toEqual([opaque, text]);
   });
 
   test.each([

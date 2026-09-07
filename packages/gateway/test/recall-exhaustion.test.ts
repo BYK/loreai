@@ -211,13 +211,15 @@ function upstream(
 }
 
 describe.each([
-  ["anthropic", false, false],
-  ["openai-responses", false, false],
-  ["openai-responses", true, false],
-  ["openai-responses", false, true],
+  ["anthropic", false, false, "anthropic"],
+  ["openai-responses", false, false, "openai-responses"],
+  ["openai-responses", true, false, "openai-responses"],
+  ["openai-responses", false, true, "openai-responses"],
+  ["anthropic", false, false, "openai-responses"],
+  ["openai", false, false, "openai-responses"],
 ] as const)(
-  "recall exhaustion: %s stream=%s codex=%s",
-  (protocol, stream, codex) => {
+  "recall exhaustion: %s stream=%s codex=%s upstream=%s",
+  (protocol, stream, codex, upstreamProtocol) => {
     test.each([
       "answer",
       "tool",
@@ -240,7 +242,8 @@ describe.each([
         protocol,
         stream,
         codex,
-        model: protocol === "anthropic" ? "claude-test" : "gpt-5.6-terra",
+        model:
+          upstreamProtocol === "anthropic" ? "claude-test" : "gpt-5.6-terra",
         system: "You are a coding agent.",
         messages: [
           {
@@ -267,15 +270,16 @@ describe.each([
             ? { tool_choice: { type: "function", name: "recall" } }
             : {},
         rawHeaders: {
-          ...(protocol === "anthropic"
+          ...(upstreamProtocol === "anthropic"
             ? { "x-api-key": "test-key" }
             : { authorization: "Bearer test-key" }),
           "x-lore-session-id": session,
           "x-lore-agent": "coder",
           "x-lore-project": process.cwd(),
-          "x-lore-provider": protocol === "anthropic" ? "anthropic" : "openai",
+          "x-lore-provider":
+            upstreamProtocol === "anthropic" ? "anthropic" : "openai",
           "x-lore-upstream-url":
-            protocol === "anthropic"
+            upstreamProtocol === "anthropic"
               ? "https://api.anthropic.com"
               : "https://api.openai.com/v1",
         },
@@ -296,14 +300,14 @@ describe.each([
               status: 503,
             });
           return upstream(
-            protocol,
+            upstreamProtocol,
             requestBody.stream === true,
             calls,
             mode === "parallel" ? "answer" : mode,
           );
         }
         return upstream(
-          protocol,
+          upstreamProtocol,
           requestBody.stream === true,
           calls,
           mode === "parallel" ? "parallel" : "recall",
@@ -351,6 +355,16 @@ describe.each([
               ],
             });
           }
+        }
+        if (mode === "refusal" && protocol === "anthropic") {
+          expect(JSON.parse(body).content).toEqual([
+            { type: "text", text: "I cannot help with that." },
+          ]);
+        }
+        if (mode === "refusal" && protocol === "openai") {
+          expect(JSON.parse(body).choices[0].message.content).toBe(
+            "I cannot help with that.",
+          );
         }
         expect(body).not.toContain("Recall depth limit reached");
       } else {

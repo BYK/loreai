@@ -11784,6 +11784,13 @@ export function accumulateResponsesNonStreamJSON(
           for (const part of msgContent) {
             if (part.type === "output_text") {
               content.push({ type: "text", text: asString(part.text) });
+            } else if (
+              part.type === "refusal" &&
+              typeof part.refusal === "string"
+            ) {
+              // Other client protocols emit normalized content. Keep the raw
+              // refusal too for lossless native Responses output and replay.
+              content.push({ type: "text", text: part.refusal });
             }
           }
         }
@@ -11880,6 +11887,18 @@ export function responsesProvenanceContent(
     (block): block is Extract<GatewayContentBlock, { type: "text" }> =>
       block.type === "text",
   );
+  // Streaming refusals remain opaque; buffered refusals also have normalized
+  // text. Only the latter consume a text slot when replaying their raw part.
+  const opaqueMessageIds = new Set(
+    response.content.flatMap((block) =>
+      block.type === "opaque" &&
+      block.responsesItem === true &&
+      block.raw.type === "message" &&
+      typeof block.raw.id === "string"
+        ? [block.raw.id]
+        : [],
+    ),
+  );
   let textIndex = 0;
   for (const raw of response.rawOutputItems) {
     if (raw.type === "item_reference") continue;
@@ -11897,7 +11916,13 @@ export function responsesProvenanceContent(
           raw: { ...raw, content: [part] },
           responsesItem: true,
         });
-        if (part.type === "output_text" && typeof part.text === "string") {
+        if (
+          (part.type === "output_text" && typeof part.text === "string") ||
+          (part.type === "refusal" &&
+            typeof part.refusal === "string" &&
+            typeof raw.id === "string" &&
+            !opaqueMessageIds.has(raw.id))
+        ) {
           textIndex++;
         }
       }
