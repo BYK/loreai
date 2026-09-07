@@ -552,7 +552,7 @@ if (report) {
     annotation(
       "notice",
       "Lore semantic lint",
-      `✓ no suspected invariant violations (${funnel})`,
+      `✓ no suspected invariant violations among selected candidates (${funnel})`,
     );
   } else if (report.status !== "complete") {
     annotation(
@@ -578,7 +578,7 @@ if (report) {
         : blocking
           ? `🚫 **${report.gate.blockingFindingIds.length} blocking finding(s)**.`
           : report.findings.length === 0
-            ? "✓ No suspected invariant violations."
+            ? "✓ No suspected invariant violations among selected candidates."
             : `⚠ **${report.findings.length} advisory finding(s)**.`;
     appendFileSync(
       summaryFile,

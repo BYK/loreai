@@ -540,6 +540,13 @@ describe("semantic lint action reporter", () => {
     const action = readFileSync(join(actionDirectory, "action.yml"), "utf8");
     expect(action).toContain('default: "1200"');
     expect(action).toContain('default: "90"');
+    expect(action).toContain('default: "restore"');
+    expect(action).toContain("actions/cache/restore@v5");
+    expect(action).toContain("actions/cache/save@v5");
+    expect(action).toContain("inputs.cache-mode == 'save'");
+    expect(action).toContain("--prime-lore-db");
+    expect(action).toContain('test -s "$LORE_DB_PATH"');
+    expect(action).toContain("steps.cache-db.outputs.ready == 'true'");
     expect(action).toContain("--report-file");
     expect(action).toContain("if: always()");
     expect(action).toContain(
@@ -1144,7 +1151,12 @@ describe("semantic lint action reporter", () => {
     expect(workflow).toContain(
       "head: ${{ github.event.pull_request.head.sha }}",
     );
-    expect(workflow).toContain("continue-on-error: true");
+    expect(workflow).toContain(
+      "continue-on-error: ${{ vars.LORE_SEMANTIC_LINT_GATE != 'true' }}",
+    );
+    expect(workflow).toContain(
+      "gate: ${{ vars.LORE_SEMANTIC_LINT_GATE == 'true' }}",
+    );
     expect(workflow).toContain("pull_request_target:");
     expect(workflow).toContain(
       "model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}",
@@ -1156,9 +1168,22 @@ describe("semantic lint action reporter", () => {
       "github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}",
     );
     expect(workflow).toMatch(
-      /permissions:\n  actions: write\n  contents: read\n  pull-requests: read\n  copilot-requests: write\n\njobs:/,
+      /permissions:\n  actions: read\n  contents: read\n  pull-requests: read\n  copilot-requests: write\n\njobs:/,
     );
     expect(workflow).not.toMatch(/^\s+pull_request:\s*$/m);
+
+    const primeWorkflow = readFileSync(
+      resolve(actionDirectory, "../../workflows/semantic-linter-cache.yml"),
+      "utf8",
+    );
+    expect(primeWorkflow).toContain("push:");
+    expect(primeWorkflow).toContain("branches: [main]");
+    expect(primeWorkflow).toContain(
+      '".github/workflows/semantic-linter-cache.yml"',
+    );
+    expect(primeWorkflow).toContain("cache-mode: save");
+    expect(primeWorkflow).toContain("actions: write");
+    expect(primeWorkflow).toContain("copilot-requests: write");
   });
 
   test("published workflow guide preserves trusted credential/model pairing", () => {
@@ -1177,6 +1202,8 @@ describe("semantic lint action reporter", () => {
     expect(guide).toContain("github-token:");
     expect(guide).toContain("official Copilot SDK bridge");
     expect(guide).toContain("copilot-requests: write");
+    expect(guide).toContain("LORE_SEMANTIC_LINT_GATE");
+    expect(guide).toContain("enforce:soft");
     expect(guide).not.toMatch(/^\s+pull_request:\s*$/m);
   });
 });

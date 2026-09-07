@@ -186,6 +186,22 @@ describe("parseEntriesFromSection", () => {
     });
   });
 
+  test("extracts an explicit semantic-lint enforcement marker", () => {
+    const entries = parseEntriesFromSection(`
+### Gotcha
+
+<!-- lore:019505a1-7c00-7000-8000-1a2b3c4d5e6f enforce:soft -->
+* **Driver boundary**: db.ts must be the only node:sqlite importer
+`);
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        id: "019505a1-7c00-7000-8000-1a2b3c4d5e6f",
+        enforce: "soft",
+      }),
+    ]);
+  });
+
   test("extracts hand-written entries without markers (no id)", () => {
     const section = `
 ## Long-term Knowledge
@@ -1208,6 +1224,23 @@ describe("exportLoreFile", () => {
     expect(content).toContain(`<!-- lore:${id} -->`);
   });
 
+  test("exports a semantic-lint enforcement marker from entry metadata", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Driver boundary",
+      content: "db.ts must be the only node:sqlite importer",
+      scope: "project",
+      metadata: { enforce: "soft", gitHead: "deadbee" },
+    });
+
+    exportLoreFile(PROJECT);
+
+    expect(readFile(LORE_FILE_PATH)).toContain(
+      `<!-- lore:${id} enforce:soft -->`,
+    );
+  });
+
   test("writes only a header when there are no entries", () => {
     exportLoreFile(PROJECT);
 
@@ -1368,6 +1401,36 @@ describe("importLoreFile", () => {
 
     const entry = ltm.getByLogical(id); // import edit appended a new version
     expect(entry?.content).toContain("API keys");
+  });
+
+  test("imports and removes an enforcement marker without dropping other metadata", () => {
+    const id = ltm.create({
+      projectPath: PROJECT,
+      category: "gotcha",
+      title: "Driver boundary",
+      content: "db.ts must be the only node:sqlite importer",
+      scope: "project",
+      metadata: { gitHead: "deadbee" },
+    });
+    writeFile(
+      `<!-- Managed by lore -->\n\n## Long-term Knowledge\n\n### Gotcha\n\n<!-- lore:${id} enforce:strict -->\n* **Driver boundary**: db.ts must be the only node:sqlite importer\n`,
+      LORE_FILE_PATH,
+    );
+
+    importLoreFile(PROJECT);
+    expect(ltm.getByLogical(id)?.metadata).toEqual({
+      enforce: "strict",
+      gitHead: "deadbee",
+    });
+
+    writeFile(
+      readFile(LORE_FILE_PATH).replace(" enforce:strict", ""),
+      LORE_FILE_PATH,
+    );
+    clearLoreFileCache(PROJECT);
+    importLoreFile(PROJECT);
+
+    expect(ltm.getByLogical(id)?.metadata).toEqual({ gitHead: "deadbee" });
   });
 
   test("handles hand-written entries (no UUID markers) in .lore.md", () => {

@@ -16,6 +16,7 @@ type LintFlags = {
   effort?: ReasoningEffort;
   gate: boolean;
   "import-lore-md": boolean;
+  "prime-lore-db": boolean;
   "report-file"?: string;
   "deadline-ms": number;
   "candidate-timeout-ms": number;
@@ -83,6 +84,11 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
         brief: "Import repository lore before linting",
         default: false,
       },
+      "prime-lore-db": {
+        kind: "boolean",
+        brief: "Import and embed repository lore even when no code changed",
+        default: false,
+      },
       "report-file": {
         kind: "parsed",
         parse: String,
@@ -116,6 +122,7 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
       effort: flags.effort,
       gate: flags.gate,
       importLoreMd: flags["import-lore-md"],
+      primeLoreDb: flags["prime-lore-db"],
       deadlineMs: flags["deadline-ms"],
       candidateTimeoutMs: flags["candidate-timeout-ms"],
       onDiagnostic: (message) =>

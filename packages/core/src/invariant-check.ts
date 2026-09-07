@@ -728,8 +728,10 @@ export function clusterHunks(
  * the invariant most likely to be violated (highest relevance per hunk).
  *
  * Algorithm:
- *  1. For each cluster representative, rank its invariants by relevance:
- *     ref-hits first (exact evidence), then cosine ≥ floor, descending.
+ *  1. For each cluster representative, rank its invariants by enforcement and
+ *     relevance: explicit strict/soft rules first, then ref-hits (exact
+ *     evidence), then cosine ≥ floor, descending. This reserves the bounded
+ *     budget for the rules that may actually gate a PR.
  *     Keep the top {@link PER_HUNK_INVARIANTS} (plus ALL ref-hits, which are
  *     never dropped — exact evidence must always be judged).
  *  2. Round-robin across representatives so early budget exhaustion still
@@ -769,8 +771,20 @@ export function selectCandidates(
         });
       }
     }
-    // Rank: ref-hits first, then descending cosine.
+    // Rank: explicit gate rules first, then ref-hits, then descending cosine.
     admitted.sort((a, b) => {
+      const rank = (candidate: Candidate): number => {
+        switch (enforcementLevel(invariants[candidate.invariantIdx].entry)) {
+          case "strict":
+            return 2;
+          case "soft":
+            return 1;
+          default:
+            return 0;
+        }
+      };
+      const rankDiff = rank(b) - rank(a);
+      if (rankDiff !== 0) return rankDiff;
       if (a.refHit !== b.refHit) return a.refHit ? -1 : 1;
       return b.similarity - a.similarity;
     });

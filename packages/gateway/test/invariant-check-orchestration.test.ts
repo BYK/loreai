@@ -246,6 +246,125 @@ describe("runSemanticLint cancellation", () => {
     expect(ensureEmbeddingReady).not.toHaveBeenCalled();
   });
 
+  it("primes .lore.md for a zero-hunk range only when requested", async () => {
+    const events: string[] = [];
+    const range = { base: "base", head: "head", source: "test" };
+    const ensureEmbeddingReady = vi.fn(async () => events.push("ready"));
+    const importLoreFile = vi.fn(() => events.push("import"));
+    const settleDocumentEmbeds = vi.fn(async () => events.push("settle"));
+    const backfillEmbeddings = vi.fn(async () => {
+      events.push("backfill");
+      return 1;
+    });
+    const checkInvariants = vi.fn(async () => {
+      events.push("check");
+      return {
+        range,
+        status: "complete" as const,
+        health: {
+          diff: { status: "healthy" as const, hunks: 0 },
+          invariantVectors: {
+            status: "healthy" as const,
+            expected: 1,
+            available: 1,
+            missing: 0,
+          },
+          hunkVectors: {
+            status: "healthy" as const,
+            expected: 0,
+            available: 0,
+            missing: 0,
+          },
+          judge: {
+            status: "healthy" as const,
+            selected: 0,
+            resolved: 0,
+            unresolved: 0,
+            notAttempted: 0,
+          },
+        },
+        hunks: 0,
+        invariants: 1,
+        candidates: 0,
+        attempted: 0,
+        resolved: 0,
+        unresolved: 0,
+        notAttempted: 0,
+        semanticCalls: 0,
+        transportAttempts: 0,
+        candidateOutcomes: [],
+        findings: [],
+      };
+    });
+    vi.doMock("node:fs", () => ({ existsSync: () => true }));
+    vi.doMock("@loreai/core", () => ({
+      config: () => ({
+        model: undefined,
+        invariantCheck: { effort: "off" },
+      }),
+      embedding: {
+        ensureEmbeddingReady,
+        settleDocumentEmbeds,
+        backfillEmbeddings,
+      },
+      importLoreFile,
+      invariantCheck: {
+        resolveRange: () => range,
+        parseDiffResult: () => ({ kind: "success", hunks: [] }),
+        checkInvariants,
+        collectCommitMessages: () => [],
+        parseOverrides: () => [],
+        gateDecision: () => ({
+          mode: "advisory",
+          exitCode: 0,
+          blocking: [],
+          overridden: [],
+          advisory: [],
+        }),
+      },
+      parseReasoningEffort: vi.fn(),
+    }));
+    vi.doMock("../src/llm-adapter", () => ({
+      createGatewayLLMClient: vi.fn(() => ({})),
+      createGatewayInvariantJudge: vi.fn(() => ({})),
+    }));
+    vi.doMock("../src/cli/start", () => ({
+      startGateway: async () => {
+        events.push("gateway");
+        return {
+          owned: true,
+          config: {
+            workerApiKey: undefined,
+            upstreamAnthropic: "http://anthropic.test",
+            upstreamOpenAI: "http://openai.test",
+          },
+          shutdown: async () => events.push("cleanup"),
+        };
+      },
+    }));
+
+    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const report = await runSemanticLint({
+      project: ".",
+      gate: false,
+      importLoreMd: true,
+      primeLoreDb: true,
+      deadlineMs: 1_000,
+      candidateTimeoutMs: 100,
+    });
+
+    expect(report.status).toBe("complete");
+    expect(events).toEqual([
+      "gateway",
+      "ready",
+      "import",
+      "settle",
+      "backfill",
+      "check",
+      "cleanup",
+    ]);
+  });
+
   it("reports readiness failure before import and cleanup", async () => {
     const events: string[] = [];
     const range = { base: "base", head: "head", source: "test" };

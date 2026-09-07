@@ -88,7 +88,9 @@ function parseMetadata(raw: string | null): KnowledgeMetadata | null {
 
 /** Stringify a metadata object for INSERT/UPDATE. `undefined` and empty objects
  *  both serialize to NULL so the column stays clean for entries that never opt in. */
-function stringifyMetadata(m: KnowledgeMetadata | undefined): string | null {
+function stringifyMetadata(
+  m: KnowledgeMetadata | null | undefined,
+): string | null {
   if (m == null) return null;
   const json = JSON.stringify(m);
   return json === "{}" ? null : json;
@@ -440,13 +442,10 @@ export function appendVersion(
     category?: string;
     isDeleted?: boolean;
     /**
-     * #627 Phase 2: stamp the NEW version with fresh provenance (the commit the
-     * edit/delete happened at). When omitted — or empty (`{}` → NULL via
-     * stringifyMetadata) — the prior version's metadata is forward-copied via
-     * `COALESCE(?, metadata)`, so a caller with no session gitHead (CLI import,
-     * dashboard delete) never wipes a previously-recorded commit anchor.
+     * Per-version metadata. Omit the property to forward-copy the current
+     * value; pass `null` or `{}` to clear it deliberately.
      */
-    metadata?: KnowledgeMetadata;
+    metadata?: KnowledgeMetadata | null;
   } = {},
 ): string | null {
   const newId = uuidv7();
@@ -487,7 +486,7 @@ export function appendVersion(
            logical_id, version, is_deleted, is_current)
          SELECT
             ?, tenant_id, project_id, COALESCE(?, category), COALESCE(?, title), COALESCE(?, content),
-           source_session, cross_project, created_at, ?, COALESCE(?, metadata), ${embSel}created_by,
+           source_session, cross_project, created_at, ?, CASE WHEN ? THEN ? ELSE metadata END, ${embSel}created_by,
            updated_by, sensitivity, promotion_status, promoted_at,
            approval_status, approved_by, approved_at, source_user_id, source_entry_id,
            last_accessed_at, worker_provider_id, worker_model_id,
@@ -500,8 +499,11 @@ export function appendVersion(
         overrides.title ?? null,
         overrides.content ?? null,
         now,
-        // #627 Phase 2: a non-empty override stamps the new version; NULL (absent
-        // or `{}`) makes COALESCE forward-copy the prior version's metadata.
+        // A missing property forwards the prior version. An explicit empty/null
+        // value clears it, which lets `.lore.md` remove an `enforce:` marker.
+        Object.hasOwn(overrides, "metadata") && overrides.metadata !== undefined
+          ? 1
+          : 0,
         stringifyMetadata(overrides.metadata),
         overrides.isDeleted ? 1 : 0,
         cur.id,
@@ -760,7 +762,13 @@ export function update(
      * appends a new version — a metric/sensitivity-only update mutates no version
      * row (A2 rows are immutable), so the existing gitHead correctly stands.
      */
-    metadata?: KnowledgeMetadata;
+    metadata?: KnowledgeMetadata | null;
+    /**
+     * Replace metadata from a canonical file import, even when content is
+     * unchanged. Ordinary callers retain the historical no-version-bump
+     * behavior for metadata-only re-observation.
+     */
+    replaceMetadata?: boolean;
   },
 ) {
   // A2 (#823): content is IMMUTABLE per version. A content change appends a new
@@ -796,11 +804,26 @@ export function update(
   const contentChanged =
     input.content !== undefined && cur != null && cur.content !== input.content;
   const titleChanged = effectiveTitle !== undefined;
-  if (contentChanged || titleChanged) {
+  const metadataChanged =
+    input.replaceMetadata === true &&
+    Object.hasOwn(input, "metadata") &&
+    JSON.stringify(cur.metadata) !== JSON.stringify(input.metadata ?? null);
+  if (contentChanged || titleChanged || metadataChanged) {
+    // Before `replaceMetadata`, an empty metadata object has always meant
+    // "no fresh provenance" and therefore forward-copies the current value.
+    // File imports explicitly opt into replacement so removing `enforce:` can
+    // clear just that marker without disturbing generic callers.
+    const metadataOverride = input.replaceMetadata
+      ? Object.hasOwn(input, "metadata")
+        ? { metadata: input.metadata }
+        : {}
+      : input.metadata && Object.keys(input.metadata).length > 0
+        ? { metadata: input.metadata }
+        : {};
     appendVersion(logicalId, {
       ...(effectiveTitle !== undefined ? { title: effectiveTitle } : {}),
       ...(input.content !== undefined ? { content: input.content } : {}),
-      metadata: input.metadata,
+      ...metadataOverride,
     });
     appended = true;
   }
@@ -884,7 +907,10 @@ export function remove(id: string, metadata?: KnowledgeMetadata) {
   // `lore why`); absent → forward-copies the entry's last commit anchor.
   const logicalId = logicalIdOf(id);
   if (!getByLogical(logicalId)) return; // already deleted or unknown — no-op
-  appendVersion(logicalId, { isDeleted: true, metadata });
+  appendVersion(logicalId, {
+    isDeleted: true,
+    ...(metadata !== undefined ? { metadata } : {}),
+  });
   // The row is NOT physically deleted, so FK ON DELETE CASCADE no longer fires —
   // clean cross-references explicitly, all keyed on the logical_id.
   // Capture the entities that lose a ref BEFORE the delete so their sync_rank

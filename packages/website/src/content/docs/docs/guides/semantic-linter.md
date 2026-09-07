@@ -7,10 +7,10 @@ sidebar:
 
 Your team's decisions, patterns, and gotchas live in [`.lore.md`](/docs/team-memory/), a version-controlled record of how this codebase is supposed to work. The **semantic linter** reads that record and, on every pull request, flags changes that appear to contradict it.
 
-It is a judge, not a rule engine. Instead of matching regexes, it asks an LLM whether a specific diff hunk conflicts with a specific documented invariant, and surfaces the ones that do as GitHub annotations. It is **advisory by default: findings and health failures do not fail the build.** A human decides what to do with each finding. Gate mode fails closed when the run is inconclusive.
+It is a judge, not a rule engine. Instead of matching regexes, it asks an LLM whether a specific diff hunk conflicts with a specific documented invariant, and surfaces the ones that do as GitHub annotations. It is **advisory by default: findings and health failures do not fail the build.** A human decides what to do with each finding. A repository can deliberately promote calibrated rules to gate mode, which fails closed when the run is inconclusive.
 
 ```
-✓ no suspected invariant violations (45 hunks × 67 invariants → 20 candidates → 20 judge calls)
+✓ no suspected invariant violations among selected candidates (45 hunks × 67 invariants → 20 candidates → 20 judge calls)
 ```
 
 ## What it is good for
@@ -19,7 +19,7 @@ It is a judge, not a rule engine. Instead of matching regexes, it asks an LLM wh
 - Turning tribal knowledge in `.lore.md` into a check that runs whether or not the person who wrote the rule is reviewing.
 - Doing this cheaply. Most hunk/invariant pairs are eliminated before any model is called (see [How it works](#how-it-works)).
 
-It is **not** a replacement for tests, type checking, or a linter. It has no ground truth; it produces suspicions for humans, so it runs alongside your real gates and never blocks them.
+It is **not** a replacement for tests, type checking, or a linter. It has no ground truth; promote only narrowly scoped, calibrated rules and keep the rest advisory.
 
 ## Quick start (GitHub Actions)
 
@@ -28,7 +28,7 @@ The repository ships a reusable composite action and a reference workflow. It us
 Add `.github/workflows/semantic-linter.yml`:
 
 ```yaml
-name: Semantic linter (advisory)
+name: Semantic linter
 
 on:
   pull_request_target:
@@ -39,6 +39,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
   copilot-requests: write
@@ -47,7 +48,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    continue-on-error: true # advisory: never block a PR
+    # Set this protected repository variable only after calibration.
+    continue-on-error: ${{ vars.LORE_SEMANTIC_LINT_GATE != 'true' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -81,9 +83,12 @@ jobs:
           model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}
           worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && secrets.LORE_WORKER_API_KEY || '' }}
           github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}
+          gate: ${{ vars.LORE_SEMANTIC_LINT_GATE == 'true' }}
 ```
 
 Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
+
+PR runs restore a derived invariant database but never write it. Copy the repository's `semantic-linter-cache.yml` too: it primes that cache on trusted `main` changes, including commits that change only `.lore.md`, avoiding forbidden cache-save attempts from `pull_request_target` runs.
 
 :::caution
 Use `pull_request_target` only with the trusted-base checkout pattern above. The workflow executes the base revision's code and fetches the PR head solely as immutable diff data, so the judge secret is never exposed to code supplied by the pull request.
@@ -133,6 +138,8 @@ The check is a three-stage funnel designed so the expensive stage runs as rarely
 3. **LLM judge.** The surviving candidates (capped at 20 per run) are sent to the judge one pair at a time: *does this hunk contradict this invariant?* Only these calls cost tokens.
 
 The funnel line in the report (`N hunks × M invariants → C candidates → J judge calls`) shows how aggressively each stage narrowed the work.
+
+On a wide PR, the cap means a complete, clean report says none of the **selected** candidates looked contradictory; it is not proof that every possible hunk/invariant pair was examined. Split broad changes before relying on an enforced rule.
 
 ### Where the invariants come from
 
@@ -212,8 +219,20 @@ A graduated ladder is designed above advisory:
 - **soft**: an overridable gate. A finding blocks unless the PR author adds a `lore-override: <invariant> — <reason>` trailer to a commit in the range.
 - **strict**: a hard gate that cannot be overridden.
 
-An invariant only escalates past advisory when its author explicitly opts it in (an `enforce` marker), and enumeration invariants are always capped at advisory regardless. The `--gate` flag (and the action's `gate` input) is the switch that makes soft/strict findings blocking.
+An invariant only escalates past advisory when its author explicitly opts it in on its marker. Enumeration invariants are always capped at advisory regardless. The `--gate` flag (and the action's `gate` input) is the switch that makes soft/strict findings blocking.
 
-:::note
-The gate/override machinery exists in the judge, but there is not yet an authoring path to set the `enforce` opt-in through `.lore.md`, so the CI check currently gates on nothing: every finding is advisory in practice. Treat gate mode as forthcoming. Use the advisory tier today and let a team tune the false-positive rate before any gate is turned on.
-:::
+```markdown
+<!-- lore:019e18ec-e328-76c4-9c3c-09dbe8d51c6c enforce:soft -->
+* **SQLite driver boundary**: `node:sqlite` must only be imported by packages/core/src/db.ts.
+```
+
+Use `enforce:soft`, `enforce:strict`, or `enforce:off`; omit it for advisory. Lore preserves the marker on export and imports it into the entry metadata. `soft` can be overridden with a `lore-override: <invariant> — <reason>` commit trailer; `strict` cannot.
+
+### Promoting a rule to a gate
+
+1. Leave a new rule advisory and review its findings across several representative PRs, including refactors and test-only changes.
+2. Make the rule narrow, prescriptive, and anchored to a file path or symbol; never promote a broad architectural summary or an enumeration.
+3. Add `enforce:soft` first. After confirming that its findings are actionable, set the protected repository variable `LORE_SEMANTIC_LINT_GATE` to `true`.
+4. Use `strict` only for a small rule that has already demonstrated a negligible false-positive rate. A partial or failed run blocks in gate mode by design.
+
+The supplied workflow reads that variable from the trusted base repository. With the variable absent or anything other than `true`, it remains advisory; this makes rollout reversible without accepting a PR-controlled gate switch.
