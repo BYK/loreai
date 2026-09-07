@@ -1012,6 +1012,30 @@ export interface RecallFollowUpCtx {
   ) => Promise<GatewayResponse>;
 }
 
+/** A final recall continuation must give the client an answer or a tool handoff. */
+export function hasRecallContinuationOutput(resp: GatewayResponse): boolean {
+  return resp.content.some((block) => {
+    if (block.type === "text") return block.text.trim().length > 0;
+    if (block.type === "tool_use") return block.name !== RECALL_TOOL_NAME;
+    // Responses refusals stay opaque for lossless replay, but are visible output.
+    return (
+      block.type === "opaque" &&
+      block.responsesItem === true &&
+      block.raw.type === "message" &&
+      Array.isArray(block.raw.content) &&
+      block.raw.content.some((part: unknown) => {
+        if (!part || typeof part !== "object") return false;
+        const refusal = part as Record<string, unknown>;
+        return (
+          refusal.type === "refusal" &&
+          typeof refusal.refusal === "string" &&
+          refusal.refusal.trim().length > 0
+        );
+      })
+    );
+  });
+}
+
 /**
  * Build a follow-up request after recall execution.
  *
@@ -1019,10 +1043,10 @@ export interface RecallFollowUpCtx {
  *  - All original messages
  *  - A synthetic assistant message with thinking blocks + recall tool_use
  *  - A user message with recall results as a tool_result
- *  - Full tools list (including recall — the continuation is recall-aware)
+ *  - Full tools list on every round, preserving the cached tool prefix
  *
  * The model continues from where it left off, now with recall results
- * in context. If it needs more detail it can call recall again.
+ * in context. On the final round, it must finish using the available results.
  *
  * `stream` is REQUIRED (no default) and MUST match how the caller consumes
  * the upstream response: `false` → JSON via `accumulateNonStreamResponse()`,
@@ -1038,7 +1062,9 @@ export function buildRecallFollowUpRequest(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   stream: boolean,
+  finalRecallRound = false,
 ): GatewayRequest {
+  if (finalRecallRound) log.info("recall final continuation: budget exhausted");
   // Build the follow-up using proper tool_use/tool_result pairs.
   //
   // Why: sending recall results as plain user text causes the LLM to treat
@@ -1095,6 +1121,14 @@ export function buildRecallFollowUpRequest(
         toolName: recallToolUseBlock.name,
         content: [
           { type: "text", text: recallResult || "[No results found.]" },
+          ...(finalRecallRound
+            ? [
+                {
+                  type: "text" as const,
+                  text: "The recall budget for this turn has been used. Continue the user's task using the results already available. Give your best supported answer, state any remaining uncertainty, or use an available non-recall tool. Do not request recall again.",
+                },
+              ]
+            : []),
         ],
       },
     ],
@@ -1308,6 +1342,7 @@ export async function runRecallFollowUpStreaming(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   signal?: AbortSignal,
+  finalRecallRound = false,
 ): Promise<RecallFollowUpStreaming | RecallFollowUpError> {
   const followUp = buildRecallFollowUpRequest(
     originalReq,
@@ -1315,6 +1350,7 @@ export async function runRecallFollowUpStreaming(
     recallResult,
     recallToolUseBlock,
     /* stream */ true,
+    finalRecallRound,
   );
   const { response } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),
@@ -1359,6 +1395,7 @@ export async function runRecallFollowUpJSON(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   signal?: AbortSignal,
+  finalRecallRound = false,
 ): Promise<RecallFollowUpJSON | RecallFollowUpError> {
   const followUp = buildRecallFollowUpRequest(
     originalReq,
@@ -1366,6 +1403,7 @@ export async function runRecallFollowUpJSON(
     recallResult,
     recallToolUseBlock,
     /* stream */ false,
+    finalRecallRound,
   );
   const { response, effectiveProtocol } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),
@@ -1421,6 +1459,7 @@ export async function runRecallFollowUpStreamAccumulated(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   signal?: AbortSignal,
+  finalRecallRound = false,
 ): Promise<RecallFollowUpJSON | RecallFollowUpError> {
   const parseSSE = ctx.parseSSE;
   if (!parseSSE) {
@@ -1434,6 +1473,7 @@ export async function runRecallFollowUpStreamAccumulated(
     recallResult,
     recallToolUseBlock,
     /* stream */ true,
+    finalRecallRound,
   );
   const { response } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),

@@ -18,6 +18,7 @@ import {
   responsesAnchorContext,
 } from "../src/pipeline";
 import {
+  hasRecallContinuationOutput,
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
   MAX_RECALL_DEPTH,
@@ -58,6 +59,7 @@ import {
   resolveToolResults,
 } from "../src/temporal-adapter";
 import type {
+  GatewayContentBlock,
   GatewayResponse,
   GatewayRequest,
   GatewayToolUseBlock,
@@ -782,6 +784,47 @@ describe("recallStoreKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildRecallFollowUpRequest", () => {
+  test.each([
+    ["anthropic", { type: "tool", name: "recall" }],
+    ["openai-responses", { type: "function", name: "recall" }],
+  ] as const)(
+    "final %s continuation preserves cached tools and controls",
+    (protocol, choice) => {
+      const req = makeRequest(
+        [],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+        ],
+      );
+      req.protocol = protocol;
+      req.metadata = Object.freeze({ tool_choice: Object.freeze(choice) });
+      req.extras = Object.freeze({ tool_choice: Object.freeze(choice) });
+      Object.freeze(req.tools);
+      Object.freeze(req.messages);
+      Object.freeze(req);
+      const block = makeRecallToolUse("architecture");
+      const follow = buildRecallFollowUpRequest(
+        req,
+        makeResponse([block], "tool_use"),
+        "real result",
+        block,
+        true,
+        true,
+      );
+      expect(follow.tools).toBe(req.tools);
+      expect(follow.metadata).toBe(req.metadata);
+      expect(follow.extras).toBe(req.extras);
+      expect(JSON.stringify(follow.messages.at(-1))).toContain("real result");
+      expect(JSON.stringify(follow.messages.at(-1))).toContain(
+        "The recall budget for this turn has been used",
+      );
+      expect(req.tools.map((tool) => tool.name)).toEqual(["Read", "recall"]);
+      expect(req.metadata.tool_choice).toBe(choice);
+      expect(req.extras?.tool_choice).toBe(choice);
+    },
+  );
+
   test("builds correct follow-up request structure with tool_use/tool_result", () => {
     const req = makeRequest(
       [{ role: "user", content: [{ type: "text", text: "hello" }] }],
@@ -3047,5 +3090,55 @@ describe("replaceRecallWithMarker", () => {
     expect(replaced.model).toBe(resp.model);
     expect(replaced.stopReason).toBe(resp.stopReason);
     expect(replaced.usage?.inputTokens).toBe(999);
+  });
+});
+
+describe("final recall continuation output", () => {
+  test.each([
+    [
+      [
+        {
+          type: "thinking",
+          thinking: "private reasoning",
+          signature: "signed",
+        },
+      ],
+      false,
+    ],
+    [
+      [
+        {
+          type: "opaque",
+          responsesItem: true,
+          raw: { type: "reasoning", encrypted_content: "private" },
+        },
+      ],
+      false,
+    ],
+    [[{ type: "text", text: "   " }], false],
+    [[{ type: "text", text: "answer" }], true],
+    [[{ type: "tool_use", id: "call", name: "Read", input: {} }], true],
+    [[{ type: "tool_use", id: "call", name: "recall", input: {} }], false],
+    [
+      [
+        {
+          type: "opaque",
+          responsesItem: true,
+          raw: {
+            type: "message",
+            content: [{ type: "refusal", refusal: "I cannot help with that." }],
+          },
+        },
+      ],
+      true,
+    ],
+  ] as const)("requires client-usable output: %j", (content, expected) => {
+    expect(
+      hasRecallContinuationOutput(
+        makeResponse(
+          structuredClone(content) as unknown as GatewayContentBlock[],
+        ),
+      ),
+    ).toBe(expected);
   });
 });
