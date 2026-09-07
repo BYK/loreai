@@ -117,6 +117,16 @@ function derivedMessageId(
   return `${TEMPORAL_ID_PREFIX}${digest}`;
 }
 
+// Keep the scalar lookup shared with the batch ambiguity fallback. LIMIT 1
+// historically has no ordering: its choice depends on SQLite's query plan.
+const MESSAGE_ID_LOOKUP = `SELECT t.id FROM temporal_messages t
+        JOIN projects p ON p.id = t.project_id
+        WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
+          AND (t.source_id = ?
+               OR (t.source_id = t.id AND t.source_id = ?)
+               OR (t.source_id IS NULL AND t.id = ?))
+        LIMIT 1`;
+
 /** Resolve a source ID to an existing legacy/restored row or its v82 key. */
 function resolveMessageId(
   projectId: string,
@@ -126,15 +136,7 @@ function resolveMessageId(
 ): string {
   const derivedId = derivedMessageId(projectId, sessionId, sourceId);
   const existing = db()
-    .query(
-      `SELECT t.id FROM temporal_messages t
-        JOIN projects p ON p.id = t.project_id
-        WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
-          AND (t.source_id = ?
-               OR (t.source_id = t.id AND t.source_id = ?)
-               OR (t.source_id IS NULL AND t.id = ?))
-        LIMIT 1`,
-    )
+    .query(MESSAGE_ID_LOOKUP)
     .get(
       projectId,
       currentTenantId(),
@@ -163,6 +165,126 @@ export function storedMessageId(input: {
     input.sourceID,
     input.legacySourceID,
   );
+}
+
+/**
+ * Batch the compatibility reads needed for recall placeholders. Source IDs
+ * are unique within a request; repeated keys use the last supplied identity.
+ * At most three statements per 100 messages, each below 999 bind parameters.
+ * No cache/marker can go stale after restore, migration or project merging.
+ */
+export function storedMessageIds(input: {
+  projectPath: string;
+  sessionID: string;
+  messages: ReadonlyArray<{ sourceID: string; legacySourceID?: string }>;
+  /** Never creates/backfills a project; an absent project returns an empty map. */
+  readOnly?: boolean;
+}): Map<string, string> {
+  const result = new Map<string, string>();
+  if (input.messages.length === 0) return result;
+  const pid = input.readOnly
+    ? projectId(input.projectPath)
+    : ensureProject(input.projectPath);
+  if (!pid) return result;
+  const tenant = currentTenantId();
+  const messages = [
+    ...new Map(input.messages.map((m) => [m.sourceID, m])).values(),
+  ];
+  for (let offset = 0; offset < messages.length; offset += 100) {
+    const chunk: Array<{
+      sourceID: string;
+      legacySourceID?: string;
+      derivedID: string;
+    }> = messages.slice(offset, offset + 100).map((message) => ({
+      ...message,
+      derivedID: derivedMessageId(pid, input.sessionID, message.sourceID),
+    }));
+    const sources = [
+      ...new Set(
+        chunk.flatMap((m) => [m.sourceID, m.legacySourceID ?? m.sourceID]),
+      ),
+    ];
+    // Materialize PK candidates before filtering NULL source IDs. Otherwise
+    // SQLite can scan EVERY restored row in the session once per chunk through
+    // idx_temporal_source_identity(project_id, session_id, source_id=NULL).
+    const rows = db()
+      .query(`WITH restored AS MATERIALIZED (
+        SELECT id, source_id, project_id, session_id FROM temporal_messages
+        WHERE id IN (${chunk.map(() => "?").join(",")})
+      )
+      SELECT t.id, t.source_id FROM temporal_messages t
+      JOIN projects p ON p.id = t.project_id
+      WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
+        AND t.source_id IN (${sources.map(() => "?").join(",")})
+      UNION ALL
+      SELECT t.id, t.source_id FROM restored t
+      JOIN projects p ON p.id = t.project_id
+      WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
+        AND t.source_id IS NULL`)
+      .all(
+        ...chunk.map((m) => m.derivedID),
+        pid,
+        tenant,
+        input.sessionID,
+        ...sources,
+        pid,
+        tenant,
+        input.sessionID,
+      ) as Array<{ id: string; source_id: string | null }>;
+    const bySource = new Map<string, Set<string>>();
+    const legacy = new Map<string, string>();
+    const restored = new Set<string>();
+    for (const row of rows) {
+      if (row.source_id === null) restored.add(row.id);
+      else {
+        let ids = bySource.get(row.source_id);
+        if (!ids) bySource.set(row.source_id, (ids = new Set()));
+        ids.add(row.id);
+        if (row.source_id === row.id) legacy.set(row.source_id, row.id);
+      }
+    }
+    const ambiguous: typeof chunk = [];
+    for (const message of chunk) {
+      const ids = new Set(bySource.get(message.sourceID));
+      const old = legacy.get(message.legacySourceID ?? message.sourceID);
+      if (old !== undefined) ids.add(old);
+      if (restored.has(message.derivedID)) ids.add(message.derivedID);
+      if (ids.size > 1) ambiguous.push(message);
+      else
+        result.set(
+          message.sourceID,
+          ids.values().next().value ?? message.derivedID,
+        );
+    }
+    if (ambiguous.length > 0) {
+      // A fixed modern/legacy priority would silently change existing recall
+      // IDs. Only genuinely ambiguous rows use the identical scalar subquery;
+      // UNION ALL keeps even this rare path bounded by batch chunks.
+      const matches = db()
+        .query(
+          ambiguous
+            .map(() => `SELECT ? AS source_id, (${MESSAGE_ID_LOOKUP}) AS id`)
+            .join(" UNION ALL "),
+        )
+        .all(
+          ...ambiguous.flatMap((m) => [
+            m.sourceID,
+            pid,
+            tenant,
+            input.sessionID,
+            m.sourceID,
+            m.legacySourceID ?? m.sourceID,
+            m.derivedID,
+          ]),
+        ) as Array<{ source_id: string; id: string | null }>;
+      for (const match of matches)
+        result.set(
+          match.source_id,
+          match.id ?? derivedMessageId(pid, input.sessionID, match.source_id),
+        );
+    }
+  }
+  return result;
 }
 
 /** Read-only variant for no-store paths; never creates or backfills a project. */

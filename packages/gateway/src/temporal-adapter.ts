@@ -226,6 +226,7 @@ export function gatewayMessagesToLore(
   messages: GatewayMessage[],
   sessionID: string,
   startIndex = 0,
+  legacyStartIndex = 0,
 ): LoreMessageWithParts[] {
   const out: LoreMessageWithParts[] = [];
   const now = Date.now();
@@ -235,9 +236,14 @@ export function gatewayMessagesToLore(
     const id = deterministicID(sessionID, m.role, startIndex + i, m.content);
     // The old adapter hashed the index within the array passed to this call.
     // Keep that exact invocation-relative index: full request histories use
-    // absolute indexes (startIndex=0), while the single assistant-response call
+    // absolute indexes (startIndex=0); narrow request slices supply legacyStartIndex.
+    // The single assistant-response call
     // historically used index 0 even though its modern ID uses startIndex.
-    const legacySourceID = legacyDeterministicID(m.role, i, m.content);
+    const legacySourceID = legacyDeterministicID(
+      m.role,
+      legacyStartIndex + i,
+      m.content,
+    );
     const parts: LorePart[] = m.content.map((block, pi) =>
       contentBlockToPart(block, sessionID, id, pi),
     );

@@ -676,6 +676,7 @@ describe("Pipeline — streaming responses", () => {
 
   afterEach(() => harness?.teardown());
   afterEach(() => vi.mocked(getDegradationWarning).mockReset());
+  afterEach(() => vi.mocked(Sentry.startInactiveSpan).mockReset());
 
   it("does not deadlock when an OpenAI translator drops Anthropic lifecycle frames", async () => {
     const anthropic = buildStreamingResponse(
@@ -1185,7 +1186,13 @@ describe("Pipeline — streaming responses", () => {
       setStatus: vi.fn(),
       updateName: vi.fn(),
     } as unknown as Sentry.Span;
-    vi.mocked(Sentry.startInactiveSpan).mockReturnValueOnce(span);
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
     let postResponses = 0;
     setPostResponseStartObserverForTest(() => postResponses++);
     setStreamingPostResponseLimitsForTest(0, 2);
@@ -1315,7 +1322,13 @@ describe("Pipeline — streaming responses", () => {
       setStatus,
       updateName: vi.fn(),
     } as unknown as Sentry.Span;
-    vi.mocked(Sentry.startInactiveSpan).mockReturnValueOnce(span);
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
     let upstreamStartedResolve: (() => void) | undefined;
     const upstreamStarted = new Promise<void>((resolve) => {
       upstreamStartedResolve = resolve;
@@ -1367,7 +1380,13 @@ describe("Pipeline — streaming responses", () => {
       setStatus: vi.fn(),
       updateName: vi.fn(),
     } as unknown as Sentry.Span;
-    vi.mocked(Sentry.startInactiveSpan).mockReturnValueOnce(span);
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
     setUpstreamInterceptor(
       async () =>
         new Response(incompleteResponsesSSE("resp_incomplete_span"), {
@@ -1589,7 +1608,13 @@ describe("Pipeline — streaming responses", () => {
       setStatus: vi.fn(),
       updateName: vi.fn(),
     } as unknown as Sentry.Span;
-    vi.mocked(Sentry.startInactiveSpan).mockReturnValueOnce(span);
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
     setUpstreamInterceptor(
       async () =>
         new Response(
