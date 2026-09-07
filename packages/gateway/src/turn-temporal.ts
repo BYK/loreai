@@ -46,7 +46,12 @@ export function storeTurnTemporal(input: {
     if (user) {
       const message = {
         projectPath,
-        info: user.info,
+        // The previous post-response conversion assigned this timestamp here.
+        // Preserve persistence-time ordering without changing the owned snapshot.
+        info: {
+          ...user.info,
+          time: { ...user.info.time, created: Date.now() },
+        },
         parts: user.parts,
         legacySourceID: user.legacySourceID,
       };

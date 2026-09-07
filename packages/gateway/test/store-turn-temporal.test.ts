@@ -103,10 +103,60 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe("storeTurnTemporal (#1084)", () => {
+  it("timestamps a delayed response at persistence time without mutating its snapshot", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.UTC(2026, 8, 7, 12);
+    vi.setSystemTime(startedAt);
+    const sessionID = freshSession();
+    const temporalInput = captureTurnTemporalInput(
+      userMessages(sessionID, "a slow request"),
+    );
+    const snapshot = structuredClone(temporalInput);
+
+    // An upstream delay must not become a user-to-assistant segmentation gap.
+    const persistedAt = startedAt + 20 * 60 * 1000;
+    vi.setSystemTime(persistedAt);
+    const input = {
+      temporalInput,
+      assistantContentBlocks: [
+        { type: "text" as const, text: "eventual reply" },
+      ],
+      usage: USAGE,
+      model: "test-model",
+      projectPath: PROJECT,
+      sessionID,
+      noStore: false,
+    };
+    storeTurnTemporal(input);
+
+    const timestamps = () =>
+      db()
+        .query(
+          "SELECT role, created_at FROM temporal_messages WHERE session_id = ? ORDER BY created_at, rowid",
+        )
+        .all(sessionID);
+    expect(timestamps()).toEqual([
+      { role: "user", created_at: persistedAt },
+      { role: "assistant", created_at: persistedAt },
+    ]);
+    expect(temporalInput).toEqual(snapshot);
+    expect(temporalInput.latestUser?.info.time.created).toBe(startedAt);
+
+    // Re-delivery keeps the original persisted creation time and snapshot.
+    vi.setSystemTime(persistedAt + 60 * 1000);
+    storeTurnTemporal(input);
+    expect(timestamps()).toEqual([
+      { role: "user", created_at: persistedAt },
+      { role: "assistant", created_at: persistedAt },
+    ]);
+    expect(temporalInput).toEqual(snapshot);
+  });
+
   it("stores the user + assistant messages for a normal turn", () => {
     const SESSION = freshSession();
     const loreMessages = userMessages(SESSION, "hello from the user");
