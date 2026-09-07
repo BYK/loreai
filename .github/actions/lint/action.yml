@@ -129,6 +129,7 @@ runs:
         LORE_IC_BASE: ${{ inputs.base }}
         LORE_IC_HEAD: ${{ inputs.head }}
         LORE_IC_MODEL: ${{ inputs.model }}
+        LORE_CACHE_MODE: ${{ inputs.cache-mode }}
         LORE_IC_EFFORT: ${{ inputs.effort }}
         LORE_WORKER_API_KEY: ${{ inputs.worker-api-key != '' && inputs.worker-api-key || inputs.github-token != '' && 'copilot-sdk-bridge' || '' }}
         LORE_WORKER_UPSTREAM: ${{ steps.copilot.outputs.url }}
