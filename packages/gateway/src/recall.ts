@@ -1012,7 +1012,23 @@ export interface RecallFollowUpCtx {
   ) => Promise<GatewayResponse>;
 }
 
-/** A final recall continuation must give the client an answer or a tool handoff. */
+function hasResponsesRefusal(item: Record<string, unknown>): boolean {
+  return (
+    item.type === "message" &&
+    Array.isArray(item.content) &&
+    item.content.some((part: unknown) => {
+      if (!part || typeof part !== "object") return false;
+      const refusal = part as Record<string, unknown>;
+      return (
+        refusal.type === "refusal" &&
+        typeof refusal.refusal === "string" &&
+        refusal.refusal.trim().length > 0
+      );
+    })
+  );
+}
+
+/** A final recall continuation must give the client an answer, refusal, or tool handoff. */
 export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
   if (
     ["max_tokens", "pause_turn", "model_context_window_exceeded"].includes(
@@ -1020,26 +1036,19 @@ export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
     )
   )
     return false;
-  return resp.content.some((block) => {
-    if (block.type === "text") return block.text.trim().length > 0;
-    if (block.type === "tool_use") return block.name !== RECALL_TOOL_NAME;
-    // Responses refusals stay opaque for lossless replay, but are visible output.
-    return (
-      block.type === "opaque" &&
-      block.responsesItem === true &&
-      block.raw.type === "message" &&
-      Array.isArray(block.raw.content) &&
-      block.raw.content.some((part: unknown) => {
-        if (!part || typeof part !== "object") return false;
-        const refusal = part as Record<string, unknown>;
-        return (
-          refusal.type === "refusal" &&
-          typeof refusal.refusal === "string" &&
-          refusal.refusal.trim().length > 0
-        );
-      })
-    );
-  });
+  return (
+    resp.content.some((block) => {
+      if (block.type === "text") return block.text.trim().length > 0;
+      if (block.type === "tool_use") return block.name !== RECALL_TOOL_NAME;
+      return (
+        block.type === "opaque" &&
+        block.responsesItem === true &&
+        hasResponsesRefusal(block.raw)
+      );
+    }) ||
+    // Buffered Responses refusals live only in the lossless raw output items.
+    (resp.rawOutputItems?.some(hasResponsesRefusal) ?? false)
+  );
 }
 
 /**

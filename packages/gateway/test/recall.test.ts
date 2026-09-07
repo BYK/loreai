@@ -12,6 +12,7 @@ import { describe, test, expect, vi } from "vitest";
 import {
   LORE_COMMIT_REMINDER,
   accumulateOpenAINonStreamJSON,
+  accumulateResponsesNonStreamJSON,
   loreMessagesToGateway,
   responsesProvenanceContent,
   responsesProvenanceByMessageId,
@@ -3094,6 +3095,58 @@ describe("replaceRecallWithMarker", () => {
 });
 
 describe("final recall continuation output", () => {
+  test.each([
+    ["I cannot help with that.", true],
+    ["", false],
+    [" \n ", false],
+    [undefined, false],
+    [42, false],
+  ])("buffered Responses refusal %j is usable: %s", (refusal, expected) => {
+    const response = accumulateResponsesNonStreamJSON({
+      id: "resp_refusal",
+      model: "gpt-test",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          id: "msg_refusal",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "refusal", refusal }],
+        },
+      ],
+    });
+    expect(response.content).toEqual([]);
+    const original = structuredClone(response);
+    Object.freeze(response.rawOutputItems);
+    expect(isUsableRecallContinuation(response)).toBe(expected);
+    expect(response).toEqual(original);
+
+    for (const stopReason of [
+      "max_tokens",
+      "pause_turn",
+      "model_context_window_exceeded",
+    ]) {
+      expect(isUsableRecallContinuation({ ...response, stopReason })).toBe(
+        false,
+      );
+    }
+  });
+
+  test.each([
+    { type: "reasoning", content: [{ type: "refusal", refusal: "no" }] },
+    { type: "message", content: [{ type: "output_text", refusal: "no" }] },
+    { type: "message", content: { type: "refusal", refusal: "no" } },
+    { type: "message", content: [null, 42, "no"] },
+  ])("does not accept a malformed refusal item: %j", (item) => {
+    expect(
+      isUsableRecallContinuation({
+        ...makeResponse([]),
+        rawOutputItems: [item],
+      }),
+    ).toBe(false);
+  });
+
   test.each([
     [
       [

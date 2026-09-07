@@ -28,7 +28,14 @@ function upstream(
   protocol: string,
   streaming: boolean,
   round: number,
-  kind: "recall" | "answer" | "tool" | "parallel" | "reasoning" | "unfinished",
+  kind:
+    | "recall"
+    | "answer"
+    | "tool"
+    | "parallel"
+    | "reasoning"
+    | "refusal"
+    | "unfinished",
 ): Response {
   if (kind === "unfinished") {
     if (protocol === "anthropic")
@@ -58,26 +65,36 @@ function upstream(
       usage: { input_tokens: 3, output_tokens: 2 },
     });
   }
-  if (kind === "reasoning") {
+  if (kind === "reasoning" || kind === "refusal") {
     if (protocol === "anthropic")
       return Response.json({
         id: `msg_${round}`,
         type: "message",
         role: "assistant",
         model: "claude-test",
-        content: [
-          { type: "thinking", thinking: "private", signature: "signed" },
-        ],
+        content:
+          kind === "refusal"
+            ? [{ type: "text", text: "I cannot help with that." }]
+            : [{ type: "thinking", thinking: "private", signature: "signed" }],
         stop_reason: "end_turn",
         stop_sequence: null,
         usage: { input_tokens: 3, output_tokens: 2 },
       });
-    const item = {
-      type: "reasoning",
-      id: `rs_${round}`,
-      summary: [],
-      encrypted_content: "opaque",
-    };
+    const item =
+      kind === "refusal"
+        ? {
+            type: "message",
+            id: `msg_${round}`,
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "refusal", refusal: "I cannot help with that." }],
+          }
+        : {
+            type: "reasoning",
+            id: `rs_${round}`,
+            summary: [],
+            encrypted_content: "opaque",
+          };
     const response = {
       id: `resp_${round}`,
       model: "gpt-5.6-terra",
@@ -90,7 +107,13 @@ function upstream(
           event("response.created", {
             response: { id: response.id, model: response.model },
           }) +
-            event("response.output_item.added", { output_index: 0, item }) +
+            event("response.output_item.added", {
+              output_index: 0,
+              item:
+                kind === "refusal"
+                  ? { type: item.type, id: item.id, role: "assistant" }
+                  : item,
+            }) +
             event("response.output_item.done", { output_index: 0, item }) +
             event("response.completed", { response }),
           { headers: { "content-type": "text/event-stream" } },
@@ -202,6 +225,7 @@ describe.each([
       "failed",
       "parallel",
       "reasoning",
+      "refusal",
       "unfinished",
     ] as const)("final result %s", async (mode) => {
       vi.mocked(executeRecall).mockResolvedValue({
@@ -299,11 +323,35 @@ describe.each([
           "The recall budget for this turn has been used",
         );
       }
-      if (mode === "answer" || mode === "tool") {
+      if (mode === "answer" || mode === "tool" || mode === "refusal") {
         expect(response.status).toBe(200);
         expect(body).toContain(
-          mode === "answer" ? "Finished the task." : '"Read"',
+          mode === "answer"
+            ? "Finished the task."
+            : mode === "refusal"
+              ? "I cannot help with that."
+              : '"Read"',
         );
+        if (mode === "refusal" && protocol === "openai-responses") {
+          if (stream) {
+            expect(body.match(/^event: response\.completed$/gm)).toHaveLength(
+              1,
+            );
+            expect(body).not.toContain("event: response.failed");
+          } else {
+            expect(JSON.parse(body)).toMatchObject({
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  content: [
+                    { type: "refusal", refusal: "I cannot help with that." },
+                  ],
+                },
+              ],
+            });
+          }
+        }
         expect(body).not.toContain("Recall depth limit reached");
       } else {
         if (stream) {
