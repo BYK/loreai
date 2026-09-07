@@ -11346,36 +11346,39 @@ export async function accumulateNonStreamResponse(
   }
 
   const json = JSON.parse(body) as Record<string, unknown>;
-  if (protocol === "openai-responses") {
-    const { response, status } = parseResponsesNonStreamEnvelope(json);
-    if (status !== "completed") {
-      throw new ResponsesTerminalError(response, status);
+  const parseResponse =
+    protocol === "openai-responses"
+      ? accumulateResponsesNonStreamJSON
+      : protocol === "openai"
+        ? accumulateOpenAINonStreamJSON
+        : protocol === "gemini"
+          ? parseGeminiResponseJSON
+          : accumulateAnthropicNonStreamJSON;
+  let response: GatewayResponse | undefined;
+  try {
+    if (protocol === "openai-responses") {
+      const parsed = parseResponsesNonStreamEnvelope(json);
+      response = parsed.response;
+      if (parsed.status !== "completed")
+        throw new ResponsesTerminalError(response, parsed.status);
+    } else {
+      response = parseResponse(json);
+      if (requireValidCompletion)
+        assertValidNonStreamCompletion(json, protocol);
     }
     return response;
+  } catch (error) {
+    if (!requireValidCompletion || error instanceof ResponsesTerminalError)
+      throw error;
+    // Content parsing can fail before usage validation. Reuse the same parser
+    // on usage fields alone, retaining its numeric and cache consistency checks.
+    // Invalid usage still throws; the projection is never returned as success.
+    response ??= parseResponse({
+      usage: json.usage,
+      usageMetadata: json.usageMetadata,
+    });
+    throw new NonStreamCompletionError(response);
   }
-  let response: GatewayResponse;
-  switch (protocol) {
-    case "openai":
-      response = accumulateOpenAINonStreamJSON(json);
-      break;
-    case "gemini":
-      response = parseGeminiResponseJSON(json);
-      break;
-    default:
-      // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
-      // Anthropic non-streaming JSON shape).
-      response = accumulateAnthropicNonStreamJSON(json);
-  }
-  if (requireValidCompletion) {
-    try {
-      assertValidNonStreamCompletion(json, protocol);
-    } catch {
-      // The protocol parser validates usage before it can reach accounting.
-      // A missing terminal marker must still fail, never normalize to success.
-      throw new NonStreamCompletionError(response);
-    }
-  }
-  return response;
 }
 
 function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {

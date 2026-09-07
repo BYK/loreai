@@ -3,6 +3,7 @@ import { db, ltm, loadSessionTracking, temporal } from "@loreai/core";
 import { loadConfig } from "../src/config";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 import {
+  accumulateNonStreamResponse,
   getActiveSessions,
   handleRequest,
   resetPipelineState,
@@ -27,6 +28,117 @@ afterEach(async () => {
   createdKnowledge.clear();
   vi.restoreAllMocks();
 });
+
+describe.each(["anthropic", "openai", "openai-responses"] as const)(
+  "malformed buffered %s content",
+  (protocol) => {
+    test.each([
+      "valid",
+      "negative",
+      "overflow",
+      "cache",
+      "missing",
+      "json",
+    ] as const)("retains only validated usage: %s", async (usageKind) => {
+      const alias = crypto.randomUUID();
+      let calls = 0;
+      setUpstreamInterceptor(async () => {
+        calls++;
+        if (calls < 11) return providerResponse(protocol, calls, "recall");
+        if (usageKind === "json")
+          return new Response('{"usage":', {
+            headers: { "content-type": "application/json" },
+          });
+        const json = await providerResponse(protocol, calls, "invalid").json();
+        // Duplicate identities force the content parser to reject before it
+        // reaches usage validation, even with a claimed successful terminal.
+        if (protocol === "anthropic") {
+          const call = {
+            type: "tool_use",
+            id: "duplicate",
+            name: "Read",
+            input: {},
+          };
+          json.content = [call, call];
+          json.stop_reason = "tool_use";
+        } else if (protocol === "openai") {
+          json.choices[0].finish_reason = "stop";
+          json.choices.push(json.choices[0]);
+        } else {
+          json.status = "completed";
+          json.output.push(json.output[0]);
+        }
+        const inputKey =
+          protocol === "openai" ? "prompt_tokens" : "input_tokens";
+        const outputKey =
+          protocol === "openai" ? "completion_tokens" : "output_tokens";
+        if (usageKind === "negative") json.usage[inputKey] = -1;
+        if (usageKind === "overflow")
+          json.usage[outputKey] = Number.MAX_SAFE_INTEGER;
+        if (usageKind === "cache") {
+          if (protocol === "anthropic") json.usage.cache_read_input_tokens = -1;
+          else
+            json.usage[
+              protocol === "openai"
+                ? "prompt_tokens_details"
+                : "input_tokens_details"
+            ] = { cached_tokens: 1001 };
+        }
+        if (usageKind === "missing") delete json.usage;
+        return Response.json(json);
+      });
+      const response = await handleRequest(request(protocol, alias), config());
+      expect(response.status).toBe(502);
+      await response.text();
+      await settled();
+      const state = stateFor(alias);
+      expect(calls).toBe(11);
+      expect(state.recallStore.size).toBe(0);
+      expect(getSessionCosts(state.sessionID)?.conversation).toMatchObject({
+        inputTokens: usageKind === "valid" ? 1030 : 30,
+        outputTokens: usageKind === "valid" ? 120 : 20,
+        turns: 1,
+      });
+    });
+  },
+);
+
+test.each(["valid", "negative", "overflow"] as const)(
+  "malformed Gemini content carries only validated %s usage",
+  async (usageKind) => {
+    const call = { functionCall: { id: "duplicate", name: "Read", args: {} } };
+    const json = {
+      candidates: [{ content: { parts: [call, call] }, finishReason: "STOP" }],
+      usageMetadata: {
+        promptTokenCount: usageKind === "negative" ? -1 : 1000,
+        candidatesTokenCount:
+          usageKind === "overflow" ? Number.MAX_SAFE_INTEGER : 100,
+        thoughtsTokenCount: 20,
+        cachedContentTokenCount: 50,
+      },
+    };
+    const error = await accumulateNonStreamResponse(
+      Response.json(json),
+      "gemini",
+      false,
+      undefined,
+      true,
+    ).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    if (usageKind === "valid") {
+      expect(error).toMatchObject({
+        response: {
+          content: [],
+          usage: {
+            inputTokens: 950,
+            outputTokens: 120,
+            cacheReadInputTokens: 50,
+          },
+        },
+      });
+    } else expect(error).not.toHaveProperty("response");
+  },
+);
 
 test("a cancelled in-flight continuation discards staged recall effects", async () => {
   const id = knowledge();
