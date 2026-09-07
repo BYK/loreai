@@ -543,7 +543,12 @@ describe("semantic lint action reporter", () => {
     expect(action).toContain('default: "restore"');
     expect(action).toContain("actions/cache/restore@v5");
     expect(action).toContain("actions/cache/save@v5");
+    expect(action).toContain("lore-invariants-v2-");
+    expect(action).toContain('git hash-object -- "${command[1]}"');
     expect(action).toContain("inputs.cache-mode == 'save'");
+    expect(
+      action.match(/LORE_CACHE_MODE: \$\{\{ inputs\.cache-mode \}\}/g),
+    ).toHaveLength(2);
     expect(action).toContain("--prime-lore-db");
     expect(action).toContain('test -s "$LORE_DB_PATH"');
     expect(action).toContain("steps.cache-db.outputs.ready == 'true'");
@@ -1181,6 +1186,8 @@ describe("semantic lint action reporter", () => {
     expect(primeWorkflow).toContain(
       '".github/workflows/semantic-linter-cache.yml"',
     );
+    expect(primeWorkflow).toContain('"packages/core/**"');
+    expect(primeWorkflow).toContain('"packages/gateway/**"');
     expect(primeWorkflow).toContain("cache-mode: save");
     expect(primeWorkflow).toContain("actions: write");
     expect(primeWorkflow).toContain("copilot-requests: write");

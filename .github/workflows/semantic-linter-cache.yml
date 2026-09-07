@@ -10,9 +10,8 @@ on:
       - ".lore.md"
       - ".github/actions/lint/**"
       - ".github/workflows/semantic-linter-cache.yml"
-      - "packages/core/src/agents-file.ts"
-      - "packages/core/src/invariant-check.ts"
-      - "packages/gateway/src/cli/invariant-check.ts"
+      - "packages/core/**"
+      - "packages/gateway/**"
       - "pnpm-lock.yaml"
   workflow_dispatch:
 
