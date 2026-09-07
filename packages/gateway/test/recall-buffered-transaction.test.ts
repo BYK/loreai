@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { db, ltm, loadSessionTracking, temporal } from "@loreai/core";
+import * as core from "@loreai/core";
 import { loadConfig } from "../src/config";
 import { clearAllCosts, getSessionCosts } from "../src/cost-tracker";
 import {
   accumulateNonStreamResponse,
+  buildStreamingResponse,
   getActiveSessions,
   handleRequest,
   resetPipelineState,
@@ -167,9 +169,13 @@ test("a cancelled in-flight continuation discards staged recall effects", async 
   expect(ltm.transferCount(id)).toBe(0);
 });
 
-test.each(["failure", "commit", "capacity"] as const)(
-  "preserves existing replay anchors after %s",
-  async (mode) => {
+test.each(
+  (["failure", "commit", "capacity", "late-capacity"] as const).flatMap(
+    (mode) => [false, true].map((stream) => ({ mode, stream })),
+  ),
+)(
+  "preserves existing replay anchors after $mode (stream=$stream)",
+  async ({ mode, stream }) => {
     knowledge();
     const alias = crypto.randomUUID();
     const req = request("anthropic", alias);
@@ -183,6 +189,7 @@ test.each(["failure", "commit", "capacity"] as const)(
     expect(state.recallStore.size).toBe(1);
     const existing = new Map(state.recallStore);
     const existingTracking = loadSessionTracking(state.sessionID)?.recallStore;
+    req.stream = stream;
     let transfersBefore: unknown;
     req.messages.push(
       { role: "assistant", content: firstContent },
@@ -197,7 +204,7 @@ test.each(["failure", "commit", "capacity"] as const)(
         ],
       },
     );
-    if (mode === "capacity") {
+    const fillCapacity = () => {
       const [key, value] = [...existing][0];
       // Existing valid state was produced by a real mixed handoff. Fill the
       // bounded map before the next request to exercise admission at capacity.
@@ -218,8 +225,9 @@ test.each(["failure", "commit", "capacity"] as const)(
         });
       }
       expect(state.recallStore.has(key)).toBe(true);
-    }
-    const mapBefore = new Map(state.recallStore);
+    };
+    if (mode === "capacity") fillCapacity();
+    let mapBefore = new Map(state.recallStore);
     if (mode === "commit")
       setRecallPersistenceCommitObserverForTest(() => {
         throw new Error("commit failed");
@@ -232,13 +240,23 @@ test.each(["failure", "commit", "capacity"] as const)(
         transfersBefore = db()
           .query("SELECT SUM(hit_count) AS count FROM knowledge_transfers")
           .get();
+      if (mode === "late-capacity" && calls === 1) {
+        fillCapacity();
+        mapBefore = new Map(state.recallStore);
+      }
       return providerResponse(
         "anthropic",
         100 + ++calls,
         mode === "failure" || calls === 1 ? "recall" : "answer",
+        stream,
       );
     });
-    if (mode === "capacity") {
+    if (stream) {
+      const response = await handleRequest(req, config());
+      expect(response.status).toBe(200);
+      if (mode === "commit" || mode === "late-capacity") await response.text();
+      else await expect(response.text()).rejects.toBeInstanceOf(Error);
+    } else if (mode === "capacity") {
       const response = await handleRequest(req, config());
       expect(response.status).toBe(502);
       await response.text();
@@ -726,6 +744,286 @@ function request(
     },
   };
 }
+
+describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
+  "native Anthropic recall transaction for %s client",
+  (client) => {
+    test.each([false, true])(
+      "mixed handoff waits for EOF (cancel=%s)",
+      async (cancel) => {
+        const id = knowledge();
+        const alias = crypto.randomUUID();
+        const req = request(client, alias);
+        req.stream = true;
+        req.rawHeaders["x-lore-provider"] = "anthropic";
+        req.rawHeaders["x-lore-upstream-url"] = "https://api.anthropic.com";
+        req.rawHeaders["x-api-key"] = "test-key";
+        delete req.rawHeaders.authorization;
+        setUpstreamInterceptor(async () =>
+          providerResponse("anthropic", 1, "mixed", true),
+        );
+        const response = await handleRequest(req, config());
+        const reader = response.body!.getReader();
+        let wire = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          expect(done).toBe(false);
+          wire += new TextDecoder().decode(value);
+          if (
+            client === "anthropic"
+              ? (wire.match(/^event: message_stop$/gm)?.length ?? 0) === 2
+              : client === "openai"
+                ? wire.includes("data: [DONE]")
+                : client === "openai-responses"
+                  ? wire.includes("event: response.completed")
+                  : wire.includes('"finishReason":')
+          )
+            break;
+        }
+        await vi.waitFor(() =>
+          expect(streamingPostResponsePendingForTest()).toBe(1),
+        );
+        const state = stateFor(alias);
+        expect.soft(state.recallStore.size).toBe(0);
+        expect
+          .soft(loadSessionTracking(state.sessionID)?.recallStore ?? null)
+          .toBeNull();
+        expect.soft(ltm.transferCount(id)).toBe(0);
+        if (cancel) await reader.cancel();
+        else expect((await reader.read()).done).toBe(true);
+        reader.releaseLock();
+        await settled();
+        expect(state.recallStore.size).toBe(cancel ? 0 : 1);
+        expect(ltm.transferCount(id)).toBe(cancel ? 0 : 1);
+        expect(getSessionCosts(state.sessionID)?.conversation).toMatchObject({
+          inputTokens: 3,
+          outputTokens: 2,
+          turns: 1,
+        });
+      },
+    );
+    test.each([
+      "answer",
+      "mixed",
+      "fallback",
+      "exhausted",
+      "cancel",
+      "abort",
+      "storage",
+      "commit",
+    ] as const)("stages effects through %s", async (mode) => {
+      const id = knowledge();
+      const alias = crypto.randomUUID();
+      const req = request(client, alias);
+      req.stream = true;
+      req.rawHeaders["x-lore-provider"] = "anthropic";
+      req.rawHeaders["x-lore-upstream-url"] = "https://api.anthropic.com";
+      req.rawHeaders["x-api-key"] = "test-key";
+      delete req.rawHeaders.authorization;
+      const caller = new AbortController();
+      req.signal = caller.signal;
+      const continuationStarted = Promise.withResolvers<void>();
+      const releaseContinuation = Promise.withResolvers<void>();
+      const snapshots: Array<{
+        anchors: number;
+        tracking: string | null;
+        transfers: number;
+      }> = [];
+      let calls = 0;
+      let commits = 0;
+      if (mode === "storage")
+        vi.spyOn(temporal, "store").mockImplementation(() => {
+          throw new Error("injected storage failure");
+        });
+      setRecallPersistenceCommitObserverForTest(() => {
+        commits++;
+        if (mode === "commit") throw new Error("injected commit failure");
+      });
+      setUpstreamInterceptor(async () => {
+        calls++;
+        const state = stateFor(alias);
+        snapshots.push({
+          anchors: state.recallStore.size,
+          tracking: loadSessionTracking(state.sessionID)?.recallStore ?? null,
+          transfers: ltm.transferCount(id),
+        });
+        if (calls === 2 && (mode === "cancel" || mode === "abort")) {
+          continuationStarted.resolve();
+          await releaseContinuation.promise;
+        }
+        if (mode === "fallback" && calls === 2)
+          return new Response("failure", { status: 503 });
+        return providerResponse(
+          "anthropic",
+          calls,
+          mode === "mixed"
+            ? "mixed"
+            : mode !== "exhausted" && calls === 3
+              ? "answer"
+              : "recall",
+          true,
+        );
+      });
+      const response = await handleRequest(req, config());
+      const reader = response.body!.getReader();
+      let wire = "";
+      let failure: unknown;
+      const read = (async () => {
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            wire += new TextDecoder().decode(value);
+          }
+        } catch (error) {
+          failure = error;
+        }
+      })();
+      try {
+        if (mode === "cancel" || mode === "abort") {
+          await continuationStarted.promise;
+          if (mode === "cancel") await reader.cancel();
+          else caller.abort(new DOMException("client cancelled", "AbortError"));
+        }
+      } finally {
+        releaseContinuation.resolve();
+      }
+      await read;
+      reader.releaseLock();
+      await settled();
+      const state = stateFor(alias);
+      const successful =
+        mode === "answer" || mode === "mixed" || mode === "fallback";
+      expect(calls).toBe(
+        mode === "exhausted"
+          ? 11
+          : mode === "mixed"
+            ? 1
+            : ["cancel", "abort", "fallback"].includes(mode)
+              ? 2
+              : 3,
+      );
+      expect(snapshots).toEqual(
+        snapshots.map(() => ({ anchors: 0, tracking: null, transfers: 0 })),
+      );
+      expect(state.recallStore.size).toBe(
+        successful ? (mode === "answer" ? 2 : 1) : 0,
+      );
+      expect(ltm.transferCount(id)).toBe(successful ? 1 : 0);
+      if (!successful)
+        expect(
+          loadSessionTracking(state.sessionID)?.recallStore ?? null,
+        ).toBeNull();
+      if (mode === "exhausted") {
+        if (client === "openai-responses")
+          expect(wire).toContain("event: response.failed");
+        else expect(failure).toBeInstanceOf(Error);
+      } else if (successful) {
+        expect(failure).toBeUndefined();
+        expect(wire).toContain(
+          mode === "answer" ? "Completed answer" : "lore-recall:",
+        );
+        expect(
+          JSON.parse(loadSessionTracking(state.sessionID)!.recallStore!).length,
+        ).toBe(state.recallStore.size);
+      }
+      if (mode === "commit") expect(commits).toBe(1);
+      if (mode === "storage") expect(commits).toBe(0);
+      if (!successful)
+        expect(
+          db()
+            .query(
+              "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ? AND role = 'assistant'",
+            )
+            .get(state.sessionID),
+        ).toEqual({ count: 0 });
+    });
+  },
+);
+
+test.each(["success", "cancel", "late-recall"] as const)(
+  "standalone native recall delivery: %s",
+  async (mode) => {
+    const id = knowledge();
+    const alias = crypto.randomUUID();
+    const req = request("anthropic", alias);
+    setUpstreamInterceptor(async () =>
+      providerResponse("anthropic", 1, "answer"),
+    );
+    await (await handleRequest(req, config())).text();
+    await settled();
+    const state = stateFor(alias);
+    const beforeTracking =
+      loadSessionTracking(state.sessionID)?.recallStore ?? null;
+    const recallStarted = Promise.withResolvers<void>();
+    const releaseRecall = Promise.withResolvers<void>();
+    const recallFinished = Promise.withResolvers<void>();
+    if (mode === "late-recall") {
+      const realRecall = core.runRecall;
+      vi.spyOn(core, "runRecall").mockImplementationOnce(async (input) => {
+        recallStarted.resolve();
+        await releaseRecall.promise;
+        try {
+          // Model a non-cooperative in-flight search returning its real transfer
+          // callback after cancellation; the gateway must discard it.
+          return await realRecall({ ...input, signal: undefined });
+        } finally {
+          recallFinished.resolve();
+        }
+      });
+    }
+    setUpstreamInterceptor(async () =>
+      providerResponse("anthropic", 2, "answer", true),
+    );
+    const completed = vi.fn();
+    const response = buildStreamingResponse(
+      providerResponse("anthropic", 1, "recall", true),
+      completed,
+      {
+        clientMessages: req.messages,
+        modifiedReq: req,
+        config: config(),
+        sessionState: state,
+        cacheOptions: {},
+        clientSpeaksAnthropic: true,
+      },
+    );
+    const reader = response.body!.getReader();
+    if (mode === "late-recall") {
+      const drain = (async () => {
+        while (!(await reader.read()).done) {
+          /* drive source */
+        }
+      })();
+      await recallStarted.promise;
+      await reader.cancel();
+      releaseRecall.resolve();
+      await recallFinished.promise;
+      await drain;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(completed).not.toHaveBeenCalled();
+    } else {
+      let wire = "";
+      do {
+        const { done, value } = await reader.read();
+        expect(done).toBe(false);
+        wire += new TextDecoder().decode(value);
+      } while ((wire.match(/^event: message_stop$/gm)?.length ?? 0) < 3);
+      await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(1));
+      expect(state.recallStore.size).toBe(0);
+      expect(ltm.transferCount(id)).toBe(0);
+      if (mode === "cancel") await reader.cancel();
+      else expect((await reader.read()).done).toBe(true);
+    }
+    reader.releaseLock();
+    expect(state.recallStore.size).toBe(mode === "success" ? 1 : 0);
+    expect(ltm.transferCount(id)).toBe(mode === "success" ? 1 : 0);
+    if (mode !== "success")
+      expect(loadSessionTracking(state.sessionID)?.recallStore ?? null).toBe(
+        beforeTracking,
+      );
+  },
+);
 
 function config() {
   const cfg = loadConfig();

@@ -6688,6 +6688,71 @@ async function forwardToUpstream(
 // Response builders
 // ---------------------------------------------------------------------------
 
+/** Stage recall effects; commit runs inside the successful-turn savepoint. */
+function createRecallPersistenceTransaction(
+  sessionState: SessionState,
+  noStore = false,
+) {
+  const pendingRecalls = new Map<string, StoredRecall>();
+  const pendingTransfers: Array<() => void> = [];
+  let baseline: Map<string, StoredRecall> | undefined;
+  let committed = false;
+  let rolledBack = false;
+  const candidateStore = (): Map<string, StoredRecall> => {
+    const candidate = new Map(sessionState.recallStore);
+    for (const [key, value] of pendingRecalls)
+      addRecallStoreEntry(candidate, key, value);
+    return candidate;
+  };
+  return {
+    deferTransfer: (record: () => void): void => {
+      if (!noStore && !committed && !rolledBack) pendingTransfers.push(record);
+    },
+    stage: (key: string, value: StoredRecall): void => {
+      if (noStore || committed || rolledBack) return;
+      // Enforce admission before exposing the marker without mutating live state.
+      addRecallStoreEntry(candidateStore(), key, value);
+      pendingRecalls.set(key, value);
+    },
+    commit: (): void => {
+      if (committed || rolledBack) return;
+      if (pendingRecalls.size === 0 && pendingTransfers.length === 0) {
+        committed = true;
+        return;
+      }
+      if (!noStore) {
+        candidateStore();
+        // Snapshot only within this synchronous commit, never across an await.
+        baseline = new Map(sessionState.recallStore);
+        for (const record of pendingTransfers) record();
+        for (const [key, value] of pendingRecalls) {
+          sessionState.recallStore.set(key, value);
+          recallPersistenceCommitObserver?.();
+        }
+        saveSessionTracking(sessionState.sessionID, {
+          recallStore: serializeRecallStore(sessionState.recallStore),
+        });
+      }
+      committed = true;
+      pendingRecalls.clear();
+      pendingTransfers.length = 0;
+    },
+    rollback: (): void => {
+      if (rolledBack) return;
+      rolledBack = true;
+      // The enclosing savepoint restores SQLite; restore the Map in place.
+      if (baseline) {
+        sessionState.recallStore.clear();
+        for (const [key, value] of baseline)
+          sessionState.recallStore.set(key, value);
+        baseline = undefined;
+      }
+      pendingRecalls.clear();
+      pendingTransfers.length = 0;
+    },
+  };
+}
+
 /**
  * Per-model cap for client usage scaling. Derives the model's real context
  * window and max-output budget (models.dev-backed) and mirrors Claude Code's
@@ -6744,6 +6809,11 @@ export function buildStreamingResponse(
     noStore?: boolean;
     /** Account failed recall continuations without persisting a successful reply. */
     onFailure?: (response: GatewayResponse) => void;
+    /** Transfer persistence to the request's downstream-success finalizer. */
+    onTransactionReady?: (transaction: {
+      commit: () => void;
+      rollback: () => void;
+    }) => void;
     /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
      *  recall marker is emitted as its own Anthropic SSE message envelope
      *  (split) or as an inline synthetic text content block (which the
@@ -6784,6 +6854,18 @@ export function buildStreamingResponse(
   maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
   signal?: AbortSignal,
 ): Response {
+  const recallPersistence = recallContext
+    ? createRecallPersistenceTransaction(
+        recallContext.sessionState,
+        recallContext.noStore,
+      )
+    : undefined;
+  if (recallPersistence) recallContext?.onTransactionReady?.(recallPersistence);
+  let sourceSucceeded = false;
+  const complete = (response: GatewayResponse): void => {
+    onComplete(response);
+    sourceSucceeded = true;
+  };
   const recallDiagnostics = createRecallDiagnostics(
     recallContext !== undefined && !recallContext.noStore,
   );
@@ -6811,6 +6893,7 @@ export function buildStreamingResponse(
     ? AbortSignal.any([signal, recallAbort.signal])
     : recallAbort.signal;
   const onStreamAbort = (): void => {
+    recallPersistence?.rollback();
     resumeDemand?.();
     resumeDemand = undefined;
     if (signal?.aborted && !recallAbort.signal.aborted) {
@@ -7073,7 +7156,7 @@ export function buildStreamingResponse(
                         getLLMClient(recallContext.config),
                         alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
                         streamSignal,
-                        recallContext.noStore ? () => {} : undefined,
+                        recallPersistence!.deferTransfer,
                       ),
                   ),
                 streamSignal,
@@ -7119,27 +7202,16 @@ export function buildStreamingResponse(
                 },
               );
               if (!recallContext.noStore) {
-                addRecallStoreEntry(
-                  recallContext.sessionState.recallStore,
-                  storeKey,
-                  {
-                    toolUseId: recallBlock.id,
-                    anchorId,
-                    anchorContextId,
-                    input,
-                    position,
-                    result,
-                    ...(companionToolUses.length > 0
-                      ? { companionToolUses }
-                      : {}),
-                  },
-                );
-                // Persist the store (v46) so the marker still expands byte-identically
-                // after a gateway restart instead of leaking raw marker text upstream.
-                saveSessionTracking(recallContext.sessionState.sessionID, {
-                  recallStore: serializeRecallStore(
-                    recallContext.sessionState.recallStore,
-                  ),
+                recallPersistence!.stage(storeKey, {
+                  toolUseId: recallBlock.id,
+                  anchorId,
+                  anchorContextId,
+                  input,
+                  position,
+                  result,
+                  ...(companionToolUses.length > 0
+                    ? { companionToolUses }
+                    : {}),
                 });
               }
 
@@ -7271,7 +7343,7 @@ export function buildStreamingResponse(
                 clearKeepalive();
                 markerResp.usage = cumulativeUsage;
                 recallDiagnostics.finish("completed");
-                onComplete(markerResp);
+                complete(markerResp);
                 safeClose();
                 return;
               }
@@ -7345,7 +7417,7 @@ export function buildStreamingResponse(
                 clearKeepalive();
                 markerResp.usage = cumulativeUsage;
                 recallDiagnostics.finish("failed");
-                onComplete(markerResp);
+                complete(markerResp);
                 safeClose();
                 return;
               }
@@ -7384,7 +7456,7 @@ export function buildStreamingResponse(
                 clearKeepalive();
                 markerResp.usage = cumulativeUsage;
                 recallDiagnostics.finish("failed");
-                onComplete(markerResp);
+                complete(markerResp);
                 safeClose();
                 return;
               }
@@ -7515,7 +7587,7 @@ export function buildStreamingResponse(
                 log.info("recall final continuation: completed");
               clearKeepalive();
               recallDiagnostics.finish("completed");
-              onComplete(continuationResp);
+              complete(continuationResp);
               safeClose();
               return;
             }
@@ -7524,9 +7596,10 @@ export function buildStreamingResponse(
           // No recall — normal path
           clearKeepalive();
           const response = accumulator.getResponse();
-          onComplete(response);
+          complete(response);
           safeClose();
         } catch (err) {
+          recallPersistence?.rollback();
           recallDiagnostics.finish(streamSignal.aborted ? "aborted" : "failed");
           if (err instanceof RecallContinuationFailure)
             reportRecallContinuationFailure(err.category);
@@ -7572,6 +7645,9 @@ export function buildStreamingResponse(
       resumeDemand = undefined;
     },
     cancel() {
+      // A translator may cancel its source after consuming a valid terminal.
+      // The request owner distinguishes that from actual downstream cancellation.
+      if (!recallContext?.onTransactionReady) recallPersistence?.rollback();
       recallDiagnostics.finish("aborted");
       resumeDemand?.();
       resumeDemand = undefined;
@@ -7588,7 +7664,7 @@ export function buildStreamingResponse(
     },
   });
 
-  return new Response(stream, {
+  const response = new Response(stream, {
     status: 200,
     headers: {
       "content-type": "text/event-stream",
@@ -7596,6 +7672,27 @@ export function buildStreamingResponse(
       connection: "keep-alive",
     },
   });
+  if (!recallPersistence || recallContext?.onTransactionReady) return response;
+  // Standalone callers also commit only when the returned body reaches EOF.
+  return wrapBodyWithCleanup(
+    response,
+    () => {
+      if (!sourceSucceeded || cancelled || streamSignal.aborted) {
+        recallPersistence.rollback();
+        return;
+      }
+      try {
+        withTenant(recallContext?.sessionState.storageTenantId ?? "", () =>
+          withSavepoint("native_recall_delivery", recallPersistence.commit),
+        );
+      } catch (error) {
+        recallPersistence.rollback();
+        throw error;
+      }
+    },
+    streamSignal,
+    recallPersistence.rollback,
+  );
 }
 
 /**
@@ -17273,6 +17370,7 @@ async function handleConversationTurn(
       response,
       releaseForeground,
       foregroundAbort.signal,
+      rollbackRecallPersistence,
     );
   };
   const awaitForeground = async <T>(operation: Promise<T>): Promise<T> => {
@@ -17374,49 +17472,10 @@ async function handleConversationTurn(
     let currentModifiedReq = modifiedReq;
     const responsesVisibleContent: GatewayContentBlock[] = [];
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
-    const pendingRecalls = new Map<string, StoredRecall>();
-    const pendingTransfers: Array<() => void> = [];
-    let recallCommitBaseline: Map<string, StoredRecall> | undefined;
-    let recallCommitted = false;
-    let recallRolledBack = false;
-    const bufferedRecallTransaction = {
-      commit: (): void => {
-        if (recallCommitted || recallRolledBack) return;
-        if (!suppressTemporalStorage) {
-          // Validate against the live store before any writes. The baseline
-          // covers only this synchronous savepoint, never an upstream await.
-          const candidate = new Map(sessionState.recallStore);
-          for (const [key, value] of pendingRecalls)
-            addRecallStoreEntry(candidate, key, value);
-          recallCommitBaseline = new Map(sessionState.recallStore);
-          for (const record of pendingTransfers) record();
-          for (const [key, value] of pendingRecalls) {
-            sessionState.recallStore.set(key, value);
-            recallPersistenceCommitObserver?.();
-          }
-          saveSessionTracking(sessionState.sessionID, {
-            recallStore: serializeRecallStore(sessionState.recallStore),
-          });
-        }
-        recallCommitted = true;
-        pendingRecalls.clear();
-        pendingTransfers.length = 0;
-      },
-      rollback: (): void => {
-        if (recallRolledBack) return;
-        recallRolledBack = true;
-        // The enclosing savepoint restores DB writes. Restore the Map in
-        // place, including when savepoint release failed after commit().
-        if (recallCommitBaseline) {
-          sessionState.recallStore.clear();
-          for (const [key, value] of recallCommitBaseline)
-            sessionState.recallStore.set(key, value);
-          recallCommitBaseline = undefined;
-        }
-        pendingRecalls.clear();
-        pendingTransfers.length = 0;
-      },
-    };
+    const bufferedRecallTransaction = createRecallPersistenceTransaction(
+      sessionState,
+      suppressTemporalStorage,
+    );
     const finishBufferedResponse = (response: GatewayResponse): void => {
       if (req.stream || recallDepth > 0) {
         // Recall state and successful-turn storage share the existing atomic
@@ -17479,10 +17538,7 @@ async function handleConversationTurn(
             getLLMClient(config),
             alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
             foregroundAbort.signal,
-            (record) => {
-              if (!suppressTemporalStorage && !recallRolledBack)
-                pendingTransfers.push(record);
-            },
+            bufferedRecallTransaction.deferTransfer,
           ),
         foregroundAbort.signal,
       );
@@ -17514,13 +17570,7 @@ async function handleConversationTurn(
           result,
           ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
         };
-        // Preserve capacity checks before exposing a marker, while keeping
-        // staged entries invisible to other requests and persisted tracking.
-        const candidate = new Map(sessionState.recallStore);
-        for (const [key, value] of pendingRecalls)
-          addRecallStoreEntry(candidate, key, value);
-        addRecallStoreEntry(candidate, storeKey, storedRecall);
-        pendingRecalls.set(storeKey, storedRecall);
+        bufferedRecallTransaction.stage(storeKey, storedRecall);
       }
 
       const markerText = buildAnchoredRecallMarker(
@@ -18192,6 +18242,10 @@ async function handleConversationTurn(
             upstreamRoute: requestUpstreamRoute,
             noStore: suppressTemporalStorage,
             onFailure: finishUnsuccessfulStreaming,
+            onTransactionReady: (transaction) => {
+              rollbackRecallPersistence();
+              recallPersistenceTransaction = transaction;
+            },
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
