@@ -654,6 +654,10 @@ export function clearProject(projectPath: string): ClearResult {
   // Delete in dependency order
   database.exec("BEGIN IMMEDIATE");
   try {
+    // Preparation may publish derived counts before any temporal row exists.
+    database
+      .query("DELETE FROM semantic_token_cache WHERE project_id = ?")
+      .run(pid);
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(pid);

@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { db, ensureProject, isToolPart, log, temporal } from "@loreai/core";
+import {
+  db,
+  ensureProject,
+  isToolPart,
+  log,
+  temporal,
+  saveSessionTracking,
+} from "@loreai/core";
+import * as tokenize from "../../core/src/tokenize";
 import * as Sentry from "@sentry/bun";
 import * as adapter from "../src/temporal-adapter";
 import {
@@ -26,9 +34,12 @@ vi.mock("@sentry/bun", async (importOriginal) => {
 const projectPath = "/test/semantic-preparation";
 const sessionID = "semantic-session";
 const sink = { info() {}, warn() {}, error() {}, captureException() {} };
-beforeEach(() => db().exec("DELETE FROM temporal_messages"));
+beforeEach(() =>
+  db().exec("DELETE FROM temporal_messages; DELETE FROM semantic_token_cache"),
+);
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   log.registerSink(sink);
 });
 const storage = {
@@ -70,6 +81,130 @@ function seed(request: ReturnType<typeof semanticHistory>, restored = false) {
 }
 
 describe("semantic preparation", () => {
+  it("does not retokenize unchanged provenance on a subsequent request", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-07T18:14:04Z"));
+    const request = semanticHistory(6);
+    ensureProject(projectPath);
+    saveSessionTracking(sessionID, {});
+    const count = vi.spyOn(tokenize, "estimateTokens");
+    const first = await prepareSemanticMessages({
+      messages: request.messages,
+      projectPath,
+      sessionID,
+      noStore: false,
+      timing: new PreparationTiming(request),
+    });
+    expect(count.mock.calls.length).toBeGreaterThan(0);
+    count.mockClear();
+    vi.setSystemTime(new Date("2026-09-07T18:15:04Z"));
+    const next = await prepareSemanticMessages({
+      messages: structuredClone(request.messages),
+      projectPath,
+      sessionID,
+      noStore: false,
+      timing: new PreparationTiming(request),
+    });
+    expect(count).not.toHaveBeenCalled();
+    expect(
+      next.loreMessages[0].info.time.created -
+        first.loreMessages[0].info.time.created,
+    ).toBe(60_000);
+    expect(next.loreMessages.map((m) => m.hiddenInputTokens)).toEqual(
+      first.loreMessages.map((m) => m.hiddenInputTokens),
+    );
+    expect(
+      loreMessagesToGateway(
+        next.loreMessages,
+        next.provenanceByMessageId,
+        true,
+      ),
+    ).toEqual(
+      loreMessagesToGateway(
+        first.loreMessages,
+        first.provenanceByMessageId,
+        true,
+      ),
+    );
+  });
+
+  it.each(["edit", "rewind"])(
+    "preserves authoritative source after a warm historical %s",
+    async (mode) => {
+      const request = semanticHistory(6);
+      ensureProject(projectPath);
+      saveSessionTracking(sessionID, {});
+      const prepare = (noStore: boolean) =>
+        prepareSemanticMessages({
+          messages: request.messages,
+          projectPath,
+          sessionID,
+          noStore,
+          timing: new PreparationTiming(request),
+        });
+      await prepare(false);
+      if (mode === "edit") {
+        // Change hidden historical bytes while leaving the visible projection,
+        // source positions, and final message unchanged.
+        const historical = request.messages.find((m) =>
+          JSON.stringify(m.provenanceContent)?.includes(
+            "synthetic-encrypted-state-",
+          ),
+        )!;
+        historical.provenanceContent = JSON.parse(
+          JSON.stringify(historical.provenanceContent).replace(
+            "synthetic-encrypted-state-",
+            "different-encrypted-state-",
+          ),
+        );
+      } else request.messages.splice(2, 2);
+      const count = vi.spyOn(tokenize, "estimateTokens");
+      const warm = await prepare(false);
+      expect(count.mock.calls.length).toBe(mode === "edit" ? 2 : 0);
+      const cold = await prepare(true);
+      expect(warm.loreMessages.map((m) => m.hiddenInputTokens)).toEqual(
+        cold.loreMessages.map((m) => m.hiddenInputTokens),
+      );
+      expect(warm.temporalInput.assistantIndex).toBe(request.messages.length);
+      expect(warm.loreMessages.map((m) => m.info.id)).toEqual(
+        cold.loreMessages.map((m) => m.info.id),
+      );
+      expect(
+        loreMessagesToGateway(
+          warm.loreMessages,
+          warm.provenanceByMessageId,
+          true,
+        ),
+      ).toEqual(
+        loreMessagesToGateway(
+          cold.loreMessages,
+          cold.provenanceByMessageId,
+          true,
+        ),
+      );
+    },
+  );
+
+  it("preserves numeric stage timings through the real log sink", () => {
+    const lines: string[] = [];
+    log.registerSink({ ...sink, info: (message) => lines.push(message) });
+    const timing = new PreparationTiming(semanticHistory(2));
+    timing.counts.messages = 5741;
+    timing.record("conversion", { wallMs: 83199, cpuMs: 83000 });
+    timing.upstreamStart();
+    const line = lines.find((message) =>
+      message.startsWith("semantic-preparation "),
+    )!;
+    expect(line).not.toContain("[object Object]");
+    const payload = JSON.parse(line.slice("semantic-preparation ".length));
+    expect(payload.messages).toBe(5741);
+    expect(payload.stages.conversion).toEqual({ wallMs: 83199, cpuMs: 83000 });
+    expect(payload.stages.turn_to_upstream.wallMs).toEqual(expect.any(Number));
+    expect(payload.stages.turn_to_upstream.cpuMs).toEqual(expect.any(Number));
+    expect(line).not.toContain(projectPath);
+    expect(line).not.toContain(sessionID);
+  });
+
   it("preserves wire/provenance and recall IDs on a resumed 5,580-message Codex transcript", async () => {
     const request = semanticHistory();
     expect(request.messages).toHaveLength(5580);

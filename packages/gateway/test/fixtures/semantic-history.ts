@@ -1,7 +1,7 @@
 import { parseOpenAICodexRequest } from "../../src/translate/openai-responses";
 
 /** Synthetic Responses/Codex transcript: no real prompts, paths or credentials. */
-export function semanticHistory(messageCount = 5580) {
+export function semanticHistory(messageCount = 5580, reasoningBytes = 0) {
   if (messageCount < 2 || messageCount % 2)
     throw new Error("Use an even message count >= 2");
   const input: Record<string, unknown>[] = [
@@ -20,7 +20,9 @@ export function semanticHistory(messageCount = 5580) {
     input.push({
       type: "reasoning",
       id: `reason-${turn}`,
-      encrypted_content: "synthetic-encrypted-state-".repeat(12),
+      encrypted_content: reasoningBytes
+        ? syntheticReasoning(turn + 1, reasoningBytes)
+        : "synthetic-encrypted-state-".repeat(12),
       summary: [],
     });
     for (let call = 0; call < 2; call++)
@@ -47,4 +49,17 @@ export function semanticHistory(messageCount = 5580) {
     { model: "synthetic-model", stream: true, input, tools: [] },
     {},
   );
+}
+
+/** Deterministic high-entropy fixture data; no real encrypted/user content. */
+function syntheticReasoning(seed: number, bytes: number): string {
+  const data = Buffer.alloc(bytes);
+  let state = seed;
+  for (let i = 0; i < bytes; i++) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    data[i] = state & 255;
+  }
+  return data.toString("base64");
 }

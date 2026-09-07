@@ -2058,6 +2058,18 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_enqueued
     ON temporal_embedding_queue(enqueued_at, message_id);
   `,
+  `
+  -- Version 86: bounded local derived token counts; no transcript or vectors.
+  CREATE TABLE IF NOT EXISTS semantic_token_cache (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES session_state(session_id) ON DELETE CASCADE,
+    payload TEXT NOT NULL CHECK(length(payload) <= 1000000),
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, session_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_semantic_token_cache_updated
+    ON semantic_token_cache(updated_at);
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -2927,6 +2939,10 @@ export function dbPath(): string {
 }
 
 let instance: Database | undefined;
+/** Read-only identity check for deferred derived-cache writes; never opens a DB. */
+export function isCurrentDatabase(connection: Database): boolean {
+  return instance === connection;
+}
 /** Actual file backing `instance`; absent for private in-memory databases. */
 let instanceFilePath: string | undefined;
 
@@ -4113,6 +4129,17 @@ function recoverMissingObjects(database: Database) {
     CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_enqueued
       ON temporal_embedding_queue(enqueued_at, message_id);
   `);
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS semantic_token_cache (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL REFERENCES session_state(session_id) ON DELETE CASCADE,
+      payload TEXT NOT NULL CHECK(length(payload) <= 1000000),
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (project_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_semantic_token_cache_updated
+      ON semantic_token_cache(updated_at);
+  `);
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
   // The verdict-keyed index MUST be created here, AFTER the column is ensured —
   // never in the big exec above, which runs before this ALTER and would throw
@@ -4234,6 +4261,7 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "project_id_aliases",
   "project_path_aliases",
   "session_prompt_deltas",
+  "semantic_token_cache", // Disposable; source-project deletion cascades it away.
   "session_rollup",
   "temporal_messages",
   "temporal_vec",
