@@ -1012,6 +1012,55 @@ export interface RecallFollowUpCtx {
   ) => Promise<GatewayResponse>;
 }
 
+function hasResponsesRefusal(item: Record<string, unknown>): boolean {
+  return (
+    item.type === "message" &&
+    Array.isArray(item.content) &&
+    item.content.some((part: unknown) => {
+      if (!part || typeof part !== "object") return false;
+      const refusal = part as Record<string, unknown>;
+      return (
+        refusal.type === "refusal" &&
+        typeof refusal.refusal === "string" &&
+        refusal.refusal.trim().length > 0
+      );
+    })
+  );
+}
+
+/** A final recall continuation must give the client an answer, refusal, or tool handoff. */
+export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
+  if (
+    ["max_tokens", "pause_turn", "model_context_window_exceeded"].includes(
+      resp.stopReason,
+    )
+  )
+    return false;
+  // A usable sibling must not hide an undispatchable tool call. Validate every
+  // name without changing the provider's tool names or cached tool definitions.
+  if (
+    resp.content.some(
+      (block) =>
+        block.type === "tool_use" &&
+        (typeof block.name !== "string" || block.name.trim().length === 0),
+    )
+  )
+    return false;
+  return (
+    resp.content.some((block) => {
+      if (block.type === "text") return block.text.trim().length > 0;
+      if (block.type === "tool_use") return block.name !== RECALL_TOOL_NAME;
+      return (
+        block.type === "opaque" &&
+        block.responsesItem === true &&
+        hasResponsesRefusal(block.raw)
+      );
+    }) ||
+    // Buffered Responses refusals live only in the lossless raw output items.
+    (resp.rawOutputItems?.some(hasResponsesRefusal) ?? false)
+  );
+}
+
 /**
  * Build a follow-up request after recall execution.
  *
@@ -1019,10 +1068,10 @@ export interface RecallFollowUpCtx {
  *  - All original messages
  *  - A synthetic assistant message with thinking blocks + recall tool_use
  *  - A user message with recall results as a tool_result
- *  - Full tools list (including recall — the continuation is recall-aware)
+ *  - Full tools list on every round, preserving the cached tool prefix
  *
  * The model continues from where it left off, now with recall results
- * in context. If it needs more detail it can call recall again.
+ * in context. On the final round, it must finish using the available results.
  *
  * `stream` is REQUIRED (no default) and MUST match how the caller consumes
  * the upstream response: `false` → JSON via `accumulateNonStreamResponse()`,
@@ -1038,7 +1087,9 @@ export function buildRecallFollowUpRequest(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   stream: boolean,
+  finalRecallRound = false,
 ): GatewayRequest {
+  if (finalRecallRound) log.info("recall final continuation: budget exhausted");
   // Build the follow-up using proper tool_use/tool_result pairs.
   //
   // Why: sending recall results as plain user text causes the LLM to treat
@@ -1095,6 +1146,14 @@ export function buildRecallFollowUpRequest(
         toolName: recallToolUseBlock.name,
         content: [
           { type: "text", text: recallResult || "[No results found.]" },
+          ...(finalRecallRound
+            ? [
+                {
+                  type: "text" as const,
+                  text: "The recall budget for this turn has been used. Continue the user's task using the results already available. Give your best supported answer, state any remaining uncertainty, or use an available non-recall tool. Do not request recall again.",
+                },
+              ]
+            : []),
         ],
       },
     ],
@@ -1308,6 +1367,7 @@ export async function runRecallFollowUpStreaming(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   signal?: AbortSignal,
+  finalRecallRound = false,
 ): Promise<RecallFollowUpStreaming | RecallFollowUpError> {
   const followUp = buildRecallFollowUpRequest(
     originalReq,
@@ -1315,6 +1375,7 @@ export async function runRecallFollowUpStreaming(
     recallResult,
     recallToolUseBlock,
     /* stream */ true,
+    finalRecallRound,
   );
   const { response } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),
@@ -1359,6 +1420,7 @@ export async function runRecallFollowUpJSON(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   signal?: AbortSignal,
+  finalRecallRound = false,
 ): Promise<RecallFollowUpJSON | RecallFollowUpError> {
   const followUp = buildRecallFollowUpRequest(
     originalReq,
@@ -1366,6 +1428,7 @@ export async function runRecallFollowUpJSON(
     recallResult,
     recallToolUseBlock,
     /* stream */ false,
+    finalRecallRound,
   );
   const { response, effectiveProtocol } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),
@@ -1421,6 +1484,7 @@ export async function runRecallFollowUpStreamAccumulated(
   recallResult: string,
   recallToolUseBlock: GatewayToolUseBlock,
   signal?: AbortSignal,
+  finalRecallRound = false,
 ): Promise<RecallFollowUpJSON | RecallFollowUpError> {
   const parseSSE = ctx.parseSSE;
   if (!parseSSE) {
@@ -1434,6 +1498,7 @@ export async function runRecallFollowUpStreamAccumulated(
     recallResult,
     recallToolUseBlock,
     /* stream */ true,
+    finalRecallRound,
   );
   const { response } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),
@@ -1479,21 +1544,58 @@ export function replaceRecallWithMarker(
   resp: GatewayResponse,
   markers?: ReadonlyMap<string, string>,
 ): GatewayResponse {
+  const replaced = new Map<string, string>();
+  const content = resp.content.map((b) => {
+    if (b.type !== "tool_use" || b.name !== RECALL_TOOL_NAME) return b;
+    const input = b.input as Record<string, unknown>;
+    const query = typeof input.query === "string" ? input.query : "";
+    const scope = (input.scope as string) ?? "all";
+    const id = typeof input.id === "string" && input.id ? input.id : undefined;
+    const text = markers?.get(b.id) ?? buildRecallMarker(query, scope, id);
+    replaced.set(b.id, text);
+    return { type: "text" as const, text };
+  });
+  // Native Responses delivery uses the raw items. Rewrite only the calls we
+  // replaced above, preserving sibling items and provider-owned objects.
+  const usedIds = new Set<string>();
+  for (const item of resp.rawOutputItems ?? []) {
+    if (typeof item.id === "string") usedIds.add(item.id);
+    if (typeof item.call_id === "string") usedIds.add(item.call_id);
+  }
+  const rawOutputItems = resp.rawOutputItems?.map((item) => {
+    const callId = typeof item.call_id === "string" ? item.call_id : item.id;
+    if (
+      item.type !== "function_call" ||
+      item.name !== RECALL_TOOL_NAME ||
+      typeof callId !== "string" ||
+      !replaced.has(callId)
+    )
+      return item;
+    // Provider identities distinguish successive turns too: an array index
+    // would reuse the same message ID when clients replay multiple markers.
+    // Fixed-length hex keeps a local collision suffix from aliasing a
+    // different provider identity on a later turn (e.g. fc_a vs fc_a_1).
+    const identity = createHash("sha256")
+      .update(typeof item.id === "string" ? item.id : callId)
+      .digest("hex")
+      .slice(0, 32);
+    const baseId = `msg_lore_recall_${identity}`;
+    let id = baseId;
+    for (let suffix = 1; usedIds.has(id); suffix++) id = `${baseId}_${suffix}`;
+    usedIds.add(id);
+    return {
+      type: "message",
+      id,
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: replaced.get(callId)!, annotations: [] },
+      ],
+    };
+  });
   return {
     ...resp,
-    content: resp.content.map((b) => {
-      if (b.type === "tool_use" && b.name === RECALL_TOOL_NAME) {
-        const input = b.input as Record<string, unknown>;
-        const query = typeof input.query === "string" ? input.query : "";
-        const scope = (input.scope as string) ?? "all";
-        const id =
-          typeof input.id === "string" && input.id ? input.id : undefined;
-        return {
-          type: "text" as const,
-          text: markers?.get(b.id) ?? buildRecallMarker(query, scope, id),
-        };
-      }
-      return b;
-    }),
+    content,
+    ...(rawOutputItems ? { rawOutputItems } : {}),
   };
 }

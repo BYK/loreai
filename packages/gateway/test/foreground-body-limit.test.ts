@@ -209,7 +209,11 @@ describe("foreground response body limits", () => {
         undefined,
         true,
       ),
-    ).rejects.toThrow("upstream Responses request did not complete");
+    ).rejects.toMatchObject({
+      name: "NonStreamCompletionError",
+      message: "upstream response did not complete",
+      response: { usage: { inputTokens: 7, outputTokens: 2 } },
+    });
   });
 
   test("rejects provider-specific non-stream incomplete reasons for Codex", async () => {
@@ -233,7 +237,11 @@ describe("foreground response body limits", () => {
         undefined,
         true,
       ),
-    ).rejects.toThrow("upstream Responses request did not complete");
+    ).rejects.toMatchObject({
+      name: "NonStreamCompletionError",
+      message: "upstream response did not complete",
+      response: { usage: { inputTokens: 7, outputTokens: 2 } },
+    });
   });
 
   test("rejects in-progress items in a completed non-stream response", async () => {

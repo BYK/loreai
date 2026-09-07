@@ -83,7 +83,12 @@ function mapStopReason(reason: string): string {
  */
 export function translateAnthropicStreamToOpenAI(
   anthropicResponse: Response,
-  opts: { strict?: boolean; signal?: AbortSignal } = {},
+  opts: {
+    strict?: boolean;
+    signal?: AbortSignal;
+    /** Preserve failures from a validated source without revalidating generated SSE. */
+    propagateErrors?: boolean;
+  } = {},
 ): Response {
   const encoder = new TextEncoder();
   const accumulator = createStreamAccumulator();
@@ -392,7 +397,7 @@ export function translateAnthropicStreamToOpenAI(
           }
           validator?.assertDone();
         } catch (err) {
-          if (opts.strict) {
+          if (opts.strict || opts.propagateErrors) {
             log.error("openai stream translation validation error:", err);
             try {
               controller.error(err);

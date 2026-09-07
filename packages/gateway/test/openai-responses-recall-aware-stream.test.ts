@@ -4259,6 +4259,169 @@ describe("streamResponsesRecallAware", () => {
     expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
   });
 
+  test.each([1, 10])(
+    "marks only the final continuation at budget %i and preserves ordinary tools",
+    async (budget) => {
+      let recalls = 0;
+      let follows = 0;
+      let finalResponse: GatewayResponse | undefined;
+      const finalFlags: boolean[] = [];
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_initial", "gpt-5.6-terra"),
+          recallCall(0, { query: "start" }, "fc_initial", "call_initial"),
+          completed("resp_initial", { input_tokens: 1, output_tokens: 2 }),
+        ]),
+        {
+          maxRecallDepth: budget,
+          onComplete: (response, successful) => {
+            expect(successful).toBe(true);
+            finalResponse = response;
+          },
+          onRecall: async () => {
+            recalls++;
+            return {
+              anchorText: buildAnchor(`q${recalls}`),
+              resultText: "result",
+            };
+          },
+          runFollowUp: async ({ finalRecallRound }) => {
+            follows++;
+            finalFlags.push(finalRecallRound);
+            const item = recallCall(
+              0,
+              { query: `q${follows}` },
+              `fc_${follows}`,
+              `call_${follows}`,
+            );
+            return {
+              reader: streamFrom([
+                created(`resp_${follows}`, "gpt-5.6-terra"),
+                follows === budget
+                  ? item.replaceAll('"name":"recall"', '"name":"Read"')
+                  : item,
+                completed(`resp_${follows}`, {
+                  input_tokens: 3,
+                  output_tokens: 4,
+                }),
+              ]).body!.getReader(),
+            };
+          },
+        },
+      );
+      const output = await drain(client);
+      expect(recalls).toBe(budget);
+      expect(follows).toBe(budget);
+      expect(finalFlags).toEqual([
+        ...Array.from({ length: budget - 1 }, () => false),
+        true,
+      ]);
+      expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(finalResponse?.content).toContainEqual(
+        expect.objectContaining({ type: "tool_use", name: "Read" }),
+      );
+      expect(finalResponse?.usage).toMatchObject({
+        inputTokens: 1 + budget * 3,
+        outputTokens: 2 + budget * 4,
+      });
+    },
+  );
+
+  test.each([
+    "incomplete",
+    "transport",
+    "exhausted-recall",
+    "reasoning",
+  ] as const)(
+    "final continuation %s fails transactionally without retry",
+    async (mode) => {
+      let follows = 0;
+      let recalls = 0;
+      let commits = 0;
+      let rollbacks = 0;
+      let successful: boolean | undefined;
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_initial", "gpt-5.6-terra"),
+          recallCall(0, { query: "start" }, "fc_initial", "call_initial"),
+          completed("resp_initial"),
+        ]),
+        {
+          maxRecallDepth: 1,
+          onComplete: (_, success) => {
+            successful = success;
+          },
+          onRecall: async () => {
+            recalls++;
+            return {
+              anchorText: buildAnchor("start"),
+              resultText: "result",
+              commit: () => {
+                commits++;
+              },
+              rollback: () => {
+                rollbacks++;
+              },
+            };
+          },
+          runFollowUp: async ({ finalRecallRound }) => {
+            follows++;
+            expect(finalRecallRound).toBe(true);
+            if (mode === "transport")
+              return {
+                reader: new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    controller.error(new Error("reset"));
+                  },
+                }).getReader(),
+              };
+            return {
+              reader: streamFrom([
+                created("resp_final", "gpt-5.6-terra"),
+                mode === "reasoning"
+                  ? sseEvent("response.output_item.added", {
+                      output_index: 0,
+                      item: {
+                        type: "reasoning",
+                        id: "rs_final",
+                        summary: [],
+                        encrypted_content: "opaque",
+                      },
+                    }) +
+                    sseEvent("response.output_item.done", {
+                      output_index: 0,
+                      item: {
+                        type: "reasoning",
+                        id: "rs_final",
+                        summary: [],
+                        encrypted_content: "opaque",
+                      },
+                    })
+                  : mode === "exhausted-recall"
+                    ? recallCall(
+                        0,
+                        { query: "again" },
+                        "fc_final",
+                        "call_final",
+                      )
+                    : textItem(0, "partial"),
+                mode === "incomplete"
+                  ? incomplete("resp_final")
+                  : completed("resp_final"),
+              ]).body!.getReader(),
+            };
+          },
+        },
+      );
+      const output = await drain(client);
+      expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(output).not.toContain("event: response.completed");
+      expect(output).not.toContain("event: response.incomplete");
+      expect(successful).toBe(false);
+      expect([recalls, follows, commits, rollbacks]).toEqual([1, 1, 0, 1]);
+    },
+  );
+
   test("caps chained recall depth", async () => {
     const chained = streamFrom([
       created("resp_chained", "gpt-5.6-terra"),
@@ -4305,7 +4468,10 @@ describe("streamResponsesRecallAware", () => {
           anchorText: buildAnchor("architecture"),
           resultText: "results",
         }),
-        runFollowUp: async () => ({ reader: final.body!.getReader() }),
+        runFollowUp: async ({ finalRecallRound }) => {
+          expect(finalRecallRound).toBe(true);
+          return { reader: final.body!.getReader() };
+        },
       },
     );
 
@@ -4315,7 +4481,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
   });
 
-  test("replaces an exhausted continuation recall with a marker", async () => {
+  test("fails an exhausted continuation recall without executing it", async () => {
     const followUp = streamFrom([
       created("resp_depth_exhausted_followup", "gpt-5.6-terra"),
       recallCall(0, { query: "more detail" }, "fc_depth", "call_depth"),
@@ -4346,9 +4512,10 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(recalls).toBe(1);
-    expect(out).toContain("Recall depth limit reached (1).");
-    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
-    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).not.toContain("Recall depth limit reached (1).");
+    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).not.toContain("event: response.completed");
   });
 
   test("recall-only: emits marker, pipes the continuation inline, rebuilds completed", async () => {
@@ -5699,52 +5866,56 @@ describe("streamResponsesRecallAware", () => {
     expect(callbackSignal?.aborted).toBe(true);
   });
 
-  test("foreground abort cancels and unlocks a hostile continuation reader", async () => {
-    const foreground = new AbortController();
-    const continuationStarted = Promise.withResolvers<void>();
-    let cancelled = false;
-    const continuation = new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            new TextEncoder().encode(
-              created("resp_hostile_continuation", "gpt-5.6-terra"),
-            ),
-          );
-        },
-        pull() {
-          continuationStarted.resolve();
-          return new Promise(() => {});
-        },
-        cancel() {
-          cancelled = true;
-          return new Promise<void>(() => {});
-        },
-      }),
-    );
-    const client = streamResponsesRecallAware(
-      streamFrom([
-        created("resp_hostile_principal", "gpt-5.6-terra"),
-        recallCall(0, { query: "architecture" }),
-        completed("resp_hostile_principal"),
-      ]),
-      {
-        signal: foreground.signal,
-        onComplete: () => {},
-        onRecall: async () => ({
-          anchorText: buildAnchor("architecture"),
-          resultText: "results",
+  test.each([1, 10])(
+    "foreground abort cancels and unlocks a hostile continuation reader (budget %i)",
+    async (maxRecallDepth) => {
+      const foreground = new AbortController();
+      const continuationStarted = Promise.withResolvers<void>();
+      let cancelled = false;
+      const continuation = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                created("resp_hostile_continuation", "gpt-5.6-terra"),
+              ),
+            );
+          },
+          pull() {
+            continuationStarted.resolve();
+            return new Promise(() => {});
+          },
+          cancel() {
+            cancelled = true;
+            return new Promise<void>(() => {});
+          },
         }),
-        runFollowUp: async () => ({ reader: continuation.body!.getReader() }),
-      },
-    );
-    const pending = drain(client);
-    await continuationStarted.promise;
-    foreground.abort(new DOMException("caller aborted", "AbortError"));
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    expect(cancelled).toBe(true);
-    expect(continuation.body?.locked).toBe(false);
-  });
+      );
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_hostile_principal", "gpt-5.6-terra"),
+          recallCall(0, { query: "architecture" }),
+          completed("resp_hostile_principal"),
+        ]),
+        {
+          maxRecallDepth,
+          signal: foreground.signal,
+          onComplete: () => {},
+          onRecall: async () => ({
+            anchorText: buildAnchor("architecture"),
+            resultText: "results",
+          }),
+          runFollowUp: async () => ({ reader: continuation.body!.getReader() }),
+        },
+      );
+      const pending = drain(client);
+      await continuationStarted.promise;
+      foreground.abort(new DOMException("caller aborted", "AbortError"));
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(cancelled).toBe(true);
+      expect(continuation.body?.locked).toBe(false);
+    },
+  );
 
   test("rejects a chained recall whose arguments never complete", async () => {
     const failures: RecallContinuationFailureCategory[] = [];

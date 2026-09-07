@@ -12,12 +12,14 @@ import { describe, test, expect, vi } from "vitest";
 import {
   LORE_COMMIT_REMINDER,
   accumulateOpenAINonStreamJSON,
+  accumulateResponsesNonStreamJSON,
   loreMessagesToGateway,
   responsesProvenanceContent,
   responsesProvenanceByMessageId,
   responsesAnchorContext,
 } from "../src/pipeline";
 import {
+  isUsableRecallContinuation,
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
   MAX_RECALL_DEPTH,
@@ -58,6 +60,7 @@ import {
   resolveToolResults,
 } from "../src/temporal-adapter";
 import type {
+  GatewayContentBlock,
   GatewayResponse,
   GatewayRequest,
   GatewayToolUseBlock,
@@ -782,6 +785,47 @@ describe("recallStoreKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildRecallFollowUpRequest", () => {
+  test.each([
+    ["anthropic", { type: "tool", name: "recall" }],
+    ["openai-responses", { type: "function", name: "recall" }],
+  ] as const)(
+    "final %s continuation preserves cached tools and controls",
+    (protocol, choice) => {
+      const req = makeRequest(
+        [],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+        ],
+      );
+      req.protocol = protocol;
+      req.metadata = Object.freeze({ tool_choice: Object.freeze(choice) });
+      req.extras = Object.freeze({ tool_choice: Object.freeze(choice) });
+      Object.freeze(req.tools);
+      Object.freeze(req.messages);
+      Object.freeze(req);
+      const block = makeRecallToolUse("architecture");
+      const follow = buildRecallFollowUpRequest(
+        req,
+        makeResponse([block], "tool_use"),
+        "real result",
+        block,
+        true,
+        true,
+      );
+      expect(follow.tools).toBe(req.tools);
+      expect(follow.metadata).toBe(req.metadata);
+      expect(follow.extras).toBe(req.extras);
+      expect(JSON.stringify(follow.messages.at(-1))).toContain("real result");
+      expect(JSON.stringify(follow.messages.at(-1))).toContain(
+        "The recall budget for this turn has been used",
+      );
+      expect(req.tools.map((tool) => tool.name)).toEqual(["Read", "recall"]);
+      expect(req.metadata.tool_choice).toBe(choice);
+      expect(req.extras?.tool_choice).toBe(choice);
+    },
+  );
+
   test("builds correct follow-up request structure with tool_use/tool_result", () => {
     const req = makeRequest(
       [{ role: "user", content: [{ type: "text", text: "hello" }] }],
@@ -2999,6 +3043,142 @@ describe("cleanupRecallStore", () => {
 // ---------------------------------------------------------------------------
 
 describe("replaceRecallWithMarker", () => {
+  test("local collision suffixes cannot alias another turn's provider identity", () => {
+    const rewrite = (providerId: string, siblingId?: string) => {
+      const call = {
+        type: "tool_use" as const,
+        id: `call_${providerId}`,
+        name: "recall",
+        input: { query: "memory" },
+      };
+      return replaceRecallWithMarker({
+        ...makeResponse([call]),
+        rawOutputItems: [
+          {
+            type: "function_call",
+            id: providerId,
+            call_id: call.id,
+            name: call.name,
+            arguments: JSON.stringify(call.input),
+            status: "completed",
+          },
+          ...(siblingId
+            ? [
+                {
+                  type: "message",
+                  id: siblingId,
+                  role: "assistant",
+                  status: "completed",
+                  content: [{ type: "output_text", text: "sibling" }],
+                },
+              ]
+            : []),
+        ],
+      }).rawOutputItems!;
+    };
+    const candidate = rewrite("fc_recall")[0].id as string;
+    const firstTurn = rewrite("fc_recall", candidate);
+    const nextTurn = rewrite("fc_recall_1");
+    expect(firstTurn[0].id).not.toBe(candidate);
+    expect(firstTurn[0].id).not.toBe(nextTurn[0].id);
+  });
+
+  test("keeps raw marker identities distinct across successive Responses turns", () => {
+    const outputs = [1, 2].map((turn) => {
+      const call = {
+        type: "tool_use" as const,
+        id: `call_recall_${turn}`,
+        name: "recall",
+        input: { query: "same search" },
+      };
+      return replaceRecallWithMarker({
+        ...makeResponse([call]),
+        rawOutputItems: [
+          {
+            type: "function_call",
+            id: `fc_recall_${turn}`,
+            call_id: call.id,
+            name: call.name,
+            arguments: JSON.stringify(call.input),
+            status: "completed",
+          },
+        ],
+      }).rawOutputItems![0];
+    });
+    expect(outputs.every((item) => item.type === "message")).toBe(true);
+    expect(outputs[0].id).not.toBe(outputs[1].id);
+  });
+
+  test("replaces raw Responses recall calls without losing other items or colliding IDs", () => {
+    const recall = {
+      type: "tool_use" as const,
+      id: "call_recall",
+      name: "recall",
+      input: { query: "memory" },
+    };
+    const read = {
+      type: "tool_use" as const,
+      id: "call_read",
+      name: "Read",
+      input: {},
+    };
+    const existing = {
+      type: "message",
+      id: "msg_lore_recall_fc_recall",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "refusal", refusal: "earlier refusal" }],
+    };
+    const rawRecall = {
+      type: "function_call",
+      id: "fc_recall",
+      call_id: recall.id,
+      name: recall.name,
+      arguments: JSON.stringify(recall.input),
+      status: "completed",
+    };
+    const rawRead = {
+      type: "function_call",
+      id: "fc_read",
+      call_id: read.id,
+      name: read.name,
+      arguments: "{}",
+      status: "completed",
+    };
+    existing.id = replaceRecallWithMarker({
+      ...makeResponse([recall]),
+      rawOutputItems: [rawRecall],
+    }).rawOutputItems![0].id as string;
+    const response = {
+      ...makeResponse([recall, read]),
+      rawOutputItems: [existing, rawRecall, rawRead],
+    };
+    const snapshot = structuredClone(response);
+    Object.freeze(response.rawOutputItems);
+    for (const item of response.rawOutputItems) Object.freeze(item);
+    const marker = buildRecallAnchor("123e4567-e89b-42d3-a456-426614174001");
+    const rewritten = replaceRecallWithMarker(
+      response,
+      new Map([[recall.id, marker]]),
+    );
+    expect(rewritten.rawOutputItems?.map((item) => item.type)).toEqual([
+      "message",
+      "message",
+      "function_call",
+    ]);
+    expect(rewritten.rawOutputItems?.[0]).toBe(existing);
+    expect(rewritten.rawOutputItems?.[2]).toBe(rawRead);
+    expect(rewritten.rawOutputItems?.[1]).toMatchObject({
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: marker }],
+    });
+    expect(new Set(rewritten.rawOutputItems?.map((item) => item.id)).size).toBe(
+      3,
+    );
+    expect(response).toEqual(snapshot);
+  });
+
   test("replaces recall tool_use with marker text", () => {
     const resp = makeResponse([
       { type: "text", text: "hello" },
@@ -3049,3 +3229,223 @@ describe("replaceRecallWithMarker", () => {
     expect(replaced.usage?.inputTokens).toBe(999);
   });
 });
+
+describe("final recall continuation output", () => {
+  test.each(["Read", "custom.namespace_tool", " Read "])(
+    "preserves the nonblank tool name %j",
+    (name) => {
+      const block = Object.freeze({
+        type: "tool_use" as const,
+        id: "ordinary",
+        name,
+        input: {},
+      });
+      const response = makeResponse([block]);
+      Object.freeze(response.content);
+      expect(isUsableRecallContinuation(response)).toBe(true);
+      expect(response.content[0]).toBe(block);
+      expect(block.name).toBe(name);
+    },
+  );
+  test.each(["", " \t\n", null, undefined, 7])(
+    "rejects malformed name %j even beside usable output",
+    (name) => {
+      const malformed = {
+        type: "tool_use" as const,
+        id: "invalid",
+        name: name as string,
+        input: {},
+      };
+      const companions = [
+        [],
+        [{ type: "text" as const, text: "Useful answer" }],
+        [
+          {
+            type: "tool_use" as const,
+            id: "ordinary",
+            name: "Read",
+            input: {},
+          },
+        ],
+        [
+          {
+            type: "opaque" as const,
+            responsesItem: true,
+            raw: {
+              type: "message",
+              content: [{ type: "refusal", refusal: "Cannot help" }],
+            },
+          },
+        ],
+      ];
+      for (const companion of companions) {
+        for (const content of [
+          [malformed, ...companion],
+          [...companion, malformed],
+        ]) {
+          const response = makeResponse(content);
+          Object.freeze(response.content);
+          for (const block of response.content) Object.freeze(block);
+          expect(isUsableRecallContinuation(response)).toBe(false);
+        }
+      }
+    },
+  );
+  test.each([
+    ["I cannot help with that.", true],
+    ["", false],
+    [" \n ", false],
+    [undefined, false],
+    [42, false],
+  ])("buffered Responses refusal %j is usable: %s", (refusal, expected) => {
+    const response = accumulateResponsesNonStreamJSON({
+      id: "resp_refusal",
+      model: "gpt-test",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          id: "msg_refusal",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "refusal", refusal }],
+        },
+      ],
+    });
+    expect(response.content).toEqual(
+      typeof refusal === "string" ? [{ type: "text", text: refusal }] : [],
+    );
+    const original = structuredClone(response);
+    Object.freeze(response.rawOutputItems);
+    expect(isUsableRecallContinuation(response)).toBe(expected);
+    expect(isUsableRecallContinuation({ ...response, content: [] })).toBe(
+      expected,
+    );
+    expect(response).toEqual(original);
+
+    for (const stopReason of [
+      "max_tokens",
+      "pause_turn",
+      "model_context_window_exceeded",
+    ]) {
+      expect(isUsableRecallContinuation({ ...response, stopReason })).toBe(
+        false,
+      );
+      expect(
+        isUsableRecallContinuation({ ...response, content: [], stopReason }),
+      ).toBe(false);
+    }
+  });
+
+  test("buffered refusal provenance does not duplicate its normalized text", () => {
+    const refusal = {
+      type: "message",
+      id: "msg_refusal",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "refusal", refusal: "I cannot help with that." }],
+    };
+    const response = accumulateResponsesNonStreamJSON({
+      id: "resp_refusal",
+      model: "gpt-test",
+      status: "completed",
+      output: [refusal, { ...refusal, id: "msg_empty", content: [] }],
+    });
+    expect(responsesProvenanceContent(response)).toEqual([
+      { type: "opaque", raw: refusal, responsesItem: true },
+    ]);
+  });
+
+  test("opaque refusal provenance preserves the next normalized text fallback", () => {
+    const refusal = {
+      type: "message",
+      id: "msg_refusal",
+      role: "assistant",
+      content: [{ type: "refusal", refusal: "I cannot help with that." }],
+    };
+    const opaque = {
+      type: "opaque" as const,
+      raw: refusal,
+      responsesItem: true,
+    };
+    const text = { type: "text" as const, text: "fallback text" };
+    const response = {
+      ...makeResponse([opaque, text]),
+      rawOutputItems: [refusal, { ...refusal, id: "msg_empty", content: [] }],
+    };
+    expect(responsesProvenanceContent(response)).toEqual([opaque, text]);
+  });
+
+  test.each([
+    { type: "reasoning", content: [{ type: "refusal", refusal: "no" }] },
+    { type: "message", content: [{ type: "output_text", refusal: "no" }] },
+    { type: "message", content: { type: "refusal", refusal: "no" } },
+    { type: "message", content: [null, 42, "no"] },
+  ])("does not accept a malformed refusal item: %j", (item) => {
+    expect(
+      isUsableRecallContinuation({
+        ...makeResponse([]),
+        rawOutputItems: [item],
+      }),
+    ).toBe(false);
+  });
+
+  test.each([
+    [
+      [
+        {
+          type: "thinking",
+          thinking: "private reasoning",
+          signature: "signed",
+        },
+      ],
+      false,
+    ],
+    [
+      [
+        {
+          type: "opaque",
+          responsesItem: true,
+          raw: { type: "reasoning", encrypted_content: "private" },
+        },
+      ],
+      false,
+    ],
+    [[{ type: "text", text: "   " }], false],
+    [[{ type: "text", text: "answer" }], true],
+    [[{ type: "tool_use", id: "call", name: "Read", input: {} }], true],
+    [[{ type: "tool_use", id: "call", name: "recall", input: {} }], false],
+    [
+      [
+        {
+          type: "opaque",
+          responsesItem: true,
+          raw: {
+            type: "message",
+            content: [{ type: "refusal", refusal: "I cannot help with that." }],
+          },
+        },
+      ],
+      true,
+    ],
+  ] as const)("requires client-usable output: %j", (content, expected) => {
+    expect(
+      isUsableRecallContinuation(
+        makeResponse(
+          structuredClone(content) as unknown as GatewayContentBlock[],
+        ),
+      ),
+    ).toBe(expected);
+  });
+});
+
+test.each(["max_tokens", "pause_turn", "model_context_window_exceeded"])(
+  "unfinished final recall stop %s is not usable even with text",
+  (stopReason) => {
+    expect(
+      isUsableRecallContinuation(
+        makeResponse([{ type: "text", text: "partial answer" }], stopReason),
+      ),
+    ).toBe(false);
+  },
+);

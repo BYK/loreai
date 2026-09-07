@@ -340,6 +340,7 @@ import {
   captureEmptyCompletion,
   type AnthropicUsage,
 } from "./sentry";
+import { createRecallDiagnostics } from "./recall-diagnostics";
 import {
   RecallContinuationFailure,
   reportRecallContinuationFailure,
@@ -369,6 +370,7 @@ import {
   executeRecall,
   findRecallToolUse,
   hasRecallToolUse,
+  isUsableRecallContinuation,
   hasOtherToolUse,
   clientHasRecallTool,
   runRecallFollowUpStreaming,
@@ -6686,6 +6688,71 @@ async function forwardToUpstream(
 // Response builders
 // ---------------------------------------------------------------------------
 
+/** Stage recall effects; commit runs inside the successful-turn savepoint. */
+function createRecallPersistenceTransaction(
+  sessionState: SessionState,
+  noStore = false,
+) {
+  const pendingRecalls = new Map<string, StoredRecall>();
+  const pendingTransfers: Array<() => void> = [];
+  let baseline: Map<string, StoredRecall> | undefined;
+  let committed = false;
+  let rolledBack = false;
+  const candidateStore = (): Map<string, StoredRecall> => {
+    const candidate = new Map(sessionState.recallStore);
+    for (const [key, value] of pendingRecalls)
+      addRecallStoreEntry(candidate, key, value);
+    return candidate;
+  };
+  return {
+    deferTransfer: (record: () => void): void => {
+      if (!noStore && !committed && !rolledBack) pendingTransfers.push(record);
+    },
+    stage: (key: string, value: StoredRecall): void => {
+      if (noStore || committed || rolledBack) return;
+      // Enforce admission before exposing the marker without mutating live state.
+      addRecallStoreEntry(candidateStore(), key, value);
+      pendingRecalls.set(key, value);
+    },
+    commit: (): void => {
+      if (committed || rolledBack) return;
+      if (pendingRecalls.size === 0 && pendingTransfers.length === 0) {
+        committed = true;
+        return;
+      }
+      if (!noStore) {
+        candidateStore();
+        // Snapshot only within this synchronous commit, never across an await.
+        baseline = new Map(sessionState.recallStore);
+        for (const record of pendingTransfers) record();
+        for (const [key, value] of pendingRecalls) {
+          sessionState.recallStore.set(key, value);
+          recallPersistenceCommitObserver?.();
+        }
+        saveSessionTracking(sessionState.sessionID, {
+          recallStore: serializeRecallStore(sessionState.recallStore),
+        });
+      }
+      committed = true;
+      pendingRecalls.clear();
+      pendingTransfers.length = 0;
+    },
+    rollback: (): void => {
+      if (rolledBack) return;
+      rolledBack = true;
+      // The enclosing savepoint restores SQLite; restore the Map in place.
+      if (baseline) {
+        sessionState.recallStore.clear();
+        for (const [key, value] of baseline)
+          sessionState.recallStore.set(key, value);
+        baseline = undefined;
+      }
+      pendingRecalls.clear();
+      pendingTransfers.length = 0;
+    },
+  };
+}
+
 /**
  * Per-model cap for client usage scaling. Derives the model's real context
  * window and max-output budget (models.dev-backed) and mirrors Claude Code's
@@ -6740,6 +6807,13 @@ export function buildStreamingResponse(
     upstreamRoute?: ResolvedRequestUpstreamRoute;
     /** Suppress recall-result retention for amnesia/no-store turns. */
     noStore?: boolean;
+    /** Account failed recall continuations without persisting a successful reply. */
+    onFailure?: (response: GatewayResponse) => void;
+    /** Transfer persistence to the request's downstream-success finalizer. */
+    onTransactionReady?: (transaction: {
+      commit: () => void;
+      rollback: () => void;
+    }) => void;
     /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
      *  recall marker is emitted as its own Anthropic SSE message envelope
      *  (split) or as an inline synthetic text content block (which the
@@ -6780,6 +6854,21 @@ export function buildStreamingResponse(
   maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
   signal?: AbortSignal,
 ): Response {
+  const recallPersistence = recallContext
+    ? createRecallPersistenceTransaction(
+        recallContext.sessionState,
+        recallContext.noStore,
+      )
+    : undefined;
+  if (recallPersistence) recallContext?.onTransactionReady?.(recallPersistence);
+  let sourceSucceeded = false;
+  const complete = (response: GatewayResponse): void => {
+    onComplete(response);
+    sourceSucceeded = true;
+  };
+  const recallDiagnostics = createRecallDiagnostics(
+    recallContext !== undefined && !recallContext.noStore,
+  );
   const recallAccum = recallContext
     ? createRecallAwareAccumulator(RECALL_TOOL_NAME, {
         scaleClientUsage: true,
@@ -6804,6 +6893,7 @@ export function buildStreamingResponse(
     ? AbortSignal.any([signal, recallAbort.signal])
     : recallAbort.signal;
   const onStreamAbort = (): void => {
+    recallPersistence?.rollback();
     resumeDemand?.();
     resumeDemand = undefined;
     if (signal?.aborted && !recallAbort.signal.aborted) {
@@ -6891,6 +6981,7 @@ export function buildStreamingResponse(
         if (keepaliveTimer) clearTimeout(keepaliveTimer);
         keepaliveTimer = null;
       };
+      let recallFailureResponse: (() => GatewayResponse) | undefined;
       void (async () => {
         try {
           // Parse and forward upstream SSE events
@@ -7017,6 +7108,17 @@ export function buildStreamingResponse(
             let currentBlockOffset = warningOffset; // accumulates across iterations
             let currentModifiedReq = recallContext.modifiedReq;
             let recallDepth = 0;
+            let cumulativeUsage = { ...(currentResp.usage ?? ZERO_USAGE) };
+            let activeContinuation: RecallAwareAccumulator | undefined;
+            recallFailureResponse = () => ({
+              ...(activeContinuation ?? currentAccum).getResponse(),
+              usage: activeContinuation
+                ? mergeRecallUsage(
+                    cumulativeUsage,
+                    activeContinuation.getResponse().usage ?? ZERO_USAGE,
+                  )
+                : cumulativeUsage,
+            });
 
             // Snapshot IDs already in LTM context (system[1] catalog + durable
             // delta) so recall can hint "N of K results already in LTM" when the
@@ -7032,6 +7134,15 @@ export function buildStreamingResponse(
               const recallBlock = findRecallToolUse(currentResp);
               if (!recallBlock) break;
 
+              if (
+                currentResp.content.filter(
+                  (block) =>
+                    block.type === "tool_use" &&
+                    block.name === RECALL_TOOL_NAME,
+                ).length > 1
+              ) {
+                throw new RecallContinuationFailure("parallel_recall");
+              }
               recallDepth++;
               const { result, input } = await promiseAgainstAbort(
                 () =>
@@ -7045,11 +7156,13 @@ export function buildStreamingResponse(
                         getLLMClient(recallContext.config),
                         alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
                         streamSignal,
+                        recallPersistence!.deferTransfer,
                       ),
                   ),
                 streamSignal,
               );
 
+              recallDiagnostics.record(input, result);
               const scope = input.scope ?? "all";
 
               // Store recall result for marker round-trip expansion
@@ -7089,27 +7202,16 @@ export function buildStreamingResponse(
                 },
               );
               if (!recallContext.noStore) {
-                addRecallStoreEntry(
-                  recallContext.sessionState.recallStore,
-                  storeKey,
-                  {
-                    toolUseId: recallBlock.id,
-                    anchorId,
-                    anchorContextId,
-                    input,
-                    position,
-                    result,
-                    ...(companionToolUses.length > 0
-                      ? { companionToolUses }
-                      : {}),
-                  },
-                );
-                // Persist the store (v46) so the marker still expands byte-identically
-                // after a gateway restart instead of leaking raw marker text upstream.
-                saveSessionTracking(recallContext.sessionState.sessionID, {
-                  recallStore: serializeRecallStore(
-                    recallContext.sessionState.recallStore,
-                  ),
+                recallPersistence!.stage(storeKey, {
+                  toolUseId: recallBlock.id,
+                  anchorId,
+                  anchorContextId,
+                  input,
+                  position,
+                  result,
+                  ...(companionToolUses.length > 0
+                    ? { companionToolUses }
+                    : {}),
                 });
               }
 
@@ -7239,7 +7341,9 @@ export function buildStreamingResponse(
                   new Map([[recallBlock.id, markerText]]),
                 );
                 clearKeepalive();
-                onComplete(markerResp);
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("completed");
+                complete(markerResp);
                 safeClose();
                 return;
               }
@@ -7289,8 +7393,12 @@ export function buildStreamingResponse(
                   result,
                   recallBlock,
                   streamSignal,
+                  recallDepth === MAX_RECALL_DEPTH,
                 );
-              } catch {
+              } catch (error) {
+                if (streamSignal.aborted) throw error;
+                if (recallDepth === MAX_RECALL_DEPTH)
+                  throw new RecallContinuationFailure("follow_up_setup");
                 log.error(
                   `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
                 );
@@ -7307,12 +7415,16 @@ export function buildStreamingResponse(
                   new Map([[recallBlock.id, markerText]]),
                 );
                 clearKeepalive();
-                onComplete(markerResp);
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("failed");
+                complete(markerResp);
                 safeClose();
                 return;
               }
 
               if (!streamingFollowUp.ok) {
+                if (recallDepth === MAX_RECALL_DEPTH)
+                  throw new RecallContinuationFailure("follow_up_failed");
                 log.error(
                   `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
                   new Error(
@@ -7342,7 +7454,9 @@ export function buildStreamingResponse(
                   new Map([[recallBlock.id, markerText]]),
                 );
                 clearKeepalive();
-                onComplete(markerResp);
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("failed");
+                complete(markerResp);
                 safeClose();
                 return;
               }
@@ -7376,9 +7490,11 @@ export function buildStreamingResponse(
                 blockOffset: contBlockOffset,
                 suppressMessageStart: !recallContext.clientSpeaksAnthropic,
               });
+              activeContinuation = contAccum;
               const contReader = streamingFollowUp.reader;
               activeReader = contReader;
 
+              const finalTerminalEvents: string[] = [];
               const continuationValidator = new AnthropicSSEValidator();
               try {
                 for await (const {
@@ -7395,7 +7511,14 @@ export function buildStreamingResponse(
                   resetKeepalive(); // continuation stream alive — reset timer
                   continuationValidator.process(contEvent, contData);
                   const forwarded = contAccum.processEvent(contEvent, contData);
-                  if (forwarded) {
+                  if (
+                    forwarded &&
+                    recallDepth === MAX_RECALL_DEPTH &&
+                    (contEvent === "message_delta" ||
+                      contEvent === "message_stop")
+                  ) {
+                    finalTerminalEvents.push(forwarded);
+                  } else if (forwarded) {
                     // Forward non-recall, non-held-back events to client.
                     // message_delta usage scaling is handled by a separate pass
                     // below only for the final continuation's terminal events.
@@ -7413,6 +7536,18 @@ export function buildStreamingResponse(
                 `recall follow-up stream complete (depth=${recallDepth}): ` +
                   `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
+              const continuationResp = contAccum.getResponse();
+              cumulativeUsage = mergeRecallUsage(
+                cumulativeUsage,
+                continuationResp.usage ?? ZERO_USAGE,
+              );
+              activeContinuation = undefined;
+              if (recallDepth === MAX_RECALL_DEPTH) {
+                if (contAccum.hasRecall())
+                  throw new RecallContinuationFailure("depth_exhausted");
+                if (!isUsableRecallContinuation(continuationResp))
+                  throw new RecallContinuationFailure("follow_up_failed");
+              }
 
               // Check if continuation contained recall — if so, loop
               if (contAccum.hasRecall() && recallDepth < MAX_RECALL_DEPTH) {
@@ -7421,13 +7556,6 @@ export function buildStreamingResponse(
                 currentBlockOffset = contBlockOffset;
                 currentModifiedReq = followUp;
                 continue; // Loop: execute the new recall, emit marker, follow up
-              }
-
-              // No more recall (or depth exhausted) — forward terminal events, close
-              if (contAccum.hasRecall()) {
-                log.warn(
-                  `recall depth exhausted (${MAX_RECALL_DEPTH}) in streaming path`,
-                );
               }
 
               // For non-Anthropic clients: the original (preamble) envelope is
@@ -7446,18 +7574,20 @@ export function buildStreamingResponse(
               // refactor that re-enters the drill-down loop or replays the
               // accumulator). In the current control flow the heldBack is read
               // exactly once — this just makes the consume semantics explicit.
+              for (const terminal of finalTerminalEvents)
+                await safeEnqueue(encoder.encode(terminal));
               const heldBack = contAccum.takeHeldBackEvents();
               if (heldBack) {
                 // Scale usage in held-back message_delta for anti-compaction
                 await safeEnqueue(encoder.encode(heldBack));
               }
 
-              const markerResp = replaceRecallWithMarker(
-                contAccum.hasRecall() ? contAccum.getResponse() : currentResp,
-                new Map([[recallBlock.id, markerText]]),
-              );
+              continuationResp.usage = cumulativeUsage;
+              if (recallDepth === MAX_RECALL_DEPTH)
+                log.info("recall final continuation: completed");
               clearKeepalive();
-              onComplete(markerResp);
+              recallDiagnostics.finish("completed");
+              complete(continuationResp);
               safeClose();
               return;
             }
@@ -7466,9 +7596,20 @@ export function buildStreamingResponse(
           // No recall — normal path
           clearKeepalive();
           const response = accumulator.getResponse();
-          onComplete(response);
+          complete(response);
           safeClose();
         } catch (err) {
+          recallPersistence?.rollback();
+          recallDiagnostics.finish(streamSignal.aborted ? "aborted" : "failed");
+          if (err instanceof RecallContinuationFailure)
+            reportRecallContinuationFailure(err.category);
+          if (recallFailureResponse) {
+            try {
+              recallContext?.onFailure?.(recallFailureResponse());
+            } catch {
+              log.error("recall failure accounting callback failed");
+            }
+          }
           streamSignal.removeEventListener("abort", onStreamAbort);
           clearKeepalive();
           clearRecallDeadline();
@@ -7504,6 +7645,10 @@ export function buildStreamingResponse(
       resumeDemand = undefined;
     },
     cancel() {
+      // A translator may cancel its source after consuming a valid terminal.
+      // The request owner distinguishes that from actual downstream cancellation.
+      if (!recallContext?.onTransactionReady) recallPersistence?.rollback();
+      recallDiagnostics.finish("aborted");
       resumeDemand?.();
       resumeDemand = undefined;
       if (keepaliveTimer) clearTimeout(keepaliveTimer);
@@ -7519,7 +7664,7 @@ export function buildStreamingResponse(
     },
   });
 
-  return new Response(stream, {
+  const response = new Response(stream, {
     status: 200,
     headers: {
       "content-type": "text/event-stream",
@@ -7527,6 +7672,27 @@ export function buildStreamingResponse(
       connection: "keep-alive",
     },
   });
+  if (!recallPersistence || recallContext?.onTransactionReady) return response;
+  // Standalone callers also commit only when the returned body reaches EOF.
+  return wrapBodyWithCleanup(
+    response,
+    () => {
+      if (!sourceSucceeded || cancelled || streamSignal.aborted) {
+        recallPersistence.rollback();
+        return;
+      }
+      try {
+        withTenant(recallContext?.sessionState.storageTenantId ?? "", () =>
+          withSavepoint("native_recall_delivery", recallPersistence.commit),
+        );
+      } catch (error) {
+        recallPersistence.rollback();
+        throw error;
+      }
+    },
+    streamSignal,
+    recallPersistence.rollback,
+  );
 }
 
 /**
@@ -7567,6 +7733,7 @@ export function streamResponsesRecallAware(
     }) => void;
     sessionID?: string;
     maxRecallDepth?: number;
+    noStore?: boolean;
     maxDeferredBytes?: number;
     maxHiddenRecallBytes?: number;
     maxRetainedStateBytes?: number;
@@ -7602,6 +7769,8 @@ export function streamResponsesRecallAware(
     }>;
     /** Streaming follow-up stage: build + forward + assert-SSE + reader. */
     runFollowUp: (ctx: {
+      /** This is the one final continuation after the last allowed recall. */
+      finalRecallRound: boolean;
       anchorText: string;
       resultText: string;
       acc: GatewayResponse;
@@ -7615,6 +7784,7 @@ export function streamResponsesRecallAware(
     }>;
   },
 ): Response {
+  const recallDiagnostics = createRecallDiagnostics(!opts.noStore);
   const state = makeResponsesAccState();
   const syntheticIdentities = new Set<string>();
   const referenceIdentities = new Set<string>();
@@ -9256,6 +9426,7 @@ export function streamResponsesRecallAware(
   const finish = (resp: GatewayResponse, successful: boolean): boolean => {
     if (completionAttempted) return completed;
     completionAttempted = true;
+    recallDiagnostics.finish(successful ? "completed" : "failed");
     try {
       opts.onComplete(resp, successful);
       completed = true;
@@ -9304,6 +9475,7 @@ export function streamResponsesRecallAware(
       }
       throw signal.reason;
     }
+    recallDiagnostics.record(input, result.resultText);
     return result;
   };
   const settleFollowUp = async (
@@ -9548,6 +9720,7 @@ export function streamResponsesRecallAware(
   const cleanupAbort = (): void =>
     signal.removeEventListener("abort", onStreamAbort);
   const onStreamAbort = (): void => {
+    recallDiagnostics.finish("aborted");
     resumeDemand?.();
     resumeDemand = undefined;
     if (keepaliveTimer) clearTimeout(keepaliveTimer);
@@ -10057,6 +10230,7 @@ export function streamResponsesRecallAware(
                     continuationFailureCategory = "follow_up_setup";
                     signal.throwIfAborted();
                     let follow = await settleFollowUp({
+                      finalRecallRound: pendingRecalls.length >= maxRecallDepth,
                       anchorText: executed.anchorText,
                       resultText: executed.resultText,
                       acc: recallAcc,
@@ -10069,6 +10243,7 @@ export function streamResponsesRecallAware(
                     let continuationFollowUpInput: Parameters<
                       typeof opts.runFollowUp
                     >[0] = {
+                      finalRecallRound: pendingRecalls.length >= maxRecallDepth,
                       anchorText: executed.anchorText,
                       resultText: executed.resultText,
                       acc: recallAcc,
@@ -10505,6 +10680,7 @@ export function streamResponsesRecallAware(
                         }
                         if (
                           error instanceof SSEStreamTransportError &&
+                          !continuationFollowUpInput.finalRecallRound &&
                           recallContinuationTransportRetries <
                             maxRecallContinuationTransportRetries
                         ) {
@@ -10615,12 +10791,27 @@ export function streamResponsesRecallAware(
                         contState.usage,
                       );
                       mergeUsage(transactionProviderUsage, contState.usage);
-                      if (continuationFailed) {
+                      if (
+                        continuationFailed ||
+                        (continuationFollowUpInput.finalRecallRound &&
+                          contState.terminalEvent === "response.incomplete")
+                      ) {
                         throw new RecallContinuationFailure("follow_up_failed");
                       }
                       if (
                         !continuationCompleted ||
                         contState.rawItems.size === 0
+                      ) {
+                        throw new RecallContinuationFailure(
+                          "follow_up_missing_output",
+                        );
+                      }
+                      if (
+                        continuationFollowUpInput.finalRecallRound &&
+                        contPending.length === 0 &&
+                        !isUsableRecallContinuation(
+                          finalizeResponsesAcc(contState),
+                        )
                       ) {
                         throw new RecallContinuationFailure(
                           "follow_up_missing_output",
@@ -10655,30 +10846,8 @@ export function streamResponsesRecallAware(
                       let nextAcc: GatewayResponse | undefined;
                       if (contPending.length === 1) {
                         if (recallDepth >= maxRecallDepth) {
-                          const exhaustedRecall = contPending[0];
-                          const shiftedRecallIndex = shiftedOutputIndex(
-                            exhaustedRecall.outputIndex,
-                            contIndex,
-                          );
-                          const marker = `Recall depth limit reached (${maxRecallDepth}).`;
-                          const syntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
-                          reserveSyntheticIdentity(syntheticId, [
-                            state,
-                            contState,
-                          ]);
-                          contState.items.set(exhaustedRecall.outputIndex, {
-                            type: "text",
-                            id: syntheticId,
-                            text: marker,
-                          });
-                          queueTransactional(
-                            encoder.encode(
-                              emitTextItem(
-                                shiftedRecallIndex,
-                                marker,
-                                syntheticId,
-                              ),
-                            ),
+                          throw new RecallContinuationFailure(
+                            "depth_exhausted",
                           );
                         } else {
                           recallDepth++;
@@ -10751,6 +10920,8 @@ export function streamResponsesRecallAware(
                         recallIndices.add(shiftedOutputIndex(index, contIndex));
                       }
                       mergeContinuation();
+                      if (continuationFollowUpInput.finalRecallRound)
+                        log.info("recall final continuation: completed");
                       if (!nextRecall || !nextExecuted || contOtherTool) {
                         state.stopReason = contState.stopReason;
                         state.terminalEvent = contState.terminalEvent;
@@ -10759,6 +10930,7 @@ export function streamResponsesRecallAware(
                       }
                       follow.commit?.();
                       continuationFollowUpInput = {
+                        finalRecallRound: recallDepth >= maxRecallDepth,
                         anchorText: nextExecuted.anchorText,
                         resultText: nextExecuted.resultText,
                         acc: nextAcc ?? finalizeResponsesAcc(contState),
@@ -11016,6 +11188,7 @@ export function streamResponsesRecallAware(
       resumeDemand = undefined;
     },
     cancel() {
+      recallDiagnostics.finish("aborted");
       resumeDemand?.();
       resumeDemand = undefined;
       cancelled = true;
@@ -11200,6 +11373,14 @@ async function preserveUpstreamErrorResponse(
   });
 }
 
+/** Parsed usage from a buffered response that lacks a valid completion. */
+class NonStreamCompletionError extends Error {
+  constructor(readonly response: GatewayResponse) {
+    super("upstream response did not complete");
+    this.name = "NonStreamCompletionError";
+  }
+}
+
 export async function accumulateNonStreamResponse(
   upstreamResponse: Response,
   protocol:
@@ -11263,25 +11444,38 @@ export async function accumulateNonStreamResponse(
   }
 
   const json = JSON.parse(body) as Record<string, unknown>;
-  if (protocol === "openai-responses") {
-    const { response, status } = parseResponsesNonStreamEnvelope(json);
-    if (status !== "completed") {
-      throw new ResponsesTerminalError(response, status);
+  const parseResponse =
+    protocol === "openai-responses"
+      ? accumulateResponsesNonStreamJSON
+      : protocol === "openai"
+        ? accumulateOpenAINonStreamJSON
+        : protocol === "gemini"
+          ? parseGeminiResponseJSON
+          : accumulateAnthropicNonStreamJSON;
+  let response: GatewayResponse | undefined;
+  try {
+    if (protocol === "openai-responses") {
+      const parsed = parseResponsesNonStreamEnvelope(json);
+      response = parsed.response;
+      if (parsed.status !== "completed")
+        throw new ResponsesTerminalError(response, parsed.status);
+    } else {
+      response = parseResponse(json);
+      if (requireValidCompletion)
+        assertValidNonStreamCompletion(json, protocol);
     }
     return response;
-  }
-  if (requireValidCompletion) {
-    assertValidNonStreamCompletion(json, protocol);
-  }
-  switch (protocol) {
-    case "openai":
-      return accumulateOpenAINonStreamJSON(json);
-    case "gemini":
-      return parseGeminiResponseJSON(json);
-    default:
-      // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
-      // Anthropic non-streaming JSON shape).
-      return accumulateAnthropicNonStreamJSON(json);
+  } catch (error) {
+    if (!requireValidCompletion || error instanceof ResponsesTerminalError)
+      throw error;
+    // Content parsing can fail before usage validation. Reuse the same parser
+    // on usage fields alone, retaining its numeric and cache consistency checks.
+    // Invalid usage still throws; the projection is never returned as success.
+    response ??= parseResponse({
+      usage: json.usage,
+      usageMetadata: json.usageMetadata,
+    });
+    throw new NonStreamCompletionError(response);
   }
 }
 
@@ -11709,6 +11903,13 @@ export function accumulateResponsesNonStreamJSON(
           for (const part of msgContent) {
             if (part.type === "output_text") {
               content.push({ type: "text", text: asString(part.text) });
+            } else if (
+              part.type === "refusal" &&
+              typeof part.refusal === "string"
+            ) {
+              // Other client protocols emit normalized content. Keep the raw
+              // refusal too for lossless native Responses output and replay.
+              content.push({ type: "text", text: part.refusal });
             }
           }
         }
@@ -11805,6 +12006,18 @@ export function responsesProvenanceContent(
     (block): block is Extract<GatewayContentBlock, { type: "text" }> =>
       block.type === "text",
   );
+  // Streaming refusals remain opaque; buffered refusals also have normalized
+  // text. Only the latter consume a text slot when replaying their raw part.
+  const opaqueMessageIds = new Set(
+    response.content.flatMap((block) =>
+      block.type === "opaque" &&
+      block.responsesItem === true &&
+      block.raw.type === "message" &&
+      typeof block.raw.id === "string"
+        ? [block.raw.id]
+        : [],
+    ),
+  );
   let textIndex = 0;
   for (const raw of response.rawOutputItems) {
     if (raw.type === "item_reference") continue;
@@ -11822,7 +12035,13 @@ export function responsesProvenanceContent(
           raw: { ...raw, content: [part] },
           responsesItem: true,
         });
-        if (part.type === "output_text" && typeof part.text === "string") {
+        if (
+          (part.type === "output_text" && typeof part.text === "string") ||
+          (part.type === "refusal" &&
+            typeof part.refusal === "string" &&
+            typeof raw.id === "string" &&
+            !opaqueMessageIds.has(raw.id))
+        ) {
           textIndex++;
         }
       }
@@ -17151,6 +17370,7 @@ async function handleConversationTurn(
       response,
       releaseForeground,
       foregroundAbort.signal,
+      rollbackRecallPersistence,
     );
   };
   const awaitForeground = async <T>(operation: Promise<T>): Promise<T> => {
@@ -17238,6 +17458,9 @@ async function handleConversationTurn(
   // Anthropic-format response, so the recall loop is protocol-agnostic here.
   // Without this, a `recall` tool_use injected by the gateway would leak to the
   // client (e.g. "Model tried to call unavailable tool 'recall'").
+  const bufferedRecallDiagnostics = createRecallDiagnostics(
+    !suppressTemporalStorage,
+  );
   const finalizeWithRecall = async (
     resp: GatewayResponse,
   ): Promise<Response> => {
@@ -17249,6 +17472,37 @@ async function handleConversationTurn(
     let currentModifiedReq = modifiedReq;
     const responsesVisibleContent: GatewayContentBlock[] = [];
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
+    const bufferedRecallTransaction = createRecallPersistenceTransaction(
+      sessionState,
+      suppressTemporalStorage,
+    );
+    const finishBufferedResponse = (response: GatewayResponse): void => {
+      if (req.stream || recallDepth > 0) {
+        // Recall state and successful-turn storage share the existing atomic
+        // finalizer, after downstream EOF, for buffered clients as well.
+        finishStreaming(response);
+      } else {
+        postResponse(
+          req,
+          response,
+          sessionState,
+          config,
+          temporalInput,
+          requestBody,
+          genAiSpan,
+          suppressTemporalStorage,
+          endGenAiSpan,
+        );
+      }
+    };
+    const failRecall = (
+      category: RecallContinuationFailureCategory,
+    ): Response => {
+      reportRecallContinuationFailure(category);
+      rollbackRecallPersistence();
+      finishUnsuccessfulStreaming({ ...currentResp, usage: cumulativeUsage });
+      return errorResponse(502, "Recall continuation failed");
+    };
     // Whether this request opted into the 1M window (context-1m beta); gates the
     // client-usage cap so a 1M-capable model the client meters against 200K is
     // clamped below its ~167K auto-compact threshold (#910 regression).
@@ -17264,7 +17518,15 @@ async function handleConversationTurn(
     );
 
     while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
+      if (
+        currentResp.content.filter(
+          (block) =>
+            block.type === "tool_use" && block.name === RECALL_TOOL_NAME,
+        ).length > 1
+      )
+        return failRecall("parallel_recall");
       recallDepth++;
+      recallPersistenceTransaction ??= bufferedRecallTransaction;
       const recallBlock = findRecallToolUse(currentResp);
       if (!recallBlock) break;
       const { result, input } = await promiseAgainstAbort(
@@ -17276,10 +17538,12 @@ async function handleConversationTurn(
             getLLMClient(config),
             alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
             foregroundAbort.signal,
+            bufferedRecallTransaction.deferTransfer,
           ),
         foregroundAbort.signal,
       );
 
+      bufferedRecallDiagnostics.record(input, result);
       // Store recall result for marker round-trip expansion
       const scope = input.scope ?? "all";
       const anchorId = crypto.randomUUID();
@@ -17297,7 +17561,7 @@ async function handleConversationTurn(
         return [{ id: block.id, name: block.name, input: block.input, side }];
       });
       if (!suppressTemporalStorage) {
-        addRecallStoreEntry(sessionState.recallStore, storeKey, {
+        const storedRecall: StoredRecall = {
           toolUseId: recallBlock.id,
           anchorId,
           anchorContextId,
@@ -17305,12 +17569,8 @@ async function handleConversationTurn(
           position,
           result,
           ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
-        });
-        // Persist the store (v46) so the marker still expands byte-identically
-        // after a gateway restart instead of leaking raw marker text upstream.
-        saveSessionTracking(sessionState.sessionID, {
-          recallStore: serializeRecallStore(sessionState.recallStore),
-        });
+        };
+        bufferedRecallTransaction.stage(storeKey, storedRecall);
       }
 
       const markerText = buildAnchoredRecallMarker(
@@ -17336,21 +17596,7 @@ async function handleConversationTurn(
           `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         markerResp.usage = cumulativeUsage;
-        if (req.stream) {
-          finishStreaming(markerResp);
-        } else {
-          postResponse(
-            req,
-            markerResp,
-            sessionState,
-            config,
-            temporalInput,
-            requestBody,
-            genAiSpan,
-            suppressTemporalStorage,
-            endGenAiSpan,
-          );
-        }
+        finishBufferedResponse(markerResp);
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -17393,7 +17639,13 @@ async function handleConversationTurn(
             requestUpstreamRoute,
           ),
         parseJSON: (response, protocol, signal) =>
-          accumulateNonStreamResponse(response, protocol, false, signal),
+          accumulateNonStreamResponse(
+            response,
+            protocol,
+            false,
+            signal,
+            recallDepth === MAX_RECALL_DEPTH,
+          ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
             signal,
@@ -17412,6 +17664,7 @@ async function handleConversationTurn(
               result,
               recallBlock,
               foregroundAbort.signal,
+              recallDepth === MAX_RECALL_DEPTH,
             )
           : await runRecallFollowUpJSON(
               jsonRecallCtx,
@@ -17420,6 +17673,7 @@ async function handleConversationTurn(
               result,
               recallBlock,
               foregroundAbort.signal,
+              recallDepth === MAX_RECALL_DEPTH,
             );
       } catch (fetchErr) {
         if (
@@ -17428,7 +17682,10 @@ async function handleConversationTurn(
         ) {
           throw fetchErr;
         }
-        if (fetchErr instanceof ResponsesTerminalError) {
+        if (
+          fetchErr instanceof ResponsesTerminalError ||
+          fetchErr instanceof NonStreamCompletionError
+        ) {
           Object.assign(
             cumulativeUsage,
             mergeRecallUsage(
@@ -17440,23 +17697,12 @@ async function handleConversationTurn(
         log.error(
           `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
+        if (recallDepth === MAX_RECALL_DEPTH)
+          return failRecall("follow_up_failed");
+        bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        if (req.stream) {
-          finishStreaming(markerResp);
-        } else {
-          postResponse(
-            req,
-            markerResp,
-            sessionState,
-            config,
-            temporalInput,
-            requestBody,
-            genAiSpan,
-            suppressTemporalStorage,
-            endGenAiSpan,
-          );
-        }
+        finishBufferedResponse(markerResp);
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -17483,23 +17729,12 @@ async function handleConversationTurn(
           model: currentModifiedReq.model,
           sessionID: sessionState.sessionID,
         });
+        if (recallDepth === MAX_RECALL_DEPTH)
+          return failRecall("follow_up_failed");
+        bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        if (req.stream) {
-          finishStreaming(markerResp);
-        } else {
-          postResponse(
-            req,
-            markerResp,
-            sessionState,
-            config,
-            temporalInput,
-            requestBody,
-            genAiSpan,
-            suppressTemporalStorage,
-            endGenAiSpan,
-          );
-        }
+        finishBufferedResponse(markerResp);
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -17526,39 +17761,16 @@ async function handleConversationTurn(
       // Loop continues — hasRecallToolUse checked at top
     }
 
-    // Depth exhausted or no more recall — finalize
-    if (hasRecallToolUse(currentResp)) {
-      log.warn(
-        `recall depth exhausted (${MAX_RECALL_DEPTH}) — stripping remaining recall`,
-      );
-      currentResp = {
-        ...currentResp,
-        content: currentResp.content.map((block) =>
-          block.type === "tool_use" && block.name === RECALL_TOOL_NAME
-            ? {
-                type: "text" as const,
-                text: `Recall depth limit reached (${MAX_RECALL_DEPTH}).`,
-              }
-            : block,
-        ),
-      };
-    }
+    if (hasRecallToolUse(currentResp)) return failRecall("depth_exhausted");
+    if (
+      recallDepth === MAX_RECALL_DEPTH &&
+      !isUsableRecallContinuation(currentResp)
+    )
+      return failRecall("follow_up_failed");
     currentResp.usage = cumulativeUsage;
-    if (req.stream) {
-      finishStreaming(currentResp);
-    } else {
-      postResponse(
-        req,
-        currentResp,
-        sessionState,
-        config,
-        temporalInput,
-        requestBody,
-        genAiSpan,
-        suppressTemporalStorage,
-        endGenAiSpan,
-      );
-    }
+    if (recallDepth === MAX_RECALL_DEPTH)
+      log.info("recall final continuation: completed");
+    finishBufferedResponse(currentResp);
     // Telemetry: flag a completion we're about to hand back with NO usable
     // content (no text, no tool_use) — the "no response data" class
     // (github-copilot #1052 follow-up). Checked on the model's response, before
@@ -17593,8 +17805,19 @@ async function handleConversationTurn(
       longContext,
     );
   };
-  const finishWithRecall = async (resp: GatewayResponse): Promise<Response> =>
-    finishForeground(await awaitForeground(finalizeWithRecall(resp)));
+  const finishWithRecall = async (resp: GatewayResponse): Promise<Response> => {
+    try {
+      const response = await awaitForeground(finalizeWithRecall(resp));
+      bufferedRecallDiagnostics.finish(response.ok ? "completed" : "failed");
+      return finishForeground(response);
+    } catch (error) {
+      rollbackRecallPersistence();
+      bufferedRecallDiagnostics.finish(
+        foregroundAbort.signal.aborted ? "aborted" : "failed",
+      );
+      throw error;
+    }
+  };
   function finishStreaming(resp: GatewayResponse): void {
     if (streamingFinalizerRegistered) return;
     streamingFinalizerRegistered = true;
@@ -17751,6 +17974,7 @@ async function handleConversationTurn(
               },
               sessionID: sessionState.sessionID,
               maxRecallDepth: MAX_RECALL_DEPTH,
+              noStore: suppressTemporalStorage,
               signal: foregroundAbort.signal,
               onRecall: async ({
                 query,
@@ -17847,8 +18071,8 @@ async function handleConversationTurn(
                   anchorText,
                   resultText: result,
                   commit: () => {
-                    for (const record of deferredTransferRecordings) record();
                     if (suppressTemporalStorage) return;
+                    for (const record of deferredTransferRecordings) record();
                     addRecallStoreEntry(
                       sessionState.recallStore,
                       storeKey,
@@ -17865,6 +18089,7 @@ async function handleConversationTurn(
                 };
               },
               runFollowUp: async ({
+                finalRecallRound,
                 acc,
                 resultText,
                 toolUseId,
@@ -17909,6 +18134,7 @@ async function handleConversationTurn(
                   resultText,
                   recallBlock,
                   signal,
+                  finalRecallRound,
                 );
                 if (!follow.ok) {
                   throw new Error(
@@ -18015,6 +18241,11 @@ async function handleConversationTurn(
             cacheOptions,
             upstreamRoute: requestUpstreamRoute,
             noStore: suppressTemporalStorage,
+            onFailure: finishUnsuccessfulStreaming,
+            onTransactionReady: (transaction) => {
+              rollbackRecallPersistence();
+              recallPersistenceTransaction = transaction;
+            },
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
@@ -18035,6 +18266,7 @@ async function handleConversationTurn(
       return finishForeground(
         translateAnthropicStreamToOpenAI(anthropicSSE, {
           signal: foregroundAbort.signal,
+          propagateErrors: true,
         }),
       );
     }
