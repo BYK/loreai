@@ -1,0 +1,941 @@
+{
+  "runtime": "Node.js 24.19.0 / Linux x64",
+  "samples": [
+    {
+      "count": 20,
+      "cohort": "mixed",
+      "mode": "before",
+      "sample": 0,
+      "gcAvailable": true,
+      "retainedMessages": 20,
+      "observations": {
+        "event_loop_delay_ms": 3.029565999999704
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 1.6525460000002568,
+          "cpuMs": 1.642
+        },
+        "provenance": {
+          "wallMs": 0.1279040000003988,
+          "cpuMs": 0.122
+        },
+        "resolve_tools": {
+          "wallMs": 0.8824030000000675,
+          "cpuMs": 0.878
+        },
+        "turn_to_upstream": {
+          "wallMs": 3.112891000000218,
+          "cpuMs": 6.388
+        },
+        "sqlCount": 9,
+        "sqlMs": 0.06672999999818785
+      },
+      "postResponse": {
+        "wallMs": 4.6844850000002225,
+        "cpuMs": 15.946,
+        "sqlCount": 17
+      },
+      "memory": {
+        "rssDelta": 0,
+        "heapDelta": 1066864,
+        "heapAfterHistoryRelease": 86952,
+        "snapshotBytes": 5216
+      }
+    },
+    {
+      "count": 20,
+      "cohort": "mixed",
+      "mode": "after",
+      "sample": 0,
+      "gcAvailable": true,
+      "retainedMessages": 20,
+      "observations": {
+        "rss_delta_bytes": 0,
+        "heap_delta_bytes": 621136,
+        "messages": 20,
+        "parts": 38,
+        "toolUses": 18,
+        "toolResults": 18,
+        "placeholders": 9,
+        "stored_id_resolutions": 9,
+        "event_loop_delay_ms": 2.154884000000038
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 0.9352829999997994,
+          "cpuMs": 3.189
+        },
+        "temporal_input": {
+          "wallMs": 0.0974370000003546,
+          "cpuMs": 0.094
+        },
+        "provenance": {
+          "wallMs": 0.04025099999989834,
+          "cpuMs": 0.038
+        },
+        "stored_ids": {
+          "wallMs": 0.49106099999971775,
+          "cpuMs": 0.486
+        },
+        "resolve_tools": {
+          "wallMs": 0.17133800000010524,
+          "cpuMs": 0.168
+        },
+        "semantic_total": {
+          "wallMs": 1.9550720000002002,
+          "cpuMs": 4.211
+        },
+        "turn_to_upstream": {
+          "wallMs": 2.497252000000117,
+          "cpuMs": 4.753
+        },
+        "sqlCount": 1,
+        "sqlMs": 0.10451799999964351
+      },
+      "postResponse": {
+        "wallMs": 1.2387410000001182,
+        "cpuMs": 1.208,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 0,
+        "heapDelta": 758032,
+        "heapAfterHistoryRelease": 48288,
+        "snapshotBytes": 5216
+      }
+    },
+    {
+      "count": 20,
+      "cohort": "mixed",
+      "mode": "after",
+      "sample": 1,
+      "gcAvailable": true,
+      "retainedMessages": 20,
+      "observations": {
+        "rss_delta_bytes": 0,
+        "heap_delta_bytes": 617952,
+        "messages": 20,
+        "parts": 38,
+        "toolUses": 18,
+        "toolResults": 18,
+        "placeholders": 9,
+        "stored_id_resolutions": 9,
+        "event_loop_delay_ms": 1.7292309999997997
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 0.9997600000001512,
+          "cpuMs": 1.837
+        },
+        "temporal_input": {
+          "wallMs": 0.0892149999999674,
+          "cpuMs": 0.085
+        },
+        "provenance": {
+          "wallMs": 0.02665999999999258,
+          "cpuMs": 0.025
+        },
+        "stored_ids": {
+          "wallMs": 0.2865120000001298,
+          "cpuMs": 0.285
+        },
+        "resolve_tools": {
+          "wallMs": 0.08995600000025661,
+          "cpuMs": 0.089
+        },
+        "semantic_total": {
+          "wallMs": 1.6481189999999515,
+          "cpuMs": 2.488
+        },
+        "turn_to_upstream": {
+          "wallMs": 1.8024420000001555,
+          "cpuMs": 3.282
+        },
+        "sqlCount": 1,
+        "sqlMs": 0.07064700000000812
+      },
+      "postResponse": {
+        "wallMs": 1.0107769999999618,
+        "cpuMs": 0.985,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 0,
+        "heapDelta": 664624,
+        "heapAfterHistoryRelease": 54280,
+        "snapshotBytes": 5216
+      }
+    },
+    {
+      "count": 20,
+      "cohort": "mixed",
+      "mode": "before",
+      "sample": 1,
+      "gcAvailable": true,
+      "retainedMessages": 20,
+      "observations": {
+        "event_loop_delay_ms": 1.5513719999999012
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 0.931557000000339,
+          "cpuMs": 0.927
+        },
+        "provenance": {
+          "wallMs": 0.031116999999994732,
+          "cpuMs": 0.03
+        },
+        "resolve_tools": {
+          "wallMs": 0.4586519999998018,
+          "cpuMs": 0.457
+        },
+        "turn_to_upstream": {
+          "wallMs": 1.5862849999998616,
+          "cpuMs": 1.58
+        },
+        "sqlCount": 9,
+        "sqlMs": 0.14519100000052276
+      },
+      "postResponse": {
+        "wallMs": 2.074662999999873,
+        "cpuMs": 2.044,
+        "sqlCount": 18
+      },
+      "memory": {
+        "rssDelta": 0,
+        "heapDelta": 616336,
+        "heapAfterHistoryRelease": 21248,
+        "snapshotBytes": 5216
+      }
+    },
+    {
+      "count": 20,
+      "cohort": "mixed",
+      "mode": "before",
+      "sample": 2,
+      "gcAvailable": true,
+      "retainedMessages": 20,
+      "observations": {
+        "event_loop_delay_ms": 1.7153010000001814
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 1.1595809999998892,
+          "cpuMs": 1.154
+        },
+        "provenance": {
+          "wallMs": 0.03266899999971429,
+          "cpuMs": 0.031
+        },
+        "resolve_tools": {
+          "wallMs": 0.39089000000012675,
+          "cpuMs": 0.389
+        },
+        "turn_to_upstream": {
+          "wallMs": 1.7492009999996299,
+          "cpuMs": 1.742
+        },
+        "sqlCount": 9,
+        "sqlMs": 0.06443699999908858
+      },
+      "postResponse": {
+        "wallMs": 2.4256030000001374,
+        "cpuMs": 3.558,
+        "sqlCount": 18
+      },
+      "memory": {
+        "rssDelta": 131072,
+        "heapDelta": 614784,
+        "heapAfterHistoryRelease": 15184,
+        "snapshotBytes": 5216
+      }
+    },
+    {
+      "count": 20,
+      "cohort": "mixed",
+      "mode": "after",
+      "sample": 2,
+      "gcAvailable": true,
+      "retainedMessages": 20,
+      "observations": {
+        "rss_delta_bytes": 131072,
+        "heap_delta_bytes": 612784,
+        "messages": 20,
+        "parts": 38,
+        "toolUses": 18,
+        "toolResults": 18,
+        "placeholders": 9,
+        "stored_id_resolutions": 9,
+        "event_loop_delay_ms": 2.0685150000003887
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 1.2056509999997616,
+          "cpuMs": 5.355
+        },
+        "temporal_input": {
+          "wallMs": 0.12391699999989214,
+          "cpuMs": 0.122
+        },
+        "provenance": {
+          "wallMs": 0.026220000000193977,
+          "cpuMs": 0.025
+        },
+        "stored_ids": {
+          "wallMs": 0.33529700000008233,
+          "cpuMs": 0.333
+        },
+        "resolve_tools": {
+          "wallMs": 0.12314599999990605,
+          "cpuMs": 0.121
+        },
+        "semantic_total": {
+          "wallMs": 1.9619040000002315,
+          "cpuMs": 6.116
+        },
+        "turn_to_upstream": {
+          "wallMs": 2.1206829999996444,
+          "cpuMs": 6.269
+        },
+        "sqlCount": 1,
+        "sqlMs": 0.10422699999980978
+      },
+      "postResponse": {
+        "wallMs": 1.3148859999996603,
+        "cpuMs": 5.461,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 262144,
+        "heapDelta": 661504,
+        "heapAfterHistoryRelease": 20752,
+        "snapshotBytes": 5216
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "mixed",
+      "mode": "before",
+      "sample": 0,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "event_loop_delay_ms": 2277.28241
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 159.56058200000007,
+          "cpuMs": 213.121
+        },
+        "provenance": {
+          "wallMs": 1.532032999999501,
+          "cpuMs": 1.911
+        },
+        "resolve_tools": {
+          "wallMs": 2115.913568,
+          "cpuMs": 2179.334
+        },
+        "turn_to_upstream": {
+          "wallMs": 2277.342802,
+          "cpuMs": 2394.716
+        },
+        "sqlCount": 2789,
+        "sqlMs": 2026.019440000011
+      },
+      "postResponse": {
+        "wallMs": 2155.309521,
+        "cpuMs": 2232.211,
+        "sqlCount": 2797
+      },
+      "memory": {
+        "rssDelta": 2883584,
+        "heapDelta": 31539608,
+        "heapAfterHistoryRelease": 82536,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "mixed",
+      "mode": "after",
+      "sample": 0,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "rss_delta_bytes": 3932160,
+        "heap_delta_bytes": 29204584,
+        "messages": 5580,
+        "parts": 11158,
+        "toolUses": 5578,
+        "toolResults": 5578,
+        "placeholders": 2789,
+        "stored_id_resolutions": 2789,
+        "event_loop_delay_ms": 214.7056679999987
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 169.56563300000016,
+          "cpuMs": 214.832
+        },
+        "temporal_input": {
+          "wallMs": 0.14423799999894982,
+          "cpuMs": 0.143
+        },
+        "provenance": {
+          "wallMs": 2.3258420000001934,
+          "cpuMs": 2.628
+        },
+        "stored_ids": {
+          "wallMs": 28.29349000000002,
+          "cpuMs": 30.422
+        },
+        "resolve_tools": {
+          "wallMs": 10.81473300000107,
+          "cpuMs": 17.54
+        },
+        "semantic_total": {
+          "wallMs": 214.55188499999895,
+          "cpuMs": 269.175
+        },
+        "turn_to_upstream": {
+          "wallMs": 214.80182200000127,
+          "cpuMs": 269.416
+        },
+        "sqlCount": 28,
+        "sqlMs": 13.251854000003732
+      },
+      "postResponse": {
+        "wallMs": 3.994011999999202,
+        "cpuMs": 14.4,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 4063232,
+        "heapDelta": 29254232,
+        "heapAfterHistoryRelease": 7515624,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "mixed",
+      "mode": "after",
+      "sample": 1,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "rss_delta_bytes": 5111808,
+        "heap_delta_bytes": 26904104,
+        "messages": 5580,
+        "parts": 11158,
+        "toolUses": 5578,
+        "toolResults": 5578,
+        "placeholders": 2789,
+        "stored_id_resolutions": 2789,
+        "event_loop_delay_ms": 219.71877999999924
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 184.79659699999866,
+          "cpuMs": 236.163
+        },
+        "temporal_input": {
+          "wallMs": 0.17380299999967974,
+          "cpuMs": 0.171
+        },
+        "provenance": {
+          "wallMs": 1.6207979999999225,
+          "cpuMs": 1.745
+        },
+        "stored_ids": {
+          "wallMs": 23.18728899999951,
+          "cpuMs": 35.02
+        },
+        "resolve_tools": {
+          "wallMs": 6.430350999999064,
+          "cpuMs": 16.371
+        },
+        "semantic_total": {
+          "wallMs": 219.56701099999918,
+          "cpuMs": 294.609
+        },
+        "turn_to_upstream": {
+          "wallMs": 219.8089060000002,
+          "cpuMs": 294.837
+        },
+        "sqlCount": 28,
+        "sqlMs": 11.49795699999595
+      },
+      "postResponse": {
+        "wallMs": 4.4513219999989815,
+        "cpuMs": 12.418,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 5242880,
+        "heapDelta": 26962464,
+        "heapAfterHistoryRelease": 52048,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "mixed",
+      "mode": "before",
+      "sample": 1,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "event_loop_delay_ms": 2247.4038309999996
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 164.38235499999973,
+          "cpuMs": 212.082
+        },
+        "provenance": {
+          "wallMs": 1.1602830000010727,
+          "cpuMs": 1.157
+        },
+        "resolve_tools": {
+          "wallMs": 2081.0350960000014,
+          "cpuMs": 2087.55
+        },
+        "turn_to_upstream": {
+          "wallMs": 2247.9834960000007,
+          "cpuMs": 2301.977
+        },
+        "sqlCount": 2789,
+        "sqlMs": 1992.7094740000466
+      },
+      "postResponse": {
+        "wallMs": 2551.7912209999995,
+        "cpuMs": 2394.585,
+        "sqlCount": 2798
+      },
+      "memory": {
+        "rssDelta": 655360,
+        "heapDelta": 29501256,
+        "heapAfterHistoryRelease": 43688,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "mixed",
+      "mode": "before",
+      "sample": 2,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "event_loop_delay_ms": 2303.5123379999986
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 173.0897640000003,
+          "cpuMs": 216.128
+        },
+        "provenance": {
+          "wallMs": 1.7975049999986368,
+          "cpuMs": 2.472
+        },
+        "resolve_tools": {
+          "wallMs": 2128.3282709999985,
+          "cpuMs": 2155.162
+        },
+        "turn_to_upstream": {
+          "wallMs": 2303.556994999999,
+          "cpuMs": 2374.118
+        },
+        "sqlCount": 2789,
+        "sqlMs": 2046.7123309999788
+      },
+      "postResponse": {
+        "wallMs": 2284.0072690000015,
+        "cpuMs": 2357.141,
+        "sqlCount": 2798
+      },
+      "memory": {
+        "rssDelta": 524288,
+        "heapDelta": 29419880,
+        "heapAfterHistoryRelease": -49976,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "mixed",
+      "mode": "after",
+      "sample": 2,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "rss_delta_bytes": 655360,
+        "heap_delta_bytes": 29229248,
+        "messages": 5580,
+        "parts": 11158,
+        "toolUses": 5578,
+        "toolResults": 5578,
+        "placeholders": 2789,
+        "stored_id_resolutions": 2789,
+        "event_loop_delay_ms": 248.6931000000004
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 185.6991479999997,
+          "cpuMs": 237.181
+        },
+        "temporal_input": {
+          "wallMs": 0.1383480000004056,
+          "cpuMs": 0.135
+        },
+        "provenance": {
+          "wallMs": 1.9881529999984195,
+          "cpuMs": 1.984
+        },
+        "stored_ids": {
+          "wallMs": 32.078638999999384,
+          "cpuMs": 33.004
+        },
+        "resolve_tools": {
+          "wallMs": 23.806665999996767,
+          "cpuMs": 26.22
+        },
+        "semantic_total": {
+          "wallMs": 248.4583249999996,
+          "cpuMs": 303.31
+        },
+        "turn_to_upstream": {
+          "wallMs": 248.73957000000155,
+          "cpuMs": 303.587
+        },
+        "sqlCount": 28,
+        "sqlMs": 15.84908500000165
+      },
+      "postResponse": {
+        "wallMs": 4.203569000001153,
+        "cpuMs": 20.092,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 655360,
+        "heapDelta": 29263608,
+        "heapAfterHistoryRelease": 60528,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "restored",
+      "mode": "before",
+      "sample": 0,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "event_loop_delay_ms": 1226.178620999999
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 172.6634640000011,
+          "cpuMs": 212.419
+        },
+        "provenance": {
+          "wallMs": 1.4419879999986733,
+          "cpuMs": 1.439
+        },
+        "resolve_tools": {
+          "wallMs": 1051.8004869999968,
+          "cpuMs": 1076.376
+        },
+        "turn_to_upstream": {
+          "wallMs": 1226.2603649999983,
+          "cpuMs": 1290.599
+        },
+        "sqlCount": 2789,
+        "sqlMs": 996.9000440001364
+      },
+      "postResponse": {
+        "wallMs": 1243.2695860000022,
+        "cpuMs": 1305.534,
+        "sqlCount": 2797
+      },
+      "memory": {
+        "rssDelta": 1966080,
+        "heapDelta": 29794392,
+        "heapAfterHistoryRelease": -1876464,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "restored",
+      "mode": "after",
+      "sample": 0,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "rss_delta_bytes": 131072,
+        "heap_delta_bytes": 28068504,
+        "messages": 5580,
+        "parts": 11158,
+        "toolUses": 5578,
+        "toolResults": 5578,
+        "placeholders": 2789,
+        "stored_id_resolutions": 2789,
+        "event_loop_delay_ms": 191.28360200000316
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 150.70906699999978,
+          "cpuMs": 206.898
+        },
+        "temporal_input": {
+          "wallMs": 0.13453300000037416,
+          "cpuMs": 0.133
+        },
+        "provenance": {
+          "wallMs": 1.9067599999980303,
+          "cpuMs": 1.901
+        },
+        "stored_ids": {
+          "wallMs": 21.92065300000104,
+          "cpuMs": 24.093
+        },
+        "resolve_tools": {
+          "wallMs": 12.269027999998798,
+          "cpuMs": 12.808
+        },
+        "semantic_total": {
+          "wallMs": 191.10299000000305,
+          "cpuMs": 250.037
+        },
+        "turn_to_upstream": {
+          "wallMs": 191.319696999999,
+          "cpuMs": 250.249
+        },
+        "sqlCount": 28,
+        "sqlMs": 8.555562999998074
+      },
+      "postResponse": {
+        "wallMs": 4.66423599999689,
+        "cpuMs": 20.066,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 131072,
+        "heapDelta": 28102856,
+        "heapAfterHistoryRelease": -5745184,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "restored",
+      "mode": "after",
+      "sample": 1,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "rss_delta_bytes": 393216,
+        "heap_delta_bytes": 29125960,
+        "messages": 5580,
+        "parts": 11158,
+        "toolUses": 5578,
+        "toolResults": 5578,
+        "placeholders": 2789,
+        "stored_id_resolutions": 2789,
+        "event_loop_delay_ms": 240.25374299999748
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 196.096626999999,
+          "cpuMs": 254.976
+        },
+        "temporal_input": {
+          "wallMs": 0.11290000000008149,
+          "cpuMs": 0.11
+        },
+        "provenance": {
+          "wallMs": 2.1114699999998265,
+          "cpuMs": 2.615
+        },
+        "stored_ids": {
+          "wallMs": 22.08356300000014,
+          "cpuMs": 27.35
+        },
+        "resolve_tools": {
+          "wallMs": 15.737261999998736,
+          "cpuMs": 47.916
+        },
+        "semantic_total": {
+          "wallMs": 240.13826899999913,
+          "cpuMs": 337.103
+        },
+        "turn_to_upstream": {
+          "wallMs": 240.28590299999996,
+          "cpuMs": 337.247
+        },
+        "sqlCount": 28,
+        "sqlMs": 9.080729000015708
+      },
+      "postResponse": {
+        "wallMs": 3.97294200000033,
+        "cpuMs": 18.062,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 393216,
+        "heapDelta": 29156872,
+        "heapAfterHistoryRelease": 33304,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "restored",
+      "mode": "before",
+      "sample": 1,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "event_loop_delay_ms": 1212.015996000002
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 152.0273879999986,
+          "cpuMs": 209.388
+        },
+        "provenance": {
+          "wallMs": 1.6204079999988608,
+          "cpuMs": 1.618
+        },
+        "resolve_tools": {
+          "wallMs": 1058.0825589999986,
+          "cpuMs": 1068.518
+        },
+        "turn_to_upstream": {
+          "wallMs": 1212.0677539999997,
+          "cpuMs": 1279.874
+        },
+        "sqlCount": 2789,
+        "sqlMs": 996.5426020000668
+      },
+      "postResponse": {
+        "wallMs": 1282.4416539999984,
+        "cpuMs": 1344.729,
+        "sqlCount": 2798
+      },
+      "memory": {
+        "rssDelta": 131072,
+        "heapDelta": 29678744,
+        "heapAfterHistoryRelease": 84560,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "restored",
+      "mode": "before",
+      "sample": 2,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "event_loop_delay_ms": 1344.4467430000004
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 164.31664199999796,
+          "cpuMs": 221.651
+        },
+        "provenance": {
+          "wallMs": 2.338573000000906,
+          "cpuMs": 2.333
+        },
+        "resolve_tools": {
+          "wallMs": 1177.1779730000017,
+          "cpuMs": 1191.436
+        },
+        "turn_to_upstream": {
+          "wallMs": 1344.4989630000018,
+          "cpuMs": 1416.101
+        },
+        "sqlCount": 2789,
+        "sqlMs": 1074.7145200000414
+      },
+      "postResponse": {
+        "wallMs": 1269.6274780000022,
+        "cpuMs": 1329.524,
+        "sqlCount": 2798
+      },
+      "memory": {
+        "rssDelta": 393216,
+        "heapDelta": 29504920,
+        "heapAfterHistoryRelease": -696,
+        "snapshotBytes": 5230
+      }
+    },
+    {
+      "count": 5580,
+      "cohort": "restored",
+      "mode": "after",
+      "sample": 2,
+      "gcAvailable": true,
+      "retainedMessages": 5580,
+      "observations": {
+        "rss_delta_bytes": 0,
+        "heap_delta_bytes": 28367256,
+        "messages": 5580,
+        "parts": 11158,
+        "toolUses": 5578,
+        "toolResults": 5578,
+        "placeholders": 2789,
+        "stored_id_resolutions": 2789,
+        "event_loop_delay_ms": 193.25271200000134
+      },
+      "preparation": {
+        "conversion": {
+          "wallMs": 156.80145000000266,
+          "cpuMs": 209.596
+        },
+        "temporal_input": {
+          "wallMs": 0.1186600000000908,
+          "cpuMs": 0.117
+        },
+        "provenance": {
+          "wallMs": 1.8974269999998796,
+          "cpuMs": 1.894
+        },
+        "stored_ids": {
+          "wallMs": 18.19118900000103,
+          "cpuMs": 19.788
+        },
+        "resolve_tools": {
+          "wallMs": 11.969080000002577,
+          "cpuMs": 19.811
+        },
+        "semantic_total": {
+          "wallMs": 193.0954640000018,
+          "cpuMs": 255.355
+        },
+        "turn_to_upstream": {
+          "wallMs": 193.28883599999972,
+          "cpuMs": 255.545
+        },
+        "sqlCount": 28,
+        "sqlMs": 7.868869999994786
+      },
+      "postResponse": {
+        "wallMs": 3.7458479999986594,
+        "cpuMs": 13.766,
+        "sqlCount": 9
+      },
+      "memory": {
+        "rssDelta": 0,
+        "heapDelta": 28401560,
+        "heapAfterHistoryRelease": 24976,
+        "snapshotBytes": 5230
+      }
+    }
+  ]
+}

@@ -336,6 +336,8 @@ it.skipIf(process.env.LORE_BENCHMARK !== "1")(
                 }),
               );
             }
+            if (!temporalInput)
+              throw new Error("benchmark did not capture turn input");
             storeTurnTemporal({ ...storage, temporalInput });
             const cpu = process.cpuUsage(postCpu);
             process.stdout.write(
