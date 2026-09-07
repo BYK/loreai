@@ -11,6 +11,13 @@
  *  2. Meta requests (title gen, summaries, etc.) → forwarded transparently, no Lore processing.
  *  3. Normal conversation turns → full pipeline.
  */
+import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
+import {
+  PreparationTiming,
+  prepareSemanticMessages,
+} from "./semantic-preparation";
+export { storeTurnTemporal } from "./turn-temporal";
+export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
@@ -241,8 +248,6 @@ import {
 } from "./stream/anthropic";
 import {
   gatewayMessagesToLore,
-  updateAssistantMessageTokens,
-  resolveToolResults,
   deterministicID,
   legacyDeterministicID,
 } from "./temporal-adapter";
@@ -376,7 +381,6 @@ import {
   expandRecallMarkers,
   cleanupRecallStore,
   replaceRecallWithMarker,
-  isRecallMarker,
   serializeRecallStore,
   addRecallStoreEntry,
   deserializeRecallStore,
@@ -11847,33 +11851,6 @@ export function responsesProvenanceContent(
   return content;
 }
 
-/** @internal Preserve request-only provenance across lossless Lore transforms. */
-export function responsesProvenanceByMessageId(
-  messages: GatewayMessage[],
-  loreMessages: LoreMessageWithParts[],
-): ReadonlyMap<
-  string,
-  Pick<GatewayMessage, "content" | "provenanceContent" | "provenancePositions">
-> {
-  return new Map(
-    loreMessages.flatMap((message, index) => {
-      const original = messages[index];
-      return original?.provenanceContent
-        ? [
-            [
-              message.info.id,
-              {
-                content: original.content,
-                provenanceContent: original.provenanceContent,
-                provenancePositions: original.provenancePositions,
-              },
-            ] as const,
-          ]
-        : [];
-    }),
-  );
-}
-
 /** @internal Build the canonical anchor hash used by every Responses path. */
 export function responsesAnchorContext(
   clientMessages: GatewayMessage[],
@@ -12132,129 +12109,6 @@ export function recordCacheTurnUsage(
   return bustCause;
 }
 
-/**
- * Persist a turn's temporal messages — the latest user message + the assistant
- * response — and their tool-call traces. Extracted from postResponse() as a
- * testable seam (#1084).
- *
- * The four writes (user store + tool-calls, then assistant store + tool-calls)
- * are batched into a SINGLE savepoint so the post-response phase commits ONCE
- * instead of ~4 times, cutting SQLite writer + WAL contention. `resolveToolResults`
- * is pure in-memory (temporal-adapter.ts) and MUST run BETWEEN the two stores —
- * the user message is stored with its ORIGINAL tool_result content, before
- * resolveToolResults strips it — so it stays inside the same savepoint. The
- * stores are idempotent UPSERTs keyed by owned message identity, so the all-or-nothing
- * rollback on a mid-batch error is recoverable: the next turn re-includes and
- * re-stores these messages.
- *
- * In no-store mode (amnesia / x-lore-no-store) ONLY the in-memory resolve runs;
- * nothing is written (but resolveToolResults still mutates `loreMessages`, which
- * downstream reconstruct-after-eviction relies on).
- */
-export function storeTurnTemporal(input: {
-  loreMessages: LoreMessageWithParts[];
-  /** The upstream assistant response content blocks (resp.content). */
-  assistantContentBlocks: GatewayContentBlock[];
-  usage: GatewayUsage;
-  model: string;
-  projectPath: string;
-  sessionID: string;
-  noStore: boolean;
-}): void {
-  const { loreMessages, projectPath, sessionID, noStore } = input;
-
-  if (noStore) {
-    // Still resolve tool results in-memory (needed downstream), but write nothing.
-    resolveToolResults(
-      loreMessages,
-      (message) =>
-        temporal.storedMessageIdIfProjectExists({
-          projectPath,
-          sessionID: message.info.sessionID,
-          sourceID: message.info.id,
-          legacySourceID: message.legacySourceID,
-        }) ?? message.info.id,
-    );
-    return;
-  }
-
-  // Resolve (and, if needed, lazily backfill/merge) the project before the
-  // temporal savepoint. mergeProjectInternal is nested-savepoint safe, so this
-  // whole operation may itself run inside a larger transaction. Warming here
-  // makes the ensureProject calls inside temporal.store / recordToolCalls cheap
-  // cache hits. (#1084.)
-  ensureProject(projectPath);
-
-  withSavepoint("post_response_temporal", () => {
-    // Store the latest user message BEFORE resolveToolResults — we want the
-    // original content (including tool_result text), not the placeholder
-    // "[tool results provided]" that resolveToolResults creates after merging.
-    for (let i = loreMessages.length - 1; i >= 0; i--) {
-      if (loreMessages[i].info.role === "user") {
-        temporal.store({
-          projectPath,
-          info: loreMessages[i].info,
-          parts: loreMessages[i].parts,
-          legacySourceID: loreMessages[i].legacySourceID,
-        });
-        // The latest user message carries tool_result blocks that resolve the
-        // PRIOR assistant turn's tool calls — record their outcomes
-        // (status/error/duration) keyed by call_id.
-        temporal.recordToolCalls({
-          projectPath,
-          info: loreMessages[i].info,
-          parts: loreMessages[i].parts,
-          legacySourceID: loreMessages[i].legacySourceID,
-        });
-        break;
-      }
-    }
-
-    // Resolve tool results for gradient transform (merges tool_result into
-    // assistant parts, strips from user messages — needed for reconstruct-
-    // after-eviction pattern but not for temporal storage above).
-    resolveToolResults(loreMessages, (message) =>
-      temporal.storedMessageId({
-        projectPath,
-        sessionID: message.info.sessionID,
-        sourceID: message.info.id,
-        legacySourceID: message.legacySourceID,
-      }),
-    );
-
-    // Build and store the assistant response message.
-    // Strip recall marker text blocks — they contain the raw query string and
-    // pollute FTS results with self-referential noise.
-    const assistantContent = input.assistantContentBlocks.filter(
-      (b) => !(b.type === "text" && isRecallMarker(b.text)),
-    );
-    const assistantMsg = gatewayMessagesToLore(
-      [{ role: "assistant", content: assistantContent }],
-      sessionID,
-      loreMessages.length,
-    )[0];
-    updateAssistantMessageTokens(assistantMsg, input.usage, input.model);
-    if (assistantContent.length > 0) {
-      temporal.store({
-        projectPath,
-        info: assistantMsg.info,
-        parts: assistantMsg.parts,
-        legacySourceID: assistantMsg.legacySourceID,
-      });
-    }
-    // Always record structured tool-call traces — even when the assistant
-    // content is empty after recall-marker stripping, or when partsToText would
-    // produce empty content (tool-only / all-failed turns). Tool parts survive
-    // the text-only recall-marker filter above.
-    temporal.recordToolCalls({
-      projectPath,
-      info: assistantMsg.info,
-      parts: assistantMsg.parts,
-      legacySourceID: assistantMsg.legacySourceID,
-    });
-  });
-}
-
 function accountConversationUsage(
   usage: GatewayUsage,
   model: string,
@@ -12292,6 +12146,7 @@ function postResponseForTenant(
   resp: GatewayResponse,
   sessionState: SessionState,
   config: GatewayConfig,
+  temporalInput: TurnTemporalInput,
   /** Serialized JSON body sent upstream — for cache prefix comparison. */
   requestBody?: string,
   /** Active gen_ai.chat span to finalize with usage attributes. */
@@ -12367,9 +12222,8 @@ function postResponseForTenant(
     const prevStopReason = sessionState.lastStopReason;
 
     // --- Temporal storage & session-state updates ---
-    // Store all messages (user + assistant) from this turn.
-    // Convert gateway messages to Lore format.
-    const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
+    // Use the original user result snapshot captured before gradient. No
+    // historical conversion or tool resolution is needed after the response.
 
     // Skip temporal storage in amnesia mode or when x-lore-no-store is set.
     // The session still gets full Lore processing (LTM, recall, gradient)
@@ -12383,7 +12237,7 @@ function postResponseForTenant(
     // Persist (and tool-trace) this turn's messages, batched into one savepoint.
     // Extracted seam — see storeTurnTemporal (#1084).
     storeTurnTemporal({
-      loreMessages,
+      temporalInput,
       assistantContentBlocks: resp.content,
       usage,
       model: resp.model,
@@ -12646,6 +12500,7 @@ function postResponse(
   resp: GatewayResponse,
   sessionState: SessionState,
   config: GatewayConfig,
+  temporalInput: TurnTemporalInput,
   requestBody?: string,
   genAiSpan?: Sentry.Span,
   suppressTemporalStorage = false,
@@ -12657,6 +12512,7 @@ function postResponse(
       resp,
       sessionState,
       config,
+      temporalInput,
       requestBody,
       genAiSpan,
       suppressTemporalStorage,
@@ -15084,10 +14940,22 @@ async function handleProvisionalConversationTurn(
     const noStore =
       persisted?.amnesia === true ||
       req.rawHeaders["x-lore-no-store"] === "true";
-    const loreMessages = gatewayMessagesToLore(
-      req.messages,
-      identified.sessionID,
+    const userIndex = req.messages.findLastIndex(
+      (message) => message.role === "user",
     );
+    const temporalInput: TurnTemporalInput = {
+      assistantIndex: req.messages.length,
+      ...(userIndex >= 0
+        ? {
+            latestUser: gatewayMessagesToLore(
+              [req.messages[userIndex]],
+              identified.sessionID,
+              userIndex,
+              userIndex,
+            )[0],
+          }
+        : {}),
+    };
     const credentialFingerprint =
       requestCredentialFingerprint(req.rawHeaders, config) ?? "";
     const known = knownSessionHeaderForRequest(
@@ -15139,7 +15007,7 @@ async function handleProvisionalConversationTurn(
       }
       ensureProject(projectPath, undefined, pathResult.gitRemote);
       storeTurnTemporal({
-        loreMessages,
+        temporalInput,
         assistantContentBlocks: accumulated.content,
         usage: accumulated.usage ?? ZERO_USAGE,
         model: accumulated.model,
@@ -15885,6 +15753,7 @@ async function handleConversationTurn(
   // session-identity and project-binding bugs (e.g. the Tier 1b rotation merge,
   // or a hosted gateway falling back to its own cwd) immediately visible in
   // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
+  const preparationTiming = new PreparationTiming(req);
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
       `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
@@ -16116,19 +15985,15 @@ async function handleConversationTurn(
   // Build the Lore message array once (resolved) — shared by the turn-1 LTM
   // decision below (isLargeColdStart) and the gradient transform in step 7, so
   // both see identical input and agree on whether this cold session compresses.
-  const loreMessages = gatewayMessagesToLore(req.messages, sessionID);
-  const provenanceByMessageId = responsesProvenanceByMessageId(
-    req.messages,
-    loreMessages,
-  );
-  resolveToolResults(loreMessages, (message) =>
-    temporal.storedMessageId({
+  const { loreMessages, temporalInput, provenanceByMessageId } =
+    await prepareSemanticMessages({
+      messages: req.messages,
+      sessionID,
       projectPath,
-      sessionID: message.info.sessionID,
-      sourceID: message.info.id,
-      legacySourceID: message.legacySourceID,
-    }),
-  );
+      noStore: suppressTemporalStorage,
+      timing: preparationTiming,
+    });
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
   // system[0]: Host prompt              [no cache_control]
@@ -17260,6 +17125,7 @@ async function handleConversationTurn(
 
   let upstreamResult: UpstreamResult;
   try {
+    preparationTiming.upstreamStart();
     upstreamResult = await forwardToUpstream(
       modifiedReq,
       config,
@@ -17478,6 +17344,7 @@ async function handleConversationTurn(
             markerResp,
             sessionState,
             config,
+            temporalInput,
             requestBody,
             genAiSpan,
             suppressTemporalStorage,
@@ -17583,6 +17450,7 @@ async function handleConversationTurn(
             markerResp,
             sessionState,
             config,
+            temporalInput,
             requestBody,
             genAiSpan,
             suppressTemporalStorage,
@@ -17625,6 +17493,7 @@ async function handleConversationTurn(
             markerResp,
             sessionState,
             config,
+            temporalInput,
             requestBody,
             genAiSpan,
             suppressTemporalStorage,
@@ -17683,6 +17552,7 @@ async function handleConversationTurn(
         currentResp,
         sessionState,
         config,
+        temporalInput,
         requestBody,
         genAiSpan,
         suppressTemporalStorage,
@@ -17768,6 +17638,7 @@ async function handleConversationTurn(
                   resp,
                   sessionState,
                   config,
+                  temporalInput,
                   requestBody,
                   genAiSpan,
                   suppressTemporalStorage,

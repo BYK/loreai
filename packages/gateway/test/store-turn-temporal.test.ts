@@ -8,11 +8,15 @@ import {
   withTenant,
   LOCAL_TENANT_ID,
 } from "@loreai/core";
-import { storeTurnTemporal } from "../src/pipeline";
+import {
+  storeTurnTemporal,
+  captureTurnTemporalInput,
+} from "../src/turn-temporal";
 import {
   deterministicID,
   gatewayMessagesToLore,
   legacyDeterministicID,
+  resolveToolResults,
 } from "../src/temporal-adapter";
 import type {
   GatewayContentBlock,
@@ -47,7 +51,7 @@ function userMessages(sessionID: string, text: string) {
 function rowsFor(sessionID: string) {
   return db()
     .query(
-      "SELECT role, content FROM temporal_messages WHERE session_id = ? ORDER BY created_at ASC, id ASC",
+      "SELECT role, content FROM temporal_messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC",
     )
     .all(sessionID) as Array<{ role: string; content: string }>;
 }
@@ -68,6 +72,22 @@ function identityRows(projectID: string, sessionID: string) {
   }>;
 }
 
+function resolveForRecall(
+  messages: ReturnType<typeof gatewayMessagesToLore>,
+  projectPath: string,
+) {
+  const ids = temporal.storedMessageIds({
+    projectPath,
+    sessionID: messages[0].info.sessionID,
+    messages: messages.map((m) => ({
+      sourceID: m.info.id,
+      legacySourceID: m.legacySourceID,
+    })),
+    readOnly: true,
+  });
+  resolveToolResults(messages, (m) => ids.get(m.info.id) ?? m.info.id);
+}
+
 function markerRecallID(messages: ReturnType<typeof gatewayMessagesToLore>) {
   const marker = messages[2]?.parts[0];
   if (marker?.type !== "text" || typeof marker.text !== "string") {
@@ -83,11 +103,64 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe("storeTurnTemporal (#1084)", () => {
+  it("timestamps a delayed response at persistence time without mutating its snapshot", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.UTC(2026, 8, 7, 12);
+    vi.setSystemTime(startedAt);
+    const sessionID = freshSession();
+    const temporalInput = captureTurnTemporalInput(
+      userMessages(sessionID, "a slow request"),
+    );
+    const snapshot = structuredClone(temporalInput);
+
+    // An upstream delay must not become a user-to-assistant segmentation gap.
+    const persistedAt = startedAt + 20 * 60 * 1000;
+    vi.setSystemTime(persistedAt);
+    const input = {
+      temporalInput,
+      assistantContentBlocks: [
+        { type: "text" as const, text: "eventual reply" },
+      ],
+      usage: USAGE,
+      model: "test-model",
+      projectPath: PROJECT,
+      sessionID,
+      noStore: false,
+    };
+    storeTurnTemporal(input);
+
+    const timestamps = () =>
+      db()
+        .query(
+          "SELECT role, created_at FROM temporal_messages WHERE session_id = ? ORDER BY created_at, rowid",
+        )
+        .all(sessionID);
+    expect(timestamps()).toEqual([
+      { role: "user", created_at: persistedAt },
+      { role: "assistant", created_at: persistedAt },
+    ]);
+    expect(temporalInput).toEqual(snapshot);
+    expect(temporalInput.latestUser?.info.time.created).toBe(startedAt);
+
+    // Re-delivery keeps the original persisted creation time and snapshot.
+    vi.setSystemTime(persistedAt + 60 * 1000);
+    storeTurnTemporal(input);
+    expect(timestamps()).toEqual([
+      { role: "user", created_at: persistedAt },
+      { role: "assistant", created_at: persistedAt },
+    ]);
+    expect(temporalInput).toEqual(snapshot);
+  });
+
   it("stores the user + assistant messages for a normal turn", () => {
+    // Both writes can share a millisecond; exercise the ordering tie explicitly.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 8, 7, 12));
     const SESSION = freshSession();
     const loreMessages = userMessages(SESSION, "hello from the user");
     const assistantContentBlocks: GatewayContentBlock[] = [
@@ -95,7 +168,7 @@ describe("storeTurnTemporal (#1084)", () => {
     ];
 
     storeTurnTemporal({
-      loreMessages,
+      temporalInput: captureTurnTemporalInput(loreMessages),
       assistantContentBlocks,
       usage: USAGE,
       model: "claude-sonnet-4-20250514",
@@ -114,7 +187,7 @@ describe("storeTurnTemporal (#1084)", () => {
     );
   });
 
-  it("writes NOTHING in no-store mode (but still resolves in-memory)", () => {
+  it("writes NOTHING and leaves its snapshot untouched in no-store mode", () => {
     const SESSION = freshSession();
     // A tool_result-bearing user message so resolveToolResults has an observable
     // in-memory effect (it strips the tool_result → placeholder).
@@ -139,7 +212,7 @@ describe("storeTurnTemporal (#1084)", () => {
     ];
 
     storeTurnTemporal({
-      loreMessages,
+      temporalInput: captureTurnTemporalInput(loreMessages),
       assistantContentBlocks,
       usage: USAGE,
       model: "claude-sonnet-4-20250514",
@@ -150,9 +223,8 @@ describe("storeTurnTemporal (#1084)", () => {
 
     // Nothing persisted …
     expect(rowsFor(SESSION)).toEqual([]);
-    // … but resolveToolResults still ran (it mutated loreMessages in place —
-    // downstream reconstruct-after-eviction depends on this).
-    expect(JSON.stringify(loreMessages)).not.toBe(before);
+    // Preparation owns resolution now; post-response storage never mutates it.
+    expect(JSON.stringify(loreMessages)).toBe(before);
   });
 
   it("stores the user message with its ORIGINAL tool_result content (before resolveToolResults strips it)", () => {
@@ -174,7 +246,7 @@ describe("storeTurnTemporal (#1084)", () => {
     );
 
     storeTurnTemporal({
-      loreMessages,
+      temporalInput: captureTurnTemporalInput(loreMessages),
       assistantContentBlocks: [{ type: "text", text: "ack" }],
       usage: USAGE,
       model: "claude-sonnet-4-20250514",
@@ -190,6 +262,7 @@ describe("storeTurnTemporal (#1084)", () => {
     expect(userRow?.content).toContain("DISTINCTIVE_TOOL_OUTPUT_XYZ");
     expect(userRow?.content).not.toContain("tool results provided");
 
+    resolveForRecall(loreMessages, PROJECT);
     const placeholder = loreMessages[0]?.parts[0];
     if (placeholder?.type !== "text" || typeof placeholder.text !== "string") {
       throw new Error("expected tool-result recall placeholder");
@@ -329,7 +402,7 @@ describe("storeTurnTemporal (#1084)", () => {
 
       const noStoreLore = gatewayMessagesToLore(conversation, sessionID);
       storeTurnTemporal({
-        loreMessages: noStoreLore,
+        temporalInput: captureTurnTemporalInput(noStoreLore),
         assistantContentBlocks: response,
         usage: USAGE,
         model: "claude-sonnet-4-20250514",
@@ -337,6 +410,7 @@ describe("storeTurnTemporal (#1084)", () => {
         sessionID,
         noStore: true,
       });
+      resolveForRecall(noStoreLore, projectPath);
       expect(markerRecallID(noStoreLore)).toBe(legacyUserID);
       expect(identityRows(projectID, sessionID)).toEqual([
         expect.objectContaining({ id: legacyUserID, source_id: legacyUserID }),
@@ -354,7 +428,7 @@ describe("storeTurnTemporal (#1084)", () => {
         const loreMessages = gatewayMessagesToLore(messages, activeSessionID);
         withTenant(tenant, () =>
           storeTurnTemporal({
-            loreMessages,
+            temporalInput: captureTurnTemporalInput(loreMessages),
             assistantContentBlocks: response,
             usage: USAGE,
             model: "claude-sonnet-4-20250514",
@@ -363,6 +437,7 @@ describe("storeTurnTemporal (#1084)", () => {
             noStore: false,
           }),
         );
+        withTenant(tenant, () => resolveForRecall(loreMessages, projectPath));
         return loreMessages;
       };
       const runFreshRows = () => {
@@ -474,7 +549,7 @@ describe("storeTurnTemporal (#1084)", () => {
 
     const execSpy = vi.spyOn(db(), "exec");
     storeTurnTemporal({
-      loreMessages,
+      temporalInput: captureTurnTemporalInput(loreMessages),
       assistantContentBlocks,
       usage: USAGE,
       model: "claude-sonnet-4-20250514",
