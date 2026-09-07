@@ -1534,21 +1534,50 @@ export function replaceRecallWithMarker(
   resp: GatewayResponse,
   markers?: ReadonlyMap<string, string>,
 ): GatewayResponse {
+  const replaced = new Map<string, string>();
+  const content = resp.content.map((b) => {
+    if (b.type !== "tool_use" || b.name !== RECALL_TOOL_NAME) return b;
+    const input = b.input as Record<string, unknown>;
+    const query = typeof input.query === "string" ? input.query : "";
+    const scope = (input.scope as string) ?? "all";
+    const id = typeof input.id === "string" && input.id ? input.id : undefined;
+    const text = markers?.get(b.id) ?? buildRecallMarker(query, scope, id);
+    replaced.set(b.id, text);
+    return { type: "text" as const, text };
+  });
+  // Native Responses delivery uses the raw items. Rewrite only the calls we
+  // replaced above, preserving sibling items and provider-owned objects.
+  const usedIds = new Set<string>();
+  for (const item of resp.rawOutputItems ?? []) {
+    if (typeof item.id === "string") usedIds.add(item.id);
+    if (typeof item.call_id === "string") usedIds.add(item.call_id);
+  }
+  const rawOutputItems = resp.rawOutputItems?.map((item, index) => {
+    const callId = typeof item.call_id === "string" ? item.call_id : item.id;
+    if (
+      item.type !== "function_call" ||
+      item.name !== RECALL_TOOL_NAME ||
+      typeof callId !== "string" ||
+      !replaced.has(callId)
+    )
+      return item;
+    const baseId = `msg_lore_recall_${index}`;
+    let id = baseId;
+    for (let suffix = 1; usedIds.has(id); suffix++) id = `${baseId}_${suffix}`;
+    usedIds.add(id);
+    return {
+      type: "message",
+      id,
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: replaced.get(callId)!, annotations: [] },
+      ],
+    };
+  });
   return {
     ...resp,
-    content: resp.content.map((b) => {
-      if (b.type === "tool_use" && b.name === RECALL_TOOL_NAME) {
-        const input = b.input as Record<string, unknown>;
-        const query = typeof input.query === "string" ? input.query : "";
-        const scope = (input.scope as string) ?? "all";
-        const id =
-          typeof input.id === "string" && input.id ? input.id : undefined;
-        return {
-          type: "text" as const,
-          text: markers?.get(b.id) ?? buildRecallMarker(query, scope, id),
-        };
-      }
-      return b;
-    }),
+    content,
+    ...(rawOutputItems ? { rawOutputItems } : {}),
   };
 }

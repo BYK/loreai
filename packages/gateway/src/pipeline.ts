@@ -11275,6 +11275,14 @@ async function preserveUpstreamErrorResponse(
   });
 }
 
+/** Parsed usage from a buffered response that lacks a valid completion. */
+class NonStreamCompletionError extends Error {
+  constructor(readonly response: GatewayResponse) {
+    super("upstream response did not complete");
+    this.name = "NonStreamCompletionError";
+  }
+}
+
 export async function accumulateNonStreamResponse(
   upstreamResponse: Response,
   protocol:
@@ -11345,19 +11353,29 @@ export async function accumulateNonStreamResponse(
     }
     return response;
   }
-  if (requireValidCompletion) {
-    assertValidNonStreamCompletion(json, protocol);
-  }
+  let response: GatewayResponse;
   switch (protocol) {
     case "openai":
-      return accumulateOpenAINonStreamJSON(json);
+      response = accumulateOpenAINonStreamJSON(json);
+      break;
     case "gemini":
-      return parseGeminiResponseJSON(json);
+      response = parseGeminiResponseJSON(json);
+      break;
     default:
       // Anthropic (incl. Bedrock via bedrock-mantle, which returns the native
       // Anthropic non-streaming JSON shape).
-      return accumulateAnthropicNonStreamJSON(json);
+      response = accumulateAnthropicNonStreamJSON(json);
   }
+  if (requireValidCompletion) {
+    try {
+      assertValidNonStreamCompletion(json, protocol);
+    } catch {
+      // The protocol parser validates usage before it can reach accounting.
+      // A missing terminal marker must still fail, never normalize to success.
+      throw new NonStreamCompletionError(response);
+    }
+  }
+  return response;
 }
 
 function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {
@@ -17352,10 +17370,73 @@ async function handleConversationTurn(
     let currentModifiedReq = modifiedReq;
     const responsesVisibleContent: GatewayContentBlock[] = [];
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
+    const pendingRecalls = new Map<string, StoredRecall>();
+    const pendingTransfers: Array<() => void> = [];
+    let recallCommitBaseline: Map<string, StoredRecall> | undefined;
+    let recallCommitted = false;
+    let recallRolledBack = false;
+    const bufferedRecallTransaction = {
+      commit: (): void => {
+        if (recallCommitted || recallRolledBack) return;
+        if (!suppressTemporalStorage) {
+          // Validate against the live store before any writes. The baseline
+          // covers only this synchronous savepoint, never an upstream await.
+          const candidate = new Map(sessionState.recallStore);
+          for (const [key, value] of pendingRecalls)
+            addRecallStoreEntry(candidate, key, value);
+          recallCommitBaseline = new Map(sessionState.recallStore);
+          for (const record of pendingTransfers) record();
+          for (const [key, value] of pendingRecalls) {
+            sessionState.recallStore.set(key, value);
+            recallPersistenceCommitObserver?.();
+          }
+          saveSessionTracking(sessionState.sessionID, {
+            recallStore: serializeRecallStore(sessionState.recallStore),
+          });
+        }
+        recallCommitted = true;
+        pendingRecalls.clear();
+        pendingTransfers.length = 0;
+      },
+      rollback: (): void => {
+        if (recallRolledBack) return;
+        recallRolledBack = true;
+        // The enclosing savepoint restores DB writes. Restore the Map in
+        // place, including when savepoint release failed after commit().
+        if (recallCommitBaseline) {
+          sessionState.recallStore.clear();
+          for (const [key, value] of recallCommitBaseline)
+            sessionState.recallStore.set(key, value);
+          recallCommitBaseline = undefined;
+        }
+        pendingRecalls.clear();
+        pendingTransfers.length = 0;
+      },
+    };
+    const finishBufferedResponse = (response: GatewayResponse): void => {
+      if (req.stream || recallDepth > 0) {
+        // Recall state and successful-turn storage share the existing atomic
+        // finalizer, after downstream EOF, for buffered clients as well.
+        finishStreaming(response);
+      } else {
+        postResponse(
+          req,
+          response,
+          sessionState,
+          config,
+          temporalInput,
+          requestBody,
+          genAiSpan,
+          suppressTemporalStorage,
+          endGenAiSpan,
+        );
+      }
+    };
     const failRecall = (
       category: RecallContinuationFailureCategory,
     ): Response => {
       reportRecallContinuationFailure(category);
+      rollbackRecallPersistence();
       finishUnsuccessfulStreaming({ ...currentResp, usage: cumulativeUsage });
       return errorResponse(502, "Recall continuation failed");
     };
@@ -17382,6 +17463,7 @@ async function handleConversationTurn(
       )
         return failRecall("parallel_recall");
       recallDepth++;
+      recallPersistenceTransaction ??= bufferedRecallTransaction;
       const recallBlock = findRecallToolUse(currentResp);
       if (!recallBlock) break;
       const { result, input } = await promiseAgainstAbort(
@@ -17393,6 +17475,10 @@ async function handleConversationTurn(
             getLLMClient(config),
             alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
             foregroundAbort.signal,
+            (record) => {
+              if (!suppressTemporalStorage && !recallRolledBack)
+                pendingTransfers.push(record);
+            },
           ),
         foregroundAbort.signal,
       );
@@ -17415,7 +17501,7 @@ async function handleConversationTurn(
         return [{ id: block.id, name: block.name, input: block.input, side }];
       });
       if (!suppressTemporalStorage) {
-        addRecallStoreEntry(sessionState.recallStore, storeKey, {
+        const storedRecall: StoredRecall = {
           toolUseId: recallBlock.id,
           anchorId,
           anchorContextId,
@@ -17423,12 +17509,14 @@ async function handleConversationTurn(
           position,
           result,
           ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
-        });
-        // Persist the store (v46) so the marker still expands byte-identically
-        // after a gateway restart instead of leaking raw marker text upstream.
-        saveSessionTracking(sessionState.sessionID, {
-          recallStore: serializeRecallStore(sessionState.recallStore),
-        });
+        };
+        // Preserve capacity checks before exposing a marker, while keeping
+        // staged entries invisible to other requests and persisted tracking.
+        const candidate = new Map(sessionState.recallStore);
+        for (const [key, value] of pendingRecalls)
+          addRecallStoreEntry(candidate, key, value);
+        addRecallStoreEntry(candidate, storeKey, storedRecall);
+        pendingRecalls.set(storeKey, storedRecall);
       }
 
       const markerText = buildAnchoredRecallMarker(
@@ -17454,21 +17542,7 @@ async function handleConversationTurn(
           `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         markerResp.usage = cumulativeUsage;
-        if (req.stream) {
-          finishStreaming(markerResp);
-        } else {
-          postResponse(
-            req,
-            markerResp,
-            sessionState,
-            config,
-            temporalInput,
-            requestBody,
-            genAiSpan,
-            suppressTemporalStorage,
-            endGenAiSpan,
-          );
-        }
+        finishBufferedResponse(markerResp);
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -17554,7 +17628,10 @@ async function handleConversationTurn(
         ) {
           throw fetchErr;
         }
-        if (fetchErr instanceof ResponsesTerminalError) {
+        if (
+          fetchErr instanceof ResponsesTerminalError ||
+          fetchErr instanceof NonStreamCompletionError
+        ) {
           Object.assign(
             cumulativeUsage,
             mergeRecallUsage(
@@ -17571,21 +17648,7 @@ async function handleConversationTurn(
         bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        if (req.stream) {
-          finishStreaming(markerResp);
-        } else {
-          postResponse(
-            req,
-            markerResp,
-            sessionState,
-            config,
-            temporalInput,
-            requestBody,
-            genAiSpan,
-            suppressTemporalStorage,
-            endGenAiSpan,
-          );
-        }
+        finishBufferedResponse(markerResp);
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -17617,21 +17680,7 @@ async function handleConversationTurn(
         bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
-        if (req.stream) {
-          finishStreaming(markerResp);
-        } else {
-          postResponse(
-            req,
-            markerResp,
-            sessionState,
-            config,
-            temporalInput,
-            requestBody,
-            genAiSpan,
-            suppressTemporalStorage,
-            endGenAiSpan,
-          );
-        }
+        finishBufferedResponse(markerResp);
         return nonStreamHttpResponse(
           shouldInjectWarning
             ? injectContextWarning(markerResp, warningText)
@@ -17667,21 +17716,7 @@ async function handleConversationTurn(
     currentResp.usage = cumulativeUsage;
     if (recallDepth === MAX_RECALL_DEPTH)
       log.info("recall final continuation: completed");
-    if (req.stream) {
-      finishStreaming(currentResp);
-    } else {
-      postResponse(
-        req,
-        currentResp,
-        sessionState,
-        config,
-        temporalInput,
-        requestBody,
-        genAiSpan,
-        suppressTemporalStorage,
-        endGenAiSpan,
-      );
-    }
+    finishBufferedResponse(currentResp);
     // Telemetry: flag a completion we're about to hand back with NO usable
     // content (no text, no tool_use) — the "no response data" class
     // (github-copilot #1052 follow-up). Checked on the model's response, before
@@ -17722,6 +17757,7 @@ async function handleConversationTurn(
       bufferedRecallDiagnostics.finish(response.ok ? "completed" : "failed");
       return finishForeground(response);
     } catch (error) {
+      rollbackRecallPersistence();
       bufferedRecallDiagnostics.finish(
         foregroundAbort.signal.aborted ? "aborted" : "failed",
       );
@@ -17981,8 +18017,8 @@ async function handleConversationTurn(
                   anchorText,
                   resultText: result,
                   commit: () => {
-                    for (const record of deferredTransferRecordings) record();
                     if (suppressTemporalStorage) return;
+                    for (const record of deferredTransferRecordings) record();
                     addRecallStoreEntry(
                       sessionState.recallStore,
                       storeKey,

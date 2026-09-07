@@ -3043,6 +3043,72 @@ describe("cleanupRecallStore", () => {
 // ---------------------------------------------------------------------------
 
 describe("replaceRecallWithMarker", () => {
+  test("replaces raw Responses recall calls without losing other items or colliding IDs", () => {
+    const recall = {
+      type: "tool_use" as const,
+      id: "call_recall",
+      name: "recall",
+      input: { query: "memory" },
+    };
+    const read = {
+      type: "tool_use" as const,
+      id: "call_read",
+      name: "Read",
+      input: {},
+    };
+    const existing = {
+      type: "message",
+      id: "msg_lore_recall_1",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "refusal", refusal: "earlier refusal" }],
+    };
+    const rawRecall = {
+      type: "function_call",
+      id: "fc_recall",
+      call_id: recall.id,
+      name: recall.name,
+      arguments: JSON.stringify(recall.input),
+      status: "completed",
+    };
+    const rawRead = {
+      type: "function_call",
+      id: "fc_read",
+      call_id: read.id,
+      name: read.name,
+      arguments: "{}",
+      status: "completed",
+    };
+    const response = {
+      ...makeResponse([recall, read]),
+      rawOutputItems: [existing, rawRecall, rawRead],
+    };
+    const snapshot = structuredClone(response);
+    Object.freeze(response.rawOutputItems);
+    for (const item of response.rawOutputItems) Object.freeze(item);
+    const marker = buildRecallAnchor("123e4567-e89b-42d3-a456-426614174001");
+    const rewritten = replaceRecallWithMarker(
+      response,
+      new Map([[recall.id, marker]]),
+    );
+    expect(rewritten.rawOutputItems?.map((item) => item.type)).toEqual([
+      "message",
+      "message",
+      "function_call",
+    ]);
+    expect(rewritten.rawOutputItems?.[0]).toBe(existing);
+    expect(rewritten.rawOutputItems?.[2]).toBe(rawRead);
+    expect(rewritten.rawOutputItems?.[1]).toMatchObject({
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: marker }],
+    });
+    expect(new Set(rewritten.rawOutputItems?.map((item) => item.id)).size).toBe(
+      3,
+    );
+    expect(response).toEqual(snapshot);
+  });
+
   test("replaces recall tool_use with marker text", () => {
     const resp = makeResponse([
       { type: "text", text: "hello" },
