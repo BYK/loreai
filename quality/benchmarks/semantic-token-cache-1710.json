@@ -1,0 +1,554 @@
+{
+  "date": "2026-09-07",
+  "base": "4f92eaafab5c463127f3de8e9f42d8f47f2bcd9f",
+  "node": "v24.19.0",
+  "platform": "Linux x86_64",
+  "fixture": {
+    "messages": 5580,
+    "reasoningBytesPerTurn": 4096,
+    "generator": "deterministic xorshift bytes encoded as base64; no user data"
+  },
+  "measurement": "semantic preparation only; excludes HTTP parsing, LTM, gradient, and upstream inference",
+  "runs": [
+    {
+      "revision": "initial cache implementation, before review lifecycle and writer-contention fixes",
+      "samples": [
+        {
+          "mode": "uncached",
+          "sourceMessages": 5580,
+          "elapsed": 107020.64080000001,
+          "stages": {
+            "conversion": {
+              "wallMs": 106966.754575,
+              "cpuMs": 107931.664
+            },
+            "temporal_input": {
+              "wallMs": 0.5055730000021867,
+              "cpuMs": 0.493
+            },
+            "provenance": {
+              "wallMs": 9.962981999997282,
+              "cpuMs": 10.279
+            },
+            "stored_ids": {
+              "wallMs": 15.924683000004734,
+              "cpuMs": 21.491
+            },
+            "resolve_tools": {
+              "wallMs": 21.561642999993637,
+              "cpuMs": 28.355
+            },
+            "semantic_total": {
+              "wallMs": 107019.522852,
+              "cpuMs": 107997.807
+            },
+            "turn_to_upstream": {
+              "wallMs": 107020.275659,
+              "cpuMs": 107998.554
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": 484425728,
+            "heap_delta_bytes": 370607032,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 107019.865309,
+            "provenance_tokens_hits": 0,
+            "provenance_tokens_misses": 2790,
+            "provenance_tokens_bpe_bytes": 16622651,
+            "provenance_tokens_bpe_ms": 106301.23342200003,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "91503580e05b00105aac0f54416cc6f5838a79b856e2758e369e966203fa80e0",
+          "cacheBytes": 0
+        },
+        {
+          "mode": "populate",
+          "sourceMessages": 5580,
+          "elapsed": 113887.357613,
+          "stages": {
+            "conversion": {
+              "wallMs": 113838.092506,
+              "cpuMs": 114759.914
+            },
+            "temporal_input": {
+              "wallMs": 0.19759800002793781,
+              "cpuMs": 0.194
+            },
+            "provenance": {
+              "wallMs": 4.600118000002112,
+              "cpuMs": 6.907
+            },
+            "stored_ids": {
+              "wallMs": 15.025763999990886,
+              "cpuMs": 26.175
+            },
+            "resolve_tools": {
+              "wallMs": 15.384636000002502,
+              "cpuMs": 27.108
+            },
+            "semantic_total": {
+              "wallMs": 113877.137297,
+              "cpuMs": 114825.782
+            },
+            "turn_to_upstream": {
+              "wallMs": 113887.12986,
+              "cpuMs": 114852.194
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": 166203392,
+            "heap_delta_bytes": -225397488,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 113884.348068,
+            "provenance_tokens_hits": 0,
+            "provenance_tokens_misses": 2790,
+            "provenance_tokens_bpe_bytes": 16622651,
+            "provenance_tokens_bpe_ms": 113189.47147499917,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "91503580e05b00105aac0f54416cc6f5838a79b856e2758e369e966203fa80e0",
+          "cacheBytes": 206580
+        },
+        {
+          "mode": "warm",
+          "sourceMessages": 5580,
+          "elapsed": 138.33430099999532,
+          "stages": {
+            "conversion": {
+              "wallMs": 114.20632900000783,
+              "cpuMs": 130.787
+            },
+            "temporal_input": {
+              "wallMs": 0.16839400000753812,
+              "cpuMs": 0.167
+            },
+            "provenance": {
+              "wallMs": 1.2675039999885485,
+              "cpuMs": 1.265
+            },
+            "stored_ids": {
+              "wallMs": 10.55257800000254,
+              "cpuMs": 12.047
+            },
+            "resolve_tools": {
+              "wallMs": 6.33209299997543,
+              "cpuMs": 8.356
+            },
+            "semantic_total": {
+              "wallMs": 136.4960940000019,
+              "cpuMs": 156.812
+            },
+            "turn_to_upstream": {
+              "wallMs": 138.1992559999926,
+              "cpuMs": 158.503
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": -29777920,
+            "heap_delta_bytes": -11688632,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 136.7814139999973,
+            "provenance_tokens_hits": 2790,
+            "provenance_tokens_misses": 0,
+            "provenance_tokens_bpe_bytes": 0,
+            "provenance_tokens_bpe_ms": 0,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "91503580e05b00105aac0f54416cc6f5838a79b856e2758e369e966203fa80e0",
+          "cacheBytes": 206580
+        },
+        {
+          "mode": "restart",
+          "sourceMessages": 5580,
+          "elapsed": 140.31494100001873,
+          "stages": {
+            "conversion": {
+              "wallMs": 110.23203700000886,
+              "cpuMs": 128.438
+            },
+            "temporal_input": {
+              "wallMs": 0.1840479999955278,
+              "cpuMs": 0.182
+            },
+            "provenance": {
+              "wallMs": 1.0757250000024214,
+              "cpuMs": 1.072
+            },
+            "stored_ids": {
+              "wallMs": 10.622392999997828,
+              "cpuMs": 11.336
+            },
+            "resolve_tools": {
+              "wallMs": 7.22754600000917,
+              "cpuMs": 10.31
+            },
+            "semantic_total": {
+              "wallMs": 138.24336299998686,
+              "cpuMs": 160.845
+            },
+            "turn_to_upstream": {
+              "wallMs": 140.14912100002402,
+              "cpuMs": 165.764
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": -30519296,
+            "heap_delta_bytes": -11067272,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 138.43130699999165,
+            "provenance_tokens_hits": 2790,
+            "provenance_tokens_misses": 0,
+            "provenance_tokens_bpe_bytes": 0,
+            "provenance_tokens_bpe_ms": 0,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "91503580e05b00105aac0f54416cc6f5838a79b856e2758e369e966203fa80e0",
+          "cacheBytes": 206580
+        },
+        {
+          "mode": "append",
+          "sourceMessages": 5582,
+          "elapsed": 179.76237499999115,
+          "stages": {
+            "conversion": {
+              "wallMs": 153.81767099999706,
+              "cpuMs": 201.434
+            },
+            "temporal_input": {
+              "wallMs": 0.20699199999216944,
+              "cpuMs": 0.205
+            },
+            "provenance": {
+              "wallMs": 1.345441999990726,
+              "cpuMs": 1.34
+            },
+            "stored_ids": {
+              "wallMs": 10.878199999977369,
+              "cpuMs": 11.61
+            },
+            "resolve_tools": {
+              "wallMs": 7.2574510000122245,
+              "cpuMs": 8.861
+            },
+            "semantic_total": {
+              "wallMs": 177.62028999999166,
+              "cpuMs": 232.739
+            },
+            "turn_to_upstream": {
+              "wallMs": 179.62391600001138,
+              "cpuMs": 234.832
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": -30203904,
+            "heap_delta_bytes": -30225632,
+            "messages": 5582,
+            "parts": 11162,
+            "toolUses": 5580,
+            "toolResults": 5580,
+            "placeholders": 2790,
+            "stored_id_resolutions": 2790,
+            "event_loop_delay_ms": 177.78749299998162,
+            "provenance_tokens_hits": 2790,
+            "provenance_tokens_misses": 1,
+            "provenance_tokens_bpe_bytes": 5961,
+            "provenance_tokens_bpe_ms": 29.89780599999358,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "9f73f6e130fc1ff1a03876cdd031e4a13e446548265b5325653a9916dca44038",
+          "cacheBytes": 206654
+        }
+      ]
+    },
+    {
+      "revision": "final implementation with lifecycle revision guard and nonblocking publication",
+      "samples": [
+        {
+          "mode": "uncached",
+          "sourceMessages": 5580,
+          "elapsed": 102376.303265,
+          "stages": {
+            "conversion": {
+              "wallMs": 102322.880866,
+              "cpuMs": 103191.184
+            },
+            "temporal_input": {
+              "wallMs": 0.48459200000797864,
+              "cpuMs": 0.475
+            },
+            "provenance": {
+              "wallMs": 9.409908000001451,
+              "cpuMs": 12.127
+            },
+            "stored_ids": {
+              "wallMs": 18.64923799999815,
+              "cpuMs": 23.085
+            },
+            "resolve_tools": {
+              "wallMs": 18.929161000007298,
+              "cpuMs": 30.244
+            },
+            "semantic_total": {
+              "wallMs": 102375.20769,
+              "cpuMs": 103263.464
+            },
+            "turn_to_upstream": {
+              "wallMs": 102375.85695,
+              "cpuMs": 103264.11
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": 462491648,
+            "heap_delta_bytes": 374747272,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 102375.497818,
+            "provenance_tokens_hits": 0,
+            "provenance_tokens_misses": 2790,
+            "provenance_tokens_bpe_bytes": 16622651,
+            "provenance_tokens_bpe_ms": 101740.42861799999,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "0345e85a096fe777f52a59653615d46de9371565062167d4f366196d65d201a4",
+          "cacheBytes": 0
+        },
+        {
+          "mode": "populate",
+          "sourceMessages": 5580,
+          "elapsed": 110825.34807100001,
+          "stages": {
+            "conversion": {
+              "wallMs": 110770.029453,
+              "cpuMs": 111688.283
+            },
+            "temporal_input": {
+              "wallMs": 0.2018450000032317,
+              "cpuMs": 0.199
+            },
+            "provenance": {
+              "wallMs": 9.167671000002883,
+              "cpuMs": 11.475
+            },
+            "stored_ids": {
+              "wallMs": 13.850076000002446,
+              "cpuMs": 26.196
+            },
+            "resolve_tools": {
+              "wallMs": 22.062489000003552,
+              "cpuMs": 40.494
+            },
+            "semantic_total": {
+              "wallMs": 110822.90885499999,
+              "cpuMs": 111777.854
+            },
+            "turn_to_upstream": {
+              "wallMs": 110825.14616599999,
+              "cpuMs": 111784.116
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": 180051968,
+            "heap_delta_bytes": -260207976,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 110825.02397099999,
+            "provenance_tokens_hits": 0,
+            "provenance_tokens_misses": 2790,
+            "provenance_tokens_bpe_bytes": 16622651,
+            "provenance_tokens_bpe_ms": 110171.25515900075,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "0345e85a096fe777f52a59653615d46de9371565062167d4f366196d65d201a4",
+          "cacheBytes": 206580
+        },
+        {
+          "mode": "warm",
+          "sourceMessages": 5580,
+          "elapsed": 149.7586429999792,
+          "stages": {
+            "conversion": {
+              "wallMs": 104.23775400000159,
+              "cpuMs": 123.588
+            },
+            "temporal_input": {
+              "wallMs": 0.1852200000139419,
+              "cpuMs": 0.183
+            },
+            "provenance": {
+              "wallMs": 1.509691000013845,
+              "cpuMs": 1.504
+            },
+            "stored_ids": {
+              "wallMs": 11.227985000004992,
+              "cpuMs": 12.93
+            },
+            "resolve_tools": {
+              "wallMs": 14.98043399999733,
+              "cpuMs": 17.782
+            },
+            "semantic_total": {
+              "wallMs": 138.72648499999195,
+              "cpuMs": 163.154
+            },
+            "turn_to_upstream": {
+              "wallMs": 149.55467500002123,
+              "cpuMs": 189.045
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": -29806592,
+            "heap_delta_bytes": -10376888,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 149.4413539999805,
+            "provenance_tokens_hits": 2790,
+            "provenance_tokens_misses": 0,
+            "provenance_tokens_bpe_bytes": 0,
+            "provenance_tokens_bpe_ms": 0,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "0345e85a096fe777f52a59653615d46de9371565062167d4f366196d65d201a4",
+          "cacheBytes": 206580
+        },
+        {
+          "mode": "restart",
+          "sourceMessages": 5580,
+          "elapsed": 147.45949000000837,
+          "stages": {
+            "conversion": {
+              "wallMs": 110.45873400001437,
+              "cpuMs": 122.257
+            },
+            "temporal_input": {
+              "wallMs": 0.25909199999296106,
+              "cpuMs": 0.257
+            },
+            "provenance": {
+              "wallMs": 1.1463020000082906,
+              "cpuMs": 1.142
+            },
+            "stored_ids": {
+              "wallMs": 11.860600000014529,
+              "cpuMs": 14.508
+            },
+            "resolve_tools": {
+              "wallMs": 10.960370999993756,
+              "cpuMs": 14.397
+            },
+            "semantic_total": {
+              "wallMs": 147.07588000001851,
+              "cpuMs": 172.342
+            },
+            "turn_to_upstream": {
+              "wallMs": 147.28693899998325,
+              "cpuMs": 172.544
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": -28766208,
+            "heap_delta_bytes": -9234272,
+            "messages": 5580,
+            "parts": 11158,
+            "toolUses": 5578,
+            "toolResults": 5578,
+            "placeholders": 2789,
+            "stored_id_resolutions": 2789,
+            "event_loop_delay_ms": 147.2213000000047,
+            "provenance_tokens_hits": 2790,
+            "provenance_tokens_misses": 0,
+            "provenance_tokens_bpe_bytes": 0,
+            "provenance_tokens_bpe_ms": 0,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "0345e85a096fe777f52a59653615d46de9371565062167d4f366196d65d201a4",
+          "cacheBytes": 206580
+        },
+        {
+          "mode": "append",
+          "sourceMessages": 5582,
+          "elapsed": 196.15915099999984,
+          "stages": {
+            "conversion": {
+              "wallMs": 168.01691000000574,
+              "cpuMs": 224.898
+            },
+            "temporal_input": {
+              "wallMs": 0.17245000001275912,
+              "cpuMs": 0.171
+            },
+            "provenance": {
+              "wallMs": 1.3623490000027232,
+              "cpuMs": 1.358
+            },
+            "stored_ids": {
+              "wallMs": 10.912727999995695,
+              "cpuMs": 11.628
+            },
+            "resolve_tools": {
+              "wallMs": 8.483658000011928,
+              "cpuMs": 10.923
+            },
+            "semantic_total": {
+              "wallMs": 195.7826809999824,
+              "cpuMs": 260.357
+            },
+            "turn_to_upstream": {
+              "wallMs": 196.0247279999894,
+              "cpuMs": 260.586
+            }
+          },
+          "observations": {
+            "rss_delta_bytes": -29089792,
+            "heap_delta_bytes": -27858824,
+            "messages": 5582,
+            "parts": 11162,
+            "toolUses": 5580,
+            "toolResults": 5580,
+            "placeholders": 2790,
+            "stored_id_resolutions": 2790,
+            "event_loop_delay_ms": 195.92179199997918,
+            "provenance_tokens_hits": 2790,
+            "provenance_tokens_misses": 1,
+            "provenance_tokens_bpe_bytes": 5961,
+            "provenance_tokens_bpe_ms": 35.489090999995824,
+            "provenance_tokens_unavailable": 0
+          },
+          "wireHash": "f7238cb81fa37f608253c667b1fad620aca9c5e3c7e289bed0d52ffe05e615c0",
+          "cacheBytes": 206654
+        }
+      ]
+    }
+  ]
+}

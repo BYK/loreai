@@ -227,6 +227,7 @@ export function gatewayMessagesToLore(
   sessionID: string,
   startIndex = 0,
   legacyStartIndex = 0,
+  hiddenTokenCount?: (visibleJson: string, provenanceJson: string) => number,
 ): LoreMessageWithParts[] {
   const out: LoreMessageWithParts[] = [];
   const now = Date.now();
@@ -248,11 +249,15 @@ export function gatewayMessagesToLore(
       contentBlockToPart(block, sessionID, id, pi),
     );
     const hiddenInputTokens = m.provenanceContent
-      ? Math.max(
-          0,
-          coreEstimateTokens(JSON.stringify(m.provenanceContent)) -
-            coreEstimateTokens(JSON.stringify(m.content)),
-        )
+      ? (
+          hiddenTokenCount ??
+          ((visibleJson, provenanceJson) =>
+            Math.max(
+              0,
+              coreEstimateTokens(provenanceJson) -
+                coreEstimateTokens(visibleJson),
+            ))
+        )(JSON.stringify(m.content), JSON.stringify(m.provenanceContent))
       : 0;
 
     if (m.role === "user") {

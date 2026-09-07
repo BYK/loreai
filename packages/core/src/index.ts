@@ -343,6 +343,7 @@ export {
 } from "./vec-latency";
 export { distillLimiter, curatorLimiter } from "./session-limiter";
 export { estimateTokens, encodingForModel } from "./tokenize";
+export { SemanticTokenCache } from "./semantic-token-cache";
 export {
   installFetchInterceptor,
   shouldIntercept,

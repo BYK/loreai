@@ -3,6 +3,7 @@ import {
   isToolPart,
   log,
   temporal,
+  SemanticTokenCache,
   type LoreMessageWithParts,
 } from "@loreai/core";
 import { gatewayMessagesToLore, resolveToolResults } from "./temporal-adapter";
@@ -98,7 +99,14 @@ export class PreparationTiming {
       wallMs: performance.now() - this.started,
       cpuMs: (delta.user + delta.system) / 1000,
     });
-    log.info("semantic-preparation", { ...this.counts, stages: this.stages });
+    log.info(
+      "semantic-preparation",
+      JSON.stringify({
+        ...this.counts,
+        stages: this.stages,
+        observations: this.observations,
+      }),
+    );
   }
 }
 
@@ -141,6 +149,7 @@ export async function prepareSemanticMessages(input: {
   const started = performance.now();
   const cpu = process.cpuUsage();
   const memory = process.memoryUsage();
+  const tokenCache = new SemanticTokenCache(input);
   // An immediate queued before synchronous preparation observes its event-loop
   // delay. Await it before the next stage so LTM work cannot pollute the sample.
   // The callback retains just a timestamp, never the transcript.
@@ -148,7 +157,13 @@ export async function prepareSemanticMessages(input: {
     setImmediate(() => resolve(performance.now() - started)),
   );
   const loreMessages = timing.measure("conversion", () =>
-    gatewayMessagesToLore(input.messages, input.sessionID),
+    gatewayMessagesToLore(
+      input.messages,
+      input.sessionID,
+      0,
+      0,
+      (visible, provenance) => tokenCache.count(visible, provenance),
+    ),
   );
   const temporalInput = timing.measure("temporal_input", () =>
     captureTurnTemporalInput(loreMessages),
@@ -191,6 +206,8 @@ export async function prepareSemanticMessages(input: {
   timing.measure("resolve_tools", () =>
     resolveToolResults(loreMessages, (m) => ids.get(m.info.id) ?? m.info.id),
   );
+  // Publish before yielding; cache writes never wait for another writer.
+  tokenCache.persist();
   const delta = process.cpuUsage(cpu);
   timing.record("semantic_total", {
     wallMs: performance.now() - started,
@@ -203,5 +220,7 @@ export async function prepareSemanticMessages(input: {
     timing.metric(name, count);
   timing.metric("stored_id_resolutions", candidates.length);
   timing.metric("event_loop_delay_ms", await loopDelay);
+  for (const [name, value] of Object.entries(tokenCache.stats))
+    timing.metric(`provenance_tokens_${name}`, value);
   return { loreMessages, temporalInput, provenanceByMessageId };
 }

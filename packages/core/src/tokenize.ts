@@ -27,6 +27,10 @@ import * as claude_encoding from "ai-tokenizer/encoding/claude";
 
 export type EncodingName = "cl100k_base" | "o200k_base" | "claude";
 
+// Durable derived counts must miss after an encoding/tokenizer-policy change.
+// The contract test checks this against the installed tokenizer version.
+export const TOKEN_ESTIMATE_CACHE_VERSION = "ai-tokenizer@1.0.6:cl100k_base:v1";
+
 const cache = new Map<EncodingName, Tokenizer>();
 cache.set("cl100k_base", new Tokenizer(cl100k_base_encoding));
 
