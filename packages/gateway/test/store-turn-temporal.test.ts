@@ -51,7 +51,7 @@ function userMessages(sessionID: string, text: string) {
 function rowsFor(sessionID: string) {
   return db()
     .query(
-      "SELECT role, content FROM temporal_messages WHERE session_id = ? ORDER BY created_at ASC, id ASC",
+      "SELECT role, content FROM temporal_messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC",
     )
     .all(sessionID) as Array<{ role: string; content: string }>;
 }
@@ -158,6 +158,9 @@ describe("storeTurnTemporal (#1084)", () => {
   });
 
   it("stores the user + assistant messages for a normal turn", () => {
+    // Both writes can share a millisecond; exercise the ordering tie explicitly.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 8, 7, 12));
     const SESSION = freshSession();
     const loreMessages = userMessages(SESSION, "hello from the user");
     const assistantContentBlocks: GatewayContentBlock[] = [
