@@ -106,12 +106,21 @@ runs:
       shell: bash
       env:
         LORE_IC_MODEL: ${{ inputs.model }}
+        LORE_CMD: ${{ inputs.lore-command }}
       run: |
         set -euo pipefail
         ort=$(node -p "require('onnxruntime-node/package.json').version" 2>/dev/null || echo "na")
         lore_hash=$(git hash-object .lore.md 2>/dev/null || echo "none")
+        # A built gateway CLI contains the importer, database schema, and
+        # embedding implementation. Fingerprint it so a compatible-looking
+        # .lore.md cache is never reused after those implementation changes.
+        read -r -a command <<< "$LORE_CMD"
+        cli_hash="none"
+        if [ "${command[0]:-}" = "node" ] && [ -f "${command[1]:-}" ]; then
+          cli_hash=$(git hash-object -- "${command[1]}")
+        fi
         model="${LORE_IC_MODEL:-default}"
-        echo "key=lore-invariants-v1-${model}-ort${ort}-${lore_hash}" >> "$GITHUB_OUTPUT"
+        echo "key=lore-invariants-v2-${model}-ort${ort}-lore${lore_hash}-cli${cli_hash}" >> "$GITHUB_OUTPUT"
         echo "db=${RUNNER_TEMP}/lore-ci/lore.db" >> "$GITHUB_OUTPUT"
 
     - name: Restore derived invariant DB
