@@ -544,6 +544,9 @@ describe("semantic lint action reporter", () => {
     expect(action).toContain("actions/cache/restore@v5");
     expect(action).toContain("actions/cache/save@v5");
     expect(action).toContain("inputs.cache-mode == 'save'");
+    expect(
+      action.match(/LORE_CACHE_MODE: \$\{\{ inputs\.cache-mode \}\}/g),
+    ).toHaveLength(2);
     expect(action).toContain("--prime-lore-db");
     expect(action).toContain('test -s "$LORE_DB_PATH"');
     expect(action).toContain("steps.cache-db.outputs.ready == 'true'");
