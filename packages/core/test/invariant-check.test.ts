@@ -755,7 +755,11 @@ describe("clusterHunks", () => {
 });
 
 describe("selectCandidates", () => {
-  function inv(refFiles: string[], vec: Float32Array | null): InvariantVec {
+  function inv(
+    refFiles: string[],
+    vec: Float32Array | null,
+    enforce?: "soft" | "strict",
+  ): InvariantVec {
     return {
       entry: {
         id: "x",
@@ -763,6 +767,7 @@ describe("selectCandidates", () => {
         title: "t",
         content: "c",
         confidence: 0.9,
+        ...(enforce ? { metadata: { enforce } } : {}),
       } as never,
       vec,
       refFiles: new Set(refFiles),
@@ -818,6 +823,20 @@ describe("selectCandidates", () => {
       cap: 2,
     });
     expect(sel.length).toBeLessThanOrEqual(2);
+  });
+
+  it("prioritizes explicit gate rules when the candidate budget is tight", () => {
+    const hunkVecs = [v(1, 0, 0)];
+    const clusters = clusterHunks(hunkVecs, 0.92);
+    const invariants = [inv([], v(1, 0, 0)), inv([], v(0.75, 0.25, 0), "soft")];
+
+    const selected = selectCandidates(clusters, hunkVecs, invariants, hunks, {
+      floor: 0.72,
+      cap: 1,
+    });
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0].invariantIdx).toBe(1);
   });
 });
 

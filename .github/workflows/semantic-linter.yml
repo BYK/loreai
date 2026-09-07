@@ -1,7 +1,9 @@
-name: Semantic linter (advisory)
+name: Semantic linter
 
-# Advisory-only: surfaces PR changes that contradict a documented invariant.
-# NEVER fails the build — reports findings as annotations + a job summary.
+# Starts advisory. Set the protected repository variable
+# LORE_SEMANTIC_LINT_GATE=true only after explicitly marking calibrated rules
+# in .lore.md; gate mode then fails closed on health failures and soft/strict
+# findings while leaving all unmarked knowledge advisory.
 
 on:
   # Run the base repository's trusted workflow definition. The job checks out
@@ -27,8 +29,9 @@ jobs:
     # ~10-15 min on a PR with many hunks and invariants. Keep enough headroom
     # for cold-start variation and bounded shutdown/report publication.
     timeout-minutes: 25
-    # Advisory: a failure here must never block a PR.
-    continue-on-error: true
+    # Keep this non-blocking until the repository explicitly promotes calibrated
+    # rules. The variable is read from the trusted base repository, never the PR.
+    continue-on-error: ${{ vars.LORE_SEMANTIC_LINT_GATE != 'true' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -84,3 +87,4 @@ jobs:
           # bounded gateway shutdown.
           deadline-seconds: "1200"
           candidate-timeout-seconds: "90"
+          gate: ${{ vars.LORE_SEMANTIC_LINT_GATE == 'true' }}

@@ -38,6 +38,12 @@ inputs:
     description: "Set true to fail on blocking findings and health failures."
     required: false
     default: "false"
+  cache-mode:
+    description: >-
+      Derived invariant-DB cache policy: restore (safe for PRs), save (trusted
+      default-branch priming only), or off.
+    required: false
+    default: "restore"
   deadline-seconds:
     description: "Overall semantic lint deadline, in seconds."
     required: false
@@ -56,6 +62,7 @@ runs:
         LORE_IC_MODEL: ${{ inputs.model }}
         LORE_WORKER_API_KEY: ${{ inputs.worker-api-key }}
         LORE_GITHUB_TOKEN: ${{ inputs.github-token }}
+        LORE_CACHE_MODE: ${{ inputs.cache-mode }}
       run: |
         set -euo pipefail
         if [ -n "$LORE_GITHUB_TOKEN" ] && [ -n "$LORE_WORKER_API_KEY" ]; then
@@ -64,6 +71,10 @@ runs:
         fi
         if [ -n "$LORE_GITHUB_TOKEN" ] && [[ ! "$LORE_IC_MODEL" =~ ^github-copilot/gpt-5\.6-[A-Za-z0-9._-]+$ ]]; then
           echo "github-token requires a Responses-compatible github-copilot/gpt-5.6-* model" >&2
+          exit 1
+        fi
+        if [[ ! "$LORE_CACHE_MODE" =~ ^(restore|save|off)$ ]]; then
+          echo "cache-mode must be restore, save, or off" >&2
           exit 1
         fi
 
@@ -105,7 +116,8 @@ runs:
 
     - name: Restore derived invariant DB
       id: cache
-      uses: actions/cache@v5
+      if: inputs.cache-mode != 'off'
+      uses: actions/cache/restore@v5
       with:
         path: ${{ runner.temp }}/lore-ci
         key: ${{ steps.key.outputs.key }}
@@ -196,3 +208,13 @@ runs:
       run: >-
         node "${{ github.action_path }}/copilot-proxy.mjs"
         stop "$LORE_COPILOT_PROXY_PID"
+
+    - name: Save derived invariant DB
+      if: >-
+        always() && inputs.cache-mode == 'save' &&
+        steps.cache.outputs.cache-hit != 'true' &&
+        steps.check.outputs.exit_code == '0'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ runner.temp }}/lore-ci
+        key: ${{ steps.key.outputs.key }}

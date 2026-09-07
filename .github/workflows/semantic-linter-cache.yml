@@ -1,0 +1,61 @@
+name: Semantic linter cache
+
+# PR runs restore this derived DB but never write it: pull_request_target's
+# token is intentionally constrained against cache writes. Prime on trusted
+# default-branch changes instead, where the cache can be safely shared with PRs.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".lore.md"
+      - ".github/actions/lint/**"
+      - ".github/workflows/semantic-linter-cache.yml"
+      - "packages/core/src/agents-file.ts"
+      - "packages/core/src/invariant-check.ts"
+      - "packages/gateway/src/cli/invariant-check.ts"
+      - "pnpm-lock.yaml"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+  copilot-requests: write
+
+jobs:
+  prime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - name: Resolve a trusted priming range
+        id: range
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$EVENT_BEFORE"
+          if ! [[ "$base" =~ ^[0-9a-fA-F]{40}$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @loreai/gateway run bundle
+      - name: Prime Lore invariant DB cache
+        uses: ./.github/actions/lint
+        with:
+          base: ${{ steps.range.outputs.base }}
+          head: ${{ steps.range.outputs.head }}
+          lore-command: "node packages/gateway/dist/bin.cjs"
+          cache-mode: save
+          model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}
+          worker-api-key: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && secrets.LORE_WORKER_API_KEY || '' }}
+          github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}
+          deadline-seconds: "1200"
+          candidate-timeout-seconds: "90"

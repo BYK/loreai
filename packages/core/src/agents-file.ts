@@ -115,8 +115,38 @@ const LORE_FILE_HEADER =
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** Matches `<!-- lore:UUID -->` tracking markers. */
-const MARKER_RE = /^<!--\s*lore:([0-9a-f-]+)\s*-->$/;
+/** Matches `<!-- lore:UUID [enforce:soft|strict|off] -->` tracking markers. */
+const MARKER_RE =
+  /^<!--\s*lore:([0-9a-f-]+)(?:\s+enforce:(soft|strict|off))?\s*-->$/;
+
+export type LoreEnforcement = "soft" | "strict" | "off";
+
+function markerEnforcement(
+  metadata: ltm.KnowledgeMetadata | null,
+): LoreEnforcement | undefined {
+  switch (metadata?.enforce) {
+    case true:
+    case "strict":
+      return "strict";
+    case "soft":
+      return "soft";
+    case false:
+    case "off":
+      return "off";
+    default:
+      return undefined;
+  }
+}
+
+function withMarkerEnforcement(
+  metadata: ltm.KnowledgeMetadata | null,
+  enforce: LoreEnforcement | undefined,
+): ltm.KnowledgeMetadata | null {
+  const next = { ...metadata };
+  if (enforce === undefined) delete next.enforce;
+  else next.enforce = enforce;
+  return Object.keys(next).length > 0 ? next : null;
+}
 
 // ---------------------------------------------------------------------------
 // File cache (kv_meta) — skip redundant import/export work
@@ -178,6 +208,8 @@ export type ParsedFileEntry = {
   category: string;
   title: string;
   content: string;
+  /** Explicit semantic-lint enforcement opt-in carried by the marker. */
+  enforce?: LoreEnforcement;
 };
 
 // ---------------------------------------------------------------------------
@@ -286,6 +318,7 @@ export function parseEntriesFromSection(section: string): ParsedFileEntry[] {
   const entries: ParsedFileEntry[] = [];
   let currentCategory = "pattern";
   let pendingId: string | null = null;
+  let pendingEnforce: LoreEnforcement | undefined;
 
   for (const raw of lines) {
     const line = raw.trim();
@@ -295,14 +328,19 @@ export function parseEntriesFromSection(section: string): ParsedFileEntry[] {
     if (headingMatch) {
       currentCategory = headingMatch[1].toLowerCase();
       pendingId = null;
+      pendingEnforce = undefined;
       continue;
     }
 
-    // Marker line: <!-- lore:UUID -->
+    // Marker line: <!-- lore:UUID [enforce:soft|strict|off] -->
     const markerMatch = line.match(MARKER_RE);
     if (markerMatch) {
       const candidate = markerMatch[1];
       pendingId = UUID_RE.test(candidate) ? candidate : null;
+      pendingEnforce =
+        pendingId === null
+          ? undefined
+          : (markerMatch[2] as LoreEnforcement | undefined);
       continue;
     }
 
@@ -317,14 +355,17 @@ export function parseEntriesFromSection(section: string): ParsedFileEntry[] {
         category: currentCategory,
         title: unescapeMarkdown(bulletMatch[1].trim()),
         content: unescapeMarkdown(bulletMatch[2].trim()),
+        ...(pendingEnforce !== undefined ? { enforce: pendingEnforce } : {}),
       });
       pendingId = null; // consume the pending marker
+      pendingEnforce = undefined;
       continue;
     }
 
     // Any non-matching non-empty line resets the pending marker
     if (line !== "" && !line.startsWith("##") && !line.startsWith("<!--")) {
       pendingId = null;
+      pendingEnforce = undefined;
     }
   }
 
@@ -398,7 +439,10 @@ function buildSection(
 
     for (let i = 0; i < sorted.length; i++) {
       if (i > 0) out.push(""); // blank line between entries for git context
-      out.push(`<!-- lore:${sorted[i].logical_id} -->`);
+      const enforce = markerEnforcement(sorted[i].metadata);
+      out.push(
+        `<!-- lore:${sorted[i].logical_id}${enforce ? ` enforce:${enforce}` : ""} -->`,
+      );
       // Render the bullet using remark serializer for proper markdown escaping.
       // serialize(root(ul([liph(...)]))) produces "* **Title**: content\n".
       // Trim the trailing newline since we join with \n ourselves.
@@ -635,8 +679,19 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
         // Known entry — update only if content changed (manual edit in file). Pass
         // the resolved current row id (Seer #848): update() resolves it to the
         // logical_id and appends a new version.
-        if (existing.content !== entry.content) {
-          ltm.update(existing.id, { content: entry.content });
+        const metadata = withMarkerEnforcement(
+          existing.metadata,
+          entry.enforce,
+        );
+        if (
+          existing.content !== entry.content ||
+          JSON.stringify(existing.metadata) !== JSON.stringify(metadata)
+        ) {
+          ltm.update(existing.id, {
+            content: entry.content,
+            metadata,
+            replaceMetadata: true,
+          });
         }
       } else if (ltm.isTombstoned(entry.id)) {
       } else {
@@ -650,11 +705,22 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
         });
         if (fuzzyMatch) {
           // Title-similar entry exists locally — update it, discard foreign UUID
+          const current = ltm.get(fuzzyMatch.id);
+          const metadata = withMarkerEnforcement(
+            current?.metadata ?? null,
+            entry.enforce,
+          );
           if (
             fuzzyMatch.title !== entry.title ||
-            ltm.get(fuzzyMatch.id)?.content !== entry.content
+            current?.content !== entry.content ||
+            JSON.stringify(current?.metadata ?? null) !==
+              JSON.stringify(metadata)
           ) {
-            ltm.update(fuzzyMatch.id, { content: entry.content });
+            ltm.update(fuzzyMatch.id, {
+              content: entry.content,
+              metadata,
+              replaceMetadata: true,
+            });
           }
         } else {
           // No workerProviderID/workerModelID — these are user-authored
@@ -667,6 +733,9 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
             scope: "project",
             crossProject: false,
             id: entry.id,
+            ...(entry.enforce !== undefined
+              ? { metadata: { enforce: entry.enforce } }
+              : {}),
           });
         }
       }
@@ -687,6 +756,9 @@ function _importEntries(entries: ParsedFileEntry[], projectPath: string): void {
           content: entry.content,
           scope: "project",
           crossProject: false,
+          ...(entry.enforce !== undefined
+            ? { metadata: { enforce: entry.enforce } }
+            : {}),
         });
       }
     }

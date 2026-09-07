@@ -12,6 +12,9 @@ paths:
   .github/workflows/semantic-linter.yml:
     ignore:
       - 'unknown permission scope "copilot-requests"'
+  .github/workflows/semantic-linter-cache.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
   .github/workflows/eval.yml:
     ignore:
       - 'unknown permission scope "copilot-requests"'
