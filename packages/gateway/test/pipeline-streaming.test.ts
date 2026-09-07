@@ -531,13 +531,16 @@ describe("non-stream recall usage aggregation", () => {
         (candidate) => candidate.headerSessionId === "failed-json-recall-usage",
       );
       expect(state).toBeDefined();
-      expect(
-        getSessionCosts(state?.sessionID ?? "")?.conversation,
-      ).toMatchObject({
-        inputTokens: 1_010,
-        outputTokens: 101,
-        turns: 1,
-      });
+      // Buffered recall commits usage in the deferred finalizer after EOF.
+      await vi.waitFor(() =>
+        expect(
+          getSessionCosts(state?.sessionID ?? "")?.conversation,
+        ).toMatchObject({
+          inputTokens: 1_010,
+          outputTokens: 101,
+          turns: 1,
+        }),
+      );
     } finally {
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
