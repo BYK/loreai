@@ -3043,6 +3043,72 @@ describe("cleanupRecallStore", () => {
 // ---------------------------------------------------------------------------
 
 describe("replaceRecallWithMarker", () => {
+  test("local collision suffixes cannot alias another turn's provider identity", () => {
+    const rewrite = (providerId: string, siblingId?: string) => {
+      const call = {
+        type: "tool_use" as const,
+        id: `call_${providerId}`,
+        name: "recall",
+        input: { query: "memory" },
+      };
+      return replaceRecallWithMarker({
+        ...makeResponse([call]),
+        rawOutputItems: [
+          {
+            type: "function_call",
+            id: providerId,
+            call_id: call.id,
+            name: call.name,
+            arguments: JSON.stringify(call.input),
+            status: "completed",
+          },
+          ...(siblingId
+            ? [
+                {
+                  type: "message",
+                  id: siblingId,
+                  role: "assistant",
+                  status: "completed",
+                  content: [{ type: "output_text", text: "sibling" }],
+                },
+              ]
+            : []),
+        ],
+      }).rawOutputItems!;
+    };
+    const candidate = rewrite("fc_recall")[0].id as string;
+    const firstTurn = rewrite("fc_recall", candidate);
+    const nextTurn = rewrite("fc_recall_1");
+    expect(firstTurn[0].id).not.toBe(candidate);
+    expect(firstTurn[0].id).not.toBe(nextTurn[0].id);
+  });
+
+  test("keeps raw marker identities distinct across successive Responses turns", () => {
+    const outputs = [1, 2].map((turn) => {
+      const call = {
+        type: "tool_use" as const,
+        id: `call_recall_${turn}`,
+        name: "recall",
+        input: { query: "same search" },
+      };
+      return replaceRecallWithMarker({
+        ...makeResponse([call]),
+        rawOutputItems: [
+          {
+            type: "function_call",
+            id: `fc_recall_${turn}`,
+            call_id: call.id,
+            name: call.name,
+            arguments: JSON.stringify(call.input),
+            status: "completed",
+          },
+        ],
+      }).rawOutputItems![0];
+    });
+    expect(outputs.every((item) => item.type === "message")).toBe(true);
+    expect(outputs[0].id).not.toBe(outputs[1].id);
+  });
+
   test("replaces raw Responses recall calls without losing other items or colliding IDs", () => {
     const recall = {
       type: "tool_use" as const,
@@ -3058,7 +3124,7 @@ describe("replaceRecallWithMarker", () => {
     };
     const existing = {
       type: "message",
-      id: "msg_lore_recall_1",
+      id: "msg_lore_recall_fc_recall",
       role: "assistant",
       status: "completed",
       content: [{ type: "refusal", refusal: "earlier refusal" }],
@@ -3079,6 +3145,10 @@ describe("replaceRecallWithMarker", () => {
       arguments: "{}",
       status: "completed",
     };
+    existing.id = replaceRecallWithMarker({
+      ...makeResponse([recall]),
+      rawOutputItems: [rawRecall],
+    }).rawOutputItems![0].id as string;
     const response = {
       ...makeResponse([recall, read]),
       rawOutputItems: [existing, rawRecall, rawRead],

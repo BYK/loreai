@@ -1552,7 +1552,7 @@ export function replaceRecallWithMarker(
     if (typeof item.id === "string") usedIds.add(item.id);
     if (typeof item.call_id === "string") usedIds.add(item.call_id);
   }
-  const rawOutputItems = resp.rawOutputItems?.map((item, index) => {
+  const rawOutputItems = resp.rawOutputItems?.map((item) => {
     const callId = typeof item.call_id === "string" ? item.call_id : item.id;
     if (
       item.type !== "function_call" ||
@@ -1561,7 +1561,15 @@ export function replaceRecallWithMarker(
       !replaced.has(callId)
     )
       return item;
-    const baseId = `msg_lore_recall_${index}`;
+    // Provider identities distinguish successive turns too: an array index
+    // would reuse the same message ID when clients replay multiple markers.
+    // Fixed-length hex keeps a local collision suffix from aliasing a
+    // different provider identity on a later turn (e.g. fc_a vs fc_a_1).
+    const identity = createHash("sha256")
+      .update(typeof item.id === "string" ? item.id : callId)
+      .digest("hex")
+      .slice(0, 32);
+    const baseId = `msg_lore_recall_${identity}`;
     let id = baseId;
     for (let suffix = 1; usedIds.has(id); suffix++) id = `${baseId}_${suffix}`;
     usedIds.add(id);
