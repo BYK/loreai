@@ -100,6 +100,16 @@ describe("exact derived provenance counts", () => {
       JSON.stringify([{ raw: { data: "x".repeat(128) + "new tail" } }]),
     ],
     [visible, provenance, visible, provenance.replace("AABCD", "ZZBCD")],
+    [
+      JSON.stringify([
+        { type: "opaque", raw: { data: "x".repeat(128) + "old tail" } },
+      ]),
+      provenance,
+      JSON.stringify([
+        { type: "opaque", raw: { data: "x".repeat(128) + "new tail" } },
+      ]),
+      provenance,
+    ],
   ])("recomputes on every full-content difference (%#)", (oldV, oldP, v, p) => {
     const first = new SemanticTokenCache(scope);
     first.count(oldV, oldP);
