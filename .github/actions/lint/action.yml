@@ -172,6 +172,11 @@ runs:
         [ -n "$LORE_IC_MODEL" ] && args+=(--model "$LORE_IC_MODEL")
         [ -n "$LORE_IC_EFFORT" ] && args+=(--effort "$LORE_IC_EFFORT")
         args+=(--import-lore-md)
+        # A trusted cache-primer must import even when .lore.md is the only
+        # changed file (which produces no code hunks).
+        if [ "$LORE_CACHE_MODE" = "save" ]; then
+          args+=(--prime-lore-db)
+        fi
         if [ "$LORE_IC_GATE" = "true" ]; then
           args+=(--gate)
         fi
@@ -210,10 +215,25 @@ runs:
         stop "$LORE_COPILOT_PROXY_PID"
 
     - name: Save derived invariant DB
+      id: cache-db
       if: >-
         always() && inputs.cache-mode == 'save' &&
         steps.cache.outputs.cache-hit != 'true' &&
         steps.check.outputs.exit_code == '0'
+      shell: bash
+      env:
+        LORE_DB_PATH: ${{ steps.key.outputs.db }}
+      run: |
+        set -euo pipefail
+        test -s "$LORE_DB_PATH"
+        echo "ready=true" >> "$GITHUB_OUTPUT"
+
+    - name: Save verified invariant DB cache
+      if: >-
+        always() && inputs.cache-mode == 'save' &&
+        steps.cache.outputs.cache-hit != 'true' &&
+        steps.check.outputs.exit_code == '0' &&
+        steps.cache-db.outputs.ready == 'true'
       uses: actions/cache/save@v5
       with:
         path: ${{ runner.temp }}/lore-ci

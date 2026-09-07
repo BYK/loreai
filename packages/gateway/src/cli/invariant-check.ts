@@ -31,6 +31,8 @@ export interface SemanticLintOptions {
   effort?: ReasoningEffort;
   gate: boolean;
   importLoreMd: boolean;
+  /** Import and embed .lore.md even when the diff contains no code hunks. */
+  primeLoreDb?: boolean;
   deadlineMs: number;
   candidateTimeoutMs: number;
   onDiagnostic?: (message: string) => void;
@@ -170,10 +172,12 @@ export async function runSemanticLint(
     }
 
     const invariantSource: LintPhaseHealth = { status: "healthy" };
-    if (diff.hunks.length === 0) {
+    if (diff.hunks.length === 0 && !options.primeLoreDb) {
       // No changed code can violate an invariant. Preserve core's zero-work
       // contract without starting the gateway, importing .lore.md, or requiring
-      // an embedding provider merely because the action requested import.
+      // an embedding provider merely because the action requested import. Cache
+      // priming opts in to the import path explicitly so a .lore.md-only commit
+      // can populate the derived DB.
       phase = "invariantVectors";
       const result = await invariantCheck.checkInvariants({
         projectPath,
@@ -412,6 +416,7 @@ export async function commandInvariantCheck(
     effort: effort ?? undefined,
     gate: values.gate === true,
     importLoreMd: values["import-lore-md"] === true,
+    primeLoreDb: values["prime-lore-db"] === true,
     deadlineMs: Number(values["deadline-ms"] ?? 1_200_000),
     candidateTimeoutMs: Number(values["candidate-timeout-ms"] ?? 90_000),
     onDiagnostic: (message) => console.error(`[lore] ${message}`),

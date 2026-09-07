@@ -544,6 +544,9 @@ describe("semantic lint action reporter", () => {
     expect(action).toContain("actions/cache/restore@v5");
     expect(action).toContain("actions/cache/save@v5");
     expect(action).toContain("inputs.cache-mode == 'save'");
+    expect(action).toContain("--prime-lore-db");
+    expect(action).toContain('test -s "$LORE_DB_PATH"');
+    expect(action).toContain("steps.cache-db.outputs.ready == 'true'");
     expect(action).toContain("--report-file");
     expect(action).toContain("if: always()");
     expect(action).toContain(
@@ -1165,7 +1168,7 @@ describe("semantic lint action reporter", () => {
       "github-token: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && '' || github.token }}",
     );
     expect(workflow).toMatch(
-      /permissions:\n  actions: write\n  contents: read\n  pull-requests: read\n  copilot-requests: write\n\njobs:/,
+      /permissions:\n  actions: read\n  contents: read\n  pull-requests: read\n  copilot-requests: write\n\njobs:/,
     );
     expect(workflow).not.toMatch(/^\s+pull_request:\s*$/m);
 

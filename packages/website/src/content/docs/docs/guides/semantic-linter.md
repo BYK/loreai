@@ -39,7 +39,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  actions: write
+  actions: read
   contents: read
   pull-requests: read
   copilot-requests: write
@@ -88,7 +88,7 @@ jobs:
 
 Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
 
-PR runs restore a derived invariant database but never write it. Copy the repository's `semantic-linter-cache.yml` too: it primes that cache on trusted `main` changes, avoiding forbidden cache-save attempts from `pull_request_target` runs.
+PR runs restore a derived invariant database but never write it. Copy the repository's `semantic-linter-cache.yml` too: it primes that cache on trusted `main` changes, including commits that change only `.lore.md`, avoiding forbidden cache-save attempts from `pull_request_target` runs.
 
 :::caution
 Use `pull_request_target` only with the trusted-base checkout pattern above. The workflow executes the base revision's code and fetches the PR head solely as immutable diff data, so the judge secret is never exposed to code supplied by the pull request.

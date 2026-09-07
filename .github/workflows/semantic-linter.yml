@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  actions: write
+  actions: read
   contents: read
   pull-requests: read
   copilot-requests: write
