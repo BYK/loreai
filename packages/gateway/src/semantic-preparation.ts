@@ -1,3 +1,4 @@
+import { SourceCheckpoint } from "./source-checkpoint";
 import * as Sentry from "@sentry/bun";
 import {
   isToolPart,
@@ -11,6 +12,7 @@ import { captureTurnTemporalInput } from "./turn-temporal";
 import type { GatewayMessage, GatewayRequest } from "./translate/types";
 
 type Stage =
+  | "source_validation"
   | "conversion"
   | "provenance"
   | "temporal_input"
@@ -144,36 +146,61 @@ export async function prepareSemanticMessages(input: {
   projectPath: string;
   noStore: boolean;
   timing: PreparationTiming;
+  protocol?: string;
+  forceFull?: boolean;
 }) {
   const { timing } = input;
+  for (const key of Object.keys(timing.counts) as Array<
+    keyof typeof timing.counts
+  >)
+    timing.counts[key] = 0;
   const started = performance.now();
   const cpu = process.cpuUsage();
   const memory = process.memoryUsage();
-  const tokenCache = new SemanticTokenCache(input);
+  const checkpoint =
+    input.protocol && !input.noStore
+      ? new SourceCheckpoint({ ...input, protocol: input.protocol })
+      : undefined;
+  const tokenCache = new SemanticTokenCache({
+    ...input,
+    retainUnused: !!checkpoint?.base,
+  });
+  const convertedFrom = checkpoint?.convertedFrom ?? 0;
+  const offset = checkpoint?.offset ?? 0;
   // An immediate queued before synchronous preparation observes its event-loop
   // delay. Await it before the next stage so LTM work cannot pollute the sample.
   // The callback retains just a timestamp, never the transcript.
   const loopDelay = new Promise<number>((resolve) =>
     setImmediate(() => resolve(performance.now() - started)),
   );
-  const loreMessages = timing.measure("conversion", () =>
+  const suffix = timing.measure("conversion", () =>
     gatewayMessagesToLore(
-      input.messages,
+      input.messages.slice(convertedFrom),
       input.sessionID,
-      0,
-      0,
+      convertedFrom,
+      convertedFrom,
       (visible, provenance) => tokenCache.count(visible, provenance),
     ),
   );
+  const raw = checkpoint?.base ? [...checkpoint.base.raw, ...suffix] : suffix;
+  const loreMessages = checkpoint ? structuredClone(raw) : raw;
   const temporalInput = timing.measure("temporal_input", () =>
-    captureTurnTemporalInput(loreMessages),
+    captureTurnTemporalInput(raw, input.messages.length, checkpoint),
   );
-  const provenanceByMessageId = timing.measure("provenance", () =>
-    responsesProvenanceByMessageId(input.messages, loreMessages),
-  );
+  timing.metric("source_converted_messages", suffix.length);
+  timing.metric("source_total_messages", input.messages.length);
+  const provenanceByMessageId = timing.measure("provenance", () => {
+    const provenance = checkpoint?.storedProvenance ?? new Map();
+    for (const [id, value] of responsesProvenanceByMessageId(
+      input.messages.slice(convertedFrom),
+      suffix,
+    ))
+      provenance.set(id, value);
+    return provenance;
+  });
   const candidates: Array<{ sourceID: string; legacySourceID?: string }> = [];
   timing.counts.messages = loreMessages.length;
-  for (const message of loreMessages) {
+  for (const [index, message] of loreMessages.entries()) {
     timing.counts.parts += message.parts.length;
     let results = 0;
     for (const part of message.parts)
@@ -188,14 +215,15 @@ export async function prepareSemanticMessages(input: {
       results > 0 &&
       results === message.parts.length
     ) {
+      timing.counts.placeholders++;
+      if (index < convertedFrom - offset) continue;
       candidates.push({
         sourceID: message.info.id,
         legacySourceID: message.legacySourceID,
       });
     }
   }
-  timing.counts.placeholders = candidates.length;
-  const ids = timing.measure("stored_ids", () =>
+  const newIds = timing.measure("stored_ids", () =>
     temporal.storedMessageIds({
       projectPath: input.projectPath,
       sessionID: input.sessionID,
@@ -203,9 +231,12 @@ export async function prepareSemanticMessages(input: {
       readOnly: input.noStore,
     }),
   );
+  const ids = checkpoint?.storedIds ?? new Map<string, string>();
+  for (const [id, stored] of newIds) ids.set(id, stored);
   timing.measure("resolve_tools", () =>
     resolveToolResults(loreMessages, (m) => ids.get(m.info.id) ?? m.info.id),
   );
+  checkpoint?.capture(raw, loreMessages, ids, provenanceByMessageId);
   // Publish before yielding; cache writes never wait for another writer.
   tokenCache.persist();
   const delta = process.cpuUsage(cpu);
@@ -222,5 +253,11 @@ export async function prepareSemanticMessages(input: {
   timing.metric("event_loop_delay_ms", await loopDelay);
   for (const [name, value] of Object.entries(tokenCache.stats))
     timing.metric(`provenance_tokens_${name}`, value);
-  return { loreMessages, temporalInput, provenanceByMessageId };
+  return {
+    loreMessages,
+    temporalInput,
+    provenanceByMessageId,
+    sourceWindow: checkpoint?.sourceWindow,
+    checkpoint,
+  };
 }

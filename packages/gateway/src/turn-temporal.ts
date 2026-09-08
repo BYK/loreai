@@ -16,15 +16,19 @@ export interface TurnTemporalInput {
   readonly latestUser?: LoreMessageWithParts;
   /** Absolute request length, even when only one message is retained. */
   readonly assistantIndex: number;
+  readonly checkpoint?: { claim(): boolean; publish(): void };
 }
 
 export function captureTurnTemporalInput(
   messages: LoreMessageWithParts[],
+  assistantIndex = messages.length,
+  checkpoint?: TurnTemporalInput["checkpoint"],
 ): TurnTemporalInput {
   const latestUser = messages.findLast((m) => m.info.role === "user");
   return Object.freeze({
     ...(latestUser ? { latestUser: structuredClone(latestUser) } : {}),
-    assistantIndex: messages.length,
+    assistantIndex,
+    ...(checkpoint ? { checkpoint } : {}),
   });
 }
 
@@ -42,6 +46,7 @@ export function storeTurnTemporal(input: {
   const { projectPath, sessionID, temporalInput } = input;
   ensureProject(projectPath);
   withSavepoint("post_response_temporal", () => {
+    const checkpointClaimed = temporalInput.checkpoint?.claim() ?? false;
     const user = temporalInput.latestUser;
     if (user) {
       const message = {
@@ -78,5 +83,6 @@ export function storeTurnTemporal(input: {
     if (assistantContent.length > 0) temporal.store(message);
     // Tool-only/error turns still need traces even when no text was stored.
     temporal.recordToolCalls(message);
+    if (checkpointClaimed) temporalInput.checkpoint?.publish();
   });
 }

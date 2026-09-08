@@ -36,6 +36,7 @@ export class SemanticTokenCache {
       projectPath: string;
       sessionID: string;
       noStore: boolean;
+      retainUnused?: boolean;
     },
   ) {
     if (scope.noStore) return;
@@ -131,7 +132,14 @@ export class SemanticTokenCache {
         currentTenantId() !== this.tenant
       )
         return;
-      const data = [...this.used];
+      const retained = this.scope.retainUnused
+        ? new Map(this.entries)
+        : new Map<string, number>();
+      for (const [key, value] of this.used) {
+        retained.delete(key);
+        retained.set(key, value);
+      }
+      const data = [...retained].slice(-SEMANTIC_TOKEN_CACHE_MAX_ENTRIES);
       const payload = JSON.stringify([
         VERSION,
         data,

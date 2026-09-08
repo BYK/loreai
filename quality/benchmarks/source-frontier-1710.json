@@ -1,0 +1,1504 @@
+{
+  "node": "v24.19.0",
+  "fixture": "930 completed six-message turns, with unique read calls/results",
+  "largeWindow": false,
+  "sourceMessages": 5580,
+  "sourceTokens": 276338,
+  "checkpointBytes": 49162,
+  "runs": [
+    {
+      "sample": 0,
+      "mode": "full",
+      "sourceMessages": 5580,
+      "preparationMs": 49.68996999999945,
+      "transformMs": 76.71057799999926,
+      "retainedMessages": 5580,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 21,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "conversion": {
+          "wallMs": 27.974347000000307,
+          "cpuMs": 39.38
+        },
+        "temporal_input": {
+          "wallMs": 0.15088600000035512,
+          "cpuMs": 0.148
+        },
+        "provenance": {
+          "wallMs": 2.138747000000876,
+          "cpuMs": 0.214
+        },
+        "stored_ids": {
+          "wallMs": 4.98493899999994,
+          "cpuMs": 7.359
+        },
+        "resolve_tools": {
+          "wallMs": 8.17235299999993,
+          "cpuMs": 15.119
+        },
+        "semantic_total": {
+          "wallMs": 49.07686899999953,
+          "cpuMs": 69.115
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5580,
+        "source_total_messages": 5580,
+        "rss_delta_bytes": 3932160,
+        "heap_delta_bytes": 21794568,
+        "messages": 5580,
+        "parts": 5580,
+        "toolUses": 930,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 49.60590499999944,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 0,
+      "mode": "warm",
+      "sourceMessages": 5580,
+      "preparationMs": 12.450117000000319,
+      "transformMs": 2.6858200000006036,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 5.476568000000043,
+          "cpuMs": 5.441
+        },
+        "conversion": {
+          "wallMs": 0.05702599999949598,
+          "cpuMs": 0.054
+        },
+        "temporal_input": {
+          "wallMs": 0.17873899999995047,
+          "cpuMs": 0.163
+        },
+        "provenance": {
+          "wallMs": 1.1959889999998268,
+          "cpuMs": 0.319
+        },
+        "stored_ids": {
+          "wallMs": 0.032097999999677995,
+          "cpuMs": 0.03
+        },
+        "resolve_tools": {
+          "wallMs": 0.3999309999999241,
+          "cpuMs": 0.511
+        },
+        "semantic_total": {
+          "wallMs": 12.025548000000526,
+          "cpuMs": 16.698
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 393216,
+        "heap_delta_bytes": 3254216,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 12.303225999999995,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 0,
+      "mode": "restart",
+      "sourceMessages": 5580,
+      "preparationMs": 19.00475600000027,
+      "transformMs": 3.1463919999996506,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 4.54624799999965,
+          "cpuMs": 5.142
+        },
+        "conversion": {
+          "wallMs": 0.06628999999975349,
+          "cpuMs": 0.063
+        },
+        "temporal_input": {
+          "wallMs": 0.07657499999913853,
+          "cpuMs": 0.111
+        },
+        "provenance": {
+          "wallMs": 0.026630000000295695,
+          "cpuMs": 0.026
+        },
+        "stored_ids": {
+          "wallMs": 0.0863999999992302,
+          "cpuMs": 0.083
+        },
+        "resolve_tools": {
+          "wallMs": 0.1515079999999216,
+          "cpuMs": 0.147
+        },
+        "semantic_total": {
+          "wallMs": 18.659026000000267,
+          "cpuMs": 17.53
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 528384,
+        "heap_delta_bytes": 2944200,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 18.936022000000776,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 0,
+      "mode": "full-append",
+      "sourceMessages": 5582,
+      "preparationMs": 63.45804500000031,
+      "transformMs": 73.95969200000036,
+      "retainedMessages": 5582,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 21,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "conversion": {
+          "wallMs": 47.68895599999996,
+          "cpuMs": 42.159
+        },
+        "temporal_input": {
+          "wallMs": 0.239980999999716,
+          "cpuMs": 0.236
+        },
+        "provenance": {
+          "wallMs": 0.05901799999992363,
+          "cpuMs": 0.057
+        },
+        "stored_ids": {
+          "wallMs": 7.15943900000002,
+          "cpuMs": 7.145
+        },
+        "resolve_tools": {
+          "wallMs": 5.817850999999791,
+          "cpuMs": 5.808
+        },
+        "semantic_total": {
+          "wallMs": 63.02515400000084,
+          "cpuMs": 57.226
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5582,
+        "source_total_messages": 5582,
+        "rss_delta_bytes": 3014656,
+        "heap_delta_bytes": 17933392,
+        "messages": 5582,
+        "parts": 5582,
+        "toolUses": 931,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 63.23885500000051,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 0,
+      "mode": "append",
+      "sourceMessages": 5582,
+      "preparationMs": 34.35477400000036,
+      "transformMs": 3.673616000000038,
+      "retainedMessages": 261,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 12,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "source_validation": {
+          "wallMs": 24.292069000000083,
+          "cpuMs": 33.784
+        },
+        "conversion": {
+          "wallMs": 0.13525300000037532,
+          "cpuMs": 0.129
+        },
+        "temporal_input": {
+          "wallMs": 0.09927999999945314,
+          "cpuMs": 0.095
+        },
+        "provenance": {
+          "wallMs": 0.06102199999986624,
+          "cpuMs": 0.06
+        },
+        "stored_ids": {
+          "wallMs": 0.07793700000001991,
+          "cpuMs": 0.076
+        },
+        "resolve_tools": {
+          "wallMs": 0.23938100000032136,
+          "cpuMs": 0.237
+        },
+        "semantic_total": {
+          "wallMs": 34.14225499999975,
+          "cpuMs": 40.938
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 2,
+        "source_total_messages": 5582,
+        "source_estimated_messages": 2,
+        "rss_delta_bytes": 2764800,
+        "heap_delta_bytes": -58268280,
+        "messages": 261,
+        "parts": 261,
+        "toolUses": 44,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 34.30348700000013,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 1,
+      "mode": "restart",
+      "sourceMessages": 5580,
+      "preparationMs": 21.599229000000378,
+      "transformMs": 2.466110000000299,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 9.168910999999753,
+          "cpuMs": 4.579
+        },
+        "conversion": {
+          "wallMs": 0.09718599999996513,
+          "cpuMs": 0.092
+        },
+        "temporal_input": {
+          "wallMs": 0.055534000000079686,
+          "cpuMs": 0.053
+        },
+        "provenance": {
+          "wallMs": 0.015693999999712105,
+          "cpuMs": 0.015
+        },
+        "stored_ids": {
+          "wallMs": 0.018958999999995285,
+          "cpuMs": 0.018
+        },
+        "resolve_tools": {
+          "wallMs": 0.15052699999978358,
+          "cpuMs": 0.15
+        },
+        "semantic_total": {
+          "wallMs": 21.457914999999957,
+          "cpuMs": 15.79
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 397312,
+        "heap_delta_bytes": 2842872,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 21.563383999999132,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 1,
+      "mode": "warm",
+      "sourceMessages": 5580,
+      "preparationMs": 13.938154999999824,
+      "transformMs": 2.5088040000000547,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 5.535166000000572,
+          "cpuMs": 5.594
+        },
+        "conversion": {
+          "wallMs": 0.06408600000031583,
+          "cpuMs": 0.06
+        },
+        "temporal_input": {
+          "wallMs": 0.06543799999963085,
+          "cpuMs": 0.096
+        },
+        "provenance": {
+          "wallMs": 0.019237999999859312,
+          "cpuMs": 0.019
+        },
+        "stored_ids": {
+          "wallMs": 0.01763699999992241,
+          "cpuMs": 0.017
+        },
+        "resolve_tools": {
+          "wallMs": 0.18616999999994732,
+          "cpuMs": 0.184
+        },
+        "semantic_total": {
+          "wallMs": 13.77783400000044,
+          "cpuMs": 10.698
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 524288,
+        "heap_delta_bytes": 2560648,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 13.887419000000591,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 1,
+      "mode": "full",
+      "sourceMessages": 5580,
+      "preparationMs": 63.98483699999997,
+      "transformMs": 68.59145100000023,
+      "retainedMessages": 5580,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 21,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "conversion": {
+          "wallMs": 36.49127300000055,
+          "cpuMs": 28.555
+        },
+        "temporal_input": {
+          "wallMs": 0.22133299999950395,
+          "cpuMs": 0.216
+        },
+        "provenance": {
+          "wallMs": 0.1040659999998752,
+          "cpuMs": 0.1
+        },
+        "stored_ids": {
+          "wallMs": 17.136304999999993,
+          "cpuMs": 7.902
+        },
+        "resolve_tools": {
+          "wallMs": 8.141757000000325,
+          "cpuMs": 7.2
+        },
+        "semantic_total": {
+          "wallMs": 63.777556000000004,
+          "cpuMs": 45.877
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5580,
+        "source_total_messages": 5580,
+        "rss_delta_bytes": 3014656,
+        "heap_delta_bytes": 17732120,
+        "messages": 5580,
+        "parts": 5580,
+        "toolUses": 930,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 63.93099700000039,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 1,
+      "mode": "append",
+      "sourceMessages": 5582,
+      "preparationMs": 22.149045999999544,
+      "transformMs": 3.1493370000007417,
+      "retainedMessages": 261,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 12,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "source_validation": {
+          "wallMs": 4.028830000000198,
+          "cpuMs": 4.021
+        },
+        "conversion": {
+          "wallMs": 0.09061599999949976,
+          "cpuMs": 0.087
+        },
+        "temporal_input": {
+          "wallMs": 0.07369099999959872,
+          "cpuMs": 0.07
+        },
+        "provenance": {
+          "wallMs": 0.022032999999282765,
+          "cpuMs": 0.021
+        },
+        "stored_ids": {
+          "wallMs": 0.029313999999430962,
+          "cpuMs": 0.028
+        },
+        "resolve_tools": {
+          "wallMs": 0.24436799999966752,
+          "cpuMs": 0.24
+        },
+        "semantic_total": {
+          "wallMs": 8.498673000000053,
+          "cpuMs": 10.211
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 2,
+        "source_total_messages": 5582,
+        "source_estimated_messages": 2,
+        "rss_delta_bytes": 262144,
+        "heap_delta_bytes": 2936472,
+        "messages": 261,
+        "parts": 261,
+        "toolUses": 44,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 22.05865900000026,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 1,
+      "mode": "full-append",
+      "sourceMessages": 5582,
+      "preparationMs": 33.96888299999955,
+      "transformMs": 45.117583999999624,
+      "retainedMessages": 5582,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 21,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "conversion": {
+          "wallMs": 26.122731999999814,
+          "cpuMs": 31.467
+        },
+        "temporal_input": {
+          "wallMs": 0.14501800000016374,
+          "cpuMs": 0.144
+        },
+        "provenance": {
+          "wallMs": 0.0367260000002716,
+          "cpuMs": 0.036
+        },
+        "stored_ids": {
+          "wallMs": 3.4639500000002954,
+          "cpuMs": 3.457
+        },
+        "resolve_tools": {
+          "wallMs": 3.1436479999993026,
+          "cpuMs": 5.419
+        },
+        "semantic_total": {
+          "wallMs": 33.80399599999964,
+          "cpuMs": 41.441
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5582,
+        "source_total_messages": 5582,
+        "rss_delta_bytes": 3014656,
+        "heap_delta_bytes": 17767504,
+        "messages": 5582,
+        "parts": 5582,
+        "toolUses": 931,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 33.935623999999734,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 2,
+      "mode": "full",
+      "sourceMessages": 5580,
+      "preparationMs": 71.3800970000002,
+      "transformMs": 52.953293999999914,
+      "retainedMessages": 5580,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 21,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "conversion": {
+          "wallMs": 39.05574500000057,
+          "cpuMs": 38.753
+        },
+        "temporal_input": {
+          "wallMs": 0.16035100000044622,
+          "cpuMs": 0.159
+        },
+        "provenance": {
+          "wallMs": 0.034571999999570835,
+          "cpuMs": 0.033
+        },
+        "stored_ids": {
+          "wallMs": 3.3801039999998466,
+          "cpuMs": 3.376
+        },
+        "resolve_tools": {
+          "wallMs": 27.67091099999925,
+          "cpuMs": 33.892
+        },
+        "semantic_total": {
+          "wallMs": 71.19973500000015,
+          "cpuMs": 77.144
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5580,
+        "source_total_messages": 5580,
+        "rss_delta_bytes": 7208960,
+        "heap_delta_bytes": -38202504,
+        "messages": 5580,
+        "parts": 5580,
+        "toolUses": 930,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 71.33239500000036,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 2,
+      "mode": "warm",
+      "sourceMessages": 5580,
+      "preparationMs": 12.79592699999921,
+      "transformMs": 3.659885000000031,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 7.086449000000357,
+          "cpuMs": 7.072
+        },
+        "conversion": {
+          "wallMs": 0.06821299999955954,
+          "cpuMs": 0.064
+        },
+        "temporal_input": {
+          "wallMs": 0.08959500000037224,
+          "cpuMs": 0.084
+        },
+        "provenance": {
+          "wallMs": 0.025918999999703374,
+          "cpuMs": 0.024
+        },
+        "stored_ids": {
+          "wallMs": 0.022453999999925145,
+          "cpuMs": 0.02
+        },
+        "resolve_tools": {
+          "wallMs": 0.26676100000076985,
+          "cpuMs": 0.263
+        },
+        "semantic_total": {
+          "wallMs": 12.591308999999455,
+          "cpuMs": 12.588
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 393216,
+        "heap_delta_bytes": 2608640,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 12.747513999999683,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 2,
+      "mode": "restart",
+      "sourceMessages": 5580,
+      "preparationMs": 16.040978000000905,
+      "transformMs": 2.675564000000122,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 4.227077999999892,
+          "cpuMs": 6.41
+        },
+        "conversion": {
+          "wallMs": 0.2592100000001665,
+          "cpuMs": 0.255
+        },
+        "temporal_input": {
+          "wallMs": 0.048061999999845284,
+          "cpuMs": 0.045
+        },
+        "provenance": {
+          "wallMs": 0.04002000000036787,
+          "cpuMs": 0.039
+        },
+        "stored_ids": {
+          "wallMs": 0.01864800000021205,
+          "cpuMs": 0.016
+        },
+        "resolve_tools": {
+          "wallMs": 0.11815800000022136,
+          "cpuMs": 0.116
+        },
+        "semantic_total": {
+          "wallMs": 15.852254000000357,
+          "cpuMs": 22.156
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 262144,
+        "heap_delta_bytes": 3086904,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 15.9958000000006,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 2,
+      "mode": "full-append",
+      "sourceMessages": 5582,
+      "preparationMs": 65.69791400000031,
+      "transformMs": 46.80623800000012,
+      "retainedMessages": 5582,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 21,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "conversion": {
+          "wallMs": 29.810879999999997,
+          "cpuMs": 29.794
+        },
+        "temporal_input": {
+          "wallMs": 0.19480300000032003,
+          "cpuMs": 0.191
+        },
+        "provenance": {
+          "wallMs": 0.040421000000606,
+          "cpuMs": 0.039
+        },
+        "stored_ids": {
+          "wallMs": 6.743754000000081,
+          "cpuMs": 10.584
+        },
+        "resolve_tools": {
+          "wallMs": 10.617811000000074,
+          "cpuMs": 5.944
+        },
+        "semantic_total": {
+          "wallMs": 49.08267699999942,
+          "cpuMs": 50.886
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5582,
+        "source_total_messages": 5582,
+        "rss_delta_bytes": 3276800,
+        "heap_delta_bytes": 19319408,
+        "messages": 5582,
+        "parts": 5582,
+        "toolUses": 931,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 65.60262999999941,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 2,
+      "mode": "append",
+      "sourceMessages": 5582,
+      "preparationMs": 8.522019,
+      "transformMs": 2.0563529999999446,
+      "retainedMessages": 261,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 12,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "source_validation": {
+          "wallMs": 4.245967000000746,
+          "cpuMs": 4.245
+        },
+        "conversion": {
+          "wallMs": 0.07007499999963329,
+          "cpuMs": 0.068
+        },
+        "temporal_input": {
+          "wallMs": 0.052849000000605884,
+          "cpuMs": 0.051
+        },
+        "provenance": {
+          "wallMs": 0.014812999999776366,
+          "cpuMs": 0.074
+        },
+        "stored_ids": {
+          "wallMs": 0.011107000000265543,
+          "cpuMs": 0.01
+        },
+        "resolve_tools": {
+          "wallMs": 0.27221000000008644,
+          "cpuMs": 0.278
+        },
+        "semantic_total": {
+          "wallMs": 8.316740000000209,
+          "cpuMs": 9.94
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 2,
+        "source_total_messages": 5582,
+        "source_estimated_messages": 2,
+        "rss_delta_bytes": 262144,
+        "heap_delta_bytes": 2646120,
+        "messages": 261,
+        "parts": 261,
+        "toolUses": 44,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 8.487656999999672,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 3,
+      "mode": "restart",
+      "sourceMessages": 5580,
+      "preparationMs": 20.427511000000777,
+      "transformMs": 4.2966630000000805,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 7.295524000000114,
+          "cpuMs": 12.469
+        },
+        "conversion": {
+          "wallMs": 0.067641999999978,
+          "cpuMs": 0.064
+        },
+        "temporal_input": {
+          "wallMs": 0.11638500000026397,
+          "cpuMs": 0.097
+        },
+        "provenance": {
+          "wallMs": 0.023786000000654894,
+          "cpuMs": 0.022
+        },
+        "stored_ids": {
+          "wallMs": 0.022855000000163272,
+          "cpuMs": 0.021
+        },
+        "resolve_tools": {
+          "wallMs": 0.216284999999516,
+          "cpuMs": 0.405
+        },
+        "semantic_total": {
+          "wallMs": 20.187700000000405,
+          "cpuMs": 30.627
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 524288,
+        "heap_delta_bytes": 2968248,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 20.379327999999987,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 3,
+      "mode": "warm",
+      "sourceMessages": 5580,
+      "preparationMs": 12.655165000000125,
+      "transformMs": 3.7185529999997016,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 7.215903000000253,
+          "cpuMs": 7.289
+        },
+        "conversion": {
+          "wallMs": 0.08779200000026322,
+          "cpuMs": 0.084
+        },
+        "temporal_input": {
+          "wallMs": 0.11090599999988626,
+          "cpuMs": 0.105
+        },
+        "provenance": {
+          "wallMs": 0.02343600000040169,
+          "cpuMs": 0.021
+        },
+        "stored_ids": {
+          "wallMs": 0.021261999999296677,
+          "cpuMs": 0.019
+        },
+        "resolve_tools": {
+          "wallMs": 0.18146299999989424,
+          "cpuMs": 0.178
+        },
+        "semantic_total": {
+          "wallMs": 12.44856400000026,
+          "cpuMs": 14.525
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 393216,
+        "heap_delta_bytes": 2511176,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 12.611128999999892,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 3,
+      "mode": "full",
+      "sourceMessages": 5580,
+      "preparationMs": 55.46556799999962,
+      "transformMs": 56.52161700000033,
+      "retainedMessages": 5580,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 21,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "conversion": {
+          "wallMs": 27.762668999999732,
+          "cpuMs": 27.689
+        },
+        "temporal_input": {
+          "wallMs": 0.14491799999996147,
+          "cpuMs": 0.143
+        },
+        "provenance": {
+          "wallMs": 0.033660999999483465,
+          "cpuMs": 0.032
+        },
+        "stored_ids": {
+          "wallMs": 7.566810999999689,
+          "cpuMs": 7.551
+        },
+        "resolve_tools": {
+          "wallMs": 3.437109999999848,
+          "cpuMs": 3.427
+        },
+        "semantic_total": {
+          "wallMs": 39.97466799999984,
+          "cpuMs": 39.914
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5580,
+        "source_total_messages": 5580,
+        "rss_delta_bytes": 3145728,
+        "heap_delta_bytes": 17252016,
+        "messages": 5580,
+        "parts": 5580,
+        "toolUses": 930,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 55.36716999999953,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 3,
+      "mode": "append",
+      "sourceMessages": 5582,
+      "preparationMs": 9.219417999999678,
+      "transformMs": 2.5091440000005605,
+      "retainedMessages": 261,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 12,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "source_validation": {
+          "wallMs": 4.644745999999941,
+          "cpuMs": 4.794
+        },
+        "conversion": {
+          "wallMs": 0.08367500000076689,
+          "cpuMs": 0.081
+        },
+        "temporal_input": {
+          "wallMs": 0.05086699999992561,
+          "cpuMs": 0.048
+        },
+        "provenance": {
+          "wallMs": 0.012208000000100583,
+          "cpuMs": 0.012
+        },
+        "stored_ids": {
+          "wallMs": 0.012448999999833177,
+          "cpuMs": 0.012
+        },
+        "resolve_tools": {
+          "wallMs": 0.08102099999996426,
+          "cpuMs": 0.08
+        },
+        "semantic_total": {
+          "wallMs": 9.06032899999991,
+          "cpuMs": 9.253
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 2,
+        "source_total_messages": 5582,
+        "source_estimated_messages": 2,
+        "rss_delta_bytes": 262144,
+        "heap_delta_bytes": 2338576,
+        "messages": 261,
+        "parts": 261,
+        "toolUses": 44,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 9.190695000000233,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 3,
+      "mode": "full-append",
+      "sourceMessages": 5582,
+      "preparationMs": 34.89986399999998,
+      "transformMs": 49.92643599999974,
+      "retainedMessages": 5582,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 21,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "conversion": {
+          "wallMs": 28.072854999999436,
+          "cpuMs": 27.957
+        },
+        "temporal_input": {
+          "wallMs": 0.16222400000060588,
+          "cpuMs": 0.16
+        },
+        "provenance": {
+          "wallMs": 0.0330100000001039,
+          "cpuMs": 0.032
+        },
+        "stored_ids": {
+          "wallMs": 3.6621090000007825,
+          "cpuMs": 4.041
+        },
+        "resolve_tools": {
+          "wallMs": 1.975962000000436,
+          "cpuMs": 1.971
+        },
+        "semantic_total": {
+          "wallMs": 34.77317299999959,
+          "cpuMs": 35.19
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5582,
+        "source_total_messages": 5582,
+        "rss_delta_bytes": 3145728,
+        "heap_delta_bytes": 17258832,
+        "messages": 5582,
+        "parts": 5582,
+        "toolUses": 931,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 34.86874699999953,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 4,
+      "mode": "full",
+      "sourceMessages": 5580,
+      "preparationMs": 35.91583300000002,
+      "transformMs": 40.09850399999959,
+      "retainedMessages": 5580,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 21,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "conversion": {
+          "wallMs": 26.584217000000535,
+          "cpuMs": 26.568
+        },
+        "temporal_input": {
+          "wallMs": 0.14336499999990338,
+          "cpuMs": 0.142
+        },
+        "provenance": {
+          "wallMs": 0.033380000000761356,
+          "cpuMs": 0.033
+        },
+        "stored_ids": {
+          "wallMs": 4.9677019999999175,
+          "cpuMs": 4.582
+        },
+        "resolve_tools": {
+          "wallMs": 3.0871339999994234,
+          "cpuMs": 3.08
+        },
+        "semantic_total": {
+          "wallMs": 35.77927699999964,
+          "cpuMs": 35.397
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5580,
+        "source_total_messages": 5580,
+        "rss_delta_bytes": 3145728,
+        "heap_delta_bytes": 17218024,
+        "messages": 5580,
+        "parts": 5580,
+        "toolUses": 930,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 35.883152999999766,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 4,
+      "mode": "warm",
+      "sourceMessages": 5580,
+      "preparationMs": 35.77073500000006,
+      "transformMs": 2.835834999999861,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 7.666822000000138,
+          "cpuMs": 7.642
+        },
+        "conversion": {
+          "wallMs": 0.06625999999960186,
+          "cpuMs": 0.064
+        },
+        "temporal_input": {
+          "wallMs": 0.061812999999347085,
+          "cpuMs": 0.058
+        },
+        "provenance": {
+          "wallMs": 0.013559999999415595,
+          "cpuMs": 0.013
+        },
+        "stored_ids": {
+          "wallMs": 0.035073000000011234,
+          "cpuMs": 0.031
+        },
+        "resolve_tools": {
+          "wallMs": 0.1418839999996635,
+          "cpuMs": 0.141
+        },
+        "semantic_total": {
+          "wallMs": 16.318324999999277,
+          "cpuMs": 16.317
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 262144,
+        "heap_delta_bytes": 2493200,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 35.70132999999987,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 4,
+      "mode": "restart",
+      "sourceMessages": 5580,
+      "preparationMs": 12.732852000000094,
+      "transformMs": 2.794463999999607,
+      "retainedMessages": 259,
+      "modelMessages": 40,
+      "modelTokens": 1952,
+      "sqlCount": 12,
+      "wireHash": "5836c239cbe7c623052baa5fa8a7e3c8d04b34567edea28e4f45ab4cca14b502",
+      "stages": {
+        "source_validation": {
+          "wallMs": 3.9554589999997916,
+          "cpuMs": 3.928
+        },
+        "conversion": {
+          "wallMs": 0.048783000000184984,
+          "cpuMs": 0.046
+        },
+        "temporal_input": {
+          "wallMs": 0.040652000000591215,
+          "cpuMs": 0.039
+        },
+        "provenance": {
+          "wallMs": 0.01033599999936996,
+          "cpuMs": 0.009
+        },
+        "stored_ids": {
+          "wallMs": 0.01033499999994092,
+          "cpuMs": 0.009
+        },
+        "resolve_tools": {
+          "wallMs": 0.0788990000000922,
+          "cpuMs": 0.078
+        },
+        "semantic_total": {
+          "wallMs": 12.583337000000029,
+          "cpuMs": 13.049
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 0,
+        "source_total_messages": 5580,
+        "source_estimated_messages": 0,
+        "rss_delta_bytes": 393216,
+        "heap_delta_bytes": 2805096,
+        "messages": 259,
+        "parts": 259,
+        "toolUses": 43,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 12.700832999999875,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 4,
+      "mode": "full-append",
+      "sourceMessages": 5582,
+      "preparationMs": 37.767086999999265,
+      "transformMs": 36.66147400000045,
+      "retainedMessages": 5582,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 21,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "conversion": {
+          "wallMs": 28.053046999999424,
+          "cpuMs": 27.993
+        },
+        "temporal_input": {
+          "wallMs": 0.13342999999986205,
+          "cpuMs": 0.132
+        },
+        "provenance": {
+          "wallMs": 0.037867000000005646,
+          "cpuMs": 0.036
+        },
+        "stored_ids": {
+          "wallMs": 4.660429999999906,
+          "cpuMs": 4.651
+        },
+        "resolve_tools": {
+          "wallMs": 3.577251000000615,
+          "cpuMs": 2.698
+        },
+        "semantic_total": {
+          "wallMs": 37.633827999999994,
+          "cpuMs": 36.713
+        }
+      },
+      "observations": {
+        "source_converted_messages": 5582,
+        "source_total_messages": 5582,
+        "rss_delta_bytes": 3145728,
+        "heap_delta_bytes": 17268248,
+        "messages": 5582,
+        "parts": 5582,
+        "toolUses": 931,
+        "toolResults": 930,
+        "placeholders": 930,
+        "stored_id_resolutions": 930,
+        "event_loop_delay_ms": 37.73818500000016,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    },
+    {
+      "sample": 4,
+      "mode": "append",
+      "sourceMessages": 5582,
+      "preparationMs": 22.06147299999975,
+      "transformMs": 2.3807710000000952,
+      "retainedMessages": 261,
+      "modelMessages": 41,
+      "modelTokens": 1955,
+      "sqlCount": 12,
+      "wireHash": "4d434d14b92ab6d3d0233250db5399eed49076b97ca9d358b4cb56a646c8c998",
+      "stages": {
+        "source_validation": {
+          "wallMs": 5.912373000000116,
+          "cpuMs": 4.694
+        },
+        "conversion": {
+          "wallMs": 0.07892900000024383,
+          "cpuMs": 0.077
+        },
+        "temporal_input": {
+          "wallMs": 0.05426099999931466,
+          "cpuMs": 0.051
+        },
+        "provenance": {
+          "wallMs": 0.011978000000453903,
+          "cpuMs": 0.011
+        },
+        "stored_ids": {
+          "wallMs": 0.012658999999985099,
+          "cpuMs": 0.012
+        },
+        "resolve_tools": {
+          "wallMs": 0.11017600000013772,
+          "cpuMs": 0.109
+        },
+        "semantic_total": {
+          "wallMs": 11.889113999999608,
+          "cpuMs": 10.681
+        }
+      },
+      "observations": {
+        "source_checkpoint_hit": 1,
+        "source_converted_messages": 2,
+        "source_total_messages": 5582,
+        "source_estimated_messages": 2,
+        "rss_delta_bytes": 393216,
+        "heap_delta_bytes": 2523024,
+        "messages": 261,
+        "parts": 261,
+        "toolUses": 44,
+        "toolResults": 43,
+        "placeholders": 43,
+        "stored_id_resolutions": 0,
+        "event_loop_delay_ms": 22.00175399999989,
+        "provenance_tokens_hits": 0,
+        "provenance_tokens_misses": 0,
+        "provenance_tokens_bpe_bytes": 0,
+        "provenance_tokens_bpe_ms": 0,
+        "provenance_tokens_unavailable": 0
+      }
+    }
+  ],
+  "candidate": "980896f942367cd7b9af05ff40572c6c82398960",
+  "base": "ffe04ec6be874daae7105c285be5251b27eef0a7",
+  "measuredDate": "2026-09-08",
+  "notes": "Synthetic completed turns; database reopen in one process; excludes HTTP parsing, LTM/embedding retrieval, upstream inference, and checkpoint finish/publication. Full mode uses the existing full-rebuild path without checkpoint work. Full modes execute the retained legacy path in the candidate, not a separate base checkout."
+}

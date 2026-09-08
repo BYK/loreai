@@ -218,6 +218,9 @@ export {
 } from "./hosted";
 export {
   transform,
+  estimateMessages,
+  FullSourceRequired,
+  type SourceWindow,
   prewarmDistillationSnapshot,
   setModelLimits,
   setMaxLayer0Tokens,
@@ -342,7 +345,11 @@ export {
   _resetVecReadLatencyForTest,
 } from "./vec-latency";
 export { distillLimiter, curatorLimiter } from "./session-limiter";
-export { estimateTokens, encodingForModel } from "./tokenize";
+export {
+  estimateTokens,
+  encodingForModel,
+  TOKEN_ESTIMATE_CACHE_VERSION,
+} from "./tokenize";
 export { SemanticTokenCache } from "./semantic-token-cache";
 export {
   installFetchInterceptor,
@@ -387,3 +394,9 @@ export type {
   CacheEconomicsInput,
   CacheEconomicsResult,
 } from "./cache-economics";
+
+export {
+  SourceWindowStore,
+  SOURCE_WINDOW_MAX_BYTES,
+  SOURCE_WINDOW_MAX_SESSIONS,
+} from "./source-window-store";
