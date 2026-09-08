@@ -367,10 +367,12 @@ runs:
         ACTOR: ${{ github.actor }}
       run: echo "${GH_TOKEN_IN}" | oras login "${REGISTRY}" -u "${ACTOR}" --password-stdin
 
-    - name: Push binaries to the registry
+    - name: Push immutable versioned nightly to the registry
       # Push from inside the artifacts directory so ORAS records bare filenames
       # (e.g. "lore-linux-x64.gz") as layer titles -- the client matches layers
-      # by bare filename.
+      # by bare filename. Publish the immutable versioned tag directly: another
+      # publisher can move the rolling `nightly` tag at any time, so it must
+      # never be used as the source of a version-specific tag.
       if: inputs.mode == 'publish-ghcr'
       shell: bash
       working-directory: ${{ inputs.artifacts-dir }}
@@ -378,7 +380,7 @@ runs:
         VERSION: ${{ inputs.version }}
         REGISTRY: ${{ inputs.registry }}
         REPO: ${{ inputs.repo }}
-        NIGHTLY_TAG: ${{ inputs.nightly-tag }}
+        NIGHTLY_TAG_PREFIX: ${{ inputs.nightly-tag-prefix }}
         ARTIFACT_TYPE_PREFIX: ${{ inputs.artifact-type-prefix }}
         SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
       run: |
@@ -386,15 +388,18 @@ runs:
           # lore-checksums.txt is deterministic metadata for every raw and
           # compressed target. Each layer, including this metadata, is itself
           # content-addressed by the resulting OCI manifest.
-          oras push "${REGISTRY}/${REPO}:${NIGHTLY_TAG}" \
+          oras push "${REGISTRY}/${REPO}:${NIGHTLY_TAG_PREFIX}${VERSION}" \
             --artifact-type "${ARTIFACT_TYPE_PREFIX}.nightly" \
             --annotation "org.opencontainers.image.source=${SOURCE_URL}" \
             --annotation "version=${VERSION}" \
             ./*.gz ./lore-checksums.txt
 
-    - name: Tag versioned nightly
-      # Immutable versioned tag via zero-copy `oras tag` so patch-chain
-      # resolution can find specific nightly versions.
+    - name: Update rolling nightly tag
+      # Move the rolling tag from the immutable, version-specific reference.
+      # A concurrent publisher may update `nightly`, but can never make this
+      # versioned tag point at its own binary manifest. The caller serializes
+      # this read/compare/write window, so an older workflow cannot roll it
+      # backwards after a newer one completes.
       if: inputs.mode == 'publish-ghcr'
       shell: bash
       env:
@@ -405,7 +410,9 @@ runs:
         NIGHTLY_TAG_PREFIX: ${{ inputs.nightly-tag-prefix }}
       run: |
         set -euo pipefail
-        oras tag "${REGISTRY}/${REPO}:${NIGHTLY_TAG}" "${NIGHTLY_TAG_PREFIX}${VERSION}"
+        FULL_REPO="${REGISTRY}/${REPO}"
+        source "${{ github.action_path }}/nightly-tags.sh"
+        advance_rolling_nightly "$FULL_REPO" "$NIGHTLY_TAG" "$NIGHTLY_TAG_PREFIX" "$VERSION"
 
     - name: Push delta patches to the registry
       # Upload pre-generated patches as a <patch-tag-prefix><version> manifest
@@ -437,8 +444,8 @@ runs:
         push_patches() {
           # Compute SHA-256 annotations from new binaries and collect patch files.
           shopt -s nullglob
-          local ANNOTATIONS=""
-          local PATCH_FILES=""
+          local -a annotations=()
+          local -a patch_files=()
           local patch_file basename_patch new_binary sha256
           for patch_file in "${PATCHES_DIR}"/*.patch; do
             basename_patch=$(basename "$patch_file" .patch)
@@ -454,11 +461,11 @@ runs:
               continue
             fi
             sha256=$(sha256sum "$new_binary" | cut -d' ' -f1)
-            ANNOTATIONS="${ANNOTATIONS} --annotation sha256-${basename_patch}=${sha256}"
-            PATCH_FILES="${PATCH_FILES} $(basename "$patch_file")"
+            annotations+=(--annotation "sha256-${basename_patch}=${sha256}")
+            patch_files+=("$(basename "$patch_file")")
           done
 
-          if [ -z "$PATCH_FILES" ]; then
+          if [ "${#patch_files[@]}" -eq 0 ]; then
             echo "No patches to push"
             return 0
           fi
@@ -478,11 +485,11 @@ runs:
           fi
 
           cd "${PATCHES_DIR}" || return 1
-          eval oras push "${FULL_REPO}:${PATCH_TAG_PREFIX}${VERSION}" \
+          oras push "${FULL_REPO}:${PATCH_TAG_PREFIX}${VERSION}" \
             --artifact-type "${ARTIFACT_TYPE_PREFIX}.patch" \
             --annotation "from-version=${PATCH_FROM_VERSION}" \
-            "${ANNOTATIONS}" \
-            "${PATCH_FILES}"
+            "${annotations[@]}" \
+            "${patch_files[@]}"
           local rc=$?
           if [ "$rc" -eq 0 ]; then
             echo "Pushed patch manifest: ${PATCH_TAG_PREFIX}${VERSION} (from ${PATCH_FROM_VERSION})"

@@ -1076,6 +1076,11 @@ jobs:
   publish-nightly:
     name: Publish Nightly to GHCR
     needs: [changes, test, build-nightly-binaries, build-nightly-darwin, generate-patches]
+    # Serialize the rolling-tag read/compare/write window across nightly
+    # workflows. The action also refuses to move it backwards by version.
+    concurrency:
+      group: nightly-ghcr-publish
+      cancel-in-progress: false
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
