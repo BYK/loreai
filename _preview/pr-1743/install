@@ -1,0 +1,368 @@
+#!/bin/bash
+set -euo pipefail
+original_args=("$@")
+umask 077
+
+RED='\033[0;31m'
+MUTED='\033[0;2m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+die() {
+  echo -e "${RED}$1${NC}" >&2
+  exit 1
+}
+
+# Catch unexpected failures from set -e / pipefail
+trap 'die "Unexpected failure at line $LINENO"' ERR
+
+usage() {
+  cat <<EOF
+Lore Installer — persistent memory for AI coding agents
+
+Usage: install [options]
+
+Options:
+    -h, --help              Display this help message
+    -v, --version <version> Install a specific version (e.g., 0.14.0) or "nightly"
+        --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
+
+Environment Variables:
+    LORE_INSTALL_DIR        Override the installation directory
+    LORE_VERSION            Install a specific version (e.g., 0.14.0, nightly)
+
+Examples:
+    curl -fsSL https://withlore.ai/install | bash
+    curl -fsSL https://withlore.ai/install | bash -s -- --version 0.14.0
+    export LORE_VERSION=nightly && curl -fsSL https://withlore.ai/install | bash
+    export LORE_INSTALL_DIR=~/.local/bin && curl -fsSL https://withlore.ai/install | bash
+EOF
+}
+
+requested_version="${LORE_VERSION:-}"
+no_modify_path=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -v|--version)
+      if [[ -n "${2:-}" ]]; then
+        requested_version="$2"
+        shift 2
+      else
+        die "Error: --version requires a version argument"
+      fi
+      ;;
+    --no-modify-path)
+      no_modify_path=true
+      shift
+      ;;
+    *) shift ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Detect platform
+# ---------------------------------------------------------------------------
+
+case "$(uname -s)" in
+  Darwin*) os="darwin" ;;
+  Linux*)  os="linux" ;;
+  MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+  *) die "Unsupported OS: $(uname -s)" ;;
+esac
+
+arch=$(uname -m)
+case "$arch" in
+  x86_64)       arch="x64" ;;
+  aarch64|arm64) arch="arm64" ;;
+  *) die "Unsupported architecture: $arch" ;;
+esac
+
+suffix=""
+if [[ "$os" == "windows" ]]; then
+  suffix=".exe"
+  if [[ "$arch" != "x64" ]]; then
+    die "Unsupported: windows-$arch (only windows-x64 is supported)"
+  fi
+fi
+
+# Only temporary download state belongs to the bootstrap. The verified
+# binary owns all persistent installation and lifecycle work.
+umask 077
+tmpdir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
+tmp_workdir=$(mktemp -d "${tmpdir%/}/lore-install.XXXXXX")
+trap 'rm -rf -- "$tmp_workdir"' EXIT
+tmp_workdir=$(cd "$tmp_workdir" && pwd -P)
+tmp_binary="${tmp_workdir}/lore${suffix}"
+expected_download_sha256=""
+installer_protocol=""
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    die "Could not hash installed files (sha256sum or shasum is required)"
+  fi
+}
+
+# Releases through 0.40.0 predate publisher checksum assets. Keep those
+# concrete historical versions installable; unknown/non-semver versions and
+# every later release use the fail-closed policy.
+stable_release_requires_checksums() {
+  local value=$1 major minor patch
+  if [[ ! "$value" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)([-+][A-Za-z0-9.-]+)?$ ]]; then
+    return 0
+  fi
+  major=${BASH_REMATCH[1]}
+  minor=${BASH_REMATCH[2]}
+  patch=${BASH_REMATCH[3]}
+  (( 10#$major > 0 || 10#$minor > 40 || (10#$minor == 40 && 10#$patch > 0) ))
+}
+
+checksum_entry=""
+read_checksum_entry() {
+  local path=$1 target=$2 line digest name count=0
+  checksum_entry=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ ! "$line" =~ ^([a-f0-9]{64})[[:space:]][[:space:]]([A-Za-z0-9][A-Za-z0-9._-]*)$ ]]; then
+      die "Stable release checksum metadata is malformed"
+    fi
+    digest=${BASH_REMATCH[1]}
+    name=${BASH_REMATCH[2]}
+    if [[ "$name" == "$target" ]]; then
+      checksum_entry=$digest
+      count=$((count + 1))
+    fi
+  done < "$path"
+  if (( count != 1 )); then
+    die "Stable release checksum metadata must contain exactly one entry for ${target}"
+  fi
+}
+
+# Remember uninstall state before network IO. The runtime compares this
+# observation under its lifecycle lock before publishing anything.
+observed_tombstone=missing
+marker="$HOME/.lore/uninstalled.json"
+if [[ -L "$marker" ]]; then die "Refusing symlinked uninstall marker"; fi
+if [[ -e "$marker" ]]; then
+  [[ -f "$marker" && -O "$marker" ]] || die "Refusing unsafe uninstall marker"
+  observed_tombstone=$(hash_file "$marker")
+fi
+
+version=""
+if [[ "$requested_version" == "nightly" ]]; then
+  # --- Nightly: download from GHCR via OCI blob protocol ---
+  # ghcr.io blob downloads redirect to Azure Blob Storage. curl -L would
+  # forward the Authorization header to Azure, which returns 404. Instead,
+  # extract the redirect URL and follow it without the auth header.
+
+  echo -e "${MUTED}Fetching nightly build from GHCR...${NC}"
+
+  # Step 1: Get anonymous pull token
+  GHCR_TOKEN=$(curl -sf \
+    "https://ghcr.io/token?scope=repository:byk/loreai:pull" \
+    | awk -F'"' '{for(i=1;i<=NF;i++) if($i=="token"){print $(i+2);exit}}')
+  if [[ -z "$GHCR_TOKEN" ]]; then
+    die "Failed to get GHCR token"
+  fi
+
+  # Step 2: Fetch the OCI manifest for the :nightly tag
+  MANIFEST=$(curl -sf \
+    -H "Authorization: Bearer $GHCR_TOKEN" \
+    -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+    "https://ghcr.io/v2/byk/loreai/manifests/nightly")
+  if [[ -z "$MANIFEST" ]]; then
+    die "Failed to fetch nightly manifest from GHCR"
+  fi
+
+  # Step 3: Extract version from manifest annotation
+  version=$(echo "$MANIFEST" \
+    | awk -F'"' '{for(i=1;i<=NF;i++) if($i=="version"){print $(i+2);exit}}')
+  if [[ -z "$version" ]]; then
+    die "Failed to extract version from nightly manifest"
+  fi
+
+  echo -e "${MUTED}Installing lore nightly ${version} (${os}-${arch})...${NC}"
+
+  # Step 4: Find the blob digest for this platform's .gz file
+  gz_filename="lore-${os}-${arch}${suffix}.gz"
+  digest=$(echo "$MANIFEST" \
+    | awk -F'"' -v target="$gz_filename" '{
+        for(i=1;i<=NF;i++){
+          if($i=="digest") d=$(i+2)
+          if($i=="org.opencontainers.image.title"&&$(i+2)==target){print d;exit}
+        }
+      }')
+  if [[ ! "$digest" =~ ^sha256:([a-f0-9]{64})$ ]]; then
+    die "No nightly build found for ${gz_filename}"
+  fi
+  expected_blob_sha256=${BASH_REMATCH[1]}
+  # This layer is emitted only by builds containing the early install command.
+  if [[ "$MANIFEST" == *'"install-protocol-v1"'* ]]; then installer_protocol=1; fi
+
+  # Step 5: Get the redirect URL (don't follow — auth must not reach Azure)
+  redir_url=$(curl -s -w '\n%{redirect_url}' -o /dev/null \
+    -H "Authorization: Bearer $GHCR_TOKEN" \
+    "https://ghcr.io/v2/byk/loreai/blobs/${digest}" | tail -1)
+  if [[ "$redir_url" != https://* ]]; then
+    die "Failed to get blob redirect URL from GHCR"
+  fi
+
+  # Step 6: Download without the registry Authorization header, then verify the
+  # exact compressed bytes against the OCI layer digest before decompression.
+  # OCI content addressing is the nightly integrity boundary; GHCR package
+  # write access remains the publisher-identity boundary.
+  tmp_archive="${tmp_workdir}/${gz_filename}"
+  if ! curl -sf "$redir_url" > "$tmp_archive"; then
+    die "Failed to download nightly binary for ${gz_filename}"
+  fi
+  actual_blob_sha256=$(hash_file "$tmp_archive")
+  if [[ "$actual_blob_sha256" != "$expected_blob_sha256" ]]; then
+    die "Nightly OCI blob digest mismatch for ${gz_filename}"
+  fi
+  if ! gunzip -c "$tmp_archive" > "$tmp_binary"; then
+    die "Failed to decompress nightly binary for ${gz_filename}"
+  fi
+
+else
+  # --- Stable: resolve version and download from GitHub Releases ---
+
+  if [[ -z "$requested_version" ]]; then
+    echo -e "${MUTED}Fetching latest version...${NC}"
+    version=$(curl -fsSL https://api.github.com/repos/BYK/loreai/releases/latest \
+      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+    if [[ -z "$version" ]]; then
+      die "Failed to fetch latest version from GitHub"
+    fi
+  else
+    version="$requested_version"
+  fi
+
+  # Strip leading 'v' if present
+  version="${version#v}"
+
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]; then
+    die "Invalid stable release version: ${version}"
+  fi
+
+  echo -e "${MUTED}Installing lore v${version} (${os}-${arch})...${NC}"
+
+  filename="lore-${os}-${arch}${suffix}"
+  release_metadata="${tmp_workdir}/release.json"
+  checksums_file="${tmp_workdir}/lore-checksums.txt"
+  checksum_asset_record=""
+  download_tag="$version"
+
+  # GitHub's HTTPS Releases API authenticates repository release metadata and
+  # exposes a server-computed digest for each uploaded asset. Authenticate the
+  # deterministic checksum asset with that digest, then use its platform entry
+  # to authenticate the decompressed binary. This does not replace an offline
+  # publisher signature: GitHub/release-credential compromise remains trusted.
+  if curl -fsSL \
+      -H "Accept: application/vnd.github.v3+json" \
+      "https://api.github.com/repos/BYK/loreai/releases/tags/${version}" \
+      > "$release_metadata"; then
+    release_tag=$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$release_metadata")
+    if [[ "$release_tag" != "$version" && "$release_tag" != "v${version}" ]]; then
+      die "Stable release metadata tag does not match requested version ${version}"
+    fi
+    download_tag="$release_tag"
+    compact_release=$(tr -d '\n\r\t ' < "$release_metadata")
+    checksum_asset_record=$(printf '%s' "$compact_release" \
+      | sed 's/},{/}\n{/g' \
+      | sed -n '/"name":"lore-checksums.txt"/p')
+  elif stable_release_requires_checksums "$version"; then
+    die "Could not fetch checksum metadata for stable release ${version}"
+  fi
+
+  if [[ -n "$checksum_asset_record" ]]; then
+    if [[ "$checksum_asset_record" == *$'\n'* ]]; then
+      die "Stable release contains ambiguous checksum metadata assets"
+    fi
+    checksum_asset_sha256=$(printf '%s' "$checksum_asset_record" \
+      | sed -n 's/.*"digest":"sha256:\([a-f0-9]\{64\}\)".*/\1/p')
+    if [[ ! "$checksum_asset_sha256" =~ ^[a-f0-9]{64}$ ]]; then
+      die "Stable release checksum metadata has no authenticated SHA-256 asset digest"
+    fi
+    checksum_asset_url=$(printf '%s' "$checksum_asset_record" \
+      | sed -n 's/.*"browser_download_url":"\([^"]*\)".*/\1/p')
+    case "$checksum_asset_url" in
+      "https://github.com/BYK/loreai/releases/download/${download_tag}/lore-checksums.txt") ;;
+      *) die "Stable release checksum metadata has an invalid download URL" ;;
+    esac
+    if ! curl -fsSL "$checksum_asset_url" > "$checksums_file"; then
+      die "Failed to download stable release checksum metadata"
+    fi
+    checksum_metadata_size=$(wc -c < "$checksums_file" | tr -d '[:space:]')
+    if [[ ! "$checksum_metadata_size" =~ ^[0-9]+$ ]] || (( checksum_metadata_size > 65536 )); then
+      die "Stable release checksum metadata is too large"
+    fi
+    actual_checksum_asset_sha256=$(hash_file "$checksums_file")
+    if [[ "$actual_checksum_asset_sha256" != "$checksum_asset_sha256" ]]; then
+      die "Stable release checksum metadata digest mismatch"
+    fi
+    if grep -q '  install-protocol-v1$' "$checksums_file"; then installer_protocol=1; fi
+    read_checksum_entry "$checksums_file" "$filename"
+    expected_download_sha256=$checksum_entry
+  elif stable_release_requires_checksums "$version"; then
+    die "Stable release ${version} is missing required checksum metadata"
+  fi
+
+  # Try gzip-compressed first (~60% smaller), fall back to raw binary
+  url="https://github.com/BYK/loreai/releases/download/${download_tag}/${filename}"
+  tmp_archive="${tmp_workdir}/${filename}.gz"
+  if curl -fsSL "${url}.gz" > "$tmp_archive" 2>/dev/null; then
+    if [[ -n "$expected_download_sha256" ]]; then
+      read_checksum_entry "$checksums_file" "${filename}.gz"
+      actual_archive_sha256=$(hash_file "$tmp_archive")
+      if [[ "$actual_archive_sha256" != "$checksum_entry" ]]; then
+        die "Stable release archive checksum mismatch for ${filename}.gz"
+      fi
+    fi
+    if ! gunzip -c "$tmp_archive" > "$tmp_binary" 2>/dev/null; then
+      die "Failed to decompress stable binary for ${filename}"
+    fi
+  else
+    curl -fsSL --progress-bar "$url" > "$tmp_binary"
+  fi
+fi
+
+executable_sha256=$(hash_file "$tmp_binary")
+if [[ ! "$executable_sha256" =~ ^[a-f0-9]{64}$ ]]; then
+  die "Could not verify the downloaded executable digest"
+fi
+if [[ -n "$expected_download_sha256" && "$executable_sha256" != "$expected_download_sha256" ]]; then
+  die "Downloaded binary checksum mismatch for lore-${os}-${arch}${suffix}"
+fi
+
+# Older releases cannot safely receive unknown setup flags. Keep their
+# compatibility implementation immutable and verify it before execution.
+if [[ "$installer_protocol" != 1 ]]; then
+  legacy="${tmp_workdir}/install-v1"
+  curl -fsSL "https://raw.githubusercontent.com/BYK/loreai/a7f4e9b5d3e7bb3f190fcd989702fcd8e7388ba2/packages/gateway/test/fixtures/install-v1.sh" > "$legacy"
+  [[ "$(hash_file "$legacy")" == "251dd2f3d8e94b709957b291b0d54db665df96361d0942cd2f02181d26a19fa8" ]] || die "Legacy installer checksum mismatch"
+  export LORE_INSTALL_OBSERVED_TOMBSTONE="$observed_tombstone"
+  if (( ${#original_args[@]} )); then
+    bash "$legacy" "${original_args[@]}"
+  else
+    bash "$legacy"
+  fi
+  exit $?
+fi
+chmod 700 "$tmp_binary"
+if [[ "$os" == darwin ]]; then xattr -d com.apple.quarantine "$tmp_binary" 2>/dev/null || true; fi
+install_args=(setup --install --channel stable --source-sha256 "$executable_sha256" --observed-tombstone "$observed_tombstone")
+if [[ "$requested_version" == nightly ]]; then install_args[3]=nightly; fi
+if [[ "$no_modify_path" == true ]]; then install_args+=(--no-modify-path); fi
+if [[ "$os" == windows ]]; then
+  # Keep the shell spelling for reversible PATH edits; Node resolves the
+  # executable destination using native paths.
+  shell_install_dir="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
+  install_args+=(--path-install-dir "$shell_install_dir")
+  export USERPROFILE=$(cygpath -w "$HOME")
+  export LORE_INSTALL_DIR=$(cygpath -w "$shell_install_dir")
+  if [[ -n "${LORE_CONFIG_DIR:-}" ]]; then export LORE_CONFIG_DIR=$(cygpath -w "$LORE_CONFIG_DIR"); fi
+fi
+MSYS_NO_PATHCONV=1 "$tmp_binary" "${install_args[@]}"
