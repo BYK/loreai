@@ -19,7 +19,7 @@ generate/publish job graph without reshaping it.
 | `mode` | What it does |
 |---|---|
 | `generate-ghcr` | Diff freshly built binaries against the previous **GHCR nightly**, size-gate the patches, leave them in `.delta-patches/` for a later publish step. |
-| `publish-ghcr` | Push the compressed binaries to the registry (`:<nightly-tag>`), create the immutable `<nightly-tag-prefix><version>` tag, and push the patch manifest (`:<patch-tag-prefix><version>`) with the integrity annotations the client reads. Only patches with a matching binary in `binaries-dir` are pushed. |
+| `publish-ghcr` | Push the compressed binaries directly to the immutable `<nightly-tag-prefix><version>` tag, advance the mutable `:<nightly-tag>` pointer, and push the patch manifest (`:<patch-tag-prefix><version>`) with the integrity annotations the client reads. Only patches with a matching binary in `binaries-dir` are pushed; their `from-version` must be forwarded from `generate-ghcr`. |
 | `generate-release` | Diff freshly built binaries against the previous stable **GitHub Release**, size-gate, leave them in `.delta-patches/` for a release-artifact upload (e.g. consumed by Craft). |
 
 ## Wire contract (defaults)
@@ -30,10 +30,16 @@ generate/publish job graph without reshaping it.
   filenames** (push runs from inside `artifacts-dir`).
 - **Patches:** manifest tag `<repo>:<patch-tag-prefix><version>` (default
   `patch-<version>`), artifact-type `<artifact-type-prefix>.patch`, annotations:
-  - `from-version=<prevVersion>` — the chain back-pointer.
+  - `from-version=<prevVersion>` — the chain back-pointer captured while the
+    patch was generated, not rediscovered during publishing.
   - `sha256-<binaryName>=<hex>` — the target integrity anchor, computed from the
     **uncompressed** binary. This is the sole trust anchor the client verifies
-    after applying a chain.
+  after applying a chain.
+
+When using `publish-ghcr`, serialize publishers targeting the same rolling
+nightly tag. The action compares versions before advancing that tag, and Lore's
+CI uses a job-level `nightly-ghcr-publish` concurrency group so an older
+workflow cannot overwrite a newer nightly.
 - **Size gate:** a patch larger than `max-ratio`% (default 50) of the gzipped
   binary is dropped (kept under the client's 60% `SIZE_THRESHOLD_RATIO` with
   margin).
@@ -64,6 +70,7 @@ overridden ones:
 | `artifacts-dir` | `artifacts` | (publish) `.gz` layers to push. |
 | `patches-dir` | `patches` | Where patches are written / read. |
 | `binary-glob` | `*` | Selects binaries to diff (e.g. `lore-*`). |
+| `from-version` | `""` | `publish-ghcr`: exact source version emitted by `generate-ghcr`; required to publish staged patches. |
 | `max-ratio` | `50` | Size-gate percentage. |
 | `zig-bsdiff-version` / `zig-bsdiff-sha256` | pinned | Encoder, SHA-verified. |
 | `oras-version` / `oras-sha256` | pinned | OCI client, SHA-verified. |
