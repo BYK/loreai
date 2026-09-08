@@ -620,7 +620,7 @@ export async function expandQuery(
         temperature: 0,
       },
     );
-    signal?.throwIfAborted();
+    promptSignal.throwIfAborted();
 
     if (!responseText) {
       log.info("query expansion timed out or failed, using original query");
@@ -640,6 +640,7 @@ export async function expandQuery(
     );
     if (!expanded.length) return [query];
 
+    llm.recordWorkerSuccess?.(sessionID ?? "_unknown", "lore-query-expand");
     return [query, ...expanded.slice(0, 3)]; // cap at 3 expansions
   } catch (err) {
     if (signal?.aborted) throw signal.reason;

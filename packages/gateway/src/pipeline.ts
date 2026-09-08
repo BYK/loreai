@@ -4381,6 +4381,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       shutdown?: (options?: { drainQueue?: boolean }) => Promise<void>;
       stats?: () => unknown;
     } = {
+      recordWorkerSuccess: rawClient.recordWorkerSuccess?.bind(rawClient),
       async prompt(system, user, opts) {
         if (!opts?.sessionID || opts.upstreamUrl) {
           return dispatchClient.prompt(system, user, opts);
@@ -12852,6 +12853,7 @@ function scheduleBackgroundWorkForTenant(
             urgent: true,
             callType: "direct",
             signal,
+            workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
             // Never run meta-distillation while the conversation cache is warm.
             // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
             // synthetic distilled prefix at messages[0/1] on the next turn. That

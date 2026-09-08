@@ -15,7 +15,7 @@
 import * as distillation from "./distillation";
 import * as entities from "./entities";
 import * as embedding from "./embedding";
-import { parseResponse } from "./curator";
+import { parseResponseWithValidity } from "./curator";
 import type { DetectedEntity, DetectedRelation } from "./curator";
 import { ENTITY_EXTRACT_SYSTEM, entityExtractUser } from "./prompt";
 import type { LLMClient } from "./types";
@@ -151,8 +151,17 @@ export async function rebuildEntitiesFromHistory(input: {
       log.warn("entity-rebuild: extraction call failed (skipping batch):", err);
       continue;
     }
+    if (input.signal?.aborted) {
+      result.cancelled = true;
+      return result;
+    }
     if (!text) continue;
-    const parsed = parseResponse(text);
+    const { value: parsed, valid } = parseResponseWithValidity(text);
+    if (valid)
+      llm.recordWorkerSuccess?.(
+        input.sessionID ?? "_unknown",
+        "lore-entity-rebuild",
+      );
     detectedEntities.push(...parsed.entities);
     detectedRelations.push(...parsed.relations);
   }

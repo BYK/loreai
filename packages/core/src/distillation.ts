@@ -1281,7 +1281,8 @@ async function distillSegment(input: {
   log.info(
     `distill segment: ${input.messages.length} msgs, ` +
       `${sourceTokens}→${distilledTokens} tokens, ` +
-      `R=${rComp.toFixed(2)}, C_norm=${cNorm.toFixed(3)}`,
+      `R=${rComp.toFixed(2)}, C_norm=${cNorm.toFixed(3)} ` +
+      `session=${input.sessionID.slice(0, 16)} worker=lore-distill urgent=${input.urgent === true}`,
   );
 
   // Soft quality warning: R < 1.0 means the distillation is below the √N

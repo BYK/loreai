@@ -2446,7 +2446,7 @@ export async function executeWarmup(
     checkCircuitBreaker(result, breakerBucket, cacheLikelyAlive);
 
     // Clear worker-health failure state on successful warmup.
-    recordWorkerSuccess(state.sessionID);
+    recordWorkerSuccess(state.sessionID, "cache-warmer");
 
     return result;
   } catch {

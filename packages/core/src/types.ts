@@ -222,6 +222,8 @@ export type LoreMessageWithParts = {
  * - Gateway: direct `fetch()` to provider APIs
  */
 export interface LLMClient {
+  /** Host health recovery, called by workers only after usable parser output. */
+  recordWorkerSuccess?(sessionID: string, workerID: string): void;
   /**
    * Send a single prompt and return the text response.
    *

@@ -1190,6 +1190,7 @@ export function createBatchLLMClient(
   // -------------------------------------------------------------------------
 
   return {
+    recordWorkerSuccess: inner.recordWorkerSuccess?.bind(inner),
     async prompt(system, user, opts) {
       // Urgent calls bypass the queue entirely
       if (opts?.urgent || shuttingDown) {

@@ -6,7 +6,7 @@
  * pipeline. This is cheaper and faster than full-pipeline import.
  */
 import * as ltm from "../ltm";
-import { parseOps, applyOps } from "../curator";
+import { parseResponseWithValidity, applyOps } from "../curator";
 import { CURATOR_SYSTEM, curatorUser } from "../prompt";
 import type { LLMClient } from "../types";
 import type { ConversationChunk } from "./types";
@@ -183,7 +183,15 @@ export async function extractKnowledge(input: {
 
       if (response) {
         result.chunksAnswered++;
-        const ops = parseOps(response);
+        const {
+          value: { ops },
+          valid,
+        } = parseResponseWithValidity(response);
+        if (valid)
+          input.llm.recordWorkerSuccess?.(
+            input.sessionID ?? "_unknown",
+            "lore-import",
+          );
         const applied = applyOps(ops, {
           projectPath: input.projectPath,
           sessionID: input.sessionID,
