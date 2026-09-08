@@ -1232,6 +1232,12 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
         },
       });
 
+      // Buffered Codex responses still carry subscription windows and credits.
+      // These values are independent of the token usage Lore may rescale.
+      for (const quota of resp.codexRateLimits ?? []) {
+        emit("codex.rate_limits", quota);
+      }
+
       // response.in_progress
       emit("response.in_progress", {
         type: "response.in_progress",

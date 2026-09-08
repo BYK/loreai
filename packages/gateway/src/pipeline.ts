@@ -11,6 +11,7 @@
  *  2. Meta requests (title gen, summaries, etc.) → forwarded transparently, no Lore processing.
  *  3. Normal conversation turns → full pipeline.
  */
+import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -11331,6 +11332,7 @@ function boundedRetryAfterMs(value: string): string | undefined {
 
 function sanitizedUpstreamErrorResponse(response: Response): Response {
   const headers = new Headers({ "content-type": "application/json" });
+  copyUsageLimitHeaders(response.headers, headers);
   const retryAfter = response.headers.get("retry-after");
   const retryAfterMs = response.headers.get("retry-after-ms");
   const boundedRetryAfterValue = retryAfter
@@ -14900,6 +14902,11 @@ async function handlePassthrough(
     abortScope.signal,
   );
 
+  const withLimits = (response: Response): Response => {
+    copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
+    return response;
+  };
+
   // Meta/side-channel calls must preserve provider errors as ordinary HTTP
   // responses. Running a 4xx/429 body through an SSE validator would launder
   // it into status 200 or a synthetic stream failure.
@@ -14923,11 +14930,13 @@ async function handlePassthrough(
   // to a different protocol (e.g., OpenAI client → Anthropic upstream).
   if (wireProtocol === req.protocol) {
     if (req.stream && upstreamResponse.body) {
-      return validatedMetaStream(
-        upstreamResponse,
-        wireProtocol,
-        req.codex === true,
-        abortScope.signal,
+      return withLimits(
+        validatedMetaStream(
+          upstreamResponse,
+          wireProtocol,
+          req.codex === true,
+          abortScope.signal,
+        ),
       );
     }
     const body = await readForegroundBody(
@@ -14941,10 +14950,9 @@ async function handlePassthrough(
         JSON.parse(body) as Record<string, unknown>,
       );
     }
-    return new Response(body, {
-      status: upstreamResponse.status,
-      headers: { "content-type": "application/json" },
-    });
+    const headers = new Headers({ "content-type": "application/json" });
+    copyUsageLimitHeaders(upstreamResponse.headers, headers);
+    return new Response(body, { status: upstreamResponse.status, headers });
   }
 
   // Cross-protocol: accumulate the upstream response and re-emit in the
@@ -14962,22 +14970,28 @@ async function handlePassthrough(
         },
       });
       if (req.protocol === "openai") {
-        return translateAnthropicStreamToOpenAI(anthropicSSE, {
-          strict: true,
-          signal: abortScope.signal,
-        });
+        return withLimits(
+          translateAnthropicStreamToOpenAI(anthropicSSE, {
+            strict: true,
+            signal: abortScope.signal,
+          }),
+        );
       }
       if (req.protocol === "openai-responses") {
-        return translateAnthropicStreamToResponses(anthropicSSE, {
-          strict: true,
-          signal: abortScope.signal,
-        });
+        return withLimits(
+          translateAnthropicStreamToResponses(anthropicSSE, {
+            strict: true,
+            signal: abortScope.signal,
+          }),
+        );
       }
       if (req.protocol === "gemini") {
-        return translateAnthropicStreamToGemini(anthropicSSE, {
-          strict: true,
-          signal: abortScope.signal,
-        });
+        return withLimits(
+          translateAnthropicStreamToGemini(anthropicSSE, {
+            strict: true,
+            signal: abortScope.signal,
+          }),
+        );
       }
     }
     // Other cross-protocol streaming combos: accumulate + re-emit
@@ -15008,12 +15022,14 @@ async function handlePassthrough(
                 stopAtTerminal: true,
               }),
     );
-    return nonStreamHttpResponse(
-      resp,
-      req.protocol,
-      req.stream,
-      undefined,
-      requestEnablesLongContext(req),
+    return withLimits(
+      nonStreamHttpResponse(
+        resp,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      ),
     );
   }
 
@@ -15026,12 +15042,14 @@ async function handlePassthrough(
       abortScope.signal,
     ),
   );
-  return nonStreamHttpResponse(
-    resp,
-    req.protocol,
-    req.stream,
-    undefined,
-    requestEnablesLongContext(req),
+  return withLimits(
+    nonStreamHttpResponse(
+      resp,
+      req.protocol,
+      req.stream,
+      undefined,
+      requestEnablesLongContext(req),
+    ),
   );
 }
 
@@ -15158,13 +15176,15 @@ async function handleProvisionalConversationTurn(
       requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
     );
     if (error.status === "incomplete" && !hasRecallToolUse(error.response)) {
-      return nonStreamHttpResponse(
+      const response = nonStreamHttpResponse(
         error.response,
         req.protocol,
         req.stream,
         undefined,
         requestEnablesLongContext(req),
       );
+      copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
+      return response;
     }
     return errorResponse(502, "Gateway request failed");
   }
@@ -15182,6 +15202,7 @@ async function handleProvisionalConversationTurn(
     undefined,
     requestEnablesLongContext(req),
   );
+  copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
 
   const commit = async (): Promise<boolean> => {
     if (
@@ -17482,6 +17503,7 @@ async function handleConversationTurn(
   const finishForeground = (response: Response): Response => {
     if (foregroundOwnershipTransferred) return response;
     foregroundOwnershipTransferred = true;
+    copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
     return wrapBodyWithCleanup(
       response,
       releaseForeground,
@@ -17873,6 +17895,15 @@ async function handleConversationTurn(
 
       // Update for next iteration
       currentModifiedReq = followUp;
+      // Recall can consume another quota window or omit quota metadata entirely.
+      // Keep this turn's ordered updates so the rebuilt stream reports every
+      // bucket, with newer updates following older ones.
+      if (currentResp.codexRateLimits?.length) {
+        continuationResp.codexRateLimits = [
+          ...currentResp.codexRateLimits,
+          ...(continuationResp.codexRateLimits ?? []),
+        ];
+      }
       currentResp = continuationResp;
       // Loop continues — hasRecallToolUse checked at top
     }

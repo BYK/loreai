@@ -56,6 +56,8 @@ export interface ResponsesAccState {
     | "response.failed";
   /** Final upstream response snapshot, used when rebuilding transformed SSE. */
   terminalResponse?: Record<string, unknown>;
+  /** Subscription metadata retained across buffered Responses reconstruction. */
+  codexRateLimits?: Array<Record<string, unknown>>;
   /** Original upstream output items, retained for terminal rebuilds. */
   rawItems: Map<number, Record<string, unknown>>;
   /** Strict-mode identity indexes. Each identity belongs to one output item. */
@@ -583,6 +585,23 @@ export function applyResponsesEvent(
   parsed: Record<string, unknown>,
 ): void {
   switch (event) {
+    case "codex.rate_limits": {
+      // Only the provider's quota event crosses buffered reconstruction. Never
+      // retain arbitrary events or diagnostic fields. The stream's existing
+      // byte/frame limits bound this response-local list.
+      const quota: Record<string, unknown> = { type: "codex.rate_limits" };
+      for (const name of [
+        "plan_type",
+        "rate_limits",
+        "credits",
+        "metered_limit_name",
+        "limit_name",
+      ]) {
+        if (Object.hasOwn(parsed, name)) quota[name] = parsed[name];
+      }
+      (state.codexRateLimits ??= []).push(quota);
+      break;
+    }
     case "response.created":
     case "response.in_progress": {
       const resp = parsed.response as Record<string, unknown> | undefined;
@@ -875,6 +894,9 @@ export function finalizeResponsesAcc(
       .filter((item) => item.type !== "item_reference"),
     stopReason,
     usage: state.usage,
+    ...(state.codexRateLimits
+      ? { codexRateLimits: state.codexRateLimits }
+      : {}),
   };
 }
 
