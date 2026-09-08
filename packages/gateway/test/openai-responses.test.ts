@@ -10,6 +10,7 @@
  *    (the gateway is a stateless full-history proxy)
  */
 import { afterEach, describe, test, expect } from "vitest";
+import { log } from "@loreai/core";
 import {
   parseOpenAIResponsesRequest,
   parseOpenAIResponsesRequestChunks,
@@ -139,6 +140,22 @@ describe("parseOpenAIResponsesRequest", () => {
     await expect(
       parseOpenAIResponsesRequestChunks(chunks(), headers),
     ).rejects.toThrow();
+  });
+
+  test("rejects a BOM after leading whitespace on the streaming path", async () => {
+    const body = Buffer.concat([
+      Buffer.from(" \t"),
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(`{"input":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}`),
+    ]);
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield body;
+    }
+
+    expect(() => JSON.parse(body.toString("utf8"))).toThrow();
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).rejects.toThrow("Invalid JSON body");
   });
 
   test("matches native UTF-8 replacement after crossing the streaming threshold", async () => {
@@ -855,6 +872,34 @@ describe("parseOpenAIResponsesRequest", () => {
       "https://api.openai.com",
     ).body as { input: Array<Record<string, unknown>> };
     expect(body.input).not.toContainEqual(reference);
+  });
+
+  test("never logs an item_reference id", () => {
+    const id = "client-id\nwith-content";
+    const warnings: string[] = [];
+    log.registerSink({
+      info: () => {},
+      warn: (message) => warnings.push(message),
+      error: () => {},
+      captureException: () => {},
+    });
+    try {
+      parseOpenAIResponsesRequest(
+        { input: [{ type: "item_reference", id }] },
+        headers,
+      );
+      expect(warnings).toEqual([
+        "dropping unresolvable Responses API item_reference; gateway is stateless full-history and cannot resolve server-side item references",
+      ]);
+      expect(warnings.join(" ")).not.toContain(id);
+    } finally {
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        captureException: () => {},
+      });
+    }
   });
 
   test("extracts instructions as system prompt", () => {

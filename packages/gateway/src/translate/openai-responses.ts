@@ -262,8 +262,11 @@ async function parseOpenAIResponsesRequestChunksInternal(
     keepStack: false,
   });
   const tokenizer = new Tokenizer();
-  const textDecoder = new TextDecoder();
-  const documentPrefix: number[] = [];
+  // Preserve BOM characters so JSON's whitespace rules can reject them outside
+  // strings, including after otherwise valid leading whitespace.
+  const textDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
+  let inString = false;
+  let escapingStringCharacter = false;
   let rootState: RootState = "start";
   let rootIsObject = false;
   let rootComplete = false;
@@ -375,25 +378,25 @@ async function parseOpenAIResponsesRequestChunksInternal(
   };
 
   const write = (chunk: Uint8Array, stream: boolean): void => {
-    for (
-      let index = 0;
-      index < chunk.byteLength && documentPrefix.length < 3;
-      index++
-    ) {
-      documentPrefix.push(chunk[index]);
-    }
-    if (
-      documentPrefix.length === 3 &&
-      documentPrefix[0] === 0xef &&
-      documentPrefix[1] === 0xbb &&
-      documentPrefix[2] === 0xbf
-    ) {
-      throw new Error("Invalid JSON body");
-    }
     // Buffer.toString("utf8") historically replaced malformed sequences before
     // JSON.parse. Keep that non-fatal decoding behavior while retaining only
     // the decoder's incomplete UTF-8 suffix between chunks.
     const text = textDecoder.decode(chunk, { stream });
+    for (const character of text) {
+      if (inString) {
+        if (escapingStringCharacter) {
+          escapingStringCharacter = false;
+        } else if (character === "\\") {
+          escapingStringCharacter = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+      } else if (character === "\uFEFF") {
+        throw new Error("Invalid JSON body");
+      } else if (character === '"') {
+        inString = true;
+      }
+    }
     if (text) tokenizer.write(Buffer.from(text, "utf8"));
   };
 
@@ -732,8 +735,7 @@ function createInputItemsBuilder(): {
     // and intentionally dropped — don't warn on those.)
     if (itemType === "item_reference") {
       log.warn(
-        `dropping unresolvable Responses API item_reference (id=${asString(raw.id, "?")}); ` +
-          `gateway is stateless full-history and cannot resolve server-side item references`,
+        "dropping unresolvable Responses API item_reference; gateway is stateless full-history and cannot resolve server-side item references",
       );
       return;
     }
