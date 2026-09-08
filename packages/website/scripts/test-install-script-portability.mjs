@@ -249,7 +249,6 @@ await test("nested subshell cleanup cannot release the parent's lock", (t) => {
     `${functions}
     unset BASHPID
     canonical_home=$(pwd -P)
-    set -x
     acquire_lifecycle_lock
     (release_lifecycle_lock; release_lifecycle_initialization_claim)
     [[ -f "$HOME/.lore/lifecycle.lock/owner.json" ]]
@@ -358,6 +357,30 @@ await test("installs and releases locks without Bash 4 BASHPID", (t) => {
     installer,
   );
   assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readdirSync(join(f.home, ".lore")).sort(), [
+    "channel",
+    "install-path",
+  ]);
+});
+
+await test("installs with padded BSD process timestamps", (t) => {
+  const f = fixture(t);
+  const result = run(
+    f,
+    `
+    unset LC_ALL
+    ps() {
+      if [[ "$*" == '-o lstart= -p '* ]]; then
+        [[ "\${LC_ALL:-}" == C ]] || { printf 'localized timestamp\\n'; return; }
+        printf '  Tue Sep  8 17:15:40 2026    \\n'
+      else command ps "$@"; fi
+    }
+    source "$1" --no-modify-path
+  `,
+    installer,
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(existsSync(join(f.home, ".local/bin/lore")));
   assert.deepEqual(readdirSync(join(f.home, ".lore")).sort(), [
     "channel",
     "install-path",
