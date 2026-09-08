@@ -16,6 +16,9 @@ import {
   vi,
 } from "vitest";
 import { config } from "../src/config";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   close,
   db,
@@ -56,6 +59,7 @@ import {
   MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
   maybeCutoverToVec0,
   resetTemporalRechunkProgress,
+  runStartupBackfill,
 } from "../src/embedding";
 import * as log from "../src/log";
 import {
@@ -2049,6 +2053,163 @@ describeVec("temporal re-chunk durable admission", () => {
     } finally {
       info.mockRestore();
     }
+  });
+
+  test("preserves a completed live replacement outside the captured rowid snapshot", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    insertContent("m2"); // Keep the high-water row alive so SQLite cannot reuse it.
+    let replaced = false;
+    const processed = await backfillTemporalEmbeddings({
+      shouldPause: () => {
+        if (!replaced) {
+          replaced = true;
+          db().query("DELETE FROM temporal_messages WHERE id = 'm1'").run();
+          insertContent("m1", `${LONG} Replaced during the walk.`);
+          storeTemporalChunks(db(), "m1", [v(0, 1, 0, 0)]);
+        }
+        return false;
+      },
+    });
+    expect(processed).toBe(1);
+    expect(queuedIds()).toEqual(["m2"]);
+    expect(chunkIds("m1")).toEqual(["m1#0"]);
+    expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test.each(["gate", "event loop"])(
+    "does not overwrite a reset during the %s yield",
+    async (during) => {
+      setStorageMode(db(), "vec0");
+      ensureVec0Store(db(), DIM);
+      for (let i = 0; i < 128; i++)
+        insertContent(`reset-${String(i).padStart(3, "0")}`);
+      let reset = false;
+      const resetProgress = () => {
+        reset = true;
+        // Config changes clear completed vectors and must revisit the prefix.
+        clearAllEmbeddings(db());
+        resetTemporalRechunkProgress();
+      };
+      const callback =
+        during === "event loop"
+          ? new Promise<void>((resolve) =>
+              setImmediate(() => {
+                resetProgress();
+                resolve();
+              }),
+            )
+          : undefined;
+      let checks = 0;
+      const processed = await backfillTemporalEmbeddings({
+        shouldPause: () => {
+          if (during === "gate" && ++checks === 2) resetProgress();
+          return false;
+        },
+      });
+      await callback;
+      expect(reset).toBe(true);
+      expect(processed).toBeLessThan(128);
+      expect(getKV(CURSOR_KEY)).toBe("");
+      expect(getKV(DONE_KEY)).toBe("0");
+      expect(getKV(MAX_ROWID_KEY)).toBe("0");
+      // Drain the previously queued prefix, then prove the reset revisits it.
+      db().query("DELETE FROM temporal_embedding_queue").run();
+      expect(await backfillTemporalEmbeddings()).toBe(128);
+      expect(queuedIds()).toHaveLength(128);
+      expect(getKV(DONE_KEY)).toBe("1");
+    },
+  );
+
+  test("does not resume an old walk after the database is closed and reopened", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    insertContent("m2");
+    let checks = 0;
+    const processed = await backfillTemporalEmbeddings({
+      shouldPause: () => {
+        if (++checks === 2) {
+          close();
+          db(); // Same file and epoch, but a successor connection owns it now.
+        }
+        return false;
+      },
+    });
+    expect(processed).toBe(1);
+    expect(getKV(CURSOR_KEY)).toBe("m1");
+    expect(getKV(DONE_KEY)).not.toBe("1");
+    expect(queuedIds()).toEqual(["m1"]);
+    expect(await backfillTemporalEmbeddings()).toBe(1);
+    expect(queuedIds()).toEqual(["m1", "m2"]);
+  });
+
+  test("startup caller does not reopen after temporal shutdown", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    insertContent("m2");
+    const token = _saveAndClearProvider();
+    _restoreProvider({ provider: { maxBatchSize: 8, embed: vi.fn() } });
+    const originalPath = process.env.LORE_DB_PATH;
+    const directory = mkdtempSync(join(tmpdir(), "lore-rechunk-close-"));
+    const successorPath = join(directory, "successor.db");
+    let checks = 0;
+    try {
+      const result = await runStartupBackfill({
+        shouldPause: () => {
+          if (++checks === 2) {
+            close();
+            process.env.LORE_DB_PATH = successorPath;
+          }
+          return false;
+        },
+      });
+      expect(result.temporalRechunked).toBe(1);
+      expect(existsSync(successorPath)).toBe(false);
+    } finally {
+      _restoreProvider(token);
+      close();
+      if (originalPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = originalPath;
+      rmSync(directory, { recursive: true, force: true });
+    }
+    expect(getKV(CURSOR_KEY)).toBe("m1");
+    expect(getKV(DONE_KEY)).not.toBe("1");
+    expect(await backfillTemporalEmbeddings()).toBe(1);
+  });
+
+  test("does not open a successor database after shutdown during admission", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    insertContent("m2");
+    const originalPath = process.env.LORE_DB_PATH;
+    const directory = mkdtempSync(join(tmpdir(), "lore-rechunk-close-"));
+    const successorPath = join(directory, "successor.db");
+    let checks = 0;
+    try {
+      const processed = await backfillTemporalEmbeddings({
+        shouldPause: () => {
+          if (++checks === 2) {
+            close();
+            process.env.LORE_DB_PATH = successorPath;
+          }
+          return false;
+        },
+      });
+      expect(processed).toBe(1);
+      expect(existsSync(successorPath)).toBe(false);
+    } finally {
+      close();
+      if (originalPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = originalPath;
+      rmSync(directory, { recursive: true, force: true });
+    }
+    expect(getKV(CURSOR_KEY)).toBe("m1");
+    expect(getKV(DONE_KEY)).not.toBe("1");
+    expect(await backfillTemporalEmbeddings()).toBe(1);
   });
 });
 
