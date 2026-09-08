@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { close, db, ensureProject } from "../src/db";
+import { close, db, dbPath, ensureProject } from "../src/db";
 import { isVecAvailable } from "../src/db/vec";
 import { ensureVec0Store, setStorageMode } from "../src/db/vec-store";
 import { toBlob } from "../src/vector-query";
 import { Worker } from "node:worker_threads";
+import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
+import { withTenant } from "../src/tenant";
 import * as log from "../src/log";
 import * as pool from "../src/vector-pool";
 import {
@@ -79,6 +81,34 @@ function keys() {
 }
 
 describeVec("idle vec0 orphan maintenance", () => {
+  it("rolls back a partly deleted page and retries without advancing", async () => {
+    temporal("first-orphan");
+    temporal("second-orphan");
+    db().exec("PRAGMA busy_timeout = 5678");
+    let deletes = 0;
+    log.registerSink({
+      info() {},
+      warn() {},
+      error() {},
+      captureException() {},
+      withDbSpan(sql, fn) {
+        if (sql.startsWith("DELETE FROM temporal_vec WHERE") && ++deletes === 2)
+          throw new Error("second delete rejected");
+        return fn();
+      },
+    });
+    stop = startVec0OrphanMaintenance(() => false);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(keys()).toEqual([
+      { chunk_id: "first-orphan" },
+      { chunk_id: "second-orphan" },
+    ]);
+    expect(db().query("PRAGMA busy_timeout").get()).toEqual({ timeout: 5678 });
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(keys()).toEqual([]);
+    expect(specs).toHaveLength(5);
+  });
+
   it("executes discovery on the bundled native read worker", async () => {
     vi.useRealTimers();
     vi.mocked(pool.tryPoolRead).mockRestore();
@@ -216,6 +246,117 @@ describeVec("idle vec0 orphan maintenance", () => {
     };
     await vi.advanceTimersByTimeAsync(1000);
     expect(keys()).toEqual([{ chunk_id: "replaced" }]);
+  });
+
+  it("retains current knowledge across tenants while pruning deleted and historical vectors", async () => {
+    for (const [id, current, deleted, tenant] of [
+      ["current-local", 1, 0, ""],
+      ["current-other", 1, 0, "tenant-b"],
+      ["old-version", 0, 0, "tenant-b"],
+      ["deleted", 1, 1, "tenant-c"],
+    ] as const) {
+      db()
+        .query(
+          "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id, is_current, is_deleted, tenant_id) VALUES (?, ?, 'test', '', '', 1, 1, ?, ?, ?, ?)",
+        )
+        .run(id, pid, id, current, deleted, tenant);
+      db()
+        .query("INSERT INTO knowledge_vec (id, embedding) VALUES (?, ?)")
+        .run(id, blob);
+    }
+    stop = withTenant("tenant-a", () =>
+      startVec0OrphanMaintenance(() => false),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(
+      db().query("SELECT id FROM knowledge_vec ORDER BY id").all(),
+    ).toEqual([{ id: "current-local" }, { id: "current-other" }]);
+    expect(
+      db()
+        .query("SELECT COUNT(*) AS n FROM knowledge WHERE project_id = ?")
+        .get(pid),
+    ).toEqual({ n: 4 });
+  });
+
+  it("rechecks a knowledge tombstone restored after the worker snapshot", async () => {
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id, is_deleted) VALUES ('restored', ?, 'test', '', '', 1, 1, 'restored', 1)",
+      )
+      .run(pid);
+    db()
+      .query("INSERT INTO knowledge_vec (id, embedding) VALUES (?, ?)")
+      .run("restored", blob);
+    beforeReply = () => {
+      db()
+        .query("UPDATE knowledge SET is_deleted = 0 WHERE id = ?")
+        .run("restored");
+    };
+    stop = startVec0OrphanMaintenance(() => false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(db().query("SELECT id FROM knowledge_vec").all()).toEqual([
+      { id: "restored" },
+    ]);
+  });
+
+  it("binds SQL-looking and large vector IDs without touching live source rows", async () => {
+    base("live");
+    temporal("live#0", "live");
+    temporal("x'); DROP TABLE temporal_messages; --");
+    temporal("x".repeat(262_144));
+    stop = startVec0OrphanMaintenance(() => false);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(keys()).toEqual([{ chunk_id: "live#0" }]);
+    expect(
+      db()
+        .query("SELECT id FROM temporal_messages WHERE project_id = ?")
+        .all(pid),
+    ).toEqual([{ id: "live" }]);
+  });
+
+  it("retries a real competing writer lock without losing rows or busy timeout state", async () => {
+    temporal("orphan");
+    db().exec("PRAGMA busy_timeout = 1234");
+    const observed: number[] = [];
+    log.registerSink({
+      info() {},
+      warn() {},
+      error() {},
+      captureException() {},
+      withDbSpan(sql, fn) {
+        if (sql.startsWith("DELETE FROM temporal_vec WHERE")) {
+          observed.push(
+            (db().query("PRAGMA busy_timeout").get() as { timeout: number })
+              .timeout,
+          );
+        }
+        return fn();
+      },
+    });
+    const other = new DatabaseSync(dbPath());
+    let locked = false;
+    try {
+      stop = startVec0OrphanMaintenance(() => false);
+      await vi.advanceTimersByTimeAsync(3000);
+      beforeReply = () => {
+        other.exec("BEGIN IMMEDIATE");
+        locked = true;
+      };
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(observed).toEqual([0]);
+      expect(keys()).toEqual([{ chunk_id: "orphan" }]);
+      expect(db().query("PRAGMA busy_timeout").get()).toEqual({
+        timeout: 1234,
+      });
+      other.exec("ROLLBACK");
+      locked = false;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(keys()).toEqual([]);
+      expect(observed).toEqual([0, 0]);
+    } finally {
+      if (locked) other.exec("ROLLBACK");
+      other.close();
+    }
   });
 
   it.each([null, pool.READ_JOB_TIMED_OUT] as const)(
