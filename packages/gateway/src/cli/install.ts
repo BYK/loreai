@@ -164,12 +164,10 @@ export async function installStandalone(
   if (dirname(home) === home)
     throw new Error("Refusing installation with HOME at filesystem root");
   const env = options.env ?? process.env;
-  const installDir = resolve(
-    options.installDir ?? env.LORE_INSTALL_DIR ?? join(home, ".local/bin"),
-  );
-  const configDir = resolve(
-    options.configDir ?? env.LORE_CONFIG_DIR ?? join(home, ".lore"),
-  );
+  const installOverride = options.installDir ?? env.LORE_INSTALL_DIR;
+  const configOverride = options.configDir ?? env.LORE_CONFIG_DIR;
+  const installDir = resolve(installOverride ?? join(home, ".local/bin"));
+  const configDir = resolve(configOverride ?? join(home, ".lore"));
   const source = resolve(options.source);
   const executable = join(
     installDir,

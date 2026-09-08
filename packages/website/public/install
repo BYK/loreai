@@ -341,8 +341,8 @@ fi
 # compatibility implementation immutable and verify it before execution.
 if [[ "$installer_protocol" != 1 ]]; then
   legacy="${tmp_workdir}/install-v1"
-  curl -fsSL "https://raw.githubusercontent.com/BYK/loreai/a7f4e9b5d3e7bb3f190fcd989702fcd8e7388ba2/packages/gateway/test/fixtures/install-v1.sh" > "$legacy"
-  [[ "$(hash_file "$legacy")" == "251dd2f3d8e94b709957b291b0d54db665df96361d0942cd2f02181d26a19fa8" ]] || die "Legacy installer checksum mismatch"
+  curl -fsSL "https://raw.githubusercontent.com/BYK/loreai/c864a31c3b41b017fbf22348d6bb8e3e0c4c61b1/packages/gateway/test/fixtures/install-v1.sh" > "$legacy"
+  [[ "$(hash_file "$legacy")" == "8465c86484f0d15fea8997bf42d06eec669475cfa01473d7ffe98489dd866b54" ]] || die "Legacy installer checksum mismatch"
   export LORE_INSTALL_OBSERVED_TOMBSTONE="$observed_tombstone"
   if (( ${#original_args[@]} )); then
     bash "$legacy" "${original_args[@]}"
