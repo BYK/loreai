@@ -224,7 +224,6 @@ await test("owner records retain exact token and process identity length limits"
     ${functions}
     set -- "\${owner_cases[@]}"
     checked=0
-    set -x
     while (( $# > 0 )); do
       if inspect_lifecycle_owner_record "$1"; then
         [[ "$2" == true ]] || exit 31
@@ -250,6 +249,7 @@ await test("nested subshell cleanup cannot release the parent's lock", (t) => {
     `${functions}
     unset BASHPID
     canonical_home=$(pwd -P)
+    set -x
     acquire_lifecycle_lock
     (release_lifecycle_lock; release_lifecycle_initialization_claim)
     [[ -f "$HOME/.lore/lifecycle.lock/owner.json" ]]
