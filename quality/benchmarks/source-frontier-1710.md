@@ -1,8 +1,9 @@
 # Durable source frontier and bounded model window (#1710)
 
 Measured 2026-09-08 on Linux, Node 24.19, candidate
-`980896f942367cd7b9af05ff40572c6c82398960`, against the full-rebuild path on
-`ffe04ec6be874daae7105c285be5251b27eef0a7`. Raw samples:
+`980896f942367cd7b9af05ff40572c6c82398960`, using the legacy full-rebuild path retained in the candidate
+(base `ffe04ec6be874daae7105c285be5251b27eef0a7`). The full modes disable
+checkpoint preparation; they do not execute a separate base checkout. Raw samples:
 [source-frontier-1710.json](source-frontier-1710.json) and
 [source-frontier-large-window-1710.json](source-frontier-large-window-1710.json).
 

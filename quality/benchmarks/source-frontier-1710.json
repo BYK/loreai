@@ -1500,5 +1500,5 @@
   "candidate": "980896f942367cd7b9af05ff40572c6c82398960",
   "base": "ffe04ec6be874daae7105c285be5251b27eef0a7",
   "measuredDate": "2026-09-08",
-  "notes": "Synthetic completed turns; database reopen in one process; excludes HTTP parsing, LTM/embedding retrieval, upstream inference, and checkpoint finish/publication. Full mode uses the existing full-rebuild path without checkpoint work."
+  "notes": "Synthetic completed turns; database reopen in one process; excludes HTTP parsing, LTM/embedding retrieval, upstream inference, and checkpoint finish/publication. Full mode uses the existing full-rebuild path without checkpoint work. Full modes execute the retained legacy path in the candidate, not a separate base checkout."
 }

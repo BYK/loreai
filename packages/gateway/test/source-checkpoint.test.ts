@@ -5,6 +5,9 @@ import {
   temporal,
   ensureProject,
   saveSessionTracking,
+  loadSessionTracking,
+  appendSessionPromptDelta,
+  listSessionPromptDeltas,
   setModelLimits,
   setMaxLayer0Tokens,
   transform,
@@ -20,8 +23,22 @@ import {
   PreparationTiming,
 } from "../src/semantic-preparation";
 import { storeTurnTemporal } from "../src/turn-temporal";
-import { loreMessagesToGateway } from "../src/pipeline";
-import type { GatewayMessage } from "../src/translate/types";
+import {
+  loreMessagesToGateway,
+  applySessionPromptDeltas,
+} from "../src/pipeline";
+import {
+  buildRecallAnchor,
+  recallAnchorContext,
+  serializeRecallStore,
+  deserializeRecallStore,
+  expandRecallMarkers,
+} from "../src/recall";
+import type {
+  GatewayMessage,
+  GatewayRequest,
+  RecallStore,
+} from "../src/translate/types";
 import { semanticHistory } from "./fixtures/semantic-history";
 const projectPath = "/test/source-checkpoint";
 const sessionID = "source-checkpoint";
@@ -471,3 +488,123 @@ it.each(["hidden tokens", "prefix subtotal", "resolved estimate"])(
     );
   },
 );
+
+it("replays durable recall, distillations, and knowledge deltas identically after restart", async () => {
+  const source = structuredClone(messages);
+  const anchorId = "123e4567-e89b-42d3-a456-426614174014";
+  const anchorIndex = source.length - 3;
+  source[anchorIndex].content = [
+    { type: "text", text: buildRecallAnchor(anchorId) },
+  ];
+  const recalls: RecallStore = new Map([
+    [
+      `anchor:${anchorId}`,
+      {
+        anchorId,
+        anchorContextId: recallAnchorContext(source, anchorIndex, []),
+        toolUseId: "restored-recall-call",
+        input: { query: "source context", scope: "session" },
+        result: "Recalled source context survives a process restart.",
+        position: 0,
+      },
+    ],
+  ]);
+  saveSessionTracking(sessionID, {
+    recallStore: serializeRecallStore(recalls),
+  });
+  const projectID = ensureProject(projectPath);
+  db()
+    .query(`INSERT INTO distillations
+    (id, project_id, session_id, narrative, facts, observations, source_ids,
+     generation, token_count, archived, created_at)
+    VALUES (?, ?, ?, ?, '[]', ?, '[]', 0, 30, 0, 1)`)
+    .run(
+      "source-window-distillation",
+      projectID,
+      sessionID,
+      "Distilled source context remains available.",
+      "Distilled source context remains available.",
+    );
+  const expand = (history: GatewayMessage[]) => {
+    const request: GatewayRequest = {
+      protocol: "openai-responses",
+      model: "test",
+      system: "test system",
+      messages: structuredClone(history),
+      tools: [],
+      stream: true,
+      maxTokens: 1024,
+      metadata: {},
+      rawHeaders: {},
+    };
+    const durable = loadSessionTracking(sessionID)?.recallStore;
+    expect(durable).toBeTruthy();
+    expect(expandRecallMarkers(request, deserializeRecallStore(durable!))).toBe(
+      true,
+    );
+    return request.messages;
+  };
+  const initial = (await prepare(expand(source))).prepared;
+  accept(initial);
+  appendSessionPromptDelta({
+    sessionID,
+    projectID,
+    selector: JSON.stringify({ target: "messages", insertAt: 2 }),
+    content: JSON.stringify([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Lore knowledge update: durable source decision.",
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Acknowledged durable source decision." },
+        ],
+      },
+    ]),
+  });
+  const durableDelta = listSessionPromptDeltas(sessionID);
+  close();
+  evictSession(sessionID);
+  const next = [
+    ...source,
+    {
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: "continue from the recalled source" },
+      ],
+    },
+  ];
+  const resumed = await prepare(expand(next));
+  expect(resumed.timing.observations.source_converted_messages).toBe(1);
+  expect(resumed.prepared.sourceWindow?.offset).toBeGreaterThan(0);
+  const render = (prepared: typeof initial) => {
+    const result = transform({
+      messages: prepared.loreMessages,
+      projectPath,
+      sessionID,
+      sourceWindow: prepared.sourceWindow,
+    });
+    const gateway = loreMessagesToGateway(
+      result.messages,
+      prepared.provenanceByMessageId,
+      false,
+    );
+    return applySessionPromptDeltas(gateway, sessionID);
+  };
+  const actual = render(resumed.prepared);
+  evictSession(sessionID);
+  const full = (await prepare(expand(next), true)).prepared;
+  const expected = render(full);
+  expect(actual).toEqual(expected);
+  const wire = JSON.stringify(actual);
+  expect(wire).toContain("Recalled source context survives");
+  expect(wire).toContain("Distilled source context remains available");
+  expect(wire).toContain("Lore knowledge update: durable source decision");
+  expect(listSessionPromptDeltas(sessionID)).toEqual(durableDelta);
+});

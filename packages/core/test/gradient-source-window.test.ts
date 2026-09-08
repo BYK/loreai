@@ -10,6 +10,8 @@ import {
   inspectSessionState,
   setForceMinLayer,
   needsUrgentDistillation,
+  calibrate,
+  resetCalibration,
 } from "../src/gradient";
 import type { LoreMessageWithParts } from "../src/types";
 
@@ -37,7 +39,10 @@ const messages: LoreMessageWithParts[] = Array.from(
 ) as LoreMessageWithParts[];
 beforeEach(() => {
   ensureProject(projectPath);
-  evictSession(sid);
+  resetCalibration(sid);
+  // The default first-turn overhead exceeds this deliberately small model.
+  // Seed measured zero overhead so pin/plain-stage tests actually reach them.
+  calibrate(0, sid);
   setModelLimits({ context: 16_000, output: 2_000 });
   setMaxLayer0Tokens(8_000);
 });
@@ -65,12 +70,15 @@ it("selects exactly the full path's window using omitted source aggregates", () 
   expect(actual).toEqual(expected);
 });
 it("requires full source on budget expansion without consuming gradient state", () => {
-  transform({
+  const seeded = transform({
     messages: structuredClone(messages),
     sessionID: sid,
     projectPath,
   });
+  expect(seeded.layer).toBe(1);
+  expect(seeded.usable).toBeGreaterThan(0);
   const before = inspectSessionState(sid);
+  expect(before?.hasRawWindowCache).toBe(true);
   expect(() =>
     transform({
       messages: structuredClone(messages.slice(-3)),
@@ -88,11 +96,13 @@ it("requires full source on budget expansion without consuming gradient state", 
 it.each([2, 4] as const)(
   "retries an exhausted layer %s scan without consuming one-shot escalation",
   (layer) => {
-    transform({
+    const seeded = transform({
       messages: structuredClone(messages),
       sessionID: sid,
       projectPath,
     });
+    expect(seeded.layer).toBe(1);
+    expect(seeded.usable).toBeGreaterThan(0);
     needsUrgentDistillation(sid);
     setForceMinLayer(layer, sid);
     const before = inspectSessionState(sid);
