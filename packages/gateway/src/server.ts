@@ -173,6 +173,16 @@ function errorResponse(
   return withoutCors(errorResponseWithoutCors(status, type, message));
 }
 
+function closingErrorResponse(
+  status: number,
+  type: string,
+  message: string,
+): Response {
+  const response = errorResponse(status, type, message);
+  response.headers.set("connection", "close");
+  return response;
+}
+
 // ---------------------------------------------------------------------------
 // Management access policy
 // ---------------------------------------------------------------------------
@@ -677,7 +687,13 @@ async function handleOpenAIResponses(
     );
     gatewayReq.signal = req.signal;
   } catch {
-    return errorResponse(400, "invalid_request_error", "Invalid JSON body");
+    // A malformed stream can remain unfinished after parsing fails. Closing the
+    // connection cancels Node's request body once the fixed 400 is delivered.
+    return closingErrorResponse(
+      400,
+      "invalid_request_error",
+      "Invalid JSON body",
+    );
   }
 
   try {
@@ -711,7 +727,11 @@ async function handleOpenAICodexResponses(
     );
     gatewayReq.signal = req.signal;
   } catch {
-    return errorResponse(400, "invalid_request_error", "Invalid JSON body");
+    return closingErrorResponse(
+      400,
+      "invalid_request_error",
+      "Invalid JSON body",
+    );
   }
 
   try {
