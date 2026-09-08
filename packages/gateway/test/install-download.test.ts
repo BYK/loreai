@@ -25,7 +25,8 @@ beforeAll(async () => {
   const bundle = await build({
     stdin: {
       contents: `import { installStandalone } from "../src/cli/install"; import { parseArgs } from "node:util";
- if(process.argv.includes("--version")){console.log("0.42.0");}else{const {values}=parseArgs({allowPositionals:true,options:{install:{type:"boolean"},channel:{type:"string"},"source-sha256":{type:"string"},"observed-tombstone":{type:"string"},"no-modify-path":{type:"boolean"}}});
+ if(process.env.TEST_WINDOWS_HOME && process.env.USERPROFILE !== process.env.HOME) throw new Error("Windows HOME mismatch");
+ if(process.argv.includes("--version")){console.log("0.42.0");}else{const {values}=parseArgs({allowPositionals:true,options:{install:{type:"boolean"},channel:{type:"string"},"source-sha256":{type:"string"},"observed-tombstone":{type:"string"},"no-modify-path":{type:"boolean"},"path-install-dir":{type:"string"}}});
  installStandalone({source:process.argv[1],channel:values.channel as "stable"|"nightly",expectedSha256:values["source-sha256"],observedTombstone:values["observed-tombstone"],noModifyPath:values["no-modify-path"]}).catch(error=>{console.error(error);process.exitCode=1;});}`,
       resolveDir: import.meta.dirname,
       loader: "ts",
@@ -40,15 +41,29 @@ beforeAll(async () => {
   binary = Buffer.from(bundle.outputFiles[0].contents);
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
-function fixture(protocol = true) {
+function fixture(protocol = true, windows = false) {
   const dir = mkdtempSync(join(root, "case-"));
   const home = join(dir, "home");
   const bin = join(dir, "bin");
   mkdirSync(home);
   mkdirSync(bin);
-  const os = process.platform === "darwin" ? "darwin" : "linux";
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
-  const name = `lore-${os}-${arch}`;
+  const os = windows
+    ? "windows"
+    : process.platform === "darwin"
+      ? "darwin"
+      : "linux";
+  const arch = windows ? "x64" : process.arch === "arm64" ? "arm64" : "x64";
+  const name = `lore-${os}-${arch}${windows ? ".exe" : ""}`;
+  if (windows) {
+    writeFileSync(
+      join(bin, "uname"),
+      '#!/bin/bash\nif [[ "$1" == -s ]]; then echo MINGW64_NT; else echo x86_64; fi\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(join(bin, "cygpath"), '#!/bin/bash\nprintf "%s\\n" "$2"\n', {
+      mode: 0o755,
+    });
+  }
   const archive = gzipSync(binary);
   writeFileSync(join(dir, "archive"), archive);
   writeFileSync(
@@ -134,9 +149,13 @@ esac
     },
   };
 }
-function run(f: ReturnType<typeof fixture>, env: NodeJS.ProcessEnv = f.env) {
+function run(
+  f: ReturnType<typeof fixture>,
+  env: NodeJS.ProcessEnv = f.env,
+  script = readFileSync(installer),
+) {
   return spawnSync("/bin/bash", ["-s", "--", "--no-modify-path"], {
-    input: readFileSync(installer),
+    input: script,
     cwd: f.home,
     env,
     encoding: "utf8",
@@ -205,4 +224,25 @@ it("rejects a modified nightly blob before executing it", () => {
   expect(result.status).not.toBe(0);
   expect(result.stderr).toContain("OCI blob digest mismatch");
   expect(existsSync(join(f.home, "executed"))).toBe(false);
+});
+
+it("hands customized Git Bash HOME to the native Windows runtime", () => {
+  const f = fixture(true, true);
+  const env = {
+    ...f.env,
+    USERPROFILE: join(f.dir, "other-home"),
+    TEST_WINDOWS_HOME: "1",
+  };
+  const mutant = Buffer.from(
+    readFileSync(installer, "utf8").replace(
+      '  export USERPROFILE=$(cygpath -w "$HOME")\n',
+      "",
+    ),
+  );
+  const rejected = run(f, env, mutant);
+  expect(rejected.status).not.toBe(0);
+  expect(rejected.stderr).toContain("Windows HOME mismatch");
+  const result = run(f, env);
+  expect(result.status, result.stderr).toBe(0);
+  expect(existsSync(join(f.home, ".lore/install-path"))).toBe(true);
 });
