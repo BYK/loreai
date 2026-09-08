@@ -7978,6 +7978,9 @@ export function streamResponsesRecallAware(
   const maxDeferredBytes = opts.maxDeferredBytes ?? 1024 * 1024;
   const maxHiddenRecallBytes = opts.maxHiddenRecallBytes ?? maxDeferredBytes;
   const maxRetainedStateBytes = opts.maxRetainedStateBytes ?? 16 * 1024 * 1024;
+  // Validated continuation output is retained transactionally until its chain
+  // completes, so bound its shared spool with the retained-state budget.
+  const maxTransactionalBytes = maxRetainedStateBytes;
   const maxStreamBytes = opts.maxStreamBytes ?? 64 * 1024 * 1024;
   let retainedStateBytes = 0;
   let streamBytes = 0;
@@ -10180,11 +10183,14 @@ export function streamResponsesRecallAware(
               const pendingCommits: Array<() => void> = [];
               const transactionalEvents: Uint8Array[] = [];
               let transactionalBytes = 0;
-              const queueTransactional = (chunk: Uint8Array): void => {
+              const reserveTransactionalBytes = (chunk: Uint8Array): void => {
                 transactionalBytes += chunk.byteLength;
-                if (transactionalBytes > maxDeferredBytes) {
+                if (transactionalBytes > maxTransactionalBytes) {
                   throw new RecallContinuationFailure("resource_limit");
                 }
+              };
+              const queueTransactional = (chunk: Uint8Array): void => {
+                reserveTransactionalBytes(chunk);
                 transactionalEvents.push(chunk);
               };
               for (const recall of pendingRecalls) {
@@ -10305,18 +10311,26 @@ export function streamResponsesRecallAware(
                       const heldContinuationEvents: Array<{
                         chunk: Uint8Array;
                         candidateIndex?: number;
+                        transactional: boolean;
                       }> = [];
-                      let heldContinuationBytes = 0;
+                      let deferredContinuationBytes = 0;
                       const holdContinuation = (
                         chunk: Uint8Array,
                         candidateIndex?: number,
                       ): void => {
-                        heldContinuationBytes += chunk.byteLength;
-                        if (heldContinuationBytes > maxDeferredBytes) {
-                          throw new RecallContinuationFailure("resource_limit");
+                        const transactional = candidateIndex === undefined;
+                        if (transactional) reserveTransactionalBytes(chunk);
+                        else {
+                          deferredContinuationBytes += chunk.byteLength;
+                          if (deferredContinuationBytes > maxDeferredBytes) {
+                            throw new RecallContinuationFailure(
+                              "resource_limit",
+                            );
+                          }
                         }
                         heldContinuationEvents.push({
                           chunk,
+                          transactional,
                           ...(candidateIndex !== undefined
                             ? { candidateIndex }
                             : {}),
@@ -10334,16 +10348,34 @@ export function streamResponsesRecallAware(
                             heldContinuationEvents[index].candidateIndex ===
                             outputIndex
                           ) {
+                            if (!heldContinuationEvents[index].transactional) {
+                              deferredContinuationBytes -=
+                                heldContinuationEvents[index].chunk.byteLength;
+                            }
                             heldContinuationEvents.splice(index, 1);
                           }
                         }
                       };
+                      const promoteVisibleContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        for (const held of heldContinuationEvents) {
+                          if (held.candidateIndex !== outputIndex) continue;
+                          deferredContinuationBytes -= held.chunk.byteLength;
+                          reserveTransactionalBytes(held.chunk);
+                          held.transactional = true;
+                        }
+                      };
                       const flushHeldContinuation = (): void => {
                         for (const held of heldContinuationEvents) {
-                          queueTransactional(held.chunk);
+                          if (held.transactional) {
+                            transactionalEvents.push(held.chunk);
+                          } else {
+                            queueTransactional(held.chunk);
+                          }
                         }
                         heldContinuationEvents.length = 0;
-                        heldContinuationBytes = 0;
+                        deferredContinuationBytes = 0;
                       };
                       let continuationRecallBytes = 0;
                       const promoteContinuationCandidate = (
@@ -10493,6 +10525,7 @@ export function streamResponsesRecallAware(
                               } else {
                                 resolvedVisibleTool =
                                   contUnresolvedToolIndices.delete(ci);
+                                promoteVisibleContinuationCandidate(ci);
                                 contUnresolvedToolBytes.delete(ci);
                                 contOtherTool = true;
                               }
@@ -10939,9 +10972,7 @@ export function streamResponsesRecallAware(
                           );
                         }
                       }
-                      for (const held of heldContinuationEvents) {
-                        queueTransactional(held.chunk);
-                      }
+                      flushHeldContinuation();
                       for (const index of contRecallIndices) {
                         recallIndices.add(shiftedOutputIndex(index, contIndex));
                       }
@@ -10983,15 +11014,20 @@ export function streamResponsesRecallAware(
                       text: executed.anchorText,
                     });
                   } catch (err) {
+                    const category =
+                      err instanceof RecallContinuationFailure
+                        ? err.category
+                        : (continuationFailureCategory ?? "unexpected");
                     log.error(
-                      `recall follow-up stream failed${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+                      `recall follow-up stream failed category=${category}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
                     );
-                    throw err instanceof RecallContinuationFailure ||
+                    if (
+                      err instanceof RecallContinuationFailure ||
                       signal.aborted
-                      ? err
-                      : new RecallContinuationFailure(
-                          continuationFailureCategory ?? "unexpected",
-                        );
+                    ) {
+                      throw err;
+                    }
+                    throw new RecallContinuationFailure(category);
                   }
                 }
               }
@@ -11133,8 +11169,14 @@ export function streamResponsesRecallAware(
               return;
             }
           } else {
+            const category =
+              err instanceof RecallContinuationFailure
+                ? err.category
+                : continuationAttempted
+                  ? (continuationFailureCategory ?? "unexpected")
+                  : undefined;
             log.error(
-              `openai-responses recall-aware stream failed${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+              `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
             );
           }
           if (!signal.aborted) {
