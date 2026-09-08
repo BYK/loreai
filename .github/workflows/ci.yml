@@ -1015,6 +1015,8 @@ jobs:
   generate-patches:
     name: Generate Delta Patches
     needs: [changes, test, build-nightly-binaries, build-nightly-darwin]
+    outputs:
+      from-version: ${{ steps.delta.outputs.from-version }}
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -1132,6 +1134,7 @@ jobs:
           artifacts-dir: artifacts
           binaries-dir: binaries
           patches-dir: .delta-patches
+          from-version: ${{ needs.generate-patches.outputs.from-version }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------

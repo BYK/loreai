@@ -30,6 +30,12 @@ inputs:
       which discovers the previous version from the GitHub Releases API.
     required: false
     default: ""
+  from-version:
+    description: >-
+      publish-ghcr: exact source version used to generate the staged patches.
+      Passed from generate-ghcr; never rediscovered while publishing.
+    required: false
+    default: ""
   registry:
     description: "OCI registry base host, e.g. ghcr.io (ghcr modes only)."
     required: false
@@ -224,15 +230,12 @@ runs:
 
         echo "${GH_TOKEN_IN}" | oras login "${REGISTRY}" -u "${ACTOR}" --password-stdin
 
-        # Newest versioned nightly tag strictly older than the one being built.
-        TAGS=$(oras repo tags "${FULL_REPO}" 2>/dev/null | grep "^${NIGHTLY_TAG_PREFIX}[0-9]" | sort -V || echo "")
-        PREV_TAG=""
-        for tag in $TAGS; do
-          if [ "$tag" = "${NIGHTLY_TAG_PREFIX}${VERSION}" ]; then
-            break
-          fi
-          PREV_TAG="$tag"
-        done
+        # The target's immutable tag is deliberately not present yet. A newer
+        # workflow may have published first, so choose by strict version order
+        # rather than relying on where the target appears in the tag listing.
+        source "${{ github.action_path }}/nightly-tags.sh"
+        TAGS=$(oras repo tags "${FULL_REPO}" 2>/dev/null || echo "")
+        PREV_TAG=$(select_previous_nightly_tag "$TAGS" "$NIGHTLY_TAG_PREFIX" "$VERSION")
 
         if [ -z "$PREV_TAG" ]; then
           echo "No previous versioned nightly found, skipping patches"
@@ -415,11 +418,11 @@ runs:
         VERSION: ${{ inputs.version }}
         REGISTRY: ${{ inputs.registry }}
         REPO: ${{ inputs.repo }}
-        NIGHTLY_TAG_PREFIX: ${{ inputs.nightly-tag-prefix }}
         PATCH_TAG_PREFIX: ${{ inputs.patch-tag-prefix }}
         ARTIFACT_TYPE_PREFIX: ${{ inputs.artifact-type-prefix }}
         PATCHES_DIR: ${{ inputs.patches-dir }}
         BINARIES_DIR: ${{ inputs.binaries-dir }}
+        PATCH_FROM_VERSION: ${{ inputs.from-version }}
         PATCH_PUSH_FATAL: ${{ inputs.patch-push-fatal }}
       run: |
         set -uo pipefail
@@ -460,29 +463,29 @@ runs:
             return 0
           fi
 
-          # Find from-version by listing versioned nightly tags.
-          local TAGS PREV_TAG="" tag PREV_VERSION
-          TAGS=$(oras repo tags "${FULL_REPO}" 2>/dev/null | grep "^${NIGHTLY_TAG_PREFIX}[0-9]" | sort -V || echo "")
-          for tag in $TAGS; do
-            if [ "$tag" = "${NIGHTLY_TAG_PREFIX}${VERSION}" ]; then break; fi
-            PREV_TAG="$tag"
-          done
-
-          if [ -z "$PREV_TAG" ]; then
-            echo "No previous nightly tag found, skipping patch push"
+          # The patch bytes and chain pointer are one atomic fact. This exact
+          # value comes from generate-ghcr via the workflow job output; do not
+          # rediscover it after publishing the target tag, which can race a
+          # newer workflow and corrupt the patch chain.
+          if [ -z "$PATCH_FROM_VERSION" ]; then
+            echo "::warning::No generated patch source version, skipping patch push"
             return 0
           fi
-          PREV_VERSION="${PREV_TAG#"${NIGHTLY_TAG_PREFIX}"}"
+          source "${{ github.action_path }}/nightly-tags.sh"
+          if ! version_is_before "$PATCH_FROM_VERSION" "$VERSION"; then
+            echo "::error::Generated patch source ${PATCH_FROM_VERSION} is not older than target ${VERSION}"
+            return 1
+          fi
 
           cd "${PATCHES_DIR}" || return 1
           eval oras push "${FULL_REPO}:${PATCH_TAG_PREFIX}${VERSION}" \
             --artifact-type "${ARTIFACT_TYPE_PREFIX}.patch" \
-            --annotation "from-version=${PREV_VERSION}" \
+            --annotation "from-version=${PATCH_FROM_VERSION}" \
             "${ANNOTATIONS}" \
             "${PATCH_FILES}"
           local rc=$?
           if [ "$rc" -eq 0 ]; then
-            echo "Pushed patch manifest: ${PATCH_TAG_PREFIX}${VERSION} (from ${PREV_VERSION})"
+            echo "Pushed patch manifest: ${PATCH_TAG_PREFIX}${VERSION} (from ${PATCH_FROM_VERSION})"
           fi
           return "$rc"
         }
