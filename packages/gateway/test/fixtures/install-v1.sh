@@ -366,7 +366,7 @@ read_trusted_uninstall_tombstone() {
     die "Uninstall marker changed while it was read: ${path}"
   fi
   token=$(printf '%s\n' "$content" | sed -n \
-    's/^{"version":1,"token":"\([A-Za-z0-9_-]\{32,256\}\)","createdAt":"[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\.[0-9]\{3\}Z"}$/\1/p')
+    's/^{"version":1,"token":"\([A-Za-z0-9_-]\{32,255\}[A-Za-z0-9_-]\{0,1\}\)","createdAt":"[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\.[0-9]\{3\}Z"}$/\1/p')
   if [[ -z "$token" ]]; then
     die "Uninstall marker is malformed or invalid: ${path}"
   fi
