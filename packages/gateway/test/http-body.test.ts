@@ -19,6 +19,7 @@ import {
   buildUpstreamRouteContext,
   compressBody,
   decodeRequestBody,
+  decodedRequestChunks,
   decompressBody,
   encodeUpstreamBody,
   encodeUpstreamBodyForRoute,
@@ -251,6 +252,120 @@ describe("decodeRequestBody", () => {
       if (mode === "deadline") vi.useRealTimers();
     },
   );
+});
+
+describe("decodedRequestChunks", () => {
+  test("rejects a producer-side compressed-size breach without hanging", async () => {
+    let cancelled = false;
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Uint8Array.of(0x1f, 0x8b));
+        controller.enqueue(
+          new Uint8Array(MAX_HTTP_REQUEST_COMPRESSED_BYTES + 1),
+        );
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const req = new Request("http://gateway.local/v1/responses", {
+      method: "POST",
+      body: source,
+      headers: { "content-encoding": "gzip" },
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of decodedRequestChunks(req)) {
+        // Consume until the decoder surfaces the producer failure.
+      }
+    };
+    await expect(consume()).rejects.toThrow(
+      `exceeded ${MAX_HTTP_REQUEST_COMPRESSED_BYTES} byte limit`,
+    );
+    expect(cancelled).toBe(true);
+    expect(source.locked).toBe(false);
+  });
+
+  test("cancels and unlocks a stalled source after malformed compressed input", async () => {
+    let cancelled = false;
+    let markPull!: () => void;
+    const pulling = new Promise<void>((resolve) => (markPull = resolve));
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // A gzip decoder rejects this invalid magic header without requiring
+        // EOF, while the producer remains blocked in its next pull.
+        controller.enqueue(Uint8Array.of(0x00, 0x00, 0x00));
+      },
+      pull() {
+        markPull();
+        return new Promise<void>(() => {});
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const req = new Request("http://gateway.local/v1/responses", {
+      method: "POST",
+      body: source,
+      headers: { "content-encoding": "gzip" },
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of decodedRequestChunks(req)) {
+        // The malformed decoder must reject before it yields output.
+      }
+    };
+    const rejected = expect(consume()).rejects.toThrow();
+    await pulling;
+    await rejected;
+    expect(cancelled).toBe(true);
+    expect(source.locked).toBe(false);
+  });
+
+  test.each(["gzip", "br", "zstd", "deflate"])(
+    "streams split %s input without changing its bytes",
+    async (encoding) => {
+      const compressed = ENCODERS[encoding](SAMPLE);
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let offset = 0; offset < compressed.byteLength; offset += 1) {
+            controller.enqueue(compressed.subarray(offset, offset + 1));
+          }
+          controller.close();
+        },
+      });
+      const req = new Request("http://gateway.local/v1/responses", {
+        method: "POST",
+        body: source,
+        headers: { "content-encoding": encoding },
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of decodedRequestChunks(req)) chunks.push(chunk);
+      expect(Buffer.concat(chunks).toString("utf8")).toBe(SAMPLE);
+    },
+  );
+
+  test("streams raw deflate when its two-byte header arrives separately", async () => {
+    const compressed = deflateRawSync(SAMPLE);
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of compressed) controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      },
+    });
+    const req = new Request("http://gateway.local/v1/responses", {
+      method: "POST",
+      body: source,
+      headers: { "content-encoding": "deflate" },
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of decodedRequestChunks(req)) chunks.push(chunk);
+    expect(Buffer.concat(chunks).toString("utf8")).toBe(SAMPLE);
+  });
 });
 
 describe("encodeUpstreamBody", () => {

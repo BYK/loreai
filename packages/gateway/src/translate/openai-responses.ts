@@ -11,6 +11,8 @@
  *   - Tools use `parameters` directly (not wrapped in `function`)
  */
 import { asString, log } from "@loreai/core";
+import { TokenParser, TokenType, Tokenizer } from "@streamparser/json";
+import type { ParsedElementInfo, ParsedTokenInfo } from "@streamparser/json";
 import type {
   GatewayContentBlock,
   GatewayMessage,
@@ -136,6 +138,391 @@ export function parseOpenAIResponsesRequest(
   };
 }
 
+const RESPONSES_TOP_LEVEL_KEYS = new Set([
+  "model",
+  "stream",
+  "max_output_tokens",
+  "instructions",
+  "tools",
+  "temperature",
+  "top_p",
+  "frequency_penalty",
+  "presence_penalty",
+  "user",
+  "provider",
+  "previous_response_id",
+  "reasoning",
+  "truncation",
+]);
+
+const CODEX_TOP_LEVEL_KEYS = new Set([
+  "include",
+  "prompt_cache_key",
+  "text",
+  "tool_choice",
+  "parallel_tool_calls",
+  "service_tier",
+]);
+
+// Keep native JSON.parse for ordinary requests. This is deliberately bounded:
+// once crossed, the raw prefix is replayed into the streaming parser and is
+// released, so large transcripts never accumulate a decoded body buffer.
+export const STREAMING_PARSE_SPOOL_BYTES = 256 * 1024;
+
+type InputItemsBuilder = ReturnType<typeof createInputItemsBuilder>;
+
+interface TopLevelCapture {
+  key: string;
+  nesting: number;
+  parser: TokenParser;
+  value: unknown;
+}
+
+interface ActiveTopLevelValue {
+  key: string;
+  nesting: number;
+  capture?: TopLevelCapture;
+  inputBuilder?: InputItemsBuilder;
+  inputString?: string;
+}
+
+function isOpeningToken(token: TokenType): boolean {
+  return token === TokenType.LEFT_BRACE || token === TokenType.LEFT_BRACKET;
+}
+
+function isClosingToken(token: TokenType): boolean {
+  return token === TokenType.RIGHT_BRACE || token === TokenType.RIGHT_BRACKET;
+}
+
+function createTopLevelCapture(key: string): TopLevelCapture {
+  const parser = new TokenParser({ paths: ["$"], keepStack: false });
+  const capture: TopLevelCapture = {
+    key,
+    nesting: 0,
+    parser,
+    value: undefined,
+  };
+  parser.onValue = ({ value }: ParsedElementInfo): void => {
+    capture.value = value;
+  };
+  return capture;
+}
+
+function feedCapture(capture: TopLevelCapture, token: ParsedTokenInfo): void {
+  capture.parser.write({
+    token: token.token,
+    value: token.value,
+    partial: token.partial,
+  });
+}
+
+function finishCapture(capture: TopLevelCapture): unknown {
+  if (!capture.parser.isEnded) capture.parser.end();
+  return capture.value;
+}
+
+function addCodexControls(
+  req: GatewayRequest,
+  raw: Record<string, unknown>,
+): GatewayRequest {
+  req.codex = true;
+  if (!req.extras) req.extras = {};
+  const extras = req.extras;
+  // `store` is intentionally absent: the upstream builder always forces it to
+  // false for Codex, so retaining the client value would be dead state.
+  if (raw.include !== undefined) extras.include = raw.include;
+  if (typeof raw.prompt_cache_key === "string") {
+    extras.prompt_cache_key = raw.prompt_cache_key;
+  }
+  if (raw.text !== undefined) extras.text = raw.text;
+  if (raw.tool_choice !== undefined) extras.tool_choice = raw.tool_choice;
+  if (typeof raw.parallel_tool_calls === "boolean") {
+    extras.parallel_tool_calls = raw.parallel_tool_calls;
+  }
+  if (typeof raw.service_tier === "string") {
+    extras.service_tier = raw.service_tier;
+  }
+  return req;
+}
+
+/**
+ * Parse a Responses request without materializing its raw `input` array. The
+ * tokenizer validates the complete document; a structural parser retains only
+ * the current input item, and controls the normalized request needs.
+ */
+async function parseOpenAIResponsesRequestChunksInternal(
+  chunks: AsyncIterable<Uint8Array>,
+  headers: Record<string, string>,
+  codex: boolean,
+  onDrain: () => void,
+): Promise<GatewayRequest> {
+  const raw: Record<string, unknown> = {};
+  const inputParser = new TokenParser({
+    paths: ["$.input.*"],
+    keepStack: false,
+  });
+  const tokenizer = new Tokenizer();
+  const documentPrefix: number[] = [];
+  let rootState: RootState = "start";
+  let rootIsObject = false;
+  let rootComplete = false;
+  let sawToken = false;
+  let rootKey: string | undefined;
+  let active: ActiveTopLevelValue | undefined;
+  let selectedInput: InputItemsBuilder | string | undefined;
+
+  inputParser.onValue = ({ value }: ParsedElementInfo): void => {
+    active?.inputBuilder?.add(value);
+  };
+
+  const finishActive = (): void => {
+    if (!active) return;
+    if (active.capture) raw[active.key] = finishCapture(active.capture);
+    if (active.inputBuilder) selectedInput = active.inputBuilder;
+    if (active.inputString !== undefined) selectedInput = active.inputString;
+    active = undefined;
+    rootKey = undefined;
+    rootState = "comma-or-end";
+  };
+
+  const consumeTopLevelToken = (token: ParsedTokenInfo): void => {
+    if (rootState === "start") {
+      if (token.token === TokenType.LEFT_BRACE) {
+        rootIsObject = true;
+        rootState = "key-or-end";
+      }
+      return;
+    }
+
+    if (active) {
+      if (active.capture) feedCapture(active.capture, token);
+      if (isOpeningToken(token.token)) active.nesting += 1;
+      if (isClosingToken(token.token)) active.nesting -= 1;
+      if (active.nesting === 0) {
+        finishActive();
+      }
+      return;
+    }
+
+    switch (rootState) {
+      case "key-or-end":
+        if (token.token === TokenType.RIGHT_BRACE) {
+          rootState = "complete";
+          rootComplete = true;
+        } else if (token.token === TokenType.STRING) {
+          rootKey = typeof token.value === "string" ? token.value : undefined;
+          rootState = "colon";
+        }
+        return;
+      case "colon":
+        if (token.token === TokenType.COLON) rootState = "value";
+        return;
+      case "value": {
+        const key = rootKey ?? "";
+        const nesting = isOpeningToken(token.token) ? 1 : 0;
+        const captureInputString =
+          key === "input" && token.token === TokenType.STRING;
+        const streamInputArray =
+          key === "input" && token.token === TokenType.LEFT_BRACKET;
+        if (key === "input") selectedInput = undefined;
+        active = {
+          key,
+          nesting,
+          inputBuilder: streamInputArray
+            ? createInputItemsBuilder()
+            : undefined,
+          inputString:
+            captureInputString && typeof token.value === "string"
+              ? token.value
+              : undefined,
+          capture:
+            !streamInputArray &&
+            !captureInputString &&
+            (RESPONSES_TOP_LEVEL_KEYS.has(key) ||
+              (codex && CODEX_TOP_LEVEL_KEYS.has(key)))
+              ? createTopLevelCapture(key)
+              : undefined,
+        };
+        const current = active;
+        if (current.capture) feedCapture(current.capture, token);
+        if (current.nesting === 0) finishActive();
+        return;
+      }
+      case "comma-or-end":
+        if (token.token === TokenType.COMMA) {
+          rootState = "key-or-end";
+        } else if (token.token === TokenType.RIGHT_BRACE) {
+          rootState = "complete";
+          rootComplete = true;
+        }
+        return;
+      case "complete":
+        return;
+    }
+  };
+
+  tokenizer.onToken = (token): void => {
+    sawToken = true;
+    consumeTopLevelToken(token);
+    // The parser needs root/object tokens to match `$.input.*`; `keepStack`
+    // prevents it from retaining unrelated top-level values.
+    inputParser.write({
+      token: token.token,
+      value: token.value,
+      partial: token.partial,
+    });
+  };
+
+  const write = (chunk: Uint8Array): void => {
+    for (
+      let index = 0;
+      index < chunk.byteLength && documentPrefix.length < 3;
+      index++
+    ) {
+      documentPrefix.push(chunk[index]);
+    }
+    if (
+      documentPrefix.length === 3 &&
+      documentPrefix[0] === 0xef &&
+      documentPrefix[1] === 0xbb &&
+      documentPrefix[2] === 0xbf
+    ) {
+      throw new Error("Invalid JSON body");
+    }
+    tokenizer.write(chunk);
+  };
+
+  const iterator = chunks[Symbol.asyncIterator]();
+  let parseError: unknown;
+  let draining = false;
+  const drain = (): void => {
+    draining = true;
+    onDrain();
+    void (async () => {
+      try {
+        while (!(await iterator.next()).done) {
+          // Keep Node's request body flowing so the handler can return a 400.
+        }
+      } catch {
+        // The public error is already fixed; decoder cleanup is best effort.
+      } finally {
+        void iterator.return?.(undefined);
+      }
+    })();
+  };
+  try {
+    while (true) {
+      const { done, value } = await iterator.next();
+      if (done) break;
+      if (parseError) continue;
+      try {
+        write(value);
+      } catch (error) {
+        // Drain the request after a syntax failure. Cancelling the Node request
+        // body here aborts its socket before the handler can send its 400.
+        parseError = error;
+        drain();
+        break;
+      }
+    }
+  } finally {
+    if (!draining) void iterator.return?.(undefined);
+  }
+  if (!parseError) {
+    try {
+      tokenizer.end();
+      if (!inputParser.isEnded) inputParser.end();
+    } catch (error) {
+      parseError =
+        error instanceof Error ? error : new Error("Invalid JSON body");
+    }
+  }
+  if (parseError || !sawToken || active || !tokenizer.isEnded) {
+    throw new Error("Invalid JSON body");
+  }
+  if (rootIsObject && !rootComplete) throw new Error("Invalid JSON body");
+
+  // Native parsing treats primitive/array roots as an empty request. Preserve
+  // that behavior without retaining the root value on the streaming path.
+  const req = parseOpenAIResponsesRequest(rootIsObject ? raw : {}, headers);
+  if (typeof selectedInput === "string") {
+    req.messages = parseInputItems(selectedInput);
+  } else if (selectedInput) {
+    req.messages = selectedInput.finish();
+  }
+  return codex ? addCodexControls(req, raw) : req;
+}
+
+async function parseOpenAIResponsesRequestChunksWithFastPath(
+  chunks: AsyncIterable<Uint8Array>,
+  headers: Record<string, string>,
+  codex: boolean,
+): Promise<GatewayRequest> {
+  const iterator = chunks[Symbol.asyncIterator]();
+  const spool: Uint8Array[] = [];
+  let total = 0;
+  let handedOff = false;
+  let draining = false;
+  try {
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) {
+        const raw = JSON.parse(Buffer.concat(spool, total).toString("utf8"));
+        return codex
+          ? parseOpenAICodexRequest(raw, headers)
+          : parseOpenAIResponsesRequest(raw, headers);
+      }
+      total += next.value.byteLength;
+      spool.push(next.value);
+      if (total > STREAMING_PARSE_SPOOL_BYTES) {
+        async function* replay(): AsyncGenerator<Uint8Array> {
+          try {
+            yield* spool;
+            while (true) {
+              const remaining = await iterator.next();
+              if (remaining.done) return;
+              yield remaining.value;
+            }
+          } finally {
+            void iterator.return?.(undefined);
+          }
+        }
+        handedOff = true;
+        try {
+          return await parseOpenAIResponsesRequestChunksInternal(
+            replay(),
+            headers,
+            codex,
+            () => {
+              draining = true;
+            },
+          );
+        } finally {
+          handedOff = false;
+        }
+      }
+    }
+  } finally {
+    if (!handedOff && !draining) void iterator.return?.(undefined);
+  }
+}
+
+type RootState =
+  | "start"
+  | "key-or-end"
+  | "colon"
+  | "value"
+  | "comma-or-end"
+  | "complete";
+
+/** Parse a streamed OpenAI Responses request. */
+export function parseOpenAIResponsesRequestChunks(
+  chunks: AsyncIterable<Uint8Array>,
+  headers: Record<string, string>,
+): Promise<GatewayRequest> {
+  return parseOpenAIResponsesRequestChunksWithFastPath(chunks, headers, false);
+}
+
 /**
  * Parse a Pi `openai-codex` request. The wire format is the OpenAI Responses
  * API, so we reuse `parseOpenAIResponsesRequest` for the shared parsing and add
@@ -152,34 +539,16 @@ export function parseOpenAICodexRequest(
   headers: Record<string, string>,
 ): GatewayRequest {
   const req = parseOpenAIResponsesRequest(body, headers);
-  req.codex = true;
-
   const raw = (body ?? {}) as Record<string, unknown>;
-  if (!req.extras) req.extras = {};
-  const extras = req.extras;
-  // NOTE: `store` is intentionally NOT captured — the upstream builder forces
-  // `store: false` for all Codex requests (ChatGPT rejects `store: true`), so
-  // echoing the client's value would be dead state.
-  if (raw.include !== undefined) {
-    extras.include = raw.include;
-  }
-  if (typeof raw.prompt_cache_key === "string") {
-    extras.prompt_cache_key = raw.prompt_cache_key;
-  }
-  if (raw.text !== undefined) {
-    extras.text = raw.text;
-  }
-  if (raw.tool_choice !== undefined) {
-    extras.tool_choice = raw.tool_choice;
-  }
-  if (typeof raw.parallel_tool_calls === "boolean") {
-    extras.parallel_tool_calls = raw.parallel_tool_calls;
-  }
-  if (typeof raw.service_tier === "string") {
-    extras.service_tier = raw.service_tier;
-  }
+  return addCodexControls(req, raw);
+}
 
-  return req;
+/** Parse a streamed Codex request while preserving Codex-only controls. */
+export function parseOpenAICodexRequestChunks(
+  chunks: AsyncIterable<Uint8Array>,
+  headers: Record<string, string>,
+): Promise<GatewayRequest> {
+  return parseOpenAIResponsesRequestChunksWithFastPath(chunks, headers, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +563,17 @@ function parseInputItems(input: unknown): GatewayMessage[] {
 
   if (!Array.isArray(input)) return [];
 
+  const builder = createInputItemsBuilder();
+  for (const item of input) {
+    builder.add(item);
+  }
+  return builder.finish();
+}
+
+function createInputItemsBuilder(): {
+  add(item: unknown): void;
+  finish(): GatewayMessage[];
+} {
   const messages: GatewayMessage[] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
 
@@ -220,9 +600,10 @@ function parseInputItems(input: unknown): GatewayMessage[] {
     return message;
   };
 
-  for (const item of input as Array<Record<string, unknown>>) {
-    const itemType = item.type as string | undefined;
-    const role = item.role as string | undefined;
+  const add = (item: unknown): void => {
+    const raw = item as Record<string, unknown>;
+    const itemType = raw.type as string | undefined;
+    const role = raw.role as string | undefined;
 
     if (itemType === "message" || (!itemType && role)) {
       // Message item — has role + content
@@ -231,7 +612,7 @@ function parseInputItems(input: unknown): GatewayMessage[] {
           ? role
           : "user";
 
-      const content = parseMessageContent(item.content);
+      const content = parseMessageContent(raw.content);
 
       if (msgRole === "developer" || msgRole === "system") {
         // developer/system messages in input array are treated as user messages
@@ -240,7 +621,7 @@ function parseInputItems(input: unknown): GatewayMessage[] {
           messages.push({ role: "user", content });
         }
       } else if (msgRole === "assistant") {
-        const parsed = parseAssistantMessageContent(item);
+        const parsed = parseAssistantMessageContent(raw);
         appendAssistant(
           parsed.content,
           parsed.provenanceContent,
@@ -251,7 +632,7 @@ function parseInputItems(input: unknown): GatewayMessage[] {
           messages.push({ role: "user", content });
         }
       }
-      continue;
+      return;
     }
 
     if (itemType === "function_call") {
@@ -268,9 +649,9 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       // together (and matched by the coalesced tool_result message below).
       const toolUseBlock: GatewayContentBlock = {
         type: "tool_use",
-        id: asString(item.call_id ?? item.id),
-        name: asString(item.name),
-        input: parseArguments(item.arguments),
+        id: asString(raw.call_id ?? raw.id),
+        name: asString(raw.name),
+        input: parseArguments(raw.arguments),
       };
       const last = messages[messages.length - 1];
       const lastIsToolUseMessage =
@@ -295,7 +676,7 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       } else {
         appendAssistant([toolUseBlock]);
       }
-      continue;
+      return;
     }
 
     if (itemType === "function_call_output") {
@@ -310,8 +691,8 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       // flattening the whole array to "".
       const toolResultBlock: GatewayContentBlock = {
         type: "tool_result",
-        toolUseId: asString(item.call_id),
-        content: parseMessageContent(item.output),
+        toolUseId: asString(raw.call_id),
+        content: parseMessageContent(raw.output),
       };
       const last = messages[messages.length - 1];
       const lastIsToolResultMessage =
@@ -324,12 +705,12 @@ function parseInputItems(input: unknown): GatewayMessage[] {
       } else {
         messages.push({ role: "user", content: [toolResultBlock] });
       }
-      continue;
+      return;
     }
 
     if (itemType === "reasoning") {
-      pendingReasoning.push({ type: "opaque", raw: item, responsesItem: true });
-      continue;
+      pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+      return;
     }
 
     // Other item types — skip, but warn about ones that can carry conversation
@@ -345,28 +726,33 @@ function parseInputItems(input: unknown): GatewayMessage[] {
     // and intentionally dropped — don't warn on those.)
     if (itemType === "item_reference") {
       log.warn(
-        `dropping unresolvable Responses API item_reference (id=${asString(item.id, "?")}); ` +
+        `dropping unresolvable Responses API item_reference (id=${asString(raw.id, "?")}); ` +
           `gateway is stateless full-history and cannot resolve server-side item references`,
       );
-      continue;
+      return;
     }
 
     // Preserve every self-contained item in request-only provenance. The
     // gateway may not render an unknown item, but canonical replay must hash
     // the same full transcript on both the producing and consuming turns.
-    pendingReasoning.push({ type: "opaque", raw: item, responsesItem: true });
-  }
+    pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
+  };
 
-  if (pendingReasoning.length > 0) {
-    messages.push({
-      role: "assistant",
-      content: [],
-      provenanceContent: pendingReasoning,
-      provenancePositions: [],
-    });
-  }
+  const finish = (): GatewayMessage[] => {
+    if (pendingReasoning.length > 0) {
+      messages.push({
+        role: "assistant",
+        content: [],
+        provenanceContent: pendingReasoning,
+        provenancePositions: [],
+      });
+      pendingReasoning = [];
+    }
 
-  return messages;
+    return messages;
+  };
+
+  return { add, finish };
 }
 
 function parseMessageContent(content: unknown): GatewayContentBlock[] {

@@ -111,6 +111,7 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
     debug: false,
     remoteGateway: false,
     hostedMode: false,
+    gatewayAuthToken: undefined,
     // Refused port → upstreamFetch fails fast so /v1/models returns 502.
     upstreamAnthropic: "http://127.0.0.1:9",
     ...overrides,
