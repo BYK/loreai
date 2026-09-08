@@ -14,11 +14,13 @@
  */
 
 import { freemem } from "node:os";
+import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
   databaseInTransaction,
   db,
   getKV,
+  isCurrentDatabase,
   setKV,
   withSavepoint,
   withTransaction,
@@ -3827,6 +3829,10 @@ const TEMPORAL_RECHUNK_DONE_KEY = "lore:temporal_rechunk.done";
  * and the redo cost of a crash mid-page.
  */
 const TEMPORAL_RECHUNK_PAGE = 256;
+/** Bound synchronous admission bursts, independently of provider duty settings.
+ * The time budget is checked between rows; a single SQLite statement may exceed it. */
+const TEMPORAL_RECHUNK_YIELD_ROWS = 32;
+const TEMPORAL_RECHUNK_YIELD_MS = 8;
 const TEMPORAL_RECHUNK_ELIGIBLE_SQL = `length(CAST(content AS BLOB)) >= ${TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH}`;
 /** Legacy keys retained only so reset clears state written by pre-v85 builds. */
 const TEMPORAL_RECHUNK_ATTEMPTS_KEY = "lore:temporal_rechunk.attempts";
@@ -3834,6 +3840,8 @@ const TEMPORAL_RECHUNK_INFLIGHT_KEY = "lore:temporal_rechunk.inflight";
 const TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY = "lore:temporal_rechunk.row_attempts";
 const TEMPORAL_RECHUNK_SKIP_KEY = "lore:temporal_rechunk.skip";
 const TEMPORAL_RECHUNK_MAX_ROWID_KEY = "lore:temporal_rechunk.max_rowid";
+/** Fence active walks across config resets, including resets by other processes. */
+const TEMPORAL_RECHUNK_EPOCH_KEY = "lore:temporal_rechunk.epoch";
 /**
  * Poll interval while the temporal walk is parked waiting for the host to go
  * idle. Short enough to resume promptly once traffic stops; a parked walk is
@@ -3848,6 +3856,7 @@ const TEMPORAL_RECHUNK_PAUSE_POLL_MS = 250;
  */
 async function awaitBackfillIdle(
   shouldPause: (() => boolean) | undefined,
+  isCurrent: () => boolean,
 ): Promise<void> {
   if (!shouldPause) return;
   // Edge-triggered logging: because this call blocks until the host is idle,
@@ -3855,6 +3864,7 @@ async function awaitBackfillIdle(
   // pair — so a long park is visible in the logs instead of looking like a wedge.
   let parked = false;
   for (;;) {
+    if (!isCurrent()) return;
     let paused = false;
     try {
       paused = shouldPause();
@@ -3882,13 +3892,16 @@ async function awaitBackfillIdle(
  * repopulates them from the queue under the new fingerprint.
  */
 export function resetTemporalRechunkProgress(): void {
-  setKV(TEMPORAL_RECHUNK_DONE_KEY, "0");
-  setKV(TEMPORAL_RECHUNK_CURSOR_KEY, "");
-  setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
-  setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
-  setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
-  setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
-  setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, "0");
+  withSavepoint("reset_temporal_rechunk", () => {
+    setKV(TEMPORAL_RECHUNK_EPOCH_KEY, randomUUID());
+    setKV(TEMPORAL_RECHUNK_DONE_KEY, "0");
+    setKV(TEMPORAL_RECHUNK_CURSOR_KEY, "");
+    setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+    setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
+    setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
+    setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
+    setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, "0");
+  });
 }
 
 /**
@@ -3954,21 +3967,32 @@ export async function backfillTemporalEmbeddings(
   // the first walk after a blob->vec0 cutover is always armed and re-embeds the
   // rows that cutover skipped. (maybeCutoverToVec0 also explicitly re-arms the
   // walk on cutover as belt-and-suspenders.) Do not reorder these two lines.
-  if (readStorageMode(db()) !== "vec0") return 0;
-  if (getKV(TEMPORAL_RECHUNK_DONE_KEY) === "1") return 0;
-
-  let cursor = getKV(TEMPORAL_RECHUNK_CURSOR_KEY) ?? "";
-  let maxRowid = Number(getKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY) ?? "0");
-  if (!Number.isSafeInteger(maxRowid) || maxRowid <= 0) {
-    maxRowid = (
-      db()
-        .query(
-          `SELECT COALESCE(MAX(rowid), 0) AS n FROM temporal_messages WHERE ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
-        )
-        .get() as { n: number }
-    ).n;
-    setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, String(maxRowid));
-  }
+  const connection = db();
+  const snapshot = withSavepoint("start_temporal_rechunk", () => {
+    if (readStorageMode(connection) !== "vec0") return null;
+    if (getKV(TEMPORAL_RECHUNK_DONE_KEY) === "1") return null;
+    const cursor = getKV(TEMPORAL_RECHUNK_CURSOR_KEY) ?? "";
+    const epoch = getKV(TEMPORAL_RECHUNK_EPOCH_KEY);
+    let maxRowid = Number(getKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY) ?? "0");
+    if (!Number.isSafeInteger(maxRowid) || maxRowid <= 0) {
+      maxRowid = (
+        connection
+          .query(
+            `SELECT COALESCE(MAX(rowid), 0) AS n FROM temporal_messages WHERE ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
+          )
+          .get() as { n: number }
+      ).n;
+      setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, String(maxRowid));
+    }
+    return { cursor, epoch, maxRowid };
+  });
+  if (!snapshot) return 0;
+  let { cursor } = snapshot;
+  const { maxRowid, epoch } = snapshot;
+  // Identity must be checked first: getKV/db() would reopen storage after close.
+  const isCurrent = () =>
+    isCurrentDatabase(connection) &&
+    getKV(TEMPORAL_RECHUNK_EPOCH_KEY) === epoch;
   let scheduled = 0;
   let scanned = 0;
 
@@ -4017,37 +4041,43 @@ export async function backfillTemporalEmbeddings(
   // the walk visible regardless of speed.
   const PROGRESS_INTERVAL_MS = 30_000;
   let lastProgressAt = Date.now();
+  let sliceStarted = performance.now();
 
   for (;;) {
+    if (!isCurrent()) return scheduled;
     // Keep the legacy walk aligned with scheduler eligibility.
     const rows = db()
       .query(
-        `SELECT id, content FROM temporal_messages
+        `SELECT id FROM temporal_messages
          WHERE id > ? AND rowid <= ? AND ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}
          ORDER BY id ASC LIMIT ?`,
       )
-      .all(cursor, maxRowid, TEMPORAL_RECHUNK_PAGE) as Array<{
-      id: string;
-      content: string;
-    }>;
+      .all(cursor, maxRowid, TEMPORAL_RECHUNK_PAGE) as Array<{ id: string }>;
 
     if (!rows.length) {
-      setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
-      setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
-      setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
-      setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
-      setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
+      withSavepoint("finish_temporal_rechunk", () => {
+        if (!isCurrent()) return;
+        setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
+        setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
+        setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
+        setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
+        setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
+      });
       break;
     }
 
     for (const row of rows) {
       // Admission performs synchronous SQLite work only. Keep the host gate so a
       // one-time full-corpus walk still yields between rows under request load.
-      await awaitBackfillIdle(opts.shouldPause);
-      withSavepoint("schedule_temporal_rechunk", () => {
+      await awaitBackfillIdle(opts.shouldPause, isCurrent);
+      if (!isCurrentDatabase(connection)) return scheduled;
+      const admitted = withSavepoint("schedule_temporal_rechunk", () => {
+        if (!isCurrent()) return false;
         const current = db()
-          .query("SELECT content FROM temporal_messages WHERE id = ?")
-          .get(row.id) as { content: string } | null;
+          .query(
+            "SELECT content FROM temporal_messages WHERE id = ? AND rowid <= ?",
+          )
+          .get(row.id, maxRowid) as { content: string } | null;
         if (current) {
           const enqueued = enqueueTemporalEmbedding(row.id, current.content);
           if (enqueued) {
@@ -4058,13 +4088,28 @@ export async function backfillTemporalEmbeddings(
         cursor = row.id;
         scanned++;
         setKV(TEMPORAL_RECHUNK_CURSOR_KEY, cursor);
+        return true;
       });
+      if (!admitted) return scheduled;
 
       if (Date.now() - lastProgressAt >= PROGRESS_INTERVAL_MS) {
         log.info(
           formatTemporalRechunkProgress(baseDone + scanned, total, scheduled),
         );
         lastProgressAt = Date.now();
+      }
+
+      // awaitBackfillIdle resolves immediately when the gate is clear. Awaiting
+      // it only yields to microtasks, starving HTTP/timers for the entire walk.
+      // Yield after SCANNED rows (including already-queued/deleted rows), with
+      // every queue/vector/cursor savepoint committed before other work runs.
+      if (
+        scanned % TEMPORAL_RECHUNK_YIELD_ROWS === 0 ||
+        performance.now() - sliceStarted >= TEMPORAL_RECHUNK_YIELD_MS
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (!isCurrent()) return scheduled;
+        sliceStarted = performance.now();
       }
     }
   }
