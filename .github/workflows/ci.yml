@@ -110,6 +110,19 @@ jobs:
       - name: Check installer bash-3.2 compatibility
         run: bash packages/website/scripts/check-install-script-bashisms.sh
 
+  install-script-portability:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Test installer descriptor and lifecycle portability
+        run: node --test packages/website/scripts/test-install-script-portability.mjs
+
   test:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
@@ -1278,13 +1291,18 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, sync-integration, hermes-test, hermes-real-abc]
+    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, install-script-bash-compat, install-script-portability, sync-integration, hermes-test, hermes-real-abc]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI result
         run: |
           if [ "${{ needs.actionlint.result }}" != "success" ]; then
             echo "::error::actionlint job did not succeed (result: ${{ needs.actionlint.result }})"
+            exit 1
+          fi
+          if [ "${{ needs.install-script-bash-compat.result }}" != "success" ] ||
+             [ "${{ needs.install-script-portability.result }}" != "success" ]; then
+            echo "::error::installer portability checks did not succeed"
             exit 1
           fi
           if [ "${{ needs.changes.outputs.code }}" == "true" ]; then

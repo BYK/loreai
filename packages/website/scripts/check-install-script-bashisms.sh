@@ -33,6 +33,8 @@ patterns=(
   '\$\{[a-zA-Z_][a-zA-Z0-9_]*@(U|L|E|P|Q|a|A)\}' # transform expansion (4.0)
 )
 
+patterns+=('[$][{]?BASHPID([^a-zA-Z0-9_]|$)') # BASHPID (4.0)
+
 labels=(
   'named file descriptor (bash 4.1+)'
   'named file descriptor close (bash 4.1+)'
@@ -44,6 +46,8 @@ labels=(
   'case-modifying parameter expansion (bash 4.0+)'
   'parameter transformation expansion (bash 4.0+)'
 )
+
+labels+=('BASHPID variable (bash 4.0+)')
 
 while IFS= read -r line; do
   lineno="${line%%:*}"
