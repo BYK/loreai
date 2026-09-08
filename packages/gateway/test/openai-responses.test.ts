@@ -9,12 +9,21 @@
  *  - Extras: reasoning/truncation passthrough; previous_response_id is DROPPED
  *    (the gateway is a stateless full-history proxy)
  */
-import { describe, test, expect } from "vitest";
+import { afterEach, describe, test, expect } from "vitest";
+import { log } from "@loreai/core";
 import {
   parseOpenAIResponsesRequest,
+  parseOpenAIResponsesRequestChunks,
+  parseOpenAICodexRequest,
+  parseOpenAICodexRequestChunks,
+  STREAMING_PARSE_SPOOL_BYTES,
   buildOpenAIResponsesUpstreamRequest,
   buildOpenAIResponsesResponse,
 } from "../src/translate/openai-responses";
+import { gzipSync } from "node:zlib";
+import { decodedRequestChunks } from "../src/http-body";
+import { createHarness, type Harness } from "./helpers/harness";
+import { makeConversationFixtures } from "./helpers/fixtures";
 import { buildOpenAIResponse } from "../src/translate/openai";
 import {
   loreMessagesToGateway,
@@ -37,6 +46,242 @@ import type {
 
 describe("parseOpenAIResponsesRequest", () => {
   const headers = { authorization: "Bearer sk-test123" };
+
+  test("parses streamed compressed input with normalizer parity", async () => {
+    const body = {
+      model: "gpt-5.6",
+      input: [
+        { type: "message", role: "user", content: "continue" },
+        { type: "function_call", call_id: "a", name: "read", arguments: "{}" },
+        { type: "reasoning", summary: [] },
+        { type: "function_call", call_id: "b", name: "grep", arguments: "{}" },
+        { type: "function_call_output", call_id: "a", output: "one" },
+        { type: "function_call_output", call_id: "b", output: "two" },
+      ],
+      tools: [
+        { type: "function", name: "read", parameters: { type: "object" } },
+      ],
+      reasoning: { effort: "high" },
+    };
+    const bytes = gzipSync(JSON.stringify(body));
+    const request = new Request("http://gateway.local/v1/responses", {
+      method: "POST",
+      // Node's undici requires this for a streaming request body.
+      ...({ duplex: "half" } as RequestInit),
+      headers: { "content-encoding": "gzip" },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let offset = 0; offset < bytes.byteLength; offset += 3) {
+            controller.enqueue(bytes.subarray(offset, offset + 3));
+          }
+          controller.close();
+        },
+      }),
+    });
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(
+        decodedRequestChunks(request, request.signal),
+        headers,
+      ),
+    ).resolves.toEqual(parseOpenAIResponsesRequest(body, headers));
+  });
+
+  test("accepts a non-object streamed JSON root like native parsing", async () => {
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from("null");
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).resolves.toEqual(parseOpenAIResponsesRequest(null, headers));
+  });
+
+  test("rejects trailing tokens after an object", async () => {
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from('{"input":"first"} null');
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).rejects.toThrow("Unexpected non-whitespace character after JSON");
+  });
+
+  test("accepts a primitive root after crossing the streaming threshold", async () => {
+    const body = `"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"`;
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from(body);
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).resolves.toEqual(parseOpenAIResponsesRequest(JSON.parse(body), headers));
+  });
+
+  test("rejects an empty JSON document after crossing the streaming threshold", async () => {
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from(" ".repeat(STREAMING_PARSE_SPOOL_BYTES + 1));
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).rejects.toThrow("Invalid JSON body");
+  });
+
+  test("matches native parsing for a BOM after crossing the streaming threshold", async () => {
+    const body = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(`{"input":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}`),
+    ]);
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield body;
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).rejects.toThrow();
+  });
+
+  test("rejects a BOM after leading whitespace on the streaming path", async () => {
+    const body = Buffer.concat([
+      Buffer.from(" \t"),
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(`{"input":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}`),
+    ]);
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield body;
+    }
+
+    expect(() => JSON.parse(body.toString("utf8"))).toThrow();
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).rejects.toThrow("Invalid JSON body");
+  });
+
+  test("matches native UTF-8 replacement after crossing the streaming threshold", async () => {
+    const bytes = Buffer.concat([
+      Buffer.from('{"input":"'),
+      Buffer.from("x".repeat(STREAMING_PARSE_SPOOL_BYTES)),
+      Buffer.from([0xff]),
+      Buffer.from('"}'),
+    ]);
+    const expected = parseOpenAIResponsesRequest(
+      JSON.parse(bytes.toString("utf8")),
+      headers,
+    );
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield bytes;
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).resolves.toEqual(expected);
+  });
+
+  test("rejects trailing tokens after an object on the streaming path", async () => {
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from(
+        `{"input":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"} null`,
+      );
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).rejects.toThrow("Invalid JSON body");
+  });
+
+  test("uses the final duplicate input property", async () => {
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from(
+        '{"model":"first","input":[{"type":"message","role":"user","content":"discard"}],"model":"last","input":[{"type":"message","role":"user","content":"keep"}]}',
+      );
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).resolves.toEqual(
+      parseOpenAIResponsesRequest(
+        {
+          model: "last",
+          input: [{ type: "message", role: "user", content: "keep" }],
+        },
+        headers,
+      ),
+    );
+  });
+
+  test("uses the final duplicate input property after streaming", async () => {
+    const padding = "x".repeat(STREAMING_PARSE_SPOOL_BYTES);
+    const body =
+      `{"input":[{"type":"message","role":"user","content":"${padding}"}],` +
+      '"input":[{"type":"message","role":"user","content":"keep"}]}';
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from(body);
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).resolves.toEqual(
+      parseOpenAIResponsesRequest(
+        {
+          input: [{ type: "message", role: "user", content: "keep" }],
+        },
+        headers,
+      ),
+    );
+  });
+
+  test("replays the bounded prefix into the streaming parser", async () => {
+    const body = {
+      model: "gpt-5.6",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: "x".repeat(STREAMING_PARSE_SPOOL_BYTES),
+        },
+        {
+          type: "function_call",
+          call_id: "call",
+          name: "read",
+          arguments: "{}",
+        },
+      ],
+      tools: [
+        { type: "function", name: "read", parameters: { type: "object" } },
+      ],
+    };
+    const encoded = Buffer.from(JSON.stringify(body));
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      for (let offset = 0; offset < encoded.byteLength; offset += 17) {
+        yield encoded.subarray(offset, offset + 17);
+      }
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).resolves.toEqual(parseOpenAIResponsesRequest(body, headers));
+  });
+
+  test("preserves Codex controls on the streamed path", async () => {
+    const body = {
+      model: "gpt-5.6-codex",
+      input: [{ type: "message", role: "user", content: "continue" }],
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: "session",
+      text: { format: { type: "text" } },
+      tool_choice: "auto",
+      parallel_tool_calls: false,
+      service_tier: "priority",
+    };
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from(JSON.stringify(body));
+    }
+
+    await expect(
+      parseOpenAICodexRequestChunks(chunks(), headers),
+    ).resolves.toEqual(parseOpenAICodexRequest(body, headers));
+  });
 
   test("parses string input as single user message", () => {
     const req = parseOpenAIResponsesRequest(
@@ -629,6 +874,34 @@ describe("parseOpenAIResponsesRequest", () => {
     expect(body.input).not.toContainEqual(reference);
   });
 
+  test("never logs an item_reference id", () => {
+    const id = "client-id\nwith-content";
+    const warnings: string[] = [];
+    log.registerSink({
+      info: () => {},
+      warn: (message) => warnings.push(message),
+      error: () => {},
+      captureException: () => {},
+    });
+    try {
+      parseOpenAIResponsesRequest(
+        { input: [{ type: "item_reference", id }] },
+        headers,
+      );
+      expect(warnings).toEqual([
+        "dropping unresolvable Responses API item_reference; gateway is stateless full-history and cannot resolve server-side item references",
+      ]);
+      expect(warnings.join(" ")).not.toContain(id);
+    } finally {
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        captureException: () => {},
+      });
+    }
+  });
+
   test("extracts instructions as system prompt", () => {
     const req = parseOpenAIResponsesRequest(
       {
@@ -749,6 +1022,38 @@ describe("parseOpenAIResponsesRequest", () => {
     );
     expect(req.messages).toHaveLength(1);
     expect(req.messages[0].role).toBe("user");
+  });
+});
+
+describe("streamed Responses ingress", () => {
+  let harness: Harness | undefined;
+
+  afterEach(async () => harness?.teardown());
+
+  test("normalizes a compressed body above the streaming threshold", async () => {
+    const content = "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1);
+    harness = await createHarness({
+      fixtures: makeConversationFixtures([
+        { userMessage: content, assistantText: "ok" },
+      ]),
+    });
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        "x-api-key": "test-key",
+        "x-lore-project": process.cwd(),
+      },
+      body: gzipSync(
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          input: [{ type: "message", role: "user", content }],
+        }),
+      ),
+    });
+
+    expect(response.status, await response.text()).toBe(200);
   });
 });
 

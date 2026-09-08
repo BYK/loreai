@@ -27,6 +27,7 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
+    "@streamparser/json": "0.0.26",
     "@stricli/auto-complete": "1.2.8",
     "@stricli/core": "1.2.8",
     "@supabase/supabase-js": "^2.58.0",

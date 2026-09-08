@@ -12,6 +12,7 @@
  * without real network access; the other routes never reach the pipeline.
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import { once } from "node:events";
 import { connect } from "node:net";
 import {
   createServer as createHttpServer,
@@ -111,6 +112,7 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
     debug: false,
     remoteGateway: false,
     hostedMode: false,
+    gatewayAuthToken: undefined,
     // Refused port → upstreamFetch fails fast so /v1/models returns 502.
     upstreamAnthropic: "http://127.0.0.1:9",
     ...overrides,
@@ -138,6 +140,63 @@ afterAll(async () => {
 });
 
 describe("server routing", () => {
+  test.each(["/v1/responses", "/v1/codex/responses"])(
+    "closes a malformed streamed request that never finishes: %s",
+    async (pathname) => {
+      const socket = connect(server.port, "127.0.0.1");
+      try {
+        await once(socket, "connect");
+        const malformed = Buffer.alloc(256 * 1024 + 1, "x");
+        const closed = once(socket, "close");
+        const response = new Promise<string>((resolve, reject) => {
+          let received = "";
+          const onData = (chunk: Buffer): void => {
+            received += chunk.toString("utf8");
+            if (!received.includes("\r\n\r\n")) return;
+            cleanup();
+            resolve(received);
+          };
+          const onError = (error: Error): void => {
+            cleanup();
+            reject(error);
+          };
+          const cleanup = (): void => {
+            socket.removeListener("data", onData);
+            socket.removeListener("error", onError);
+          };
+          socket.on("data", onData);
+          socket.once("error", onError);
+        });
+
+        socket.write(
+          `POST ${pathname} HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\nContent-Type: application/json\r\n\r\n${malformed.byteLength.toString(16)}\r\n`,
+        );
+        socket.write(malformed);
+        socket.write("\r\n");
+
+        await expect(response).resolves.toContain("HTTP/1.1 400");
+        await expect(
+          Promise.race([
+            closed,
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      "malformed streamed request left its socket open",
+                    ),
+                  ),
+                500,
+              ),
+            ),
+          ]),
+        ).resolves.toBeDefined();
+      } finally {
+        socket.destroy();
+      }
+    },
+  );
+
   test("owner control identity is unavailable without a configured token", async () => {
     const res = await localRequest(server.port, "/_lore/control", {
       headers: { authorization: "Bearer attacker" },

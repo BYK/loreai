@@ -34,6 +34,7 @@ import {
   zstdCompressSync,
   zstdDecompressSync,
 } from "node:zlib";
+import type { Transform } from "node:stream";
 import { promiseAgainstAbort } from "./abort-race";
 import { cancelAndReleaseReader } from "./stream/anthropic";
 
@@ -89,6 +90,44 @@ async function readRequestBodyBytes(
       chunks.push(value);
     }
     return Buffer.concat(chunks, total);
+  } finally {
+    if (completed) {
+      try {
+        reader.releaseLock();
+      } catch {
+        // Normal EOF has no pending read in conforming runtimes.
+      }
+    } else {
+      cancelAndReleaseReader(reader, signal.reason);
+    }
+  }
+}
+
+async function* requestBodyChunks(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): AsyncGenerator<Uint8Array> {
+  const reader = body.getReader();
+  let completed = false;
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await promiseAgainstAbort(
+        () => reader.read(),
+        signal,
+      );
+      signal.throwIfAborted();
+      if (done) {
+        completed = true;
+        return;
+      }
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_HTTP_REQUEST_COMPRESSED_BYTES) {
+        throw new HttpRequestBodyTooLargeError("compressed");
+      }
+      yield value;
+    }
   } finally {
     if (completed) {
       try {
@@ -234,6 +273,194 @@ async function decompressRequestBody(
     signal.removeEventListener("abort", onAbort);
     decoder.destroy();
   }
+}
+
+function createRequestBodyDecoder(
+  encoding: string,
+  prefix: Uint8Array,
+): Transform {
+  switch (encoding) {
+    case "zstd":
+      return createZstdDecompress();
+    case "gzip":
+    case "x-gzip":
+      return createGunzip();
+    case "br":
+      return createBrotliDecompress();
+    case "deflate":
+      // RFC 1950's two-byte wrapper is self-identifying. Selecting once avoids
+      // replaying hostile input through both wrapped and raw decoders.
+      return hasZlibWrapper(prefix) ? createInflate() : createInflateRaw();
+    default:
+      throw new Error(`Unsupported Content-Encoding: ${encoding}`);
+  }
+}
+
+function waitForDecoderDrain(
+  decoder: Transform,
+  signal: AbortSignal,
+): Promise<void> {
+  return promiseAgainstAbort(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          decoder.removeListener("drain", onDrain);
+          decoder.removeListener("error", onError);
+          decoder.removeListener("close", onClose);
+        };
+        const onDrain = (): void => {
+          cleanup();
+          resolve();
+        };
+        const onError = (error: Error): void => {
+          cleanup();
+          reject(error);
+        };
+        const onClose = (): void => {
+          cleanup();
+          reject(new Error("decoder closed"));
+        };
+        decoder.once("drain", onDrain);
+        decoder.once("error", onError);
+        decoder.once("close", onClose);
+      }),
+    signal,
+  );
+}
+
+async function* decodedCompressedRequestChunks(
+  body: ReadableStream<Uint8Array>,
+  encoding: string,
+  signal: AbortSignal,
+): AsyncGenerator<Uint8Array> {
+  const decoderAbort = new AbortController();
+  const source = requestBodyChunks(
+    body,
+    AbortSignal.any([signal, decoderAbort.signal]),
+  );
+  const replayChunks: Uint8Array[] = [];
+  const header = new Uint8Array(2);
+  let headerLength = 0;
+  let decoder: Transform | undefined;
+  let writing: Promise<void> | undefined;
+  try {
+    while (headerLength < header.byteLength) {
+      const next = await source.next();
+      if (next.done) break;
+      replayChunks.push(next.value);
+      const length = Math.min(
+        header.byteLength - headerLength,
+        next.value.byteLength,
+      );
+      header.set(next.value.subarray(0, length), headerLength);
+      headerLength += length;
+    }
+
+    const activeDecoder = createRequestBodyDecoder(
+      encoding,
+      header.subarray(0, headerLength),
+    );
+    decoder = activeDecoder;
+    const onAbort = (): void => {
+      const reason =
+        signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException("request aborted", "AbortError");
+      decoder?.destroy(reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    const writeSource = async (): Promise<void> => {
+      for (const chunk of replayChunks) {
+        signal.throwIfAborted();
+        if (!activeDecoder.write(chunk)) {
+          await waitForDecoderDrain(activeDecoder, signal);
+        }
+      }
+      try {
+        for await (const chunk of source) {
+          signal.throwIfAborted();
+          if (!activeDecoder.write(chunk)) {
+            await waitForDecoderDrain(activeDecoder, signal);
+          }
+        }
+        activeDecoder.end();
+      } catch (error) {
+        activeDecoder.destroy(error instanceof Error ? error : undefined);
+        throw error;
+      }
+    };
+    writing = writeSource();
+    // Surface producer failures to the consumer immediately. Without this,
+    // a rejected source leaves the decoder waiting for an `end()` that never
+    // arrives, even though the request has already failed.
+    void writing.catch((error: unknown) => {
+      activeDecoder.destroy(error instanceof Error ? error : undefined);
+    });
+    let total = 0;
+    try {
+      for await (const value of decoder) {
+        signal.throwIfAborted();
+        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        total += chunk.byteLength;
+        if (total > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
+          throw new HttpRequestBodyTooLargeError("decompressed");
+        }
+        yield chunk;
+      }
+      await writing;
+      signal.throwIfAborted();
+    } catch (error) {
+      decoder.destroy(error instanceof Error ? error : undefined);
+      // A decoder can reject while its producer awaits another source chunk.
+      // Abort it and do not wait for a hostile producer to settle.
+      decoderAbort.abort(error);
+      void source.return?.(undefined);
+      signal.throwIfAborted();
+      if (error instanceof HttpRequestBodyTooLargeError) throw error;
+      if (outputLimitError(error)) {
+        throw new HttpRequestBodyTooLargeError("decompressed");
+      }
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      decoder.destroy();
+      void writing.catch(() => {});
+    }
+  } finally {
+    decoderAbort.abort(signal.reason);
+    decoder?.destroy();
+    void writing?.catch(() => {});
+    void source.return?.(undefined);
+  }
+}
+
+/**
+ * Yield decoded request bytes without retaining the full wire or decoded body.
+ * Consumers must fully consume this generator or close it to release the
+ * request reader and decoder promptly.
+ */
+export async function* decodedRequestChunks(
+  req: Request,
+  signal: AbortSignal = req.signal,
+): AsyncGenerator<Uint8Array> {
+  const enc = normalizeRequestEncoding(req.headers.get("content-encoding"));
+  if (!req.body) return;
+  if (!enc) {
+    let total = 0;
+    for await (const chunk of requestBodyChunks(req.body, signal)) {
+      total += chunk.byteLength;
+      if (total > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
+        throw new HttpRequestBodyTooLargeError("decompressed");
+      }
+      yield chunk;
+    }
+    return;
+  }
+  if (!isSupportedEncoding(enc)) {
+    throw new Error(`Unsupported Content-Encoding: ${enc}`);
+  }
+  yield* decodedCompressedRequestChunks(req.body, enc, signal);
 }
 
 /**

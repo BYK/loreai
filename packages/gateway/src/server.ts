@@ -48,8 +48,8 @@ import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest } from "./translate/openai";
 import { parseGeminiRequest } from "./translate/gemini";
 import {
-  parseOpenAICodexRequest,
-  parseOpenAIResponsesRequest,
+  parseOpenAICodexRequestChunks,
+  parseOpenAIResponsesRequestChunks,
 } from "./translate/openai-responses";
 import {
   handleRequest,
@@ -61,7 +61,7 @@ import {
 import { upstreamFetch } from "./fetch";
 import { responseAgainstAbort } from "./abort-race";
 import { cancelAndReleaseReader, readStreamChunk } from "./stream/anthropic";
-import { decodeRequestBody } from "./http-body";
+import { decodeRequestBody, decodedRequestChunks } from "./http-body";
 import { SHUTDOWN_DEADLINE_MS } from "./shutdown-deadline";
 import {
   BEDROCK_RUNTIME_PATH_RE,
@@ -171,6 +171,16 @@ function errorResponse(
   message: string,
 ): Response {
   return withoutCors(errorResponseWithoutCors(status, type, message));
+}
+
+function closingErrorResponse(
+  status: number,
+  type: string,
+  message: string,
+): Response {
+  const response = errorResponse(status, type, message);
+  response.headers.set("connection", "close");
+  return response;
 }
 
 // ---------------------------------------------------------------------------
@@ -669,25 +679,21 @@ async function handleOpenAIResponses(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
-  let body: unknown;
-  try {
-    // Transparently decode any Content-Encoding (Codex sends zstd by default)
-    // before JSON-parsing — raw compressed bytes would otherwise fail to parse.
-    body = JSON.parse(await decodeRequestBody(req));
-  } catch {
-    return errorResponse(400, "invalid_request_error", "Invalid JSON body");
-  }
-
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = parseOpenAIResponsesRequest(
-      body,
+    gatewayReq = await parseOpenAIResponsesRequestChunks(
+      decodedRequestChunks(req, req.signal),
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "Failed to parse request";
-    return errorResponse(400, "invalid_request_error", msg);
+  } catch {
+    // A malformed stream can remain unfinished after parsing fails. Closing the
+    // connection cancels Node's request body once the fixed 400 is delivered.
+    return closingErrorResponse(
+      400,
+      "invalid_request_error",
+      "Invalid JSON body",
+    );
   }
 
   try {
@@ -713,22 +719,19 @@ async function handleOpenAICodexResponses(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
-  let body: unknown;
-  try {
-    // Transparently decode any Content-Encoding (Codex sends zstd by default)
-    // before JSON-parsing — raw compressed bytes would otherwise fail to parse.
-    body = JSON.parse(await decodeRequestBody(req));
-  } catch {
-    return errorResponse(400, "invalid_request_error", "Invalid JSON body");
-  }
-
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = parseOpenAICodexRequest(body, headersToRecord(req.headers));
+    gatewayReq = await parseOpenAICodexRequestChunks(
+      decodedRequestChunks(req, req.signal),
+      headersToRecord(req.headers),
+    );
     gatewayReq.signal = req.signal;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "Failed to parse request";
-    return errorResponse(400, "invalid_request_error", msg);
+  } catch {
+    return closingErrorResponse(
+      400,
+      "invalid_request_error",
+      "Invalid JSON body",
+    );
   }
 
   try {
@@ -1467,13 +1470,14 @@ export function bindNodeIngressAbort(
     }
   };
   const onSocketError = (error: Error): void => abort(error);
+  const socket = nodeReq.socket;
   nodeReq.on("aborted", onRequestAborted);
   nodeReq.on("close", onRequestClose);
   nodeReq.on("error", onRequestError);
   nodeRes.on("close", onResponseClose);
   nodeRes.on("error", onResponseError);
-  nodeReq.socket.on("close", onSocketClose);
-  nodeReq.socket.on("error", onSocketError);
+  socket.on("close", onSocketClose);
+  socket.on("error", onSocketError);
   return {
     signal: controller.signal,
     cleanup: () => {
@@ -1482,8 +1486,8 @@ export function bindNodeIngressAbort(
       nodeReq.removeListener("error", onRequestError);
       nodeRes.removeListener("close", onResponseClose);
       nodeRes.removeListener("error", onResponseError);
-      nodeReq.socket.removeListener("close", onSocketClose);
-      nodeReq.socket.removeListener("error", onSocketError);
+      socket.removeListener("close", onSocketClose);
+      socket.removeListener("error", onSocketError);
     },
   };
 }
