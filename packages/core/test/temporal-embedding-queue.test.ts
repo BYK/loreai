@@ -297,7 +297,12 @@ describe("durable temporal embedding scheduler", () => {
         /^temporal embedding scheduler drain failed: reason=operation-failed stage=embed elapsed_ms=\d+ messages=1 input_bytes=\d+ units=1 failures=1 retry_ms=1000$/,
       ),
     );
-    const rendered = JSON.stringify(error.mock.calls);
+    expect(error).toHaveBeenCalledOnce();
+    expect(
+      error.mock.calls.flat().every((argument) => typeof argument === "string"),
+    ).toBe(true);
+    // Match the logger's coercion: JSON.stringify(Error) would hide its message.
+    const rendered = error.mock.calls.flat().map(String).join("\n");
     expect(rendered).not.toContain(content);
     expect(rendered).not.toContain(id);
     expect(rendered).not.toContain("private provider diagnostic");
