@@ -549,6 +549,9 @@ export type SessionState = {
   fingerprint: string;
   /** Unix timestamp (ms) of the last request in this session. */
   lastRequestTime: number;
+  /** Completion time of the last accepted response, for tool-continuation
+   *  retention. A slow response must not consume the client's tool grace. */
+  lastResponseTime?: number;
   /** Unix timestamp (ms) of the request before the current one — used by budget
    *  throttle to compute elapsed time since the previous turn for cache TTL safety. */
   prevRequestTime?: number;
@@ -568,6 +571,9 @@ export type SessionState = {
    *  subsequent turns don't re-schedule duplicate curations. Set before
    *  runBackground(), cleared in its .finally(). Transient (not persisted). */
   curationScheduled?: boolean;
+  /** Queued/running turn-triggered background chains. Includes time waiting
+   *  for global capacity before the core per-session limiter is entered. */
+  backgroundWorkCount?: number;
   /** Stored recall results for marker-based round-trip expansion. */
   recallStore: RecallStore;
   /** Cache analytics — request body prefix comparison + API cache fields. */

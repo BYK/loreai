@@ -414,6 +414,11 @@ export function shouldDeferPrefixRewriteOnCoolBust(
  */
 const SUBAGENT_EVICTION_MS = 5 * 60 * 1000; // 5 minutes
 
+// A tool result may arrive long after the response that requested it. Keep
+// disposable live state for at least an hour, but do not treat a historical
+// tool_use stop reason as proof of activity forever. Durable state survives.
+const TOOL_USE_EVICTION_MS = 60 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // startIdleScheduler
 // ---------------------------------------------------------------------------
@@ -863,18 +868,25 @@ export function evictIdleSessions(
     if (inProgress.has(sessionID)) continue; // don't evict during active idle work
     if (warmupInProgress.has(sessionID)) continue;
     if (isExternallyActive?.(sessionID)) continue;
+    if (state.backgroundWorkCount) continue; // includes the global background queue
+    if (distillLimiter.isBusy(sessionID) || curatorLimiter.isBusy(sessionID))
+      continue;
     // Sub-agent sessions are ephemeral — evict faster
-    const timeout = state.isSubagent
-      ? Math.min(evictionTimeoutMs, SUBAGENT_EVICTION_MS)
-      : evictionTimeoutMs;
-    if (now - state.lastRequestTime < timeout) continue;
-    // Don't evict sessions still executing tools — they're active
-    if (state.lastStopReason === "tool_use") continue;
+    const toolPending = state.lastStopReason === "tool_use";
+    const timeout = toolPending
+      ? Math.max(evictionTimeoutMs, TOOL_USE_EVICTION_MS)
+      : state.isSubagent
+        ? Math.min(evictionTimeoutMs, SUBAGENT_EVICTION_MS)
+        : evictionTimeoutMs;
+    const lastActivity = toolPending
+      ? Math.max(state.lastRequestTime, state.lastResponseTime ?? 0)
+      : state.lastRequestTime;
+    if (now - lastActivity < timeout) continue;
 
     log.info(
       `evicting idle session ${sessionID.slice(0, 16)}` +
         `${state.isSubagent ? " (subagent)" : ""}` +
-        ` (idle ${Math.round((now - state.lastRequestTime) / 60_000)}m)`,
+        ` (idle ${Math.round((now - lastActivity) / 60_000)}m)`,
     );
 
     // Persist final cost snapshot before eviction
@@ -935,6 +947,15 @@ export function evictIdleSessions(
 
     // Clean up pipeline-level satellite Maps via callback
     onEvict?.(sessionID);
+
+    // Release sensitive/large snapshots even if a settled task still holds an
+    // old state reference. Recall and prompt state remain persisted for resume.
+    state.cacheAnalytics.lastRequestBody = null;
+    state.cacheAnalytics.lastNormalizedBody = null;
+    state.cacheAnalytics.lastRequestBodyLength = 0;
+    state.lastUpstream = undefined;
+    state.upstreamByProvider.clear();
+    state.recallStore.clear();
 
     // Remove from the main sessions map last
     sessions.delete(sessionID);

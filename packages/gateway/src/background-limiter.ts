@@ -86,7 +86,11 @@ const LOW_PRIORITY_SHED_THRESHOLD = 0.5;
  */
 const LOAD_BOOST_THRESHOLD = 0.5;
 
-const limiter = pLimit(MIN_BACKGROUND_CONCURRENCY);
+// Discarded jobs must settle so their owners can release session state.
+const limiter = pLimit({
+  concurrency: MIN_BACKGROUND_CONCURRENCY,
+  rejectOnClear: true,
+});
 
 /**
  * In-flight (already-started) background tasks, so `drainBackground()` can await
@@ -283,7 +287,9 @@ export async function runBackground<T>(
     }
     return undefined;
   }
+  let started = false;
   return limiter(async () => {
+    started = true;
     // Re-check after waiting in the queue — the breaker may have tripped
     // while this task was pending behind other in-flight work.
     if (isBackgroundPaused(providerID)) {
@@ -304,6 +310,12 @@ export async function runBackground<T>(
     } finally {
       activeTasks.delete(task);
     }
+  }).catch((error: unknown) => {
+    // clearQueue cancels only pending jobs. Treat those as skipped work, while
+    // preserving every failure (including AbortError) from a started task.
+    if (!started && error instanceof Error && error.name === "AbortError")
+      return undefined;
+    throw error;
   });
 }
 

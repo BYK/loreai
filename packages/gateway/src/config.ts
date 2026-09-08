@@ -81,6 +81,9 @@ export interface GatewayConfig {
   idleTimeoutSeconds: number;
   /** Session eviction timeout in seconds. Sessions idle beyond this are evicted
    *  from memory (state is preserved in DB). Default: 1800 (30 min).
+   *  Pending tool calls retain state for at least 1 hour after the latest
+   *  request or completed response (or this timeout, if longer). Active requests,
+   *  response finalizers, and queued/running session work prevent eviction.
    *  Set to 0 to disable eviction. Env: LORE_SESSION_EVICTION_TIMEOUT */
   sessionEvictionTimeoutSeconds: number;
   /** Whether to log requests. Default: false. Env: LORE_DEBUG */
