@@ -601,7 +601,9 @@ inspect_lifecycle_owner_record() {
   after_owner=$(lifecycle_owner_file_identity "$owner_path") || return 1
   [[ "$before_owner" == "$after_owner" ]] || return 1
 
-  owner_pattern='^\{"version":1,"token":"([A-Za-z0-9_-]{32,256})","pid":([1-9][0-9]*),"operation":"(gateway-start|gateway-shutdown|upgrade|setup|uninstall|hosted-install)","createdAt":"([^"]{1,64})","processStartedAt":"([^"]{1,64})","processIdentity":"([^"]{1,1024})"\}$'
+  # Darwin's regex engine caps each repetition bound at 255. Split the
+  # token (32..256) and identity (1..1024) bounds without extra captures.
+  owner_pattern='^\{"version":1,"token":"([A-Za-z0-9_-]{32,255}[A-Za-z0-9_-]?)","pid":([1-9][0-9]*),"operation":"(gateway-start|gateway-shutdown|upgrade|setup|uninstall|hosted-install)","createdAt":"([^"]{1,64})","processStartedAt":"([^"]{1,64})","processIdentity":"([^"]{1,255}[^"]{0,255}[^"]{0,255}[^"]{0,255}[^"]{0,4})"\}$'
   [[ "$owner_content" =~ $owner_pattern ]] || return 1
   owner_token=${BASH_REMATCH[1]}
   owner_pid=${BASH_REMATCH[2]}
@@ -1008,7 +1010,7 @@ claim_expired_incomplete_lifecycle_lock() {
   shopt -u nullglob
   for claim in "${initialization_claims[@]}"; do
     claim_token=${claim##*.lifecycle.lock.init.}
-    [[ "$claim_token" =~ ^[A-Za-z0-9_-]{32,256}$ ]] || return 1
+    [[ "$claim_token" =~ ^[A-Za-z0-9_-]{32,255}[A-Za-z0-9_-]?$ ]] || return 1
     inspect_lifecycle_owner_record "$claim" || return 1
     [[ "$inspected_lock_token" == "$claim_token" ]] || return 1
     if [[ "$claim" == "$lifecycle_initialization_claim_path" ]]; then
@@ -1922,7 +1924,7 @@ append_path_block() {
     if (( ${#recovery_claims[@]} == 1 )); then
       recovery_claim=${recovery_claims[0]}
       recovery_suffix=${recovery_claim#"${rc}.lore-original."}
-      if [[ ! "$recovery_suffix" =~ ^[A-Za-z0-9_-]{32,256}\.([1-9][0-9]*)\.([1-9][0-9]*)\.([a-f0-9]{64})$ ||
+      if [[ ! "$recovery_suffix" =~ ^[A-Za-z0-9_-]{32,255}[A-Za-z0-9_-]?\.([1-9][0-9]*)\.([1-9][0-9]*)\.([a-f0-9]{64})$ ||
             -L "$recovery_claim" || ! -f "$recovery_claim" ||
             ( "$os" != "windows" && ! -O "$recovery_claim" ) ]]; then
         die "Refusing unsafe shell profile recovery claim: ${recovery_claim}"
