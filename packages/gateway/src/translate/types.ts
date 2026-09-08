@@ -344,6 +344,9 @@ export type GatewayResponse = {
   content: GatewayContentBlock[];
   /** Original Responses output items needed for stateless follow-up requests. */
   rawOutputItems?: Array<Record<string, unknown>>;
+  /** Codex account quota events, independent of model token usage. Response-local
+   * metadata retained only to rebuild the Responses SSE wire format. */
+  codexRateLimits?: Array<Record<string, unknown>>;
   /** Provider stop reason (e.g. `end_turn`, `stop`, `tool_use`, `length`). */
   stopReason: string;
   /**

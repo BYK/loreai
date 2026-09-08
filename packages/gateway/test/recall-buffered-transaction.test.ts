@@ -16,6 +16,12 @@ import {
 import type { GatewayRequest } from "../src/translate/types";
 import { parseAnthropicResponseJSON } from "../src/translate/anthropic";
 import {
+  _resetForTest as resetWorkerHealth,
+  _setNowForTest as setWorkerHealthTime,
+  getDegradationWarning,
+  recordWorkerFailure,
+} from "../src/worker-health";
+import {
   buildRecallAnchor,
   recallAnchorContext,
   MAX_RECALL_STORE_ENTRIES,
@@ -29,7 +35,81 @@ afterEach(async () => {
   for (const id of createdKnowledge) ltm.remove(id);
   createdKnowledge.clear();
   vi.restoreAllMocks();
+  resetWorkerHealth();
 });
+
+test.each(["absent", "different-bucket"] as const)(
+  "buffered Codex recall retains prior quota when continuation metadata is %s",
+  async (continuationQuota) => {
+    knowledge();
+    const alias = crypto.randomUUID();
+    const req = request("openai-responses", alias, true);
+    setUpstreamInterceptor(async () =>
+      providerResponse("openai-responses", 1, "answer"),
+    );
+    await (await handleRequest(req, config())).text();
+    await settled();
+    const state = stateFor(alias);
+
+    // A real sustained worker failure causes response warning injection,
+    // selecting the buffered Codex path instead of live recall streaming.
+    let now = 1000000;
+    setWorkerHealthTime(() => now);
+    recordWorkerFailure(state.sessionID, "lore-distill", "rate-limit");
+    now += 31 * 60 * 1000;
+    recordWorkerFailure(state.sessionID, "lore-distill", "rate-limit");
+    expect(getDegradationWarning(state.sessionID)).not.toBeNull();
+
+    const firstQuota = {
+      type: "codex.rate_limits",
+      rate_limits: {
+        primary: {
+          used_percent: 25,
+          window_minutes: 300,
+          reset_at: 2000000000,
+        },
+      },
+    };
+    const nextQuota = { ...firstQuota, metered_limit_name: "codex_spark" };
+    let calls = 0;
+    setUpstreamInterceptor(async () => {
+      calls++;
+      const response = providerResponse(
+        "openai-responses",
+        calls,
+        calls === 1 ? "recall" : "answer",
+        true,
+      );
+      const quota =
+        calls === 1
+          ? firstQuota
+          : continuationQuota === "different-bucket"
+            ? nextQuota
+            : undefined;
+      return new Response(
+        (quota
+          ? `event: codex.rate_limits\ndata: ${JSON.stringify(quota)}\n\n`
+          : "") + (await response.text()),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    req.stream = true;
+    const response = await handleRequest(req, config());
+    const body = await response.text();
+    await settled();
+    expect(response.status, body).toBe(200);
+    expect(calls).toBe(2);
+    expect(body).toContain("Unrecovered background-worker failures");
+    expect(body).toContain("Completed answer");
+    const events = body
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("event: codex.rate_limits\n"))
+      .map((frame) => JSON.parse(frame.split("\ndata: ")[1]));
+    expect(events).toEqual(
+      continuationQuota === "absent" ? [firstQuota] : [firstQuota, nextQuota],
+    );
+  },
+);
 
 describe.each(["anthropic", "openai", "openai-responses"] as const)(
   "malformed buffered %s content",
