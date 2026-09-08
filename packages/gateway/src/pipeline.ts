@@ -11,6 +11,7 @@
  *  2. Meta requests (title gen, summaries, etc.) → forwarded transparently, no Lore processing.
  *  3. Normal conversation turns → full pipeline.
  */
+import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -11331,6 +11332,7 @@ function boundedRetryAfterMs(value: string): string | undefined {
 
 function sanitizedUpstreamErrorResponse(response: Response): Response {
   const headers = new Headers({ "content-type": "application/json" });
+  copyUsageLimitHeaders(response.headers, headers);
   const retryAfter = response.headers.get("retry-after");
   const retryAfterMs = response.headers.get("retry-after-ms");
   const boundedRetryAfterValue = retryAfter
@@ -14941,10 +14943,9 @@ async function handlePassthrough(
         JSON.parse(body) as Record<string, unknown>,
       );
     }
-    return new Response(body, {
-      status: upstreamResponse.status,
-      headers: { "content-type": "application/json" },
-    });
+    const headers = new Headers({ "content-type": "application/json" });
+    copyUsageLimitHeaders(upstreamResponse.headers, headers);
+    return new Response(body, { status: upstreamResponse.status, headers });
   }
 
   // Cross-protocol: accumulate the upstream response and re-emit in the
@@ -15182,6 +15183,7 @@ async function handleProvisionalConversationTurn(
     undefined,
     requestEnablesLongContext(req),
   );
+  copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
 
   const commit = async (): Promise<boolean> => {
     if (
@@ -17482,6 +17484,7 @@ async function handleConversationTurn(
   const finishForeground = (response: Response): Response => {
     if (foregroundOwnershipTransferred) return response;
     foregroundOwnershipTransferred = true;
+    copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
     return wrapBodyWithCleanup(
       response,
       releaseForeground,
