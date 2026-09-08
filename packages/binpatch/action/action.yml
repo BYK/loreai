@@ -387,7 +387,7 @@ runs:
             --artifact-type "${ARTIFACT_TYPE_PREFIX}.nightly" \
             --annotation "org.opencontainers.image.source=${SOURCE_URL}" \
             --annotation "version=${VERSION}" \
-            ./*.gz ./lore-checksums.txt
+            ./*.gz ./lore-checksums.txt ./install-protocol-v1
 
     - name: Tag versioned nightly
       # Immutable versioned tag via zero-copy `oras tag` so patch-chain

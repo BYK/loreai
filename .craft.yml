@@ -62,4 +62,4 @@ targets:
   # are uploaded as release assets — npm tarballs are published via the
   # npm targets above, not attached to the GitHub Release.
   - name: github
-    includeNames: /(\.(gz|patch)|^lore-checksums\.txt)$/
+    includeNames: /(\.(gz|patch)|^lore-checksums\.txt|^install-protocol-v1)$/
