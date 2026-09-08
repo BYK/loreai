@@ -11,6 +11,7 @@ import {
 import {
   _restoreProvider,
   _saveAndClearProvider,
+  LocalProviderUnavailableError,
   type EmbeddingProvider,
 } from "../src/embedding";
 import {
@@ -25,6 +26,7 @@ import {
 } from "../src/temporal-embedding-queue";
 import { MAX_TEMPORAL_CHUNKS_PER_MESSAGE } from "../src/embedding-units";
 import * as log from "../src/log";
+import * as embedding from "../src/embedding";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -96,6 +98,7 @@ beforeEach(() => {
 afterEach(async () => {
   stopTemporalEmbeddingScheduler();
   await settleTemporalEmbeddingScheduler();
+  vi.useRealTimers();
   _restoreProvider(savedProvider);
   log.registerSink(passthroughSink);
   vi.restoreAllMocks();
@@ -269,7 +272,7 @@ describe("durable temporal embedding scheduler", () => {
     expect(row.embedding).toBeNull();
   });
 
-  test("scheduler failures emit only a fixed content-free message", async () => {
+  test("scheduler failures identify the stage without exposing private diagnostics", async () => {
     const logged = deferred<void>();
     const error = vi.spyOn(log, "error").mockImplementation(() => {
       logged.resolve();
@@ -290,13 +293,333 @@ describe("durable temporal embedding scheduler", () => {
     await settleTemporalEmbeddingScheduler();
 
     expect(error).toHaveBeenCalledWith(
-      "temporal embedding scheduler drain failed",
+      expect.stringMatching(
+        /^temporal embedding scheduler drain failed: reason=operation-failed stage=embed elapsed_ms=\d+ messages=1 input_bytes=\d+ units=1 failures=1 retry_ms=1000$/,
+      ),
     );
     const rendered = JSON.stringify(error.mock.calls);
     expect(rendered).not.toContain(content);
     expect(rendered).not.toContain(id);
     expect(rendered).not.toContain("private provider diagnostic");
     expect(queueRow(id)).not.toBeNull();
+  });
+
+  test("persistent failures back off exponentially, cap retries, and recover once after durable progress", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    let failing = true;
+    const embed = vi.fn(async (texts: string[]) => {
+      if (failing) throw new Error("private retry diagnostic");
+      return texts.map(() => vector());
+    });
+    installProvider({ maxBatchSize: 8, embed });
+    const id = insertMessage(
+      "durable retries must survive each failed provider attempt",
+    );
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(embed).toHaveBeenCalledTimes(1);
+    for (const [index, delay] of [
+      1000, 2000, 4000, 8000, 16000, 30000, 30000,
+    ].entries()) {
+      expect(error.mock.calls.at(-1)?.[0]).toContain(`retry_ms=${delay}`);
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(embed).toHaveBeenCalledTimes(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(embed).toHaveBeenCalledTimes(index + 2);
+      expect(queueRow(id)).not.toBeNull();
+    }
+    failing = false;
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(queueRow(id)).toBeNull();
+    const recoveries = () =>
+      info.mock.calls.filter(([message]) =>
+        String(message).startsWith("temporal embedding scheduler recovered:"),
+      );
+    expect(recoveries()).toHaveLength(1);
+    expect(recoveries()[0]?.[0]).toContain("failures=8");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(recoveries()).toHaveLength(1);
+    failing = true;
+    insertMessage(
+      "new work starts a fresh failure streak after a real recovery",
+    );
+    await vi.advanceTimersByTimeAsync(250);
+    expect(error.mock.calls.at(-1)?.[0]).toContain("failures=1 retry_ms=1000");
+  });
+
+  test("an empty poll does not claim recovery or reset the failure streak", async () => {
+    vi.useFakeTimers();
+    const info = vi.spyOn(log, "info").mockImplementation(() => {});
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    installProvider({
+      maxBatchSize: 8,
+      async embed() {
+        throw new Error("private");
+      },
+    });
+    const id = insertMessage(
+      "another connection may remove failed work before the retry",
+    );
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    db()
+      .query("DELETE FROM temporal_embedding_queue WHERE message_id = ?")
+      .run(id);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(
+      info.mock.calls.some(([message]) =>
+        String(message).includes("scheduler recovered"),
+      ),
+    ).toBe(false);
+    insertMessage(
+      "later work still inherits the provider failure backoff streak",
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(error.mock.calls.at(-1)?.[0]).toContain("failures=2 retry_ms=2000");
+  });
+
+  test("deadline failures identify the scheduler deadline, not the provider's private abort error", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    installProvider({
+      maxBatchSize: 8,
+      embed(_texts, _inputType, signal) {
+        return new Promise((_, reject) =>
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("private deadline payload")),
+            { once: true },
+          ),
+        );
+      },
+    });
+    const id = insertMessage(
+      "a timed out provider request must not lose its durable job",
+    );
+    _setTemporalEmbeddingRequestTimeoutForTest(10);
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(error).toHaveBeenCalledOnce();
+    expect(error.mock.calls[0]?.[0]).toContain(
+      "reason=deadline stage=embed elapsed_ms=10",
+    );
+    expect(JSON.stringify(error.mock.calls)).not.toContain(
+      "private deadline payload",
+    );
+    expect(queueRow(id)).not.toBeNull();
+  });
+
+  test("provider unavailability preserves the slow retry cadence without logging its cause", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const embed = vi.fn(async () => {
+      throw new LocalProviderUnavailableError(new Error("secret model path"));
+    });
+    installProvider({ maxBatchSize: 8, embed });
+    insertMessage(
+      "provider availability errors must use the slower polling cadence",
+    );
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(error.mock.calls[0]?.[0]).toContain(
+      "reason=provider-unavailable stage=embed",
+    );
+    expect(error.mock.calls[0]?.[0]).toContain("retry_ms=30000");
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(embed).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(error.mock.calls)).not.toContain("secret model path");
+  });
+
+  test("shutdown cancellation stays quiet and restart waits for the old provider slot", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const gate = deferred<Float32Array[]>();
+    const fresh = deferred<Float32Array[]>();
+    const embed = vi
+      .fn()
+      .mockImplementationOnce(() => gate.promise)
+      .mockImplementation(() => fresh.promise);
+    installProvider({ maxBatchSize: 8, embed });
+    const id = insertMessage(
+      "a restarted scheduler must wait for abort-ignoring inference to settle",
+    );
+    try {
+      startTemporalEmbeddingScheduler();
+      await vi.advanceTimersByTimeAsync(0);
+      stopTemporalEmbeddingScheduler();
+      startTemporalEmbeddingScheduler();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(embed).toHaveBeenCalledOnce();
+      gate.resolve([vector()]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(error).not.toHaveBeenCalled();
+      expect(queueRow(id)).not.toBeNull();
+      expect(embed).toHaveBeenCalledTimes(2);
+      fresh.resolve([vector(2)]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(queueRow(id)).toBeNull();
+    } finally {
+      gate.resolve([vector()]);
+      fresh.resolve([vector(2)]);
+    }
+  });
+
+  test("settlement after stop never probes or recreates the provider", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const available = vi.spyOn(embedding, "isAvailable");
+    installProvider({
+      maxBatchSize: 8,
+      embed(_texts, _inputType, signal) {
+        return new Promise((_, reject) =>
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("private shutdown")),
+            { once: true },
+          ),
+        );
+      },
+    });
+    insertMessage(
+      "shutdown must not call the provider after releasing runtime ownership",
+    );
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(available).toHaveBeenCalledOnce();
+    stopTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(available).toHaveBeenCalledOnce();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test("a deadline preceding stop and restart is reported once by the current scheduler", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const gate = deferred<Float32Array[]>();
+    const embed = vi
+      .fn()
+      .mockImplementationOnce(() => gate.promise)
+      .mockImplementation(async (texts: string[]) =>
+        texts.map(() => vector(2)),
+      );
+    installProvider({ maxBatchSize: 8, embed });
+    const id = insertMessage(
+      "deadline ownership must survive restarting while old inference is pending",
+    );
+    _setTemporalEmbeddingRequestTimeoutForTest(10);
+    try {
+      startTemporalEmbeddingScheduler();
+      await vi.advanceTimersByTimeAsync(10);
+      stopTemporalEmbeddingScheduler();
+      startTemporalEmbeddingScheduler();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(embed).toHaveBeenCalledOnce();
+      gate.resolve([vector()]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(queueRow(id)).not.toBeNull();
+      expect(error).toHaveBeenCalledOnce();
+      expect(error.mock.calls[0]?.[0]).toContain("reason=deadline stage=embed");
+      expect(error.mock.calls[0]?.[0]).toContain("failures=1 retry_ms=1000");
+      await vi.advanceTimersByTimeAsync(999);
+      expect(embed).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(embed).toHaveBeenCalledTimes(2);
+      expect(queueRow(id)).toBeNull();
+    } finally {
+      gate.resolve([vector()]);
+    }
+  });
+
+  test("malformed vectors identify validation failures and preserve queued work", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    installProvider({
+      maxBatchSize: 8,
+      async embed() {
+        return [new Float32Array(1)];
+      },
+    });
+    const id = insertMessage(
+      "the scheduler must reject incomplete vectors before any commit",
+    );
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(error.mock.calls[0]?.[0]).toContain(
+      "reason=invalid-output stage=validate",
+    );
+    expect(queueRow(id)).not.toBeNull();
+  });
+
+  test("commit failures roll back vectors and classify storage without exposing its exception", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    installProvider({
+      maxBatchSize: 8,
+      async embed(texts) {
+        return texts.map(() => vector());
+      },
+    });
+    const id = insertMessage(
+      "queue deletion must commit atomically with its generated embedding",
+    );
+    db().exec(
+      "CREATE TEMP TRIGGER fail_temporal_queue_delete BEFORE DELETE ON temporal_embedding_queue BEGIN SELECT RAISE(ABORT, 'private storage payload'); END",
+    );
+    try {
+      startTemporalEmbeddingScheduler();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(error.mock.calls[0]?.[0]).toContain(
+        "reason=operation-failed stage=commit",
+      );
+      expect(queueRow(id)).not.toBeNull();
+      expect(
+        db()
+          .query("SELECT embedding FROM temporal_messages WHERE id = ?")
+          .get(id),
+      ).toEqual({ embedding: null });
+      expect(JSON.stringify(error.mock.calls)).not.toContain(
+        "private storage payload",
+      );
+    } finally {
+      db().exec("DROP TRIGGER fail_temporal_queue_delete");
+    }
+  });
+
+  test("hostile thrown values cannot inject diagnostics or prevent subsequent retries", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("private getter");
+        },
+        getPrototypeOf() {
+          throw new Error("private prototype");
+        },
+      },
+    );
+    const embed = vi.fn(async () => {
+      throw hostile;
+    });
+    installProvider({ maxBatchSize: 8, embed });
+    insertMessage(
+      "untrusted failures must not break the retry reporting machinery",
+    );
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(
+      /private|prototype|getter/,
+    );
+    expect(error.mock.calls[0]?.[0]).toContain(
+      "reason=operation-failed stage=embed",
+    );
   });
 
   test("refreshes stale admission metadata without sending stale content", async () => {
