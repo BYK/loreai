@@ -32,6 +32,18 @@ const HASH_CHUNK_BYTES = 16 * 1024;
 const IDLE_DRAIN_INTERVAL_MS = 250;
 const UNAVAILABLE_DRAIN_INTERVAL_MS = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const FAILURE_RETRY_BASE_MS = 1_000;
+const FAILURE_RETRY_MAX_MS = 30_000;
+
+interface DrainDiagnostics {
+  stage: "read" | "prepare" | "embed" | "validate" | "commit";
+  startedAt: number;
+  messages: number;
+  inputBytes: number;
+  units: number;
+  providerUnavailable: boolean;
+  abortReason?: "deadline" | "shutdown";
+}
 
 interface QueueRow {
   message_id: string;
@@ -54,6 +66,10 @@ let schedulerStarted = false;
 let schedulerTimer: ReturnType<typeof setTimeout> | undefined;
 let activeDrain: Promise<number> | undefined;
 let activeDrainAbort: AbortController | undefined;
+let activeDiagnostics: DrainDiagnostics | undefined;
+let schedulerGeneration = 0;
+let consecutiveFailures = 0;
+let failureRetryMs = 0;
 let requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;
 const drainSettlers = new Set<() => void>();
 
@@ -190,7 +206,10 @@ function commitJob(job: CapturedJob, vectors: Float32Array[]): boolean {
   return committed;
 }
 
-async function drainOnce(signal: AbortSignal): Promise<number> {
+async function drainOnce(
+  signal: AbortSignal,
+  diagnostics: DrainDiagnostics,
+): Promise<number> {
   const candidates = db()
     .query(
       `SELECT q.message_id, q.content_hash, q.fingerprint,
@@ -215,6 +234,7 @@ async function drainOnce(signal: AbortSignal): Promise<number> {
     return true;
   });
   const placeholders = admitted.map(() => "?").join(",");
+  diagnostics.messages = admitted.length;
   const contentById = new Map(
     (
       db()
@@ -237,6 +257,11 @@ async function drainOnce(signal: AbortSignal): Promise<number> {
       }>
     ).map((row) => [row.id, row.content_bytes]),
   );
+  diagnostics.inputBytes = [...contentById.values()].reduce(
+    (sum, bytes) => sum + bytes.byteLength,
+    0,
+  );
+  diagnostics.stage = "prepare";
   const rows = admitted
     .map((candidate): QueueRow | null => {
       const contentBytes = contentById.get(candidate.message_id);
@@ -276,7 +301,12 @@ async function drainOnce(signal: AbortSignal): Promise<number> {
   const emptyJobs = jobs.filter((job) => job.texts.length === 0);
   const embeddingJobs = jobs.filter((job) => job.texts.length > 0);
   const texts = embeddingJobs.flatMap((job) => job.texts);
-  if (texts.length > 0 && !embedding.isAvailable()) return 0;
+  diagnostics.units = texts.length;
+  diagnostics.stage = "embed";
+  if (texts.length > 0 && !embedding.isAvailable()) {
+    diagnostics.providerUnavailable = true;
+    return 0;
+  }
   const vectors =
     texts.length > 0
       ? await embedding.embedInTokenBatches(texts, "document", signal)
@@ -284,8 +314,10 @@ async function drainOnce(signal: AbortSignal): Promise<number> {
   if (signal.aborted) {
     throw new embedding.EmbeddingRequestAbortedError();
   }
+  diagnostics.stage = "validate";
   validateVectors(vectors);
 
+  diagnostics.stage = "commit";
   let committed = emptyJobs.reduce(
     (count, job) => count + (commitJob(job, []) ? 1 : 0),
     0,
@@ -307,15 +339,27 @@ export function drainTemporalEmbeddingQueueOnce(): Promise<number> {
   if (activeDrain) return activeDrain;
   const abort = new AbortController();
   activeDrainAbort = abort;
-  const timer = setTimeout(
-    () =>
-      abort.abort(new Error("temporal embedding request deadline exceeded")),
-    requestTimeoutMs,
-  );
+  const diagnostics: DrainDiagnostics = {
+    stage: "read",
+    startedAt: performance.now(),
+    messages: 0,
+    inputBytes: 0,
+    units: 0,
+    providerUnavailable: false,
+  };
+  activeDiagnostics = diagnostics;
+  const timer = setTimeout(() => {
+    if (abort.signal.aborted) return;
+    diagnostics.abortReason = "deadline";
+    abort.abort(new Error("temporal embedding request deadline exceeded"));
+  }, requestTimeoutMs);
   timer.unref?.();
-  activeDrain = drainOnce(abort.signal).finally(() => {
+  activeDrain = drainOnce(abort.signal, diagnostics).finally(() => {
     clearTimeout(timer);
-    if (activeDrainAbort === abort) activeDrainAbort = undefined;
+    if (activeDrainAbort === abort) {
+      activeDrainAbort = undefined;
+      activeDiagnostics = undefined;
+    }
     activeDrain = undefined;
     const settlers = [...drainSettlers];
     drainSettlers.clear();
@@ -324,25 +368,88 @@ export function drainTemporalEmbeddingQueueOnce(): Promise<number> {
   return activeDrain;
 }
 
-function scheduleDrain(delayMs: number): void {
-  if (!schedulerStarted || schedulerTimer) return;
+/** Never inspect or stringify arbitrary exception properties, including causes. */
+function failureReason(error: unknown, diagnostics: DrainDiagnostics): string {
+  if (diagnostics.abortReason === "deadline") return "deadline";
+  // Even instanceof can throw for an untrusted Proxy rejection value.
+  try {
+    if (error instanceof embedding.LocalProviderUnavailableError) {
+      return "provider-unavailable";
+    }
+    if (error instanceof embedding.EmbeddingRequestAbortedError) {
+      return "request-aborted";
+    }
+  } catch {
+    // Fall through to an owned, content-free classification.
+  }
+  return diagnostics.stage === "validate"
+    ? "invalid-output"
+    : "operation-failed";
+}
+
+function schedulerIsCurrent(generation: number): boolean {
+  return schedulerStarted && schedulerGeneration === generation;
+}
+
+function scheduleDrain(
+  delayMs: number,
+  generation = schedulerGeneration,
+): void {
+  if (!schedulerIsCurrent(generation) || schedulerTimer) return;
   schedulerTimer = setTimeout(() => {
     schedulerTimer = undefined;
-    if (!schedulerStarted) return;
-    void drainTemporalEmbeddingQueueOnce()
-      .catch(() => {
-        log.error("temporal embedding scheduler drain failed");
-        return 0;
-      })
-      .then((processed) => {
+    if (!schedulerIsCurrent(generation)) return;
+    const drain = drainTemporalEmbeddingQueueOnce();
+    // Capture this drain's context before its finally releases the shared slot.
+    const diagnostics = activeDiagnostics!;
+    void drain.then(
+      (processed) => {
+        if (!schedulerIsCurrent(generation)) return;
+        if (processed > 0 && consecutiveFailures > 0) {
+          log.info(
+            `temporal embedding scheduler recovered: failures=${consecutiveFailures} committed=${processed}`,
+          );
+          consecutiveFailures = 0;
+          failureRetryMs = 0;
+        }
         scheduleDrain(
           processed > 0
             ? 0
-            : embedding.isAvailable()
-              ? IDLE_DRAIN_INTERVAL_MS
-              : UNAVAILABLE_DRAIN_INTERVAL_MS,
+            : diagnostics.providerUnavailable
+              ? UNAVAILABLE_DRAIN_INTERVAL_MS
+              : Math.max(IDLE_DRAIN_INTERVAL_MS, failureRetryMs),
+          generation,
         );
-      });
+      },
+      (error: unknown) => {
+        if (!schedulerIsCurrent(generation)) return;
+        if (diagnostics.abortReason === "shutdown") {
+          // A restarted scheduler can share the old, cancelled provider call.
+          scheduleDrain(0, generation);
+          return;
+        }
+        consecutiveFailures = Math.min(
+          consecutiveFailures + 1,
+          Number.MAX_SAFE_INTEGER,
+        );
+        const reason = failureReason(error, diagnostics);
+        failureRetryMs = Math.min(
+          FAILURE_RETRY_BASE_MS * 2 ** Math.min(consecutiveFailures - 1, 5),
+          FAILURE_RETRY_MAX_MS,
+        );
+        let unavailable = reason === "provider-unavailable";
+        try {
+          unavailable ||= !embedding.isAvailable();
+        } catch {
+          // Availability probing must not replace the original failure or stop retries.
+        }
+        if (unavailable) failureRetryMs = UNAVAILABLE_DRAIN_INTERVAL_MS;
+        log.error(
+          `temporal embedding scheduler drain failed: reason=${reason} stage=${diagnostics.stage} elapsed_ms=${Math.round(performance.now() - diagnostics.startedAt)} messages=${diagnostics.messages} input_bytes=${diagnostics.inputBytes} units=${diagnostics.units} failures=${consecutiveFailures} retry_ms=${failureRetryMs}`,
+        );
+        scheduleDrain(failureRetryMs, generation);
+      },
+    );
   }, delayMs);
   schedulerTimer.unref?.();
 }
@@ -351,15 +458,20 @@ function scheduleDrain(delayMs: number): void {
 export function startTemporalEmbeddingScheduler(): void {
   if (schedulerStarted) return;
   schedulerStarted = true;
+  schedulerGeneration++;
   scheduleDrain(0);
 }
 
 /** Stop admission of new scheduler drains. Any active provider call keeps its slot. */
 export function stopTemporalEmbeddingScheduler(): void {
   schedulerStarted = false;
+  schedulerGeneration++;
   if (schedulerTimer) clearTimeout(schedulerTimer);
   schedulerTimer = undefined;
-  activeDrainAbort?.abort(new Error("temporal embedding scheduler stopped"));
+  if (activeDrainAbort && !activeDrainAbort.signal.aborted) {
+    if (activeDiagnostics) activeDiagnostics.abortReason = "shutdown";
+    activeDrainAbort.abort(new Error("temporal embedding scheduler stopped"));
+  }
 }
 
 /**
@@ -394,6 +506,8 @@ export function _resetTemporalEmbeddingSchedulerForTest(): void {
   stopTemporalEmbeddingScheduler();
   drainSettlers.clear();
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;
+  consecutiveFailures = 0;
+  failureRetryMs = 0;
 }
 
 /** Test-only request deadline override. Null restores the production default. */
