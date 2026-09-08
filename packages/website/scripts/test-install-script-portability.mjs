@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -31,7 +32,9 @@ const executable = (path, body) =>
   writeFileSync(path, `#!/bin/bash\nset -eu\n${body}\n`, { mode: 0o755 });
 
 function fixture(t, drift = "both") {
-  const root = mkdtempSync(join(tmpdir(), "lore-installer-portability-"));
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "lore-installer-portability-")),
+  );
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -179,6 +182,62 @@ await test("fd and path exact-mode checks reject special permission bits", (t) =
     path_has_exact_mode "$HOME/private" 700
     fd_has_exact_mode 8 700
   `,
+  );
+  assert.equal(result.status, 0, result.stderr);
+});
+
+await test("owner records retain exact token and process identity length limits", (t) => {
+  const f = fixture(t);
+  const cases = [
+    ...[31, 32, 255, 256, 257].map((length) => ({
+      token: "a".repeat(length),
+      identity: `unverified:${"a".repeat(length)}`,
+      valid: length >= 32 && length <= 256,
+    })),
+    ...[255, 256, 1020, 1024, 1025].map((length) => ({
+      token: "a".repeat(32),
+      identity: `linux:boot:${"1".repeat(length - 11)}`,
+      valid: length <= 1024,
+    })),
+  ];
+  const args = cases.flatMap(({ token, identity, valid }, index) => {
+    const path = join(f.home, `owner-${index}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        token,
+        pid: 123,
+        operation: "hosted-install",
+        createdAt: "2026-08-12T00:00:00.000Z",
+        processStartedAt: "2026-08-12T00:00:00.000Z",
+        processIdentity: identity,
+      }) + "\n",
+      { mode: 0o600 },
+    );
+    return [path, valid ? "true" : "false", token, identity];
+  });
+  const result = run(
+    f,
+    `owner_cases=("$@")
+    set --
+    ${functions}
+    set -- "\${owner_cases[@]}"
+    checked=0
+    while (( $# > 0 )); do
+      if inspect_lifecycle_owner_record "$1"; then
+        [[ "$2" == true ]] || exit 31
+        [[ "$inspected_lock_token" == "$3" && "$inspected_lock_pid" == 123 &&
+           "$inspected_lock_process_identity" == "$4" ]] || exit 32
+      else
+        [[ "$2" == false ]] || exit 33
+      fi
+      checked=$((checked + 1))
+      shift 4
+    done
+    [[ $checked == ${cases.length} ]]
+  `,
+    ...args,
   );
   assert.equal(result.status, 0, result.stderr);
 });
