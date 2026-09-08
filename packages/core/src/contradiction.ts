@@ -197,6 +197,7 @@ export async function detectContradictions(input: {
 
     const verdict = parseContradictionVerdict(responseText);
     if (!verdict) continue; // unparseable — leave unrecorded, retry next pass
+    input.llm.recordWorkerSuccess?.(input.sessionID, "lore-contradiction");
 
     if (verdict.contradict) {
       const inserted = ltm.recordContradiction({

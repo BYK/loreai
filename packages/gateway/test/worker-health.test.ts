@@ -3,6 +3,7 @@ import * as Sentry from "@sentry/bun";
 import {
   recordWorkerFailure,
   recordWorkerSuccess,
+  makeWorkerHealth,
   allowWorkerProbe,
   getStatus,
   getDegradationWarning,
@@ -47,6 +48,77 @@ describe("worker-health", () => {
     vi.clearAllMocks();
   });
 
+  describe("worker-scoped recovery (#1718)", () => {
+    test("usable distillation does not clear curator failure or its age", () => {
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s1", "lore-curator", "parse-error");
+      t += 31 * 60_000;
+      recordWorkerFailure("s1", "lore-curator", "parse-error");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      makeWorkerHealth("s1", "lore-distill").recordSuccess();
+      const health = getWorkerHealth().find((h) => h.sessionID === "s1");
+      expect(health?.workerIDs).toEqual(["lore-curator"]);
+      expect(health?.firstFailureAt).toBe(1_000_000);
+      expect(health?.reasons).toEqual(["parse-error"]);
+      expect(getDegradationWarning("s1")).toContain("lore-curator");
+    });
+
+    test("cache warming and another session cannot recover failed distillation", () => {
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      makeWorkerHealth("s1", "cache-warmer").recordSuccess();
+      makeWorkerHealth("s2", "lore-distill").recordSuccess();
+      expect(
+        getWorkerHealth().find((h) => h.sessionID === "s1")?.workerIDs,
+      ).toEqual(["lore-distill"]);
+      makeWorkerHealth("s1", "lore-distill").recordSuccess();
+      expect(getWorkerHealth()).toEqual([]);
+    });
+
+    test("idle time alone does not turn one isolated failure into an outage", () => {
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      t += 31 * 60_000;
+      expect(getDegradationWarning("s1")).toBeNull();
+    });
+
+    test("warning reports observed failures and transport-specific advice", () => {
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s1", "lore-distill", "transport-error");
+      t += 31 * 60_000;
+      recordWorkerFailure("s1", "lore-distill", "transport-error");
+      const warning = getDegradationWarning("s1");
+      expect(warning).toContain("lore-distill");
+      expect(warning).toContain("last failure");
+      expect(warning).toContain("transport");
+      expect(warning).not.toContain("have been failing for");
+      expect(warning).not.toContain("not being compressed");
+      expect(warning).not.toContain("workerModel");
+      expect(warning).not.toContain("empty or unusable");
+    });
+
+    test("auth rejection attribution cannot cross worker kinds", () => {
+      recordWorkerFailure("s1", "lore-import", "auth-rejected");
+      recordWorkerFailure("s1", "lore-curator", "no-response");
+      expect(hasRecentAuthRejectedFailure("s1", "lore-import")).toBe(true);
+      expect(hasRecentAuthRejectedFailure("s1", "lore-curator")).toBe(false);
+    });
+
+    test("recovering the oldest worker resets the remaining failure age", () => {
+      let t = 1_000_000;
+      _setNowForTest(() => t);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      t += 31 * 60_000;
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      recordWorkerFailure("s1", "lore-curator", "parse-error");
+      makeWorkerHealth("s1", "lore-distill").recordSuccess();
+      expect(getWorkerHealth()[0]?.firstFailureAt).toBe(t);
+      expect(getDegradationWarning("s1")).toBeNull();
+    });
+  });
+
   describe("sliding window", () => {
     test("first 1-2 failures: log only, no alert", () => {
       recordWorkerFailure("s1", "lore-distill", "no-auth");
@@ -68,7 +140,7 @@ describe("worker-health", () => {
       // Session authenticated and worked at least once, so a later sustained
       // failure is a genuine "was working, now broken" degradation (not the
       // first-run no-auth warm-up state, which is suppressed).
-      recordWorkerSuccess("s1");
+      recordWorkerSuccess("s1", "lore-distill");
       for (let i = 0; i < 3; i++) {
         recordWorkerFailure("s1", "lore-distill", "no-auth");
         t += 5 * 60 * 1000; // 5 min between failures — outside the 5-min window
@@ -79,6 +151,7 @@ describe("worker-health", () => {
       t = 1_000_000 + 31 * 60 * 1000;
       _setNowForTest(() => t);
       expect(getStatus("s1")).toBe("degraded");
+      recordWorkerFailure("s1", "lore-distill", "no-auth");
       expect(getDegradationWarning("s1")).not.toBeNull();
     });
 
@@ -99,7 +172,7 @@ describe("worker-health", () => {
       const s = workerHealthSummary();
       expect(s.ok).toBe(false);
       expect(s.degradedSessions).toBe(1);
-      expect(s.detail).toContain("stalled");
+      expect(s.detail).toContain("may be delayed");
     });
 
     test("degradation warning points at a REAL CLI command (lore doctor, not lore status)", () => {
@@ -109,13 +182,14 @@ describe("worker-health", () => {
       // command is worse than useless when their workers are already failing.
       let t = 1_000_000;
       _setNowForTest(() => t);
-      recordWorkerSuccess("s1"); // authenticated once; later failure is real
+      recordWorkerSuccess("s1", "lore-distill"); // authenticated once; later failure is real
       for (let i = 0; i < 3; i++) {
         recordWorkerFailure("s1", "lore-distill", "no-auth");
         t += 5 * 60 * 1000;
       }
       t = 1_000_000 + 31 * 60 * 1000;
       _setNowForTest(() => t);
+      recordWorkerFailure("s1", "lore-distill", "no-auth");
       const warning = getDegradationWarning("s1");
       expect(warning).not.toBeNull();
       expect(warning).toContain("`lore doctor`");
@@ -170,7 +244,7 @@ describe("worker-health", () => {
   describe("recovery", () => {
     test("recordWorkerSuccess clears state and emits nothing if not alerted", () => {
       recordWorkerFailure("s1", "lore-distill", "no-auth");
-      recordWorkerSuccess("s1");
+      recordWorkerSuccess("s1", "lore-distill");
       expect(getStatus("s1")).toBe("healthy");
       expect(
         getWorkerHealth().find((h) => h.sessionID === "s1"),
@@ -187,7 +261,7 @@ describe("worker-health", () => {
       t = 1_000_000 + 31 * 60 * 1000;
       _setNowForTest(() => t);
       expect(getStatus("s1")).toBe("degraded");
-      recordWorkerSuccess("s1");
+      recordWorkerSuccess("s1", "lore-distill");
       expect(getStatus("s1")).toBe("healthy");
     });
   });
@@ -247,7 +321,7 @@ describe("worker-health", () => {
       let t = 1_000_000;
       _setNowForTest(() => t);
       // Session authenticated and produced usable output once.
-      recordWorkerSuccess("s-was-ok");
+      recordWorkerSuccess("s-was-ok", "lore-distill");
       // Later its credential goes stale.
       for (let i = 0; i < 3; i++) {
         recordWorkerFailure("s-was-ok", "lore-distill", "no-auth");
@@ -255,6 +329,7 @@ describe("worker-health", () => {
       }
       t = 1_000_000 + 31 * 60 * 1000;
       _setNowForTest(() => t);
+      recordWorkerFailure("s-was-ok", "lore-distill", "no-auth");
       expect(getDegradationWarning("s-was-ok")).not.toBeNull();
     });
 
@@ -267,6 +342,7 @@ describe("worker-health", () => {
       recordWorkerFailure("s-fresh", "lore-distill", "upstream-error");
       t = 1_000_000 + 31 * 60 * 1000;
       _setNowForTest(() => t);
+      recordWorkerFailure("s-fresh", "lore-distill", "no-response");
       expect(getDegradationWarning("s-fresh")).not.toBeNull();
     });
 
@@ -293,6 +369,7 @@ describe("worker-health", () => {
       t = 1_000_000 + 31 * 60 * 1000;
       _setNowForTest(() => t);
       expect(getStatus("s-outage")).toBe("degraded");
+      recordWorkerFailure("s-outage", "lore-distill", "no-auth");
       expect(getDegradationWarning("s-outage")).not.toBeNull();
     });
   });
@@ -367,7 +444,7 @@ describe("worker-health", () => {
       _setNowForTest(() => 1_000_000 + 31 * 60 * 1000);
       expect(getStatus("s1")).toBe("degraded");
 
-      recordWorkerSuccess("s1");
+      recordWorkerSuccess("s1", "lore-distill");
       expect(Sentry.addBreadcrumb).toHaveBeenCalledTimes(1);
       const [crumb] = (Sentry.addBreadcrumb as ReturnType<typeof vi.fn>).mock
         .calls[0];
@@ -385,7 +462,7 @@ describe("worker-health", () => {
       // Session worked once, so a later stale-auth failure is a real
       // degradation with a user-facing local warning (first-run no-auth, which
       // has no prior success, is suppressed separately).
-      recordWorkerSuccess("s1");
+      recordWorkerSuccess("s1", "lore-distill");
       // 3 rapid no-auth failures reach the degraded threshold in one window.
       recordWorkerFailure("s1", "lore-contradiction", "no-auth");
       recordWorkerFailure("s1", "lore-contradiction", "no-auth");
@@ -398,6 +475,7 @@ describe("worker-health", () => {
       // degraded status + the actionable `lore doctor` warning.
       _setNowForTest(() => 1_000_000 + 31 * 60 * 1000);
       expect(getStatus("s1")).toBe("degraded");
+      recordWorkerFailure("s1", "lore-contradiction", "no-auth");
       expect(getDegradationWarning("s1")).not.toBeNull();
     });
 
@@ -490,7 +568,7 @@ describe("worker-health", () => {
       recordWorkerFailure("s1", "lore-distill", "no-response");
       expect(allowWorkerProbe("s1")).toBe(false);
 
-      recordWorkerSuccess("s1");
+      recordWorkerSuccess("s1", "lore-distill");
       expect(allowWorkerProbe("s1")).toBe(true);
     });
 
@@ -576,7 +654,7 @@ describe("worker-health", () => {
       markWorkerPaused("s1");
       expect(isWorkerCreditPaused("s1")).toBe(true);
       // Note: no failure-ladder entry exists for a credit-paused session.
-      recordWorkerSuccess("s1");
+      recordWorkerSuccess("s1", "lore-distill");
       expect(isWorkerCreditPaused("s1")).toBe(false);
     });
 
@@ -881,6 +959,41 @@ describe("worker-health", () => {
   // `lore import` run hits an auth-rejected 401. Without it, a 71-chunk import
   // would burn 71 doomed requests + 71 Sentry captures before exiting with
   // a generic "no response from the model" message.
+  test("cross-worker success history survives TTL while credential failures remain", () => {
+    vi.useFakeTimers();
+    try {
+      let t = 5_000_000;
+      _setNowForTest(() => t);
+      recordWorkerSuccess("ttl-mixed", "cache-warmer");
+      recordWorkerFailure("ttl-mixed", "lore-distill", "no-auth");
+      for (let minute = 1; minute <= 65; minute++) {
+        t += 60_000;
+        recordWorkerFailure("ttl-mixed", "lore-distill", "no-auth");
+        vi.advanceTimersByTime(60_000);
+      }
+      expect(getDegradationWarning("ttl-mixed")).toContain("lore-distill");
+      // History is still evicted once the final unresolved worker expires.
+      t += 61 * 60_000;
+      vi.advanceTimersByTime(5 * 60_000);
+      recordWorkerFailure("ttl-mixed", "lore-distill", "no-auth");
+      t += 31 * 60_000;
+      recordWorkerFailure("ttl-mixed", "lore-distill", "no-auth");
+      expect(getDegradationWarning("ttl-mixed")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("an active worker cannot keep another worker's failures past TTL", () => {
+    let t = 8_000_000;
+    _setNowForTest(() => t);
+    recordWorkerFailure("ttl-workers", "lore-distill", "transport-error");
+    t += 59 * 60_000;
+    recordWorkerFailure("ttl-workers", "lore-curator", "parse-error");
+    t += 2 * 60_000;
+    expect(getWorkerHealth()[0]?.workerIDs).toEqual(["lore-curator"]);
+  });
+
   describe("hasRecentAuthRejectedFailure", () => {
     test("no failures → false (the empty-state default)", () => {
       expect(hasRecentAuthRejectedFailure("_unknown", "lore-import")).toBe(

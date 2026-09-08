@@ -235,6 +235,13 @@ async function _detect(input: {
 
   // Step 6: Parse response and create preference entry
   const pattern = parsePatternResponse(responseText);
+  const cleaned = responseText
+    .trim()
+    .replace(/^```json?\s*/i, "")
+    .replace(/\s*```$/i, "");
+  if (pattern || cleaned === "null") {
+    input.llm.recordWorkerSuccess?.(input.sessionID, "lore-pattern-echo");
+  }
   if (!pattern) return;
 
   // Pre-check: ltm.create()'s dedup guard silently returns the existing ID

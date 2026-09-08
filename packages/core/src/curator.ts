@@ -112,38 +112,55 @@ export function parseOps(text: string): CuratorOp[] {
  * Parse the full curator response including both ops and detected entities.
  */
 export function parseResponse(text: string): CuratorResponse {
+  return parseResponseWithValidity(text).value;
+}
+
+/** Preserve forgiving parsing while distinguishing usable no-ops from errors. */
+export function parseResponseWithValidity(text: string): {
+  value: CuratorResponse;
+  valid: boolean;
+} {
+  const empty: CuratorResponse = { ops: [], entities: [], relations: [] };
   const cleaned = text
     .trim()
     .replace(/^```json?\s*/i, "")
     .replace(/\s*```$/i, "");
   try {
     const parsed = JSON.parse(cleaned);
-
-    // Legacy format: plain array of ops
     if (Array.isArray(parsed)) {
+      const ops = filterOps(parsed);
       return {
-        ops: filterOps(parsed),
-        entities: [],
-        relations: [],
+        value: { ...empty, ops },
+        valid: parsed.length === 0 || ops.length > 0,
       };
     }
-
-    // New format: { ops: [...], entities: [...], relations: [...] }
     if (typeof parsed === "object" && parsed !== null) {
-      const ops = Array.isArray(parsed.ops) ? filterOps(parsed.ops) : [];
-      const detectedEntities = Array.isArray(parsed.entities)
-        ? filterEntities(parsed.entities)
-        : [];
-      const detectedRelations = Array.isArray(parsed.relations)
-        ? filterRelations(parsed.relations)
-        : [];
-      return { ops, entities: detectedEntities, relations: detectedRelations };
+      const value = {
+        ops: Array.isArray(parsed.ops) ? filterOps(parsed.ops) : [],
+        entities: Array.isArray(parsed.entities)
+          ? filterEntities(parsed.entities)
+          : [],
+        relations: Array.isArray(parsed.relations)
+          ? filterRelations(parsed.relations)
+          : [],
+      };
+      const fields = ["ops", "entities", "relations"].filter(
+        (field) => field in parsed,
+      );
+      const validShape =
+        fields.length > 0 &&
+        fields.every((field) => Array.isArray(parsed[field]));
+      const valid =
+        validShape &&
+        (fields.every((field) => parsed[field].length === 0) ||
+          value.ops.length + value.entities.length + value.relations.length >
+            0);
+      return { value, valid };
     }
-
-    return { ops: [], entities: [], relations: [] };
   } catch {
-    return { ops: [], entities: [], relations: [] };
+    /* Invalid JSON retains the existing empty public result. */
   }
+  return { value: empty, valid: false };
 }
 
 function filterOps(arr: unknown[]): CuratorOp[] {
@@ -975,11 +992,9 @@ async function runInner(input: {
     };
   }
 
-  const response = parseResponse(responseText);
-  // Record success only AFTER parsing — parseResponse() silently swallows
-  // malformed JSON into empty ops. Recording success before parse would clear
-  // the health state, making sustained parse failures invisible.
-  input.workerHealth?.recordSuccess();
+  const { value: response, valid } = parseResponseWithValidity(responseText);
+  if (valid) input.workerHealth?.recordSuccess();
+  else input.workerHealth?.recordFailure("parse-error");
 
   // Soft cap (v48): admit creates even at the limit, then evict the lowest-VALUE
   // tail back down to maxEntries below (see post-applyOps eviction). This breaks
@@ -1571,9 +1586,12 @@ async function runConsolidationPrompt(
     return { updated: 0, deleted: 0 };
   }
 
-  const ops = parseOps(responseText);
-  // Record success after parsing (see runInner for rationale).
-  input.workerHealth?.recordSuccess();
+  const {
+    value: { ops },
+    valid,
+  } = parseResponseWithValidity(responseText);
+  if (valid) input.workerHealth?.recordSuccess();
+  else input.workerHealth?.recordFailure("parse-error");
   const result = applyOps(ops, {
     projectPath: input.projectPath,
     sessionID: input.sessionID,

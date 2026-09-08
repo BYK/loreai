@@ -1147,6 +1147,7 @@ export interface LLMInvariantJudgeOptions {
   model?: { providerID: string; modelID: string };
   effort?: ReasoningEffort;
   sessionID: string;
+  signal?: AbortSignal;
 }
 
 /**
@@ -1160,6 +1161,7 @@ export function createLLMInvariantJudge(
   const prompt = async (user: string): Promise<string | null> =>
     options.llm.prompt(INVARIANT_JUDGE_SYSTEM, user, {
       model: options.model,
+      signal: options.signal,
       workerID: "lore-invariant-check",
       thinking: false,
       reasoningEffort: options.effort,
@@ -1178,7 +1180,9 @@ export function createLLMInvariantJudge(
         // LLMClient does not expose retries. Count the visible dispatch as one;
         // direct InvariantJudge integrations must report every hidden attempt.
         transportAttempts++;
-        return prompt(user);
+        const response = await prompt(user);
+        options.signal?.throwIfAborted();
+        return response;
       };
       const stats = (): JudgeStats => ({ semanticCalls, transportAttempts });
 
@@ -1209,7 +1213,13 @@ export function createLLMInvariantJudge(
       }
 
       const verdict = parseInvariantVerdict(response);
-      if (verdict) return { kind: "verdict", ...verdict, stats: stats() };
+      if (verdict) {
+        options.llm.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-invariant-check",
+        );
+        return { kind: "verdict", ...verdict, stats: stats() };
+      }
 
       if (input.semanticCallBudget < 2) {
         return invalidVerdictOutcome(stats());
@@ -1241,6 +1251,12 @@ export function createLLMInvariantJudge(
         };
       }
       const repaired = parseInvariantVerdict(response);
+      if (repaired) {
+        options.llm.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-invariant-check",
+        );
+      }
       return repaired
         ? { kind: "verdict", ...repaired, stats: stats() }
         : invalidVerdictOutcome(stats());
@@ -1439,6 +1455,7 @@ export async function checkInvariants(
           model: input.model,
           effort: input.effort,
           sessionID: input.sessionID,
+          signal: input.signal,
         })
       : null);
 

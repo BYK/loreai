@@ -208,3 +208,71 @@ describe("createGatewayInvariantJudge", () => {
     });
   });
 });
+
+// Both adapters must recover only after schema validation, including repair.
+describe("invariant worker recovery", () => {
+  for (const adapter of ["gateway", "core"] as const) {
+    test.each([
+      "initial",
+      "repair",
+      "invalid",
+      "cancel-initial",
+      "cancel-repair",
+    ])(`${adapter}: %s`, async (mode) => {
+      const { createLLMInvariantJudge } =
+        await import("../../core/src/invariant-check");
+      const controller = new AbortController();
+      const recordWorkerSuccess = vi.fn();
+      let calls = 0;
+      const prompt = vi.fn(async () => {
+        calls++;
+        if (
+          (mode === "cancel-initial" && calls === 1) ||
+          (mode === "cancel-repair" && calls === 2)
+        )
+          controller.abort(new DOMException("cancel", "AbortError"));
+        if (
+          mode === "invalid" ||
+          ((mode === "repair" || mode === "cancel-repair") && calls === 1)
+        )
+          return "not JSON";
+        return '{"verdict":"satisfies","reason":"covered"}';
+      });
+      const judge =
+        adapter === "core"
+          ? createLLMInvariantJudge({
+              llm: { prompt, recordWorkerSuccess },
+              sessionID: "recover-judge",
+              signal: controller.signal,
+            })
+          : createGatewayInvariantJudge({
+              client: {
+                prompt,
+                recordWorkerSuccess,
+                promptDetailed: async () => ({
+                  kind: "success",
+                  text: await prompt(),
+                  model: "test/model",
+                  protocol: "openai-responses",
+                  attempts: 1,
+                }),
+              },
+              model: MODEL,
+              sessionID: "recover-judge",
+              signal: controller.signal,
+            });
+      const outcome = await judge.judge(INPUT);
+      expect(prompt).toHaveBeenCalledTimes(
+        ["initial", "cancel-initial"].includes(mode) ? 1 : 2,
+      );
+      const usable = mode === "initial" || mode === "repair";
+      expect(outcome.kind).toBe(usable ? "verdict" : "unresolved");
+      expect(recordWorkerSuccess).toHaveBeenCalledTimes(usable ? 1 : 0);
+      if (usable)
+        expect(recordWorkerSuccess).toHaveBeenCalledWith(
+          "recover-judge",
+          "lore-invariant-check",
+        );
+    });
+  }
+});

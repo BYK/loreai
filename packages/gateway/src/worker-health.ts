@@ -27,10 +27,10 @@
  *  - Sustained 30+ min: getDegradationWarning() returns non-null for
  *    injection into the next user response
  *  - Sustained 60+ min: Sentry.captureException (full alert, not debounced)
- *  - Any successful worker call: clear state, optionally send Sentry recovery
+ *  - Usable worker output: clear that worker's state, optionally log recovery
  *
  * All public functions are safe to call concurrently (single-threaded event
- * loop) and idempotent. State is per-session and TTL-evicted.
+ * loop). State is per session and worker kind, and TTL-evicted.
  */
 
 import * as Sentry from "@sentry/bun";
@@ -59,6 +59,8 @@ export type FailureReason =
   | "cross-provider"
   | "upstream-error"
   | "no-response"
+  | "transport-error"
+  | "timeout"
   | "parse-error"
   | "rate-limit"
   | "circuit-breaker"
@@ -133,7 +135,7 @@ const FAILURE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 /** Number of failures in the window that triggers the first alert. */
 const DEGRADED_THRESHOLD = 3;
 
-/** Minimum time between Sentry message events for the same session. */
+/** Minimum time between Sentry message events for the same session and worker. */
 const ALERT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
 
 /** Sustained failure duration that triggers response-message injection. */
@@ -142,7 +144,7 @@ const RESPONSE_MESSAGE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
 /** Sustained failure duration that triggers Sentry exception (not debounced). */
 const CRITICAL_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 
-/** Per-session TTL after last failure. State is evicted when this expires. */
+/** Per-worker TTL after last failure. State is evicted when this expires. */
 const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /** How often the TTL sweep runs. */
@@ -173,7 +175,38 @@ const CIRCUIT_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 // State
 // ---------------------------------------------------------------------------
 
-const state: Map<string, SessionHealth> = new Map();
+const state = new Map<string, Map<string, SessionHealth>>();
+
+/** Expire each worker independently, including reads between periodic sweeps. */
+function workerFailures(
+  sessionID: string,
+): Map<string, SessionHealth> | undefined {
+  const workers = state.get(sessionID);
+  if (!workers) return undefined;
+  for (const [workerID, entry] of workers) {
+    if (now() - entry.lastFailureAt > SESSION_TTL_MS) workers.delete(workerID);
+  }
+  if (workers.size === 0) {
+    state.delete(sessionID);
+    return undefined;
+  }
+  return workers;
+}
+
+/** Keep the existing session-level API while retaining recovery ownership. */
+function sessionFailure(sessionID: string): SessionHealth | undefined {
+  const entries = [...(workerFailures(sessionID)?.values() ?? [])];
+  if (!entries.length) return undefined;
+  return {
+    sessionID,
+    firstFailureAt: Math.min(...entries.map((e) => e.firstFailureAt)),
+    lastFailureAt: Math.max(...entries.map((e) => e.lastFailureAt)),
+    failureCount: entries.reduce((sum, e) => sum + e.failureCount, 0),
+    reasons: new Set(entries.flatMap((e) => [...e.reasons])),
+    workerIDs: new Set(entries.flatMap((e) => [...e.workerIDs])),
+    sawGenuineReason: entries.some((e) => e.sawGenuineReason),
+  };
+}
 
 /**
  * Sessions soft-paused due to an upstream credit/billing state (HTTP 402,
@@ -187,7 +220,7 @@ const creditPaused: Map<string, { lastProbe: number }> = new Map();
 
 /**
  * Sessions that have had at least one SUCCESSFUL worker call, with the
- * timestamp of the most recent success. Used to distinguish a first-run
+ * timestamp of the most recent usable output per worker. Used to distinguish a first-run
  * "never authenticated yet" state from a genuine "was working, now broken"
  * degradation.
  *
@@ -202,7 +235,7 @@ const creditPaused: Map<string, { lastProbe: number }> = new Map();
  *
  * Bounded like {@link state}: swept on the same TTL so it can't grow unbounded.
  */
-const succeededSessions: Map<string, { lastSuccessAt: number }> = new Map();
+const succeededSessions = new Map<string, Map<string, number>>();
 
 /**
  * Provider+model+worker verdicts for models that consistently return no usable
@@ -299,17 +332,13 @@ export function hasRecentAuthRejectedFailure(
   withinMs = 60_000,
   sinceMs?: number,
 ): boolean {
-  const entry = state.get(sessionID);
+  const entry = workerFailures(sessionID)?.get(workerID);
   if (!entry) return false;
   // `sinceMs` lets a fresh invocation ignore stale-but-unexpired failures
   // recorded by an earlier invocation in this process. Recorded after
   // runStart → counts; recorded before → ignored (a fresh credential might
   // have made the failure moot).
   if (sinceMs != null && entry.lastFailureAt < sinceMs) return false;
-  // has() is O(1); cheaper than maintaining a per-worker list. Workers are a
-  // small finite set today (lore-distill / lore-curator / …) so the Set
-  // membership check is plenty fast.
-  if (!entry.workerIDs.has(workerID)) return false;
   if (now() - entry.lastFailureAt > withinMs) return false;
   return entry.reasons.has("auth-rejected");
 }
@@ -592,21 +621,12 @@ export function recordWorkerFailure(
     return;
   }
 
-  let entry = state.get(sessionID);
-
-  // Initialize or rotate the sliding window.
-  //
-  // Two axes to reconcile:
-  //  - Sliding window (FAILURE_WINDOW_MS = 5m): the counter that triggers the
-  //    first Sentry alert. Reset on entry to the new window.
-  //  - Sustained duration (RESPONSE_MESSAGE_THRESHOLD_MS = 30m,
-  //    CRITICAL_THRESHOLD_MS = 60m): measured from firstFailureAt. MUST be
-  //    preserved across window rotations, otherwise a session that fails every
-  //    4 minutes would never accumulate to 30/60 minutes of sustained outage.
-  //
-  // The full TTL (SESSION_TTL_MS = 1h) is the eviction bound — once the gap
-  // since lastFailureAt exceeds it, the session is considered fully recovered
-  // and we start fresh (including resetting firstFailureAt).
+  let workers = workerFailures(sessionID);
+  if (!workers) {
+    workers = new Map();
+    state.set(sessionID, workers);
+  }
+  let entry = workers.get(workerID);
   if (!entry) {
     entry = {
       sessionID,
@@ -614,31 +634,14 @@ export function recordWorkerFailure(
       lastFailureAt: t,
       failureCount: 0,
       reasons: new Set(),
-      workerIDs: new Set(),
+      workerIDs: new Set([workerID]),
       sawGenuineReason: false,
     };
-    state.set(sessionID, entry);
-  } else if (t - entry.lastFailureAt > SESSION_TTL_MS) {
-    // Stale entry past full TTL — fully recovered. Start fresh.
-    state.delete(sessionID);
-    entry = {
-      sessionID,
-      firstFailureAt: t,
-      lastFailureAt: t,
-      failureCount: 0,
-      reasons: new Set(),
-      workerIDs: new Set(),
-      sawGenuineReason: false,
-    };
-    state.set(sessionID, entry);
+    workers.set(workerID, entry);
   } else if (t - entry.lastFailureAt > FAILURE_WINDOW_MS) {
-    // New sliding window within the same sustained outage: reset the counter
-    // and reason/worker sets, but KEEP firstFailureAt so the 30m/60m
-    // sustained thresholds continue to accumulate. `sawGenuineReason` also
-    // persists — it latches for the whole outage, not per window.
+    // Preserve this worker's unresolved failure history across counter windows.
     entry.failureCount = 0;
     entry.reasons = new Set();
-    entry.workerIDs = new Set();
   }
 
   entry.failureCount++;
@@ -713,7 +716,7 @@ export function recordWorkerFailure(
   }
 
   // Critical escalation: sustained 1h+ of failure → Sentry exception.
-  // Throttled to once per hour per session to avoid alert fatigue.
+  // Throttled to once per hour per session and worker to avoid alert fatigue.
   const sustainedMs = t - entry.firstFailureAt;
   if (sustainedMs >= CRITICAL_THRESHOLD_MS) {
     const shouldException =
@@ -753,44 +756,34 @@ export function recordWorkerFailure(
 }
 
 /**
- * Record a successful worker call. Clears the failure state for the session
- * and emits a Sentry recovery message if the session was previously in
- * alert state.
+ * Record usable output after parser validation. Recover only this worker;
+ * another worker's failures must survive a successful call.
  */
-export function recordWorkerSuccess(sessionID: string): void {
-  // A successful call clears any credit pause (e.g. user topped up). Must run
-  // before the early return below: credit-paused sessions have no failure-
-  // ladder `state` entry (402 never calls recordWorkerFailure).
+export function recordWorkerSuccess(sessionID: string, workerID: string): void {
+  // Preserve the existing account-credit recovery policy.
   creditPaused.delete(sessionID);
-
-  // Mark that this session has authenticated and produced usable worker output
-  // at least once. Any later degradation is then a genuine "was working, now
-  // broken" event worth warning the user about (see {@link succeededSessions}).
-  succeededSessions.set(sessionID, { lastSuccessAt: now() });
-  // Arm the TTL sweep here too: this map is populated on the SUCCESS path, but
-  // the sweep that bounds it was otherwise only armed by recordWorkerFailure.
-  // A process that never records a failure would otherwise grow this map
-  // unbounded (one entry per unique session).
+  let successes = succeededSessions.get(sessionID);
+  if (!successes) {
+    successes = new Map();
+    succeededSessions.set(sessionID, successes);
+  }
+  successes.set(workerID, now());
   ensureSweepTimer();
 
-  const entry = state.get(sessionID);
+  const workers = workerFailures(sessionID);
+  const entry = workers?.get(workerID);
   if (!entry) return;
-
-  const wasInAlertState = entry.alertSentAt !== undefined;
-  state.delete(sessionID);
-
-  if (wasInAlertState) {
-    log.info(
-      `[worker-health] session ${sessionID.slice(0, 16)} recovered (was degraded, now healthy)`,
-    );
-    // Recovery is a GOOD event — record it as a breadcrumb (forensic context
-    // for any later event in this scope) rather than a captured message, which
-    // would otherwise spawn its own Sentry issue per session (noise).
+  workers!.delete(workerID);
+  if (!workers!.size) state.delete(sessionID);
+  log.info(
+    `[worker-health] ${workerID} recovered for session=${sessionID.slice(0, 16)}`,
+  );
+  if (entry.alertSentAt !== undefined) {
     Sentry.addBreadcrumb({
       category: "worker-health",
       level: "info",
       message: "Worker health recovered",
-      data: { session_id: sessionID },
+      data: { session_id: sessionID, worker_id: workerID },
     });
   }
 }
@@ -815,15 +808,11 @@ export function recordWorkerSuccess(sessionID: string): void {
  * distillation and blocking compaction are intentionally exempt — starving
  * them harms the user more than a futile retry costs.
  *
- * Note: those exempt paths omit the `workerHealth` hook entirely, so they are
- * invisible to the breaker — they neither open/extend it (their failures
- * aren't recorded) nor close it (no `recordWorkerSuccess`). Recovery is
- * therefore detected only by the periodic non-urgent probe this gate lets
- * through, which DOES carry the hook; recovery latency is bounded by
- * {@link CIRCUIT_PROBE_INTERVAL_MS}.
+ * Urgent work bypasses scheduling policy, but still reports its failures and
+ * usable outcomes. Recovery clears only the corresponding worker's failures.
  */
 export function allowWorkerProbe(sessionID: string): boolean {
-  const entry = state.get(sessionID);
+  const entry = sessionFailure(sessionID);
   if (!entry) return true; // healthy — no recorded failures
 
   const t = now();
@@ -842,6 +831,9 @@ export function allowWorkerProbe(sessionID: string): boolean {
  * the guidance off the recorded reasons.
  */
 function likelyCauseFor(reasons: Set<FailureReason>): string {
+  if (reasons.has("transport-error") || reasons.has("timeout")) {
+    return "worker requests failed during transport or timed out. Check connectivity and `lore doctor` / dashboard transport diagnostics.";
+  }
   if (reasons.has("no-auth") || reasons.has("auth-rejected")) {
     return (
       "session authentication has gone stale. Run `lore doctor` or check the " +
@@ -873,31 +865,37 @@ function likelyCauseFor(reasons: Set<FailureReason>): string {
  * Returns the user-facing warning message for the next response, or null
  * if the session is healthy.
  *
- * The message is intentionally concise and actionable — the user is being
- * harmed (context bloat, no LTM growth) and needs to know.
+ * Require repeated observed failures; age alone does not prove continuous
+ * failure. Successful output from another worker does not clear this warning.
  */
 export function getDegradationWarning(sessionID: string): string | null {
-  const entry = state.get(sessionID);
-  if (!entry) return null;
-  const sustainedMs = now() - entry.firstFailureAt;
-  if (sustainedMs < RESPONSE_MESSAGE_THRESHOLD_MS) return null;
-  // First-run suppression: if this session has NEVER had a successful worker
-  // call and has NEVER seen a genuine (non-credential-class) outage reason for
-  // this outage, every failure is credential-class (no-auth / cross-provider) —
-  // the normal "not authenticated yet" warm-up state on a fresh install, not a
-  // working session that broke. Telling the user their memory is being "harmed"
-  // here is alarming and wrong (Kjaer/Erica both hit this). Stay quiet until
-  // either a real credential lands (recordWorkerSuccess flips neverSucceeded)
-  // or a genuine outage reason is seen (sawGenuineReason latches, surviving
-  // window rotation so a real failure that ages out isn't reclassified as
-  // first-run noise).
-  const neverSucceeded = !succeededSessions.has(sessionID);
-  if (neverSucceeded && !entry.sawGenuineReason) return null;
+  const workers = workerFailures(sessionID);
+  if (!workers) return null;
+  const affected = [...workers.values()].filter(
+    (entry) =>
+      entry.lastFailureAt - entry.firstFailureAt >=
+        RESPONSE_MESSAGE_THRESHOLD_MS &&
+      (succeededSessions.has(sessionID) || entry.sawGenuineReason),
+  );
+  if (!affected.length) return null;
+  const t = now();
+  const details = affected.map((entry) => {
+    const workerID = [...entry.workerIDs][0];
+    const success = succeededSessions.get(sessionID)?.get(workerID);
+    return (
+      `${workerID} (first failure ${formatDuration(t - entry.firstFailureAt)} ago; ` +
+      `last failure ${formatDuration(t - entry.lastFailureAt)} ago; ` +
+      (success === undefined
+        ? "no usable success recorded"
+        : `last usable success ${formatDuration(t - success)} ago`) +
+      ")"
+    );
+  });
+  const reasons = new Set(affected.flatMap((entry) => [...entry.reasons]));
   return (
-    `[Lore: Background workers (distillation, curation, cache warming) for this session ` +
-    `have been failing for ${formatDuration(sustainedMs)}. This is harmful — your ` +
-    `context window is not being compressed and long-term knowledge is not being ` +
-    `captured. Likely cause: ${likelyCauseFor(entry.reasons)}]`
+    `[Lore: Unrecovered background-worker failures: ${details.join("; ")}. ` +
+    `Affected work may be delayed; other workers may still be progressing. ` +
+    `Diagnostics: ${likelyCauseFor(reasons)}]`
   );
 }
 
@@ -906,7 +904,7 @@ export function getDegradationWarning(sessionID: string): string | null {
  * response header.
  */
 export function getStatus(sessionID: string): WorkerHealthStatus {
-  const entry = state.get(sessionID);
+  const entry = sessionFailure(sessionID);
   if (!entry) return "healthy";
   const sustainedMs = now() - entry.firstFailureAt;
   if (sustainedMs >= CRITICAL_THRESHOLD_MS) return "critical";
@@ -940,7 +938,9 @@ export function getWorkerHealth(): Array<{
     workerIDs: Array<WorkerID | (string & {})>;
     warning: string | null;
   }> = [];
-  for (const entry of state.values()) {
+  for (const sessionID of state.keys()) {
+    const entry = sessionFailure(sessionID);
+    if (!entry) continue;
     const sustainedMs = t - entry.firstFailureAt;
     result.push({
       sessionID: entry.sessionID,
@@ -972,10 +972,8 @@ export interface WorkerHealthSummary {
 
 /**
  * Gateway-wide roll-up of the per-session failure ladder, for health surfaces
- * (`/health`, `lore doctor`). Sustained background-worker failures mean
- * distillation/curation aren't running — context isn't being compressed and
- * knowledge isn't being captured — which is otherwise only visible once a
- * single session crosses the 30-minute response-warning threshold.
+ * (`/health`, `lore doctor`). The legacy status age tracks unresolved failures;
+ * it does not imply that every worker has stopped or that no progress occurred.
  */
 export function workerHealthSummary(): WorkerHealthSummary {
   const degraded = getWorkerHealth().filter(
@@ -992,8 +990,8 @@ export function workerHealthSummary(): WorkerHealthSummary {
     ok: false,
     degradedSessions: degraded.length,
     detail:
-      `${degraded.length} session(s) with sustained background-worker failures — ` +
-      "distillation/curation may be stalled (likely stale auth or exhausted credit)",
+      `${degraded.length} session(s) with unrecovered background-worker failures — ` +
+      "some worker tasks may be delayed; check per-worker failure reasons in the dashboard",
   };
 }
 
@@ -1015,7 +1013,7 @@ export function makeWorkerHealth(
       recordWorkerFailure(sessionID, workerID, reason as FailureReason);
     },
     recordSuccess() {
-      recordWorkerSuccess(sessionID);
+      recordWorkerSuccess(sessionID, workerID);
     },
   };
 }
@@ -1061,23 +1059,16 @@ function ensureSweepTimer(): void {
   if (typeof setInterval !== "function") return; // edge case: tests with no timers
   sweepTimer = setInterval(() => {
     const t = now();
-    for (const [sessionID, entry] of state) {
-      if (t - entry.lastFailureAt > SESSION_TTL_MS) {
-        state.delete(sessionID);
+    for (const sessionID of state.keys()) workerFailures(sessionID);
+    // Preserve the session-level authenticated-history predicate while any
+    // worker still has unresolved failures; recovery ownership remains per worker.
+    for (const [sessionID, successes] of succeededSessions) {
+      for (const [workerID, lastSuccessAt] of successes) {
+        if (t - lastSuccessAt > SESSION_TTL_MS && !state.has(sessionID)) {
+          successes.delete(workerID);
+        }
       }
-    }
-    // Bound the ever-succeeded map on the same TTL so it can't grow unbounded
-    // across a long-lived gateway process. BUT never evict a session that still
-    // has an active failure entry: a session that was working and then hits
-    // persistent credential-class failures (e.g. auth went stale) keeps failing
-    // past 1h, and dropping its "was working" history here would flip
-    // neverSucceeded back to true and wrongly suppress its degradation banner
-    // (Seer #15390225). Only evict once the failure entry is gone (session
-    // recovered or fully aged out).
-    for (const [sessionID, s] of succeededSessions) {
-      if (t - s.lastSuccessAt > SESSION_TTL_MS && !state.has(sessionID)) {
-        succeededSessions.delete(sessionID);
-      }
+      if (!successes.size) succeededSessions.delete(sessionID);
     }
   }, SWEEP_INTERVAL_MS);
   // Allow the process to exit without waiting on this timer.

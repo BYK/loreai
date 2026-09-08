@@ -91,6 +91,7 @@ import {
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
 import {
   recordWorkerFailure,
+  recordWorkerSuccess,
   markWorkerPaused,
   isWorkerIncapable,
   markWorkerIncapable,
@@ -3419,6 +3420,7 @@ export function createGatewayLLMClient(
   const factoryVertexProject = opts?.vertexProject;
   const onAuthRejected = opts?.onAuthRejected;
   const client: GatewayLLMClient = {
+    recordWorkerSuccess,
     async prompt(system, user, opts) {
       // Reset at the START of every call so callers see only the last
       // non-thrown failure from THIS call, not a stale one from a prior
@@ -5051,7 +5053,14 @@ export function createGatewayLLMClient(
       } catch (e) {
         // Preserve the caller's exact abort reason regardless of its class.
         if (opts?.signal?.aborted) throw opts.signal.reason;
-        if (e instanceof DOMException && e.name === "TimeoutError") throw e;
+        if (e instanceof DOMException && e.name === "TimeoutError") {
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            "timeout",
+          );
+          throw e;
+        }
 
         if (e instanceof WorkerRequestTooLargeError) {
           recordWorkerFailure(
@@ -5067,17 +5076,18 @@ export function createGatewayLLMClient(
           return null;
         }
 
-        // Client disconnect / abort is benign — downgrade from error to info
-        // to avoid Sentry noise from normal connection lifecycle events.
+        // Caller cancellation was rethrown above and never enters health.
         const isAbort = e instanceof DOMException && e.name === "AbortError";
-        // Network/timeout error — no response was received. Record here so the
-        // adapter remains the single owner of transport-failure attribution
-        // (core workers no longer record on a null return).
-        recordWorkerFailure(
-          opts?.sessionID ?? "_unknown",
-          opts?.workerID ?? "unknown",
-          "no-response",
-        );
+        if (!isAbort) {
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            transportErrorKind(e) === "deadline" ||
+              transportErrorKind(e) === "timeout"
+              ? "timeout"
+              : "transport-error",
+          );
+        }
         if (isAbort) {
           log.info("worker prompt aborted (client disconnect or shutdown)");
           recordPromptFailure("aborted", "client disconnect or shutdown", {
@@ -5225,6 +5235,20 @@ export function createGatewayInvariantJudge(
           },
         );
         transportAttempts += outcome.attempts;
+        if (signal?.aborted) {
+          return {
+            kind: "failure",
+            code:
+              signal.reason instanceof DOMException &&
+              signal.reason.name === "TimeoutError"
+                ? "timeout"
+                : "aborted",
+            message: "Invariant judge cancelled before accepting output",
+            retryable: !options.signal?.aborted,
+            model: outcome.model,
+            attempts: outcome.attempts,
+          };
+        }
         return outcome;
       };
 
@@ -5239,7 +5263,13 @@ export function createGatewayInvariantJudge(
         return promptFailureToJudgeOutcome(outcome, stats(), options.signal);
       }
       let verdict = invariantCheck.parseInvariantVerdict(outcome.text);
-      if (verdict) return { kind: "verdict", ...verdict, stats: stats() };
+      if (verdict) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-invariant-check",
+        );
+        return { kind: "verdict", ...verdict, stats: stats() };
+      }
       if (input.semanticCallBudget < 2) {
         return invalidGatewayVerdict(stats());
       }
@@ -5256,6 +5286,12 @@ export function createGatewayInvariantJudge(
         return promptFailureToJudgeOutcome(outcome, stats(), options.signal);
       }
       verdict = invariantCheck.parseInvariantVerdict(outcome.text);
+      if (verdict) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-invariant-check",
+        );
+      }
       return verdict
         ? { kind: "verdict", ...verdict, stats: stats() }
         : invalidGatewayVerdict(stats());
