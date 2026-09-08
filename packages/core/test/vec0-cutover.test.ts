@@ -59,6 +59,7 @@ import {
   MAX_TEMPORAL_CHUNKS_PER_MESSAGE,
   maybeCutoverToVec0,
   resetTemporalRechunkProgress,
+  runStartupBackfill,
 } from "../src/embedding";
 import * as log from "../src/log";
 import {
@@ -2142,6 +2143,41 @@ describeVec("temporal re-chunk durable admission", () => {
     expect(queuedIds()).toEqual(["m1"]);
     expect(await backfillTemporalEmbeddings()).toBe(1);
     expect(queuedIds()).toEqual(["m1", "m2"]);
+  });
+
+  test("startup caller does not reopen after temporal shutdown", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    insertContent("m2");
+    const token = _saveAndClearProvider();
+    _restoreProvider({ provider: { maxBatchSize: 8, embed: vi.fn() } });
+    const originalPath = process.env.LORE_DB_PATH;
+    const directory = mkdtempSync(join(tmpdir(), "lore-rechunk-close-"));
+    const successorPath = join(directory, "successor.db");
+    let checks = 0;
+    try {
+      const result = await runStartupBackfill({
+        shouldPause: () => {
+          if (++checks === 2) {
+            close();
+            process.env.LORE_DB_PATH = successorPath;
+          }
+          return false;
+        },
+      });
+      expect(result.temporalRechunked).toBe(1);
+      expect(existsSync(successorPath)).toBe(false);
+    } finally {
+      _restoreProvider(token);
+      close();
+      if (originalPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = originalPath;
+      rmSync(directory, { recursive: true, force: true });
+    }
+    expect(getKV(CURSOR_KEY)).toBe("m1");
+    expect(getKV(DONE_KEY)).not.toBe("1");
+    expect(await backfillTemporalEmbeddings()).toBe(1);
   });
 
   test("does not open a successor database after shutdown during admission", async () => {

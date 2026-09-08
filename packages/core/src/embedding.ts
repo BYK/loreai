@@ -3440,9 +3440,23 @@ export async function runStartupBackfill(
   // + done-flagged, so this is the heavy walk only on the first vec0 run (and
   // again after a config change); a no-op in blob mode and once converged. Idle-
   // gated (opts.shouldPause) so it yields the shared embed pool to live traffic.
+  const temporalConnection = db();
   const temporalRechunked = await backfillTemporalEmbeddings({
     shouldPause: opts.shouldPause,
   });
+  // The walk may stop after shutdown. Do not reopen storage for GC or coverage
+  // stats, or use a successor connection that belongs to a different startup.
+  if (!isCurrentDatabase(temporalConnection)) {
+    return {
+      ...emptyBackfillStats(),
+      pendingKnowledge,
+      pendingDistillations,
+      knowledgeEmbedded,
+      distillationEmbedded,
+      entityEmbedded,
+      temporalRechunked,
+    };
+  }
 
   // Startup backstop: reclaim vec0 rows orphaned by bulk base-row deletes
   // (project/session/prune) since the last run. Harmless if there are none.
