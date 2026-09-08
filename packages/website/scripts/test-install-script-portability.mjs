@@ -74,6 +74,7 @@ function fixture(t, drift = "both") {
   );
   executable(join(bin, "sync"), ":");
   if (process.platform !== "darwin") {
+    executable(join(bin, "wc"), `printf '%8s\\n' "$(/usr/bin/wc "$@")"`);
     executable(
       join(bin, "date"),
       `
@@ -199,7 +200,7 @@ await test("nested subshell cleanup cannot release the parent's lock", (t) => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-for (const renameDuringGuard of [false, true]) {
+for (const renameDuringGuard of ["none", "before-cd", "after-cd"]) {
   await test(`stale lock guards stay in their original directory (rename=${renameDuringGuard})`, (t) => {
     const f = fixture(t);
     const state = join(f.home, ".lore");
@@ -220,17 +221,19 @@ for (const renameDuringGuard of [false, true]) {
       }) + "\n",
       { mode: 0o600 },
     );
-    const injection = renameDuringGuard
-      ? `
+    const injection =
+      renameDuringGuard !== "none"
+        ? `
       cd() {
-        builtin cd "$@" || return 1
-        if [[ "$PWD" == "$HOME/.lore/lifecycle.lock" ]]; then
+        ${renameDuringGuard === "after-cd" ? 'builtin cd "$@" || return 1' : ""}
+        if [[ "$*" == *"$HOME/.lore/lifecycle.lock" ]]; then
           command mv "$HOME/.lore/lifecycle.lock" "$HOME/.lore/old-lock"
           command mkdir -m 700 "$HOME/.lore/lifecycle.lock"
         fi
+        ${renameDuringGuard === "before-cd" ? 'builtin cd "$@" || return 1' : ""}
       }
     `
-      : "";
+        : "";
     const result = run(
       f,
       `${functions}
@@ -240,10 +243,13 @@ for (const renameDuringGuard of [false, true]) {
       release_lifecycle_lock
     `,
     );
-    if (renameDuringGuard) {
+    if (renameDuringGuard !== "none") {
       assert.notEqual(result.status, 0);
       assert.deepEqual(readdirSync(lock), []);
-      assert.ok(existsSync(join(state, "old-lock/lifecycle.lock")));
+      assert.equal(
+        existsSync(join(state, "old-lock/lifecycle.lock")),
+        renameDuringGuard === "after-cd",
+      );
     } else {
       assert.equal(result.status, 0, result.stderr);
       assert.equal(existsSync(lock), false);
@@ -296,6 +302,46 @@ await test("installs and releases locks without Bash 4 BASHPID", (t) => {
     "channel",
     "install-path",
   ]);
+});
+
+await test("installs when Bash reads the script from a pipe", (t) => {
+  const f = fixture(t);
+  const result = spawnSync(bash, ["-s", "--", "--no-modify-path"], {
+    cwd: f.home,
+    env: f.env,
+    input: source,
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readdirSync(join(f.home, ".lore")).sort(), [
+    "channel",
+    "install-path",
+  ]);
+});
+
+await test("owner descriptor validation failure retains its diagnostic and cleans up", (t) => {
+  const f = fixture(t);
+  const result = run(
+    f,
+    `${functions}
+    stat() {
+      if [[ $# == 2 && "$2" == %p ]]; then
+        mode=$(command stat "$@") || return 1
+        if (( (8#$mode & 07777) == 0600 )); then
+          printf '100644\\n'
+          return 0
+        fi
+      fi
+      command stat "$@"
+    }
+    canonical_home=$(pwd -P)
+    acquire_lifecycle_lock
+  `,
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Could not stage Lore lifecycle lock owner/);
+  assert.deepEqual(readdirSync(join(f.home, ".lore")), []);
 });
 
 for (const when of ["before-cd", "during-chmod"]) {

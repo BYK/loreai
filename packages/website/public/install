@@ -589,8 +589,8 @@ inspect_lifecycle_owner_record() {
   (( owner_size > 0 && owner_size <= 16384 )) || return 1
   before_owner=$(lifecycle_owner_file_identity "$owner_path") || return 1
   owner_content=$(<"$owner_path") || return 1
-  [[ "$(wc -l < "$owner_path")" == "1" ]] || return 1
-  owner_content_size=$(LC_ALL=C printf '%s' "$owner_content" | wc -c)
+  [[ "$(wc -l < "$owner_path" | tr -d '[:space:]')" == "1" ]] || return 1
+  owner_content_size=$(LC_ALL=C printf '%s' "$owner_content" | wc -c | tr -d '[:space:]')
   [[ "$owner_content_size" =~ ^[0-9]+$ ]] || return 1
   (( owner_content_size + 1 == owner_size )) || return 1
   [[ -f "$owner_path" && ! -L "$owner_path" ]] || return 1
@@ -1123,19 +1123,19 @@ acquire_lifecycle_lock() {
      [[ "$(stable_file_identity "$lifecycle_initialization_stage_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]] ||
      { [[ "$os" != "windows" && ! -O "$lifecycle_initialization_stage_path" ]] ||
         ! fd_has_exact_mode "$owner_fd" 600; }; then
-    exec 9>&- 2>/dev/null || true
+    { exec 9>&-; } 2>/dev/null || true
     remove_lifecycle_initialization_stage
     die "Could not stage Lore lifecycle lock owner"
   fi
   sync_path "$owner_fd_path" 2>/dev/null || true
   if ! lifecycle_state_dir_is_trusted ||
      [[ "$(stable_file_identity "$lifecycle_initialization_stage_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]]; then
-    exec 9>&- 2>/dev/null || true
+    { exec 9>&-; } 2>/dev/null || true
     remove_lifecycle_initialization_stage
     die "Lifecycle owner generation changed before claim publication"
   fi
   if ! ln "$lifecycle_initialization_stage_path" "$lifecycle_initialization_claim_path"; then
-    exec 9>&- 2>/dev/null || true
+    { exec 9>&-; } 2>/dev/null || true
     remove_lifecycle_initialization_stage
     die "Could not publish Lore lifecycle initialization claim"
   fi
@@ -1148,7 +1148,7 @@ acquire_lifecycle_lock() {
         "$inspected_lock_process_identity" != "$process_identity" ||
         "$inspected_lock_owner_content" != "$owner_content" ||
         "$(stable_file_identity "$lifecycle_initialization_claim_path" 2>/dev/null || true)" != "$lifecycle_initialization_stage_identity" ]]; then
-    exec 9>&- 2>/dev/null || true
+    { exec 9>&-; } 2>/dev/null || true
     release_lifecycle_initialization_claim
     remove_lifecycle_initialization_stage
     die "Lore lifecycle initialization claim changed during publication"
@@ -1568,7 +1568,7 @@ else
     if ! curl -fsSL "$checksum_asset_url" > "$checksums_file"; then
       die "Failed to download stable release checksum metadata"
     fi
-    checksum_metadata_size=$(wc -c < "$checksums_file")
+    checksum_metadata_size=$(wc -c < "$checksums_file" | tr -d '[:space:]')
     if [[ ! "$checksum_metadata_size" =~ ^[0-9]+$ ]] || (( checksum_metadata_size > 65536 )); then
       die "Stable release checksum metadata is too large"
     fi
