@@ -296,6 +296,38 @@ function createRequestBodyDecoder(
   }
 }
 
+function waitForDecoderDrain(
+  decoder: Transform,
+  signal: AbortSignal,
+): Promise<void> {
+  return promiseAgainstAbort(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          decoder.removeListener("drain", onDrain);
+          decoder.removeListener("error", onError);
+          decoder.removeListener("close", onClose);
+        };
+        const onDrain = (): void => {
+          cleanup();
+          resolve();
+        };
+        const onError = (error: Error): void => {
+          cleanup();
+          reject(error);
+        };
+        const onClose = (): void => {
+          cleanup();
+          reject(new Error("decoder closed"));
+        };
+        decoder.once("drain", onDrain);
+        decoder.once("error", onError);
+        decoder.once("close", onClose);
+      }),
+    signal,
+  );
+}
+
 async function* decodedCompressedRequestChunks(
   body: ReadableStream<Uint8Array>,
   encoding: string,
@@ -342,30 +374,14 @@ async function* decodedCompressedRequestChunks(
       for (const chunk of replayChunks) {
         signal.throwIfAborted();
         if (!activeDecoder.write(chunk)) {
-          await promiseAgainstAbort(
-            () =>
-              new Promise<void>((resolve) =>
-                activeDecoder.once("drain", resolve),
-              ),
-            signal,
-          );
+          await waitForDecoderDrain(activeDecoder, signal);
         }
       }
       try {
         for await (const chunk of source) {
           signal.throwIfAborted();
           if (!activeDecoder.write(chunk)) {
-            await promiseAgainstAbort(
-              () =>
-                new Promise<void>((resolve, reject) => {
-                  activeDecoder.once("drain", resolve);
-                  activeDecoder.once("error", reject);
-                  activeDecoder.once("close", () =>
-                    reject(new Error("decoder closed")),
-                  );
-                }),
-              signal,
-            );
+            await waitForDecoderDrain(activeDecoder, signal);
           }
         }
         activeDecoder.end();

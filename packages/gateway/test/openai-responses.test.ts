@@ -141,6 +141,26 @@ describe("parseOpenAIResponsesRequest", () => {
     ).rejects.toThrow();
   });
 
+  test("matches native UTF-8 replacement after crossing the streaming threshold", async () => {
+    const bytes = Buffer.concat([
+      Buffer.from('{"input":"'),
+      Buffer.from("x".repeat(STREAMING_PARSE_SPOOL_BYTES)),
+      Buffer.from([0xff]),
+      Buffer.from('"}'),
+    ]);
+    const expected = parseOpenAIResponsesRequest(
+      JSON.parse(bytes.toString("utf8")),
+      headers,
+    );
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield bytes;
+    }
+
+    await expect(
+      parseOpenAIResponsesRequestChunks(chunks(), headers),
+    ).resolves.toEqual(expected);
+  });
+
   test("rejects trailing tokens after an object on the streaming path", async () => {
     async function* chunks(): AsyncGenerator<Uint8Array> {
       yield Buffer.from(

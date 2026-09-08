@@ -324,6 +324,51 @@ describe("decodedRequestChunks", () => {
     expect(source.locked).toBe(false);
   });
 
+  test("settles a backpressured replay write when the first gzip chunk is malformed", async () => {
+    let cancelled = false;
+    const abort = new AbortController();
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // This exceeds zlib's writable high-water mark, so replay takes the
+        // backpressure branch before the malformed header emits its error.
+        controller.enqueue(new Uint8Array(64 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const req = new Request("http://gateway.local/v1/responses", {
+      method: "POST",
+      body: source,
+      signal: abort.signal,
+      headers: { "content-encoding": "gzip" },
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of decodedRequestChunks(req)) {
+        // The malformed decoder must reject before it yields output.
+      }
+    };
+    const outcome = consume().then(
+      () => "resolved",
+      () => "rejected",
+    );
+    const result = await Promise.race([
+      outcome,
+      new Promise<"timed-out">((resolve) =>
+        setTimeout(() => resolve("timed-out"), 100),
+      ),
+    ]);
+    // Clean up the intentionally stalled failing implementation before
+    // asserting so this regression cannot leave an open test handle.
+    abort.abort(new DOMException("test cleanup", "AbortError"));
+    await outcome;
+    expect(result).toBe("rejected");
+    expect(cancelled).toBe(true);
+    expect(source.locked).toBe(false);
+  });
+
   test.each(["gzip", "br", "zstd", "deflate"])(
     "streams split %s input without changing its bytes",
     async (encoding) => {

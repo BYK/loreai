@@ -262,6 +262,7 @@ async function parseOpenAIResponsesRequestChunksInternal(
     keepStack: false,
   });
   const tokenizer = new Tokenizer();
+  const textDecoder = new TextDecoder();
   const documentPrefix: number[] = [];
   let rootState: RootState = "start";
   let rootIsObject = false;
@@ -373,7 +374,7 @@ async function parseOpenAIResponsesRequestChunksInternal(
     });
   };
 
-  const write = (chunk: Uint8Array): void => {
+  const write = (chunk: Uint8Array, stream: boolean): void => {
     for (
       let index = 0;
       index < chunk.byteLength && documentPrefix.length < 3;
@@ -389,7 +390,11 @@ async function parseOpenAIResponsesRequestChunksInternal(
     ) {
       throw new Error("Invalid JSON body");
     }
-    tokenizer.write(chunk);
+    // Buffer.toString("utf8") historically replaced malformed sequences before
+    // JSON.parse. Keep that non-fatal decoding behavior while retaining only
+    // the decoder's incomplete UTF-8 suffix between chunks.
+    const text = textDecoder.decode(chunk, { stream });
+    if (text) tokenizer.write(Buffer.from(text, "utf8"));
   };
 
   const iterator = chunks[Symbol.asyncIterator]();
@@ -416,7 +421,7 @@ async function parseOpenAIResponsesRequestChunksInternal(
       if (done) break;
       if (parseError) continue;
       try {
-        write(value);
+        write(value, true);
       } catch (error) {
         // Drain the request after a syntax failure. Cancelling the Node request
         // body here aborts its socket before the handler can send its 400.
@@ -430,6 +435,7 @@ async function parseOpenAIResponsesRequestChunksInternal(
   }
   if (!parseError) {
     try {
+      write(new Uint8Array(), false);
       tokenizer.end();
       if (!inputParser.isEnded) inputParser.end();
     } catch (error) {
