@@ -350,3 +350,37 @@ it("protects incremental distillation while it waits outside the per-session lim
     evictIdlePipelineSessionsForTest(config(), Date.now() + 2 * HOUR),
   ).toBe(1);
 });
+
+it("releases session ownership when a queued distillation is discarded", async () => {
+  const state = await startSession();
+  _setConcurrencyForTest(1);
+  const entered = deferred();
+  const release = deferred();
+  const blocker = runBackground(async () => {
+    entered.resolve();
+    await release.promise;
+  });
+  await entered.promise;
+  vi.spyOn(temporal, "undistilledTokens").mockReturnValue(100_000);
+  const distill = vi
+    .spyOn(distillation, "run")
+    .mockResolvedValue({ rounds: 0, distilled: 0 });
+  try {
+    scheduleBackgroundWork(state, config());
+    await tick();
+    expect(state.backgroundWorkCount).toBe(1);
+    expect(distillLimiter.isBusy(state.sessionID)).toBe(false);
+    const drain = drainBackground();
+    release.resolve();
+    await drain;
+    await tick();
+    expect(distill).not.toHaveBeenCalled();
+    expect(state.backgroundWorkCount).toBe(0);
+    expect(
+      evictIdlePipelineSessionsForTest(config(), Date.now() + 2 * HOUR),
+    ).toBe(1);
+  } finally {
+    release.resolve();
+    await blocker;
+  }
+});

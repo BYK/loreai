@@ -115,6 +115,19 @@ describe("background-limiter", () => {
     ).rejects.toThrow("boom");
   });
 
+  test.each([false, true])(
+    "preserves a started task's AbortError (synchronous=%s)",
+    async (synchronous) => {
+      const failure = new DOMException("task cancelled", "AbortError");
+      await expect(
+        runBackground(() => {
+          if (synchronous) throw failure;
+          return Promise.reject(failure);
+        }),
+      ).rejects.toBe(failure);
+    },
+  );
+
   test("skips queued tasks when circuit breaker trips while waiting", async () => {
     let resolve!: () => void;
     const blocker = new Promise<void>((r) => {
@@ -555,7 +568,15 @@ describe("background-limiter", () => {
       const t2 = runBackground(async () => {
         started2 = true;
       });
-      void t2.catch(() => {}); // queued task may stay pending after clearQueue
+      let queuedOutcome: unknown = "pending";
+      void t2.then(
+        (value) => {
+          queuedOutcome = value;
+        },
+        (error) => {
+          queuedOutcome = error;
+        },
+      );
       await new Promise((r) => setTimeout(r, 10));
       expect(started2).toBe(false);
 
@@ -564,6 +585,8 @@ describe("background-limiter", () => {
       await drain; // must not hang on the discarded t2
       await t1;
       expect(started2).toBe(false); // t2 was discarded, never executed
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(queuedOutcome).toBeUndefined(); // cleanup chains must settle too
     });
 
     test("returns after the timeout instead of hanging on a slow task", async () => {
