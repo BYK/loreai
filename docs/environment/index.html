@@ -220,7 +220,7 @@
 </tr>
 <tr>
 <td><code dir="auto">LORE_SESSION_EVICTION_TIMEOUT</code></td>
-<td>Session eviction timeout in seconds. Sessions idle beyond this are evicted from memory (state is preserved in DB). Default: 1800 (30 min). Set to 0 to disable eviction. Env: LORE_SESSION_EVICTION_TIMEOUT</td>
+<td>Session eviction timeout in seconds. Sessions idle beyond this are evicted from memory (state is preserved in DB). Default: 1800 (30 min). Pending tool calls retain state for at least 1 hour after the latest request or completed response (or this timeout, if longer). Active requests, response finalizers, and queued/running session work prevent eviction. Set to 0 to disable eviction. Env: LORE_SESSION_EVICTION_TIMEOUT</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_UPSTREAM_ANTHROPIC</code><br><strong>Default:</strong> <code dir="auto">"https://api.anthropic.com"</code></td>
