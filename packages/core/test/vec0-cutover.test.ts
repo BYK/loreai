@@ -232,6 +232,24 @@ db();
 const describeVec = isVecAvailable() ? describe : describe.skip;
 
 describeVec("vec0 write + read round-trip", () => {
+  test("converged startup leaves orphan discovery to idle maintenance (#1681)", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    db()
+      .query("INSERT INTO knowledge_vec (id, embedding) VALUES (?, ?)")
+      .run("orphan", toBlob(v(1)));
+    const token = _saveAndClearProvider();
+    _restoreProvider({ provider: { maxBatchSize: 8, embed: vi.fn() } });
+    try {
+      await runStartupBackfill();
+      expect(
+        db().query("SELECT id FROM knowledge_vec WHERE id = ?").get("orphan"),
+      ).toBeTruthy();
+    } finally {
+      _restoreProvider(token);
+    }
+  });
+
   test("storeEmbedding writes to the vec0 table (not the base column)", () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);

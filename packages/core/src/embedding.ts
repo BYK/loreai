@@ -33,7 +33,6 @@ import {
   type EmbeddingTable,
   embeddingColumnExists,
   ensureVec0Store,
-  gcVec0DanglingRows,
   hasEmbeddingSql,
   missingEmbeddingSql,
   readStorageMode,
@@ -3458,9 +3457,8 @@ export async function runStartupBackfill(
     };
   }
 
-  // Startup backstop: reclaim vec0 rows orphaned by bulk base-row deletes
-  // (project/session/prune) since the last run. Harmless if there are none.
-  if (mode === "vec0") gcVec0DanglingRows(db());
+  // Orphan discovery belongs to the host's idle read-worker maintenance.
+  // Never scan the full vector corpus on the startup writer (#1681).
 
   // Coverage stats — always log to stderr so the problem is visible.
   const kTotal = (

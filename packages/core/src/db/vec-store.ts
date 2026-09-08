@@ -690,8 +690,9 @@ const ALL_EMBEDDING_TABLES: readonly EmbeddingTable[] = [
  * rows. These rows are already HARMLESS for correctness (recall hydration drops
  * a hit whose base row is missing, and a deleted project's rows live in their
  * own partition), so this is a bloat / recall-quality backstop, not a fix. Runs
- * at startup in vec0 mode (all tables) and after a bulk base-row delete (scoped
- * to the tables that delete touched — see `data.ts`). One bounded anti-join pass
+ * only after an explicit bulk base-row delete (scoped to the tables that delete
+ * touched — see `data.ts`). Startup uses idle read-worker maintenance instead.
+ * One full anti-join pass
  * per requested table; each is a single scan (cheaper than a per-id delete on
  * the un-indexed `temporal_vec.message_id` aux column for large id sets).
  */

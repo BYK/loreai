@@ -54,6 +54,7 @@ import {
   freelistBytes,
   dbFileSizeBytes,
   embedding,
+  startVec0OrphanMaintenance,
 } from "@loreai/core";
 import type { CacheStrategy, ChangedEntry, LLMClient } from "@loreai/core";
 import {
@@ -452,6 +453,21 @@ export function startIdleScheduler(
   // periods stay quiet instead of repeating a stale p50/p95 line every tick.
   let lastVecLatencyLogged = 0;
 
+  const stopVec0Maintenance = startVec0OrphanMaintenance(() => {
+    if (shouldShedLowPriority()) return true;
+    const now = Date.now();
+    for (const [id, state] of sessions) {
+      if (
+        isExternallyActive?.(id) ||
+        state.backgroundWorkCount ||
+        now - Math.max(state.lastRequestTime, state.lastResponseTime ?? 0) <
+          config.idleTimeoutSeconds * 1000
+      )
+        return true;
+    }
+    return false;
+  });
+
   // Begin sampling event-loop delay for the periodic resource gauge below.
   startResourceMonitor();
 
@@ -831,7 +847,10 @@ export function startIdleScheduler(
     }
   }, POLL_INTERVAL_MS);
 
-  return () => clearInterval(timer);
+  return () => {
+    stopVec0Maintenance();
+    clearInterval(timer);
+  };
 }
 
 // ---------------------------------------------------------------------------
