@@ -103,6 +103,7 @@ export {
 export { dataDir } from "./data-dir";
 export { currentTenantId, withTenant, LOCAL_TENANT_ID } from "./tenant";
 export { isVecAvailable } from "./db/vec";
+export { startVec0OrphanMaintenance } from "./vec0-orphan-maintenance";
 export {
   checkVecWorker,
   type VecWorkerCheck,

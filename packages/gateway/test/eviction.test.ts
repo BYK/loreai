@@ -24,6 +24,7 @@ import {
   ltm,
 } from "@loreai/core";
 import { startIdleScheduler, evictIdleSessions } from "../src/idle";
+import * as orphanMaintenance from "../../core/src/vec0-orphan-maintenance";
 import { loadConfig } from "../src/config";
 import type { GatewayConfig } from "../src/config";
 import type { SessionState } from "../src/translate/types";
@@ -654,6 +655,44 @@ describe("evictIdleSessions", () => {
 // ---------------------------------------------------------------------------
 
 describe("startIdleScheduler", () => {
+  test("owns orphan maintenance and gates it on live work and recent responses", () => {
+    vi.useFakeTimers();
+    const childStop = vi.fn();
+    const start = vi
+      .spyOn(orphanMaintenance, "startVec0OrphanMaintenance")
+      .mockReturnValue(childStop);
+    let active = false;
+    const state = makeSessionState({ lastRequestTime: Date.now() - 120_000 });
+    const sessions = new Map([["s", state]]);
+    const stop = startIdleScheduler(
+      makeConfig(),
+      sessions,
+      async () => {},
+      undefined,
+      () => active,
+    );
+    try {
+      const gate = start.mock.calls[0][0];
+      expect(gate()).toBe(false);
+      active = true;
+      expect(gate()).toBe(true);
+      active = false;
+      state.lastResponseTime = Date.now();
+      expect(gate()).toBe(true);
+      state.lastResponseTime = Date.now() - 120_000;
+      state.backgroundWorkCount = 1;
+      expect(gate()).toBe(true);
+      state.backgroundWorkCount = 0;
+      state.lastRequestTime = Date.now();
+      expect(gate()).toBe(true);
+    } finally {
+      stop();
+      start.mockRestore();
+      vi.useRealTimers();
+    }
+    expect(childStop).toHaveBeenCalledTimes(1);
+  });
+
   test("accepts optional onEvict callback", () => {
     const sessions = new Map<string, SessionState>();
     const config = makeConfig();
