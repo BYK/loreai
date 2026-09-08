@@ -134,3 +134,21 @@ it("requires the full source for an uninterrupted tool chain", () => {
     }),
   ).toThrow(FullSourceRequired);
 });
+
+it.each([2, 4] as const)(
+  "consumes forced layer %s durably when the source offset is zero",
+  (layer) => {
+    setForceMinLayer(layer, sid);
+    expect(loadForceMinLayer(sid)).toBe(layer);
+    const result = transform({
+      messages: structuredClone(messages),
+      sessionID: sid,
+      projectPath,
+      sourceWindow: metadata(0),
+    });
+    expect(result.layer).toBeGreaterThanOrEqual(layer);
+    expect(loadForceMinLayer(sid)).toBe(0);
+    evictSession(sid);
+    expect(loadForceMinLayer(sid)).toBe(0);
+  },
+);

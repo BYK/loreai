@@ -142,6 +142,75 @@ it("converts only the appended suffix after warm and database-reopen resumes", a
     );
   }
 });
+it.each([false, true])(
+  "reuses and advances a complete checkpoint with offset zero (restart=%s)",
+  async (restart) => {
+    setModelLimits({ context: 1_000_000, output: 2_000 });
+    setMaxLayer0Tokens(500_000);
+    const source = semanticHistory(6).messages;
+    expect(accept((await prepare(source)).prepared).layer).toBe(0);
+    const saved = new SourceWindowStore(storage).load() as {
+      sourceCount: number;
+      window: { offset: number };
+    };
+    expect(saved.sourceCount).toBe(source.length);
+    expect(saved.window.offset).toBe(0);
+    if (restart) {
+      close();
+      evictSession(sessionID);
+    }
+
+    const unchanged = await prepare(source);
+    expect(unchanged.timing.observations.source_checkpoint_hit).toBe(1);
+    expect(unchanged.timing.observations.source_converted_messages).toBe(0);
+    expect(unchanged.timing.observations.source_estimated_messages).toBe(0);
+    expect(unchanged.timing.observations.stored_id_resolutions).toBe(0);
+    expect(unchanged.prepared.loreMessages).toHaveLength(source.length);
+    accept(unchanged.prepared);
+    expect(unchanged.timing.observations.source_checkpoint_published).toBe(1);
+
+    const next: GatewayMessage[] = [
+      ...source,
+      { role: "assistant", content: [{ type: "text", text: "done" }] },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ];
+    const appended = await prepare(next);
+    expect(appended.timing.observations.source_checkpoint_hit).toBe(1);
+    expect(appended.timing.observations.source_converted_messages).toBe(2);
+    expect(appended.timing.observations.source_estimated_messages).toBe(2);
+    expect(appended.prepared.temporalInput.assistantIndex).toBe(next.length);
+    const actual = accept(appended.prepared);
+    expect(actual.layer).toBe(0);
+    expect(appended.timing.observations.source_checkpoint_published).toBe(1);
+    expect(new SourceWindowStore(storage).load()).toMatchObject({
+      sourceCount: next.length,
+      window: { offset: 0 },
+    });
+    evictSession(sessionID);
+    const full = (await prepare(next, true)).prepared;
+    const expected = transform({
+      messages: full.loreMessages,
+      projectPath,
+      sessionID,
+    });
+    // Exercise the same complete-source provenance gate as the pipeline.
+    const render = (result: typeof actual, prepared: typeof full) =>
+      loreMessagesToGateway(
+        result.messages,
+        prepared.provenanceByMessageId,
+        !prepared.sourceWindow &&
+          result.messages.length === prepared.loreMessages.length &&
+          result.messages.every(
+            (message, index) =>
+              message.info.id === prepared.loreMessages[index]?.info.id,
+          ),
+      );
+    const actualWire = render(actual, appended.prepared);
+    expect(JSON.stringify(actualWire)).toContain("synthetic-encrypted-state-");
+    expect(actualWire).toEqual(render(expected, full));
+  },
+);
+
 it("reconciles historical edits even when the old boundary is unchanged", async () => {
   accept((await prepare(messages)).prepared);
   const edited = structuredClone(messages);

@@ -252,7 +252,11 @@ export class SourceCheckpoint {
     return this.base?.sourceCount ?? 0;
   }
   get sourceWindow(): SourceWindow | undefined {
-    return this.base?.window.offset ? this.base.window : undefined;
+    // This describes an omitted prefix, not whether a checkpoint was reused.
+    // At offset zero, base/convertedFrom still enable suffix-only preparation,
+    // while undefined preserves the pipeline's complete-source provenance path.
+    const window = this.base?.window;
+    return window && window.offset > 0 ? window : undefined;
   }
   get storedIds(): Map<string, string> {
     return new Map(this.base?.ids);

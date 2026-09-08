@@ -3513,6 +3513,9 @@ function transformInner(input: {
   // One-shot: consumed here and reset to 0 (both in-memory and on disk).
   let effectiveMinLayer = sessState.forceMinLayer;
   sessState.forceMinLayer = 0;
+  // Complete source (including offset zero) consumes escalation normally.
+  // Only an omitted-prefix attempt can need full-source replay and must defer
+  // durable consumption until the speculative transform succeeds.
   if (sid && effectiveMinLayer > 0 && !input.sourceWindow?.offset)
     saveForceMinLayer(sid, 0);
 
