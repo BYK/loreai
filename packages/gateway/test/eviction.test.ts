@@ -415,7 +415,7 @@ describe("evictIdleSessions", () => {
     expect(sessions.has("response-active")).toBe(true);
   });
 
-  test("does not evict sessions still executing tools", () => {
+  test("retains a recently inactive tool-call session during its grace period", () => {
     const sessions = new Map<string, SessionState>();
     sessions.set(
       "tool-sess",
@@ -437,6 +437,139 @@ describe("evictIdleSessions", () => {
 
     expect(evicted).toBe(0);
     expect(sessions.has("tool-sess")).toBe(true);
+  });
+
+  test.each([false, true])(
+    "expires abandoned tool-call sessions after one hour (subagent=%s)",
+    (isSubagent) => {
+      const now = Date.now();
+      const state = makeSessionState({
+        isSubagent,
+        lastRequestTime: now,
+        lastStopReason: "tool_use",
+      });
+      const sessions = new Map([[state.sessionID, state]]);
+      const evict = (at: number) =>
+        evictIdleSessions(makeConfig(), sessions, EMPTY_SET, EMPTY_SET, at);
+      expect(evict(now + 3_600_000 - 1)).toBe(0);
+      expect(evict(now + 3_600_000)).toBe(1);
+      expect(sessions.size).toBe(0);
+    },
+  );
+
+  test("respects a longer configured tool-call retention timeout", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now,
+      lastStopReason: "tool_use",
+    });
+    const sessions = new Map([[state.sessionID, state]]);
+    const evict = (at: number) =>
+      evictIdleSessions(
+        makeConfig({ sessionEvictionTimeoutSeconds: 7200 }),
+        sessions,
+        EMPTY_SET,
+        EMPTY_SET,
+        at,
+      );
+    expect(evict(now + 7_200_000 - 1)).toBe(0);
+    expect(evict(now + 7_200_000)).toBe(1);
+  });
+
+  test("starts tool-call grace after a slow response and refreshes it on continuation arrival", () => {
+    const now = Date.now();
+    const state = Object.assign(
+      makeSessionState({
+        lastRequestTime: now - 7_200_000,
+        lastStopReason: "tool_use",
+      }),
+      { lastResponseTime: now },
+    );
+    const sessions = new Map([[state.sessionID, state]]);
+    const evict = (at: number) =>
+      evictIdleSessions(makeConfig(), sessions, EMPTY_SET, EMPTY_SET, at);
+    expect(evict(now + 3_600_000 - 1)).toBe(0);
+    // A failed continuation still gets a finite grace period from its arrival.
+    state.lastRequestTime = now + 3_600_000 - 1;
+    expect(evict(now + 3_600_000)).toBe(0);
+    expect(evict(state.lastRequestTime + 3_600_000)).toBe(1);
+  });
+
+  test("keeps tool-call eviction disabled when the configured timeout is zero", () => {
+    const state = makeSessionState({
+      lastRequestTime: 0,
+      lastStopReason: "tool_use",
+    });
+    const sessions = new Map([[state.sessionID, state]]);
+    expect(
+      evictIdleSessions(
+        makeConfig({ sessionEvictionTimeoutSeconds: 0 }),
+        sessions,
+        EMPTY_SET,
+        EMPTY_SET,
+        Date.now(),
+      ),
+    ).toBe(0);
+  });
+
+  test.each(["distillation", "curation"] as const)(
+    "retains expired sessions until active and queued %s settle",
+    async (kind) => {
+      const pool = kind === "distillation" ? distillLimiter : curatorLimiter;
+      const now = Date.now();
+      const state = makeSessionState({ lastRequestTime: now - 7_200_000 });
+      const sessions = new Map([[state.sessionID, state]]);
+      const limiter = pool.get(state.sessionID);
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const active = limiter(() => blocked);
+      const queued = limiter(async () => {});
+      const evict = () =>
+        evictIdleSessions(makeConfig(), sessions, EMPTY_SET, EMPTY_SET, now);
+      try {
+        await Promise.resolve();
+        expect(limiter.activeCount).toBe(1);
+        expect(limiter.pendingCount).toBe(1);
+        expect(evict()).toBe(0);
+      } finally {
+        release();
+        await Promise.all([active, queued]);
+      }
+      expect(evict()).toBe(1);
+      expect(pool.get(state.sessionID)).not.toBe(limiter);
+    },
+  );
+
+  test("releases cached request bodies and upstream credentials even when an old state reference survives", () => {
+    const state = makeSessionState({ lastRequestTime: 0 });
+    state.cacheAnalytics.lastRequestBody = new Uint8Array([1, 2, 3]);
+    state.cacheAnalytics.lastNormalizedBody = new Uint8Array([4, 5, 6]);
+    state.cacheAnalytics.lastRequestBodyLength = 3;
+    state.lastUpstream = {
+      url: "https://api.openai.com/v1/responses",
+      protocol: "openai-responses",
+      providerID: "openai",
+      model: "test-model",
+      headers: { authorization: "Bearer sensitive" },
+    };
+    state.upstreamByProvider.set("openai", state.lastUpstream);
+    const sessions = new Map([[state.sessionID, state]]);
+    expect(
+      evictIdleSessions(
+        makeConfig(),
+        sessions,
+        EMPTY_SET,
+        EMPTY_SET,
+        Date.now(),
+      ),
+    ).toBe(1);
+    expect(state.cacheAnalytics.lastRequestBody).toBeNull();
+    expect(state.cacheAnalytics.lastNormalizedBody).toBeNull();
+    expect(state.cacheAnalytics.lastRequestBodyLength).toBe(0);
+    expect(state.lastUpstream).toBeUndefined();
+    expect(state.upstreamByProvider.size).toBe(0);
   });
 
   test("returns count of evicted sessions", () => {

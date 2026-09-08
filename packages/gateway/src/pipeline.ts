@@ -280,7 +280,11 @@ import {
   type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
-import { startIdleScheduler, buildIdleWorkHandler } from "./idle";
+import {
+  startIdleScheduler,
+  buildIdleWorkHandler,
+  evictIdleSessions,
+} from "./idle";
 import { flushPendingImport } from "./pending-import";
 import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
@@ -763,6 +767,7 @@ function pumpPendingSessionClaims(): void {
 function isPipelineSessionActive(sessionID: string): boolean {
   return (
     activePipelineRequestsForSession(sessionID) > 0 ||
+    pendingSessionClaims.has(sessionID) ||
     streamingPostResponseFinalizers.has(sessionID)
   );
 }
@@ -3512,6 +3517,22 @@ function evictPipelineSessionState(sessionID: string): void {
 /** Test seam for exercising the same cleanup used by idle session eviction. */
 export function evictStableLtmSessionForTest(sessionID: string): void {
   evictStableLtmSession(sessionID);
+}
+
+/** Exercise idle eviction with the production ownership and satellite cleanup. */
+export function evictIdlePipelineSessionsForTest(
+  config: GatewayConfig,
+  now: number,
+): number {
+  return evictIdleSessions(
+    config,
+    sessions,
+    new Set(),
+    new Set(),
+    now,
+    evictPipelineSessionState,
+    isPipelineSessionActive,
+  );
 }
 
 /**
@@ -12500,6 +12521,8 @@ function postResponseForTenant(
     // --- Cache warming: record inter-turn gap + track warmup hits ---
     const now = Date.now();
 
+    sessionState.lastResponseTime = now;
+
     // (A) Record inter-turn gap — only for genuine user-initiated turns.
     // Tool-use auto-continuations (prior stop_reason was "tool_use") produce
     // sub-second gaps that represent automated round-trips, not human think
@@ -12745,15 +12768,20 @@ function postResponse(
  * Schedule background distillation and curation (fire-and-forget).
  */
 /**
- * In-flight DIRECT (non-limiter) background promises — currently just the
- * urgent distillation, which bypasses `runBackground`. Tracked so
- * `resetPipelineState()` can await it before the DB is swapped, alongside the
- * limiter's `drainBackground()`. See #885.
+ * Full background chains, including post-completion state writes. Reset
+ * awaits these alongside the limiter's drain before swapping the DB (#885).
+ * Session ownership also covers global-queue wait time before a core limiter
+ * is entered, so idle eviction cannot discard credentials under queued work.
  */
 const inFlightBackground = new Set<Promise<unknown>>();
-function trackBackground(p: Promise<unknown>): void {
+function trackBackground(p: Promise<unknown>, state?: SessionState): void {
+  if (state) state.backgroundWorkCount = (state.backgroundWorkCount ?? 0) + 1;
   inFlightBackground.add(p);
-  void p.finally(() => inFlightBackground.delete(p));
+  const settled = () => {
+    inFlightBackground.delete(p);
+    if (state) state.backgroundWorkCount!--;
+  };
+  void p.then(settled, settled);
 }
 
 function scheduleBackgroundWorkForTenant(
@@ -12863,6 +12891,7 @@ function scheduleBackgroundWorkForTenant(
           })
           .catch((e) => log.error("background distillation failed:", e)),
       ),
+      sessionState,
     );
   } else if (
     !isBackgroundPaused(workerProviderID) &&
@@ -12888,25 +12917,28 @@ function scheduleBackgroundWorkForTenant(
         log.info(
           `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
         );
-        runBackground(
-          () =>
-            withTenant(sessionState.storageTenantId ?? "", () =>
-              distillation.run({
-                llm,
-                projectPath,
-                sessionID,
-                model,
-                skipMeta: true,
-                callType: batchQueueEnabled ? "batch" : "direct",
-                workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-                signal,
-                // #627 Phase 1: stamp the session's gitHead on every distilled row.
-                metadata: buildSessionMetadata(sessionState.gitHead),
-              }),
-            ),
-          `incremental-distill session=${sessionID.slice(0, 16)}`,
-          workerProviderID,
-        ).catch((e) => log.error("background distillation failed:", e));
+        trackBackground(
+          runBackground(
+            () =>
+              withTenant(sessionState.storageTenantId ?? "", () =>
+                distillation.run({
+                  llm,
+                  projectPath,
+                  sessionID,
+                  model,
+                  skipMeta: true,
+                  callType: batchQueueEnabled ? "batch" : "direct",
+                  workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+                  signal,
+                  // #627 Phase 1: stamp the session's gitHead on every distilled row.
+                  metadata: buildSessionMetadata(sessionState.gitHead),
+                }),
+              ),
+            `incremental-distill session=${sessionID.slice(0, 16)}`,
+            workerProviderID,
+          ).catch((e) => log.error("background distillation failed:", e)),
+          sessionState,
+        );
       }
     }
   }
@@ -13018,6 +13050,7 @@ function scheduleBackgroundWorkForTenant(
         .finally(() => {
           sessionState.curationScheduled = false;
         }),
+      sessionState,
     );
   }
 }
