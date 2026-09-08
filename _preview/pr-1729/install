@@ -1084,7 +1084,10 @@ acquire_lifecycle_lock() {
   fi
   [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] || owner_pid=$$
   local process_start
-  process_start=$(ps -o lstart= -p "$$" 2>/dev/null || true)
+  # BSD ps pads lstart to its column width. Publish a strict process timestamp
+  # independent of the user's locale.
+  process_start=$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null |
+    sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
   [[ -n "$process_start" ]] && process_started_at="$process_start"
   process_identity="unverified:${lifecycle_lock_token}"
   if [[ "$os" == "linux" && -r "/proc/$$/stat" && -r /proc/sys/kernel/random/boot_id ]]; then
