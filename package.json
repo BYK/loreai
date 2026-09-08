@@ -83,7 +83,7 @@
     "pg": "^8.13.1",
     "tsx": "^4.22.3",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.7",
+    "vitest": "^5.0.0",
     "vitest-evals": "^0.10.0"
   },
   "repository": {
