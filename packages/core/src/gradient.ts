@@ -22,6 +22,28 @@ import { estimateTokens } from "./tokenize";
 
 type MessageWithParts = LoreMessageWithParts;
 
+/** Exact aggregates for source messages preceding a bounded raw window. */
+export interface SourceWindow {
+  offset: number;
+  omittedTokens: number;
+  /** Cumulative resolved tokens at absolute source indexes, starting with zero. */
+  prefixTokens: number[];
+  /** Prior transformed IDs certify that no prior raw window lies in the omitted prefix. */
+  previousWindowIDs: string[];
+}
+
+export class FullSourceRequired extends Error {
+  constructor(
+    readonly reason:
+      | "window_exhausted"
+      | "tool_chain"
+      | "calibration"
+      | "passthrough",
+  ) {
+    super(`Full source required: ${reason}`);
+  }
+}
+
 // Token estimate using the shared ai-tokenizer-backed helper (cl100k_base by
 // default — gradient.ts intentionally does NOT thread the active provider/model
 // through all 21 internal call sites; per-encoding selection would balloon the
@@ -3063,6 +3085,7 @@ export function resetRawWindowCache(sessionID?: string) {
  * updates the cache.
  */
 function tryFitStable(input: {
+  sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   prefix: MessageWithParts[];
   prefixTokens: number;
@@ -3090,9 +3113,13 @@ function tryFitStable(input: {
     // old messages) because the offset is relative to the tail.
     const newMessages = Math.max(
       0,
-      input.messages.length - rawWindowCache.pinnedTotalCount,
+      input.messages.length +
+        (input.sourceWindow?.offset ?? 0) -
+        rawWindowCache.pinnedTotalCount,
     );
     const windowSize = rawWindowCache.pinnedRawCount + newMessages;
+    if (input.sourceWindow?.offset && windowSize > input.messages.length)
+      throw new FullSourceRequired("window_exhausted");
     const pinnedIdx = Math.max(0, input.messages.length - windowSize);
 
     // Ensure the pinned window starts with a user message when a prefix is
@@ -3135,7 +3162,8 @@ function tryFitStable(input: {
         input.sessState.rawWindowCache = {
           ...rawWindowCache,
           pinnedRawCount: pinnedWindow.length,
-          pinnedTotalCount: input.messages.length,
+          pinnedTotalCount:
+            input.messages.length + (input.sourceWindow?.offset ?? 0),
           pinnedBudget: input.rawBudget,
         };
       }
@@ -3175,6 +3203,7 @@ function tryFitStable(input: {
   // also degraded, just at the 100% boundary); higher layers (tool stripping)
   // take over when even the current turn doesn't fit the full rawBudget.
   const result = tryFit({
+    sourceWindow: input.sourceWindow,
     messages: input.messages,
     prefix: input.prefix,
     prefixTokens: input.prefixTokens,
@@ -3195,7 +3224,8 @@ function tryFitStable(input: {
       input.sessState.rawWindowCache = {
         sessionID: input.sessionID,
         pinnedRawCount: rawMessageCount,
-        pinnedTotalCount: input.messages.length,
+        pinnedTotalCount:
+          input.messages.length + (input.sourceWindow?.offset ?? 0),
         pinnedBudget: input.rawBudget,
       };
     }
@@ -3346,6 +3376,7 @@ function layer0Bounds(
  * tested here — no decision-vs-compression drift band. (#796)
  */
 export function isLargeColdStart(input: {
+  sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   sessionID?: string;
   /** Override the session's in-flight LTM token count (see docstring). */
@@ -3369,7 +3400,10 @@ export function isLargeColdStart(input: {
   const sessLtmTokens =
     input.ltmTokens ?? (sid ? sessState.ltmTokens : ltmTokensFallback);
   const expectedInput =
-    estimateMessages(input.messages) + overhead + sessLtmTokens;
+    estimateMessages(input.messages) +
+    (input.sourceWindow?.omittedTokens ?? 0) +
+    overhead +
+    sessLtmTokens;
   const { layer0Input, layer0Ceiling, maxInput } = layer0Bounds(
     expectedInput,
     false,
@@ -3382,6 +3416,7 @@ export function isLargeColdStart(input: {
 }
 
 function transformInner(input: {
+  sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   projectPath: string;
   sessionID?: string;
@@ -3478,7 +3513,8 @@ function transformInner(input: {
   // One-shot: consumed here and reset to 0 (both in-memory and on disk).
   let effectiveMinLayer = sessState.forceMinLayer;
   sessState.forceMinLayer = 0;
-  if (sid && effectiveMinLayer > 0) saveForceMinLayer(sid, 0);
+  if (sid && effectiveMinLayer > 0 && !input.sourceWindow?.offset)
+    saveForceMinLayer(sid, 0);
 
   // --- Approach A: Cache-preserving passthrough ---
   // Use exact token count from the previous API response when available.
@@ -3594,21 +3630,38 @@ function transformInner(input: {
     // 1.3 covers this without triggering unnecessary compression.
     const CALIBRATED_DELTA_SAFETY = 1.3;
 
-    const newMessages =
-      sessState.lastWindowMessageIDs.size > 0
-        ? input.messages.filter(
-            (m) => !sessState.lastWindowMessageIDs.has(m.info.id),
-          )
-        : input.messages.slice(
-            -Math.max(
-              0,
-              input.messages.length - sessState.lastKnownMessageCount,
-            ),
-          );
-    const rawNewMsgTokens = newMessages.reduce(
-      (s, m) => s + estimateMessage(m),
-      0,
-    );
+    let newMessages: MessageWithParts[];
+    let omittedNewTokens = input.sourceWindow?.omittedTokens ?? 0;
+    if (sessState.lastWindowMessageIDs.size > 0) {
+      if (input.sourceWindow?.offset) {
+        const prior = new Set(input.sourceWindow.previousWindowIDs);
+        for (const id of sessState.lastWindowMessageIDs)
+          if (!prior.has(id)) throw new FullSourceRequired("calibration");
+      }
+      newMessages = input.messages.filter(
+        (m) => !sessState.lastWindowMessageIDs.has(m.info.id),
+      );
+    } else if (input.sourceWindow?.offset) {
+      const sourceCount = input.sourceWindow.offset + input.messages.length;
+      const start =
+        sourceCount > sessState.lastKnownMessageCount
+          ? sessState.lastKnownMessageCount
+          : 0;
+      const omittedStart = Math.min(start, input.sourceWindow.offset);
+      const skipped = input.sourceWindow.prefixTokens[omittedStart];
+      if (skipped === undefined) throw new FullSourceRequired("calibration");
+      omittedNewTokens -= skipped;
+      newMessages = input.messages.slice(
+        Math.max(0, start - input.sourceWindow.offset),
+      );
+    } else {
+      newMessages = input.messages.slice(
+        -Math.max(0, input.messages.length - sessState.lastKnownMessageCount),
+      );
+    }
+    const rawNewMsgTokens =
+      omittedNewTokens +
+      newMessages.reduce((s, m) => s + estimateMessage(m), 0);
     const newMsgTokens = Math.ceil(rawNewMsgTokens * CALIBRATED_DELTA_SAFETY);
     const ltmDelta = sessLtmTokens - sessState.lastKnownLtm;
     expectedInput = sessState.lastKnownInput + newMsgTokens + ltmDelta;
@@ -3616,7 +3669,7 @@ function transformInner(input: {
     // First turn or session change: fall back to chars/3 estimate + overhead.
     const messageTokens = input.messages.reduce(
       (s, m) => s + estimateMessage(m),
-      0,
+      input.sourceWindow?.omittedTokens ?? 0,
     );
     expectedInput = messageTokens + overhead + sessLtmTokens;
   }
@@ -3668,6 +3721,7 @@ function transformInner(input: {
     effectiveMinLayer === 0 &&
     layer0Passes(layer0Input, layer0Ceiling, maxInput)
   ) {
+    if (input.sourceWindow?.offset) throw new FullSourceRequired("passthrough");
     // All messages fit — return unmodified to preserve append-only prompt-cache pattern.
     // Raw messages are strictly better context than lossy distilled summaries.
     // The quality-hard-ceiling clause (fill > QUALITY_HARD_CEILING_FRACTION of
@@ -3749,6 +3803,8 @@ function transformInner(input: {
         freeWrite,
       })
     ) {
+      if (input.sourceWindow?.offset)
+        throw new FullSourceRequired("passthrough");
       const messageTokens = calibrated
         ? expectedInput - (sessLtmTokens - sessState.lastKnownLtm)
         : expectedInput - overhead - sessLtmTokens;
@@ -3779,6 +3835,8 @@ function transformInner(input: {
   // ones with compact annotations. This can save thousands of tokens for sessions
   // with repeated file reads, potentially avoiding escalation to higher layers.
   const turnStart = currentTurnStart(input.messages);
+  if (input.sourceWindow?.offset && turnStart === 0)
+    throw new FullSourceRequired("tool_chain");
   // Pass the per-session decision memo so dedup stays byte-stable across turns
   // (an already-sent output keeps its full/collapsed form). Only when we have a
   // session to scope the memo to.
@@ -3930,6 +3988,7 @@ function transformInner(input: {
       // prefix the trim gate kept — otherwise tryFitStable's own
       // `prefixTokens > distilledBudget` guard would reject it and escalate.
       result = tryFitStable({
+        sourceWindow: input.sourceWindow,
         messages: dedupMessages,
         prefix: stagePrefix,
         prefixTokens: stagePrefixTokens,
@@ -3947,6 +4006,7 @@ function transformInner(input: {
       sessState.rawWindowCache = null;
       sessState.distilledBudgetHighWater = 0;
       result = tryFit({
+        sourceWindow: input.sourceWindow,
         messages: dedupMessages,
         prefix: stagePrefix,
         prefixTokens: stagePrefixTokens,
@@ -4022,6 +4082,8 @@ function transformInner(input: {
   // Current turn is always included (non-negotiable — dropping it causes
   // the infinite tool-call loop). Clean parts but never strip tool outputs.
   const nuclearTurnStart = currentTurnStart(input.messages);
+  if (input.sourceWindow?.offset && nuclearTurnStart === 0)
+    throw new FullSourceRequired("tool_chain");
   const currentTurn = input.messages.slice(nuclearTurnStart).map((m) => ({
     info: m.info,
     parts: cleanParts(m.parts),
@@ -4047,6 +4109,13 @@ function transformInner(input: {
     });
     olderTokens += est;
   }
+
+  if (
+    input.sourceWindow?.offset &&
+    olderMessages.length === nuclearTurnStart &&
+    olderTokens < remaining
+  )
+    throw new FullSourceRequired("window_exhausted");
 
   // Ensure role alternation at the prefix/raw boundary: drop leading assistant
   // messages from the older tail so the raw window starts with user (#424).
@@ -4088,6 +4157,7 @@ function transformInner(input: {
 // count but the "new messages" delta is computed against the full DB count,
 // making newMsgCount ≈ 0 and causing layer 0 passthrough on an overflowing session.
 export function transform(input: {
+  sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   projectPath: string;
   sessionID?: string;
@@ -4103,6 +4173,26 @@ export function transform(input: {
   // other request can clobber the globals between here and the transform.
   if (input.budget) applyModelBudget(input.budget);
 
+  const attemptSid = input.sessionID ?? input.messages[0]?.info.sessionID;
+  const original =
+    input.sourceWindow?.offset && attemptSid
+      ? getSessionState(attemptSid)
+      : undefined;
+  const originalUrgent = attemptSid
+    ? urgentDistillationMap.get(attemptSid)
+    : undefined;
+  if (original && attemptSid) {
+    const decisions = new Map<string, boolean>();
+    for (const message of input.messages)
+      for (const part of message.parts) {
+        if (!isToolPart(part)) continue;
+        const key = `${message.info.id}:${part.id ?? ""}`;
+        const value = original.dedupDecisions.get(key);
+        if (value !== undefined) decisions.set(key, value);
+      }
+    sessionStates.set(attemptSid, { ...original, dedupDecisions: decisions });
+  }
+
   // #797: count this transform for the cold-start grace window. Incremented
   // BEFORE transformInner so the very first turn observes transformCount === 1,
   // making the grace cover exactly the first COLD_START_GRACE_TURNS turns of a
@@ -4112,7 +4202,25 @@ export function transform(input: {
   const coldStartSid = input.sessionID ?? input.messages[0]?.info.sessionID;
   if (coldStartSid) getSessionState(coldStartSid).transformCount++;
 
-  const result = transformInner(input);
+  let result: TransformResult;
+  try {
+    result = transformInner(input);
+  } catch (error) {
+    if (original && attemptSid) {
+      sessionStates.set(attemptSid, original);
+      if (originalUrgent === undefined)
+        urgentDistillationMap.delete(attemptSid);
+      else urgentDistillationMap.set(attemptSid, originalUrgent);
+    }
+    throw error;
+  }
+  if (original && attemptSid) {
+    const accepted = getSessionState(attemptSid);
+    for (const [key, value] of accepted.dedupDecisions)
+      original.dedupDecisions.set(key, value);
+    accepted.dedupDecisions = original.dedupDecisions;
+    if (original.forceMinLayer > 0) saveForceMinLayer(attemptSid, 0);
+  }
 
   // Sanitize non-terminal tool parts before the window reaches the SDK.
   // Must run after transformInner (covers all layers 0-4) and before the
@@ -4248,6 +4356,7 @@ function currentTurnStart(messages: MessageWithParts[]): number {
 }
 
 function tryFit(input: {
+  sourceWindow?: SourceWindow;
   messages: MessageWithParts[];
   prefix: MessageWithParts[];
   prefixTokens: number;
@@ -4277,6 +4386,8 @@ function tryFit(input: {
   // These are always included — they must never be evicted. If they alone exceed the
   // raw budget, escalate to the next layer (which strips tool outputs to reduce size).
   const turnStart = currentTurnStart(input.messages);
+  if (input.sourceWindow?.offset && turnStart === 0)
+    throw new FullSourceRequired("tool_chain");
   const currentTurn = input.messages.slice(turnStart);
   const currentTurnTokens = currentTurn.reduce(
     (s, m) => s + estimateMessage(m),
@@ -4312,6 +4423,9 @@ function tryFit(input: {
     olderTokens += tokens;
     if (i === 0) cutoff = 0;
   }
+
+  if (input.sourceWindow?.offset && cutoff === 0)
+    throw new FullSourceRequired("window_exhausted");
 
   // Ensure role alternation at the prefix/raw boundary: the distilled prefix
   // ends with an assistant message, so the raw window must start with a user.

@@ -21,7 +21,11 @@ export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
-import { asString, estimateTokens as coreEstimateTokens } from "@loreai/core";
+import {
+  FullSourceRequired,
+  asString,
+  estimateTokens as coreEstimateTokens,
+} from "@loreai/core";
 import {
   load,
   config as loreConfig,
@@ -16239,14 +16243,20 @@ async function handleConversationTurn(
   // Build the Lore message array once (resolved) — shared by the turn-1 LTM
   // decision below (isLargeColdStart) and the gradient transform in step 7, so
   // both see identical input and agree on whether this cold session compresses.
-  const { loreMessages, temporalInput, provenanceByMessageId } =
-    await prepareSemanticMessages({
-      messages: req.messages,
-      sessionID,
-      projectPath,
-      noStore: suppressTemporalStorage,
-      timing: preparationTiming,
-    });
+  let {
+    loreMessages,
+    temporalInput,
+    provenanceByMessageId,
+    sourceWindow,
+    checkpoint,
+  } = await prepareSemanticMessages({
+    messages: req.messages,
+    sessionID,
+    projectPath,
+    noStore: suppressTemporalStorage,
+    protocol: req.protocol,
+    timing: preparationTiming,
+  });
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
@@ -16363,6 +16373,7 @@ async function handleConversationTurn(
       const largeColdStart =
         isFirstTurn &&
         isLargeColdStart({
+          sourceWindow,
           messages: loreMessages,
           sessionID,
           ltmTokens: stable?.tokenCount ?? 0,
@@ -16690,15 +16701,42 @@ async function handleConversationTurn(
     req.signal,
   );
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  const result = transform({
-    messages: loreMessages,
-    projectPath,
-    sessionID,
-    // Apply this request's model budget atomically inside transform — see the
-    // ModelBudget snapshot above. Prevents a concurrent request for a different
-    // model from clobbering caps/pricing during the intervening ltm awaits.
-    budget: modelBudget,
-  });
+  let result;
+  try {
+    result = transform({
+      messages: loreMessages,
+      projectPath,
+      sessionID,
+      budget: modelBudget,
+      sourceWindow,
+    });
+  } catch (error) {
+    if (!(error instanceof FullSourceRequired) || !sourceWindow) throw error;
+    preparationTiming.metric(`source_fallback_${error.reason}`, 1);
+    ({
+      loreMessages,
+      temporalInput,
+      provenanceByMessageId,
+      sourceWindow,
+      checkpoint,
+    } = await prepareSemanticMessages({
+      messages: req.messages,
+      sessionID,
+      projectPath,
+      noStore: suppressTemporalStorage,
+      protocol: req.protocol,
+      forceFull: true,
+      timing: preparationTiming,
+    }));
+    assertCurrentPipelineGeneration(req.signal, requestGeneration);
+    result = transform({
+      messages: loreMessages,
+      projectPath,
+      sessionID,
+      budget: modelBudget,
+    });
+  }
+  checkpoint?.finish(result.messages);
 
   // Drop trailing pure-text assistant messages to prevent prefill errors
   for (;;) {
@@ -16992,7 +17030,8 @@ async function handleConversationTurn(
   const transformedMessages = loreMessagesToGateway(
     result.messages,
     provenanceByMessageId,
-    result.messages.length === loreMessages.length &&
+    !sourceWindow &&
+      result.messages.length === loreMessages.length &&
       result.messages.every(
         (message, index) => message.info.id === loreMessages[index]?.info.id,
       ),

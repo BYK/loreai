@@ -1,3 +1,4 @@
+import { SOURCE_WINDOW_SCHEMA } from "./source-window-schema";
 import { Database, registerScalarFunction } from "#db/driver";
 import { isVecAvailable, loadVecExtension, resetVecState } from "./db/vec";
 import {
@@ -2070,6 +2071,8 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   CREATE INDEX IF NOT EXISTS idx_semantic_token_cache_updated
     ON semantic_token_cache(updated_at);
   `,
+  // Version 87: bounded, local accepted-source transcript windows.
+  SOURCE_WINDOW_SCHEMA,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4140,6 +4143,7 @@ function recoverMissingObjects(database: Database) {
     CREATE INDEX IF NOT EXISTS idx_semantic_token_cache_updated
       ON semantic_token_cache(updated_at);
   `);
+  database.exec(SOURCE_WINDOW_SCHEMA);
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
   // The verdict-keyed index MUST be created here, AFTER the column is ensured —
   // never in the big exec above, which runs before this ALTER and would throw
@@ -4261,6 +4265,7 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "project_id_aliases",
   "project_path_aliases",
   "session_prompt_deltas",
+  "source_windows", // Disposable; source-project deletion cascades it away.
   "semantic_token_cache", // Disposable; source-project deletion cascades it away.
   "session_rollup",
   "temporal_messages",

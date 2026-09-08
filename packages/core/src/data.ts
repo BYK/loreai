@@ -655,6 +655,7 @@ export function clearProject(projectPath: string): ClearResult {
   database.exec("BEGIN IMMEDIATE");
   try {
     // Preparation may publish derived counts before any temporal row exists.
+    database.query("DELETE FROM source_windows WHERE project_id = ?").run(pid);
     database
       .query("DELETE FROM semantic_token_cache WHERE project_id = ?")
       .run(pid);

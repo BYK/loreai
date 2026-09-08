@@ -1,3 +1,4 @@
+import { MIGRATIONS } from "../../core/src/db";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   close,
@@ -397,7 +398,7 @@ describe("storeTurnTemporal (#1084)", () => {
       `);
       close();
       expect(db().query("SELECT version FROM schema_version").get()).toEqual({
-        version: 86,
+        version: MIGRATIONS.length,
       });
 
       const noStoreLore = gatewayMessagesToLore(conversation, sessionID);
