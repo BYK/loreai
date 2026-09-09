@@ -143,6 +143,8 @@ export type RecallRun = {
 
 /** Keep one tool call bounded while allowing known source details to be batched. */
 export const MAX_RECALL_BATCH_IDS = 8;
+/** Bound untrusted tool IDs before they are interpolated into a result. */
+export const MAX_RECALL_ID_CHARS = 256;
 export const DEFAULT_RECALL_DETAIL_CHARS = 12_000;
 export const MAX_RECALL_DETAIL_CHARS = 16_000;
 export const MAX_RECALL_BATCH_CHARS = 32_000;
@@ -1712,6 +1714,7 @@ export async function searchRecall(
  *   t: (temporal), lat: (lat-section), e: (entity).
  */
 export function recallById(id: string): string {
+  if (!isValidRecallId(id)) return "Invalid recall id.";
   const colonIdx = id.indexOf(":");
   if (colonIdx < 1) return `No entry found for id: ${id}`;
 
@@ -1925,11 +1928,18 @@ function sourceCoverage(
         : null;
     }
     case "e": {
-      const entity = entities.getWithAliases(rawId);
+      const entity = db()
+        .query(
+          "SELECT id, updated_at FROM entities WHERE tenant_id = ? AND id = ?",
+        )
+        .get(currentTenantId(), rawId) as {
+        id: string;
+        updated_at: number;
+      } | null;
       return entity
         ? {
             identity: `e:${entity.id}`,
-            revision: fingerprint(JSON.stringify(entity)),
+            revision: fingerprint(`${entity.id}:${entity.updated_at}`),
           }
         : null;
     }
@@ -1938,34 +1948,187 @@ function sourceCoverage(
   }
 }
 
+function isValidRecallId(id: string): boolean {
+  return id.length > 0 && id.length <= MAX_RECALL_ID_CHARS;
+}
+
+function detailPage(
+  id: string,
+  coverage: Omit<RecallCoverage, "offset" | "length" | "complete">,
+  header: string,
+  content: string,
+  totalLength: number,
+  offset: number,
+): RecallRun {
+  const start = Math.min(offset, totalLength);
+  const length = Math.min(content.length, totalLength - start);
+  const end = start + length;
+  const complete = end >= totalLength;
+  const suffix = complete
+    ? ""
+    : `\n\n[Detail truncated after characters ${start}-${end} of ${totalLength}. Call recall again with id \`${id}\` and detailOffset ${end}.]`;
+  return {
+    result: `${header}\n\n${inline(content)}${suffix}`,
+    coverage: [
+      {
+        ...coverage,
+        offset: start,
+        length,
+        complete,
+        kind: "detail",
+      },
+    ],
+  };
+}
+
 /** Fetch a bounded detail plus private source coverage for recall policy. */
 export function recallByIdWithMetadata(
   id: string,
   input: RecallDetailOptions = {},
 ): RecallRun {
   const { offset, limit } = normalizeDetailOptions(input);
-  const full = recallById(id);
+  if (!isValidRecallId(id)) {
+    return { result: "Invalid recall id.", coverage: [] };
+  }
   const coverage = sourceCoverage(id);
-  if (!coverage) return { result: full, coverage: [] };
-  const start = Math.min(offset, full.length);
-  const text = full.slice(start, start + limit);
-  const end = start + text.length;
-  const complete = end >= full.length;
-  const suffix = complete
-    ? ""
-    : `\n\n[Detail truncated after characters ${start}-${end} of ${full.length}. Call recall again with id \`${id}\` and detailOffset ${end}.]`;
-  return {
-    result: text + suffix,
-    coverage: [
-      {
-        ...coverage,
-        offset: start,
-        length: text.length,
-        complete,
-        kind: "detail",
-      },
-    ],
-  };
+  if (!coverage)
+    return { result: `No entry found for id: ${id}`, coverage: [] };
+
+  const colon = id.indexOf(":");
+  const prefix = id.slice(0, colon);
+  const rawId = id.slice(colon + 1);
+  switch (prefix) {
+    case "k":
+    case "xk": {
+      const logicalId = ltm.logicalIdOf(rawId);
+      const row = db()
+        .query(
+          `SELECT substr(title, 1, 256) AS title, category,
+                  length(content) AS content_length,
+                  substr(content, ? + 1, ?) AS content_page
+             FROM knowledge_current
+            WHERE tenant_id = ? AND logical_id = ?`,
+        )
+        .get(offset, limit, currentTenantId(), logicalId) as {
+        title: string;
+        category: string;
+        content_length: number;
+        content_page: string;
+      } | null;
+      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      return detailPage(
+        id,
+        coverage,
+        `## Recall Detail: ${id}\n\n#### Knowledge\n- **${inline(row.title)}** (${row.category}):`,
+        row.content_page,
+        row.content_length,
+        offset,
+      );
+    }
+    case "d": {
+      const row = db()
+        .query(
+          `SELECT length(d.observations) AS content_length,
+                  substr(d.observations, ? + 1, ?) AS content_page
+             FROM distillations d JOIN projects p ON p.id = d.project_id
+            WHERE p.tenant_id = ? AND d.id = ?`,
+        )
+        .get(offset, limit, currentTenantId(), rawId) as {
+        content_length: number;
+        content_page: string;
+      } | null;
+      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      return detailPage(
+        id,
+        coverage,
+        `## Recall Detail: ${id}\n\n#### Distilled`,
+        row.content_page,
+        row.content_length,
+        offset,
+      );
+    }
+    case "t": {
+      const row = db()
+        .query(
+          `SELECT t.role, substr(t.session_id, 1, 8) AS session_id,
+                  t.created_at, length(t.content) AS content_length,
+                  substr(t.content, ? + 1, ?) AS content_page
+             FROM temporal_messages t JOIN projects p ON p.id = t.project_id
+            WHERE p.tenant_id = ? AND t.id = ?`,
+        )
+        .get(offset, limit, currentTenantId(), rawId) as {
+        role: string;
+        session_id: string;
+        created_at: number;
+        content_length: number;
+        content_page: string;
+      } | null;
+      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      return detailPage(
+        id,
+        coverage,
+        `## Recall Detail: ${id}\n\n#### Conversation\n(${row.role}, ${relativeAge(row.created_at)}, session: ${row.session_id})`,
+        row.content_page,
+        row.content_length,
+        offset,
+      );
+    }
+    case "lat": {
+      const row = db()
+        .query(
+          `SELECT substr(l.file, 1, 256) AS file,
+                  substr(l.heading, 1, 256) AS heading,
+                  length(l.content) AS content_length,
+                  substr(l.content, ? + 1, ?) AS content_page
+             FROM lat_sections l JOIN projects p ON p.id = l.project_id
+            WHERE p.tenant_id = ? AND l.id = ?`,
+        )
+        .get(offset, limit, currentTenantId(), rawId) as {
+        file: string;
+        heading: string;
+        content_length: number;
+        content_page: string;
+      } | null;
+      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      return detailPage(
+        id,
+        coverage,
+        `## Recall Detail: ${id}\n\n#### Reference\n**${inline(row.file)} § ${inline(row.heading)}**`,
+        row.content_page,
+        row.content_length,
+        offset,
+      );
+    }
+    case "e": {
+      const row = db()
+        .query(
+          `SELECT entity_type, substr(canonical_name, 1, 256) AS canonical_name,
+                  length(COALESCE(metadata, '')) AS content_length,
+                  substr(COALESCE(metadata, ''), ? + 1, ?) AS content_page
+             FROM entities WHERE tenant_id = ? AND id = ?`,
+        )
+        .get(offset, limit, currentTenantId(), rawId) as {
+        entity_type: string;
+        canonical_name: string;
+        content_length: number;
+        content_page: string;
+      } | null;
+      if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      return detailPage(
+        id,
+        coverage,
+        `## Recall Detail: ${id}\n\n#### People & Entities\n**${inline(row.canonical_name)}** (${row.entity_type})`,
+        row.content_page,
+        row.content_length,
+        offset,
+      );
+    }
+    default:
+      return {
+        result: `Unknown source prefix "${prefix}" in id: ${id}`,
+        coverage: [],
+      };
+  }
 }
 
 /** Full recall run retaining the legacy string API. */
@@ -1984,6 +2147,11 @@ export async function runRecallWithMetadata(
   input.signal?.throwIfAborted();
   if (input.id && input.ids) {
     throw new Error("Recall id and ids cannot be used together");
+  }
+  if (input.id !== undefined && !isValidRecallId(input.id)) {
+    throw new Error(
+      `Recall id must be a non-empty string no longer than ${MAX_RECALL_ID_CHARS} characters`,
+    );
   }
   if (
     (input.detailOffset !== undefined || input.detailLimit !== undefined) &&
@@ -2004,8 +2172,10 @@ export async function runRecallWithMetadata(
     let remaining = MAX_RECALL_BATCH_CHARS;
     for (const requestedId of input.ids) {
       input.signal?.throwIfAborted();
-      if (typeof requestedId !== "string" || !requestedId.trim()) {
-        throw new Error("Recall ids must contain non-empty strings");
+      if (typeof requestedId !== "string" || !isValidRecallId(requestedId)) {
+        throw new Error(
+          `Recall ids must contain non-empty strings no longer than ${MAX_RECALL_ID_CHARS} characters`,
+        );
       }
       if (seenRequests.has(requestedId)) continue;
       seenRequests.add(requestedId);
