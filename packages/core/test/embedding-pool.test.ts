@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
@@ -133,6 +133,13 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
+/** Flush worker/provider microtasks while Vitest owns the timer queue. */
+async function flushFakeTimers(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
 /** Attach handlers immediately so an expected rejection isn't flagged unhandled. */
 function settle<T>(
   p: Promise<T>,
@@ -193,6 +200,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
     // Restore NODE_ENV (a couple of tests flip it to exercise the production path).
     if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
     else delete process.env.NODE_ENV;
+    vi.useRealTimers();
   });
 
   it("serializes cold bootstrap before enabling parallel dispatch", async () => {
@@ -834,20 +842,169 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes).toHaveLength(1);
     fakes[0].initError("transient one");
     expect((await first).ok).toBe(false);
-    expect((await second).ok).toBe(false);
     await flush();
+    let secondSettled = false;
+    void second.then(() => {
+      secondSettled = true;
+    });
+    expect(secondSettled).toBe(false);
     expect(_getLocalInitRetryAtForTest()).toBeGreaterThan(Date.now());
 
-    const cooling = await settle(embed(["too soon"], "document"));
-    expect(cooling.ok).toBe(false);
+    const coolingController = new AbortController();
+    const cooling = settle(
+      embed(["too soon"], "document", coolingController.signal),
+    );
+    let coolingSettled = false;
+    void cooling.then(() => {
+      coolingSettled = true;
+    });
+    await flush();
+    expect(coolingSettled).toBe(false);
     expect(fakes).toHaveLength(1);
+    coolingController.abort();
+    const coolingOutcome = await cooling;
+    expect(coolingOutcome.ok).toBe(false);
+    if (!coolingOutcome.ok) {
+      expect(coolingOutcome.err).toBeInstanceOf(EmbeddingRequestAbortedError);
+    }
 
     _setLocalInitRetryAtForTest(Date.now() - 1);
     const retry = embed(["after cooldown"], "document");
     await flush();
     expect(fakes).toHaveLength(2);
-    fakes[1].completeAll();
+    fakes[1].completeNext();
+    await flush();
+    expect((await second).ok).toBe(true);
+    fakes[1].completeNext();
     expect(await retry).toHaveLength(1);
+  });
+
+  it("keeps queued operations pending and resumes them after an init cooldown", async () => {
+    vi.useFakeTimers();
+    _setEmbedPoolSizeForTest(1);
+    _setLocalInitCooldownMsForTest(1_000);
+    const fakes = installFakeWorkers();
+
+    const failed = settle(embed(["failed"], "document"));
+    const queued1 = settle(embed(["queued-1"], "document"));
+    const queued2 = settle(embed(["queued-2"], "document"));
+    await flushFakeTimers();
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    const scheduledTimers: Array<ReturnType<typeof setTimeout>> = [];
+    const fakeSetTimeout = globalThis.setTimeout;
+    const timeoutSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((handler, timeout, ...args) => {
+        const timer = fakeSetTimeout(handler, timeout, ...args);
+        scheduledTimers.push(timer);
+        return timer;
+      });
+    fakes[0].initError("transient init failure");
+    await flushFakeTimers();
+    expect((await failed).ok).toBe(false);
+    const retryTimer = scheduledTimers.at(-1);
+    expect(retryTimer).toBeDefined();
+    expect(retryTimer?.hasRef()).toBe(true);
+    timeoutSpy.mockRestore();
+
+    let queued1Settled = false;
+    let queued2Settled = false;
+    void queued1.then(() => {
+      queued1Settled = true;
+    });
+    void queued2.then(() => {
+      queued2Settled = true;
+    });
+    await flushFakeTimers();
+    expect(queued1Settled).toBe(false);
+    expect(queued2Settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fakes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushFakeTimers();
+    expect(fakes).toHaveLength(2);
+    expect(fakes[1].embedIds).toHaveLength(1);
+
+    fakes[1].completeNext();
+    await flushFakeTimers();
+    expect((await queued1).ok).toBe(true);
+    expect(fakes[1].embedIds).toHaveLength(1);
+    fakes[1].completeNext();
+    await flushFakeTimers();
+    expect((await queued2).ok).toBe(true);
+  });
+
+  it("drains every queued operation when provider failure is terminal", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+
+    const running = settle(embed(["running"], "document"));
+    const queued1 = settle(embed(["queued-1"], "document"));
+    const queued2 = settle(embed(["queued-2"], "document"));
+    await flush();
+
+    fakes[0].initError("Cannot find module 'onnxruntime-node'");
+    await flush();
+    for (const outcome of await Promise.all([running, queued1, queued2])) {
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) {
+        expect(outcome.err).toBeInstanceOf(LocalProviderUnavailableError);
+      }
+    }
+  });
+
+  it("cancels a pending cooldown wake-up when the pool shuts down", async () => {
+    vi.useFakeTimers();
+    _setEmbedPoolSizeForTest(1);
+    _setLocalInitCooldownMsForTest(1_000);
+    const fakes = installFakeWorkers();
+
+    const running = settle(embed(["running"], "document"));
+    const queued = settle(embed(["queued"], "document"));
+    await flushFakeTimers();
+    fakes[0].initError("transient init failure");
+    await flushFakeTimers();
+    expect((await running).ok).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await resetProvider();
+    const queuedOutcome = await queued;
+    expect(queuedOutcome.ok).toBe(false);
+    if (!queuedOutcome.ok) {
+      expect(queuedOutcome.err).toBeInstanceOf(LocalProviderUnavailableError);
+    }
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("cancels the cooldown wake-up with its last queued waiter", async () => {
+    vi.useFakeTimers();
+    _setEmbedPoolSizeForTest(1);
+    _setLocalInitCooldownMsForTest(1_000);
+    const fakes = installFakeWorkers();
+    const controller = new AbortController();
+
+    const running = settle(embed(["running"], "document"));
+    const queued = settle(embed(["queued"], "document", controller.signal));
+    await flushFakeTimers();
+    fakes[0].initError("transient init failure");
+    await flushFakeTimers();
+    expect((await running).ok).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+
+    controller.abort();
+    const queuedOutcome = await queued;
+    expect(queuedOutcome.ok).toBe(false);
+    if (!queuedOutcome.ok) {
+      expect(queuedOutcome.err).toBeInstanceOf(EmbeddingRequestAbortedError);
+    }
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fakes).toHaveLength(1);
   });
 
   it("applies the same bounded cooldown to worker errors", async () => {
@@ -861,10 +1018,24 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect((await first).ok).toBe(false);
     await flush();
 
-    const cooling = await settle(embed(["too soon"], "document"));
-    expect(cooling.ok).toBe(false);
+    const coolingController = new AbortController();
+    const cooling = settle(
+      embed(["too soon"], "document", coolingController.signal),
+    );
+    let coolingSettled = false;
+    void cooling.then(() => {
+      coolingSettled = true;
+    });
+    await flush();
+    expect(coolingSettled).toBe(false);
     expect(fakes).toHaveLength(1);
     expect(_getLocalInitRetryAtForTest()).toBeGreaterThan(Date.now());
+    coolingController.abort();
+    const coolingOutcome = await cooling;
+    expect(coolingOutcome.ok).toBe(false);
+    if (!coolingOutcome.ok) {
+      expect(coolingOutcome.err).toBeInstanceOf(EmbeddingRequestAbortedError);
+    }
 
     for (let attempt = 2; attempt <= 3; attempt++) {
       _setLocalInitRetryAtForTest(Date.now() - 1);

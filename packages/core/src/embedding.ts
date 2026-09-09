@@ -1965,6 +1965,18 @@ function cloneEmbeddingVectors(vectors: Float32Array[]): Float32Array[] {
   return vectors.map((vector) => vector.slice());
 }
 
+/** Internal dispatch signal: the provider can recover at `retryAt`, so queued
+ * work must remain owned instead of being rejected as permanently unavailable. */
+class EmbeddingWorkerRetryCooldownError extends LocalProviderUnavailableError {
+  readonly retryAt: number;
+
+  constructor(retryAt: number) {
+    super("embedding worker retry cooldown is active");
+    this.name = "EmbeddingWorkerRetryCooldownError";
+    this.retryAt = retryAt;
+  }
+}
+
 /**
  * A pool of {@link LocalProvider} workers so concurrent embeds run in parallel
  * instead of serializing through a single worker (#999). Mirrors
@@ -2007,6 +2019,8 @@ class EmbeddingPool implements EmbeddingProvider {
     TokenBatchCheckpoint
   >();
   private dispatching = false;
+  private retryDispatchTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryDispatchAt = 0;
   private closing = false;
   private shutdownPromise: Promise<void> | null = null;
 
@@ -2051,9 +2065,7 @@ class EmbeddingPool implements EmbeddingProvider {
     // protects a constrained host — identical to today's single worker).
     if (this.slots.length === 0) {
       if (localInitRetryAt > now) {
-        throw new LocalProviderUnavailableError(
-          "embedding worker retry cooldown is active",
-        );
+        throw new EmbeddingWorkerRetryCooldownError(localInitRetryAt);
       }
       // Admit exactly one recovery probe after the cooldown. The outstanding
       // failure debt below prevents pool growth until this slot succeeds.
@@ -2249,7 +2261,33 @@ class EmbeddingPool implements EmbeddingProvider {
     if (operation) {
       this.queuedBytes = Math.max(0, this.queuedBytes - operation.byteSize);
     }
+    if (this.queue.length === 0) this.clearRetryDispatchTimer();
     return operation;
+  }
+
+  private clearRetryDispatchTimer(): void {
+    if (this.retryDispatchTimer) clearTimeout(this.retryDispatchTimer);
+    this.retryDispatchTimer = null;
+    this.retryDispatchAt = 0;
+  }
+
+  /** Resume the host queue when a transient provider cooldown expires. Keeping
+   * this timer pool-owned avoids a cascade of false terminal rejections while
+   * still bounding retained work through the normal queue limits. */
+  private scheduleRetryDispatch(retryAt: number): void {
+    if (this.retryDispatchTimer && this.retryDispatchAt === retryAt) return;
+    this.clearRetryDispatchTimer();
+    this.retryDispatchAt = retryAt;
+    const timer = setTimeout(
+      () => {
+        if (this.retryDispatchTimer !== timer) return;
+        this.retryDispatchTimer = null;
+        this.retryDispatchAt = 0;
+        this.dispatch();
+      },
+      Math.max(0, retryAt - Date.now()),
+    );
+    this.retryDispatchTimer = timer;
   }
 
   private canEnqueueOperation(
@@ -2475,6 +2513,10 @@ class EmbeddingPool implements EmbeddingProvider {
         try {
           slot = this.pickSlot();
         } catch (error) {
+          if (error instanceof EmbeddingWorkerRetryCooldownError) {
+            this.scheduleRetryDispatch(error.retryAt);
+            break;
+          }
           this.removeQueuedOperation(0);
           if (this.operations.get(operation.key) === operation) {
             this.operations.delete(operation.key);
@@ -2488,6 +2530,7 @@ class EmbeddingPool implements EmbeddingProvider {
           }
           continue;
         }
+        this.clearRetryDispatchTimer();
         if (slot.inflight > 0) break;
 
         this.removeQueuedOperation(0);
@@ -2555,6 +2598,7 @@ class EmbeddingPool implements EmbeddingProvider {
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.closing = true;
+    this.clearRetryDispatchTimer();
     const shutdownError = new LocalProviderUnavailableError(
       "embedding pool shut down",
     );
