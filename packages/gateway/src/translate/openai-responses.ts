@@ -868,7 +868,16 @@ function buildStrictRecallParameters(
         : typeof property.type === "string"
           ? [property.type]
           : [];
-      const type = [...sourceTypes.filter((item) => item !== "null"), "null"];
+      const nonNullTypes = sourceTypes.filter((item) => item !== "null");
+      if (
+        nonNullTypes.length === 0 ||
+        nonNullTypes.some((item) => typeof item !== "string")
+      ) {
+        throw new Error(
+          `Recall schema property "${name}" must declare a non-null type`,
+        );
+      }
+      const type = [...nonNullTypes, "null"];
       return [
         name,
         {

@@ -1224,6 +1224,26 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(RECALL_GATEWAY_TOOL.inputSchema).not.toHaveProperty("required");
   });
 
+  test("rejects a null-only strict projection for an ill-formed recall property", () => {
+    const req = parseOpenAIResponsesRequest(
+      { model: "gpt-4o", input: "Hello" },
+      {},
+    );
+    req.tools.push({
+      name: "recall",
+      description: "Recall memory",
+      inputSchema: {
+        type: "object",
+        properties: { query: { anyOf: [{ type: "string" }] } },
+        additionalProperties: false,
+      },
+    });
+
+    expect(() =>
+      buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com"),
+    ).toThrow('Recall schema property "query" must declare a non-null type');
+  });
+
   test("does NOT forward previous_response_id (gateway is stateless full-history)", () => {
     // The gateway always sends the complete conversation as `input`. Forwarding
     // previous_response_id would make the upstream ALSO prepend its server-stored
