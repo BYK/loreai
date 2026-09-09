@@ -1,8 +1,10 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import {
   MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_ID_CHARS,
+  recallById,
   runRecall,
   runRecallWithMetadata,
 } from "../src/recall";
@@ -99,6 +101,39 @@ describe("recall detail batches", () => {
       { identity: `k:${knowledge(id).logical_id}`, offset: 400 },
     ]);
     expect(second.result).not.toEqual(first.result);
+  });
+
+  test("renders a detail page without hydrating the full knowledge entry", async () => {
+    const id = seed("Paged source", "x".repeat(20_000));
+    const get = vi.spyOn(ltm, "get").mockImplementation(() => {
+      throw new Error("full knowledge hydration must not occur for a page");
+    });
+
+    try {
+      const page = await runRecallWithMetadata({
+        query: "",
+        id: `k:${id}`,
+        detailLimit: 400,
+        projectPath: PROJECT,
+      });
+      expect(page.result).toContain("Paged source");
+      expect(page.coverage).toMatchObject([{ length: 400, complete: false }]);
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+    }
+  });
+
+  test("rejects oversized IDs without echoing them into a recall result", async () => {
+    const oversized = `k:${"x".repeat(MAX_RECALL_ID_CHARS)}`;
+
+    await expect(
+      runRecall({ query: "", id: oversized, projectPath: PROJECT }),
+    ).rejects.toThrow(`no longer than ${MAX_RECALL_ID_CHARS}`);
+    await expect(
+      runRecall({ query: "", ids: [oversized], projectPath: PROJECT }),
+    ).rejects.toThrow(`no longer than ${MAX_RECALL_ID_CHARS}`);
+    expect(recallById(oversized)).toBe("Invalid recall id.");
   });
 
   test("distinguishes a search preview from a subsequent full detail", async () => {
