@@ -20,6 +20,7 @@
 import {
   runRecallWithMetadata,
   MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_ID_CHARS,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
   log,
@@ -67,13 +68,19 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
       },
       id: {
         type: "string",
+        minLength: 1,
+        maxLength: MAX_RECALL_ID_CHARS,
         description: RECALL_PARAM_DESCRIPTIONS.id,
       },
       ids: {
         type: "array",
         minItems: 1,
         maxItems: MAX_RECALL_BATCH_IDS,
-        items: { type: "string", minLength: 1 },
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_RECALL_ID_CHARS,
+        },
         description: RECALL_PARAM_DESCRIPTIONS.ids,
       },
       detailOffset: {
@@ -145,7 +152,10 @@ export function buildRecallMarker(
 ): string {
   if (ids && ids.length > 0)
     return `📚 Fetching details for ${ids.length} sources…`;
-  if (id) return `📚 Fetching detail for ${id}…`;
+  if (id)
+    return `📚 Fetching detail for ${
+      id.length <= MAX_RECALL_ID_CHARS ? id : "an invalid source"
+    }…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }
 
@@ -546,12 +556,16 @@ function isStoredRecall(value: unknown): value is StoredRecall {
   }
   const ids = input.ids;
   if (
-    (typeof input.id === "string" && !input.id) ||
+    (typeof input.id === "string" &&
+      (!input.id || input.id.length > MAX_RECALL_ID_CHARS)) ||
     (ids !== undefined &&
       (!Array.isArray(ids) ||
         ids.length === 0 ||
         ids.length > MAX_RECALL_BATCH_IDS ||
-        !ids.every((id): id is string => typeof id === "string" && !!id))) ||
+        !ids.every(
+          (id): id is string =>
+            typeof id === "string" && !!id && id.length <= MAX_RECALL_ID_CHARS,
+        ))) ||
     (input.id !== undefined && ids !== undefined) ||
     ((input.detailOffset !== undefined || input.detailLimit !== undefined) &&
       typeof input.id !== "string") ||
@@ -948,7 +962,9 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   }
   if (
     record.id !== undefined &&
-    (typeof record.id !== "string" || !record.id)
+    (typeof record.id !== "string" ||
+      !record.id ||
+      record.id.length > MAX_RECALL_ID_CHARS)
   ) {
     throw new Error("Recall id must be a non-empty string");
   }
@@ -957,7 +973,10 @@ function parseRecallInput(block: GatewayToolUseBlock): {
     (!Array.isArray(record.ids) ||
       record.ids.length === 0 ||
       record.ids.length > MAX_RECALL_BATCH_IDS ||
-      record.ids.some((id) => typeof id !== "string" || !id))
+      record.ids.some(
+        (id) =>
+          typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
+      ))
   ) {
     throw new Error(
       `Recall ids must contain from 1 to ${MAX_RECALL_BATCH_IDS} non-empty strings`,
