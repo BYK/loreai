@@ -27,7 +27,9 @@ class FakeWorker extends EventEmitter {
   readonly posted: PostedMsg[] = [];
   terminated = false;
   postMessage(msg: unknown): void {
-    this.posted.push({ ...(msg as PostedMsg) });
+    const posted = { ...(msg as PostedMsg) };
+    this.posted.push(posted);
+    if (posted.type === "shutdown") this.emit("exit", 0);
   }
   ref(): void {}
   unref(): void {}

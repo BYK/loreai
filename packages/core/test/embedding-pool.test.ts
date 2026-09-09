@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
   embed,
+  embedInTokenBatches,
+  EmbeddingQueueCapacityError,
   EmbeddingRequestAbortedError,
+  EmbeddingWorkerWatchdogError,
   ensureEmbeddingReady,
   isAvailable,
   LocalProviderUnavailableError,
@@ -16,6 +19,7 @@ import {
   _saveAndClearProvider,
   _setConstrainedMemoryForTest,
   _setEmbedPoolSizeForTest,
+  _setEmbeddingWorkerWatchdogsForTest,
   _setLocalInitCooldownMsForTest,
   _setLocalInitRetryAtForTest,
   _setPoolFreememForTest,
@@ -36,6 +40,7 @@ const GB = 1024 * 1024 * 1024;
  *  embed requests posted to it and only completes them when the test says so. */
 class FakeWorker extends EventEmitter {
   readonly embedIds: number[] = [];
+  embedPostCount = 0;
   gotShutdown = false;
   terminated = false;
   exitOnShutdown = true;
@@ -48,6 +53,7 @@ class FakeWorker extends EventEmitter {
         this.throwOnNextEmbed = false;
         throw new Error("worker died before postMessage");
       }
+      this.embedPostCount++;
       this.embedIds.push(m.id);
     } else if (m.type === "shutdown") {
       this.gotShutdown = true;
@@ -72,6 +78,24 @@ class FakeWorker extends EventEmitter {
         vectors: [new Float32Array([1, 0, 0])],
       });
     }
+  }
+
+  /** Resolve the oldest embed request posted so far. */
+  completeNext(): void {
+    const id = this.embedIds.shift();
+    if (id === undefined) return;
+    this.emit("message", {
+      type: "result",
+      id,
+      vectors: [new Float32Array([1, 0, 0])],
+    });
+  }
+
+  /** Mark the oldest posted request as entering tokenization/inference. */
+  startNext(): void {
+    const id = this.embedIds[0];
+    if (id === undefined) return;
+    this.emit("message", { type: "started", id });
   }
 
   /** Simulate a fatal model-init failure (permanent per-provider break). */
@@ -106,6 +130,13 @@ function installFakeWorkers(
 async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
   await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
+/** Flush worker/provider microtasks while Vitest owns the timer queue. */
+async function flushFakeTimers(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  await vi.advanceTimersByTimeAsync(0);
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
@@ -154,6 +185,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
   afterEach(() => {
     _setTestWorkerFactory(null);
     _setEmbedPoolSizeForTest(null);
+    _setEmbeddingWorkerWatchdogsForTest(null, null);
     _setLocalInitCooldownMsForTest(null);
     _setPoolFreememForTest(null);
     _setConstrainedMemoryForTest(null);
@@ -168,9 +200,10 @@ describe("EmbeddingPool dispatch (#999)", () => {
     // Restore NODE_ENV (a couple of tests flip it to exercise the production path).
     if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
     else delete process.env.NODE_ENV;
+    vi.useRealTimers();
   });
 
-  it("serializes cold bootstrap before dispatching concurrent embeds in parallel", async () => {
+  it("serializes cold bootstrap before enabling parallel dispatch", async () => {
     _setEmbedPoolSizeForTest(2);
     _setPoolFreememForTest(64 * GB); // ample → growth allowed
     const fakes = installFakeWorkers();
@@ -179,13 +212,16 @@ describe("EmbeddingPool dispatch (#999)", () => {
     const p2 = embed(["beta"], "query");
     await flush();
 
-    // Until a real result proves model readiness, all cold requests share one
-    // worker so sibling initializers cannot race the shared model cache.
+    // Until a real result proves model readiness, only one native batch is
+    // dispatched so sibling initializers cannot race the shared model cache.
     expect(fakes).toHaveLength(1);
-    expect(fakes[0].embedIds).toHaveLength(2);
+    expect(fakes[0].embedIds).toHaveLength(1);
 
-    fakes[0].completeAll();
+    fakes[0].completeNext();
     expect(await p1).toHaveLength(1);
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
     expect(await p2).toHaveLength(1);
 
     // After bootstrap, genuine concurrent demand grows the pool as before.
@@ -220,31 +256,485 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(await p2).toHaveLength(1);
   });
 
-  it("retires only an aborted request's assigned worker before releasing it", async () => {
-    _setEmbedPoolSizeForTest(2);
+  it("removes a cancelled queued request without restarting its worker", async () => {
+    _setEmbedPoolSizeForTest(1);
     _setPoolFreememForTest(64 * GB);
     const fakes = installFakeWorkers();
     await warmPool(fakes);
 
+    const blocked = embed(["blocked"], "document");
     const abort = new AbortController();
-    const abandoned = settle(embed(["abandoned"], "document", abort.signal));
-    const sibling = embed(["sibling"], "document");
+    const cancelled = settle(embed(["cancelled"], "document", abort.signal));
     await flush();
-    expect(fakes).toHaveLength(2);
+    expect(fakes).toHaveLength(1);
     expect(fakes[0].embedIds).toHaveLength(1);
-    expect(fakes[1].embedIds).toHaveLength(1);
 
     abort.abort();
-    const outcome = await abandoned;
+    const outcome = await cancelled;
     expect(outcome).toEqual({
       ok: false,
       err: expect.any(EmbeddingRequestAbortedError),
     });
-    expect(fakes[0].gotShutdown).toBe(true);
-    expect(fakes[1].gotShutdown).toBe(false);
+    expect(fakes[0].gotShutdown).toBe(false);
 
-    fakes[1].completeAll();
-    await expect(sibling).resolves.toHaveLength(1);
+    fakes[0].completeNext();
+    await expect(blocked).resolves.toHaveLength(1);
+
+    const reused = embed(["reused"], "document");
+    await flush();
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
+    await expect(reused).resolves.toHaveLength(1);
+  });
+
+  it("settles an executing caller without releasing capacity or restarting the worker", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const abort = new AbortController();
+    const cancelled = settle(embed(["executing"], "document", abort.signal));
+    const queued = embed(["queued"], "document");
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    abort.abort();
+    await expect(cancelled).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    expect(fakes[0].gotShutdown).toBe(false);
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
+    await expect(queued).resolves.toHaveLength(1);
+  });
+
+  it("detaches a cold initialization waiter while initialization continues", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    const abort = new AbortController();
+    const cancelled = settle(embed(["cold first"], "document", abort.signal));
+    const remaining = embed(["cold second"], "document");
+    await flush();
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    abort.abort();
+    await expect(cancelled).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    expect(fakes[0].gotShutdown).toBe(false);
+
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
+    await expect(remaining).resolves.toHaveLength(1);
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("reattaches an identical retry to abandoned execution instead of duplicating inference", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const abort = new AbortController();
+    const first = settle(
+      embed(["same durable input"], "document", abort.signal),
+    );
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    abort.abort();
+    await first;
+    const retry = embed(["same durable input"], "document");
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    fakes[0].completeNext();
+    await expect(retry).resolves.toHaveLength(1);
+    expect(fakes[0].gotShutdown).toBe(false);
+  });
+
+  it("resumes a token-batched retry without restarting its completed prefix", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const texts = ["a".repeat(9_000), "b".repeat(9_000)];
+    const abort = new AbortController();
+    const first = settle(embedInTokenBatches(texts, "document", abort.signal));
+
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+
+    abort.abort();
+    await expect(first).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    const retrySignal = new AbortController();
+    const retry = embedInTokenBatches(texts, "document", retrySignal.signal);
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+
+    fakes[0].completeNext();
+    await expect(retry).resolves.toHaveLength(2);
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+  });
+
+  it("removes a queued token batch when its caller cancels", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+
+    const blocked = embed(["occupy worker"], "document");
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+
+    const abort = new AbortController();
+    const cancelled = settle(
+      embedInTokenBatches(["x".repeat(9_000)], "document", abort.signal),
+    );
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+
+    abort.abort();
+    await expect(cancelled).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+
+    fakes[0].completeNext();
+    await blocked;
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+  });
+
+  it("bounds queued operations while reserving capacity for recall", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const blocked = embed(["occupy bounded queue worker"], "document");
+    await flush();
+    const controllers = Array.from(
+      { length: 240 },
+      () => new AbortController(),
+    );
+    const queued = controllers.map((controller, index) =>
+      settle(embed([`normal-queued-${index}`], "document", controller.signal)),
+    );
+    await flush();
+
+    await expect(embed(["normal-overflow"], "document")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    // The normal-work ceiling leaves 16 hard-cap slots for recall, even when
+    // background document work has saturated its allocation.
+    const recallControllers = Array.from(
+      { length: 16 },
+      () => new AbortController(),
+    );
+    const recalls = recallControllers.map((controller, index) =>
+      settle(
+        embed(
+          [`latency-sensitive-recall-${index}`],
+          "query",
+          controller.signal,
+        ),
+      ),
+    );
+    await flush();
+    await expect(embed(["hard-cap-overflow"], "query")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    for (const controller of recallControllers) controller.abort();
+    for (const controller of controllers) controller.abort();
+    const outcomes = await Promise.all([...queued, ...recalls]);
+    expect(outcomes.every((outcome) => !outcome.ok)).toBe(true);
+    fakes[0].completeNext();
+    await blocked;
+  });
+
+  it("bounds identical waiters and reopens admission after one cancels", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const controllers = Array.from({ length: 64 }, () => new AbortController());
+    const waiters = controllers.map((controller) =>
+      settle(embed(["identical flood"], "document", controller.signal)),
+    );
+    await flush();
+
+    await expect(embed(["identical flood"], "document")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+
+    controllers[0].abort();
+    await expect(waiters[0]).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    const replacementController = new AbortController();
+    const replacement = settle(
+      embed(["identical flood"], "document", replacementController.signal),
+    );
+    replacementController.abort();
+    for (const controller of controllers.slice(1)) controller.abort();
+    const outcomes = await Promise.all([...waiters.slice(1), replacement]);
+    expect(outcomes.every((outcome) => !outcome.ok)).toBe(true);
+
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+  });
+
+  it("reopens cumulative queued-byte capacity after cancellation", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const blocked = embed(["occupy byte-bounded queue worker"], "document");
+    await flush();
+    const firstText = "a".repeat(4 * 1024 * 1024);
+    const secondText = "b".repeat(4 * 1024 * 1024);
+    const firstController = new AbortController();
+    const first = settle(
+      embed([firstText], "document", firstController.signal),
+    );
+    await flush();
+
+    // Each request is below 7 MiB, but their cumulative queued bytes are not.
+    await expect(embed([secondText], "document")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    firstController.abort();
+    await expect(first).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+
+    const secondController = new AbortController();
+    const second = settle(
+      embed([secondText], "document", secondController.signal),
+    );
+    await flush();
+    secondController.abort();
+    await expect(second).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+    fakes[0].completeNext();
+    await blocked;
+  });
+
+  it("enforces the hard queued-byte cap across normal and recall work", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const blocked = embed(["occupy hard-byte-cap worker"], "document");
+    await flush();
+
+    const normalController = new AbortController();
+    const normal = settle(
+      embed(
+        ["n".repeat(7 * 1024 * 1024 - 256 * 1024)],
+        "document",
+        normalController.signal,
+      ),
+    );
+    const firstRecallController = new AbortController();
+    const firstRecall = settle(
+      embed(["q".repeat(1024 * 1024)], "query", firstRecallController.signal),
+    );
+    await flush();
+
+    const secondRecallText = "r".repeat(512 * 1024);
+    await expect(embed([secondRecallText], "query")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    firstRecallController.abort();
+    await expect(firstRecall).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    const replacementController = new AbortController();
+    const replacement = settle(
+      embed([secondRecallText], "query", replacementController.signal),
+    );
+    replacementController.abort();
+    normalController.abort();
+    const outcomes = await Promise.all([normal, replacement]);
+    expect(outcomes.every((outcome) => !outcome.ok)).toBe(true);
+
+    fakes[0].completeNext();
+    await blocked;
+  });
+
+  it("reuses a completed orphan result when a durable retry arrives", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const abort = new AbortController();
+    const first = settle(
+      embed(["late durable result"], "document", abort.signal),
+    );
+    await flush();
+    abort.abort();
+    await first;
+
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(0);
+
+    await expect(
+      embed(["late durable result"], "document"),
+    ).resolves.toHaveLength(1);
+    expect(fakes[0].embedIds).toHaveLength(0);
+    expect(fakes[0].gotShutdown).toBe(false);
+  });
+
+  it("cancels one coalesced waiter without cancelling the shared operation", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const abort = new AbortController();
+    const cancelled = settle(embed(["shared"], "document", abort.signal));
+    const remaining = embed(["shared"], "document");
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    abort.abort();
+    await expect(cancelled).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    fakes[0].completeNext();
+    await expect(remaining).resolves.toHaveLength(1);
+    expect(fakes[0].gotShutdown).toBe(false);
+  });
+
+  it("already-aborted input creates no worker", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    const abort = new AbortController();
+    abort.abort();
+
+    await expect(
+      embed(["cancelled"], "document", abort.signal),
+    ).rejects.toBeInstanceOf(EmbeddingRequestAbortedError);
+    await flush();
+    expect(fakes).toHaveLength(0);
+  });
+
+  it("retires and replaces a worker whose initialization watchdog expires", async () => {
+    _setEmbedPoolSizeForTest(1);
+    _setEmbeddingWorkerWatchdogsForTest(10, 60_000);
+    const fakes = installFakeWorkers();
+
+    await expect(embed(["stuck init"], "document")).rejects.toMatchObject({
+      name: "EmbeddingWorkerWatchdogError",
+      stage: "init",
+    } satisfies Partial<EmbeddingWorkerWatchdogError>);
+    expect(fakes[0].gotShutdown).toBe(true);
+
+    const recovered = embed(["fresh worker"], "document");
+    await flush();
+    expect(fakes).toHaveLength(2);
+    fakes[1].completeNext();
+    await expect(recovered).resolves.toHaveLength(1);
+  });
+
+  it("uses a separate execution watchdog after worker start", async () => {
+    _setEmbedPoolSizeForTest(1);
+    _setEmbeddingWorkerWatchdogsForTest(60_000, 10);
+    const fakes = installFakeWorkers();
+
+    const stuck = embed(["stuck inference"], "document");
+    await flush();
+    fakes[0].startNext();
+    await expect(stuck).rejects.toMatchObject({
+      name: "EmbeddingWorkerWatchdogError",
+      stage: "execution",
+    } satisfies Partial<EmbeddingWorkerWatchdogError>);
+    expect(fakes[0].gotShutdown).toBe(true);
+  });
+
+  it("counts a retiring worker against the capacity ceiling until exit", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    _setEmbeddingWorkerWatchdogsForTest(60_000, 10);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const healthy = embed(["healthy sibling"], "document");
+    const stuck = settle(embed(["stuck sibling"], "document"));
+    await flush();
+    expect(fakes).toHaveLength(2);
+    fakes[1].exitOnShutdown = false;
+    fakes[1].startNext();
+    await expect(stuck).resolves.toMatchObject({
+      ok: false,
+      err: { name: "EmbeddingWorkerWatchdogError", stage: "execution" },
+    });
+    expect(fakes[1].gotShutdown).toBe(true);
+
+    const firstQueued = embed(["first queued"], "document");
+    const secondQueued = embed(["second queued"], "document");
+    fakes[0].completeNext();
+    await expect(healthy).resolves.toHaveLength(1);
+    await flush();
+
+    // The surviving slot accepts one job, but the retiring model prevents a
+    // replacement from temporarily becoming a third resident worker.
+    expect(fakes).toHaveLength(2);
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    fakes[1].exit();
+    await flush();
+    expect(fakes).toHaveLength(3);
+    expect(fakes[2].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
+    fakes[2].completeNext();
+    await Promise.all([firstQueued, secondQueued]);
+  });
+
+  it("normalizes an initialization watchdog at the readiness boundary", async () => {
+    _setEmbedPoolSizeForTest(1);
+    _setEmbeddingWorkerWatchdogsForTest(10, 60_000);
+    installFakeWorkers();
+
+    const outcome = await settle(ensureEmbeddingReady({ deadlineMs: 1_000 }));
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.err).toBeInstanceOf(LocalProviderUnavailableError);
+      expect(outcome.err).not.toBeInstanceOf(EmbeddingWorkerWatchdogError);
+      expect((outcome.err as Error & { cause?: unknown }).cause).toMatchObject({
+        name: "EmbeddingWorkerWatchdogError",
+        stage: "init",
+      });
+    }
   });
 
   it("stays at a single worker under concurrency when memory is tight", async () => {
@@ -256,12 +746,15 @@ describe("EmbeddingPool dispatch (#999)", () => {
     const p2 = embed(["beta"], "query");
     await flush();
 
-    // Both requests queue on the one worker rather than loading a second model.
+    // The second request remains host-queued behind the one native batch.
     expect(fakes).toHaveLength(1);
-    expect(fakes[0].embedIds).toHaveLength(2);
+    expect(fakes[0].embedIds).toHaveLength(1);
 
-    fakes[0].completeAll();
+    fakes[0].completeNext();
     expect(await p1).toHaveLength(1);
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
     expect(await p2).toHaveLength(1);
   });
 
@@ -281,10 +774,13 @@ describe("EmbeddingPool dispatch (#999)", () => {
     // Clamped to 256 MiB (< one per-worker budget), the pool must NOT load a
     // second model despite the ceiling and the host's 64 GiB free figure.
     expect(fakes).toHaveLength(1);
-    expect(fakes[0].embedIds).toHaveLength(2);
+    expect(fakes[0].embedIds).toHaveLength(1);
 
-    fakes[0].completeAll();
+    fakes[0].completeNext();
     expect(await p1).toHaveLength(1);
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
     expect(await p2).toHaveLength(1);
   });
 
@@ -346,20 +842,169 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes).toHaveLength(1);
     fakes[0].initError("transient one");
     expect((await first).ok).toBe(false);
-    expect((await second).ok).toBe(false);
     await flush();
+    let secondSettled = false;
+    void second.then(() => {
+      secondSettled = true;
+    });
+    expect(secondSettled).toBe(false);
     expect(_getLocalInitRetryAtForTest()).toBeGreaterThan(Date.now());
 
-    const cooling = await settle(embed(["too soon"], "document"));
-    expect(cooling.ok).toBe(false);
+    const coolingController = new AbortController();
+    const cooling = settle(
+      embed(["too soon"], "document", coolingController.signal),
+    );
+    let coolingSettled = false;
+    void cooling.then(() => {
+      coolingSettled = true;
+    });
+    await flush();
+    expect(coolingSettled).toBe(false);
     expect(fakes).toHaveLength(1);
+    coolingController.abort();
+    const coolingOutcome = await cooling;
+    expect(coolingOutcome.ok).toBe(false);
+    if (!coolingOutcome.ok) {
+      expect(coolingOutcome.err).toBeInstanceOf(EmbeddingRequestAbortedError);
+    }
 
     _setLocalInitRetryAtForTest(Date.now() - 1);
     const retry = embed(["after cooldown"], "document");
     await flush();
     expect(fakes).toHaveLength(2);
-    fakes[1].completeAll();
+    fakes[1].completeNext();
+    await flush();
+    expect((await second).ok).toBe(true);
+    fakes[1].completeNext();
     expect(await retry).toHaveLength(1);
+  });
+
+  it("keeps queued operations pending and resumes them after an init cooldown", async () => {
+    vi.useFakeTimers();
+    _setEmbedPoolSizeForTest(1);
+    _setLocalInitCooldownMsForTest(1_000);
+    const fakes = installFakeWorkers();
+
+    const failed = settle(embed(["failed"], "document"));
+    const queued1 = settle(embed(["queued-1"], "document"));
+    const queued2 = settle(embed(["queued-2"], "document"));
+    await flushFakeTimers();
+    expect(fakes).toHaveLength(1);
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    const scheduledTimers: Array<ReturnType<typeof setTimeout>> = [];
+    const fakeSetTimeout = globalThis.setTimeout;
+    const timeoutSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((handler, timeout, ...args) => {
+        const timer = fakeSetTimeout(handler, timeout, ...args);
+        scheduledTimers.push(timer);
+        return timer;
+      });
+    fakes[0].initError("transient init failure");
+    await flushFakeTimers();
+    expect((await failed).ok).toBe(false);
+    const retryTimer = scheduledTimers.at(-1);
+    expect(retryTimer).toBeDefined();
+    expect(retryTimer?.hasRef()).toBe(true);
+    timeoutSpy.mockRestore();
+
+    let queued1Settled = false;
+    let queued2Settled = false;
+    void queued1.then(() => {
+      queued1Settled = true;
+    });
+    void queued2.then(() => {
+      queued2Settled = true;
+    });
+    await flushFakeTimers();
+    expect(queued1Settled).toBe(false);
+    expect(queued2Settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fakes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushFakeTimers();
+    expect(fakes).toHaveLength(2);
+    expect(fakes[1].embedIds).toHaveLength(1);
+
+    fakes[1].completeNext();
+    await flushFakeTimers();
+    expect((await queued1).ok).toBe(true);
+    expect(fakes[1].embedIds).toHaveLength(1);
+    fakes[1].completeNext();
+    await flushFakeTimers();
+    expect((await queued2).ok).toBe(true);
+  });
+
+  it("drains every queued operation when provider failure is terminal", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+
+    const running = settle(embed(["running"], "document"));
+    const queued1 = settle(embed(["queued-1"], "document"));
+    const queued2 = settle(embed(["queued-2"], "document"));
+    await flush();
+
+    fakes[0].initError("Cannot find module 'onnxruntime-node'");
+    await flush();
+    for (const outcome of await Promise.all([running, queued1, queued2])) {
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) {
+        expect(outcome.err).toBeInstanceOf(LocalProviderUnavailableError);
+      }
+    }
+  });
+
+  it("cancels a pending cooldown wake-up when the pool shuts down", async () => {
+    vi.useFakeTimers();
+    _setEmbedPoolSizeForTest(1);
+    _setLocalInitCooldownMsForTest(1_000);
+    const fakes = installFakeWorkers();
+
+    const running = settle(embed(["running"], "document"));
+    const queued = settle(embed(["queued"], "document"));
+    await flushFakeTimers();
+    fakes[0].initError("transient init failure");
+    await flushFakeTimers();
+    expect((await running).ok).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await resetProvider();
+    const queuedOutcome = await queued;
+    expect(queuedOutcome.ok).toBe(false);
+    if (!queuedOutcome.ok) {
+      expect(queuedOutcome.err).toBeInstanceOf(LocalProviderUnavailableError);
+    }
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("cancels the cooldown wake-up with its last queued waiter", async () => {
+    vi.useFakeTimers();
+    _setEmbedPoolSizeForTest(1);
+    _setLocalInitCooldownMsForTest(1_000);
+    const fakes = installFakeWorkers();
+    const controller = new AbortController();
+
+    const running = settle(embed(["running"], "document"));
+    const queued = settle(embed(["queued"], "document", controller.signal));
+    await flushFakeTimers();
+    fakes[0].initError("transient init failure");
+    await flushFakeTimers();
+    expect((await running).ok).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+
+    controller.abort();
+    const queuedOutcome = await queued;
+    expect(queuedOutcome.ok).toBe(false);
+    if (!queuedOutcome.ok) {
+      expect(queuedOutcome.err).toBeInstanceOf(EmbeddingRequestAbortedError);
+    }
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fakes).toHaveLength(1);
   });
 
   it("applies the same bounded cooldown to worker errors", async () => {
@@ -373,10 +1018,24 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect((await first).ok).toBe(false);
     await flush();
 
-    const cooling = await settle(embed(["too soon"], "document"));
-    expect(cooling.ok).toBe(false);
+    const coolingController = new AbortController();
+    const cooling = settle(
+      embed(["too soon"], "document", coolingController.signal),
+    );
+    let coolingSettled = false;
+    void cooling.then(() => {
+      coolingSettled = true;
+    });
+    await flush();
+    expect(coolingSettled).toBe(false);
     expect(fakes).toHaveLength(1);
     expect(_getLocalInitRetryAtForTest()).toBeGreaterThan(Date.now());
+    coolingController.abort();
+    const coolingOutcome = await cooling;
+    expect(coolingOutcome.ok).toBe(false);
+    if (!coolingOutcome.ok) {
+      expect(coolingOutcome.err).toBeInstanceOf(EmbeddingRequestAbortedError);
+    }
 
     for (let attempt = 2; attempt <= 3; attempt++) {
       _setLocalInitRetryAtForTest(Date.now() - 1);
@@ -433,6 +1092,9 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes).toHaveLength(3);
     fakes[0].completeAll();
     fakes[2].completeAll();
+    await flush();
+    fakes[0].completeAll();
+    fakes[2].completeAll();
     await Promise.all([duringCooldown, alsoDuringCooldown, recovery]);
   });
 
@@ -466,7 +1128,9 @@ describe("EmbeddingPool dispatch (#999)", () => {
         const alsoCooling = embed([`cooldown-busy-${attempt}`], "document");
         await flush();
         expect(fakes).toHaveLength(attempt + 1);
-        fakes[0].completeAll();
+        fakes[0].completeNext();
+        await flush();
+        fakes[0].completeNext();
         await Promise.all([stillCooling, alsoCooling]);
       }
     }
@@ -477,7 +1141,9 @@ describe("EmbeddingPool dispatch (#999)", () => {
     const queuedAfterExhaustion = embed(["still healthy only"], "document");
     await flush();
     expect(fakes).toHaveLength(4);
-    fakes[0].completeAll();
+    fakes[0].completeNext();
+    await flush();
+    fakes[0].completeNext();
     await Promise.all([afterExhaustion, queuedAfterExhaustion]);
   });
 
@@ -522,7 +1188,9 @@ describe("EmbeddingPool dispatch (#999)", () => {
     const queued = embed(["no immediate replacement"], "document");
     await flush();
     expect(fakes).toHaveLength(4);
-    fakes[3].completeAll();
+    fakes[3].completeNext();
+    await flush();
+    fakes[3].completeNext();
     await Promise.all([after, queued]);
   });
 
@@ -737,7 +1405,9 @@ describe("EmbeddingPool dispatch (#999)", () => {
 
     // Invalid env → undefined → default ceiling of 1 in test mode.
     expect(fakes).toHaveLength(1);
-    fakes[0].completeAll();
+    fakes[0].completeNext();
+    await flush();
+    fakes[0].completeNext();
     await Promise.all([p1, p2]);
   });
 
@@ -805,7 +1475,9 @@ describe("EmbeddingPool dispatch (#999)", () => {
     await flush();
 
     expect(fakes).toHaveLength(1);
-    fakes[0].completeAll();
+    fakes[0].completeNext();
+    await flush();
+    fakes[0].completeNext();
     await Promise.all([p1, p2]);
   });
 
