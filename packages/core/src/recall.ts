@@ -2286,7 +2286,7 @@ export async function runRecallWithMetadata(
       sections.push(
         `### Detail: ${requestedId}\nOutcome: ${outcome}\n\n${detail.result}`,
       );
-      remaining -= Math.min(remaining, detail.result.length);
+      remaining -= Math.min(remaining, codePointLength(detail.result));
     }
     input.signal?.throwIfAborted();
     return {

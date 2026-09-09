@@ -131,6 +131,22 @@ describe("recall detail batches", () => {
     ]);
   });
 
+  test("counts astral Unicode in batch output budgets by code point", async () => {
+    const emoji = seed("Emoji budget source", "😀".repeat(12_000));
+    const second = seed("Second budget source", "x".repeat(10_000));
+    const third = seed("Third budget source", "third source remains available");
+
+    const result = await runRecallWithMetadata({
+      query: "",
+      ids: [`k:${emoji}`, `k:${second}`, `k:${third}`],
+      projectPath: PROJECT,
+    });
+
+    expect(result.result).toContain("Third budget source");
+    expect(result.result).not.toContain("batch output limit reached");
+    expect(result.coverage).toHaveLength(3);
+  });
+
   test("renders a detail page without hydrating the full knowledge entry", async () => {
     const id = seed("Paged source", "x".repeat(20_000));
     const get = vi.spyOn(ltm, "get").mockImplementation(() => {
