@@ -49,6 +49,15 @@ class CapturingWorker extends EventEmitter {
     if (!m) throw new Error("fake worker received no message");
     return m;
   }
+  completeNext(): void {
+    const id = this.posted.at(-1)?.id;
+    if (id === undefined) return;
+    this.emit("message", {
+      type: "result",
+      id,
+      vectors: [new Float32Array([1, 0, 0])],
+    });
+  }
 }
 
 function installCapturingWorkers(): CapturingWorker[] {
@@ -140,10 +149,14 @@ describe("embedding pool memory sizing (OOM regression)", () => {
 
     // Construct + first request while free memory is ample.
     _setContainerFreeForTest(6 * GB);
-    void settle(embed(["first request while memory is ample"], "document"));
+    const first = settle(
+      embed(["first request while memory is ample"], "document"),
+    );
     await flush();
     expect(fakes).toHaveLength(1);
     const firstCap = fakes[0].lastPosted().maxTokens;
+    fakes[0].completeNext();
+    await first;
 
     // Free memory collapses (sibling workers + live sessions allocate). The next
     // request must be sized DOWN to what's now available — a construction-time

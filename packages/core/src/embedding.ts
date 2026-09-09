@@ -14,7 +14,7 @@
  */
 
 import { freemem } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
   databaseInTransaction,
@@ -650,13 +650,23 @@ export class LocalProviderUnavailableError extends Error {
   }
 }
 
-/** A caller cancelled one local worker request. The pool retires only the
- * assigned worker before surfacing this error, so no abandoned inference or
- * pending-map entry survives behind a released admission slot. */
+/** A caller stopped waiting for an embedding request. */
 export class EmbeddingRequestAbortedError extends Error {
   constructor() {
     super("Embedding request aborted");
     this.name = "EmbeddingRequestAbortedError";
+  }
+}
+
+/** The worker exceeded its own initialization or execution lifetime. This is
+ * independent of every caller's deadline and retires only the affected slot. */
+export class EmbeddingWorkerWatchdogError extends Error {
+  readonly stage: "init" | "execution";
+
+  constructor(stage: "init" | "execution") {
+    super(`Embedding worker ${stage} watchdog expired`);
+    this.name = "EmbeddingWorkerWatchdogError";
+    this.stage = stage;
   }
 }
 
@@ -993,6 +1003,7 @@ class LocalProvider implements EmbeddingProvider {
       /** Original request payload, retained so it can be re-submitted to a
        *  freshly respawned worker after an OOM backoff (fresh WASM heap). */
       payload: EmbedRequest;
+      onExecutionStart?: () => void;
     }
   >();
   private nextRequestId = 0;
@@ -1214,6 +1225,10 @@ class LocalProvider implements EmbeddingProvider {
       this.worker.on("message", (msg: WorkerOutbound) => {
         if (this.worker !== spawned) return; // superseded worker — ignore
         switch (msg.type) {
+          case "started": {
+            this.pendingRequests.get(msg.id)?.onExecutionStart?.();
+            break;
+          }
           case "result": {
             const pending = this.pendingRequests.get(msg.id);
             if (pending) {
@@ -1660,6 +1675,7 @@ class LocalProvider implements EmbeddingProvider {
     texts: string[],
     inputType: "document" | "query",
     signal?: AbortSignal,
+    onExecutionStart?: () => void,
   ): Promise<Float32Array[]> {
     if (signal?.aborted) throw new EmbeddingRequestAbortedError();
     await this.ensureWorker();
@@ -1726,6 +1742,7 @@ class LocalProvider implements EmbeddingProvider {
         resolve: resolveRequest,
         reject: rejectRequest,
         payload,
+        onExecutionStart,
       });
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) {
@@ -1849,16 +1866,74 @@ export function _setPoolFreememForTest(bytes: number | null): void {
   testPoolFreememBytes = bytes;
 }
 
-/** One worker slot: a {@link LocalProvider} and the number of embed requests the
- *  pool currently has in flight against it. The pool is the sole caller of each
- *  provider's `embed()`, so it tracks in-flight itself — no LocalProvider surface
- *  change. `inflight` stays accurate across a provider's OOM respawn because the
- *  original `embed()` promise stays pending until the resubmit finally settles. */
+/** One worker slot and its actual execution count. Host queueing keeps this at
+ * zero or one. It stays occupied after caller cancellation and across an OOM
+ * respawn until the underlying provider operation settles. */
 interface EmbedSlot {
   provider: LocalProvider;
   inflight: number;
   healthy: boolean;
   recoveryGeneration: number | null;
+  retirement: Promise<void> | null;
+}
+
+type PoolOperationState = "queued" | "running" | "completed";
+
+interface PoolWaiter {
+  settled: boolean;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  resolve: (vectors: Float32Array[]) => void;
+  reject: (error: Error) => void;
+}
+
+interface PoolOperation {
+  key: string;
+  texts: string[];
+  inputType: "document" | "query";
+  priority: "high" | "normal";
+  state: PoolOperationState;
+  waiters: Set<PoolWaiter>;
+  retainResult?: boolean;
+  vectors?: Float32Array[];
+  completedAt?: number;
+}
+
+/** Keep a successful orphan result long enough for a durable scheduler's
+ * bounded retry to reclaim it without running the same native inference twice. */
+const COMPLETED_EMBED_REUSE_MS = 5 * 60_000;
+const MAX_COMPLETED_EMBED_RESULTS = 8;
+const DEFAULT_EMBED_INIT_WATCHDOG_MS = 10 * 60_000;
+const DEFAULT_EMBED_EXECUTION_WATCHDOG_MS = 5 * 60_000;
+let embedInitWatchdogMs = DEFAULT_EMBED_INIT_WATCHDOG_MS;
+let embedExecutionWatchdogMs = DEFAULT_EMBED_EXECUTION_WATCHDOG_MS;
+
+/** Test seam for independent worker-owned watchdogs. */
+export function _setEmbeddingWorkerWatchdogsForTest(
+  initMs: number | null,
+  executionMs: number | null,
+): void {
+  embedInitWatchdogMs = initMs ?? DEFAULT_EMBED_INIT_WATCHDOG_MS;
+  embedExecutionWatchdogMs = executionMs ?? DEFAULT_EMBED_EXECUTION_WATCHDOG_MS;
+}
+
+function embeddingOperationKey(
+  texts: string[],
+  inputType: "document" | "query",
+): string {
+  const hash = createHash("sha256");
+  hash.update(inputType);
+  for (const value of texts) {
+    hash.update("\0");
+    hash.update(String(Buffer.byteLength(value)));
+    hash.update(":");
+    hash.update(value);
+  }
+  return hash.digest("hex");
+}
+
+function cloneEmbeddingVectors(vectors: Float32Array[]): Float32Array[] {
+  return vectors.map((vector) => vector.slice());
 }
 
 /**
@@ -1867,14 +1942,13 @@ interface EmbedSlot {
  * `vector-pool.ts`, but over the stateful embedding provider rather than raw
  * workers — each LocalProvider keeps its full, tested per-worker lifecycle (OOM
  * ×0.7 backoff + respawn + resubmit, corrupt-model self-heal, WASM-fatal latch,
- * cap re-probe, bounded shutdown). This class adds ONLY cross-worker dispatch.
+ * cap re-probe, bounded shutdown).
  *
- * Dispatch: least-busy live provider. Query jump-ahead is preserved by the
- * existing IN-WORKER priority queue (`embedding-worker.ts`) — a high-priority
- * single-text query floats ahead of any backfill batches queued in whichever
- * worker it lands on. With an idle worker available (the common query-vs-backfill
- * case) a query waits zero; worst case it waits one in-flight batch (token-area
- * ≤ 4096 → sub-second), versus today's unbounded cross-session serialization.
+ * The host owns a priority queue and posts at most one request to each worker.
+ * A cancelled queued request is removed without reaching the worker. A caller
+ * that cancels running work detaches promptly while execution remains accounted
+ * for until completion or a worker-owned watchdog retires the slot. Identical
+ * retries join running work or reclaim its bounded cached result.
  *
  * Growth is LAZY and MEMORY-GATED: worker 0 spawns on the first embed (today's
  * behavior); a secondary spawns only under genuine concurrent demand, below the
@@ -1894,6 +1968,11 @@ class EmbeddingPool implements EmbeddingProvider {
   private readonly ceiling: number;
   private readonly slots: EmbedSlot[] = [];
   private readonly retiredShutdowns = new Set<Promise<void>>();
+  /** Queue on the host so at most one native batch is posted to each worker.
+   * Caller cancellation can then detach without changing worker lifetime. */
+  private readonly queue: PoolOperation[] = [];
+  private readonly operations = new Map<string, PoolOperation>();
+  private dispatching = false;
   private closing = false;
   private shutdownPromise: Promise<void> | null = null;
 
@@ -2015,17 +2094,20 @@ class EmbeddingPool implements EmbeddingProvider {
       inflight: 0,
       healthy: false,
       recoveryGeneration: recoveryProbe ? localInitFailureGeneration : null,
+      retirement: null,
     };
     this.slots.push(slot);
     return slot;
   }
 
   private retireSlot(slot: EmbedSlot): Promise<void> {
+    if (slot.retirement) return slot.retirement;
     const index = this.slots.indexOf(slot);
     if (index === -1) return Promise.resolve();
     this.slots.splice(index, 1);
     this.preserveHealthyServiceAfterExhaustion();
     const retirement = slot.provider.shutdown().catch(() => {});
+    slot.retirement = retirement;
     this.retiredShutdowns.add(retirement);
     void retirement.finally(() => this.retiredShutdowns.delete(retirement));
     return retirement;
@@ -2044,53 +2126,292 @@ class EmbeddingPool implements EmbeddingProvider {
     localProviderErrorLogged = false;
   }
 
-  async embed(
+  private settleWaiter(
+    operation: PoolOperation,
+    waiter: PoolWaiter,
+    outcome: { vectors: Float32Array[] } | { error: Error },
+  ): void {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    operation.waiters.delete(waiter);
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+    }
+    if ("vectors" in outcome) {
+      waiter.resolve(cloneEmbeddingVectors(outcome.vectors));
+    } else {
+      waiter.reject(outcome.error);
+    }
+  }
+
+  private dropUnobservedQueuedOperation(operation: PoolOperation): void {
+    if (operation.state !== "queued" || operation.waiters.size > 0) return;
+    const index = this.queue.indexOf(operation);
+    if (index !== -1) this.queue.splice(index, 1);
+    if (this.operations.get(operation.key) === operation) {
+      this.operations.delete(operation.key);
+    }
+    operation.texts = [];
+  }
+
+  private attachWaiter(
+    operation: PoolOperation,
+    signal?: AbortSignal,
+  ): Promise<Float32Array[]> {
+    if (signal?.aborted) {
+      return Promise.reject(new EmbeddingRequestAbortedError());
+    }
+    if (operation.state === "completed" && operation.vectors) {
+      const vectors = cloneEmbeddingVectors(operation.vectors);
+      if (this.operations.get(operation.key) === operation) {
+        this.operations.delete(operation.key);
+      }
+      operation.vectors = undefined;
+      return Promise.resolve(vectors);
+    }
+
+    return new Promise<Float32Array[]>((resolve, reject) => {
+      const waiter: PoolWaiter = { settled: false, signal, resolve, reject };
+      const onAbort = (): void => {
+        this.settleWaiter(operation, waiter, {
+          error: new EmbeddingRequestAbortedError(),
+        });
+        if (operation.state === "running" && operation.waiters.size === 0) {
+          operation.retainResult = true;
+        }
+        this.dropUnobservedQueuedOperation(operation);
+      };
+      waiter.onAbort = onAbort;
+      operation.waiters.add(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  }
+
+  private enqueueOperation(operation: PoolOperation): void {
+    if (operation.priority === "high") {
+      let insertAt = 0;
+      while (
+        insertAt < this.queue.length &&
+        this.queue[insertAt].priority === "high"
+      ) {
+        insertAt++;
+      }
+      this.queue.splice(insertAt, 0, operation);
+      return;
+    }
+    this.queue.push(operation);
+  }
+
+  private pruneCompletedOperations(now = Date.now()): void {
+    const completed: PoolOperation[] = [];
+    for (const [key, operation] of this.operations) {
+      if (operation.state !== "completed") continue;
+      if (
+        operation.completedAt === undefined ||
+        now - operation.completedAt > COMPLETED_EMBED_REUSE_MS
+      ) {
+        this.operations.delete(key);
+        operation.vectors = undefined;
+      } else {
+        completed.push(operation);
+      }
+    }
+    completed.sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0));
+    while (completed.length > MAX_COMPLETED_EMBED_RESULTS) {
+      const operation = completed.shift();
+      if (!operation) break;
+      if (this.operations.get(operation.key) === operation) {
+        this.operations.delete(operation.key);
+      }
+      operation.vectors = undefined;
+    }
+  }
+
+  private recordSlotSuccess(slot: EmbedSlot): void {
+    slot.healthy = true;
+    if (
+      slot.recoveryGeneration !== null &&
+      slot.recoveryGeneration === localInitFailureGeneration
+    ) {
+      slot.recoveryGeneration = null;
+      if (localInitFailures > 0) {
+        log.info(
+          `local embedding provider recovered after ${localInitFailures} failed init attempt(s)`,
+        );
+      }
+      localInitFailures = 0;
+      localInitRetryAt = 0;
+      if (localProviderFailureCause === "transient-init-exhausted") {
+        clearLocalProviderLatch();
+      }
+      localProviderErrorLogged = false;
+      return;
+    }
+
+    slot.recoveryGeneration = null;
+    // An already in-flight sibling proves service is still available, but must
+    // not erase another slot's retry debt or admit immediate respawns.
+    this.preserveHealthyServiceAfterExhaustion();
+  }
+
+  private async runOperation(
+    operation: PoolOperation,
+    slot: EmbedSlot,
+  ): Promise<void> {
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+    let rejectWatchdog!: (error: Error) => void;
+    const watchdog = new Promise<never>((_resolve, reject) => {
+      rejectWatchdog = reject;
+    });
+    const armWatchdog = (
+      stage: "init" | "execution",
+      timeoutMs: number,
+    ): void => {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      watchdogTimer = setTimeout(
+        () => {
+          log.error(
+            `embedding worker watchdog expired: stage=${stage} timeout_ms=${timeoutMs}`,
+          );
+          rejectWatchdog(new EmbeddingWorkerWatchdogError(stage));
+        },
+        Math.max(1, timeoutMs),
+      );
+      watchdogTimer.unref?.();
+    };
+    armWatchdog("init", embedInitWatchdogMs);
+
+    try {
+      // Deliberately omit every caller's AbortSignal. The operation owns the
+      // worker slot until native inference settles; callers only own waiters.
+      const vectors = await Promise.race([
+        slot.provider.embed(
+          operation.texts,
+          operation.inputType,
+          undefined,
+          () => armWatchdog("execution", embedExecutionWatchdogMs),
+        ),
+        watchdog,
+      ]);
+      this.recordSlotSuccess(slot);
+      const retainResult =
+        operation.retainResult === true && operation.waiters.size === 0;
+      operation.state = "completed";
+      operation.completedAt = Date.now();
+      operation.vectors = retainResult
+        ? cloneEmbeddingVectors(vectors)
+        : undefined;
+      operation.texts = [];
+      for (const waiter of operation.waiters) {
+        this.settleWaiter(operation, waiter, { vectors });
+      }
+      if (retainResult) {
+        this.pruneCompletedOperations(operation.completedAt);
+      } else if (this.operations.get(operation.key) === operation) {
+        this.operations.delete(operation.key);
+      }
+    } catch (error) {
+      if (this.operations.get(operation.key) === operation) {
+        this.operations.delete(operation.key);
+      }
+      operation.texts = [];
+      operation.vectors = undefined;
+      const ownedError =
+        error instanceof Error
+          ? error
+          : new Error("embedding worker operation failed");
+      for (const waiter of operation.waiters) {
+        this.settleWaiter(operation, waiter, { error: ownedError });
+      }
+      if (
+        error instanceof LocalProviderUnavailableError ||
+        error instanceof EmbeddingWorkerWatchdogError
+      ) {
+        await this.retireSlot(slot);
+      }
+    } finally {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      slot.inflight--;
+      this.dispatch();
+    }
+  }
+
+  private dispatch(): void {
+    if (this.closing || this.dispatching) return;
+    this.dispatching = true;
+    try {
+      while (this.queue.length > 0) {
+        const operation = this.queue[0];
+        if (operation.waiters.size === 0) {
+          this.dropUnobservedQueuedOperation(operation);
+          continue;
+        }
+
+        let slot: EmbedSlot;
+        try {
+          slot = this.pickSlot();
+        } catch (error) {
+          this.queue.shift();
+          if (this.operations.get(operation.key) === operation) {
+            this.operations.delete(operation.key);
+          }
+          const ownedError =
+            error instanceof Error
+              ? error
+              : new LocalProviderUnavailableError();
+          for (const waiter of operation.waiters) {
+            this.settleWaiter(operation, waiter, { error: ownedError });
+          }
+          continue;
+        }
+        if (slot.inflight > 0) break;
+
+        this.queue.shift();
+        operation.state = "running";
+        slot.inflight++;
+        void this.runOperation(operation, slot);
+      }
+    } finally {
+      this.dispatching = false;
+    }
+  }
+
+  embed(
     texts: string[],
     inputType: "document" | "query",
     signal?: AbortSignal,
   ): Promise<Float32Array[]> {
-    const slot = this.pickSlot();
-    slot.inflight++;
-    try {
-      const vectors = await slot.provider.embed(texts, inputType, signal);
-      slot.healthy = true;
-      if (
-        slot.recoveryGeneration !== null &&
-        slot.recoveryGeneration === localInitFailureGeneration
-      ) {
-        slot.recoveryGeneration = null;
-        if (localInitFailures > 0) {
-          log.info(
-            `local embedding provider recovered after ${localInitFailures} failed init attempt(s)`,
-          );
-        }
-        localInitFailures = 0;
-        localInitRetryAt = 0;
-        if (localProviderFailureCause === "transient-init-exhausted") {
-          clearLocalProviderLatch();
-        }
-        localProviderErrorLogged = false;
-      } else {
-        slot.recoveryGeneration = null;
-        // An already in-flight sibling proves service is still available, but
-        // must not erase another slot's retry debt or admit immediate respawns.
-        this.preserveHealthyServiceAfterExhaustion();
-      }
-      return vectors;
-    } catch (error) {
-      if (
-        error instanceof LocalProviderUnavailableError ||
-        error instanceof EmbeddingRequestAbortedError
-      ) {
-        // A transient init failure belongs to this worker, not every slot in the
-        // pool. Retire it so a sibling's successful recovery cannot leave the
-        // failed slot eligible for later backfill or lint requests.
-        await this.retireSlot(slot);
-      }
-      throw error;
-    } finally {
-      slot.inflight--;
+    if (signal?.aborted) {
+      return Promise.reject(new EmbeddingRequestAbortedError());
     }
+    if (this.closing) {
+      return Promise.reject(
+        new LocalProviderUnavailableError("embedding pool is unavailable"),
+      );
+    }
+
+    this.pruneCompletedOperations();
+    const ownedTexts = texts.slice();
+    const key = embeddingOperationKey(ownedTexts, inputType);
+    const existing = this.operations.get(key);
+    if (existing) return this.attachWaiter(existing, signal);
+
+    const operation: PoolOperation = {
+      key,
+      texts: ownedTexts,
+      inputType,
+      priority: isRecallEmbed(ownedTexts, inputType) ? "high" : "normal",
+      state: "queued",
+      waiters: new Set(),
+    };
+    this.operations.set(key, operation);
+    const result = this.attachWaiter(operation, signal);
+    if (operation.waiters.size > 0) {
+      this.enqueueOperation(operation);
+      this.dispatch();
+    }
+    return result;
   }
 
   hasHealthySlot(): boolean {
@@ -2102,6 +2423,18 @@ class EmbeddingPool implements EmbeddingProvider {
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.closing = true;
+    const shutdownError = new LocalProviderUnavailableError(
+      "embedding pool shut down",
+    );
+    for (const operation of this.operations.values()) {
+      for (const waiter of operation.waiters) {
+        this.settleWaiter(operation, waiter, { error: shutdownError });
+      }
+      operation.texts = [];
+      operation.vectors = undefined;
+    }
+    this.queue.length = 0;
+    this.operations.clear();
     const providers = this.slots.splice(0).map((s) => s.provider);
     this.shutdownPromise = (async () => {
       await Promise.all(providers.map((p) => p.shutdown()));
@@ -2565,8 +2898,8 @@ export async function ensureEmbeddingReady(
  * A single-text `query` embed is a recall lookup — the latency-sensitive
  * request path (the recall tool and forSession LTM ranking), as opposed to
  * batch/document writes. This is the single source of truth for that
- * classification: the worker uses it to assign "high" priority (see
- * {@link LocalProvider.embed}) and {@link embed} uses it to track in-flight
+ * classification: the pool uses it to assign "high" priority and {@link embed}
+ * uses it to track in-flight
  * recall load for the temporal backfill's idle-gate. Both sites call this one
  * predicate so the "mirrors the worker" invariant can never silently drift.
  */

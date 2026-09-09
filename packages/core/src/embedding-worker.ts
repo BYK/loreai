@@ -740,6 +740,7 @@ async function processEmbed(req: EmbedRequest): Promise<void> {
   inflight++;
   try {
     await ensurePipeline();
+    post({ type: "started", id: req.id });
 
     // Truncate to the main-thread-owned token cap BEFORE the single inference
     // attempt. The cap is memory-aware and is lowered ×0.7 per fresh-heap

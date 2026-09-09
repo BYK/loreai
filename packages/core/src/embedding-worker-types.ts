@@ -53,6 +53,15 @@ export interface EmbedResult {
   vectors: Float32Array[];
 }
 
+/** The worker has finished model initialization and is starting this request's
+ * token preparation/inference. Lets the host switch from its init watchdog to
+ * the independent execution watchdog. */
+export interface EmbedStarted {
+  type: "started";
+  /** Matches the request ID. */
+  id: number;
+}
+
 /** A single embed request failed (ONNX error, etc.). */
 export interface EmbedError {
   type: "error";
@@ -95,6 +104,7 @@ export interface InitNeedsWasm {
 }
 
 export type WorkerOutbound =
+  | EmbedStarted
   | EmbedResult
   | EmbedError
   | InitError
