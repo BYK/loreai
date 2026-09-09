@@ -658,6 +658,15 @@ export class EmbeddingRequestAbortedError extends Error {
   }
 }
 
+/** The host-owned local queue hit its bounded count or byte budget. The
+ * provider remains healthy; durable callers should retry with backoff. */
+export class EmbeddingQueueCapacityError extends Error {
+  constructor() {
+    super("Embedding queue capacity exceeded");
+    this.name = "EmbeddingQueueCapacityError";
+  }
+}
+
 /** The worker exceeded its own initialization or execution lifetime. This is
  * independent of every caller's deadline and retires only the affected slot. */
 export class EmbeddingWorkerWatchdogError extends Error {
@@ -1890,6 +1899,7 @@ interface PoolWaiter {
 interface PoolOperation {
   key: string;
   texts: string[];
+  byteSize: number;
   inputType: "document" | "query";
   priority: "high" | "normal";
   state: PoolOperationState;
@@ -1899,10 +1909,29 @@ interface PoolOperation {
   completedAt?: number;
 }
 
+/** Successfully completed prefix of one interrupted token-batched call. The
+ * next durable temporal retry consumes it once and resumes at `nextIndex`. */
+interface TokenBatchCheckpoint {
+  nextIndex: number;
+  vectors: Float32Array[];
+  updatedAt: number;
+}
+
 /** Keep a successful orphan result long enough for a durable scheduler's
  * bounded retry to reclaim it without running the same native inference twice. */
 const COMPLETED_EMBED_REUSE_MS = 5 * 60_000;
 const MAX_COMPLETED_EMBED_RESULTS = 8;
+/** Bound raw input retained by the host queue and the O(n) cancellation scan.
+ * Normal background work stops below the hard ceiling so latency-sensitive
+ * recall can still enter a saturated queue. In-flight work is separately
+ * bounded by the four-worker absolute pool ceiling. */
+const MAX_QUEUED_EMBED_OPERATIONS = 256;
+const MAX_QUEUED_EMBED_BYTES = 8 * 1024 * 1024;
+const MAX_NORMAL_QUEUED_EMBED_OPERATIONS = 240;
+const MAX_NORMAL_QUEUED_EMBED_BYTES = 7 * 1024 * 1024;
+/** Deduplication must not turn one bounded operation into an unbounded listener
+ * set under a same-input flood. The operation cap bounds the aggregate. */
+const MAX_WAITERS_PER_EMBED_OPERATION = 64;
 const DEFAULT_EMBED_INIT_WATCHDOG_MS = 10 * 60_000;
 const DEFAULT_EMBED_EXECUTION_WATCHDOG_MS = 5 * 60_000;
 let embedInitWatchdogMs = DEFAULT_EMBED_INIT_WATCHDOG_MS;
@@ -1971,7 +2000,12 @@ class EmbeddingPool implements EmbeddingProvider {
   /** Queue on the host so at most one native batch is posted to each worker.
    * Caller cancellation can then detach without changing worker lifetime. */
   private readonly queue: PoolOperation[] = [];
+  private queuedBytes = 0;
   private readonly operations = new Map<string, PoolOperation>();
+  private readonly tokenBatchCheckpoints = new Map<
+    string,
+    TokenBatchCheckpoint
+  >();
   private dispatching = false;
   private closing = false;
   private shutdownPromise: Promise<void> | null = null;
@@ -2049,7 +2083,7 @@ class EmbeddingPool implements EmbeddingProvider {
     const canGrow =
       healthySlots.length > 0 &&
       best.inflight > 0 &&
-      this.slots.length < this.ceiling &&
+      this.slots.length + this.retiredShutdowns.size < this.ceiling &&
       this.liveFreemem() >= PER_WORKER_MEM_BUDGET_BYTES;
     if (canGrow) {
       if (localInitRetryAt > 0) {
@@ -2109,7 +2143,10 @@ class EmbeddingPool implements EmbeddingProvider {
     const retirement = slot.provider.shutdown().catch(() => {});
     slot.retirement = retirement;
     this.retiredShutdowns.add(retirement);
-    void retirement.finally(() => this.retiredShutdowns.delete(retirement));
+    void retirement.finally(() => {
+      this.retiredShutdowns.delete(retirement);
+      this.dispatch();
+    });
     return retirement;
   }
 
@@ -2147,7 +2184,7 @@ class EmbeddingPool implements EmbeddingProvider {
   private dropUnobservedQueuedOperation(operation: PoolOperation): void {
     if (operation.state !== "queued" || operation.waiters.size > 0) return;
     const index = this.queue.indexOf(operation);
-    if (index !== -1) this.queue.splice(index, 1);
+    if (index !== -1) this.removeQueuedOperation(index);
     if (this.operations.get(operation.key) === operation) {
       this.operations.delete(operation.key);
     }
@@ -2169,6 +2206,9 @@ class EmbeddingPool implements EmbeddingProvider {
       operation.vectors = undefined;
       return Promise.resolve(vectors);
     }
+    if (operation.waiters.size >= MAX_WAITERS_PER_EMBED_OPERATION) {
+      return Promise.reject(new EmbeddingQueueCapacityError());
+    }
 
     return new Promise<Float32Array[]>((resolve, reject) => {
       const waiter: PoolWaiter = { settled: false, signal, resolve, reject };
@@ -2189,6 +2229,7 @@ class EmbeddingPool implements EmbeddingProvider {
   }
 
   private enqueueOperation(operation: PoolOperation): void {
+    this.queuedBytes += operation.byteSize;
     if (operation.priority === "high") {
       let insertAt = 0;
       while (
@@ -2201,6 +2242,33 @@ class EmbeddingPool implements EmbeddingProvider {
       return;
     }
     this.queue.push(operation);
+  }
+
+  private removeQueuedOperation(index: number): PoolOperation | undefined {
+    const [operation] = this.queue.splice(index, 1);
+    if (operation) {
+      this.queuedBytes = Math.max(0, this.queuedBytes - operation.byteSize);
+    }
+    return operation;
+  }
+
+  private canEnqueueOperation(
+    priority: PoolOperation["priority"],
+    byteSize: number,
+  ): boolean {
+    const maxOperations =
+      priority === "high"
+        ? MAX_QUEUED_EMBED_OPERATIONS
+        : MAX_NORMAL_QUEUED_EMBED_OPERATIONS;
+    const maxBytes =
+      priority === "high"
+        ? MAX_QUEUED_EMBED_BYTES
+        : MAX_NORMAL_QUEUED_EMBED_BYTES;
+    return (
+      byteSize <= maxBytes &&
+      this.queue.length < maxOperations &&
+      this.queuedBytes <= maxBytes - byteSize
+    );
   }
 
   private pruneCompletedOperations(now = Date.now()): void {
@@ -2226,6 +2294,55 @@ class EmbeddingPool implements EmbeddingProvider {
       }
       operation.vectors = undefined;
     }
+  }
+
+  private pruneTokenBatchCheckpoints(now = Date.now()): void {
+    const retained = [...this.tokenBatchCheckpoints.entries()]
+      .filter(([, checkpoint]) => {
+        if (now - checkpoint.updatedAt <= COMPLETED_EMBED_REUSE_MS) return true;
+        checkpoint.vectors = [];
+        return false;
+      })
+      .sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+    this.tokenBatchCheckpoints.clear();
+    for (const [key, checkpoint] of retained.slice(
+      -MAX_COMPLETED_EMBED_RESULTS,
+    )) {
+      this.tokenBatchCheckpoints.set(key, checkpoint);
+    }
+    for (const [, checkpoint] of retained.slice(
+      0,
+      -MAX_COMPLETED_EMBED_RESULTS,
+    )) {
+      checkpoint.vectors = [];
+    }
+  }
+
+  /** Consume one interrupted call's successful prefix. */
+  takeTokenBatchCheckpoint(key: string): TokenBatchCheckpoint | undefined {
+    this.pruneTokenBatchCheckpoints();
+    const checkpoint = this.tokenBatchCheckpoints.get(key);
+    if (!checkpoint) return undefined;
+    this.tokenBatchCheckpoints.delete(key);
+    return {
+      ...checkpoint,
+      vectors: cloneEmbeddingVectors(checkpoint.vectors),
+    };
+  }
+
+  /** Retain bounded progress only after an interrupted durable drain. */
+  storeTokenBatchCheckpoint(
+    key: string,
+    nextIndex: number,
+    vectors: Float32Array[],
+  ): void {
+    if (this.closing || nextIndex <= 0 || vectors.length !== nextIndex) return;
+    this.tokenBatchCheckpoints.set(key, {
+      nextIndex,
+      vectors: cloneEmbeddingVectors(vectors),
+      updatedAt: Date.now(),
+    });
+    this.pruneTokenBatchCheckpoints();
   }
 
   private recordSlotSuccess(slot: EmbedSlot): void {
@@ -2348,11 +2465,17 @@ class EmbeddingPool implements EmbeddingProvider {
           continue;
         }
 
+        // A retiring worker still owns its native model/heap until confirmed
+        // exit. Do not replace the last active slot (or exceed the ceiling via
+        // pool growth) while that memory remains live. Retirement completion
+        // re-enters dispatch above.
+        if (this.slots.length === 0 && this.retiredShutdowns.size > 0) break;
+
         let slot: EmbedSlot;
         try {
           slot = this.pickSlot();
         } catch (error) {
-          this.queue.shift();
+          this.removeQueuedOperation(0);
           if (this.operations.get(operation.key) === operation) {
             this.operations.delete(operation.key);
           }
@@ -2367,7 +2490,7 @@ class EmbeddingPool implements EmbeddingProvider {
         }
         if (slot.inflight > 0) break;
 
-        this.queue.shift();
+        this.removeQueuedOperation(0);
         operation.state = "running";
         slot.inflight++;
         void this.runOperation(operation, slot);
@@ -2396,12 +2519,21 @@ class EmbeddingPool implements EmbeddingProvider {
     const key = embeddingOperationKey(ownedTexts, inputType);
     const existing = this.operations.get(key);
     if (existing) return this.attachWaiter(existing, signal);
+    const priority = isRecallEmbed(ownedTexts, inputType) ? "high" : "normal";
+    const byteSize = ownedTexts.reduce(
+      (total, text) => total + Buffer.byteLength(text),
+      0,
+    );
+    if (!this.canEnqueueOperation(priority, byteSize)) {
+      return Promise.reject(new EmbeddingQueueCapacityError());
+    }
 
     const operation: PoolOperation = {
       key,
       texts: ownedTexts,
+      byteSize,
       inputType,
-      priority: isRecallEmbed(ownedTexts, inputType) ? "high" : "normal",
+      priority,
       state: "queued",
       waiters: new Set(),
     };
@@ -2434,7 +2566,12 @@ class EmbeddingPool implements EmbeddingProvider {
       operation.vectors = undefined;
     }
     this.queue.length = 0;
+    this.queuedBytes = 0;
     this.operations.clear();
+    for (const checkpoint of this.tokenBatchCheckpoints.values()) {
+      checkpoint.vectors = [];
+    }
+    this.tokenBatchCheckpoints.clear();
     const providers = this.slots.splice(0).map((s) => s.provider);
     this.shutdownPromise = (async () => {
       await Promise.all(providers.map((p) => p.shutdown()));
@@ -2877,6 +3014,13 @@ export async function ensureEmbeddingReady(
       return;
     } catch (error) {
       if (error instanceof EmbeddingAbortError) throw error;
+      // Worker watchdogs are an internal lifecycle classification. Keep the
+      // public readiness contract provider-shaped so orchestration that already
+      // handles an unavailable local provider does not need to know which
+      // worker-owned deadline expired.
+      if (error instanceof EmbeddingWorkerWatchdogError) {
+        throw new LocalProviderUnavailableError(error);
+      }
       if (!(error instanceof LocalProviderUnavailableError)) throw error;
       throwIfEmbeddingAborted(guard);
       if (localProviderFailureCause !== null || localInitRetryAt <= 0) {
@@ -2963,6 +3107,18 @@ export async function embed(
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
+  return await embedWithProvider(provider, texts, inputType, signal);
+}
+
+/** Run one request against a fixed provider instance. Keeping provider capture
+ * explicit lets a multi-batch operation survive config/reset races without
+ * silently moving later batches to a different model. */
+async function embedWithProvider(
+  provider: EmbeddingProvider,
+  texts: string[],
+  inputType: "document" | "query",
+  signal?: AbortSignal,
+): Promise<Float32Array[]> {
   // A single-text query embed is a recall lookup (see isRecallEmbed — the same
   // predicate the worker uses for high priority). Track it in flight so the
   // temporal re-chunk backfill can yield the shared worker while recall is
@@ -3190,6 +3346,13 @@ function trackDocEmbed(p: Promise<unknown>): void {
   void p.finally(() => _docEmbedsInFlight.delete(p));
 }
 
+function isExpectedBestEffortEmbeddingError(error: unknown): boolean {
+  return (
+    error instanceof LocalProviderUnavailableError ||
+    error instanceof EmbeddingQueueCapacityError
+  );
+}
+
 /**
  * Await all in-flight fire-and-forget document embeds (knowledge / distillation
  * / entity). Loops so embeds spawned while draining (rare) are also awaited.
@@ -3253,7 +3416,7 @@ export function embedKnowledgeEntry(
         storeEmbedding(db(), "knowledge", id, vec);
       })
       .catch((err) => {
-        if (err instanceof LocalProviderUnavailableError) return;
+        if (isExpectedBestEffortEmbeddingError(err)) return;
         log.error("embedding failed for knowledge entry", id, ":", err);
       }),
   );
@@ -3291,7 +3454,7 @@ export function embedEntity(
         storeEmbedding(db(), "entities", id, vec);
       })
       .catch((err) => {
-        if (err instanceof LocalProviderUnavailableError) return;
+        if (isExpectedBestEffortEmbeddingError(err)) return;
         log.error("embedding failed for entity", id, ":", err);
       }),
   );
@@ -3310,7 +3473,7 @@ export function embedDistillation(id: string, observations: string): void {
         storeEmbedding(db(), "distillations", id, vec);
       })
       .catch((err) => {
-        if (err instanceof LocalProviderUnavailableError) return;
+        if (isExpectedBestEffortEmbeddingError(err)) return;
         log.error("embedding failed for distillation", id, ":", err);
       }),
   );
@@ -3333,7 +3496,7 @@ export function warmupEmbedding(): void {
   if (!isAvailable()) return;
   if (config().search.embeddings.provider !== "local") return;
   void embed(["warmup"], "document").catch((err) => {
-    if (err instanceof LocalProviderUnavailableError) return;
+    if (isExpectedBestEffortEmbeddingError(err)) return;
     log.error("embedding warmup failed:", err);
   });
 }
@@ -3359,28 +3522,56 @@ export { MAX_TEMPORAL_CHUNKS_PER_MESSAGE } from "./embedding-units";
  * MAX_BATCH_TOKEN_AREA, mirroring the backfill paths. All-or-nothing: a failure
  * in any batch rejects before the caller stores, so a partial chunk set is never
  * written (storeTemporalChunks DELETEs-then-INSERTs the complete set).
+ *
+ * A signal-driven local call checkpoints only its successfully completed prefix
+ * when interrupted. Queued/current native work retains the pool's normal
+ * cancellation semantics; no future sub-batch starts for the abandoned caller.
+ * An identical durable retry on the same pool consumes the bounded checkpoint
+ * once and resumes from that prefix instead of repeating successful inference.
  */
 export async function embedInTokenBatches(
   texts: string[],
   inputType: "document" | "query",
   signal?: AbortSignal,
 ): Promise<Float32Array[]> {
+  const provider = getProvider();
+  if (!provider) throw new Error("No embedding provider available");
+  const localPool =
+    provider instanceof EmbeddingPool && signal ? provider : undefined;
+  const checkpointKey = localPool
+    ? embeddingOperationKey(texts, inputType)
+    : undefined;
+  const checkpoint =
+    localPool && checkpointKey
+      ? localPool.takeTokenBatchCheckpoint(checkpointKey)
+      : undefined;
   const items = texts.map((text) => ({ text }));
-  const out: Float32Array[] = [];
-  for (let i = 0; i < items.length;) {
-    const batch = nextBatch(items, i);
-    i += batch.length;
-    const vecs = await embed(
-      batch.map((b) => b.text),
-      inputType,
-      signal,
-    );
-    if (vecs.length !== batch.length) {
-      throw new Error("embedding provider returned an unexpected vector count");
+  const out = checkpoint?.vectors ?? [];
+  let nextIndex = checkpoint?.nextIndex ?? 0;
+  try {
+    while (nextIndex < items.length) {
+      const batch = nextBatch(items, nextIndex);
+      const vecs = await embedWithProvider(
+        provider,
+        batch.map((b) => b.text),
+        inputType,
+        signal,
+      );
+      if (vecs.length !== batch.length) {
+        throw new Error(
+          "embedding provider returned an unexpected vector count",
+        );
+      }
+      out.push(...vecs);
+      nextIndex += batch.length;
     }
-    out.push(...vecs);
+    return out;
+  } catch (error) {
+    if (localPool && checkpointKey && nextIndex > 0) {
+      localPool.storeTokenBatchCheckpoint(checkpointKey, nextIndex, out);
+    }
+    throw error;
   }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -3983,6 +4174,10 @@ export async function backfillEmbeddings(
       // not a bug — check before log.error so captureException doesn't fire
       // and create Sentry noise (LOREAI-GATEWAY-Q).
       if (err instanceof EmbeddingAbortError) throw err;
+      if (err instanceof EmbeddingQueueCapacityError) {
+        log.info("embedding backfill stopped: queue saturated");
+        break;
+      }
       if (err instanceof LocalProviderUnavailableError) {
         log.info("embedding backfill stopped: provider unavailable");
         break;
@@ -4053,6 +4248,10 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
       // Provider shutdown / unavailability is expected graceful degradation,
       // not a bug — check before log.error so captureException doesn't fire
       // and create Sentry noise (LOREAI-GATEWAY-Q).
+      if (err instanceof EmbeddingQueueCapacityError) {
+        log.info("distillation embedding backfill stopped: queue saturated");
+        break;
+      }
       if (err instanceof LocalProviderUnavailableError) {
         log.info(
           "distillation embedding backfill stopped: provider unavailable",
@@ -4142,6 +4341,10 @@ export async function backfillEntityEmbeddings(): Promise<number> {
       // Provider shutdown / unavailability is expected graceful degradation,
       // not a bug — check before log.error so captureException doesn't fire
       // and create Sentry noise (LOREAI-GATEWAY-Q).
+      if (err instanceof EmbeddingQueueCapacityError) {
+        log.info("entity embedding backfill stopped: queue saturated");
+        break;
+      }
       if (err instanceof LocalProviderUnavailableError) {
         log.info("entity embedding backfill stopped: provider unavailable");
         break;

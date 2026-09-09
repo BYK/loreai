@@ -3,6 +3,8 @@ import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
 import {
   embed,
+  embedInTokenBatches,
+  EmbeddingQueueCapacityError,
   EmbeddingRequestAbortedError,
   EmbeddingWorkerWatchdogError,
   ensureEmbeddingReady,
@@ -38,6 +40,7 @@ const GB = 1024 * 1024 * 1024;
  *  embed requests posted to it and only completes them when the test says so. */
 class FakeWorker extends EventEmitter {
   readonly embedIds: number[] = [];
+  embedPostCount = 0;
   gotShutdown = false;
   terminated = false;
   exitOnShutdown = true;
@@ -50,6 +53,7 @@ class FakeWorker extends EventEmitter {
         this.throwOnNextEmbed = false;
         throw new Error("worker died before postMessage");
       }
+      this.embedPostCount++;
       this.embedIds.push(m.id);
     } else if (m.type === "shutdown") {
       this.gotShutdown = true;
@@ -350,6 +354,234 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes[0].gotShutdown).toBe(false);
   });
 
+  it("resumes a token-batched retry without restarting its completed prefix", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const texts = ["a".repeat(9_000), "b".repeat(9_000)];
+    const abort = new AbortController();
+    const first = settle(embedInTokenBatches(texts, "document", abort.signal));
+
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+
+    abort.abort();
+    await expect(first).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    const retrySignal = new AbortController();
+    const retry = embedInTokenBatches(texts, "document", retrySignal.signal);
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+
+    fakes[0].completeNext();
+    await expect(retry).resolves.toHaveLength(2);
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+  });
+
+  it("removes a queued token batch when its caller cancels", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+
+    const blocked = embed(["occupy worker"], "document");
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+
+    const abort = new AbortController();
+    const cancelled = settle(
+      embedInTokenBatches(["x".repeat(9_000)], "document", abort.signal),
+    );
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+
+    abort.abort();
+    await expect(cancelled).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+
+    fakes[0].completeNext();
+    await blocked;
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+  });
+
+  it("bounds queued operations while reserving capacity for recall", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const blocked = embed(["occupy bounded queue worker"], "document");
+    await flush();
+    const controllers = Array.from(
+      { length: 240 },
+      () => new AbortController(),
+    );
+    const queued = controllers.map((controller, index) =>
+      settle(embed([`normal-queued-${index}`], "document", controller.signal)),
+    );
+    await flush();
+
+    await expect(embed(["normal-overflow"], "document")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    // The normal-work ceiling leaves 16 hard-cap slots for recall, even when
+    // background document work has saturated its allocation.
+    const recallControllers = Array.from(
+      { length: 16 },
+      () => new AbortController(),
+    );
+    const recalls = recallControllers.map((controller, index) =>
+      settle(
+        embed(
+          [`latency-sensitive-recall-${index}`],
+          "query",
+          controller.signal,
+        ),
+      ),
+    );
+    await flush();
+    await expect(embed(["hard-cap-overflow"], "query")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    for (const controller of recallControllers) controller.abort();
+    for (const controller of controllers) controller.abort();
+    const outcomes = await Promise.all([...queued, ...recalls]);
+    expect(outcomes.every((outcome) => !outcome.ok)).toBe(true);
+    fakes[0].completeNext();
+    await blocked;
+  });
+
+  it("bounds identical waiters and reopens admission after one cancels", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const controllers = Array.from({ length: 64 }, () => new AbortController());
+    const waiters = controllers.map((controller) =>
+      settle(embed(["identical flood"], "document", controller.signal)),
+    );
+    await flush();
+
+    await expect(embed(["identical flood"], "document")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+
+    controllers[0].abort();
+    await expect(waiters[0]).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    const replacementController = new AbortController();
+    const replacement = settle(
+      embed(["identical flood"], "document", replacementController.signal),
+    );
+    replacementController.abort();
+    for (const controller of controllers.slice(1)) controller.abort();
+    const outcomes = await Promise.all([...waiters.slice(1), replacement]);
+    expect(outcomes.every((outcome) => !outcome.ok)).toBe(true);
+
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+  });
+
+  it("reopens cumulative queued-byte capacity after cancellation", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const blocked = embed(["occupy byte-bounded queue worker"], "document");
+    await flush();
+    const firstText = "a".repeat(4 * 1024 * 1024);
+    const secondText = "b".repeat(4 * 1024 * 1024);
+    const firstController = new AbortController();
+    const first = settle(
+      embed([firstText], "document", firstController.signal),
+    );
+    await flush();
+
+    // Each request is below 7 MiB, but their cumulative queued bytes are not.
+    await expect(embed([secondText], "document")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    firstController.abort();
+    await expect(first).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+
+    const secondController = new AbortController();
+    const second = settle(
+      embed([secondText], "document", secondController.signal),
+    );
+    await flush();
+    secondController.abort();
+    await expect(second).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+    fakes[0].completeNext();
+    await blocked;
+  });
+
+  it("enforces the hard queued-byte cap across normal and recall work", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const blocked = embed(["occupy hard-byte-cap worker"], "document");
+    await flush();
+
+    const normalController = new AbortController();
+    const normal = settle(
+      embed(
+        ["n".repeat(7 * 1024 * 1024 - 256 * 1024)],
+        "document",
+        normalController.signal,
+      ),
+    );
+    const firstRecallController = new AbortController();
+    const firstRecall = settle(
+      embed(["q".repeat(1024 * 1024)], "query", firstRecallController.signal),
+    );
+    await flush();
+
+    const secondRecallText = "r".repeat(512 * 1024);
+    await expect(embed([secondRecallText], "query")).rejects.toBeInstanceOf(
+      EmbeddingQueueCapacityError,
+    );
+
+    firstRecallController.abort();
+    await expect(firstRecall).resolves.toEqual({
+      ok: false,
+      err: expect.any(EmbeddingRequestAbortedError),
+    });
+    const replacementController = new AbortController();
+    const replacement = settle(
+      embed([secondRecallText], "query", replacementController.signal),
+    );
+    replacementController.abort();
+    normalController.abort();
+    const outcomes = await Promise.all([normal, replacement]);
+    expect(outcomes.every((outcome) => !outcome.ok)).toBe(true);
+
+    fakes[0].completeNext();
+    await blocked;
+  });
+
   it("reuses a completed orphan result when a durable retry arrives", async () => {
     _setEmbedPoolSizeForTest(1);
     const fakes = installFakeWorkers();
@@ -439,6 +671,62 @@ describe("EmbeddingPool dispatch (#999)", () => {
       stage: "execution",
     } satisfies Partial<EmbeddingWorkerWatchdogError>);
     expect(fakes[0].gotShutdown).toBe(true);
+  });
+
+  it("counts a retiring worker against the capacity ceiling until exit", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    _setEmbeddingWorkerWatchdogsForTest(60_000, 10);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const healthy = embed(["healthy sibling"], "document");
+    const stuck = settle(embed(["stuck sibling"], "document"));
+    await flush();
+    expect(fakes).toHaveLength(2);
+    fakes[1].exitOnShutdown = false;
+    fakes[1].startNext();
+    await expect(stuck).resolves.toMatchObject({
+      ok: false,
+      err: { name: "EmbeddingWorkerWatchdogError", stage: "execution" },
+    });
+    expect(fakes[1].gotShutdown).toBe(true);
+
+    const firstQueued = embed(["first queued"], "document");
+    const secondQueued = embed(["second queued"], "document");
+    fakes[0].completeNext();
+    await expect(healthy).resolves.toHaveLength(1);
+    await flush();
+
+    // The surviving slot accepts one job, but the retiring model prevents a
+    // replacement from temporarily becoming a third resident worker.
+    expect(fakes).toHaveLength(2);
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    fakes[1].exit();
+    await flush();
+    expect(fakes).toHaveLength(3);
+    expect(fakes[2].embedIds).toHaveLength(1);
+    fakes[0].completeNext();
+    fakes[2].completeNext();
+    await Promise.all([firstQueued, secondQueued]);
+  });
+
+  it("normalizes an initialization watchdog at the readiness boundary", async () => {
+    _setEmbedPoolSizeForTest(1);
+    _setEmbeddingWorkerWatchdogsForTest(10, 60_000);
+    installFakeWorkers();
+
+    const outcome = await settle(ensureEmbeddingReady({ deadlineMs: 1_000 }));
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.err).toBeInstanceOf(LocalProviderUnavailableError);
+      expect(outcome.err).not.toBeInstanceOf(EmbeddingWorkerWatchdogError);
+      expect((outcome.err as Error & { cause?: unknown }).cause).toMatchObject({
+        name: "EmbeddingWorkerWatchdogError",
+        stage: "init",
+      });
+    }
   });
 
   it("stays at a single worker under concurrency when memory is tight", async () => {

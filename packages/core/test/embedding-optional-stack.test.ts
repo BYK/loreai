@@ -91,7 +91,11 @@ describe("isMissingLocalStackError", () => {
 /** Minimal stand-in for a node:worker_threads Worker (mirrors the seam used by
  *  embedding-oom-recovery.test.ts) so we can emit "message" deterministically. */
 class FakeWorker extends EventEmitter {
-  postMessage(): void {}
+  postMessage(message: unknown): void {
+    if ((message as { type?: string }).type === "shutdown") {
+      this.emit("exit", 0);
+    }
+  }
   ref(): void {}
   unref(): void {}
   terminate(): Promise<number> {

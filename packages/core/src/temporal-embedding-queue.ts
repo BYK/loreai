@@ -373,6 +373,9 @@ function failureReason(error: unknown, diagnostics: DrainDiagnostics): string {
   if (diagnostics.abortReason === "deadline") return "deadline";
   // Even instanceof can throw for an untrusted Proxy rejection value.
   try {
+    if (error instanceof embedding.EmbeddingQueueCapacityError) {
+      return "queue-capacity";
+    }
     if (error instanceof embedding.LocalProviderUnavailableError) {
       return "provider-unavailable";
     }

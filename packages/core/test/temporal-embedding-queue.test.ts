@@ -11,6 +11,7 @@ import {
 import {
   _restoreProvider,
   _saveAndClearProvider,
+  EmbeddingQueueCapacityError,
   LocalProviderUnavailableError,
   type EmbeddingProvider,
 } from "../src/embedding";
@@ -437,6 +438,29 @@ describe("durable temporal embedding scheduler", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(embed).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(error.mock.calls)).not.toContain("secret model path");
+  });
+
+  test("queue saturation uses transient backpressure retry without exposing content", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const embed = vi.fn(async () => {
+      throw new EmbeddingQueueCapacityError();
+    });
+    installProvider({ maxBatchSize: 8, embed });
+    const content = "private queued input must not appear in capacity logs";
+    insertMessage(content);
+
+    startTemporalEmbeddingScheduler();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(error.mock.calls[0]?.[0]).toContain(
+      "reason=queue-capacity stage=embed",
+    );
+    expect(error.mock.calls[0]?.[0]).toContain("retry_ms=1000");
+    expect(JSON.stringify(error.mock.calls)).not.toContain(content);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(embed).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(embed).toHaveBeenCalledTimes(2);
   });
 
   test("shutdown cancellation stays quiet and restart waits for the old provider slot", async () => {

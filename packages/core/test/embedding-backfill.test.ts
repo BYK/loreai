@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import {
   _restoreProvider,
@@ -6,9 +6,15 @@ import {
   backfillDistillationEmbeddings,
   backfillEmbeddings,
   backfillEntityEmbeddings,
+  embedDistillation,
+  embedEntity,
+  embedKnowledgeEntry,
   EmbeddingAbortError,
+  EmbeddingQueueCapacityError,
   fromBlob,
+  settleDocumentEmbeds,
 } from "../src/embedding";
+import * as log from "../src/log";
 
 const PROJECT = "/test/embedding-backfill";
 
@@ -51,6 +57,7 @@ describe("backfill writes embeddings through storeEmbedding (blob layout)", () =
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     _restoreProvider(token);
   });
 
@@ -145,5 +152,71 @@ describe("backfill writes embeddings through storeEmbedding (blob layout)", () =
     const blob = embeddingOf("entities", "be");
     expect(blob).not.toBeNull();
     expect(Array.from(fromBlob(blob as Buffer))).toEqual(Array.from(VEC));
+  });
+
+  test("fire-and-forget writes suppress expected queue backpressure", async () => {
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const providerEmbed = vi.fn(async () => {
+      throw new EmbeddingQueueCapacityError();
+    });
+    _restoreProvider({
+      provider: { maxBatchSize: 8, embed: providerEmbed },
+    });
+
+    embedKnowledgeEntry("capacity-k", "title", "content");
+    embedDistillation("capacity-d", "observations");
+    embedEntity("capacity-e", "entity", ["alias"]);
+    await settleDocumentEmbeds();
+
+    expect(providerEmbed).toHaveBeenCalledTimes(3);
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test("every sequential backfill stops at its first queue-capacity failure", async () => {
+    const now = Date.now();
+    for (let i = 0; i < 9; i++) {
+      const longText = `${i}-${"x".repeat(9_000)}`;
+      db()
+        .query(
+          "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'test', ?, ?, ?, ?, ?)",
+        )
+        .run(
+          `capacity-k-${i}`,
+          pid,
+          `title-${i}`,
+          longText,
+          now,
+          now,
+          `capacity-k-${i}`,
+        );
+      db()
+        .query(
+          "INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, archived) VALUES (?, ?, 's', '', '', ?, '', 0, 0, ?, 0)",
+        )
+        .run(`capacity-d-${i}`, pid, longText, now);
+      db()
+        .query(
+          "INSERT INTO entities (id, project_id, entity_type, canonical_name, cross_project, created_at, updated_at) VALUES (?, ?, 'tool', ?, 0, ?, ?)",
+        )
+        .run(`capacity-e-${i}`, pid, longText, now, now);
+    }
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+
+    for (const backfill of [
+      backfillEmbeddings,
+      backfillDistillationEmbeddings,
+      backfillEntityEmbeddings,
+    ]) {
+      const providerEmbed = vi.fn(async () => {
+        throw new EmbeddingQueueCapacityError();
+      });
+      _restoreProvider({
+        provider: { maxBatchSize: 8, embed: providerEmbed },
+      });
+
+      await expect(backfill()).resolves.toBe(0);
+      expect(providerEmbed).toHaveBeenCalledOnce();
+    }
+    expect(error).not.toHaveBeenCalled();
   });
 });

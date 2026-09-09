@@ -101,6 +101,10 @@ export function detectPatternEchoes(input: {
 }): Promise<void> {
   const cooldownOwner = Symbol(input.sessionID);
   const p = _detect({ ...input, cooldownOwner }).catch((err) => {
+    // Saturation is expected transient backpressure. This fire-and-forget path
+    // leaves the distillation unembedded for startup backfill; reporting every
+    // occurrence as a Sentry error would turn one full queue into a log storm.
+    if (err instanceof embedding.EmbeddingQueueCapacityError) return;
     if (input.signal?.aborted) {
       if (lastExtraction.get(input.sessionID)?.owner === cooldownOwner) {
         lastExtraction.delete(input.sessionID);

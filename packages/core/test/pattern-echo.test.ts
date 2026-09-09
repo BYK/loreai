@@ -6,6 +6,7 @@ import {
   detectPatternEchoes,
   PATTERN_COOLDOWN_MS,
 } from "../src/pattern-echo";
+import * as log from "../src/log";
 import type { LLMClient } from "../src/types";
 
 // pattern-echo runs two jobs at the gen-0 distillation hook: (1) embed + store
@@ -154,6 +155,29 @@ describe("pattern-echo cooldown", () => {
     // The embed recovers on the next segment → detection runs (not rate-limited).
     await detectPatternEchoes({ ...base, distillId: "f2" });
     expect(searchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats queue saturation as expected backpressure without error logging or cooldown", async () => {
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const pid = ensureProject(PROJECT);
+    insertDistill("q1", pid, "s-capacity");
+    insertDistill("q2", pid, "s-capacity");
+    const base = {
+      observations: "private observations",
+      projectPath: PROJECT,
+      sessionID: "s-capacity",
+      llm: stubLLM(),
+    };
+
+    embedSpy.mockRejectedValueOnce(new embedding.EmbeddingQueueCapacityError());
+    await detectPatternEchoes({ ...base, distillId: "q1" });
+    expect(error).not.toHaveBeenCalled();
+    expect(searchSpy).not.toHaveBeenCalled();
+
+    // Capacity reopening must allow the next segment to attempt detection;
+    // saturation happened before the cooldown was armed.
+    await detectPatternEchoes({ ...base, distillId: "q2" });
+    expect(searchSpy).toHaveBeenCalledOnce();
   });
 
   it("rolls back its cooldown when cancellation interrupts an armed attempt", async () => {
