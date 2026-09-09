@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 190030)
-Total output lines: 19651
-
 /**
  * Core request processing pipeline for the Lore gateway.
  *
@@ -29,6 +26,8 @@ import {
   FullSourceRequired,
   asString,
   estimateTokens as coreEstimateTokens,
+  MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_ID_CHARS,
 } from "@loreai/core";
 import {
   load,
@@ -355,6 +354,7 @@ import {
 import { createRecallDiagnostics } from "./recall-diagnostics";
 import {
   MAX_RECALL_EXECUTIONS,
+  MAX_RECALL_SEARCH_ITEMS,
   RecallChainBudget,
   type RecallStopReason,
 } from "./recall-budget";
@@ -422,6 +422,19 @@ import {
   parseResolveProjectResult,
   type ResolveProjectResult,
 } from "./synthetic-tools";
+
+/** Reserve the largest source set this untrusted recall input can expose. */
+function recallItemReservation(input: unknown): number {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return MAX_RECALL_SEARCH_ITEMS;
+  }
+  const record = input as Record<string, unknown>;
+  if (Array.isArray(record.ids)) {
+    return Math.min(record.ids.length, MAX_RECALL_BATCH_IDS);
+  }
+  if (typeof record.id === "string") return 1;
+  return MAX_RECALL_SEARCH_ITEMS;
+}
 
 // ---------------------------------------------------------------------------
 // Recall tool commit reminder
@@ -6288,7 +6301,7022 @@ function resolveRequestUpstreamRoute(
     headerUpstream &&
     headerUpstreamPath &&
     !isUpstreamWithinBase(
-      new URL(headerUpstreamPath, new URL(h…70030 tokens truncated…nal?.throwIfAborted();
+      new URL(headerUpstreamPath, new URL(headerUpstream).origin).href,
+      headerUpstream,
+    )
+  ) {
+    throw new Error("Explicit upstream path escapes its upstream base");
+  }
+  if (providerID && !providerRoute && !headerUpstream) {
+    throw new Error(`Unsupported provider "${providerID}"`);
+  }
+  if (
+    providerID &&
+    providerRoute?.url == null &&
+    !headerUpstream &&
+    !selfUrlBuildingProtocol
+  ) {
+    throw new Error(
+      `Provider "${providerID}" requires an explicit upstream URL`,
+    );
+  }
+  const providerRouteUsable =
+    providerRoute &&
+    (providerRoute.url != null || headerUpstream || selfUrlBuildingProtocol)
+      ? providerRoute
+      : null;
+  const nativeIngressAnthropicOverride =
+    providerHeader != null && providerRouteUsable?.protocol === "anthropic";
+  const effectiveProtocol: EffectiveUpstreamProtocol =
+    req.protocol === "openai-responses"
+      ? nativeIngressAnthropicOverride
+        ? "anthropic"
+        : "openai-responses"
+      : req.protocol === "gemini"
+        ? nativeIngressAnthropicOverride
+          ? "anthropic"
+          : "gemini"
+        : (providerRouteUsable?.protocol ??
+          modelRoute?.protocol ??
+          req.protocol);
+  const bedrockMantle = isBedrockMantleDispatch(
+    providerRouteUsable,
+    effectiveProtocol,
+  );
+  const selfBuiltUpstreamUrl = bedrockMantle
+    ? bedrockMantleUrl(config.bedrockRegion)
+    : effectiveProtocol === "vertex"
+      ? `https://${vertexHost(config.vertexRegion)}`
+      : null;
+  const effectiveUpstreamBase =
+    headerUpstream ??
+    selfBuiltUpstreamUrl ??
+    providerRoute?.url ??
+    modelRoute?.url ??
+    (effectiveProtocol === "anthropic"
+      ? config.upstreamAnthropic
+      : effectiveProtocol === "gemini"
+        ? GEMINI_DEFAULT_UPSTREAM
+        : config.upstreamOpenAI);
+
+  return {
+    providerHeader,
+    providerID,
+    headerUpstream,
+    headerUpstreamPath,
+    providerRoute,
+    modelRoute,
+    effectiveProtocol,
+    effectiveUpstreamBase,
+    bedrockMantle,
+  };
+}
+
+/** Result from forwardToUpstream — includes the serialized body for cache analytics. */
+type UpstreamResult = {
+  response: Response;
+  /** The serialized JSON body sent to the upstream provider. */
+  serializedBody: string;
+  /** The wire protocol used for the upstream request (may differ from ingress). */
+  effectiveProtocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "vertex"
+    | "gemini";
+};
+
+/**
+ * Forward a request to the upstream provider (Anthropic or OpenAI).
+ *
+ * When an interceptor is provided (or a module-level one is active), the
+ * interceptor is called instead of `fetch` directly.  This enables recording
+ * and replay without modifying individual call sites.
+ *
+ * Returns the raw fetch Response alongside the serialized request body
+ * (for cache analytics prefix comparison).
+ */
+async function forwardToUpstream(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  interceptor?: UpstreamInterceptor,
+  cache?: AnthropicCacheOptions,
+  signal?: AbortSignal,
+  resolvedRoute?: ResolvedRequestUpstreamRoute,
+): Promise<UpstreamResult> {
+  let url: string;
+  let headers: Record<string, string>;
+  let body: unknown;
+
+  const route = resolvedRoute ?? resolveRequestUpstreamRoute(req, config);
+  const {
+    providerHeader,
+    providerID,
+    headerUpstream,
+    headerUpstreamPath,
+    providerRoute,
+    modelRoute,
+    effectiveProtocol,
+    effectiveUpstreamBase,
+    bedrockMantle,
+  } = route;
+
+  // Warn when a provider route exists but has no URL and no header override —
+  // the request will fall through to config defaults which likely have wrong
+  // credentials. The user should set LORE_UPSTREAM_<PROVIDER>=<url>.
+  if (
+    providerRoute?.url == null &&
+    providerID &&
+    !headerUpstream &&
+    !modelRoute
+  ) {
+    log.warn(
+      `provider "${providerID}" has no upstream URL configured — falling back to default. ` +
+        `Set LORE_UPSTREAM_${providerID.toUpperCase().replace(/-/g, "_")}=<url> ` +
+        `to route requests correctly.`,
+    );
+  }
+
+  // Log which routing tier resolved the upstream — useful for diagnosing
+  // provider routing issues without guessing.
+  const routingAuth = extractAuth(req.rawHeaders);
+  log.info(
+    `upstream: ${upstreamUrlForLog(effectiveUpstreamBase)} ` +
+      `(provider=${providerID ?? "none"}, ` +
+      `providerURL=${upstreamUrlForLog(providerRoute?.url)}, ` +
+      `modelRoute=${upstreamUrlForLog(modelRoute?.url)}, ` +
+      `headerUpstream=${headerUpstream ? "yes" : "no"}, ` +
+      `protocol=${effectiveProtocol}, ` +
+      `scheme=${routingAuth?.scheme ?? "none"})`,
+  );
+
+  // Defense-in-depth: warn when a bearer token prefix clearly mismatches
+  // the resolved upstream. Catches misrouting before the upstream rejects it.
+  if (
+    routingAuth?.scheme === "bearer" &&
+    routingAuth.value.startsWith("gho_") &&
+    !effectiveUpstreamBase.includes("githubcopilot")
+  ) {
+    log.error(
+      `auth/upstream mismatch: GitHub OAuth token (gho_) routed to ${upstreamUrlForLog(effectiveUpstreamBase)} — ` +
+        `provider: ${providerID ?? "none"}`,
+    );
+  }
+
+  if (effectiveProtocol === "openai-responses") {
+    // Inject LTM into system prompt for non-Anthropic paths.
+    // Anthropic handles LTM via separate system blocks in buildAnthropicRequest;
+    // OpenAI paths receive a single system string, so we concatenate here.
+    const ltmParts = [cache?.stableLtmSystem].filter(Boolean);
+    const reqWithLtm = ltmParts.length
+      ? {
+          ...req,
+          system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
+        }
+      : req;
+    const result = buildOpenAIResponsesUpstreamRequest(
+      reqWithLtm,
+      effectiveUpstreamBase,
+    );
+    url = result.url;
+    headers = result.headers;
+    body = result.body;
+  } else if (effectiveProtocol === "openai") {
+    // Inject LTM into system prompt (see comment above for openai-responses).
+    const ltmParts = [cache?.stableLtmSystem].filter(Boolean);
+    const reqWithLtm = ltmParts.length
+      ? {
+          ...req,
+          system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
+        }
+      : req;
+    // Pass cache options through so OpenRouter (and other OpenAI-protocol
+    // Anthropic-compatible endpoints) receive `cache_control` breakpoints on
+    // the system prefix, the conversation tail, and the last tool. OpenRouter
+    // honors Anthropic-style ephemeral breakpoints on the OpenAI Chat
+    // Completions API for Anthropic models; providers that don't support
+    // caching ignore the annotation. Downgrade the extended "1h" TTL to bare
+    // ephemeral (5m) for non-native endpoints, mirroring the Anthropic-compat
+    // branch below — the "1h" ttl is an Anthropic beta that third parties may
+    // reject. The LTM now rides the single system-string breakpoint, so drop
+    // the (now-inlined) stableLtmSystem field.
+    const effectiveCache: AnthropicCacheOptions | undefined = cache
+      ? {
+          ...cache,
+          systemTTL: cache.systemTTL === false ? false : "5m",
+          conversationTTL: "5m",
+          stableLtmSystem: undefined,
+        }
+      : cache;
+    const result = buildOpenAIUpstreamRequest(
+      reqWithLtm,
+      effectiveUpstreamBase,
+      effectiveCache,
+    );
+    url = result.url;
+    headers = result.headers;
+    body = result.body;
+  } else if (effectiveProtocol === "vertex") {
+    // Google Vertex AI (Claude): the native Anthropic Messages API over GCP
+    // OAuth2. Reuse buildAnthropicRequest (incl. cache_control), then apply the
+    // three Vertex transforms — model id in the URL path (+ the :rawPredict vs
+    // :streamRawPredict verb selects streaming), `anthropic_version` in the body
+    // (toVertexBody), and a GCP bearer token for auth (replacing the client
+    // x-api-key). The 1h extended-cache-ttl is an Anthropic beta of uncertain
+    // Vertex support, so downgrade to 5m — the same safe default used for other
+    // non-native Anthropic hosts (mantle / MiniMax / Fireworks).
+    const effectiveCache = cache
+      ? { ...cache, systemTTL: "5m" as const, conversationTTL: "5m" as const }
+      : cache;
+    const result = buildAnthropicRequest(req, effectiveCache);
+
+    const project = await resolveVertexProject(config.vertexProject, signal);
+    if (!project) {
+      throw new Error(
+        "Vertex: no GCP project configured. Set GOOGLE_CLOUD_PROJECT (or " +
+          "LORE_VERTEX_PROJECT), or ensure Application Default Credentials " +
+          "provide a project.",
+      );
+    }
+    // Auth: GCP OAuth2 bearer (ADC) replaces the client credential. cch billing
+    // re-signing is gated on effectiveProtocol==="anthropic" below, so it never
+    // fires for Vertex. The transport rewrite (region from an X-Lore-Upstream-URL
+    // override else config, rawPredict URL, toVertexBody, and stripping the
+    // api.anthropic.com-only headers + setting the bearer) is a pure helper so
+    // it can be unit-tested in isolation — see buildVertexUpstream.
+    const token = await getVertexAccessToken(signal);
+    const vt = buildVertexUpstream({
+      anthropicHeaders: result.headers,
+      anthropicBody: result.body as Record<string, unknown>,
+      effectiveUpstreamBase,
+      configRegion: config.vertexRegion,
+      project,
+      model: req.model,
+      stream: req.stream,
+      token,
+    });
+    url = vt.url;
+    headers = vt.headers;
+    body = vt.body;
+  } else if (effectiveProtocol === "gemini") {
+    // Google Gemini native generateContent. Inject LTM into the system prompt
+    // (Gemini maps `system` → `systemInstruction`), same as the OpenAI branches
+    // above — Anthropic-style separate system blocks don't apply here.
+    const ltmParts = [cache?.stableLtmSystem].filter(Boolean);
+    const reqWithLtm = ltmParts.length
+      ? {
+          ...req,
+          system: [req.system, ...ltmParts].filter(Boolean).join("\n\n"),
+        }
+      : req;
+    const result = buildGeminiUpstreamRequest(
+      reqWithLtm,
+      effectiveUpstreamBase,
+    );
+    url = result.url;
+    headers = result.headers;
+    body = result.body;
+  } else {
+    // For non-native-Anthropic upstreams (MiniMax, Fireworks, etc.), downgrade
+    // extended cache TTL ("1h") to standard 5-minute ephemeral — the "1h" TTL
+    // is an Anthropic beta extension that third-party endpoints may reject.
+    // Standard cache_control breakpoints with bare ephemeral are kept (widely
+    // supported) so third-party providers still benefit from prompt caching.
+    const isNativeAnthropic =
+      effectiveUpstreamBase === "https://api.anthropic.com";
+    const effectiveCache =
+      cache && !isNativeAnthropic
+        ? {
+            ...cache,
+            systemTTL: "5m" as const,
+            conversationTTL: "5m" as const,
+          }
+        : cache;
+    const result = buildAnthropicRequest(req, effectiveCache);
+    url = `${effectiveUpstreamBase}${result.url}`;
+    headers = result.headers;
+    body = result.body;
+    // AWS Bedrock (bedrock-mantle): remap the model id in the OUTGOING body to
+    // the mantle catalog form (`anthropic.<model>`). Only the upstream body is
+    // remapped — `req.model` stays the client id for session/cache tracking.
+    // The mantle endpoint reads `model` from the body (native Anthropic Messages
+    // API), so this is the only Bedrock-specific transform on the request path.
+    if (bedrockMantle && body && typeof body === "object") {
+      (body as { model?: string }).model = toMantleModelId(req.model);
+    }
+  }
+
+  // Verbatim endpoint passthrough (#1052): when the fetch interceptor preserved
+  // the client's original endpoint path (x-lore-upstream-path) AND we are a pure
+  // passthrough — same host (headerUpstream is the highest-priority base, so it
+  // equals effectiveUpstreamBase) and same wire protocol (no translation) — POST
+  // to the exact original endpoint instead of the reconstructed canonical path.
+  // This is what lets providers whose endpoint omits `/v1` (GitHub Copilot's
+  // `/chat/completions`) or uses a non-standard prefix work without an allowlist.
+  // No-ops for the standard `/v1/...` case (verbatim == reconstructed), and the
+  // protocol-equality guard excludes vertex/bedrock and any translated turn.
+  url = verbatimUpstreamUrl({
+    reconstructedUrl: url,
+    effectiveUpstreamBase,
+    headerUpstream,
+    upstreamPath: headerUpstreamPath,
+    effectiveProtocol,
+    ingressProtocol: req.protocol,
+  });
+
+  // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as the final overlay so
+  // corporate proxies, LiteLLM team-routing tokens, Cloudflare AI Gateway
+  // auth, and service-account scenarios can override any header — including
+  // the gateway-reconstructed `x-api-key` / `Authorization`.
+  applyUpstreamExtraHeaders(headers, extraHeadersForUpstream(config, url));
+
+  let serializedBody = JSON.stringify(body);
+
+  // Re-sign the billing header cch after body reconstruction.
+  // buildAnthropicRequest completely rebuilds the body (different JSON key
+  // ordering, cache_control wrappers, toAnthropicBlock transforms) which
+  // invalidates the client's original cch signature. resignBody detects
+  // billing headers and re-signs with our known seed + version.
+  //
+  // 🔴 Gate on hasBillingHeader(req.system): only re-sign when a REAL Claude
+  // Code OAuth billing header is present as system[0] (the `^`-anchored
+  // BILLING_HEADER_RE). Without this gate, resignBody is reached for ALL
+  // anthropic-protocol turns — including api-key sessions whose CONTENT quotes
+  // the sentinel verbatim (e.g. editing cch.ts / cch.test.ts). resignBody
+  // would then content-match that quoted sentinel, rewrite its cch every turn
+  // (busting the prompt cache), and trip the verifyBillingHeaderUnique warning.
+  // The real header is always system[0] (Claude Code emits it there; the worker
+  // prepends it), so a content copy can never be at offset 0 of req.system.
+  // NOTE: this intentionally uses hasBillingHeader ALONE — unlike the `isCC`
+  // size heuristic (`isClaudeCodeClient(...) || hasBillingHeader(...)`). Re-
+  // signing REQUIRES the header to actually be embedded in system[0]; without
+  // it there is literally nothing to sign, so the OR form would be wrong here.
+  if (effectiveProtocol === "anthropic" && hasBillingHeader(req.system)) {
+    const firstUserMsg = req.messages.find((m) => m.role === "user");
+    const firstUserText = firstUserMsg?.content.find(
+      (b) => b.type === "text" && "text" in b,
+    );
+    serializedBody = resignBody(
+      serializedBody,
+      (firstUserText as { text: string } | undefined)?.text ?? "",
+    );
+  }
+
+  // Re-compress the upstream body with the client's original Content-Encoding
+  // (Codex sends `zstd` by default) so the upstream receives the same wire
+  // encoding the client used. `content-encoding` is gateway-owned (never
+  // forwarded by the builders) — set it here to match the bytes we actually
+  // send. `serializedBody` (the uncompressed JSON) stays the return value so
+  // cache analytics / the cache-warmer keep comparing uncompressed prefixes.
+  //
+  // Scope re-encoding to the destination the client targeted: only replay the
+  // encoding on a native passthrough (the upstream origin equals the ingress
+  // protocol's native upstream) or an explicit destination override
+  // (X-Lore-Upstream-URL / X-Lore-Provider). If the gateway auto-routed to a
+  // different destination with no explicit override — by translating the wire
+  // protocol OR re-routing to a different provider host on the same protocol —
+  // the upstream is a backend the client never targeted and may reject the
+  // encoding, so forward uncompressed (always accepted). See mayReencodeUpstream
+  // for the rationale (#1032).
+  const ingressUpstreamBase =
+    req.protocol === "anthropic"
+      ? config.upstreamAnthropic
+      : config.upstreamOpenAI;
+  const { body: upstreamBody, contentEncoding } = encodeUpstreamBodyForRoute(
+    serializedBody,
+    req.rawHeaders["content-encoding"],
+    buildUpstreamRouteContext({
+      upstreamUrlHeader: headerUpstream,
+      providerHeader,
+      ingressProtocol: req.protocol,
+      effectiveProtocol,
+      ingressUpstreamBase,
+      effectiveUpstreamBase,
+    }),
+  );
+  if (contentEncoding) headers["content-encoding"] = contentEncoding;
+
+  const effectiveInterceptor = interceptor ?? activeInterceptor;
+
+  if (effectiveInterceptor) {
+    const response = await responseAgainstAbort(
+      () =>
+        effectiveInterceptor(body, req.model, req.stream, () =>
+          responseAgainstAbort(
+            () =>
+              upstreamFetch(url, {
+                method: "POST",
+                headers,
+                body: upstreamBody,
+                signal,
+              }),
+            signal,
+          ),
+        ),
+      signal,
+    );
+    return { response, serializedBody, effectiveProtocol };
+  }
+
+  const response = await responseAgainstAbort(
+    () =>
+      upstreamFetch(url, {
+        method: "POST",
+        headers,
+        body: upstreamBody,
+        signal,
+      }),
+    signal,
+  );
+  return { response, serializedBody, effectiveProtocol };
+}
+
+// ---------------------------------------------------------------------------
+// Response builders
+// ---------------------------------------------------------------------------
+
+/** Stage recall effects; commit runs inside the successful-turn savepoint. */
+function createRecallPersistenceTransaction(
+  sessionState: SessionState,
+  noStore = false,
+) {
+  const pendingRecalls = new Map<string, StoredRecall>();
+  const pendingTransfers: Array<() => void> = [];
+  let baseline: Map<string, StoredRecall> | undefined;
+  let committed = false;
+  let rolledBack = false;
+  const candidateStore = (): Map<string, StoredRecall> => {
+    const candidate = new Map(sessionState.recallStore);
+    for (const [key, value] of pendingRecalls)
+      addRecallStoreEntry(candidate, key, value);
+    return candidate;
+  };
+  return {
+    deferTransfer: (record: () => void): void => {
+      if (!noStore && !committed && !rolledBack) pendingTransfers.push(record);
+    },
+    stage: (key: string, value: StoredRecall): void => {
+      if (noStore || committed || rolledBack) return;
+      // Enforce admission before exposing the marker without mutating live state.
+      addRecallStoreEntry(candidateStore(), key, value);
+      pendingRecalls.set(key, value);
+    },
+    commit: (): void => {
+      if (committed || rolledBack) return;
+      if (pendingRecalls.size === 0 && pendingTransfers.length === 0) {
+        committed = true;
+        return;
+      }
+      if (!noStore) {
+        candidateStore();
+        // Snapshot only within this synchronous commit, never across an await.
+        baseline = new Map(sessionState.recallStore);
+        for (const record of pendingTransfers) record();
+        for (const [key, value] of pendingRecalls) {
+          sessionState.recallStore.set(key, value);
+          recallPersistenceCommitObserver?.();
+        }
+        saveSessionTracking(sessionState.sessionID, {
+          recallStore: serializeRecallStore(sessionState.recallStore),
+        });
+      }
+      committed = true;
+      pendingRecalls.clear();
+      pendingTransfers.length = 0;
+    },
+    rollback: (): void => {
+      if (rolledBack) return;
+      rolledBack = true;
+      // The enclosing savepoint restores SQLite; restore the Map in place.
+      if (baseline) {
+        sessionState.recallStore.clear();
+        for (const [key, value] of baseline)
+          sessionState.recallStore.set(key, value);
+        baseline = undefined;
+      }
+      pendingRecalls.clear();
+      pendingTransfers.length = 0;
+    },
+  };
+}
+
+/**
+ * Per-model cap for client usage scaling. Derives the model's real context
+ * window and max-output budget (models.dev-backed) and mirrors Claude Code's
+ * `0.9 × (effectiveWindow − 13k)`. An empty/missing model id falls back to the
+ * conservative default cap; unknown models use `getModelEntrySync`'s 200K-window
+ * fallback entry (still well under a real 200K client's compaction threshold).
+ *
+ * `longContext` MUST reflect whether THIS request opted into the 1M window via
+ * the `context-1m` beta ({@link requestEnablesLongContext}). Without it, the
+ * effective window is clamped to 200K ({@link clientMeteredContextWindow}) so a
+ * 1M-capable third-party model (e.g. MiniMax-M3) the client meters against a
+ * 200K window can't sail past the client's ~167K auto-compact threshold — the
+ * whole point of scaling. Defaults to `false` (conservative) so any caller that
+ * can't determine the beta state gets the safe, compaction-proof cap.
+ */
+function maxReportedUsageForModelID(
+  modelID: string,
+  longContext = false,
+): number {
+  if (!modelID) return DEFAULT_MAX_REPORTED_USAGE;
+  const entry = getModelEntrySync(modelID);
+  const realContextWindow = entry.limit?.context ?? 200_000;
+  const maxOutput = entry.limit?.output ?? MAX_OUTPUT_RESERVE;
+  const contextWindow = clientMeteredContextWindow(
+    realContextWindow,
+    longContext,
+  );
+  return maxReportedUsageForModel(contextWindow, maxOutput);
+}
+
+/**
+ * Create a streaming SSE response from upstream with parallel accumulation.
+ *
+ * When `recallContext` is provided, uses a recall-aware accumulator that
+ * transparently intercepts recall tool_use blocks:
+ *  - **Case 1 (recall-only)**: pauses client stream, executes recall, sends
+ *    a follow-up request, and pipes the continuation into the same HTTP
+ *    response stream.
+ *  - **Case 2 (mixed tools)**: suppresses recall blocks, stores the pending
+ *    result for injection into the next request.
+ */
+export function buildStreamingResponse(
+  upstreamResponse: Response,
+  onComplete: (response: GatewayResponse) => void,
+  recallContext?: {
+    /** Original client transcript used for replay-anchor provenance. */
+    clientMessages: GatewayMessage[];
+    modifiedReq: GatewayRequest;
+    config: GatewayConfig;
+    sessionState: SessionState;
+    cacheOptions: AnthropicCacheOptions;
+    upstreamRoute?: ResolvedRequestUpstreamRoute;
+    /** Suppress recall-result retention for amnesia/no-store turns. */
+    noStore?: boolean;
+    /** Account failed recall continuations without persisting a successful reply. */
+    onFailure?: (response: GatewayResponse) => void;
+    /** Transfer persistence to the request's downstream-success finalizer. */
+    onTransactionReady?: (transaction: {
+      commit: () => void;
+      rollback: () => void;
+    }) => void;
+    /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
+     *  recall marker is emitted as its own Anthropic SSE message envelope
+     *  (split) or as an inline synthetic text content block (which the
+     *  OpenAI/Responses/Gemini translators forward as their native text
+     *  chunk). Either way the marker reaches the client — the difference
+     *  is whether it lands as a distinct assistant message in the client's
+     *  transcript (Anthropic native) or as inline text content (others). */
+    clientSpeaksAnthropic: boolean;
+    /** Frozen system[1] baseline (Lore context capability note + preferences +
+     *  entities + project knowledge catalog). Used to compute which recall
+     *  hits are already in the model's LTM context so recall can hint
+     *  "N of K results already in LTM" and avoid silent agent loop exits on
+     *  fully-redundant recall queries. */
+    stableLtmText?: string;
+    /** Durable prompt-delta pair just appended to the conversation — entries
+     *  that are fully in context (full content, not just catalog titles). */
+    pendingKnowledgeDelta?: {
+      previousKeys: string[] | undefined;
+      nextKeys: string[] | undefined;
+      entries: Array<{
+        id: string;
+        category: string;
+        title: string;
+        content: string;
+      }>;
+      overflow?: Array<{ id: string; category: string; title: string }>;
+    };
+    /** Absolute request deadline inherited from the foreground abort scope. */
+    recallDeadlineAt?: number;
+  },
+  /** When set, prepend a synthetic warning content block to the stream.
+   *  Currently used for the worker-degradation warning (#797 removed the
+   *  unsustainable-conversation warning, but the injection mechanism is
+   *  reusable for any user-actionable warning surfaced mid-stream). */
+  warningText?: string,
+  /** Session id, for telemetry (abort-under-pressure capture). Passed
+   *  independently of recallContext so non-recall turns are still attributable. */
+  sessionID?: string,
+  /** Per-model client-usage cap (anti-compaction). Defaults to the 200K cap. */
+  maxReportedUsage: number = DEFAULT_MAX_REPORTED_USAGE,
+  signal?: AbortSignal,
+): Response {
+  const recallPersistence = recallContext
+    ? createRecallPersistenceTransaction(
+        recallContext.sessionState,
+        recallContext.noStore,
+      )
+    : undefined;
+  if (recallPersistence) recallContext?.onTransactionReady?.(recallPersistence);
+  let sourceSucceeded = false;
+  const complete = (response: GatewayResponse): void => {
+    onComplete(response);
+    sourceSucceeded = true;
+  };
+  const recallDiagnostics = createRecallDiagnostics(
+    recallContext !== undefined && !recallContext.noStore,
+  );
+  const recallAccum = recallContext
+    ? createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+        scaleClientUsage: true,
+        maxReportedUsage,
+      })
+    : null;
+  const accumulator: StreamAccumulator =
+    recallAccum ??
+    createStreamAccumulator({ scaleClientUsage: true, maxReportedUsage });
+  const encoder = new TextEncoder();
+  const recallVisibleContent: GatewayContentBlock[] = [];
+  // Start of the client-facing stream — used to flag aborts that happen after
+  // a long in-flight time (a host-pressure signal; see the abort catch below).
+  const streamStartMs = Date.now();
+
+  // Client-disconnect detection: shared between start() and cancel()
+  let cancelled = false;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let resumeDemand: (() => void) | undefined;
+  const recallAbort = new AbortController();
+  const streamSignal = signal
+    ? AbortSignal.any([signal, recallAbort.signal])
+    : recallAbort.signal;
+  const onStreamAbort = (): void => {
+    recallPersistence?.rollback();
+    resumeDemand?.();
+    resumeDemand = undefined;
+    if (signal?.aborted && !recallAbort.signal.aborted) {
+      recallAbort.abort(signal.reason);
+    }
+    if (activeReader) cancelAndReleaseReader(activeReader, streamSignal.reason);
+    else
+      void upstreamResponse.body?.cancel(streamSignal.reason).catch(() => {});
+  };
+  streamSignal.addEventListener("abort", onStreamAbort, { once: true });
+  if (streamSignal.aborted) onStreamAbort();
+  const recallDeadline = setTimeout(
+    () =>
+      recallAbort.abort(
+        new DOMException("recall stream deadline exceeded", "TimeoutError"),
+      ),
+    FOREGROUND_REQUEST_TIMEOUT_MS,
+  );
+  const clearRecallDeadline = (): void => clearTimeout(recallDeadline);
+
+  // --- Keepalive ping timer ---
+  // Emits SSE `ping` events on the client-facing stream when no upstream
+  // events arrive for KEEPALIVE_INACTIVITY_MS. This prevents Bun's hardcoded
+  // ~5-min fetch timeout (oven-sh/bun#16682) from killing the client↔gateway
+  // connection during long thinking pauses, recall execution, or follow-up
+  // requests. `ping` is a first-class no-op event in Anthropic's SSE protocol
+  // and is explicitly skipped by the OpenAI/Responses stream translators.
+  const KEEPALIVE_INACTIVITY_MS = 30_000; // 30s — well under Bun's ~5-min cap
+  const pingEvent = encoder.encode(
+    formatSSEEvent("ping", JSON.stringify({ type: "ping" })),
+  );
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      // Guard helpers for client-disconnect safety
+      const waitForDemand = async (): Promise<void> => {
+        while (
+          !cancelled &&
+          !streamSignal.aborted &&
+          (controller.desiredSize ?? 1) <= 0
+        ) {
+          await new Promise<void>((resolve) => {
+            resumeDemand = resolve;
+          });
+        }
+        streamSignal.throwIfAborted();
+      };
+      const safeEnqueue = async (data: Uint8Array): Promise<boolean> => {
+        if (cancelled) return false;
+        await waitForDemand();
+        if (cancelled) return false;
+        try {
+          controller.enqueue(data);
+          return true;
+        } catch {
+          cancelled = true;
+          return false;
+        }
+      };
+      const safeClose = (): void => {
+        clearRecallDeadline();
+        streamSignal.removeEventListener("abort", onStreamAbort);
+        if (cancelled) return;
+        try {
+          controller.close();
+        } catch {
+          // Already closed/cancelled
+        }
+      };
+
+      /** Reset the keepalive inactivity timer. Call on every upstream event. */
+      const resetKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = setTimeout(function tick() {
+          if (cancelled) return;
+          if ((controller.desiredSize ?? 1) > 0) void safeEnqueue(pingEvent);
+          // Re-arm: keep pinging every KEEPALIVE_INACTIVITY_MS until an
+          // upstream event arrives (which calls resetKeepalive) or the
+          // stream closes (which calls clearKeepalive).
+          keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+        }, KEEPALIVE_INACTIVITY_MS);
+      };
+      const clearKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = null;
+      };
+      let recallFailureResponse: (() => GatewayResponse) | undefined;
+      void (async () => {
+        try {
+          // Parse and forward upstream SSE events
+          if (!upstreamResponse.body) {
+            throw new Error("Upstream response has no body");
+          }
+          const reader = upstreamResponse.body.getReader();
+          activeReader = reader;
+
+          // When a warning needs to be prepended to the response, we emit a
+          // synthetic text content block after any leading thinking blocks,
+          // then offset all subsequent real content block indices by 1.
+          // The accumulator sees the original (un-offset) data so postResponse()
+          // gets the clean response — only the client stream has the warning.
+          // Thinking blocks are forwarded at their original indices to preserve
+          // the expected ordering (clients may inspect the first block's type).
+          let warningEmitted = false;
+          let inThinking = false;
+          let warningBlockIndex = 0; // incremented past thinking blocks
+          const warningOffset = warningText ? 1 : 0;
+
+          resetKeepalive();
+          const validator = new AnthropicSSEValidator();
+          const eventStream = parseSSEStream(reader, {
+            signal: streamSignal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            requireEventTerminator: true,
+            fatalUtf8: true,
+            maxFrames: DEFAULT_MAX_SSE_FRAMES,
+            maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
+          });
+          for await (const { event, data } of eventStream) {
+            resetKeepalive(); // upstream is alive — reset inactivity timer
+            validator.process(event, data);
+            const forwarded = accumulator.processEvent(event, data);
+            if (forwarded) {
+              // --- Warning injection: skip thinking blocks, inject before first text/tool block ---
+              if (warningText && !warningEmitted) {
+                if (event === "message_start" || event === "ping") {
+                  // Forward as-is, no action needed
+                  if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                  continue;
+                }
+
+                // Track thinking blocks — forward at original indices, no offset
+                if (event === "content_block_start") {
+                  try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.content_block?.type === "thinking") {
+                      inThinking = true;
+                      warningBlockIndex++;
+                      if (!(await safeEnqueue(encoder.encode(forwarded))))
+                        break;
+                      continue;
+                    }
+                  } catch {
+                    /* fall through to inject */
+                  }
+                }
+                if (inThinking) {
+                  if (event === "content_block_stop") inThinking = false;
+                  if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                  continue;
+                }
+
+                // First non-thinking content block — inject warning before it
+                const blockStart = JSON.stringify({
+                  type: "content_block_start",
+                  index: warningBlockIndex,
+                  content_block: { type: "text", text: "" },
+                });
+                const blockDelta = JSON.stringify({
+                  type: "content_block_delta",
+                  index: warningBlockIndex,
+                  delta: { type: "text_delta", text: warningText },
+                });
+                const blockStop = JSON.stringify({
+                  type: "content_block_stop",
+                  index: warningBlockIndex,
+                });
+                const warningSSE =
+                  `event: content_block_start\ndata: ${blockStart}\n\n` +
+                  `event: content_block_delta\ndata: ${blockDelta}\n\n` +
+                  `event: content_block_stop\ndata: ${blockStop}\n\n`;
+                if (!(await safeEnqueue(encoder.encode(warningSSE)))) break;
+                warningEmitted = true;
+                // Fall through to offset and forward this event
+              }
+
+              // Offset content block indices to account for the injected warning block
+              let toSend = forwarded;
+              if (warningOffset > 0 && warningEmitted) {
+                toSend = forwarded.replace(
+                  /^(data: )(.+)$/m,
+                  (_, prefix, jsonStr) => {
+                    try {
+                      const obj = JSON.parse(jsonStr);
+                      if (typeof obj.index === "number") {
+                        obj.index += warningOffset;
+                        return prefix + JSON.stringify(obj);
+                      }
+                    } catch {
+                      /* not JSON — leave as-is */
+                    }
+                    return prefix + jsonStr;
+                  },
+                );
+              }
+              if (!(await safeEnqueue(encoder.encode(toSend)))) break;
+            }
+            if (validator.isDone()) break;
+          }
+          cancelAndReleaseReader(reader);
+          if (activeReader === reader) activeReader = null;
+          if (!cancelled) validator.assertDone();
+
+          // --- Recall interception (streaming) ---
+          // Loop allows the model to call recall multiple times (e.g. drill
+          // down into t:<id> source citations). Uses RecallAwareAccumulator
+          // for each continuation stream to detect further recall calls.
+          if (recallAccum?.hasRecall() && recallContext) {
+            let currentAccum: RecallAwareAccumulator = recallAccum;
+            let currentResp = recallAccum.getResponse();
+            let currentBlockOffset = warningOffset; // accumulates across iterations
+            let currentModifiedReq = recallContext.modifiedReq;
+            let recallDepth = 0;
+            let cumulativeUsage = { ...(currentResp.usage ?? ZERO_USAGE) };
+            const recallBudget = new RecallChainBudget({
+              maxExecutions: loreConfig().search.recall.chainMaxExecutions,
+              deadlineAt: recallContext.recallDeadlineAt,
+            });
+            // This response already consumed the model's context/token budget
+            // before it asked for recall. Include it before admitting the first
+            // recall so the chain cannot repeatedly spend an untracked
+            // principal turn plus its continuations.
+            recallBudget.recordUsage(currentResp.usage);
+            const logRecallBudgetStop = (reason: RecallStopReason): void => {
+              log.info(
+                `recall final continuation: budget exhausted reason=${reason}`,
+              );
+            };
+            let activeContinuation: RecallAwareAccumulator | undefined;
+            recallFailureResponse = () => ({
+              ...(activeContinuation ?? currentAccum).getResponse(),
+              usage: activeContinuation
+                ? mergeRecallUsage(
+                    cumulativeUsage,
+                    activeContinuation.getResponse().usage ?? ZERO_USAGE,
+                  )
+                : cumulativeUsage,
+            });
+
+            // Snapshot IDs already in LTM context (system[1] catalog + durable
+            // delta) so recall can hint "N of K results already in LTM" when the
+            // model would otherwise treat redundant hits as new info and emit
+            // a silent 3-token stop.
+            const alreadyInLtmIds = buildAlreadyInLtmIds(
+              recallContext.stableLtmText,
+              recallContext.pendingKnowledgeDelta,
+            );
+
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              const recallBlock = findRecallToolUse(currentResp);
+              if (!recallBlock) break;
+
+              if (
+                currentResp.content.filter(
+                  (block) =>
+                    block.type === "tool_use" &&
+                    block.name === RECALL_TOOL_NAME,
+                ).length > 1
+              ) {
+                throw new RecallContinuationFailure("parallel_recall");
+              }
+              const admission = recallBudget.admit(
+                recallItemReservation(recallBlock.input),
+              );
+              if (admission) {
+                logRecallBudgetStop(admission);
+                throw new RecallContinuationFailure("depth_exhausted");
+              }
+              recallDepth++;
+              const { result, input, coverage } = await promiseAgainstAbort(
+                () =>
+                  withTenant(
+                    recallContext.sessionState.storageTenantId ?? "",
+                    () =>
+                      executeRecall(
+                        recallBlock,
+                        recallContext.sessionState.projectPath,
+                        recallContext.sessionState.sessionID,
+                        getLLMClient(recallContext.config),
+                        alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
+                        streamSignal,
+                        recallPersistence!.deferTransfer,
+                      ),
+                  ),
+                streamSignal,
+              );
+
+              recallDiagnostics.record(input, result, coverage);
+              const stopReason = recallBudget.record({
+                resultBytes: Buffer.byteLength(result),
+                coverage,
+              });
+              if (stopReason) logRecallBudgetStop(stopReason);
+              // Reserve one full provider turn for synthesis before the hard
+              // token boundary can turn a follow-up recall into a rollback.
+              const finalRecallRound = recallBudget.mustFinalizeNext();
+              const followUpResult = recallBudgetGuidance(result, stopReason);
+              const scope = input.scope ?? "all";
+
+              // Store recall result for marker round-trip expansion
+              const anchorId = crypto.randomUUID();
+              const storeKey = `anchor:${anchorId}`;
+              const position = currentResp.content.indexOf(recallBlock);
+              const markerPrefix = recallContext.clientSpeaksAnthropic
+                ? currentResp.content.filter(
+                    (block) =>
+                      block.type !== "tool_use" || block.id !== recallBlock.id,
+                  )
+                : currentResp.content.slice(0, position);
+              const anchorContextId = recallAnchorContext(
+                recallContext.clientMessages,
+                recallContext.clientMessages.length,
+                [...recallVisibleContent, ...markerPrefix],
+              );
+              const companionToolUses = currentResp.content.flatMap(
+                (block, index) => {
+                  if (
+                    block.type !== "tool_use" ||
+                    block.id === recallBlock.id
+                  ) {
+                    return [];
+                  }
+                  return [
+                    {
+                      id: block.id,
+                      name: block.name,
+                      input: block.input,
+                      side:
+                        recallContext.clientSpeaksAnthropic || index < position
+                          ? ("before" as const)
+                          : ("after" as const),
+                    },
+                  ];
+                },
+              );
+              if (!recallContext.noStore) {
+                recallPersistence!.stage(storeKey, {
+                  toolUseId: recallBlock.id,
+                  anchorId,
+                  anchorContextId,
+                  input,
+                  position,
+                  result,
+                  ...(companionToolUses.length > 0
+                    ? { companionToolUses }
+                    : {}),
+                });
+              }
+
+              // Emit marker — split into its own SSE message envelope for Anthropic-native
+              // clients (so the marker renders as a DISTINCT assistant message in
+              // the transcript, not inline with the model's preamble); for
+              // non-Anthropic clients (OpenAI Chat Completions / Responses /
+              // Gemini), emit it as a SYNTHETIC text content block in the Anthropic SSE.
+              // The OpenAI/Responses/Gemini adapters (stream/openai.ts, stream/openai-responses.ts,
+              // stream/gemini.ts) each translate text content blocks into their native
+              // streaming format automatically — so the marker reaches the OpenAI client
+              // as a delta.content chunk, the Responses client as an output_text delta,
+              // and the Gemini client as a text part. This preserves the recall context
+              // across turns (the client's persisted transcript has SOMETHING for
+              // expandRecallMarkers to find next turn, fixing the silent-recall-loss bug
+              // that would result from dropping the marker entirely for these clients).
+              const markerText = buildAnchoredRecallMarker(
+                input.query,
+                scope,
+                input.id,
+                input.ids,
+                anchorId,
+              );
+              if (recallContext.clientSpeaksAnthropic) {
+                recallVisibleContent.push(...markerPrefix, {
+                  type: "text",
+                  text: markerText,
+                });
+              } else {
+                recallVisibleContent.push(
+                  ...currentResp.content.map((block) =>
+                    block.type === "tool_use" && block.id === recallBlock.id
+                      ? { type: "text" as const, text: markerText }
+                      : block,
+                  ),
+                );
+              }
+              let syntheticMarker: string;
+              if (recallContext.clientSpeaksAnthropic) {
+                const syntheticMessageId = `lore_marker_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+                syntheticMarker = buildSSEMarkerMessage(
+                  syntheticMessageId,
+                  currentResp.model,
+                  markerText,
+                );
+              } else {
+                // Inline synthetic text block at the index where the recall
+                // tool_use was suppressed. Existing translators forward text
+                // blocks to the client's native streaming format — see
+                // stream/openai.ts:225-239 (text_delta → delta.content chunk),
+                // stream/openai-responses.ts (text → output_text delta), and
+                // stream/gemini.ts (buffered → text part in aggregated frame).
+                const markerIdx =
+                  currentAccum.clientBlockCount() + currentBlockOffset;
+                syntheticMarker = [
+                  formatSSEEvent(
+                    "content_block_start",
+                    JSON.stringify({
+                      type: "content_block_start",
+                      index: markerIdx,
+                      content_block: { type: "text", text: "" },
+                    }),
+                  ),
+                  formatSSEEvent(
+                    "content_block_delta",
+                    JSON.stringify({
+                      type: "content_block_delta",
+                      index: markerIdx,
+                      delta: { type: "text_delta", text: markerText },
+                    }),
+                  ),
+                  formatSSEEvent(
+                    "content_block_stop",
+                    JSON.stringify({
+                      type: "content_block_stop",
+                      index: markerIdx,
+                    }),
+                  ),
+                ].join("");
+              }
+              // For Anthropic-native clients, the marker is a SEPARATE SSE
+              // message envelope (own message_start/message_stop). The original
+              // envelope (preamble) must close BEFORE the marker opens —
+              // otherwise the wire has two message_start events with no closing
+              // message_stop between them, which is malformed Anthropic SSE.
+              // Forward the original's held-back message_delta + message_stop
+              // FIRST, then emit the marker. Use `takeHeldBackEvents()` so the
+              // mixed-tools terminal-close branch can't double-emit the same
+              // events.
+              // For non-Anthropic clients, the marker is inline so the original
+              // envelope stays open — held-back events are forwarded LATER
+              // (after the follow-up completes, in the recall-only success
+              // path at pipeline.ts:~4960).
+              if (recallContext.clientSpeaksAnthropic) {
+                const originalHeldBack = currentAccum.takeHeldBackEvents();
+                if (originalHeldBack) {
+                  if (!(await safeEnqueue(encoder.encode(originalHeldBack)))) {
+                    clearKeepalive();
+                    return;
+                  }
+                }
+              }
+
+              if (!(await safeEnqueue(encoder.encode(syntheticMarker)))) {
+                clearKeepalive();
+                return;
+              }
+
+              if (currentAccum.hasOtherTools()) {
+                // Mixed tools — forward held-back events, close stream
+                log.info(
+                  `recall (stream, mixed, depth=${recallDepth}): stored result for session ` +
+                    `${recallContext.sessionState.sessionID.slice(0, 16)}`,
+                );
+
+                // For non-Anthropic clients, the marker is inline (envelope
+                // stays open), so the held-back events close the envelope at
+                // stream end. For Anthropic clients, the held-back was already
+                // consumed (via takeHeldBackEvents) before the marker emission
+                // above — so takeHeldBackEvents() returns "" here, no-op.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("completed");
+                complete(markerResp);
+                safeClose();
+                return;
+              }
+
+              // Recall-only — send follow-up, pipe continuation
+              log.info(
+                `recall (stream, depth=${recallDepth}): executing follow-up for session ` +
+                  `${recallContext.sessionState.sessionID.slice(0, 16)}`,
+              );
+
+              // Build (stream:true) + forward + assert-SSE + get reader in one
+              // coupled call so the follow-up's stream flag can never diverge
+              // from how the continuation is consumed (parseSSEStream below).
+              // Disable conversation caching on the follow-up: the appended
+              // recall result makes the prefix diverge from the next real turn,
+              // so the cache write would be wasted money.
+              const streamingRecallCtx: RecallFollowUpCtx = {
+                forward: (r, signal) =>
+                  forwardToUpstream(
+                    r,
+                    recallContext.config,
+                    undefined,
+                    {
+                      ...recallContext.cacheOptions,
+                      cacheConversation: false,
+                    },
+                    signal,
+                    recallContext.upstreamRoute,
+                  ),
+                // JSON parsing is unused on the streaming path (assertSSEResponse
+                // guarantees an SSE body); provide a guard that throws if reached.
+                parseJSON: () => {
+                  throw new Error(
+                    "parseJSON must not be called on the streaming recall path",
+                  );
+                },
+              };
+
+              let streamingFollowUp: Awaited<
+                ReturnType<typeof runRecallFollowUpStreaming>
+              >;
+              try {
+                streamingFollowUp = await runRecallFollowUpStreaming(
+                  streamingRecallCtx,
+                  currentModifiedReq,
+                  currentResp,
+                  followUpResult,
+                  recallBlock,
+                  streamSignal,
+                  finalRecallRound,
+                );
+              } catch (error) {
+                if (streamSignal.aborted) throw error;
+                if (finalRecallRound)
+                  throw new RecallContinuationFailure("follow_up_setup");
+                log.error(
+                  `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
+                );
+                // takeHeldBackEvents() — for Anthropic this is a no-op
+                // (already consumed before the marker envelope emission
+                // above); for non-Anthropic the held-back closes the
+                // (still-open) envelope here.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("failed");
+                complete(markerResp);
+                safeClose();
+                return;
+              }
+
+              if (!streamingFollowUp.ok) {
+                if (finalRecallRound)
+                  throw new RecallContinuationFailure("follow_up_failed");
+                log.error(
+                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
+                  new Error(
+                    `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
+                  ),
+                );
+                captureToolPairing400({
+                  status: streamingFollowUp.status ?? 0,
+                  errorBody: streamingFollowUp.detail,
+                  messages: currentModifiedReq.messages,
+                  // Layer is not in scope on the streaming recall continuation;
+                  // -1 signals "unknown" while still tagging the error class.
+                  layer: -1,
+                  model: currentModifiedReq.model,
+                  sessionID: recallContext.sessionState.sessionID,
+                });
+                // takeHeldBackEvents() — for Anthropic this is a no-op
+                // (already consumed before the marker envelope emission
+                // above); for non-Anthropic the held-back closes the
+                // (still-open) envelope here.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("failed");
+                complete(markerResp);
+                safeClose();
+                return;
+              }
+
+              const followUp = streamingFollowUp.followUp;
+              log.info(
+                `recall follow-up response (depth=${recallDepth}): session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
+              );
+
+              // Pipe the continuation stream through a recall-aware accumulator.
+              // For Anthropic-native clients:
+              //  - The marker is its own SSE message envelope (separate
+              //    message_start/message_stop), so the continuation's content_block_start
+              //    indices start at 0 in its own message — blockOffset=0.
+              //  - The continuation must open with its OWN message_start (don't suppress).
+              //    The original envelope's message_start/message_stop were already closed
+              //    by the explicit held-back forwarding just before the marker envelope.
+              //
+              // For non-Anthropic clients:
+              //  - The marker is an inline synthetic text block, so the original envelope
+              //    stays open throughout the marker and the continuation. The continuation
+              //    extends the original envelope — blockOffset includes the marker block,
+              //    and the continuation's message_start is suppressed (single-message
+              //    stream per OpenAI Chat Completions / Responses / Gemini).
+              const contBlockOffset = recallContext.clientSpeaksAnthropic
+                ? 0
+                : currentAccum.clientBlockCount() + currentBlockOffset + 1;
+              const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+                scaleClientUsage: true,
+                maxReportedUsage,
+                blockOffset: contBlockOffset,
+                suppressMessageStart: !recallContext.clientSpeaksAnthropic,
+              });
+              activeContinuation = contAccum;
+              const contReader = streamingFollowUp.reader;
+              activeReader = contReader;
+
+              const finalTerminalEvents: string[] = [];
+              const continuationValidator = new AnthropicSSEValidator();
+              try {
+                for await (const {
+                  event: contEvent,
+                  data: contData,
+                } of parseSSEStream(contReader, {
+                  signal: streamSignal,
+                  inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                  requireEventTerminator: true,
+                  fatalUtf8: true,
+                  maxFrames: DEFAULT_MAX_SSE_FRAMES,
+                  maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
+                })) {
+                  resetKeepalive(); // continuation stream alive — reset timer
+                  continuationValidator.process(contEvent, contData);
+                  const forwarded = contAccum.processEvent(contEvent, contData);
+                  if (
+                    forwarded &&
+                    finalRecallRound &&
+                    (contEvent === "message_delta" ||
+                      contEvent === "message_stop")
+                  ) {
+                    finalTerminalEvents.push(forwarded);
+                  } else if (forwarded) {
+                    // Forward non-recall, non-held-back events to client.
+                    // message_delta usage scaling is handled by a separate pass
+                    // below only for the final continuation's terminal events.
+                    if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                  }
+                  if (continuationValidator.isDone()) break;
+                }
+              } finally {
+                cancelAndReleaseReader(contReader, streamSignal.reason);
+                if (activeReader === contReader) activeReader = null;
+              }
+              if (!cancelled) continuationValidator.assertDone();
+
+              log.info(
+                `recall follow-up stream complete (depth=${recallDepth}): ` +
+                  `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
+              );
+              const continuationResp = contAccum.getResponse();
+              cumulativeUsage = mergeRecallUsage(
+                cumulativeUsage,
+                continuationResp.usage ?? ZERO_USAGE,
+              );
+              activeContinuation = undefined;
+              const continuationStopReason = recallBudget.recordUsage(
+                continuationResp.usage,
+              );
+              if (finalRecallRound || continuationStopReason) {
+                if (contAccum.hasRecall())
+                  throw new RecallContinuationFailure("depth_exhausted");
+                if (!isUsableRecallContinuation(continuationResp))
+                  throw new RecallContinuationFailure("follow_up_failed");
+              }
+
+              // Check if continuation contained recall — if so, loop
+              if (
+                contAccum.hasRecall() &&
+                !finalRecallRound &&
+                !continuationStopReason
+              ) {
+                currentAccum = contAccum;
+                currentResp = contAccum.getResponse();
+                currentBlockOffset = contBlockOffset;
+                currentModifiedReq = followUp;
+                continue; // Loop: execute the new recall, emit marker, follow up
+              }
+
+              // For non-Anthropic clients: the original (preamble) envelope is
+              // kept open throughout the inline marker and the follow-up
+              // continuation. The continuation's terminal message_delta +
+              // message_stop (held back in contAccum below) close the original
+              // envelope inline as the stream ends. Forwarding the preamble's
+              // held-back here would duplicate the close event and break the
+              // OpenAI wire (extra [DONE] sentinel + contradictory
+              // finish_reason). For Anthropic clients, the preamble's
+              // held-back was already consumed before the marker envelope
+              // emission above — contAccum's held-back is the relevant close.
+              // Use takeHeldBackEvents() (not peek) so the held-back is
+              // atomically consumed: defense-in-depth against any future code
+              // path that might read contAccum's heldBack again (e.g. a
+              // refactor that re-enters the drill-down loop or replays the
+              // accumulator). In the current control flow the heldBack is read
+              // exactly once — this just makes the consume semantics explicit.
+              for (const terminal of finalTerminalEvents)
+                await safeEnqueue(encoder.encode(terminal));
+              const heldBack = contAccum.takeHeldBackEvents();
+              if (heldBack) {
+                // Scale usage in held-back message_delta for anti-compaction
+                await safeEnqueue(encoder.encode(heldBack));
+              }
+
+              continuationResp.usage = cumulativeUsage;
+              if (finalRecallRound || continuationStopReason)
+                log.info("recall final continuation: completed");
+              clearKeepalive();
+              recallDiagnostics.finish("completed");
+              complete(continuationResp);
+              safeClose();
+              return;
+            }
+          }
+
+          // No recall — normal path
+          clearKeepalive();
+          const response = accumulator.getResponse();
+          complete(response);
+          safeClose();
+        } catch (err) {
+          recallPersistence?.rollback();
+          recallDiagnostics.finish(streamSignal.aborted ? "aborted" : "failed");
+          if (err instanceof RecallContinuationFailure)
+            reportRecallContinuationFailure(err.category);
+          if (recallFailureResponse) {
+            try {
+              recallContext?.onFailure?.(recallFailureResponse());
+            } catch {
+              log.error("recall failure accounting callback failed");
+            }
+          }
+          streamSignal.removeEventListener("abort", onStreamAbort);
+          clearKeepalive();
+          clearRecallDeadline();
+          if (activeReader) {
+            cancelAndReleaseReader(activeReader, err);
+            activeReader = null;
+          }
+          // Client disconnect / abort is benign — downgrade from error to info
+          // to avoid Sentry noise from normal connection lifecycle events.
+          const isAbort =
+            err instanceof DOMException && err.name === "AbortError";
+          if (isAbort) {
+            log.info("streaming pipeline aborted (client disconnect)");
+            // Only surfaces to Sentry if the host was under pressure at abort time.
+            captureClientAbortUnderPressure({
+              startMs: streamStartMs,
+              route: "stream",
+              sessionID,
+            });
+          } else {
+            log.error("streaming pipeline error:", err);
+          }
+          try {
+            controller.error(err);
+          } catch {
+            // Controller already closed or cancelled — error already logged above
+          }
+        }
+      })();
+    },
+    pull() {
+      resumeDemand?.();
+      resumeDemand = undefined;
+    },
+    cancel() {
+      // A translator may cancel its source after consuming a valid terminal.
+      // The request owner distinguishes that from actual downstream cancellation.
+      if (!recallContext?.onTransactionReady) recallPersistence?.rollback();
+      recallDiagnostics.finish("aborted");
+      resumeDemand?.();
+      resumeDemand = undefined;
+      if (keepaliveTimer) clearTimeout(keepaliveTimer);
+      keepaliveTimer = null;
+      cancelled = true;
+      streamSignal.removeEventListener("abort", onStreamAbort);
+      clearRecallDeadline();
+      recallAbort.abort(new DOMException("client disconnected", "AbortError"));
+      if (activeReader) {
+        cancelAndReleaseReader(activeReader);
+        activeReader = null;
+      }
+    },
+  });
+
+  const response = new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+  if (!recallPersistence || recallContext?.onTransactionReady) return response;
+  // Standalone callers also commit only when the returned body reaches EOF.
+  return wrapBodyWithCleanup(
+    response,
+    () => {
+      if (!sourceSucceeded || cancelled || streamSignal.aborted) {
+        recallPersistence.rollback();
+        return;
+      }
+      try {
+        withTenant(recallContext?.sessionState.storageTenantId ?? "", () =>
+          withSavepoint("native_recall_delivery", recallPersistence.commit),
+        );
+      } catch (error) {
+        recallPersistence.rollback();
+        throw error;
+      }
+    },
+    streamSignal,
+    recallPersistence.rollback,
+  );
+}
+
+/**
+ * True-streaming, recall-aware variant of `streamResponsesPassthrough` for the
+ * OpenAI Responses API (codex/ChatGPT) — used when the request carries the
+ * gateway-injected `recall` tool but the client speaks the Responses API.
+ *
+ * Unlike the buffered `accumulateResponsesSSEStream` path (which withholds ALL
+ * client bytes until the entire slow reasoning-heavy upstream completes — the
+ * cause of opencode's 10s `ProviderHeaderTimeoutError`), this function forwards
+ * every upstream SSE event to the client AS IT ARRIVES, while transparently
+ * intercepting a `recall` `function_call` output item:
+ *
+ *  - **No recall**: forwards everything unchanged (identical to
+ *    `streamResponsesPassthrough`).
+ *  - **Recall + other tools (mixed)**: suppresses the recall item and its
+ *    flow events, emits a synthetic marker text item, then rebuilds the
+ *    terminal `response.completed` reflecting only client-visible output.
+ *  - **Recall only**: suppresses the recall item, emits a synthetic marker
+ *    text item, runs the (streaming) recall follow-up, pipes the continuation
+ *    events inline continuing the `output_index` numbering, then rebuilds the
+ *    terminal `response.completed` reflecting marker + continuation.
+ *
+ * `onComplete` mirrors `streamResponsesPassthrough` (invoked exactly once with
+ * the accumulated internal response for `postResponse`/calibration).
+ *
+ * The recall execution callback abstracts the pipeline-scope dependencies
+ * (`executeRecall` + follow-up forwarding + recall store), so this function
+ * stays a self-contained streamer in the Responses module.
+ */
+export function streamResponsesRecallAware(
+  upstreamResponse: Response,
+  opts: {
+    onComplete: (response: GatewayResponse, successful: boolean) => void;
+    onTransactionReady?: (transaction: {
+      commit: () => void;
+      rollback: () => void;
+    }) => void;
+    sessionID?: string;
+    /** Emergency ceiling for the request-owned recall chain. */
+    maxRecallExecutions?: number;
+    /** @deprecated Use `maxRecallExecutions`. */
+    maxRecallDepth?: number;
+    noStore?: boolean;
+    maxDeferredBytes?: number;
+    maxHiddenRecallBytes?: number;
+    maxRetainedStateBytes?: number;
+    maxStreamBytes?: number;
+    maxSSEFrames?: number;
+    validation?: "public" | "codex";
+    /** Caller abort combined with the stream's client-disconnect controller. */
+    signal?: AbortSignal;
+    /** Absolute request deadline inherited from the foreground abort scope. */
+    recallDeadlineAt?: number;
+    /**
+     * Called when a `recall` function_call is fully parsed. Runs the recall
+     * (LTM search + optional LLM result) and returns the pieces needed to
+     * deliver the marker + continuation to the client:
+     *  - `resultText`: the raw recall result string (for the follow-up).
+     */
+    onRecall: (input: {
+      query: string;
+      scope?: string;
+      id?: string;
+      ids?: string[];
+      detailOffset?: number;
+      detailLimit?: number;
+      outputIndex: number;
+      toolUseId: string;
+      /** Position in the normalized GatewayResponse content array. */
+      contentPosition: number;
+      /** The accumulated response INCLUDING the recall tool_use, so the caller
+       *  can build the follow-up request from the same accumulation the
+       *  streamer uses. */
+      acc: GatewayResponse;
+      signal: AbortSignal;
+    }) => Promise<{
+      anchorText: string;
+      resultText: string;
+      /** Private source coverage; never emitted to the client. */
+      coverage?: readonly import("@loreai/core").RecallCoverage[];
+      commit?: () => void;
+      rollback?: () => void;
+    }>;
+    /** Streaming follow-up stage: build + forward + assert-SSE + reader. */
+    runFollowUp: (ctx: {
+      /** This is the one final continuation after the last allowed recall. */
+      finalRecallRound: boolean;
+      anchorText: string;
+      resultText: string;
+      acc: GatewayResponse;
+      toolUseId: string;
+      contentPosition: number;
+      signal: AbortSignal;
+    }) => Promise<{
+      reader: ReadableStreamDefaultReader<Uint8Array>;
+      /** Advance request state only after this continuation starts another recall. */
+      commit?: () => void;
+    }>;
+  },
+): Response {
+  const recallDiagnostics = createRecallDiagnostics(!opts.noStore);
+  const state = makeResponsesAccState();
+  const syntheticIdentities = new Set<string>();
+  const referenceIdentities = new Set<string>();
+  const outputIdentities = new Set<string>();
+  const responseLifecycles = new WeakMap<
+    ResponsesAccState,
+    { created: boolean; terminal: boolean }
+  >();
+  const responseLifecycleFor = (
+    acc: ResponsesAccState,
+  ): { created: boolean; terminal: boolean } => {
+    let lifecycle = responseLifecycles.get(acc);
+    if (!lifecycle) {
+      lifecycle = { created: false, terminal: false };
+      responseLifecycles.set(acc, lifecycle);
+    }
+    return lifecycle;
+  };
+  type TextPartLifecycle = {
+    kind: string;
+    authoritativeValue: string;
+    authoritativeValueSeen: boolean;
+    deltaSeen: boolean;
+    valueDone: boolean;
+    finalValue?: string;
+    partAdded: boolean;
+    partDone: boolean;
+    partFinalValue?: string;
+  };
+  type OutputLifecycle = {
+    argumentDeltaSeen: boolean;
+    argumentDeltas: string;
+    argumentsDone: boolean;
+    outputDone: boolean;
+    reasoning: Map<number, TextPartLifecycle>;
+    content: Map<number, TextPartLifecycle>;
+  };
+  const outputLifecycles = new WeakMap<
+    ResponsesAccState,
+    Map<number, OutputLifecycle>
+  >();
+  const lifecyclesFor = (
+    acc: ResponsesAccState,
+  ): Map<number, OutputLifecycle> => {
+    let lifecycles = outputLifecycles.get(acc);
+    if (!lifecycles) {
+      lifecycles = new Map();
+      outputLifecycles.set(acc, lifecycles);
+    }
+    return lifecycles;
+  };
+  const codexNormalizationStates = new WeakMap<
+    ResponsesAccState,
+    ResponsesAccState
+  >();
+  const normalizeCodexEvent = (
+    acc: ResponsesAccState,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): ResponsesAccState | undefined => {
+    if (opts.validation !== "codex") return undefined;
+    let normalizationState = codexNormalizationStates.get(acc);
+    if (!normalizationState) {
+      normalizationState = makeResponsesAccState();
+      codexNormalizationStates.set(acc, normalizationState);
+    }
+    normalizeCodexResponsesEvent(
+      normalizationState,
+      event,
+      parsed,
+      Math.min(maxSSEFrames, DEFAULT_MAX_SSE_FRAMES),
+    );
+    return normalizationState;
+  };
+  const emptyTextPartLifecycle = (kind: string): TextPartLifecycle => ({
+    kind,
+    authoritativeValue: "",
+    authoritativeValueSeen: false,
+    deltaSeen: false,
+    valueDone: false,
+    partAdded: false,
+    partDone: false,
+  });
+  const partValue = (
+    kind: string,
+    part: Record<string, unknown>,
+    description: string,
+  ): string => {
+    const value = kind === "refusal" ? part.refusal : part.text;
+    if (typeof value !== "string") {
+      throw new Error(`invalid Responses ${description} value`);
+    }
+    return value;
+  };
+  const finalizedMessageContent = (
+    lifecycle: OutputLifecycle,
+  ): Array<Record<string, unknown>> =>
+    Array.from(lifecycle.content)
+      .sort(([left], [right]) => left - right)
+      .filter(([, part]) => part.valueDone || part.partDone)
+      .map(([, part]) =>
+        part.kind === "refusal"
+          ? { type: "refusal", refusal: part.authoritativeValue }
+          : { type: "output_text", text: part.authoritativeValue },
+      );
+  const seedTextParts = (
+    parts: unknown,
+    target: Map<number, TextPartLifecycle>,
+    allowedKinds: ReadonlySet<string>,
+    description: string,
+  ): void => {
+    if (parts === undefined) return;
+    if (!Array.isArray(parts)) {
+      throw new Error(`Responses ${description} must be an array`);
+    }
+    for (const [index, rawPart] of parts.entries()) {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const part = rawPart as Record<string, unknown>;
+      if (typeof part.type !== "string" || !allowedKinds.has(part.type)) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const lifecycle = emptyTextPartLifecycle(part.type);
+      lifecycle.authoritativeValue = partValue(
+        part.type,
+        part,
+        `${description} initial`,
+      );
+      lifecycle.authoritativeValueSeen = true;
+      target.set(index, lifecycle);
+    }
+  };
+  let transactionBaseline: ResponsesAccState | undefined;
+  let transactionProviderUsage: GatewayUsage = { ...ZERO_USAGE };
+  const transactionRollbacks: Array<() => void> = [];
+  let deferredTransaction:
+    | { commit: () => void; rollback: () => void }
+    | undefined;
+  const restoreTransactionBaseline = (): void => {
+    if (!transactionBaseline) return;
+    state.id = transactionBaseline.id;
+    state.model = transactionBaseline.model;
+    state.stopReason = transactionBaseline.stopReason;
+    state.terminalEvent = transactionBaseline.terminalEvent;
+    state.terminalResponse = transactionBaseline.terminalResponse;
+    state.usage = { ...transactionBaseline.usage };
+    state.items = new Map(transactionBaseline.items);
+    state.rawItems = new Map(transactionBaseline.rawItems);
+    transactionBaseline = undefined;
+  };
+  const rollbackTransaction = (): void => {
+    restoreTransactionBaseline();
+    for (const rollback of transactionRollbacks.splice(0).reverse()) {
+      try {
+        rollback();
+      } catch (err) {
+        log.error("recall transaction rollback failed:", err);
+      }
+    }
+  };
+  const encoder = new TextEncoder();
+  const sessionID = opts.sessionID;
+  const recallBudget = new RecallChainBudget({
+    maxExecutions:
+      opts.maxRecallExecutions ?? opts.maxRecallDepth ?? MAX_RECALL_EXECUTIONS,
+    deadlineAt: opts.recallDeadlineAt,
+  });
+  const maxDeferredBytes = opts.maxDeferredBytes ?? 1024 * 1024;
+  const maxHiddenRecallBytes = opts.maxHiddenRecallBytes ?? maxDeferredBytes;
+  const maxRetainedStateBytes = opts.maxRetainedStateBytes ?? 16 * 1024 * 1024;
+  // Validated continuation output is retained transactionally until its chain
+  // completes, so bound its shared spool with the retained-state budget.
+  const maxTransactionalBytes = maxRetainedStateBytes;
+  const maxStreamBytes = opts.maxStreamBytes ?? 64 * 1024 * 1024;
+  let retainedStateBytes = 0;
+  let streamBytes = 0;
+  let hiddenRecallBytes = 0;
+  const maxSSEFrames = opts.maxSSEFrames ?? 100_000;
+  const frameCounter = { count: 0 };
+  const sseInactivityMs = FOREGROUND_SSE_INACTIVITY_MS;
+  const maxRecallContinuationTransportRetries = 1;
+
+  type RecallArguments = {
+    query: string;
+    scope?: string;
+    id?: string;
+    ids?: string[];
+    detailOffset?: number;
+    detailLimit?: number;
+  };
+  const parseRecallArguments = (value: unknown): RecallArguments => {
+    if (typeof value !== "string") {
+      throw new Error(
+        "invalid recall function arguments: expected JSON string",
+      );
+    }
+    let input: unknown;
+    try {
+      input = JSON.parse(value);
+    } catch {
+      throw new Error("invalid recall function arguments: malformed JSON");
+    }
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error("invalid recall function arguments: expected object");
+    }
+    const record = input as Record<string, unknown>;
+    const allowed = new Set([
+      "query",
+      "scope",
+      "id",
+      "ids",
+      "detailOffset",
+      "detailLimit",
+    ]);
+    const unknown = Object.keys(record).find((key) => !allowed.has(key));
+    if (unknown) {
+      throw new Error(
+        `invalid recall function arguments: unknown property "${unknown}"`,
+      );
+    }
+    if (record.query !== undefined && typeof record.query !== "string") {
+      throw new Error(
+        "invalid recall function arguments: query must be a string",
+      );
+    }
+    if (
+      record.id !== undefined &&
+      record.id !== null &&
+      (typeof record.id !== "string" ||
+        !record.id ||
+        record.id.length > MAX_RECALL_ID_CHARS)
+    ) {
+      throw new Error("invalid recall function arguments: id must be a string");
+    }
+    if (
+      record.ids !== undefined &&
+      (!Array.isArray(record.ids) ||
+        record.ids.length === 0 ||
+        record.ids.length > MAX_RECALL_BATCH_IDS ||
+        record.ids.some(
+          (id) =>
+            typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
+        ))
+    ) {
+      throw new Error(
+        `invalid recall function arguments: ids must contain 1-${MAX_RECALL_BATCH_IDS} strings no longer than ${MAX_RECALL_ID_CHARS} characters`,
+      );
+    }
+    if (record.id !== undefined && record.ids !== undefined) {
+      throw new Error("invalid recall function arguments: id and ids conflict");
+    }
+    if (
+      record.detailOffset !== undefined &&
+      (!Number.isSafeInteger(record.detailOffset) ||
+        (record.detailOffset as number) < 0)
+    ) {
+      throw new Error(
+        "invalid recall function arguments: detailOffset must be non-negative",
+      );
+    }
+    if (
+      record.detailLimit !== undefined &&
+      (!Number.isSafeInteger(record.detailLimit) ||
+        (record.detailLimit as number) < 1 ||
+        (record.detailLimit as number) > 16_000)
+    ) {
+      throw new Error(
+        "invalid recall function arguments: detailLimit must be 1-16000",
+      );
+    }
+    if (
+      record.scope !== undefined &&
+      record.scope !== null &&
+      typeof record.scope !== "string"
+    ) {
+      throw new Error(
+        "invalid recall function arguments: scope must be a string",
+      );
+    }
+    const query = record.query ?? "";
+    const id = record.id || undefined;
+    const ids = Array.isArray(record.ids) ? [...record.ids] : undefined;
+    if (!query.trim() && !id && !ids) {
+      throw new Error(
+        "invalid recall function arguments: query, id, or ids is required",
+      );
+    }
+    if (
+      (record.detailOffset !== undefined || record.detailLimit !== undefined) &&
+      !id
+    ) {
+      throw new Error(
+        "invalid recall function arguments: detail ranges require one id",
+      );
+    }
+    const scope = record.scope || undefined;
+    if (
+      scope &&
+      scope !== "all" &&
+      scope !== "session" &&
+      scope !== "project" &&
+      scope !== "knowledge"
+    ) {
+      throw new Error("invalid recall function arguments: unsupported scope");
+    }
+    return {
+      query,
+      ...(scope ? { scope } : {}),
+      ...(id ? { id } : {}),
+      ...(ids ? { ids } : {}),
+      ...(typeof record.detailOffset === "number"
+        ? { detailOffset: record.detailOffset }
+        : {}),
+      ...(typeof record.detailLimit === "number"
+        ? { detailLimit: record.detailLimit }
+        : {}),
+    };
+  };
+  type PendingResponsesRecall = {
+    outputIndex: number;
+    contentPosition: number;
+    query: string;
+    scope?: string;
+    id?: string;
+    ids?: string[];
+    detailOffset?: number;
+    detailLimit?: number;
+    toolUseId: string;
+  };
+  const collectCompletedRecall = (
+    acc: ResponsesAccState,
+    outputIndex: number,
+    parsedInputs: Map<number, RecallArguments>,
+    pending: PendingResponsesRecall[],
+  ): boolean => {
+    const rawItem = acc.rawItems.get(outputIndex);
+    if (
+      rawItem?.type !== "function_call" ||
+      rawItem.name !== RECALL_TOOL_NAME
+    ) {
+      return false;
+    }
+    if (pending.some((recall) => recall.outputIndex === outputIndex)) {
+      throw new Error(`duplicate recall completion for index ${outputIndex}`);
+    }
+    const input =
+      parsedInputs.get(outputIndex) ?? parseRecallArguments(rawItem.arguments);
+    const recallItem = acc.items.get(outputIndex);
+    const toolUseId =
+      recallItem?.type === "tool_use" ? recallItem.callId || recallItem.id : "";
+    if (!toolUseId) {
+      throw new Error(
+        `recall output missing identity for index ${outputIndex}`,
+      );
+    }
+    const contentPosition = finalizeResponsesAcc(acc).content.findIndex(
+      (block) => block.type === "tool_use" && block.id === toolUseId,
+    );
+    pending.push({
+      outputIndex,
+      contentPosition,
+      query: input.query,
+      scope: input.scope,
+      id: input.id,
+      ids: input.ids,
+      detailOffset: input.detailOffset,
+      detailLimit: input.detailLimit,
+      toolUseId,
+    });
+    parsedInputs.delete(outputIndex);
+    return true;
+  };
+
+  const addUsageTokens = (left: number, right: number): number => {
+    const result = left + right;
+    if (
+      !Number.isSafeInteger(left) ||
+      left < 0 ||
+      !Number.isSafeInteger(right) ||
+      right < 0 ||
+      !Number.isSafeInteger(result)
+    ) {
+      throw new Error("Responses usage token overflow");
+    }
+    return result;
+  };
+  const mergeUsage = (target: GatewayUsage, source: GatewayUsage): void => {
+    target.inputTokens = addUsageTokens(target.inputTokens, source.inputTokens);
+    target.outputTokens = addUsageTokens(
+      target.outputTokens,
+      source.outputTokens,
+    );
+    if (source.cacheReadInputTokens != null) {
+      target.cacheReadInputTokens = addUsageTokens(
+        target.cacheReadInputTokens ?? 0,
+        source.cacheReadInputTokens,
+      );
+    }
+    if (source.cacheCreationInputTokens != null) {
+      target.cacheCreationInputTokens = addUsageTokens(
+        target.cacheCreationInputTokens ?? 0,
+        source.cacheCreationInputTokens,
+      );
+    }
+  };
+  const assertUsageMergeable = (
+    target: GatewayUsage,
+    source: GatewayUsage,
+  ): void => {
+    const inputTokens = addUsageTokens(target.inputTokens, source.inputTokens);
+    const outputTokens = addUsageTokens(
+      target.outputTokens,
+      source.outputTokens,
+    );
+    const cacheReadInputTokens = addUsageTokens(
+      target.cacheReadInputTokens ?? 0,
+      source.cacheReadInputTokens ?? 0,
+    );
+    const cacheCreationInputTokens = addUsageTokens(
+      target.cacheCreationInputTokens ?? 0,
+      source.cacheCreationInputTokens ?? 0,
+    );
+    addUsageTokens(
+      addUsageTokens(
+        addUsageTokens(inputTokens, cacheReadInputTokens),
+        cacheCreationInputTokens,
+      ),
+      outputTokens,
+    );
+  };
+
+  let cancelled = false;
+  let terminalDelivered = false;
+  const abortController = new AbortController();
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, abortController.signal])
+    : abortController.signal;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  const outputIndexForEvent = (
+    event: string,
+    parsed: Record<string, unknown>,
+    state: ResponsesAccState,
+  ): number | undefined => {
+    const requiresOutputIndex =
+      /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_(?:summary|text)|refusal)/.test(
+        event,
+      );
+    const hasOutputIndex = Object.hasOwn(parsed, "output_index");
+    if (!requiresOutputIndex && !hasOutputIndex) return undefined;
+    const index = parsed.output_index;
+    if (!Number.isSafeInteger(index) || (index as number) < 0) {
+      throw new Error(`invalid Responses output_index for ${event}`);
+    }
+    const outputIndex = index as number;
+    if (
+      opts.validation === "codex" &&
+      event === "response.output_item.done" &&
+      !state.rawItems.has(outputIndex)
+    ) {
+      const doneItem = parsed.item as Record<string, unknown> | undefined;
+      if (!doneItem) {
+        throw new Error(
+          `Responses output_item.done missing item for index ${outputIndex}`,
+        );
+      }
+      if (doneItem.type === "message" && doneItem.role === undefined) {
+        doneItem.role = "assistant";
+      }
+      const seedItem = { ...doneItem };
+      delete seedItem.status;
+      if (seedItem.type === "message") delete seedItem.content;
+      outputIndexForEvent(
+        "response.output_item.added",
+        { output_index: outputIndex, item: seedItem },
+        state,
+      );
+      applyResponsesEvent(state, "response.output_item.added", {
+        output_index: outputIndex,
+        item: seedItem,
+      });
+      if (seedItem.type === "function_call") {
+        const seededLifecycle = lifecyclesFor(state).get(outputIndex);
+        if (!seededLifecycle) {
+          throw new Error(
+            `missing Responses lifecycle for index ${outputIndex}`,
+          );
+        }
+        seededLifecycle.argumentsDone = true;
+      }
+    }
+    const lifecycles = lifecyclesFor(state);
+    const lifecycle = lifecycles.get(outputIndex);
+    if (lifecycle?.outputDone && event !== "response.output_item.added") {
+      throw new Error(
+        `Responses event after output_item.done for index ${outputIndex}`,
+      );
+    }
+    if (event === "response.output_item.added") {
+      if (state.rawItems.has(outputIndex)) {
+        throw new Error(`duplicate Responses output_index ${outputIndex}`);
+      }
+      const item = parsed.item as Record<string, unknown> | undefined;
+      const sparseCodexFunction =
+        opts.validation === "codex" && item?.type === "function_call";
+      if (
+        !item ||
+        typeof item.type !== "string" ||
+        !isSupportedResponsesOutputItemType(item.type) ||
+        !isValidResponsesReasoningEncryptedContent(item) ||
+        !isValidResponsesOutputItemStatus(item.type, item.status, "added") ||
+        typeof item.id !== "string" ||
+        item.id.length === 0 ||
+        (item.type === "function_call" &&
+          (typeof item.call_id !== "string" ||
+            typeof item.name !== "string" ||
+            (!sparseCodexFunction &&
+              (item.call_id.length === 0 || item.name.length === 0))))
+      ) {
+        throw new Error(
+          `incomplete Responses output_item.added identity for index ${outputIndex}`,
+        );
+      }
+      if (
+        item.type === "function_call" &&
+        item.call_id !== "" &&
+        item.id === item.call_id
+      ) {
+        throw new Error("duplicate Responses identity within output item");
+      }
+      if (
+        item.type === "function_call" &&
+        item.arguments !== undefined &&
+        typeof item.arguments !== "string"
+      ) {
+        throw new Error("invalid initial Responses function arguments");
+      }
+      if (
+        item.type === "function_call" &&
+        item.status !== undefined &&
+        typeof item.status !== "string"
+      ) {
+        throw new Error("invalid initial Responses function status");
+      }
+      if (
+        item.type === "function_call" &&
+        item.name === RECALL_TOOL_NAME &&
+        item.status !== undefined &&
+        item.status !== "in_progress" &&
+        item.status !== "completed"
+      ) {
+        throw new Error("recall function call cannot start failed");
+      }
+      if (item.type === "message" && item.role !== "assistant") {
+        throw new Error("Responses output message must have assistant role");
+      }
+      const identities = [item.id, item.call_id].filter(
+        (value): value is string =>
+          typeof value === "string" && value.length > 0,
+      );
+      if (
+        identities.some(
+          (identity) =>
+            outputIdentities.has(identity) ||
+            referenceIdentities.has(identity) ||
+            syntheticIdentities.has(identity),
+        )
+      ) {
+        throw new Error("duplicate Responses item identity");
+      }
+      for (const identity of identities) outputIdentities.add(identity);
+      for (const [existingIndex, existing] of state.rawItems) {
+        const newIdentities = [item.id, item.call_id].filter(
+          (value): value is string =>
+            typeof value === "string" && value.length > 0,
+        );
+        const existingIdentities = new Set(
+          [existing.id, existing.call_id].filter(
+            (value): value is string =>
+              typeof value === "string" && value.length > 0,
+          ),
+        );
+        if (
+          existingIndex !== outputIndex &&
+          newIdentities.some((identity) => existingIdentities.has(identity))
+        ) {
+          throw new Error("duplicate Responses item identity");
+        }
+      }
+      const initialArguments =
+        item.type === "function_call" && typeof item.arguments === "string"
+          ? item.arguments
+          : "";
+      const newLifecycle: OutputLifecycle = {
+        argumentDeltaSeen: initialArguments.length > 0,
+        argumentDeltas: initialArguments,
+        argumentsDone: item.type !== "function_call",
+        outputDone: false,
+        reasoning: new Map(),
+        content: new Map(),
+      };
+      if (item.type === "message") {
+        seedTextParts(
+          item.content,
+          newLifecycle.content,
+          new Set(["output_text", "refusal"]),
+          "message content",
+        );
+      } else if (item.type === "reasoning") {
+        seedTextParts(
+          item.summary,
+          newLifecycle.reasoning,
+          new Set(["summary_text"]),
+          "reasoning summary",
+        );
+        seedTextParts(
+          item.content,
+          newLifecycle.content,
+          new Set(["reasoning_text"]),
+          "reasoning content",
+        );
+      }
+      lifecycles.set(outputIndex, newLifecycle);
+    } else if (!state.rawItems.has(outputIndex)) {
+      throw new Error(
+        `Responses ${event} arrived before output_item.added for index ${outputIndex}`,
+      );
+    } else {
+      const declared = state.rawItems.get(outputIndex);
+      if (!lifecycle) {
+        throw new Error(`missing Responses lifecycle for index ${outputIndex}`);
+      }
+      const item = parsed.item as Record<string, unknown> | undefined;
+      if (
+        opts.validation === "codex" &&
+        event === "response.output_item.done" &&
+        item?.type === "message" &&
+        item.content === undefined &&
+        lifecycle
+      ) {
+        const content = finalizedMessageContent(lifecycle);
+        if (content.length > 0) item.content = content;
+      }
+      if (
+        event === "response.output_item.done" &&
+        (!item ||
+          !declared ||
+          !isValidResponsesReasoningEncryptedContent(item) ||
+          !responsesDoneItemMatchesAdded(item, declared))
+      ) {
+        throw new Error(
+          `Responses output_item.done changed item identity for index ${outputIndex}`,
+        );
+      }
+      let finalFunctionIdentity: { callId: string; name: string } | undefined;
+      if (
+        event === "response.output_item.done" &&
+        item?.type === "function_call"
+      ) {
+        const normalized = state.items.get(outputIndex);
+        if (normalized?.type !== "tool_use") {
+          throw new Error(
+            `Responses output_item.done changed item type for index ${outputIndex}`,
+          );
+        }
+        const finalCallId = item.call_id;
+        const finalName = item.name;
+        if (
+          typeof finalCallId !== "string" ||
+          finalCallId.length === 0 ||
+          typeof finalName !== "string" ||
+          finalName.length === 0 ||
+          finalCallId === item.id
+        ) {
+          throw new Error(
+            `Responses output_item.done has incomplete function identity for index ${outputIndex}`,
+          );
+        }
+        const establishedIdentities = new Set(
+          [declared?.id, declared?.call_id].filter(
+            (value): value is string =>
+              typeof value === "string" && value.length > 0,
+          ),
+        );
+        if (
+          !establishedIdentities.has(finalCallId) &&
+          (outputIdentities.has(finalCallId) ||
+            referenceIdentities.has(finalCallId) ||
+            syntheticIdentities.has(finalCallId))
+        ) {
+          throw new Error("duplicate Responses item identity");
+        }
+        for (const [existingIndex, existing] of state.rawItems) {
+          if (
+            existingIndex !== outputIndex &&
+            (existing.id === finalCallId || existing.call_id === finalCallId)
+          ) {
+            throw new Error("duplicate Responses item identity");
+          }
+        }
+        finalFunctionIdentity = { callId: finalCallId, name: finalName };
+      }
+      const declaredType = declared?.type;
+      const itemId = parsed.item_id;
+      if (
+        event !== "response.output_item.done" &&
+        (typeof itemId !== "string" || itemId !== declared?.id)
+      ) {
+        throw new Error(
+          `Responses ${event} changed item_id for index ${outputIndex}`,
+        );
+      }
+      if (
+        (event.startsWith("response.output_text") ||
+          event.startsWith("response.content_part") ||
+          event.startsWith("response.reasoning_text") ||
+          event.startsWith("response.refusal")) &&
+        (!Number.isSafeInteger(parsed.content_index) ||
+          (parsed.content_index as number) < 0)
+      ) {
+        throw new Error(`invalid Responses content_index for ${event}`);
+      }
+      if (
+        event.startsWith("response.output_text") ||
+        event.startsWith("response.content_part") ||
+        event.startsWith("response.reasoning_text") ||
+        event.startsWith("response.refusal")
+      ) {
+        const contentIndex = parsed.content_index as number;
+        const expectedKind = event.startsWith("response.output_text")
+          ? "output_text"
+          : event.startsWith("response.refusal")
+            ? "refusal"
+            : event.startsWith("response.reasoning_text")
+              ? "reasoning_text"
+              : undefined;
+        const part = parsed.part as Record<string, unknown> | undefined;
+        const partKind =
+          event.startsWith("response.content_part") &&
+          typeof part?.type === "string"
+            ? part.type
+            : undefined;
+        const kind = expectedKind ?? partKind;
+        if (
+          !kind ||
+          !["output_text", "refusal", "reasoning_text"].includes(kind)
+        ) {
+          throw new Error(`invalid Responses content type for ${event}`);
+        }
+        const expectedItemType =
+          kind === "reasoning_text" ? "reasoning" : "message";
+        if (declaredType !== expectedItemType) {
+          throw new Error(
+            `Responses ${event} does not match item type ${String(declaredType)}`,
+          );
+        }
+        const contentState =
+          lifecycle.content.get(contentIndex) ?? emptyTextPartLifecycle(kind);
+        if (contentState.kind !== kind) {
+          throw new Error(
+            `Responses ${event} changed content type for index ${outputIndex}:${contentIndex}`,
+          );
+        }
+        if (event === "response.content_part.added") {
+          if (
+            contentState.partAdded ||
+            contentState.deltaSeen ||
+            contentState.valueDone
+          ) {
+            throw new Error(
+              `invalid Responses content_part.added for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          if (!part) {
+            throw new Error(`invalid Responses ${event} part`);
+          }
+          const initialValue = partValue(kind, part, event);
+          if (
+            contentState.authoritativeValueSeen &&
+            contentState.authoritativeValue !== initialValue
+          ) {
+            throw new Error(
+              `Responses content_part.added changed initial content for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          contentState.partAdded = true;
+          contentState.authoritativeValue = initialValue;
+          contentState.authoritativeValueSeen = true;
+        } else if (event === "response.content_part.done") {
+          if (!contentState.partAdded || contentState.partDone) {
+            throw new Error(
+              `invalid Responses content_part.done for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          if (!part) {
+            throw new Error(`invalid Responses ${event} part`);
+          }
+          const finalPartValue = partValue(kind, part, event);
+          if (
+            (contentState.authoritativeValueSeen &&
+              contentState.authoritativeValue !== finalPartValue) ||
+            (contentState.finalValue !== undefined &&
+              contentState.finalValue !== finalPartValue)
+          ) {
+            throw new Error(
+              `Responses content_part.done changed content for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          contentState.partDone = true;
+          contentState.partFinalValue = finalPartValue;
+          contentState.authoritativeValue = finalPartValue;
+          contentState.authoritativeValueSeen = true;
+        } else {
+          if (contentState.valueDone || contentState.partDone) {
+            throw new Error(
+              `Responses content changed after completion for index ${outputIndex}:${contentIndex}`,
+            );
+          }
+          if (event.endsWith(".delta")) {
+            if (typeof parsed.delta !== "string") {
+              throw new Error(`invalid Responses ${event} delta`);
+            }
+            contentState.deltaSeen = true;
+            contentState.authoritativeValue += parsed.delta;
+            contentState.authoritativeValueSeen = true;
+          } else if (event.endsWith(".done")) {
+            const finalValue =
+              kind === "refusal" ? parsed.refusal : parsed.text;
+            if (typeof finalValue !== "string") {
+              throw new Error(`invalid Responses ${event} final value`);
+            }
+            contentState.valueDone = true;
+            contentState.finalValue = finalValue;
+            if (
+              contentState.authoritativeValueSeen &&
+              contentState.authoritativeValue !== finalValue
+            ) {
+              throw new Error(
+                `Responses ${event} changed streamed content for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            contentState.authoritativeValue = finalValue;
+            contentState.authoritativeValueSeen = true;
+            if (
+              contentState.partFinalValue !== undefined &&
+              contentState.partFinalValue !== finalValue
+            ) {
+              throw new Error(
+                `Responses ${event} changed content part for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+          }
+        }
+        lifecycle.content.set(contentIndex, contentState);
+      }
+      if (
+        event.startsWith("response.reasoning_summary") &&
+        (!Number.isSafeInteger(parsed.summary_index) ||
+          (parsed.summary_index as number) < 0)
+      ) {
+        throw new Error(`invalid Responses summary_index for ${event}`);
+      }
+      if (
+        ((event.startsWith("response.output_text") ||
+          event.startsWith("response.refusal")) &&
+          declaredType !== "message") ||
+        (event.startsWith("response.reasoning_summary") &&
+          declaredType !== "reasoning") ||
+        (event.startsWith("response.function_call_arguments") &&
+          declaredType !== "function_call")
+      ) {
+        throw new Error(
+          `Responses ${event} does not match item type ${String(declaredType)}`,
+        );
+      }
+      if (event.startsWith("response.reasoning_summary")) {
+        const summaryIndex = parsed.summary_index as number;
+        const summaryState =
+          lifecycle.reasoning.get(summaryIndex) ??
+          emptyTextPartLifecycle("summary_text");
+        if (event === "response.reasoning_summary_part.added") {
+          if (
+            summaryState.partAdded ||
+            summaryState.deltaSeen ||
+            summaryState.valueDone
+          ) {
+            throw new Error(
+              `invalid Responses reasoning summary part for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          const part = parsed.part as Record<string, unknown> | undefined;
+          if (part !== undefined) {
+            if (part.type !== "summary_text") {
+              throw new Error("invalid Responses reasoning summary part");
+            }
+            const initialValue = partValue(
+              "summary_text",
+              part,
+              "reasoning summary initial",
+            );
+            if (
+              summaryState.authoritativeValueSeen &&
+              summaryState.authoritativeValue !== initialValue
+            ) {
+              throw new Error(
+                `Responses reasoning summary part changed initial content for index ${outputIndex}:${summaryIndex}`,
+              );
+            }
+            summaryState.authoritativeValue = initialValue;
+            summaryState.authoritativeValueSeen = true;
+          }
+          summaryState.partAdded = true;
+        } else if (event === "response.reasoning_summary_part.done") {
+          if (!summaryState.partAdded || summaryState.partDone) {
+            throw new Error(
+              `invalid Responses reasoning summary completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          const part = parsed.part as Record<string, unknown> | undefined;
+          if (part !== undefined) {
+            if (part.type !== "summary_text") {
+              throw new Error("invalid Responses reasoning summary part");
+            }
+            const finalPartValue = partValue(
+              "summary_text",
+              part,
+              "reasoning summary final",
+            );
+            if (
+              (summaryState.authoritativeValueSeen &&
+                summaryState.authoritativeValue !== finalPartValue) ||
+              (summaryState.finalValue !== undefined &&
+                summaryState.finalValue !== finalPartValue)
+            ) {
+              throw new Error(
+                `Responses reasoning summary part changed content for index ${outputIndex}:${summaryIndex}`,
+              );
+            }
+            summaryState.partFinalValue = finalPartValue;
+            summaryState.authoritativeValue = finalPartValue;
+            summaryState.authoritativeValueSeen = true;
+          }
+          summaryState.partDone = true;
+        } else if (event.endsWith(".delta")) {
+          if (summaryState.valueDone || summaryState.partDone) {
+            throw new Error(
+              `Responses reasoning summary changed after completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          if (typeof parsed.delta !== "string") {
+            throw new Error("invalid Responses reasoning summary delta");
+          }
+          summaryState.deltaSeen = true;
+          summaryState.authoritativeValue += parsed.delta;
+          summaryState.authoritativeValueSeen = true;
+        } else if (event.endsWith(".done")) {
+          if (summaryState.valueDone || summaryState.partDone) {
+            throw new Error(
+              `duplicate Responses reasoning summary completion for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          if (typeof parsed.text !== "string") {
+            throw new Error("invalid Responses reasoning summary final value");
+          }
+          if (
+            summaryState.authoritativeValueSeen &&
+            summaryState.authoritativeValue !== parsed.text
+          ) {
+            throw new Error(
+              `Responses reasoning summary changed streamed content for index ${outputIndex}:${summaryIndex}`,
+            );
+          }
+          summaryState.valueDone = true;
+          summaryState.finalValue = parsed.text;
+          summaryState.authoritativeValue = parsed.text;
+          summaryState.authoritativeValueSeen = true;
+        }
+        lifecycle.reasoning.set(summaryIndex, summaryState);
+      }
+      if (event === "response.function_call_arguments.done") {
+        if (lifecycle.argumentsDone) {
+          throw new Error(
+            `duplicate Responses function arguments completion for index ${outputIndex}`,
+          );
+        }
+        if (typeof parsed.arguments !== "string") {
+          throw new Error("invalid Responses function arguments completion");
+        }
+        if (
+          lifecycle.argumentDeltaSeen &&
+          lifecycle.argumentDeltas !== parsed.arguments
+        ) {
+          throw new Error(
+            `Responses function arguments completion changed streamed arguments for index ${outputIndex}`,
+          );
+        }
+        lifecycle.argumentsDone = true;
+        lifecycle.argumentDeltas = parsed.arguments;
+      } else if (
+        event.startsWith("response.function_call_arguments") &&
+        lifecycle.argumentsDone
+      ) {
+        throw new Error(
+          `Responses function arguments changed after completion for index ${outputIndex}`,
+        );
+      } else if (event === "response.function_call_arguments.delta") {
+        if (typeof parsed.delta !== "string") {
+          throw new Error("invalid Responses function arguments delta");
+        }
+        lifecycle.argumentDeltaSeen = true;
+        lifecycle.argumentDeltas += parsed.delta;
+      }
+      if (event === "response.output_item.done") {
+        if (declaredType === "function_call") {
+          const normalized = state.items.get(outputIndex);
+          if (
+            normalized?.type !== "tool_use" ||
+            typeof item?.arguments !== "string"
+          ) {
+            throw new Error(
+              `Responses output_item.done changed arguments for index ${outputIndex}`,
+            );
+          }
+          if (
+            (lifecycle.argumentDeltaSeen || lifecycle.argumentsDone) &&
+            item.arguments !== lifecycle.argumentDeltas
+          ) {
+            throw new Error(
+              `Responses output_item.done changed arguments for index ${outputIndex}`,
+            );
+          }
+          if (!lifecycle.argumentDeltaSeen && !lifecycle.argumentsDone) {
+            lifecycle.argumentDeltas = item.arguments;
+            lifecycle.argumentsDone = true;
+          }
+          if (!finalFunctionIdentity) {
+            throw new Error(
+              `Responses output_item.done missing function identity for index ${outputIndex}`,
+            );
+          }
+          if (item?.status !== undefined && typeof item.status !== "string") {
+            throw new Error("invalid Responses function call status");
+          }
+          if (
+            item.name === RECALL_TOOL_NAME &&
+            item?.status !== undefined &&
+            item.status !== "completed"
+          ) {
+            throw new Error("recall function call did not complete");
+          }
+          outputIdentities.add(finalFunctionIdentity.callId);
+          normalized.callId = finalFunctionIdentity.callId;
+          normalized.name = finalFunctionIdentity.name;
+          normalized.args = item.arguments;
+        }
+        if (declaredType === "message") {
+          const finalContent = item?.content;
+          if (!Array.isArray(finalContent)) {
+            throw new Error(
+              `Responses message completed without content for index ${outputIndex}`,
+            );
+          }
+          const orderedContent = Array.from(lifecycle.content).sort(
+            ([left], [right]) => left - right,
+          );
+          if (
+            orderedContent.length > 0 &&
+            finalContent.length !== orderedContent.length
+          ) {
+            throw new Error(
+              `Responses output_item.done changed content count for index ${outputIndex}`,
+            );
+          }
+          for (const [
+            ordinal,
+            [contentIndex, contentState],
+          ] of orderedContent.entries()) {
+            const finalPart = finalContent[ordinal] as
+              | Record<string, unknown>
+              | undefined;
+            if (!finalPart || finalPart.type !== contentState.kind) {
+              throw new Error(
+                `Responses output_item.done changed content type for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            if (contentState.deltaSeen && !contentState.valueDone) {
+              throw new Error(
+                `Responses content ended before completion for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            if (contentState.partAdded && !contentState.partDone) {
+              throw new Error(
+                `Responses content part ended before completion for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+            const finalValue = partValue(
+              contentState.kind,
+              finalPart,
+              "output item content",
+            );
+            if (
+              (contentState.authoritativeValueSeen &&
+                finalValue !== contentState.authoritativeValue) ||
+              (contentState.finalValue !== undefined &&
+                finalValue !== contentState.finalValue) ||
+              (contentState.partFinalValue !== undefined &&
+                finalValue !== contentState.partFinalValue)
+            ) {
+              throw new Error(
+                `Responses output_item.done changed content for index ${outputIndex}:${contentIndex}`,
+              );
+            }
+          }
+        }
+        if (declaredType === "reasoning") {
+          const summary = item?.summary;
+          if (summary !== undefined && !Array.isArray(summary)) {
+            throw new Error("Responses reasoning summary must be an array");
+          }
+          if (summary === undefined) {
+            for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+              if (
+                (summaryState.deltaSeen && !summaryState.valueDone) ||
+                (summaryState.partAdded && !summaryState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+            }
+          }
+          if (Array.isArray(summary)) {
+            for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+              const finalPart = summary[summaryIndex] as
+                | Record<string, unknown>
+                | undefined;
+              if (!finalPart) {
+                if (
+                  (summaryState.deltaSeen && !summaryState.valueDone) ||
+                  (summaryState.partAdded && !summaryState.partDone)
+                ) {
+                  throw new Error(
+                    `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                  );
+                }
+                continue;
+              }
+              if (
+                finalPart.type !== "summary_text" ||
+                typeof finalPart.text !== "string"
+              ) {
+                throw new Error("invalid Responses reasoning summary item");
+              }
+              if (
+                (summaryState.deltaSeen && !summaryState.valueDone) ||
+                (summaryState.partAdded && !summaryState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+              if (
+                summaryState.authoritativeValueSeen &&
+                summaryState.authoritativeValue !== finalPart.text
+              ) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning summary for index ${outputIndex}:${summaryIndex}`,
+                );
+              }
+            }
+          }
+          const finalContent = item?.content;
+          if (finalContent !== undefined && !Array.isArray(finalContent)) {
+            throw new Error("Responses reasoning content must be an array");
+          }
+          if (lifecycle.content.size > 0) {
+            if (!Array.isArray(finalContent)) {
+              throw new Error(
+                `Responses reasoning completed without content for index ${outputIndex}`,
+              );
+            }
+            for (const [contentIndex, contentState] of lifecycle.content) {
+              const finalPart = finalContent[contentIndex] as
+                | Record<string, unknown>
+                | undefined;
+              if (!finalPart || finalPart.type !== contentState.kind) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning content type for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+              if (
+                (contentState.deltaSeen && !contentState.valueDone) ||
+                (contentState.partAdded && !contentState.partDone)
+              ) {
+                throw new Error(
+                  `Responses reasoning content ended before completion for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+              const finalValue = partValue(
+                contentState.kind,
+                finalPart,
+                "reasoning output item content",
+              );
+              if (
+                (contentState.authoritativeValueSeen &&
+                  contentState.authoritativeValue !== finalValue) ||
+                (contentState.finalValue !== undefined &&
+                  contentState.finalValue !== finalValue) ||
+                (contentState.partFinalValue !== undefined &&
+                  contentState.partFinalValue !== finalValue)
+              ) {
+                throw new Error(
+                  `Responses output_item.done changed reasoning content for index ${outputIndex}:${contentIndex}`,
+                );
+              }
+            }
+          }
+        }
+        lifecycle.outputDone = true;
+      }
+    }
+    return outputIndex;
+  };
+  const seedImplicitCodexItem = (
+    acc: ResponsesAccState,
+    normalizationState: ResponsesAccState | undefined,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): void => {
+    if (
+      !normalizationState ||
+      event === "response.output_item.added" ||
+      event === "response.output_item.done"
+    ) {
+      return;
+    }
+    const outputIndex = parsed.output_index;
+    if (!Number.isSafeInteger(outputIndex) || (outputIndex as number) < 0)
+      return;
+    const index = outputIndex as number;
+    if (acc.rawItems.has(index)) return;
+    const normalizedRaw = normalizationState.rawItems.get(index);
+    if (!normalizedRaw) return;
+    const seedItem = { ...normalizedRaw };
+    outputIndexForEvent(
+      "response.output_item.added",
+      { output_index: index, item: seedItem },
+      acc,
+    );
+    applyResponsesEvent(acc, "response.output_item.added", {
+      output_index: index,
+      item: seedItem,
+    });
+  };
+  const validateResponseLifecycle = (
+    acc: ResponsesAccState,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): void => {
+    const lifecycle = responseLifecycleFor(acc);
+    if (lifecycle.terminal) {
+      throw new Error(`Responses event after terminal: ${event}`);
+    }
+    if (event === "response.created") {
+      if (lifecycle.created) throw new Error("duplicate response.created");
+      const response = parsed.response as Record<string, unknown> | undefined;
+      if (!response || typeof response.id !== "string" || !response.id) {
+        throw new Error("response.created missing response identity");
+      }
+      if (
+        response.status !== undefined &&
+        response.status !== "in_progress" &&
+        !(opts.validation === "codex" && response.status === "queued")
+      ) {
+        throw new Error("response.created has invalid status");
+      }
+      if (
+        response.output !== undefined &&
+        (!Array.isArray(response.output) || response.output.length > 0)
+      ) {
+        throw new Error("response.created must start with empty output");
+      }
+      lifecycle.created = true;
+      return;
+    }
+    if (!lifecycle.created && event.startsWith("response.")) {
+      throw new Error(`Responses event before response.created: ${event}`);
+    }
+    if (event === "response.in_progress") {
+      const response = parsed.response as Record<string, unknown> | undefined;
+      if (acc.id && response?.id !== undefined && response.id !== acc.id) {
+        throw new Error(
+          "Responses in-progress event changed response identity",
+        );
+      }
+      if (response?.status !== undefined && response.status !== "in_progress") {
+        throw new Error("response.in_progress has invalid status");
+      }
+      if (
+        response?.output !== undefined &&
+        (!Array.isArray(response.output) || response.output.length > 0)
+      ) {
+        throw new Error("response.in_progress must have empty output");
+      }
+    }
+    if (
+      event === "response.completed" ||
+      event === "response.done" ||
+      event === "response.incomplete" ||
+      event === "response.failed"
+    ) {
+      const response = parsed.response as Record<string, unknown> | undefined;
+      if (acc.id && response?.id !== acc.id) {
+        throw new Error("Responses terminal event changed response identity");
+      }
+      const status = response?.status;
+      const terminalStatuses = new Set([
+        "completed",
+        "incomplete",
+        "failed",
+        "cancelled",
+      ]);
+      if (typeof status !== "string" || !terminalStatuses.has(status)) {
+        throw new Error("Responses terminal event has nonterminal status");
+      }
+      if (
+        (event === "response.completed" &&
+          status !== "completed" &&
+          !(opts.validation === "codex" && status === "incomplete")) ||
+        (event === "response.incomplete" && status !== "incomplete") ||
+        (event === "response.failed" &&
+          status !== "failed" &&
+          status !== "cancelled")
+      ) {
+        throw new Error("Responses terminal event contradicts response status");
+      }
+      if (status === "incomplete") {
+        const details = response?.incomplete_details;
+        if (
+          details !== undefined &&
+          details !== null &&
+          (typeof details !== "object" || Array.isArray(details))
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+        const reason =
+          details && typeof details === "object" && !Array.isArray(details)
+            ? (details as Record<string, unknown>).reason
+            : undefined;
+        if (
+          reason !== undefined &&
+          reason !== "max_output_tokens" &&
+          reason !== "content_filter"
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+      }
+      lifecycle.terminal = true;
+    }
+  };
+  const assertOutputLifecyclesComplete = (
+    acc: ResponsesAccState,
+    allowedIncompleteIndices: ReadonlySet<number> = new Set(),
+  ): void => {
+    const lifecycles = lifecyclesFor(acc);
+    for (const index of acc.rawItems.keys()) {
+      if (lifecycles.get(index)?.outputDone) continue;
+      if (allowedIncompleteIndices.has(index)) continue;
+      if (opts.validation !== "codex") {
+        throw new Error(
+          `Responses stream ended before output_item.done for index ${index}`,
+        );
+      }
+      const item = acc.rawItems.get(index);
+      if (
+        item?.type === "reasoning" &&
+        typeof item.encrypted_content === "string"
+      ) {
+        throw new Error(
+          `Responses stream ended with provisional reasoning for index ${index}`,
+        );
+      }
+      // Sparse Codex may omit output_item.done. Non-reasoning items and
+      // reasoning without a string ciphertext envelope are safe to retain.
+    }
+  };
+  const preserveStreamedReasoning = (
+    acc: ResponsesAccState,
+    outputIndex: number,
+  ): void => {
+    const raw = acc.rawItems.get(outputIndex);
+    const lifecycle = lifecyclesFor(acc).get(outputIndex);
+    if (raw?.type !== "reasoning" || !lifecycle?.reasoning.size) return;
+    const summary = Array.isArray(raw.summary) ? [...raw.summary] : [];
+    let changed = false;
+    for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+      if (
+        summary[summaryIndex] === undefined &&
+        summaryState.authoritativeValueSeen
+      ) {
+        summary[summaryIndex] = {
+          type: "summary_text",
+          text: summaryState.authoritativeValue,
+        };
+        changed = true;
+      }
+    }
+    if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
+  };
+  const assertTerminalReasoningMatchesLifecycle = (
+    lifecycle: OutputLifecycle,
+    actual: Record<string, unknown>,
+    outputIndex: number,
+  ): void => {
+    const collections: Array<
+      [unknown, ReadonlyMap<number, TextPartLifecycle>, string]
+    > = [
+      [actual.summary, lifecycle.reasoning, "reasoning summary"],
+      [actual.content, lifecycle.content, "reasoning content"],
+    ];
+    for (const [rawParts, states, description] of collections) {
+      if (rawParts === undefined) continue;
+      if (!Array.isArray(rawParts)) {
+        throw new Error(`Responses terminal ${description} must be an array`);
+      }
+      for (const [partIndex, state] of states) {
+        const part = rawParts[partIndex];
+        if (!part || typeof part !== "object" || Array.isArray(part)) {
+          throw new Error(`Responses terminal changed ${description}`);
+        }
+        const record = part as Record<string, unknown>;
+        if (
+          record.type !== state.kind ||
+          (state.authoritativeValueSeen &&
+            partValue(state.kind, record, `terminal ${description}`) !==
+              state.authoritativeValue)
+        ) {
+          throw new Error(
+            `Responses terminal changed ${description} for index ${outputIndex}:${partIndex}`,
+          );
+        }
+      }
+    }
+  };
+  const assertTerminalOutputMatches = (
+    acc: ResponsesAccState,
+    parsed: Record<string, unknown>,
+    onSynthesizedDone?: (
+      outputIndex: number,
+      item: Record<string, unknown>,
+    ) => void,
+  ): void => {
+    const response = parsed.response as Record<string, unknown> | undefined;
+    if (!response) throw new Error("Responses terminal event missing response");
+    if (acc.id && response.id !== acc.id) {
+      throw new Error("Responses terminal event changed response identity");
+    }
+    if (response.output === undefined) {
+      if (opts.validation === "public" && response.status === "completed") {
+        throw new Error("Responses terminal output must be an array");
+      }
+      return;
+    }
+    if (!Array.isArray(response.output)) {
+      throw new Error("Responses terminal output must be an array");
+    }
+    // ChatGPT/Codex can omit some or all streamed items from the terminal
+    // snapshot. Treat the output_item lifecycle as authoritative while still
+    // requiring every repeated terminal item to match in stream order.
+    const actualOutput = response.output.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error("Responses terminal output contains malformed item");
+      }
+      return item as Record<string, unknown>;
+    });
+    const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
+    if (
+      opts.validation === "public" &&
+      actualOutput.length !== expected.length
+    ) {
+      throw new Error("Responses terminal output changed streamed item");
+    }
+    let expectedIndex = 0;
+    for (const actual of actualOutput) {
+      const isReference = actual.type === "item_reference";
+      if (
+        isReference &&
+        (typeof actual.id !== "string" ||
+          !actual.id ||
+          Object.keys(actual).some((key) => key !== "type" && key !== "id"))
+      ) {
+        throw new Error("Responses terminal output contains invalid reference");
+      }
+      const matchIndex = expected.findIndex(
+        ([outputIndex, streamed], index) => {
+          if (
+            index < expectedIndex ||
+            actual.id !== streamed.id ||
+            (!isReference && actual.type !== streamed.type)
+          ) {
+            return false;
+          }
+          if (isReference || actual.call_id === streamed.call_id) return true;
+          return (
+            opts.validation === "codex" &&
+            !lifecyclesFor(acc).get(outputIndex)?.outputDone
+          );
+        },
+      );
+      if (matchIndex < 0) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      if (opts.validation === "public" && matchIndex !== expectedIndex) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      const [outputIndex, streamed] = expected[matchIndex];
+      const lifecycle = lifecyclesFor(acc).get(outputIndex);
+      if (
+        !isReference &&
+        opts.validation === "codex" &&
+        lifecycle &&
+        !lifecycle.outputDone
+      ) {
+        outputIndexForEvent(
+          "response.output_item.done",
+          { output_index: outputIndex, item: actual },
+          acc,
+        );
+        applyResponsesEvent(acc, "response.output_item.done", {
+          output_index: outputIndex,
+          item: actual,
+        });
+        preserveStreamedReasoning(acc, outputIndex);
+        onSynthesizedDone?.(outputIndex, actual);
+      } else if (
+        !isReference &&
+        !responsesTerminalItemMatches(actual, streamed)
+      ) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      if (!isReference && actual.type === "reasoning") {
+        if (!lifecycle) {
+          throw new Error(
+            `missing Responses lifecycle for index ${outputIndex}`,
+          );
+        }
+        assertTerminalReasoningMatchesLifecycle(lifecycle, actual, outputIndex);
+      }
+      if (!isReference) {
+        acc.rawItems.set(outputIndex, { ...streamed, ...actual });
+      }
+      expectedIndex = matchIndex + 1;
+    }
+  };
+  type ReferenceLifecycle = { id: string; done: boolean };
+  const consumeReferenceEvent = (
+    acc: ResponsesAccState,
+    references: Map<number, ReferenceLifecycle>,
+    event: string,
+    parsed: Record<string, unknown>,
+  ): boolean => {
+    const rawIndex = parsed.output_index;
+    const item = parsed.item as Record<string, unknown> | undefined;
+    if (
+      event === "response.output_item.added" &&
+      item?.type === "item_reference"
+    ) {
+      if (!Number.isSafeInteger(rawIndex) || (rawIndex as number) < 0) {
+        throw new Error("invalid Responses output_index for item_reference");
+      }
+      const outputIndex = rawIndex as number;
+      if (
+        typeof item.id !== "string" ||
+        !item.id ||
+        Object.keys(item).some((key) => key !== "type" && key !== "id")
+      ) {
+        throw new Error("invalid Responses output item reference");
+      }
+      if (
+        references.has(outputIndex) ||
+        acc.rawItems.has(outputIndex) ||
+        syntheticIdentities.has(item.id) ||
+        outputIdentities.has(item.id) ||
+        [...acc.rawItems.values()].some(
+          (existing) => existing.id === item.id || existing.call_id === item.id,
+        ) ||
+        referenceIdentities.has(item.id)
+      ) {
+        throw new Error("duplicate Responses item reference");
+      }
+      references.set(outputIndex, { id: item.id, done: false });
+      referenceIdentities.add(item.id);
+      return true;
+    }
+    if (!Number.isSafeInteger(rawIndex)) return false;
+    const outputIndex = rawIndex as number;
+    const reference = references.get(outputIndex);
+    if (!reference) return false;
+    if (
+      event !== "response.output_item.done" ||
+      reference.done ||
+      !item ||
+      item.type !== "item_reference" ||
+      item.id !== reference.id ||
+      Object.keys(item).some((key) => key !== "type" && key !== "id")
+    ) {
+      throw new Error(
+        `invalid Responses item_reference lifecycle for index ${outputIndex}`,
+      );
+    }
+    reference.done = true;
+    return true;
+  };
+  const assertReferenceLifecyclesComplete = (
+    references: ReadonlyMap<number, ReferenceLifecycle>,
+  ): void => {
+    for (const [outputIndex, reference] of references) {
+      if (!reference.done) {
+        throw new Error(
+          `Responses stream ended before item_reference completion for index ${outputIndex}`,
+        );
+      }
+    }
+  };
+  const assertRecallItemsCompleted = (
+    acc: ResponsesAccState,
+    recallIndices: readonly number[],
+  ): void => {
+    for (const outputIndex of recallIndices) {
+      const status = acc.rawItems.get(outputIndex)?.status;
+      if (status !== undefined && status !== "completed") {
+        throw new Error(
+          `recall function call did not complete for index ${outputIndex}`,
+        );
+      }
+    }
+  };
+  const stripHiddenReferenceOutput = (
+    parsed: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    const response = parsed.response as Record<string, unknown> | undefined;
+    if (!Array.isArray(response?.output)) return parsed;
+    const output = response.output.filter(
+      (item) =>
+        !(
+          item &&
+          typeof item === "object" &&
+          !Array.isArray(item) &&
+          (item as Record<string, unknown>).type === "item_reference" &&
+          typeof (item as Record<string, unknown>).id === "string" &&
+          referenceIdentities.has(
+            (item as Record<string, unknown>).id as string,
+          )
+        ),
+    );
+    if (output.length === response.output.length) return parsed;
+    return { ...parsed, response: { ...response, output } };
+  };
+  const reserveSyntheticIdentity = (
+    syntheticId: string,
+    states: readonly ResponsesAccState[],
+  ): void => {
+    if (
+      syntheticIdentities.has(syntheticId) ||
+      referenceIdentities.has(syntheticId) ||
+      outputIdentities.has(syntheticId) ||
+      states.some(
+        (acc) =>
+          [...acc.items.values()].some(
+            (item) =>
+              item.id === syntheticId ||
+              (item.type === "tool_use" && item.callId === syntheticId),
+          ) ||
+          [...acc.rawItems.values()].some(
+            (item) => item.id === syntheticId || item.call_id === syntheticId,
+          ),
+      )
+    ) {
+      throw new Error("duplicate synthetic Responses item identity");
+    }
+    syntheticIdentities.add(syntheticId);
+  };
+
+  // --- Keepalive (same as streamResponsesPassthrough) ---
+  const KEEPALIVE_INACTIVITY_MS = 30_000;
+  const keepaliveComment = encoder.encode(`: keepalive\n\n`);
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+  let completed = false;
+  let completionAttempted = false;
+  let nextSequenceNumber = 0;
+
+  const sequenceChunk = (chunk: Uint8Array): Uint8Array => {
+    const text = new TextDecoder().decode(chunk);
+    if (!text.startsWith("event: ")) return chunk;
+    let output = "";
+    for (const frame of text.split("\n\n")) {
+      if (!frame) continue;
+      const lines = frame.split("\n");
+      const eventLine = lines.find((line) => line.startsWith("event: "));
+      const dataLines = lines.filter((line) => line.startsWith("data: "));
+      if (!eventLine || dataLines.length === 0) {
+        output += `${frame}\n\n`;
+        continue;
+      }
+      const event = eventLine.slice("event: ".length);
+      const data = dataLines
+        .map((line) => line.slice("data: ".length))
+        .join("\n");
+      try {
+        const parsed = JSON.parse(data) as Record<string, unknown>;
+        output += formatResponsesEvent(
+          event,
+          JSON.stringify({ ...parsed, sequence_number: nextSequenceNumber++ }),
+        );
+      } catch {
+        output += `${frame}\n\n`;
+      }
+    }
+    return encoder.encode(output);
+  };
+
+  const finish = (resp: GatewayResponse, successful: boolean): boolean => {
+    if (completionAttempted) return completed;
+    completionAttempted = true;
+    recallDiagnostics.finish(successful ? "completed" : "failed");
+    try {
+      opts.onComplete(resp, successful);
+      completed = true;
+      return true;
+    } catch (err) {
+      log.error("openai-responses recall-aware onComplete error:", err);
+      return false;
+    }
+  };
+  const settleRecall = async (
+    input: Parameters<typeof opts.onRecall>[0],
+  ): ReturnType<typeof opts.onRecall> => {
+    const admission = recallBudget.admit(recallItemReservation(input));
+    if (admission) throw new RecallContinuationFailure("depth_exhausted");
+    const operation = opts.onRecall(input);
+    const onLateResult = async (): Promise<void> => {
+      try {
+        const late = await operation;
+        late.rollback?.();
+      } catch {
+        // The aborted request no longer observes the callback result.
+      }
+    };
+    if (signal.aborted) {
+      void onLateResult();
+      throw signal.reason;
+    }
+    let rejectAbort: ((reason: unknown) => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+      rejectAbort = reject;
+    });
+    const onAbort = (): void => rejectAbort?.(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    let result: Awaited<ReturnType<typeof opts.onRecall>>;
+    try {
+      result = await Promise.race([operation, abort]);
+    } catch (err) {
+      if (signal.aborted) void onLateResult();
+      throw err;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+    if (signal.aborted) {
+      try {
+        result.rollback?.();
+      } catch (err) {
+        log.error("late recall rollback failed:", err);
+      }
+      throw signal.reason;
+    }
+    recallDiagnostics.record(input, result.resultText, result.coverage);
+    const stopReason = recallBudget.record({
+      resultBytes: Buffer.byteLength(result.resultText),
+      coverage: result.coverage,
+    });
+    if (stopReason)
+      log.info(
+        `recall final continuation: budget exhausted reason=${stopReason}`,
+      );
+    return result;
+  };
+  const settleFollowUp = async (
+    input: Parameters<typeof opts.runFollowUp>[0],
+  ): ReturnType<typeof opts.runFollowUp> => {
+    const operation = opts.runFollowUp({
+      ...input,
+      resultText: recallBudgetGuidance(
+        input.resultText,
+        input.finalRecallRound ? recallBudget.stopReason() : undefined,
+      ),
+    });
+    const cancelLateReader = async (): Promise<void> => {
+      try {
+        const late = await operation;
+        cancelAndReleaseReader(late.reader, signal.reason);
+      } catch {
+        // The aborted request no longer observes the callback result.
+      }
+    };
+    if (signal.aborted) {
+      void cancelLateReader();
+      throw signal.reason;
+    }
+    let rejectAbort: ((reason: unknown) => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+      rejectAbort = reject;
+    });
+    const onAbort = (): void => rejectAbort?.(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    let result: Awaited<ReturnType<typeof opts.runFollowUp>>;
+    try {
+      result = await Promise.race([operation, abort]);
+    } catch (err) {
+      if (signal.aborted) void cancelLateReader();
+      throw err;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+    if (signal.aborted) {
+      cancelAndReleaseReader(result.reader, signal.reason);
+      throw signal.reason;
+    }
+    return result;
+  };
+  const shiftedOutputIndex = (index: number, offset: number): number => {
+    const shifted = index + offset;
+    if (!Number.isSafeInteger(shifted) || shifted < 0) {
+      throw new Error("Responses output_index overflow");
+    }
+    return shifted;
+  };
+
+  /**
+   * Serialize a synthetic Responses output_text item as its SSE flow events
+   * (`output_item.added`, `content_part.added`, repeated `output_text.delta`,
+   * `output_text.done`, `content_part.done`, `output_item.done`).
+   */
+  function emitTextItem(
+    outputIndex: number,
+    text: string,
+    itemId = `msg_${state.id || "lore"}_${outputIndex}`,
+  ): string {
+    return (
+      formatResponsesEvent(
+        "response.output_item.added",
+        JSON.stringify({
+          type: "response.output_item.added",
+          output_index: outputIndex,
+          item: {
+            type: "message",
+            id: itemId,
+            role: "assistant",
+            status: "in_progress",
+            content: [],
+          },
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.content_part.added",
+        JSON.stringify({
+          type: "response.content_part.added",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          part: { type: "output_text", text: "", annotations: [] },
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.output_text.delta",
+        JSON.stringify({
+          type: "response.output_text.delta",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          delta: text,
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.output_text.done",
+        JSON.stringify({
+          type: "response.output_text.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          text,
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.content_part.done",
+        JSON.stringify({
+          type: "response.content_part.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: 0,
+          part: { type: "output_text", text, annotations: [] },
+        }),
+      ) +
+      formatResponsesEvent(
+        "response.output_item.done",
+        JSON.stringify({
+          type: "response.output_item.done",
+          output_index: outputIndex,
+          item: {
+            type: "message",
+            id: itemId,
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text, annotations: [] }],
+          },
+        }),
+      )
+    );
+  }
+
+  /**
+   * Rebuild the terminal `response.completed` event from the given completion
+   * state (used instead of the suppressed original when recall was detected).
+   */
+  function buildTerminal(res: GatewayResponse): string {
+    const finalOutput = buildOutputItems();
+    const finalStatus = mapStatusFromStopReason(res.stopReason);
+    const ru = res.usage ?? ZERO_USAGE;
+    const inclusiveInputTokens = addUsageTokens(
+      addUsageTokens(ru.inputTokens, ru.cacheReadInputTokens ?? 0),
+      ru.cacheCreationInputTokens ?? 0,
+    );
+    const usageData: Record<string, unknown> = {
+      input_tokens: inclusiveInputTokens,
+      output_tokens: ru.outputTokens,
+      total_tokens: addUsageTokens(inclusiveInputTokens, ru.outputTokens),
+    };
+    if (
+      ru.cacheReadInputTokens != null ||
+      ru.cacheCreationInputTokens != null
+    ) {
+      usageData.input_tokens_details = {
+        cached_tokens: ru.cacheReadInputTokens ?? 0,
+        cache_write_tokens: ru.cacheCreationInputTokens ?? 0,
+      };
+    }
+    const terminalEvent = state.terminalEvent ?? "response.completed";
+    const terminalResponse = state.terminalResponse;
+    return formatResponsesEvent(
+      terminalEvent,
+      JSON.stringify({
+        type: terminalEvent,
+        response: {
+          ...terminalResponse,
+          id: state.id,
+          object: "response",
+          created_at:
+            terminalResponse?.created_at ?? Math.floor(Date.now() / 1000),
+          model: res.model || state.model,
+          status: finalStatus,
+          output: finalOutput,
+          usage: usageData,
+        },
+      }),
+    );
+  }
+
+  function buildOutputItems(
+    hiddenIndices: ReadonlySet<number> = new Set(),
+  ): Array<Record<string, unknown>> {
+    const finalOutput: Array<Record<string, unknown>> = [];
+    const sortedIndices = [
+      ...new Set([...state.rawItems.keys(), ...state.items.keys()]),
+    ].sort((a, b) => a - b);
+    for (const index of sortedIndices) {
+      if (hiddenIndices.has(index)) continue;
+      const item = state.items.get(index);
+      if (!item) {
+        const rawItem = state.rawItems.get(index);
+        if (rawItem && rawItem.type !== "item_reference") {
+          finalOutput.push(rawItem);
+        }
+        continue;
+      }
+      if (item.type === "text") {
+        if (item.content) {
+          const raw = state.rawItems.get(index);
+          finalOutput.push({
+            ...(raw ?? {
+              type: "message",
+              id: item.id,
+              role: "assistant",
+              status: "completed",
+            }),
+            content: Array.isArray(raw?.content) ? raw.content : item.content,
+          });
+          continue;
+        }
+        if (item.refusal !== undefined) {
+          finalOutput.push({
+            type: "message",
+            id: item.id,
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "refusal", refusal: item.refusal }],
+          });
+          continue;
+        }
+        finalOutput.push({
+          type: "message",
+          id: item.id,
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: item.text, annotations: [] }],
+        });
+      } else {
+        const raw = state.rawItems.get(index);
+        finalOutput.push({
+          ...raw,
+          type: "function_call",
+          id: item.id,
+          call_id: item.callId,
+          name: item.name,
+          arguments: item.args,
+          status: typeof raw?.status === "string" ? raw.status : "completed",
+        });
+      }
+    }
+    return finalOutput;
+  }
+
+  let resumeDemand: (() => void) | undefined;
+  const cleanupAbort = (): void =>
+    signal.removeEventListener("abort", onStreamAbort);
+  const onStreamAbort = (): void => {
+    recallDiagnostics.finish("aborted");
+    resumeDemand?.();
+    resumeDemand = undefined;
+    if (keepaliveTimer) clearTimeout(keepaliveTimer);
+    keepaliveTimer = null;
+    if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
+    else void upstreamResponse.body?.cancel(signal.reason).catch(() => {});
+  };
+  signal.addEventListener("abort", onStreamAbort, { once: true });
+  if (signal.aborted) onStreamAbort();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      void (async () => {
+        const waitForDemand = async (): Promise<void> => {
+          while (
+            !cancelled &&
+            !signal.aborted &&
+            (controller.desiredSize ?? 1) <= 0
+          ) {
+            await new Promise<void>((resolve) => {
+              resumeDemand = resolve;
+            });
+          }
+          signal.throwIfAborted();
+        };
+        const safeEnqueue = async (
+          chunk: Uint8Array,
+          afterEnqueue?: () => void,
+        ): Promise<boolean> => {
+          if (cancelled) return false;
+          await waitForDemand();
+          if (cancelled) return false;
+          try {
+            controller.enqueue(sequenceChunk(chunk));
+          } catch {
+            cancelled = true;
+            return false;
+          }
+          afterEnqueue?.();
+          return true;
+        };
+        const safeClose = (): void => {
+          cleanupAbort();
+          if (cancelled) return;
+          try {
+            controller.close();
+          } catch {
+            // Already closed/cancelled
+          }
+        };
+        const safeError = (error: unknown): void => {
+          cleanupAbort();
+          if (cancelled) return;
+          try {
+            controller.error(error);
+          } catch {
+            // Already closed/cancelled.
+          }
+        };
+
+        const resetKeepalive = (): void => {
+          if (keepaliveTimer) clearTimeout(keepaliveTimer);
+          keepaliveTimer = setTimeout(function tick() {
+            if (cancelled || signal.aborted) return;
+            if ((controller.desiredSize ?? 1) > 0) {
+              void safeEnqueue(keepaliveComment);
+            }
+            if (!signal.aborted) {
+              keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+            }
+          }, KEEPALIVE_INACTIVITY_MS);
+        };
+        const clearKeepalive = (): void => {
+          if (keepaliveTimer) clearTimeout(keepaliveTimer);
+          keepaliveTimer = null;
+        };
+        let principalReader: ReadableStreamDefaultReader<Uint8Array> | null =
+          null;
+        let continuationAttempted = false;
+        let continuationFailureCategory:
+          | RecallContinuationFailureCategory
+          | undefined;
+        let continuationFailureReported = false;
+        const reportContinuationFailure = (
+          category: RecallContinuationFailureCategory,
+        ): void => {
+          if (continuationFailureReported) return;
+          continuationFailureReported = true;
+          reportRecallContinuationFailure(category);
+        };
+        // Recall items are gateway-internal and must stay hidden on every exit,
+        // including failures raised before marker replacement.
+        const recallIndices = new Set<number>();
+        const referenceIndices = new Map<number, ReferenceLifecycle>();
+
+        try {
+          if (!upstreamResponse.body) {
+            throw new Error("Upstream response has no body");
+          }
+          const reader = upstreamResponse.body.getReader();
+          principalReader = reader;
+          activeReader = reader;
+
+          // --- Recall interception state ---
+          // `output_index` values whose item is a suppressed `recall` function_call.
+          const parsedRecallInputs = new Map<number, RecallArguments>();
+          // Ordered list of parsed recall invocations: { outputIndex, block }.
+          const pendingRecalls: PendingResponsesRecall[] = [];
+          // Whether any NON-recall function_call appeared (mixed-tools case).
+          let otherToolSeen = false;
+          const unresolvedToolIndices = new Set<number>();
+          const unresolvedToolBytes = new Map<number, number>();
+          const deferredEvents: Array<{
+            chunk: Uint8Array;
+            candidateIndex?: number;
+          }> = [];
+          let deferredBytes = 0;
+          const discardDeferredCandidate = (outputIndex: number): void => {
+            for (let index = deferredEvents.length - 1; index >= 0; index--) {
+              if (deferredEvents[index].candidateIndex === outputIndex) {
+                deferredEvents.splice(index, 1);
+              }
+            }
+          };
+          const promoteDeferredCandidate = (outputIndex: number): void => {
+            hiddenRecallBytes += unresolvedToolBytes.get(outputIndex) ?? 0;
+            unresolvedToolBytes.delete(outputIndex);
+            if (hiddenRecallBytes > maxHiddenRecallBytes) {
+              throw new Error("recall stream exceeded deferred event limit");
+            }
+          };
+
+          resetKeepalive();
+          for await (const { event, data } of parseSSEStream(reader, {
+            maxFrames: maxSSEFrames,
+            inactivityMs: sseInactivityMs,
+            signal,
+            frameCounter,
+          })) {
+            resetKeepalive(); // upstream alive — reset inactivity timer
+
+            if (!data || data === "[DONE]") continue;
+            streamBytes += encoder.encode(
+              formatResponsesEvent(event, data),
+            ).byteLength;
+            if (streamBytes > maxStreamBytes) {
+              throw new Error("Responses stream exceeded byte limit");
+            }
+
+            let parsed: Record<string, unknown>;
+            try {
+              parsed = JSON.parse(data) as Record<string, unknown>;
+            } catch {
+              if (event.startsWith("response.")) {
+                throw new Error(`malformed JSON in Responses event ${event}`);
+              }
+              // Non-JSON keepalive/comment event — forward as-is.
+              if (event !== "message") {
+                const chunk = encoder.encode(formatResponsesEvent(event, data));
+                if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
+                  deferredBytes += chunk.byteLength;
+                  if (deferredBytes > maxDeferredBytes) {
+                    throw new Error(
+                      "recall stream exceeded deferred event limit",
+                    );
+                  }
+                  deferredEvents.push({ chunk });
+                } else {
+                  await safeEnqueue(chunk);
+                }
+              }
+              continue;
+            }
+            if (parsed.type !== event) {
+              throw new Error(`Responses payload type does not match ${event}`);
+            }
+            const normalizationState = normalizeCodexEvent(
+              state,
+              event,
+              parsed,
+            );
+            validateResponseLifecycle(state, event, parsed);
+            seedImplicitCodexItem(state, normalizationState, event, parsed);
+
+            if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
+              continue;
+            }
+
+            const outputIndex = outputIndexForEvent(event, parsed, state);
+            if (outputIndex !== undefined) {
+              retainedStateBytes += encoder.encode(data).byteLength;
+              if (retainedStateBytes > maxRetainedStateBytes) {
+                throw new Error("Responses retained state exceeded byte limit");
+              }
+              const implicitItem = state.rawItems.get(outputIndex);
+              if (
+                opts.validation === "codex" &&
+                event !== "response.output_item.added" &&
+                event !== "response.output_item.done" &&
+                implicitItem?.type === "function_call" &&
+                implicitItem.name === ""
+              ) {
+                unresolvedToolIndices.add(outputIndex);
+              }
+            }
+
+            let resolvedVisibleTool = false;
+            // Detect recall and unresolved sparse function-call identities.
+            if (
+              (event === "response.output_item.added" ||
+                event === "response.output_item.done") &&
+              outputIndex !== undefined
+            ) {
+              const item = parsed.item as Record<string, unknown> | undefined;
+              const isRecallCall =
+                item?.type === "function_call" && item?.name === "recall";
+              if (isRecallCall) {
+                unresolvedToolIndices.delete(outputIndex);
+                discardDeferredCandidate(outputIndex);
+                promoteDeferredCandidate(outputIndex);
+                recallIndices.add(outputIndex);
+              } else if (item?.type === "function_call") {
+                if (
+                  event === "response.output_item.added" &&
+                  opts.validation === "codex" &&
+                  item.name === ""
+                ) {
+                  unresolvedToolIndices.add(outputIndex);
+                } else {
+                  resolvedVisibleTool =
+                    unresolvedToolIndices.delete(outputIndex);
+                  unresolvedToolBytes.delete(outputIndex);
+                  otherToolSeen = true;
+                }
+              }
+            }
+
+            if (
+              resolvedVisibleTool &&
+              recallIndices.size === 0 &&
+              unresolvedToolIndices.size === 0
+            ) {
+              for (const deferred of deferredEvents) {
+                if (!(await safeEnqueue(deferred.chunk))) break;
+              }
+              deferredEvents.length = 0;
+              deferredBytes = 0;
+            }
+
+            const isRecallEvent =
+              outputIndex !== undefined && recallIndices.has(outputIndex);
+            const isUnresolvedToolEvent =
+              outputIndex !== undefined &&
+              unresolvedToolIndices.has(outputIndex);
+
+            // Always accumulate into the internal state for postResponse.
+            applyResponsesEvent(state, event, parsed);
+            if (
+              event === "response.output_item.done" &&
+              outputIndex !== undefined
+            ) {
+              preserveStreamedReasoning(state, outputIndex);
+            }
+
+            // Suppress all events belonging to a recall item, but still count
+            // them so malformed argument streams cannot grow without bound.
+            if (
+              (isRecallEvent || isUnresolvedToolEvent) &&
+              outputIndex !== undefined
+            ) {
+              const hiddenChunk = encoder.encode(
+                formatResponsesEvent(event, data),
+              );
+              const hiddenBytes = hiddenChunk.byteLength;
+              deferredBytes += hiddenBytes;
+              if (isRecallEvent) {
+                hiddenRecallBytes += hiddenBytes;
+              } else {
+                unresolvedToolBytes.set(
+                  outputIndex,
+                  (unresolvedToolBytes.get(outputIndex) ?? 0) + hiddenBytes,
+                );
+              }
+              if (
+                deferredBytes > maxDeferredBytes ||
+                hiddenRecallBytes > maxHiddenRecallBytes
+              ) {
+                throw new Error("recall stream exceeded deferred event limit");
+              }
+              if (
+                event === "response.function_call_arguments.done" &&
+                isRecallEvent
+              ) {
+                parsedRecallInputs.set(
+                  outputIndex,
+                  parseRecallArguments(parsed.arguments),
+                );
+              }
+              if (isUnresolvedToolEvent && !isRecallEvent) {
+                deferredEvents.push({
+                  chunk: hiddenChunk,
+                  candidateIndex: outputIndex,
+                });
+              }
+              if (event === "response.output_item.done") {
+                if (isRecallEvent) {
+                  collectCompletedRecall(
+                    state,
+                    outputIndex,
+                    parsedRecallInputs,
+                    pendingRecalls,
+                  );
+                }
+              }
+              // Don't forward recall-item events to the client.
+              continue;
+            }
+
+            // Terminal events: handle recall interception before forwarding.
+            if (
+              event === "response.completed" ||
+              event === "response.done" ||
+              event === "response.incomplete" ||
+              event === "response.failed"
+            ) {
+              const terminalParsed = stripHiddenReferenceOutput(parsed);
+              if (opts.validation === "codex") {
+                assertTerminalOutputMatches(
+                  state,
+                  terminalParsed,
+                  (outputIndex, item) => {
+                    if (item.type !== "function_call") return;
+                    if (item.name === RECALL_TOOL_NAME) {
+                      unresolvedToolIndices.delete(outputIndex);
+                      discardDeferredCandidate(outputIndex);
+                      promoteDeferredCandidate(outputIndex);
+                      recallIndices.add(outputIndex);
+                      collectCompletedRecall(
+                        state,
+                        outputIndex,
+                        parsedRecallInputs,
+                        pendingRecalls,
+                      );
+                    } else {
+                      unresolvedToolIndices.delete(outputIndex);
+                      unresolvedToolBytes.delete(outputIndex);
+                      otherToolSeen = true;
+                    }
+                  },
+                );
+                assertOutputLifecyclesComplete(state);
+              } else {
+                assertOutputLifecyclesComplete(state);
+                assertTerminalOutputMatches(state, terminalParsed);
+              }
+              assertReferenceLifecyclesComplete(referenceIndices);
+              assertRecallItemsCompleted(
+                state,
+                pendingRecalls.map((recall) => recall.outputIndex),
+              );
+              if (pendingRecalls.length === 0) {
+                if (unresolvedToolIndices.size > 0) {
+                  throw new Error(
+                    "Responses terminal left sparse function identity unresolved",
+                  );
+                }
+                if (recallIndices.size > 0) {
+                  throw new Error(
+                    "recall stream ended before function arguments completed",
+                  );
+                }
+                for (const deferred of deferredEvents) {
+                  if (!(await safeEnqueue(deferred.chunk))) break;
+                }
+                deferredEvents.length = 0;
+                deferredBytes = 0;
+                // No recall — forward the terminal event verbatim.
+                const finalResponse = finalizeResponsesAcc(state);
+                if (
+                  !(await safeEnqueue(
+                    encoder.encode(
+                      formatResponsesEvent(
+                        event,
+                        terminalParsed === parsed
+                          ? data
+                          : JSON.stringify(terminalParsed),
+                      ),
+                    ),
+                    () => {
+                      terminalDelivered = true;
+                      finish(
+                        finalResponse,
+                        state.terminalEvent === "response.completed",
+                      );
+                    },
+                  ))
+                )
+                  break;
+                cancelAndReleaseReader(reader, signal.reason);
+                principalReader = null;
+                clearKeepalive();
+                safeClose();
+                return;
+              }
+              if (state.terminalEvent === "response.failed") {
+                throw new Error("recall principal returned response.failed");
+              }
+              if (state.terminalEvent === "response.incomplete") {
+                throw new Error(
+                  "incomplete recall principal cannot execute recall",
+                );
+              }
+
+              // Recall was detected. Drive the recall loop.
+              if (pendingRecalls.length > 1) {
+                throw new RecallContinuationFailure("parallel_recall");
+              }
+              const anchorTexts: string[] = [];
+              transactionBaseline = {
+                ...state,
+                usage: { ...state.usage },
+                items: new Map(state.items),
+                rawItems: new Map(state.rawItems),
+              };
+              transactionProviderUsage = { ...ZERO_USAGE };
+              // The principal Responses stream is part of the same request
+              // budget. Count it once before its first recall is admitted;
+              // continuation streams are accounted for after each follow-up.
+              recallBudget.recordUsage(state.usage);
+              const pendingCommits: Array<() => void> = [];
+              const transactionalEvents: Uint8Array[] = [];
+              let transactionalBytes = 0;
+              const reserveTransactionalBytes = (chunk: Uint8Array): void => {
+                transactionalBytes += chunk.byteLength;
+                if (transactionalBytes > maxTransactionalBytes) {
+                  throw new RecallContinuationFailure("resource_limit");
+                }
+              };
+              const queueTransactional = (chunk: Uint8Array): void => {
+                reserveTransactionalBytes(chunk);
+                transactionalEvents.push(chunk);
+              };
+              for (const recall of pendingRecalls) {
+                const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
+                reserveSyntheticIdentity(syntheticId, [state]);
+                const recallAcc = finalizeResponsesAcc(state);
+                const contentPosition = recallAcc.content.findIndex(
+                  (block) =>
+                    block.type === "tool_use" && block.id === recall.toolUseId,
+                );
+                if (contentPosition < 0) {
+                  throw new RecallContinuationFailure("missing_recall_block");
+                }
+                let executed: Awaited<ReturnType<typeof settleRecall>>;
+                try {
+                  executed = await settleRecall({
+                    query: recall.query,
+                    scope: recall.scope,
+                    id: recall.id,
+                    ids: recall.ids,
+                    detailOffset: recall.detailOffset,
+                    detailLimit: recall.detailLimit,
+                    outputIndex: recall.outputIndex,
+                    toolUseId: recall.toolUseId,
+                    contentPosition,
+                    acc: recallAcc,
+                    signal,
+                  });
+                } catch (error) {
+                  if (signal.aborted) throw error;
+                  if (error instanceof RecallContinuationFailure) throw error;
+                  throw new RecallContinuationFailure("recall_execution");
+                }
+                anchorTexts.push(executed.anchorText);
+                if (executed.commit) pendingCommits.push(executed.commit);
+                if (executed.rollback) {
+                  transactionRollbacks.push(executed.rollback);
+                }
+                const anchorChunk = encoder.encode(
+                  emitTextItem(
+                    recall.outputIndex,
+                    executed.anchorText,
+                    syntheticId,
+                  ),
+                );
+                if (otherToolSeen) {
+                  state.items.set(recall.outputIndex, {
+                    type: "text",
+                    id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
+                    text: executed.anchorText,
+                  });
+                  queueTransactional(anchorChunk);
+                  for (const deferred of deferredEvents) {
+                    queueTransactional(deferred.chunk);
+                  }
+                } else {
+                  queueTransactional(anchorChunk);
+                  for (const deferred of deferredEvents) {
+                    queueTransactional(deferred.chunk);
+                  }
+                }
+                deferredEvents.length = 0;
+                deferredBytes = 0;
+
+                if (
+                  !otherToolSeen &&
+                  recall === pendingRecalls[pendingRecalls.length - 1]
+                ) {
+                  // Recall-only: run the streaming follow-up and pipe the
+                  // continuation inline before the final completion.
+                  try {
+                    continuationAttempted = true;
+                    continuationFailureCategory = "follow_up_setup";
+                    signal.throwIfAborted();
+                    let follow = await settleFollowUp({
+                      finalRecallRound: recallBudget.mustFinalizeNext(),
+                      anchorText: executed.anchorText,
+                      resultText: executed.resultText,
+                      acc: recallAcc,
+                      toolUseId: recall.toolUseId,
+                      contentPosition,
+                      signal,
+                    });
+                    let recallContinuationTransportRetries = 0;
+                    let continuationFollowUpInput: Parameters<
+                      typeof opts.runFollowUp
+                    >[0] = {
+                      finalRecallRound: recallBudget.mustFinalizeNext(),
+                      anchorText: executed.anchorText,
+                      resultText: executed.resultText,
+                      acc: recallAcc,
+                      toolUseId: recall.toolUseId,
+                      contentPosition,
+                      signal,
+                    };
+                    let continuationRetryBaseline = {
+                      transactionalEvents: transactionalEvents.length,
+                      transactionalBytes,
+                      retainedStateBytes,
+                      hiddenRecallBytes,
+                      outputIdentities: new Set(outputIdentities),
+                      referenceIdentities: new Set(referenceIdentities),
+                    };
+                    continuationFailureCategory = "follow_up_protocol";
+                    for (;;) {
+                      activeReader = follow.reader;
+                      let retryFollowUp = false;
+                      const contState = makeResponsesAccState();
+                      const contRecallIndices = new Set<number>();
+                      const contReferenceIndices = new Map<
+                        number,
+                        ReferenceLifecycle
+                      >();
+                      const contRecallInputs = new Map<
+                        number,
+                        RecallArguments
+                      >();
+                      const contPending: PendingResponsesRecall[] = [];
+                      const contUnresolvedToolIndices = new Set<number>();
+                      const contUnresolvedToolBytes = new Map<number, number>();
+                      const heldContinuationEvents: Array<{
+                        chunk: Uint8Array;
+                        candidateIndex?: number;
+                        transactional: boolean;
+                      }> = [];
+                      let deferredContinuationBytes = 0;
+                      const holdContinuation = (
+                        chunk: Uint8Array,
+                        candidateIndex?: number,
+                      ): void => {
+                        const transactional = candidateIndex === undefined;
+                        if (transactional) reserveTransactionalBytes(chunk);
+                        else {
+                          deferredContinuationBytes += chunk.byteLength;
+                          if (deferredContinuationBytes > maxDeferredBytes) {
+                            throw new RecallContinuationFailure(
+                              "resource_limit",
+                            );
+                          }
+                        }
+                        heldContinuationEvents.push({
+                          chunk,
+                          transactional,
+                          ...(candidateIndex !== undefined
+                            ? { candidateIndex }
+                            : {}),
+                        });
+                      };
+                      const discardContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        for (
+                          let index = heldContinuationEvents.length - 1;
+                          index >= 0;
+                          index--
+                        ) {
+                          if (
+                            heldContinuationEvents[index].candidateIndex ===
+                            outputIndex
+                          ) {
+                            if (!heldContinuationEvents[index].transactional) {
+                              deferredContinuationBytes -=
+                                heldContinuationEvents[index].chunk.byteLength;
+                            }
+                            heldContinuationEvents.splice(index, 1);
+                          }
+                        }
+                      };
+                      const promoteVisibleContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        for (const held of heldContinuationEvents) {
+                          if (held.candidateIndex !== outputIndex) continue;
+                          deferredContinuationBytes -= held.chunk.byteLength;
+                          reserveTransactionalBytes(held.chunk);
+                          held.transactional = true;
+                        }
+                      };
+                      const flushHeldContinuation = (): void => {
+                        for (const held of heldContinuationEvents) {
+                          if (held.transactional) {
+                            transactionalEvents.push(held.chunk);
+                          } else {
+                            queueTransactional(held.chunk);
+                          }
+                        }
+                        heldContinuationEvents.length = 0;
+                        deferredContinuationBytes = 0;
+                      };
+                      let continuationRecallBytes = 0;
+                      const promoteContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        const bytes =
+                          contUnresolvedToolBytes.get(outputIndex) ?? 0;
+                        contUnresolvedToolBytes.delete(outputIndex);
+                        continuationRecallBytes += bytes;
+                        hiddenRecallBytes += bytes;
+                        if (
+                          continuationRecallBytes > maxDeferredBytes ||
+                          hiddenRecallBytes > maxHiddenRecallBytes
+                        ) {
+                          throw new RecallContinuationFailure("resource_limit");
+                        }
+                      };
+                      let contOtherTool = false;
+                      let continuationCompleted = false;
+                      let continuationFailed = false;
+                      const contIndex = shiftedOutputIndex(
+                        Math.max(
+                          -1,
+                          ...state.rawItems.keys(),
+                          ...state.items.keys(),
+                        ),
+                        1,
+                      );
+                      try {
+                        for await (const {
+                          event: ce,
+                          data: cd,
+                        } of parseSSEStream(follow.reader, {
+                          maxFrames: maxSSEFrames,
+                          inactivityMs: sseInactivityMs,
+                          signal,
+                          frameCounter,
+                        })) {
+                          if (cancelled) break;
+                          if (!cd || cd === "[DONE]") continue;
+                          streamBytes += encoder.encode(
+                            formatResponsesEvent(ce, cd),
+                          ).byteLength;
+                          if (streamBytes > maxStreamBytes) {
+                            throw new RecallContinuationFailure(
+                              "resource_limit",
+                            );
+                          }
+                          let cparsed: Record<string, unknown>;
+                          try {
+                            cparsed = JSON.parse(cd) as Record<string, unknown>;
+                          } catch {
+                            if (ce.startsWith("response.")) {
+                              throw new Error(
+                                `malformed JSON in Responses event ${ce}`,
+                              );
+                            }
+                            if (ce !== "message") {
+                              const chunk = encoder.encode(
+                                formatResponsesEvent(ce, cd),
+                              );
+                              if (
+                                contRecallIndices.size > 0 ||
+                                contUnresolvedToolIndices.size > 0
+                              ) {
+                                holdContinuation(chunk);
+                              } else {
+                                queueTransactional(chunk);
+                              }
+                            }
+                            continue;
+                          }
+                          if (cparsed.type !== ce) {
+                            throw new Error(
+                              `Responses payload type does not match ${ce}`,
+                            );
+                          }
+                          const contNormalizationState = normalizeCodexEvent(
+                            contState,
+                            ce,
+                            cparsed,
+                          );
+                          validateResponseLifecycle(contState, ce, cparsed);
+                          seedImplicitCodexItem(
+                            contState,
+                            contNormalizationState,
+                            ce,
+                            cparsed,
+                          );
+                          if (
+                            consumeReferenceEvent(
+                              contState,
+                              contReferenceIndices,
+                              ce,
+                              cparsed,
+                            )
+                          ) {
+                            continue;
+                          }
+                          const ci = outputIndexForEvent(
+                            ce,
+                            cparsed,
+                            contState,
+                          );
+                          if (ci !== undefined) {
+                            retainedStateBytes += encoder.encode(cd).byteLength;
+                            if (retainedStateBytes > maxRetainedStateBytes) {
+                              throw new RecallContinuationFailure(
+                                "resource_limit",
+                              );
+                            }
+                            const implicitItem = contState.rawItems.get(ci);
+                            if (
+                              opts.validation === "codex" &&
+                              ce !== "response.output_item.added" &&
+                              ce !== "response.output_item.done" &&
+                              implicitItem?.type === "function_call" &&
+                              implicitItem.name === ""
+                            ) {
+                              contUnresolvedToolIndices.add(ci);
+                            }
+                          }
+                          let resolvedVisibleTool = false;
+                          if (
+                            (ce === "response.output_item.added" ||
+                              ce === "response.output_item.done") &&
+                            ci !== undefined
+                          ) {
+                            const item = cparsed.item as
+                              | Record<string, unknown>
+                              | undefined;
+                            if (
+                              item?.type === "function_call" &&
+                              item.name === RECALL_TOOL_NAME
+                            ) {
+                              contUnresolvedToolIndices.delete(ci);
+                              discardContinuationCandidate(ci);
+                              promoteContinuationCandidate(ci);
+                              contRecallIndices.add(ci);
+                            } else if (item?.type === "function_call") {
+                              if (
+                                ce === "response.output_item.added" &&
+                                opts.validation === "codex" &&
+                                item.name === ""
+                              ) {
+                                contUnresolvedToolIndices.add(ci);
+                              } else {
+                                resolvedVisibleTool =
+                                  contUnresolvedToolIndices.delete(ci);
+                                promoteVisibleContinuationCandidate(ci);
+                                contUnresolvedToolBytes.delete(ci);
+                                contOtherTool = true;
+                              }
+                            }
+                          }
+                          if (
+                            resolvedVisibleTool &&
+                            contRecallIndices.size === 0 &&
+                            contUnresolvedToolIndices.size === 0
+                          ) {
+                            flushHeldContinuation();
+                          }
+                          applyResponsesEvent(contState, ce, cparsed);
+                          if (
+                            ce === "response.output_item.done" &&
+                            ci !== undefined
+                          ) {
+                            preserveStreamedReasoning(contState, ci);
+                          }
+                          const isContRecall =
+                            ci !== undefined && contRecallIndices.has(ci);
+                          const isContUnresolvedTool =
+                            ci !== undefined &&
+                            contUnresolvedToolIndices.has(ci);
+                          if (
+                            (isContRecall || isContUnresolvedTool) &&
+                            ci !== undefined
+                          ) {
+                            const hiddenChunk = encoder.encode(
+                              formatResponsesEvent(
+                                ce,
+                                JSON.stringify({
+                                  ...cparsed,
+                                  output_index: shiftedOutputIndex(
+                                    ci,
+                                    contIndex,
+                                  ),
+                                }),
+                              ),
+                            );
+                            const hiddenBytes = hiddenChunk.byteLength;
+                            if (isContRecall) {
+                              continuationRecallBytes += hiddenBytes;
+                              hiddenRecallBytes += hiddenBytes;
+                            } else {
+                              contUnresolvedToolBytes.set(
+                                ci,
+                                (contUnresolvedToolBytes.get(ci) ?? 0) +
+                                  hiddenBytes,
+                              );
+                            }
+                            if (
+                              continuationRecallBytes > maxDeferredBytes ||
+                              hiddenRecallBytes > maxHiddenRecallBytes
+                            ) {
+                              throw new RecallContinuationFailure(
+                                "resource_limit",
+                              );
+                            }
+                            if (
+                              ce === "response.function_call_arguments.done" &&
+                              isContRecall
+                            ) {
+                              contRecallInputs.set(
+                                ci,
+                                parseRecallArguments(cparsed.arguments),
+                              );
+                            }
+                            if (isContUnresolvedTool && !isContRecall) {
+                              holdContinuation(hiddenChunk, ci);
+                            }
+                            if (ce === "response.output_item.done") {
+                              if (isContRecall) {
+                                collectCompletedRecall(
+                                  contState,
+                                  ci,
+                                  contRecallInputs,
+                                  contPending,
+                                );
+                              }
+                            }
+                            continue;
+                          }
+                          if (
+                            ce === "response.completed" ||
+                            ce === "response.done" ||
+                            ce === "response.incomplete" ||
+                            ce === "response.failed"
+                          ) {
+                            const terminalParsed =
+                              stripHiddenReferenceOutput(cparsed);
+                            const incompleteRecallIndices = new Set(
+                              [...contRecallIndices].filter(
+                                (outputIndex) =>
+                                  !contPending.some(
+                                    (recall) =>
+                                      recall.outputIndex === outputIndex,
+                                  ),
+                              ),
+                            );
+                            if (opts.validation === "codex") {
+                              assertTerminalOutputMatches(
+                                contState,
+                                terminalParsed,
+                                (outputIndex, item) => {
+                                  if (item.type !== "function_call") return;
+                                  if (item.name === RECALL_TOOL_NAME) {
+                                    contUnresolvedToolIndices.delete(
+                                      outputIndex,
+                                    );
+                                    discardContinuationCandidate(outputIndex);
+                                    promoteContinuationCandidate(outputIndex);
+                                    contRecallIndices.add(outputIndex);
+                                    collectCompletedRecall(
+                                      contState,
+                                      outputIndex,
+                                      contRecallInputs,
+                                      contPending,
+                                    );
+                                  } else {
+                                    contUnresolvedToolIndices.delete(
+                                      outputIndex,
+                                    );
+                                    contUnresolvedToolBytes.delete(outputIndex);
+                                    contOtherTool = true;
+                                  }
+                                },
+                              );
+                              assertOutputLifecyclesComplete(
+                                contState,
+                                incompleteRecallIndices,
+                              );
+                            } else {
+                              assertOutputLifecyclesComplete(
+                                contState,
+                                incompleteRecallIndices,
+                              );
+                              assertTerminalOutputMatches(
+                                contState,
+                                terminalParsed,
+                              );
+                            }
+                            assertReferenceLifecyclesComplete(
+                              contReferenceIndices,
+                            );
+                            assertRecallItemsCompleted(
+                              contState,
+                              contPending.map((recall) => recall.outputIndex),
+                            );
+                            if (contUnresolvedToolIndices.size > 0) {
+                              throw new Error(
+                                "Responses continuation left sparse function identity unresolved",
+                              );
+                            }
+                            if (contRecallIndices.size === 0) {
+                              flushHeldContinuation();
+                            }
+                            continuationCompleted =
+                              contState.terminalEvent !== undefined;
+                            continuationFailed =
+                              contState.terminalEvent === "response.failed";
+                            break;
+                          }
+                          if (
+                            ce === "response.created" ||
+                            ce === "response.in_progress"
+                          ) {
+                            continue;
+                          }
+                          if (ci !== undefined) {
+                            const shifted = encoder.encode(
+                              formatResponsesEvent(
+                                ce,
+                                JSON.stringify({
+                                  ...cparsed,
+                                  output_index: shiftedOutputIndex(
+                                    ci,
+                                    contIndex,
+                                  ),
+                                }),
+                              ),
+                            );
+                            if (
+                              contRecallIndices.size > 0 ||
+                              contUnresolvedToolIndices.size > 0
+                            ) {
+                              holdContinuation(shifted);
+                            } else queueTransactional(shifted);
+                          } else if (ce !== "message") {
+                            const chunk = encoder.encode(
+                              formatResponsesEvent(ce, cd),
+                            );
+                            if (
+                              contRecallIndices.size > 0 ||
+                              contUnresolvedToolIndices.size > 0
+                            ) {
+                              holdContinuation(chunk);
+                            } else queueTransactional(chunk);
+                          }
+                        }
+                      } catch (error) {
+                        if (
+                          error instanceof SSEStreamLimitError ||
+                          frameCounter.count > maxSSEFrames ||
+                          (error instanceof Error &&
+                            /^SSE stream exceeded \d+ frame limit$/.test(
+                              error.message,
+                            ))
+                        ) {
+                          throw new RecallContinuationFailure("resource_limit");
+                        }
+                        if (
+                          error instanceof SSEStreamTransportError &&
+                          !continuationFollowUpInput.finalRecallRound &&
+                          recallContinuationTransportRetries <
+                            maxRecallContinuationTransportRetries
+                        ) {
+                          recallContinuationTransportRetries++;
+                          transactionalEvents.length =
+                            continuationRetryBaseline.transactionalEvents;
+                          transactionalBytes =
+                            continuationRetryBaseline.transactionalBytes;
+                          retainedStateBytes =
+                            continuationRetryBaseline.retainedStateBytes;
+                          hiddenRecallBytes =
+                            continuationRetryBaseline.hiddenRecallBytes;
+                          outputIdentities.clear();
+                          for (const identity of continuationRetryBaseline.outputIdentities) {
+                            outputIdentities.add(identity);
+                          }
+                          referenceIdentities.clear();
+                          for (const identity of continuationRetryBaseline.referenceIdentities) {
+                            referenceIdentities.add(identity);
+                          }
+                          log.warn(
+                            `retrying recall continuation after ${error.kind} transport failure${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+                          );
+                          retryFollowUp = true;
+                        } else {
+                          if (error instanceof SSEStreamTransportError) {
+                            continuationFailureCategory = "follow_up_transport";
+                          }
+                          throw error instanceof RecallContinuationFailure
+                            ? error
+                            : new RecallContinuationFailure(
+                                continuationFailureCategory ?? "unexpected",
+                              );
+                        }
+                      } finally {
+                        cancelAndReleaseReader(follow.reader, signal.reason);
+                      }
+                      if (retryFollowUp) {
+                        continuationFailureCategory = "follow_up_setup";
+                        follow = await settleFollowUp(
+                          continuationFollowUpInput,
+                        );
+                        continuationFailureCategory = "follow_up_protocol";
+                        continue;
+                      }
+                      const mergeContinuation = (): void => {
+                        for (const item of contState.rawItems.values()) {
+                          const itemIdentities = [item.id, item.call_id].filter(
+                            (value): value is string =>
+                              typeof value === "string" && value.length > 0,
+                          );
+                          for (const existing of state.items.values()) {
+                            const existingIdentities = new Set(
+                              [
+                                existing.id,
+                                existing.type === "tool_use"
+                                  ? existing.callId
+                                  : undefined,
+                              ].filter(
+                                (value): value is string =>
+                                  typeof value === "string" && value.length > 0,
+                              ),
+                            );
+                            if (
+                              itemIdentities.some((identity) =>
+                                existingIdentities.has(identity),
+                              )
+                            ) {
+                              throw new Error(
+                                "duplicate Responses item identity across continuation",
+                              );
+                            }
+                          }
+                          for (const existing of state.rawItems.values()) {
+                            const existingIdentities = new Set(
+                              [existing.id, existing.call_id].filter(
+                                (value): value is string =>
+                                  typeof value === "string" && value.length > 0,
+                              ),
+                            );
+                            if (
+                              itemIdentities.some((identity) =>
+                                existingIdentities.has(identity),
+                              )
+                            ) {
+                              throw new Error(
+                                "duplicate Responses item identity across continuation",
+                              );
+                            }
+                          }
+                        }
+                        for (const [idx, item] of contState.items) {
+                          state.items.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
+                        }
+                        for (const [idx, item] of contState.rawItems) {
+                          state.rawItems.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
+                        }
+                        mergeUsage(state.usage, contState.usage);
+                      };
+                      assertUsageMergeable(
+                        transactionProviderUsage,
+                        contState.usage,
+                      );
+                      mergeUsage(transactionProviderUsage, contState.usage);
+                      recallBudget.recordUsage(contState.usage);
+                      if (
+                        continuationFailed ||
+                        (continuationFollowUpInput.finalRecallRound &&
+                          contState.terminalEvent === "response.incomplete")
+                      ) {
+                        throw new RecallContinuationFailure("follow_up_failed");
+                      }
+                      if (
+                        !continuationCompleted ||
+                        contState.rawItems.size === 0
+                      ) {
+                        throw new RecallContinuationFailure(
+                          "follow_up_missing_output",
+                        );
+                      }
+                      if (
+                        continuationFollowUpInput.finalRecallRound &&
+                        contPending.length === 0 &&
+                        !isUsableRecallContinuation(
+                          finalizeResponsesAcc(contState),
+                        )
+                      ) {
+                        throw new RecallContinuationFailure(
+                          "follow_up_missing_output",
+                        );
+                      }
+                      if (contRecallIndices.size !== contPending.length) {
+                        throw new RecallContinuationFailure(
+                          "follow_up_incomplete_arguments",
+                        );
+                      }
+                      if (contPending.length > 1) {
+                        throw new RecallContinuationFailure("parallel_recall");
+                      }
+                      if (
+                        contState.terminalEvent === "response.incomplete" &&
+                        contPending.length > 0
+                      ) {
+                        throw new RecallContinuationFailure(
+                          "nested_recall_incomplete",
+                        );
+                      }
+                      assertUsageMergeable(state.usage, contState.usage);
+                      let nextRecall: (typeof contPending)[number] | undefined;
+                      let nextExecuted:
+                        | {
+                            anchorText: string;
+                            resultText: string;
+                            commit?: () => void;
+                            rollback?: () => void;
+                          }
+                        | undefined;
+                      let nextAcc: GatewayResponse | undefined;
+                      if (contPending.length === 1) {
+                        if (continuationFollowUpInput.finalRecallRound) {
+                          throw new RecallContinuationFailure(
+                            "depth_exhausted",
+                          );
+                        } else {
+                          nextAcc = finalizeResponsesAcc(contState);
+                          const pendingNextRecall = contPending[0];
+                          const contentPosition = nextAcc.content.findIndex(
+                            (block) =>
+                              block.type === "tool_use" &&
+                              block.id === pendingNextRecall.toolUseId,
+                          );
+                          if (contentPosition < 0) {
+                            throw new RecallContinuationFailure(
+                              "missing_recall_block",
+                            );
+                          }
+                          nextRecall = {
+                            ...pendingNextRecall,
+                            contentPosition,
+                          };
+                          const shiftedRecallIndex = shiftedOutputIndex(
+                            nextRecall.outputIndex,
+                            contIndex,
+                          );
+                          const nextSyntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
+                          reserveSyntheticIdentity(nextSyntheticId, [
+                            state,
+                            contState,
+                          ]);
+                          continuationFailureCategory =
+                            "nested_recall_execution";
+                          try {
+                            nextExecuted = await settleRecall({
+                              ...nextRecall,
+                              acc: nextAcc,
+                              signal,
+                            });
+                          } catch (error) {
+                            if (signal.aborted) throw error;
+                            if (error instanceof RecallContinuationFailure)
+                              throw error;
+                            throw new RecallContinuationFailure(
+                              "nested_recall_execution",
+                            );
+                          }
+                          continuationFailureCategory = "follow_up_protocol";
+                          if (nextExecuted.commit) {
+                            pendingCommits.push(nextExecuted.commit);
+                          }
+                          if (nextExecuted.rollback) {
+                            transactionRollbacks.push(nextExecuted.rollback);
+                          }
+                          const nextRecallIndex = nextRecall.outputIndex;
+                          contState.items.set(nextRecallIndex, {
+                            type: "text",
+                            id: nextSyntheticId,
+                            text: nextExecuted.anchorText,
+                          });
+                          queueTransactional(
+                            encoder.encode(
+                              emitTextItem(
+                                shiftedRecallIndex,
+                                nextExecuted.anchorText,
+                              ),
+                            ),
+                          );
+                        }
+                      }
+                      flushHeldContinuation();
+                      for (const index of contRecallIndices) {
+                        recallIndices.add(shiftedOutputIndex(index, contIndex));
+                      }
+                      mergeContinuation();
+                      if (continuationFollowUpInput.finalRecallRound)
+                        log.info("recall final continuation: completed");
+                      if (!nextRecall || !nextExecuted || contOtherTool) {
+                        state.stopReason = contState.stopReason;
+                        state.terminalEvent = contState.terminalEvent;
+                        state.terminalResponse = contState.terminalResponse;
+                        break;
+                      }
+                      follow.commit?.();
+                      continuationFollowUpInput = {
+                        finalRecallRound: recallBudget.mustFinalizeNext(),
+                        anchorText: nextExecuted.anchorText,
+                        resultText: nextExecuted.resultText,
+                        acc: nextAcc ?? finalizeResponsesAcc(contState),
+                        toolUseId: nextRecall.toolUseId,
+                        contentPosition: nextRecall.contentPosition,
+                        signal,
+                      };
+                      continuationRetryBaseline = {
+                        transactionalEvents: transactionalEvents.length,
+                        transactionalBytes,
+                        retainedStateBytes,
+                        hiddenRecallBytes,
+                        outputIdentities: new Set(outputIdentities),
+                        referenceIdentities: new Set(referenceIdentities),
+                      };
+                      continuationFailureCategory = "follow_up_setup";
+                      follow = await settleFollowUp(continuationFollowUpInput);
+                      continuationFailureCategory = "follow_up_protocol";
+                      recallContinuationTransportRetries = 0;
+                    }
+                    state.items.set(recall.outputIndex, {
+                      type: "text",
+                      id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
+                      text: executed.anchorText,
+                    });
+                  } catch (err) {
+                    const category =
+                      err instanceof RecallContinuationFailure
+                        ? err.category
+                        : (continuationFailureCategory ?? "unexpected");
+                    log.error(
+                      `recall follow-up stream failed category=${category}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+                    );
+                    if (
+                      err instanceof RecallContinuationFailure ||
+                      signal.aborted
+                    ) {
+                      throw err;
+                    }
+                    throw new RecallContinuationFailure(category);
+                  }
+                }
+              }
+
+              // Rebuild the terminal response.completed reflecting only the
+              // continuation (recall-only) or the client-owned tools (mixed).
+              const finalResp = finalizeResponsesAcc(state);
+              let anchorIndex = 0;
+              const visibleResp = {
+                ...finalResp,
+                content: finalResp.content.map((block) => {
+                  if (block.type !== "tool_use" || block.name !== "recall") {
+                    return block;
+                  }
+                  return {
+                    type: "text" as const,
+                    text: anchorTexts[anchorIndex++] ?? "",
+                  };
+                }),
+              };
+              if (continuationAttempted) {
+                continuationFailureCategory = "delivery";
+              }
+              clearKeepalive();
+              for (const chunk of transactionalEvents) {
+                if (!(await safeEnqueue(chunk))) {
+                  throw new Error(
+                    "client disconnected while delivering recall continuation",
+                  );
+                }
+              }
+              if (
+                !(await safeEnqueue(
+                  encoder.encode(buildTerminal(visibleResp)),
+                  () => {
+                    terminalDelivered = true;
+                    const successful =
+                      state.terminalEvent === "response.completed";
+                    let transactionSettled = false;
+                    const transaction = {
+                      commit: () => {
+                        if (transactionSettled) return;
+                        try {
+                          for (const commit of pendingCommits) commit();
+                          transactionSettled = true;
+                          pendingCommits.length = 0;
+                          transactionRollbacks.length = 0;
+                          transactionBaseline = undefined;
+                        } catch (error) {
+                          pendingCommits.length = 0;
+                          transaction.rollback();
+                          throw error;
+                        }
+                      },
+                      rollback: () => {
+                        if (transactionSettled) return;
+                        transactionSettled = true;
+                        pendingCommits.length = 0;
+                        rollbackTransaction();
+                      },
+                    };
+                    deferredTransaction = transaction;
+                    if (successful) opts.onTransactionReady?.(transaction);
+                    if (!finish(visibleResp, successful)) {
+                      transaction.rollback();
+                      throw new Error(
+                        "recall onComplete failed after delivery",
+                      );
+                    }
+                    if (successful) {
+                      if (!opts.onTransactionReady) transaction.commit();
+                    } else {
+                      transaction.rollback();
+                    }
+                  },
+                ))
+              ) {
+                throw new Error(
+                  "client disconnected while delivering recall terminal",
+                );
+              }
+              if (cancelled) throw signal.reason;
+              cancelAndReleaseReader(reader, signal.reason);
+              principalReader = null;
+              safeClose();
+              return;
+            }
+
+            // Non-terminal, non-recall event: forward verbatim.
+            const chunk = encoder.encode(formatResponsesEvent(event, data));
+            if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
+              deferredBytes += chunk.byteLength;
+              if (deferredBytes > maxDeferredBytes) {
+                throw new Error("recall stream exceeded deferred event limit");
+              }
+              deferredEvents.push({ chunk });
+            } else if (!(await safeEnqueue(chunk))) {
+              break;
+            }
+          }
+
+          throw new Error(
+            "upstream Responses stream ended without a terminal event",
+          );
+        } catch (err) {
+          rollbackTransaction();
+          if (principalReader) {
+            cancelAndReleaseReader(principalReader, signal.reason);
+          }
+          principalReader = null;
+          clearKeepalive();
+          if (opts.signal?.aborted && !cancelled) {
+            safeError(opts.signal.reason);
+            return;
+          }
+          if (terminalDelivered) {
+            if (continuationAttempted && !signal.aborted) {
+              reportContinuationFailure(
+                err instanceof RecallContinuationFailure
+                  ? err.category
+                  : (continuationFailureCategory ?? "unexpected"),
+              );
+            }
+            safeClose();
+            return;
+          }
+          const isAbort =
+            err instanceof DOMException && err.name === "AbortError";
+          if (isAbort) {
+            log.info(
+              `openai-responses recall-aware stream aborted${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+            );
+            if (cancelled || signal.aborted) {
+              if (opts.signal?.aborted && !cancelled) {
+                safeError(opts.signal.reason);
+              } else {
+                safeClose();
+              }
+              return;
+            }
+          } else {
+            const category =
+              err instanceof RecallContinuationFailure
+                ? err.category
+                : continuationAttempted
+                  ? (continuationFailureCategory ?? "unexpected")
+                  : undefined;
+            log.error(
+              `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+            );
+          }
+          if (!signal.aborted) {
+            if (err instanceof RecallContinuationFailure) {
+              reportContinuationFailure(err.category);
+            } else if (continuationAttempted) {
+              reportContinuationFailure(
+                continuationFailureCategory ?? "unexpected",
+              );
+            }
+          }
+          const failedResponse = finalizeResponsesAcc(state);
+          try {
+            assertUsageMergeable(
+              failedResponse.usage ?? ZERO_USAGE,
+              transactionProviderUsage,
+            );
+            failedResponse.usage ??= { ...ZERO_USAGE };
+            mergeUsage(failedResponse.usage, transactionProviderUsage);
+          } catch (usageError) {
+            log.error(
+              "failed to merge recall continuation usage for accounting:",
+              usageError,
+            );
+          }
+          transactionProviderUsage = { ...ZERO_USAGE };
+          failedResponse.content = failedResponse.content.filter(
+            (block) =>
+              (block.type !== "tool_use" || block.name !== RECALL_TOOL_NAME) &&
+              (block.type !== "text" || !parseRecallAnchor(block.text)),
+          );
+          failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
+            (item) =>
+              item.type !== "function_call" || item.name !== RECALL_TOOL_NAME,
+          );
+          await safeEnqueue(
+            encoder.encode(
+              formatResponsesEvent(
+                "response.failed",
+                JSON.stringify({
+                  type: "response.failed",
+                  response: {
+                    id: state.id || "resp_error",
+                    object: "response",
+                    created_at: Math.floor(Date.now() / 1000),
+                    model: state.model,
+                    status: "failed",
+                    output: buildOutputItems(recallIndices),
+                    usage: null,
+                    error: {
+                      type: "server_error",
+                      message:
+                        "Lore could not continue the response after recall",
+                    },
+                  },
+                }),
+              ),
+            ),
+            () => finish(failedResponse, false),
+          );
+          safeClose();
+        }
+      })().catch((error) => {
+        cleanupAbort();
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = null;
+        try {
+          controller.error(error);
+        } catch {
+          // Already closed/cancelled.
+        }
+      });
+    },
+
+    pull() {
+      resumeDemand?.();
+      resumeDemand = undefined;
+    },
+    cancel() {
+      recallDiagnostics.finish("aborted");
+      resumeDemand?.();
+      resumeDemand = undefined;
+      cancelled = true;
+      cleanupAbort();
+      if (deferredTransaction) deferredTransaction.rollback();
+      else rollbackTransaction();
+      abortController.abort(
+        new DOMException("Responses client disconnected", "AbortError"),
+      );
+      if (keepaliveTimer) clearTimeout(keepaliveTimer);
+      if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
+      else void upstreamResponse.body?.cancel(signal.reason).catch(() => {});
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
+/**
+ * Accumulate a non-streaming upstream response into a GatewayResponse.
+ *
+ * Dispatches to the correct parser based on the upstream wire protocol:
+ *  - "anthropic": Anthropic Messages API format
+ *  - "openai": OpenAI Chat Completions API format
+ *  - "openai-responses": OpenAI Responses API format
+ */
+const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
+const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
+const FOREGROUND_ERROR_BODY_TIMEOUT_MS = 10_000;
+const MAX_RELAY_RETRY_AFTER_MS = 300_000;
+let foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
+
+/** Test-only override for a bounded upstream error-body read. */
+export function setForegroundErrorBodyTimeoutForTest(timeoutMs?: number): void {
+  foregroundErrorBodyTimeoutMs = timeoutMs ?? FOREGROUND_ERROR_BODY_TIMEOUT_MS;
+}
+
+function boundedRetryAfter(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return String(
+      Math.min(Math.ceil(seconds), Math.ceil(MAX_RELAY_RETRY_AFTER_MS / 1_000)),
+    );
+  }
+  const timestamp = Date.parse(trimmed);
+  if (Number.isNaN(timestamp)) return undefined;
+  return String(
+    Math.min(
+      Math.max(0, Math.ceil((timestamp - Date.now()) / 1_000)),
+      Math.ceil(MAX_RELAY_RETRY_AFTER_MS / 1_000),
+    ),
+  );
+}
+
+function boundedRetryAfterMs(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const milliseconds = Number(trimmed);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return undefined;
+  return String(Math.min(Math.ceil(milliseconds), MAX_RELAY_RETRY_AFTER_MS));
+}
+
+function sanitizedUpstreamErrorResponse(response: Response): Response {
+  const headers = new Headers({ "content-type": "application/json" });
+  copyUsageLimitHeaders(response.headers, headers);
+  const retryAfter = response.headers.get("retry-after");
+  const retryAfterMs = response.headers.get("retry-after-ms");
+  const boundedRetryAfterValue = retryAfter
+    ? boundedRetryAfter(retryAfter)
+    : undefined;
+  const boundedRetryAfterMsValue = retryAfterMs
+    ? boundedRetryAfterMs(retryAfterMs)
+    : undefined;
+  if (boundedRetryAfterValue) {
+    headers.set("retry-after", boundedRetryAfterValue);
+  }
+  if (boundedRetryAfterMsValue) {
+    headers.set("retry-after-ms", boundedRetryAfterMsValue);
+  }
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "server_error", message: "Gateway request failed" },
+    }),
+    { status: response.status, headers },
+  );
+}
+
+export async function readForegroundBody(
+  response: Response,
+  diagnostic: boolean,
+  onTruncated?: () => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const limit = diagnostic
+    ? MAX_FOREGROUND_ERROR_BYTES
+    : MAX_FOREGROUND_RESPONSE_BYTES;
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await readStreamChunk(reader, { signal });
+      if (done) break;
+      if (!value) continue;
+      const remaining = limit - bytes;
+      if (value.byteLength >= remaining) {
+        if (!diagnostic) {
+          if (value.byteLength > remaining) {
+            throw new Error(`foreground response exceeded ${limit} byte limit`);
+          }
+        } else {
+          // Reaching the cap is conservatively treated as truncation: proving
+          // exact EOF would require one more read, which may stall forever.
+          onTruncated?.();
+          if (remaining > 0) chunks.push(value.subarray(0, remaining));
+          bytes += Math.max(0, remaining);
+          break;
+        }
+      }
+      chunks.push(value);
+      bytes += value.byteLength;
+    }
+    const body = Buffer.concat(chunks);
+    if (diagnostic) return new TextDecoder().decode(body);
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(body);
+    } catch {
+      throw new Error("malformed upstream response UTF-8");
+    }
+  } finally {
+    cancelAndReleaseReader(reader);
+  }
+}
+
+async function preserveUpstreamErrorResponse(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<Response> {
+  let truncated = false;
+  const body = await readForegroundBody(
+    response,
+    true,
+    () => {
+      truncated = true;
+    },
+    signal,
+  );
+  const headers = new Headers(response.headers);
+  // The retained body may be shorter than the provider's original payload.
+  for (const name of [
+    "connection",
+    "content-encoding",
+    "content-length",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "set-cookie",
+    "set-cookie2",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ]) {
+    headers.delete(name);
+  }
+  if (truncated) headers.set("x-lore-body-truncated", "true");
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/** Parsed usage from a buffered response that lacks a valid completion. */
+class NonStreamCompletionError extends Error {
+  constructor(readonly response: GatewayResponse) {
+    super("upstream response did not complete");
+    this.name = "NonStreamCompletionError";
+  }
+}
+
+export async function accumulateNonStreamResponse(
+  upstreamResponse: Response,
+  protocol:
+    | "anthropic"
+    | "openai"
+    | "openai-responses"
+    | "vertex"
+    | "gemini" = "anthropic",
+  codex = false,
+  signal?: AbortSignal,
+  requireValidCompletion = false,
+): Promise<GatewayResponse> {
+  // Some providers (the ChatGPT/Copilot/Codex backend, DeepSeek) return an SSE
+  // stream even when stream: false was sent — sometimes WITHOUT the
+  // text/event-stream content-type. Sniff the body: if it's SSE, run it through
+  // the protocol's stream accumulator (merges EVERY chunk, so a multi-chunk
+  // stream is reconstructed faithfully — taking only the last data: line would
+  // drop all but the final delta, and JSON.parse-ing the body would throw on
+  // "data: {...}" / "event: ..." text — LOREAI-GATEWAY-38 / -1P). Otherwise
+  // parse the single JSON body.
+  const contentType = upstreamResponse.headers.get("content-type") ?? "";
+  const body = await readForegroundBody(
+    upstreamResponse,
+    false,
+    undefined,
+    signal,
+  );
+  if (looksLikeSSE(contentType, body)) {
+    const sse = new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    switch (protocol) {
+      case "openai":
+        return accumulateOpenAISSEStream(sse, {
+          signal,
+          strict: true,
+          stopAtTerminal: true,
+          consumeUntilDone: true,
+        });
+      case "openai-responses":
+        return accumulateResponsesSSEStream(sse, {
+          signal,
+          validation: codex ? "codex" : "public",
+          stopAtTerminal: true,
+          requireCompletedTerminal: true,
+        });
+      case "gemini":
+        return accumulateGeminiSSEStream(sse, {
+          signal,
+          strict: true,
+          stopAtTerminal: true,
+        });
+      default:
+        // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
+        return accumulateSSEResponse(sse, {
+          signal,
+          strict: true,
+          stopAtTerminal: true,
+        });
+    }
+  }
+
+  const json = JSON.parse(body) as Record<string, unknown>;
+  const parseResponse =
+    protocol === "openai-responses"
+      ? accumulateResponsesNonStreamJSON
+      : protocol === "openai"
+        ? accumulateOpenAINonStreamJSON
+        : protocol === "gemini"
+          ? parseGeminiResponseJSON
+          : accumulateAnthropicNonStreamJSON;
+  let response: GatewayResponse | undefined;
+  try {
+    if (protocol === "openai-responses") {
+      const parsed = parseResponsesNonStreamEnvelope(json);
+      response = parsed.response;
+      if (parsed.status !== "completed")
+        throw new ResponsesTerminalError(response, parsed.status);
+    } else {
+      response = parseResponse(json);
+      if (requireValidCompletion)
+        assertValidNonStreamCompletion(json, protocol);
+    }
+    return response;
+  } catch (error) {
+    if (!requireValidCompletion || error instanceof ResponsesTerminalError)
+      throw error;
+    // Content parsing can fail before usage validation. Reuse the same parser
+    // on usage fields alone, retaining its numeric and cache consistency checks.
+    // Invalid usage still throws; the projection is never returned as success.
+    response ??= parseResponse({
+      usage: json.usage,
+      usageMetadata: json.usageMetadata,
+    });
+    throw new NonStreamCompletionError(response);
+  }
+}
+
+function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {
+  response: GatewayResponse;
+  status: string;
+} {
+  const response = accumulateResponsesNonStreamJSON(json);
+  const status = typeof json.status === "string" ? json.status : "unknown";
+  if (status === "completed" || status === "incomplete") {
+    assertValidNonStreamCompletion(json, "openai-responses");
+  }
+  return { response, status };
+}
+
+async function preserveIncompleteResponsesTerminal(
+  operation: Promise<GatewayResponse>,
+): Promise<GatewayResponse> {
+  try {
+    return await operation;
+  } catch (error) {
+    if (
+      error instanceof ResponsesTerminalError &&
+      error.status === "incomplete"
+    ) {
+      return error.response;
+    }
+    throw error;
+  }
+}
+
+function assertValidNonStreamCompletion(
+  json: Record<string, unknown>,
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
+): void {
+  if (json.error !== undefined && json.error !== null) {
+    throw new Error("upstream response contained an error");
+  }
+
+  if (protocol === "openai") {
+    const choices = json.choices;
+    const first = Array.isArray(choices) ? choices[0] : undefined;
+    if (
+      !first ||
+      typeof first !== "object" ||
+      Array.isArray(first) ||
+      !(first as Record<string, unknown>).message ||
+      typeof (first as Record<string, unknown>).finish_reason !== "string"
+    ) {
+      throw new Error("upstream OpenAI request did not complete");
+    }
+    return;
+  }
+
+  if (protocol === "openai-responses") {
+    const status = json.status;
+    if (
+      (status !== "completed" && status !== "incomplete") ||
+      typeof json.id !== "string" ||
+      typeof json.model !== "string" ||
+      !Array.isArray(json.output) ||
+      !json.usage ||
+      typeof json.usage !== "object" ||
+      Array.isArray(json.usage)
+    ) {
+      throw new Error("upstream Responses request did not complete");
+    }
+    const seenIdentities = new Set<string>();
+    for (const rawItem of json.output) {
+      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const item = rawItem as Record<string, unknown>;
+      if (
+        typeof item.type !== "string" ||
+        !item.type ||
+        !isSupportedResponsesOutputItemType(item.type) ||
+        typeof item.id !== "string" ||
+        !item.id ||
+        seenIdentities.has(item.id)
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      seenIdentities.add(item.id);
+      if (item.type === "message") {
+        const validItemStatus =
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (
+          item.role !== "assistant" ||
+          !validItemStatus ||
+          !Array.isArray(item.content)
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const rawPart of item.content) {
+          if (
+            !rawPart ||
+            typeof rawPart !== "object" ||
+            Array.isArray(rawPart)
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          const part = rawPart as Record<string, unknown>;
+          if (
+            (part.type === "output_text" && typeof part.text !== "string") ||
+            (part.type === "refusal" && typeof part.refusal !== "string") ||
+            (part.type !== "output_text" && part.type !== "refusal")
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+        }
+      } else if (item.type === "function_call") {
+        const validItemStatus =
+          item.status === "completed" ||
+          item.status === "failed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (
+          typeof item.call_id !== "string" ||
+          !item.call_id ||
+          seenIdentities.has(item.call_id) ||
+          typeof item.name !== "string" ||
+          !item.name ||
+          typeof item.arguments !== "string" ||
+          !validItemStatus
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        seenIdentities.add(item.call_id);
+      } else if (item.type === "reasoning") {
+        const validItemStatus =
+          item.status === undefined ||
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (!validItemStatus) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const [field, partType] of [
+          ["summary", "summary_text"],
+          ["content", "reasoning_text"],
+        ] as const) {
+          const parts = item[field];
+          if (parts === undefined) continue;
+          if (!Array.isArray(parts)) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          for (const rawPart of parts) {
+            if (
+              !rawPart ||
+              typeof rawPart !== "object" ||
+              Array.isArray(rawPart) ||
+              (rawPart as Record<string, unknown>).type !== partType ||
+              typeof (rawPart as Record<string, unknown>).text !== "string"
+            ) {
+              throw new Error("upstream Responses request did not complete");
+            }
+          }
+        }
+        if (
+          item.encrypted_content !== undefined &&
+          item.encrypted_content !== null &&
+          typeof item.encrypted_content !== "string"
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      } else if (item.type === "item_reference") {
+        // A standalone non-stream response has no streamed item lifecycle to
+        // resolve this reference against; accepting it would silently erase
+        // provider output during normalization.
+        throw new Error("upstream Responses request did not complete");
+      } else {
+        if (
+          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      }
+    }
+    if (status === "incomplete") {
+      const details = json.incomplete_details;
+      if (
+        details !== undefined &&
+        details !== null &&
+        (typeof details !== "object" ||
+          Array.isArray(details) ||
+          typeof (details as Record<string, unknown>).reason !== "string")
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const reason =
+        details && typeof details === "object" && !Array.isArray(details)
+          ? (details as Record<string, unknown>).reason
+          : undefined;
+      if (
+        reason !== undefined &&
+        reason !== "max_output_tokens" &&
+        reason !== "content_filter"
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+    }
+    return;
+  }
+
+  if (protocol === "gemini") {
+    const candidates = json.candidates;
+    const first = Array.isArray(candidates) ? candidates[0] : undefined;
+    const promptFeedback = json.promptFeedback;
+    const blockReason =
+      promptFeedback &&
+      typeof promptFeedback === "object" &&
+      !Array.isArray(promptFeedback)
+        ? (promptFeedback as Record<string, unknown>).blockReason
+        : undefined;
+    if (
+      (!first ||
+        typeof first !== "object" ||
+        Array.isArray(first) ||
+        typeof (first as Record<string, unknown>).finishReason !== "string") &&
+      typeof blockReason !== "string"
+    ) {
+      throw new Error("upstream Gemini request did not complete");
+    }
+    return;
+  }
+
+  if (
+    json.type !== "message" ||
+    json.role !== "assistant" ||
+    typeof json.id !== "string" ||
+    typeof json.model !== "string" ||
+    !Array.isArray(json.content) ||
+    typeof json.stop_reason !== "string" ||
+    !json.usage ||
+    typeof json.usage !== "object" ||
+    Array.isArray(json.usage)
+  ) {
+    throw new Error("upstream Anthropic request did not complete");
+  }
+}
+
+// Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON
+const accumulateAnthropicNonStreamJSON = parseAnthropicResponseJSON;
+
+export function accumulateOpenAINonStreamJSON(
+  json: Record<string, unknown>,
+): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  if (json.choices !== undefined && !Array.isArray(json.choices)) {
+    throw new Error("malformed OpenAI response choice");
+  }
+  const choices = json.choices as Array<Record<string, unknown>> | undefined;
+  const logicalChoiceIndices = new Set<number>();
+  for (let position = 0; position < (choices?.length ?? 0); position++) {
+    const choice = choices?.[position];
+    if (!choice || typeof choice !== "object" || Array.isArray(choice)) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const logicalIndex =
+      choice.index === undefined ? position : (choice.index as number);
+    if (
+      !Number.isSafeInteger(logicalIndex) ||
+      logicalIndex < 0 ||
+      logicalChoiceIndices.has(logicalIndex)
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    logicalChoiceIndices.add(logicalIndex);
+  }
+  for (const choice of choices ?? []) {
+    const choiceToolIdentities = new Set<string>();
+    if (
+      !choice ||
+      typeof choice !== "object" ||
+      Array.isArray(choice) ||
+      (choice.index !== undefined &&
+        (!Number.isSafeInteger(choice.index) ||
+          (choice.index as number) < 0)) ||
+      (choice.finish_reason !== undefined &&
+        choice.finish_reason !== null &&
+        typeof choice.finish_reason !== "string") ||
+      !choice.message ||
+      typeof choice.message !== "object" ||
+      Array.isArray(choice.message)
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const candidateMessage = choice.message as Record<string, unknown>;
+    if (
+      (candidateMessage.content !== undefined &&
+        candidateMessage.content !== null &&
+        typeof candidateMessage.content !== "string") ||
+      (candidateMessage.role !== undefined &&
+        typeof candidateMessage.role !== "string")
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const candidateCalls = candidateMessage?.tool_calls;
+    if (candidateCalls === undefined) continue;
+    if (!Array.isArray(candidateCalls)) {
+      throw new Error("malformed OpenAI response tool identity");
+    }
+    for (const call of candidateCalls) {
+      if (!call || typeof call !== "object" || Array.isArray(call)) {
+        throw new Error("malformed OpenAI response choice");
+      }
+      const typedCall = call as Record<string, unknown>;
+      const fn = typedCall.function;
+      if (
+        !fn ||
+        typeof fn !== "object" ||
+        Array.isArray(fn) ||
+        typeof (fn as Record<string, unknown>).name !== "string" ||
+        typeof (fn as Record<string, unknown>).arguments !== "string"
+      ) {
+        throw new Error("malformed OpenAI response choice");
+      }
+      const id = asString(typedCall.id);
+      if (!id || choiceToolIdentities.has(id)) {
+        throw new Error("malformed OpenAI response tool identity");
+      }
+      choiceToolIdentities.add(id);
+    }
+  }
+  const firstChoice = choices?.[0];
+  const message = firstChoice?.message as Record<string, unknown> | undefined;
+
+  if (message) {
+    const textContent = message.content as string | undefined;
+    if (textContent) {
+      content.push({ type: "text", text: textContent });
+    }
+    const toolCalls = message.tool_calls as
+      | Array<Record<string, unknown>>
+      | undefined;
+    if (toolCalls) {
+      const toolIdentities = new Set<string>();
+      for (const tc of toolCalls) {
+        const fn = tc.function as Record<string, unknown> | undefined;
+        let input: unknown = {};
+        if (typeof fn?.arguments === "string") {
+          try {
+            input = JSON.parse(fn.arguments);
+          } catch {
+            input = fn.arguments;
+          }
+        }
+        const id = asString(tc.id);
+        if (!id || toolIdentities.has(id)) {
+          throw new Error("malformed OpenAI response tool identity");
+        }
+        toolIdentities.add(id);
+        content.push({
+          type: "tool_use",
+          id,
+          name: asString(fn?.name),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map OpenAI finish_reason to gateway stop reason
+  const finishReason = firstChoice?.finish_reason as string | undefined;
+  let stopReason = "end_turn";
+  if (finishReason === "stop") stopReason = "end_turn";
+  else if (finishReason === "length") stopReason = "max_tokens";
+  else if (finishReason === "tool_calls") stopReason = "tool_use";
+
+  const usage = validateOpenAIUsage(
+    json.usage,
+    "malformed OpenAI response usage",
+  );
+  const promptTokensDetails = usage?.prompt_tokens_details as
+    | Record<string, number>
+    | undefined;
+
+  return {
+    id: asString(json.id),
+    model: asString(json.model),
+    content,
+    stopReason,
+    usage: {
+      // prompt_tokens is inclusive of cache reads/writes; convert to the
+      // gateway's disjoint convention so cache tokens aren't double-counted.
+      inputTokens: disjointOpenAIInputTokens(
+        usage?.prompt_tokens as number | undefined,
+        promptTokensDetails?.cached_tokens,
+        promptTokensDetails?.cache_write_tokens,
+      ),
+      outputTokens: (usage?.completion_tokens as number) ?? 0,
+      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+      // OpenRouter reports cache-write tokens (Anthropic explicit caching) in
+      // prompt_tokens_details.cache_write_tokens. OpenAI proper doesn't report
+      // writes separately (leaves it undefined) — see the OpenRouter usage
+      // accounting docs. Left undefined when absent so it never masquerades
+      // as a real zero-write in analytics/cost tracking.
+      cacheCreationInputTokens: promptTokensDetails?.cache_write_tokens,
+    },
+  };
+}
+
+export function accumulateResponsesNonStreamJSON(
+  json: Record<string, unknown>,
+): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  const output = json.output as Array<Record<string, unknown>> | undefined;
+  const replayableOutput = output?.filter(
+    (item) => item.type !== "item_reference",
+  );
+
+  if (replayableOutput) {
+    const identities = new Set<string>();
+    for (const item of replayableOutput) {
+      const itemId = asString(item.id);
+      if (!itemId || identities.has(itemId)) {
+        throw new Error("malformed Responses response item identity");
+      }
+      identities.add(itemId);
+      if (item.type === "message") {
+        const msgContent = item.content as
+          | Array<Record<string, unknown>>
+          | undefined;
+        if (msgContent) {
+          for (const part of msgContent) {
+            if (part.type === "output_text") {
+              content.push({ type: "text", text: asString(part.text) });
+            } else if (
+              part.type === "refusal" &&
+              typeof part.refusal === "string"
+            ) {
+              // Other client protocols emit normalized content. Keep the raw
+              // refusal too for lossless native Responses output and replay.
+              content.push({ type: "text", text: part.refusal });
+            }
+          }
+        }
+      } else if (item.type === "function_call") {
+        let input: unknown = {};
+        if (typeof item.arguments === "string") {
+          try {
+            input = JSON.parse(item.arguments);
+          } catch {
+            input = item.arguments;
+          }
+        }
+        const id = asString(item.call_id ?? item.id);
+        if (!id || identities.has(id)) {
+          throw new Error("malformed Responses response tool identity");
+        }
+        identities.add(id);
+        content.push({
+          type: "tool_use",
+          id,
+          name: asString(item.name),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map Responses API status to gateway stop reason
+  const status = json.status as string | undefined;
+  let stopReason = "end_turn";
+  if (status === "incomplete") {
+    const details = json.incomplete_details;
+    const reason =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? (details as Record<string, unknown>).reason
+        : undefined;
+    stopReason = reason === "content_filter" ? "content_filter" : "max_tokens";
+  }
+  if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
+    stopReason = "tool_use";
+  }
+
+  const usage = validateResponsesUsage(
+    json.usage,
+    "malformed Responses response usage",
+  );
+  // Responses API reports cache details under `input_tokens_details`; fall back
+  // to `prompt_tokens_details` (Chat Completions shape) for resilience across
+  // OpenAI-compatible providers.
+  const inputTokensDetails = (usage?.input_tokens_details ??
+    usage?.prompt_tokens_details) as Record<string, number> | undefined;
+
+  return {
+    id: asString(json.id),
+    model: asString(json.model),
+    content,
+    rawOutputItems: replayableOutput,
+    stopReason,
+    usage: {
+      inputTokens: disjointOpenAIInputTokens(
+        usage?.input_tokens as number | undefined,
+        inputTokensDetails?.cached_tokens,
+        inputTokensDetails?.cache_write_tokens,
+      ),
+      outputTokens: (usage?.output_tokens as number) ?? 0,
+      cacheReadInputTokens: inputTokensDetails?.cached_tokens,
+      cacheCreationInputTokens: inputTokensDetails?.cache_write_tokens,
+    },
+  };
+}
+
+/** @internal Exported for end-to-end replay tests. */
+export function responsesProvenanceContent(
+  response: GatewayResponse,
+  replacements: ReadonlyMap<string, string> = new Map(),
+  stopBeforeToolUseId?: string,
+): GatewayContentBlock[] {
+  if (!response.rawOutputItems?.length) {
+    const content: GatewayContentBlock[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        if (block.id === stopBeforeToolUseId) break;
+        const replacement = replacements.get(block.id);
+        content.push(replacement ? { type: "text", text: replacement } : block);
+      } else {
+        content.push(block);
+      }
+    }
+    return content;
+  }
+
+  const content: GatewayContentBlock[] = [];
+  const textBlocks = response.content.filter(
+    (block): block is Extract<GatewayContentBlock, { type: "text" }> =>
+      block.type === "text",
+  );
+  // Streaming refusals remain opaque; buffered refusals also have normalized
+  // text. Only the latter consume a text slot when replaying their raw part.
+  const opaqueMessageIds = new Set(
+    response.content.flatMap((block) =>
+      block.type === "opaque" &&
+      block.responsesItem === true &&
+      block.raw.type === "message" &&
+      typeof block.raw.id === "string"
+        ? [block.raw.id]
+        : [],
+    ),
+  );
+  let textIndex = 0;
+  for (const raw of response.rawOutputItems) {
+    if (raw.type === "item_reference") continue;
+    if (raw.type === "reasoning") {
+      content.push({ type: "opaque", raw, responsesItem: true });
+      continue;
+    }
+    if (raw.type === "message") {
+      const parts = Array.isArray(raw.content)
+        ? (raw.content as Array<Record<string, unknown>>)
+        : [];
+      for (const part of parts) {
+        content.push({
+          type: "opaque",
+          raw: { ...raw, content: [part] },
+          responsesItem: true,
+        });
+        if (
+          (part.type === "output_text" && typeof part.text === "string") ||
+          (part.type === "refusal" &&
+            typeof part.refusal === "string" &&
+            typeof raw.id === "string" &&
+            !opaqueMessageIds.has(raw.id))
+        ) {
+          textIndex++;
+        }
+      }
+      if (parts.length === 0 && textBlocks[textIndex]) {
+        content.push(textBlocks[textIndex++]);
+      }
+      continue;
+    }
+    if (raw.type === "function_call") {
+      const toolUseId = asString(raw.call_id ?? raw.id);
+      if (toolUseId === stopBeforeToolUseId) break;
+      const replacement = replacements.get(toolUseId);
+      if (replacement) {
+        content.push({ type: "text", text: replacement });
+        continue;
+      }
+      const block = response.content.find(
+        (candidate): candidate is GatewayToolUseBlock =>
+          candidate.type === "tool_use" && candidate.id === toolUseId,
+      );
+      if (block) content.push(block);
+      continue;
+    }
+    content.push({ type: "opaque", raw, responsesItem: true });
+  }
+  return content;
+}
+
+/** @internal Build the canonical anchor hash used by every Responses path. */
+export function responsesAnchorContext(
+  clientMessages: GatewayMessage[],
+  visibleContent: GatewayContentBlock[],
+  response: GatewayResponse,
+  stopBeforeToolUseId: string,
+): string {
+  return recallAnchorContext(clientMessages, clientMessages.length, [
+    ...visibleContent,
+    ...responsesProvenanceContent(response, new Map(), stopBeforeToolUseId),
+  ]);
+}
+
+/**
+ * Convert a GatewayResponse to a non-streaming HTTP Response.
+ * Scales usage fields to prevent client auto-compaction.
+ */
+function nonStreamHttpResponse(
+  resp: GatewayResponse,
+  clientProtocol?: GatewayRequest["protocol"],
+  clientStream?: boolean,
+  extraHeaders?: Record<string, string>,
+  /** Whether the originating request opted into the 1M window via `context-1m`
+   *  beta. Defaults to `false` so the cap is clamped to the 200K-window value —
+   *  the safe, compaction-proof default for callers that don't thread it. */
+  longContext = false,
+): Response {
+  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
+  const usage = resp.usage ?? ZERO_USAGE;
+
+  // Scale usage so the client's token total stays below auto-compact threshold.
+  // postResponse() has already consumed the real values for calibration/bustRate.
+  // Cap is per-model AND per client-metered-window: a genuine 1M request (with
+  // the context-1m beta) isn't throttled to the 200K cap, but a 1M-capable model
+  // the client meters against 200K (no beta) IS clamped so it can't cross the
+  // client's ~167K auto-compact threshold (#910 regression; MiniMax-M3).
+  const scaledUsage = scaleUsageForClient(
+    {
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cache_read_input_tokens: usage.cacheReadInputTokens,
+      cache_creation_input_tokens: usage.cacheCreationInputTokens,
+    },
+    maxReportedUsageForModelID(resp.model, longContext),
+  );
+  const scaledResp: GatewayResponse = {
+    ...resp,
+    usage: {
+      inputTokens: scaledUsage.input_tokens,
+      outputTokens: scaledUsage.output_tokens,
+      cacheReadInputTokens: scaledUsage.cache_read_input_tokens,
+      cacheCreationInputTokens: scaledUsage.cache_creation_input_tokens,
+    },
+  };
+
+  // Return the response in the client's native wire format so server handlers
+  // can pass through without re-translation. This prevents the class of bugs
+  // where the stream flag is forgotten during server-side format conversion.
+  let clientResp: Response;
+  if (clientProtocol === "openai") {
+    clientResp = buildOpenAIResponse(scaledResp, clientStream ?? false);
+  } else if (clientProtocol === "openai-responses") {
+    clientResp = buildOpenAIResponsesResponse(
+      scaledResp,
+      clientStream ?? false,
+    );
+  } else if (clientProtocol === "gemini") {
+    clientResp = buildGeminiResponse(scaledResp, clientStream ?? false);
+  } else if (clientStream) {
+    // Anthropic (or unspecified) client that requested `stream: true`. The
+    // upstream response was BUFFERED (non-Anthropic upstreams — OpenAI /
+    // Responses / Gemini — are accumulated, not streamed through), so we
+    // synthesize a complete Anthropic SSE stream from it. Returning the
+    // non-streaming JSON body below would leave the client's SDK waiting
+    // forever for an SSE stream it opened the request for — the github-copilot
+    // + Claude-model "response never reaches the UI" bug (#1052). The other
+    // client protocols already honor `clientStream` via their builders above.
+    clientResp = streamHttpResponse(scaledResp);
+  } else {
+    // Anthropic or unspecified — default non-streaming JSON format.
+    const body = buildAnthropicNonStreamResponse(scaledResp);
+    clientResp = new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      clientResp.headers.set(k, v);
+    }
+  }
+  return clientResp;
+}
+
+/**
+ * Convert a GatewayResponse to a streaming SSE HTTP Response.
+ */
+function streamHttpResponse(resp: GatewayResponse): Response {
+  // Synthesize a complete Anthropic SSE stream from the fully-accumulated
+  // response, preserving ALL blocks (text + tool_use + thinking + opaque). This
+  // is used both for synthetic responses (slash commands) and — critically —
+  // when re-emitting a BUFFERED non-Anthropic upstream (OpenAI/Responses/Gemini)
+  // to an Anthropic client that requested `stream: true`. A text-only synthesis
+  // would silently drop tool calls, breaking coding agents (#1052).
+  const sseBody = buildSSEResponse(resp);
+
+  return new Response(sseBody, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Post-response processing
+// ---------------------------------------------------------------------------
+
+/**
+ * Analyze this turn's cache behavior and feed the result into BOTH the
+ * telemetry sinks (span attributes, Sentry metric, durable bust counter) and
+ * the consecutive-bust tracker (recordCacheUsage).
+ *
+ * Extracted from postResponse() as a testable seam (issue #928). The wire that
+ * matters for correctness is: analyzeCacheTurn -> categorizeBust ->
+ * recordCacheUsage(..., bustCause). Threading the categorized cause is what
+ * lets recordCacheUsage exempt prefix-rewrite busts (caused by Lore's own
+ * meta-distillation) from consecutiveBusts, the same way it exempts idle-resume
+ * re-warms — neither is user-context growth. That wire was previously only
+ * reachable through the full pipeline; this seam makes it directly unit-testable
+ * (a turn that categorizes as prefix-rewrite must NOT increment the counter).
+ *
+ * Side effects (unchanged from the inlined version):
+ *   - mutates sessionState.cacheAnalytics (via analyzeCacheTurn),
+ *     sessionState.lastTurnWasIdle (consumed -> false) and
+ *     sessionState.coldCacheWindow (rolling 20-turn cold-turn history),
+ *   - enriches genAiSpan with cache-divergence attributes and ends it (the span
+ *     is finalized here, before recordCacheUsage, exactly as in the original
+ *     inlined block),
+ *   - increments the per-session consecutive-bust counter in @loreai/core.
+ *
+ * @returns the categorized bust cause, or `undefined` when there is no request
+ *          body to compare (the rare no-body path — the bust tracker then falls
+ *          back to its legacy "count it" behavior).
+ */
+export function recordCacheTurnUsage(
+  sessionState: SessionState,
+  usage: GatewayUsage,
+  model: string,
+  projectPath: string,
+  /** Serialized JSON body sent upstream — for cache prefix comparison. */
+  requestBody?: string,
+  /** Active gen_ai.chat span to enrich with divergence diagnostics. */
+  genAiSpan?: Sentry.Span,
+  endSpan?: () => void,
+): CacheBustCause | undefined {
+  // Capture the idle-resume flag up front: it is consumed (set false) inside
+  // the block below but is still needed afterwards by recordCacheUsage so a
+  // cold-cache re-warm is not counted as a consecutive bust.
+  const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
+  // bustCause is computed inside the requestBody block (so we know we have a
+  // body to analyze); left undefined when the body is missing so the
+  // recordCacheUsage call below falls through to the legacy "count it"
+  // behavior on the rare no-body path.
+  let bustCause: CacheBustCause | undefined;
+  if (requestBody) {
+    // Read the unified cache strategy so the cache-analytics warn path can
+    // skip the dramatic-drop alert for cool-* sessions (those strategies
+    // explicitly chose to let the prefix go cold; the alert is just noise).
+    // Result is `undefined` for non-confident strategies — analyzeCacheTurn
+    // falls back to the existing noisy behavior in that case (conservative).
+    const econResult = getCacheStrategy(sessionState.sessionID);
+    const cacheStrategy = econResult?.result.confident
+      ? econResult.result.strategy
+      : undefined;
+    const turnAnalysis = analyzeCacheTurn(
+      sessionState.cacheAnalytics,
+      requestBody,
+      usage,
+      sessionState.sessionID,
+      sessionState.messageCount,
+      cacheStrategy,
+    );
+    bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
+    if (genAiSpan) {
+      setCacheAnalyticsAttributes(
+        genAiSpan,
+        turnAnalysis,
+        bustCause,
+        turnAnalysis.prevSnippet,
+        turnAnalysis.currSnippet,
+      );
+    }
+    emitCacheBustMetric(
+      bustCause,
+      usage.cacheCreationInputTokens ?? 0,
+      model,
+      turnAnalysis.relocatable,
+      // Distinguish a free cold-boundary prefix-rewrite (rode along with an
+      // idle-resume write that was happening anyway) from an avoidable warm one
+      // (meta-distillation leaking onto a live cache) — see emitCacheBustMetric.
+      turnWasIdleResume,
+    );
+    // Persist a durable counter so the issue #791 "is system[0] dynamic
+    // content a material cache-bust cause?" gate survives gateway restarts
+    // (the in-memory analytics reset every restart). Passive telemetry only.
+    recordCacheBustObservation({
+      projectID: ensureProject(projectPath),
+      cause: bustCause,
+      relocatable: turnAnalysis.relocatable,
+      writeTokens: usage.cacheCreationInputTokens ?? 0,
+    });
+    sessionState.lastTurnWasIdle = false; // consumed
+
+    // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)
+    const cacheRead = usage.cacheReadInputTokens ?? 0;
+    const cacheCreation = usage.cacheCreationInputTokens ?? 0;
+    const isColdTurn = cacheRead === 0 && cacheCreation > 0;
+    if (!sessionState.coldCacheWindow) sessionState.coldCacheWindow = [];
+    sessionState.coldCacheWindow.push(isColdTurn);
+    if (sessionState.coldCacheWindow.length > 20) {
+      sessionState.coldCacheWindow.shift();
+    }
+  }
+
+  // --- Finalize gen_ai.chat span (after cache analytics enrichment) ---
+  // Ended here (before recordCacheUsage, matching the original inlined order)
+  // so the extraction is ordering-identical: recordCacheUsage is pure
+  // session-state bookkeeping that never touches the span, and ending the span
+  // first means a throw in recordCacheUsage can't leak an unfinished span.
+  if (genAiSpan) {
+    if (endSpan) endSpan();
+    else genAiSpan.end();
+  }
+
+  // --- Consecutive bust tracking for tier-based decisions ---
+  // Pass the current turn's idle-resume flag so a cold-cache re-warm (cache
+  // legitimately expired during the user's pause) is not counted as a
+  // consecutive bust — that produced false "unsustainable" warnings on bursty
+  // sessions whose turns are spaced beyond the conversation cache TTL.
+  // Also pass the categorized bust cause so prefix-rewrite busts (caused by
+  // Lore's own meta-distillation) are held the same way idle-resume busts
+  // are — these are not user-context growth.
+  recordCacheUsage(
+    usage.cacheCreationInputTokens ?? 0,
+    usage.cacheReadInputTokens ?? 0,
+    usage.inputTokens ?? 0,
+    sessionState.sessionID,
+    turnWasIdleResume,
+    bustCause,
+  );
+
+  return bustCause;
+}
+
+function accountConversationUsage(
+  usage: GatewayUsage,
+  model: string,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+): AnthropicUsage {
+  const usageForSentry: AnthropicUsage = {
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cache_read_input_tokens: usage.cacheReadInputTokens,
+    cache_creation_input_tokens: usage.cacheCreationInputTokens,
+  };
+  setSentryCacheContext(usage);
+  emitCostMetric(
+    model,
+    usageForSentry,
+    "conversation",
+    resolvedConversationTTL,
+  );
+  recordConversationCost(
+    sessionID,
+    model,
+    usageForSentry,
+    resolvedConversationTTL,
+  );
+  return usageForSentry;
+}
+
+/**
+ * Run after a successful response: calibrate, store temporal messages,
+ * and schedule background work (distillation, curation).
+ */
+function postResponseForTenant(
+  req: GatewayRequest,
+  resp: GatewayResponse,
+  sessionState: SessionState,
+  config: GatewayConfig,
+  temporalInput: TurnTemporalInput,
+  /** Serialized JSON body sent upstream — for cache prefix comparison. */
+  requestBody?: string,
+  /** Active gen_ai.chat span to finalize with usage attributes. */
+  genAiSpan?: Sentry.Span,
+  /** Storage policy captured when this turn resolved its session. */
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  postResponseStartObserver?.();
+  const { sessionID, projectPath } = sessionState;
+
+  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
+  const usage = resp.usage ?? ZERO_USAGE;
+
+  try {
+    confirmKnownSessionHeader(req, sessionState, config);
+
+    // --- Calibrate overhead from real token counts ---
+    const actualInput =
+      (usage.inputTokens ?? 0) +
+      (usage.cacheReadInputTokens ?? 0) +
+      (usage.cacheCreationInputTokens ?? 0);
+    calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
+
+    // --- Sentry cache context + cost metric ---
+    const usageForSentry = accountConversationUsage(
+      usage,
+      resp.model,
+      sessionID,
+      sessionState.resolvedConversationTTL,
+    );
+    if (genAiSpan) {
+      setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
+    }
+
+    // --- Cache analytics + bust cause telemetry + consecutive-bust tracking ---
+    // Extracted into recordCacheTurnUsage() so the analyze -> categorize ->
+    // recordCacheUsage wire (esp. threading the bust cause so prefix-rewrite
+    // busts are exempted from consecutiveBusts) is unit-testable without driving
+    // the whole pipeline. The seam also enriches and ENDS genAiSpan (before its
+    // own recordCacheUsage call) so the extraction is ordering-identical to the
+    // original inlined block. See issue #928.
+    if (suppressTemporalStorage) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+      sessionState.cacheAnalytics.lastNormalizedBody = null;
+      sessionState.cacheAnalytics.lastRequestBodyLength = 0;
+    }
+    recordCacheTurnUsage(
+      sessionState,
+      usage,
+      resp.model,
+      projectPath,
+      suppressTemporalStorage ? undefined : requestBody,
+      genAiSpan,
+      endSpan,
+    );
+    // Admin credentials are authorized at dispatch time and never retained in
+    // session snapshots. The idle warmer still receives gateway-global extras,
+    // so prevent it from replaying a cached body to a client-selected endpoint
+    // that is outside every configured trusted base.
+    if (
+      Object.keys(config.upstreamExtraHeaders).length > 0 &&
+      sessionState.lastUpstream &&
+      Object.keys(
+        extraHeadersForUpstream(config, sessionState.lastUpstream.url),
+      ).length === 0
+    ) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+    }
+
+    // Capture previous stop reason before it's overwritten below (line ~1667).
+    // Used to detect tool-use continuation turns for gap recording filtering.
+    const prevStopReason = sessionState.lastStopReason;
+
+    // --- Temporal storage & session-state updates ---
+    // Use the original user result snapshot captured before gradient. No
+    // historical conversion or tool resolution is needed after the response.
+
+    // Skip temporal storage in amnesia mode or when x-lore-no-store is set.
+    // The session still gets full Lore processing (LTM, recall, gradient)
+    // but doesn't write to memory. Amnesia is session-scoped (toggle via
+    // /lore:amnesia:on|off); no-store is per-request (header-based).
+    // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
+    // intentionally dropped — the seed row never exists, so the later
+    // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
+    const noStore = suppressTemporalStorage;
+
+    // Persist (and tool-trace) this turn's messages, batched into one savepoint.
+    // Extracted seam — see storeTurnTemporal (#1084).
+    storeTurnTemporal({
+      temporalInput,
+      assistantContentBlocks: resp.content,
+      usage,
+      model: resp.model,
+      projectPath,
+      sessionID,
+      noStore,
+    });
+
+    // Update session state (persisted in the batched save after messageCount update)
+    sessionState.turnsSinceCuration =
+      (sessionState.turnsSinceCuration ?? 0) + 1;
+
+    // --- Track consecutive text-only end_turn responses (session-end heuristic) ---
+    const hasToolUse = resp.content.some((b) => b.type === "tool_use");
+    if (resp.stopReason === "end_turn" && !hasToolUse) {
+      sessionState.consecutiveTextOnlyTurns =
+        (sessionState.consecutiveTextOnlyTurns ?? 0) + 1;
+    } else {
+      sessionState.consecutiveTextOnlyTurns = 0;
+    }
+
+    // --- Output tracking for dynamic max_tokens sizing ---
+    sessionState.lastStopReason = resp.stopReason;
+    sessionState.lastInputTokens =
+      (usage.inputTokens ?? 0) +
+      (usage.cacheReadInputTokens ?? 0) +
+      (usage.cacheCreationInputTokens ?? 0);
+    const outputTokens = usage.outputTokens;
+    if (outputTokens > 0) {
+      const EMA_ALPHA = 0.3;
+      sessionState.outputTokensEMA =
+        sessionState.outputTokensEMA == null
+          ? outputTokens
+          : Math.round(
+              sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
+                outputTokens * EMA_ALPHA,
+            );
+    }
+
+    // --- Cache warming: record inter-turn gap + track warmup hits ---
+    const now = Date.now();
+
+    sessionState.lastResponseTime = now;
+
+    // (A) Record inter-turn gap — only for genuine user-initiated turns.
+    // Tool-use auto-continuations (prior stop_reason was "tool_use") produce
+    // sub-second gaps that represent automated round-trips, not human think
+    // time. Recording these would skew the survival model toward very short
+    // return times.
+    const isToolUseContinuation = prevStopReason === "tool_use";
+    if (!isToolUseContinuation) {
+      if (sessionState.lastUserTurnTime > 0) {
+        const gap = now - sessionState.lastUserTurnTime;
+        recordGap(getSessionHistogram(sessionState), gap);
+        recordGlobalGap(sessionState.projectPath, gap);
+      }
+      // Update baseline for next gap measurement — only after recording.
+      sessionState.lastUserTurnTime = now;
+    }
+
+    // (B) Track warmup hits and TTL savings — valid for ALL turn types.
+    // A user returning after a warmup is a hit regardless of whether it's
+    // a tool-use continuation.
+    // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
+    // is attributed to a warmup hit, skip TTL savings to avoid double-counting
+    // the same cacheReadTokens in both buckets.
+    if (sessionState.lastRequestTime > 0) {
+      let warmupHitThisTurn = false;
+
+      // Track warmup hit: user returned after THIS session warmed the cache.
+      // creditWarmupHit consumes the warmup (clears lastWarmupAt + refresh
+      // tokens), guards against phantom savings (Bug A: only credits when this
+      // session paid for the warmup), and returns the pro-rata savings
+      // (Bug B: min(returning-turn cache read, prefix the warmup refreshed)).
+      if (sessionState.warmup?.lastWarmupAt) {
+        const ttlMs =
+          sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+        const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
+        const outcome = creditWarmupHit(
+          sessionState.warmup,
+          sinceWarmup,
+          ttlMs,
+          usage.cacheReadInputTokens ?? 0,
+        );
+        if (outcome.hit) {
+          warmupHitThisTurn = true;
+          emitWarmupHitMetric(
+            sessionState.lastUpstream?.model ?? req.model,
+            sessionState.resolvedConversationTTL ?? "5m",
+          );
+          // Record counterfactual savings = the pro-rata credit
+          // min(returning-turn cache read, prefix the warmup refreshed) —
+          // without warming these reads would have been a full cache write.
+          if (outcome.creditedTokens > 0) {
+            recordWarmupHit(
+              sessionID,
+              req.model,
+              outcome.creditedTokens,
+              sessionState.resolvedConversationTTL ?? "5m",
+            );
+          }
+          log.info(
+            `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
+              `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup ` +
+              `(credited=${outcome.creditedTokens} tokens)`,
+          );
+        }
+      }
+
+      // Track 1h TTL savings: if gap > 5m but we still got cache reads,
+      // the 1h TTL saved a full cache write. Skip if already counted as
+      // a warmup hit to avoid double-counting the same tokens.
+      if (!warmupHitThisTurn) {
+        const requestGap = now - sessionState.lastRequestTime;
+        if (requestGap > 300_000) {
+          const cacheRead = usage.cacheReadInputTokens ?? 0;
+          if (cacheRead > 0) {
+            recordTTLSavings(sessionID, req.model, cacheRead);
+          }
+        }
+      }
+    }
+    // Reset warming state if session was marked dead or had active warming.
+    // Dead flag is cleared so the next break gets a fresh ROI analysis.
+    // warmupCount is reset so the break-even cap starts from 0 on the next break.
+    if (sessionState.warmup) {
+      if (sessionState.warmup.disabled) {
+        sessionState.warmup.disabled = false;
+        log.info(
+          `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
+        );
+      }
+      if (
+        sessionState.warmup.warmupCount > 0 &&
+        !sessionState.warmup.forceKeepWarm
+      ) {
+        sessionState.warmup.warmupCount = 0;
+      }
+    }
+
+    // --- Shadow context tracking for counterfactual compaction estimation ---
+    // Track how large the context *would* be without Lore's distillation
+    // compressing it. When the shadow counter crosses the auto-compact
+    // threshold, record a counterfactual compaction event.
+    updateShadowContext(
+      sessionID,
+      actualInput,
+      usage.outputTokens ?? 0,
+      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
+      req.model,
+      sessionState.resolvedConversationTTL,
+      requestEnablesLongContext(req),
+    );
+
+    // Mark session dirty for periodic flush (gradient + warming + costs).
+    // The 30s idle tick will persist state only for dirty sessions.
+    sessionState._dirty = true;
+
+    // --- Commit-triggered curation ---
+    // Git commits are natural task boundaries where decisions crystallize.
+    // When a commit is detected in tool outputs, force curation to trigger
+    // on this turn by bumping turnsSinceCuration to the threshold.
+    if (
+      loreConfig().knowledge.enabled &&
+      loreConfig().curator.onIdle &&
+      containsGitCommit(req)
+    ) {
+      const modelInputCost =
+        getModelEntrySync(
+          getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
+        ).cost?.input ?? 3;
+      const curationMultiplier =
+        modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+      const effectiveAfterTurns =
+        loreConfig().curator.afterTurns * curationMultiplier;
+      if (sessionState.turnsSinceCuration < effectiveAfterTurns) {
+        log.info(
+          `commit detected in session ${sessionID.slice(0, 16)} — triggering curation`,
+        );
+        sessionState.turnsSinceCuration = effectiveAfterTurns;
+      }
+    }
+
+    // --- Schedule background work (fire-and-forget) ---
+    saveSessionTracking(sessionID, {
+      messageCount: sessionState.messageCount,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+      projectPath: sessionState.projectPath || null,
+      projectPathProvisional: sessionState.projectPathProvisional === true,
+      ...(sessionState.compactionAnomalyPending
+        ? { compactionAnomalyPending: true }
+        : {}),
+    });
+    if (!sessionState.headerSessionId) {
+      const result = learnHeaders(
+        sessionState.candidateHeaders,
+        req.rawHeaders,
+      );
+      sessionState.candidateHeaders = result.updatedCandidates;
+    }
+    if (!noStore) {
+      scheduleBackgroundWork(sessionState, config);
+    }
+    return true;
+  } catch (e) {
+    log.error("post-response processing failed:", e);
+    return false;
+  } finally {
+    endSpan?.();
+  }
+}
+
+/** Record validated provider usage without publishing successful-turn state. */
+function accountUnsuccessfulResponse(
+  resp: GatewayResponse,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+  genAiSpan: Sentry.Span | undefined,
+  endSpan: () => void,
+  markDirty?: () => void,
+): void {
+  const usage = resp.usage ?? ZERO_USAGE;
+  const hasUsage = Object.values(usage).some(
+    (tokens) => typeof tokens === "number" && tokens > 0,
+  );
+  try {
+    if (hasUsage) {
+      markDirty?.();
+      const usageForSentry = accountConversationUsage(
+        usage,
+        resp.model,
+        sessionID,
+        resolvedConversationTTL,
+      );
+      if (genAiSpan) {
+        setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
+      }
+    }
+  } finally {
+    genAiSpan?.setStatus({
+      code: 2,
+      message: "upstream response did not complete",
+    });
+    endSpan();
+  }
+}
+
+function conversationTTLForAccounting(
+  sessionID: string,
+): "5m" | "1h" | undefined {
+  const liveTTL = sessions.get(sessionID)?.resolvedConversationTTL;
+  if (liveTTL === "5m" || liveTTL === "1h") return liveTTL;
+  const persistedTTL = loadSessionTracking(sessionID)?.resolvedConversationTTL;
+  return persistedTTL === "5m" || persistedTTL === "1h"
+    ? persistedTTL
+    : undefined;
+}
+
+function postResponse(
+  req: GatewayRequest,
+  resp: GatewayResponse,
+  sessionState: SessionState,
+  config: GatewayConfig,
+  temporalInput: TurnTemporalInput,
+  requestBody?: string,
+  genAiSpan?: Sentry.Span,
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  return withTenant(sessionState.storageTenantId ?? "", () =>
+    postResponseForTenant(
+      req,
+      resp,
+      sessionState,
+      config,
+      temporalInput,
+      requestBody,
+      genAiSpan,
+      suppressTemporalStorage,
+      endSpan,
+    ),
+  );
+}
+
+/**
+ * Schedule background distillation and curation (fire-and-forget).
+ */
+/**
+ * Full background chains, including post-completion state writes. Reset
+ * awaits these alongside the limiter's drain before swapping the DB (#885).
+ * Session ownership also covers global-queue wait time before a core limiter
+ * is entered, so idle eviction cannot discard credentials under queued work.
+ */
+const inFlightBackground = new Set<Promise<unknown>>();
+function trackBackground(p: Promise<unknown>, state?: SessionState): void {
+  if (state) state.backgroundWorkCount = (state.backgroundWorkCount ?? 0) + 1;
+  inFlightBackground.add(p);
+  const settled = () => {
+    inFlightBackground.delete(p);
+    if (state) state.backgroundWorkCount!--;
+  };
+  void p.then(settled, settled);
+}
+
+function scheduleBackgroundWorkForTenant(
+  sessionState: SessionState,
+  config: GatewayConfig,
+): void {
+  const { sessionID, projectPath } = sessionState;
+  const signal = AbortSignal.any([
+    pipelineGenerationAbort.signal,
+    sessionLifecycleSignal(sessionID),
+  ]);
+
+  // Skip background work when the session's auth credential is stale and no
+  // fresh fallback is available — worker LLM calls would just 401.
+  // Auth refreshes when the next client request arrives via setSessionAuth().
+  if (isAuthStale(sessionID) && !resolveAuth(sessionID)) return;
+
+  const llm = getLLMClient(config);
+  const cfg = loreConfig();
+  const model = getWorkerModel(sessionState.lastUpstream);
+  // Provider the worker will call — used to scope the circuit-breaker check so
+  // a 429 from a DIFFERENT provider doesn't pause this session's background
+  // work. Undefined when the worker model can't be resolved (→ global breaker).
+  const workerProviderID = model?.providerID;
+
+  // Provider-aware auth guard: if the resolved worker model's provider has no
+  // usable credential for this session, every background worker call to it just
+  // returns no-auth and degrades worker-health each tick. This mirrors the
+  // worker's own resolution (resolveAuth with the model's provider, incl. the
+  // cross-provider fail-closed). The provider-agnostic guard above misses this:
+  // a session can hold a credential under provider A while lastUpstream points
+  // at provider B (e.g. a turn declared x-lore-provider:anthropic but stored no
+  // anthropic key). Skip instead of flooding — getSessionAuth emits the
+  // store-key/lookup-key mismatch warning once, then we stay quiet, and work
+  // resumes automatically once a turn uses a provider we hold a credential for.
+  // Gates urgent distillation too: a no-auth call can never succeed. #894
+  // Exempt the dedicated-worker-key setup (LORE_WORKER_API_KEY): there the
+  // worker uses its own credential and bypasses resolveAuth (getWorkerAuth,
+  // ~1697), so a session-auth miss must NOT disable background work — that
+  // cross-provider config (e.g. MiniMax workers, Anthropic sessions) is exactly
+  // when model.providerID legitimately differs from the session's credential.
+  if (
+    !config.workerApiKey &&
+    model &&
+    !hasWorkerSessionAuth(
+      sessionID,
+      model.providerID,
+      matchingProviderSnapshot(sessionState, model.providerID)?.protocol,
+    )
+  )
+    return;
+
+  // When the OAuth account is near quota exhaustion, skip non-urgent
+  // background work to preserve remaining entitlement for user-facing turns.
+  // Urgent distillation is exempt (it unblocks the next user turn).
+  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
+
+  // Worker circuit breaker: when background workers have been failing for a
+  // sustained period, stop hammering the upstream every turn — allow only a
+  // periodic probe so a recovered upstream is detected without burning
+  // thousands of futile calls (Sentry: runaway lore-distill failure counts).
+  // Urgent distillation below is intentionally exempt — it unblocks the user.
+  // Also throttle sessions soft-paused by an upstream credit/billing state
+  // (HTTP 402) — retrying the failing provider every turn just wastes calls;
+  // a probe is allowed periodically (see isWorkerCreditPaused) to detect a
+  // credit top-up.
+  const workerThrottled =
+    !allowWorkerProbe(sessionID) || isWorkerCreditPaused(sessionID);
+
+  // Check if urgent distillation is needed (gradient flagged it OR a
+  // compaction anomaly was detected on the previous turn). Mark urgent: true
+  // so these bypass the batch queue — the gradient is in overflow (or the
+  // client just compacted) and needs the result before the next user turn.
+  // Note: urgent distillation is NOT gated by isBackgroundPaused() — a
+  // degraded/overflowing context window for up to 10 minutes (max breaker
+  // duration) is worse than one API call with its own tight retry budget
+  // (MAX_RETRIES_URGENT = 2, 1-4s backoff).
+  const urgentFromGradient = needsUrgentDistillation(sessionState.sessionID);
+  const urgentFromCompaction = sessionState.compactionAnomalyPending === true;
+  if (urgentFromCompaction) {
+    // Consume the one-shot flag immediately so the next non-compaction
+    // turn doesn't re-trigger urgent distillation. Persisted with the
+    // session-tracking save below.
+    sessionState.compactionAnomalyPending = false;
+    saveSessionTracking(sessionID, { compactionAnomalyPending: false });
+  }
+  if (urgentFromGradient || urgentFromCompaction) {
+    trackBackground(
+      withTenant(sessionState.storageTenantId ?? "", () =>
+        distillation
+          .run({
+            llm,
+            projectPath,
+            sessionID,
+            model,
+            force: true,
+            urgent: true,
+            callType: "direct",
+            signal,
+            workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+            // Never run meta-distillation while the conversation cache is warm.
+            // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
+            // synthetic distilled prefix at messages[0/1] on the next turn. That
+            // early-message rewrite is a real prompt-cache bust. Idle-time meta in
+            // idle.ts remains enabled because the cache is already cold there.
+            skipMeta: true,
+          })
+          .catch((e) => log.error("background distillation failed:", e)),
+      ),
+      sessionState,
+    );
+  } else if (
+    !isBackgroundPaused(workerProviderID) &&
+    !quotaPaused &&
+    !workerThrottled
+  ) {
+    // Incremental distillation and curation are non-urgent — skip when the
+    // circuit breaker is active to reduce API pressure. These are also gated
+    // by runBackground() which checks isBackgroundPaused(), but the early
+    // check here avoids unnecessary token counting and model lookups.
+    // Idle-time work in idle.ts also uses runBackground(), so under sustained
+    // rate pressure everything defers until the breaker naturally expires.
+    //
+    // Coalesce: if a distillation is already in-flight or queued for THIS
+    // session (distillLimiter is per-session p-limit(1)), skip scheduling
+    // another. The in-flight run will pick up the newly-arrived tokens on
+    // its next segment pass, and queuing duplicates just starves the global
+    // p-limit(2) background slot — distillations getting blocked behind
+    // each other in the global queue.
+    if (!distillLimiter.isBusy(sessionID)) {
+      const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
+      if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
+        log.info(
+          `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
+        );
+        trackBackground(
+          runBackground(
+            () =>
+              withTenant(sessionState.storageTenantId ?? "", () =>
+                distillation.run({
+                  llm,
+                  projectPath,
+                  sessionID,
+                  model,
+                  skipMeta: true,
+                  callType: batchQueueEnabled ? "batch" : "direct",
+                  workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+                  signal,
+                  // #627 Phase 1: stamp the session's gitHead on every distilled row.
+                  metadata: buildSessionMetadata(sessionState.gitHead),
+                }),
+              ),
+            `incremental-distill session=${sessionID.slice(0, 16)}`,
+            workerProviderID,
+          ).catch((e) => log.error("background distillation failed:", e)),
+          sessionState,
+        );
+      }
+    }
+  }
+
+  // Curation: run periodically when the knowledge system is enabled.
+  // Cost-aware frequency: on expensive models, curate less often to reduce
+  // the probability of LTM changes that bust the cache. Each LTM change
+  // that exceeds the diff pinning threshold invalidates tools + messages.
+  // Also gated by circuit breaker — curation is never urgent.
+  // Quota-paused accounts skip curation too (non-urgent background work).
+  // Worker-throttled sessions (sustained worker failure) skip it as well.
+  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
+    return;
+
+  const modelInputCost =
+    getModelEntrySync(
+      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
+    ).cost?.input ?? 3;
+  const curationMultiplier =
+    modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+  const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
+
+  // Coalesce: skip scheduling curation when one is already scheduled, queued,
+  // or in-flight for THIS session. Without this, `turnsSinceCuration` stays
+  // at/above the threshold (it is only reset in the `.then()` after a run
+  // completes — see below), so every subsequent turn re-schedules curation,
+  // flooding the background queue with duplicates that are shed at queue-full.
+  //
+  // Two signals are required:
+  //  - `curationScheduled` (synchronous): set BEFORE runBackground() and
+  //    cleared in .finally(). `curatorLimiter` is only entered when the task
+  //    actually executes inside curator.run(), so under a saturated global
+  //    queue `isBusy` stays false between scheduling and execution — this flag
+  //    closes that window deterministically.
+  //  - `curatorLimiter.isBusy` (durable across ticks): also covers the
+  //    idle-path curation (idle.ts) which doesn't set curationScheduled.
+  // Mirrors the incremental-distill guard above and the idle-path guard.
+  // In-flight (turn-based) curation is OFF by default: changing the knowledge
+  // base mid-conversation rewrites system[2] (context-bound LTM) and busts the
+  // prompt cache for the rest of a large session. Curation still runs on idle
+  // (idle.ts), where the cache is cold so the rewrite is free. `turnsSinceCuration`
+  // keeps accumulating during the active conversation and fires on the next idle.
+  if (
+    shouldRunInFlightCuration({
+      knowledgeEnabled: cfg.knowledge.enabled,
+      inFlight: cfg.curator.inFlight,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      effectiveAfterTurns,
+      curationScheduled: !!sessionState.curationScheduled,
+      curatorBusy: curatorLimiter.isBusy(sessionID),
+    })
+  ) {
+    sessionState.curationScheduled = true;
+    // Track the FULL chain (not just the limiter task) so resetPipelineState's
+    // drain also awaits the post-completion saveSessionTracking writes in the
+    // .then below — those run a few microtasks after the inner task settles and
+    // would otherwise escape the drain. (Latent today since in-flight curation
+    // is off by default, but keeps the leak closed if it's ever enabled.) #885
+    trackBackground(
+      runBackground(
+        () =>
+          withTenant(sessionState.storageTenantId ?? "", () =>
+            Sentry.startSpan(
+              {
+                name: "lore.curator",
+                op: "lore.curation",
+                attributes: { trigger: "in-flight" },
+              },
+              () =>
+                curator.run({
+                  llm,
+                  projectPath,
+                  sessionID,
+                  model,
+                  workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                  signal,
+                  // #627 Phase 1: stamp the session's gitHead on curator entries.
+                  metadata: buildSessionMetadata(sessionState.gitHead),
+                }),
+            ),
+          ),
+        `in-flight-curation session=${sessionID.slice(0, 16)}`,
+        workerProviderID,
+      )
+        .then((result) => {
+          if (!result) return; // skipped by circuit breaker
+          signal.throwIfAborted();
+          sessionState.turnsSinceCuration = 0;
+          saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
+          if (
+            result.created > 0 ||
+            result.updated > 0 ||
+            result.deleted > 0 ||
+            result.changedEntries?.length > 0
+          ) {
+            // Invalidate LTM cache only when curation actually changed entries
+            ltmSessionCache.delete(sessionID);
+            saveSessionTracking(sessionID, {
+              ltmCacheText: null,
+              ltmCacheTokens: null,
+            });
+            log.info(
+              `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
+            );
+            emitCurationMetrics({ ...result, trigger: "in-flight" });
+          }
+        })
+        .catch((e) => log.error("background curation failed:", e))
+        .finally(() => {
+          sessionState.curationScheduled = false;
+        }),
+      sessionState,
+    );
+  }
+}
+
+export function scheduleBackgroundWork(
+  sessionState: SessionState,
+  config: GatewayConfig,
+): void {
+  withTenant(sessionState.storageTenantId ?? "", () =>
+    scheduleBackgroundWorkForTenant(sessionState, config),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Compaction summary generation — shared by HTTP interception and /v1/compact
+// ---------------------------------------------------------------------------
+
+/**
+ * Interval between keep-alive `ping` events sent on the compaction SSE stream
+ * while the summary is being generated. Anthropic itself sends periodic pings
+ * on long-running streams; this keeps the client connection from timing out
+ * while we (possibly) distill the remainder under a rate limit.
+ */
+const COMPACT_KEEPALIVE_PING_MS = 15_000;
+
+/**
+ * Generate a compaction summary for a session, assembled deterministically
+ * from Lore's own memory (distillations + long-term knowledge + the prior
+ * summary). The only LLM work is urgently distilling any undistilled
+ * remainder first; there is no dedicated "compaction" LLM call. Returns null
+ * only when there is genuinely nothing to compact.
+ *
+ * This is the core logic shared by both:
+ *  - `handleCompaction` (HTTP-intercepted compaction from Claude Code / OpenCode)
+ *  - `handleCompactEndpoint` (explicit POST /v1/compact from Pi plugin)
+ */
+export async function generateCompactionSummary(opts: {
+  projectPath: string;
+  sessionID: string;
+  config: GatewayConfig;
+  previousSummary?: string;
+  sessionUpstream?: { providerID?: string; modelID?: string };
+  signal?: AbortSignal;
+  trackOperation?: (operation: Promise<unknown>) => void;
+}): Promise<string | null> {
+  const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
+    opts;
+  opts.signal?.throwIfAborted();
 
   // 1. Bring distillations current. Compaction does NOT make a dedicated
   //    "compaction" LLM call anymore — its only LLM work is distilling the
@@ -10833,13 +17861,9 @@ async function handleConversationTurn(
         return failRecall("parallel_recall");
       const recallBlock = findRecallToolUse(currentResp);
       if (!recallBlock) break;
-      const requestedItems = Array.isArray(
-        (recallBlock.input as Record<string, unknown>).ids,
-      )
-        ? ((recallBlock.input as Record<string, unknown>).ids as unknown[])
-            .length
-        : 1;
-      const admission = recallBudget.admit(requestedItems);
+      const admission = recallBudget.admit(
+        recallItemReservation(recallBlock.input),
+      );
       if (admission) {
         logRecallBudgetStop(admission);
         return failRecall("depth_exhausted");
@@ -10866,6 +17890,9 @@ async function handleConversationTurn(
         coverage,
       });
       if (stopReason) logRecallBudgetStop(stopReason);
+      // Keep a whole continuation available to turn the final recall result
+      // into an answer instead of discovering the token boundary afterward.
+      const finalRecallRound = recallBudget.mustFinalizeNext();
       const followUpResult = recallBudgetGuidance(result, stopReason);
       // Store recall result for marker round-trip expansion
       const scope = input.scope ?? "all";
@@ -10968,7 +17995,7 @@ async function handleConversationTurn(
             protocol,
             false,
             signal,
-            stopReason !== undefined,
+            finalRecallRound,
           ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
@@ -10988,7 +18015,7 @@ async function handleConversationTurn(
               followUpResult,
               recallBlock,
               foregroundAbort.signal,
-              stopReason !== undefined,
+              finalRecallRound,
             )
           : await runRecallFollowUpJSON(
               jsonRecallCtx,
@@ -10997,7 +18024,7 @@ async function handleConversationTurn(
               followUpResult,
               recallBlock,
               foregroundAbort.signal,
-              stopReason !== undefined,
+              finalRecallRound,
             );
       } catch (fetchErr) {
         if (
@@ -11021,7 +18048,7 @@ async function handleConversationTurn(
         log.error(
           `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
-        if (stopReason) return failRecall("follow_up_failed");
+        if (finalRecallRound) return failRecall("follow_up_failed");
         bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
@@ -11052,7 +18079,7 @@ async function handleConversationTurn(
           model: currentModifiedReq.model,
           sessionID: sessionState.sessionID,
         });
-        if (stopReason) return failRecall("follow_up_failed");
+        if (finalRecallRound) return failRecall("follow_up_failed");
         bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
@@ -11072,7 +18099,7 @@ async function handleConversationTurn(
 
       // Accumulate usage from this iteration
       const contUsage = continuationResp.usage ?? ZERO_USAGE;
-      recallBudget.recordUsage(contUsage);
+      const continuationStopReason = recallBudget.recordUsage(contUsage);
       Object.assign(
         cumulativeUsage,
         mergeRecallUsage(cumulativeUsage, contUsage),
@@ -11090,6 +18117,12 @@ async function handleConversationTurn(
         ];
       }
       currentResp = continuationResp;
+      if (
+        (finalRecallRound || continuationStopReason) &&
+        hasRecallToolUse(currentResp)
+      ) {
+        return failRecall("depth_exhausted");
+      }
       // Loop continues — hasRecallToolUse checked at top
     }
 
