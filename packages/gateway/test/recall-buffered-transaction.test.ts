@@ -935,6 +935,7 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
       "commit",
     ] as const)("stages effects through %s", async (mode) => {
       const id = knowledge();
+      if (mode === "exhausted") prepareProductiveRecallSources();
       const alias = crypto.randomUUID();
       const req = request(client, alias);
       req.stream = true;
@@ -1018,7 +1019,7 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
         mode === "answer" || mode === "mixed" || mode === "fallback";
       expect(calls).toBe(
         mode === "exhausted"
-          ? 11
+          ? FINAL_RECALL_CALL
           : mode === "mixed"
             ? 1
             : ["cancel", "abort", "fallback"].includes(mode)
@@ -1081,18 +1082,20 @@ test.each(["success", "cancel", "late-recall"] as const)(
     const releaseRecall = Promise.withResolvers<void>();
     const recallFinished = Promise.withResolvers<void>();
     if (mode === "late-recall") {
-      const realRecall = core.runRecall;
-      vi.spyOn(core, "runRecall").mockImplementationOnce(async (input) => {
-        recallStarted.resolve();
-        await releaseRecall.promise;
-        try {
-          // Model a non-cooperative in-flight search returning its real transfer
-          // callback after cancellation; the gateway must discard it.
-          return await realRecall({ ...input, signal: undefined });
-        } finally {
-          recallFinished.resolve();
-        }
-      });
+      const realRecall = core.runRecallWithMetadata;
+      vi.spyOn(core, "runRecallWithMetadata").mockImplementationOnce(
+        async (input) => {
+          recallStarted.resolve();
+          await releaseRecall.promise;
+          try {
+            // Model a non-cooperative in-flight search returning its real transfer
+            // callback after cancellation; the gateway must discard it.
+            return await realRecall({ ...input, signal: undefined });
+          } finally {
+            recallFinished.resolve();
+          }
+        },
+      );
     }
     setUpstreamInterceptor(async () =>
       providerResponse("anthropic", 2, "answer", true),
