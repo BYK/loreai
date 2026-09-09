@@ -841,6 +841,66 @@ function parseArguments(args: unknown): unknown {
   return args ?? {};
 }
 
+/**
+ * OpenAI strict function schemas require every property to be listed in
+ * `required`. Recall has three mutually exclusive modes, so the properties
+ * omitted by a mode must be represented as nullable instead.
+ */
+function buildStrictRecallParameters(
+  inputSchema: Record<string, unknown>,
+): Record<string, unknown> {
+  const schema = { ...inputSchema };
+  delete schema.anyOf;
+  const sourceProperties =
+    schema.properties &&
+    typeof schema.properties === "object" &&
+    !Array.isArray(schema.properties)
+      ? (schema.properties as Record<string, unknown>)
+      : {};
+  const properties = Object.fromEntries(
+    Object.entries(sourceProperties).map(([name, value]) => {
+      const property =
+        value && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : {};
+      const sourceTypes = Array.isArray(property.type)
+        ? property.type
+        : typeof property.type === "string"
+          ? [property.type]
+          : [];
+      const nonNullTypes = sourceTypes.filter((item) => item !== "null");
+      if (
+        nonNullTypes.length === 0 ||
+        nonNullTypes.some((item) => typeof item !== "string")
+      ) {
+        throw new Error(
+          `Recall schema property "${name}" must declare a non-null type`,
+        );
+      }
+      const type = [...nonNullTypes, "null"];
+      return [
+        name,
+        {
+          ...property,
+          type,
+          ...(Array.isArray(property.enum)
+            ? {
+                enum: property.enum.includes(null)
+                  ? property.enum
+                  : [...property.enum, null],
+              }
+            : {}),
+        },
+      ];
+    }),
+  );
+  return {
+    ...schema,
+    properties,
+    required: Object.keys(properties),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // GatewayRequest → OpenAI Responses API upstream request
 // ---------------------------------------------------------------------------
@@ -889,28 +949,12 @@ export function buildOpenAIResponsesUpstreamRequest(
           parameters: t.inputSchema,
         };
       }
-      const properties = t.inputSchema.properties as Record<
-        string,
-        Record<string, unknown>
-      >;
       return {
         type: "function",
         name: t.name,
         description: t.description,
         strict: true,
-        parameters: {
-          ...t.inputSchema,
-          properties: {
-            ...properties,
-            scope: {
-              ...properties.scope,
-              type: ["string", "null"],
-              enum: [...((properties.scope.enum as unknown[]) ?? []), null],
-            },
-            id: { ...properties.id, type: ["string", "null"] },
-          },
-          required: Object.keys(properties),
-        },
+        parameters: buildStrictRecallParameters(t.inputSchema),
       };
     });
   }

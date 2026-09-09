@@ -10,7 +10,7 @@
  *    (the gateway is a stateless full-history proxy)
  */
 import { afterEach, describe, test, expect } from "vitest";
-import { log } from "@loreai/core";
+import { log, MAX_RECALL_BATCH_IDS } from "@loreai/core";
 import {
   parseOpenAIResponsesRequest,
   parseOpenAIResponsesRequestChunks,
@@ -33,6 +33,7 @@ import {
   gatewayMessagesToLore,
   resolveToolResults,
 } from "../src/temporal-adapter";
+import { RECALL_GATEWAY_TOOL } from "../src/recall";
 import type {
   GatewayResponse,
   GatewayContentBlock,
@@ -1165,7 +1166,7 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     expect(tools[0].parameters).toEqual({ type: "object", properties: {} });
   });
 
-  test("marks the closed recall schema strict without changing client tools", () => {
+  test("projects the real recall tool into OpenAI's strict schema dialect", () => {
     const req = parseOpenAIResponsesRequest(
       {
         model: "gpt-4o",
@@ -1181,20 +1182,10 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
       },
       {},
     );
-    req.tools.push({
-      name: "recall",
-      description: "Recall memory",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string" },
-          scope: { type: "string" },
-          id: { type: "string" },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-    });
+    const originalRecallSchema = structuredClone(
+      RECALL_GATEWAY_TOOL.inputSchema,
+    );
+    req.tools.push(RECALL_GATEWAY_TOOL);
 
     const body = buildOpenAIResponsesUpstreamRequest(
       req,
@@ -1203,14 +1194,54 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
 
     expect(body.tools[0]).not.toHaveProperty("strict");
     expect(body.tools[1]).toMatchObject({ name: "recall", strict: true });
-    expect(body.tools[1].parameters).toMatchObject({
-      required: ["query", "scope", "id"],
+    const parameters = body.tools[1].parameters as Record<string, unknown>;
+    expect(parameters).not.toHaveProperty("anyOf");
+    expect(parameters).toMatchObject({
+      required: ["query", "scope", "id", "ids", "detailOffset", "detailLimit"],
       additionalProperties: false,
       properties: {
-        scope: { type: ["string", "null"], enum: [null] },
+        query: { type: ["string", "null"] },
+        scope: {
+          type: ["string", "null"],
+          enum: ["all", "session", "project", "knowledge", null],
+        },
         id: { type: ["string", "null"] },
+        ids: {
+          type: ["array", "null"],
+          minItems: 1,
+          maxItems: MAX_RECALL_BATCH_IDS,
+          items: { type: "string" },
+        },
+        detailOffset: { type: ["integer", "null"], minimum: 0 },
+        detailLimit: {
+          type: ["integer", "null"],
+          minimum: 1,
+          maximum: 16_000,
+        },
       },
     });
+    expect(RECALL_GATEWAY_TOOL.inputSchema).toEqual(originalRecallSchema);
+    expect(RECALL_GATEWAY_TOOL.inputSchema).not.toHaveProperty("required");
+  });
+
+  test("rejects a null-only strict projection for an ill-formed recall property", () => {
+    const req = parseOpenAIResponsesRequest(
+      { model: "gpt-4o", input: "Hello" },
+      {},
+    );
+    req.tools.push({
+      name: "recall",
+      description: "Recall memory",
+      inputSchema: {
+        type: "object",
+        properties: { query: { anyOf: [{ type: "string" }] } },
+        additionalProperties: false,
+      },
+    });
+
+    expect(() =>
+      buildOpenAIResponsesUpstreamRequest(req, "https://api.openai.com"),
+    ).toThrow('Recall schema property "query" must declare a non-null type');
   });
 
   test("does NOT forward previous_response_id (gateway is stateless full-history)", () => {

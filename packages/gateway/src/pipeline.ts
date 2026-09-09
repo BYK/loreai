@@ -8103,26 +8103,35 @@ export function streamResponsesRecallAware(
         `invalid recall function arguments: unknown property "${unknown}"`,
       );
     }
-    if (record.query !== undefined && typeof record.query !== "string") {
+    // The strict OpenAI tool projection sends every declared property and uses
+    // `null` for values omitted by the selected recall mode.
+    const queryValue = record.query === null ? undefined : record.query;
+    const scopeValue = record.scope === null ? undefined : record.scope;
+    const idValue = record.id === null ? undefined : record.id;
+    const idsValue = record.ids === null ? undefined : record.ids;
+    const detailOffsetValue =
+      record.detailOffset === null ? undefined : record.detailOffset;
+    const detailLimitValue =
+      record.detailLimit === null ? undefined : record.detailLimit;
+    if (queryValue !== undefined && typeof queryValue !== "string") {
       throw new Error(
         "invalid recall function arguments: query must be a string",
       );
     }
     if (
-      record.id !== undefined &&
-      record.id !== null &&
-      (typeof record.id !== "string" ||
-        !record.id ||
-        record.id.length > MAX_RECALL_ID_CHARS)
+      idValue !== undefined &&
+      (typeof idValue !== "string" ||
+        !idValue ||
+        idValue.length > MAX_RECALL_ID_CHARS)
     ) {
       throw new Error("invalid recall function arguments: id must be a string");
     }
     if (
-      record.ids !== undefined &&
-      (!Array.isArray(record.ids) ||
-        record.ids.length === 0 ||
-        record.ids.length > MAX_RECALL_BATCH_IDS ||
-        record.ids.some(
+      idsValue !== undefined &&
+      (!Array.isArray(idsValue) ||
+        idsValue.length === 0 ||
+        idsValue.length > MAX_RECALL_BATCH_IDS ||
+        idsValue.some(
           (id) =>
             typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
         ))
@@ -8131,54 +8140,50 @@ export function streamResponsesRecallAware(
         `invalid recall function arguments: ids must contain 1-${MAX_RECALL_BATCH_IDS} strings no longer than ${MAX_RECALL_ID_CHARS} characters`,
       );
     }
-    if (record.id !== undefined && record.ids !== undefined) {
+    if (idValue !== undefined && idsValue !== undefined) {
       throw new Error("invalid recall function arguments: id and ids conflict");
     }
     if (
-      record.detailOffset !== undefined &&
-      (!Number.isSafeInteger(record.detailOffset) ||
-        (record.detailOffset as number) < 0)
+      detailOffsetValue !== undefined &&
+      (!Number.isSafeInteger(detailOffsetValue) ||
+        (detailOffsetValue as number) < 0)
     ) {
       throw new Error(
         "invalid recall function arguments: detailOffset must be non-negative",
       );
     }
     if (
-      record.detailLimit !== undefined &&
-      (!Number.isSafeInteger(record.detailLimit) ||
-        (record.detailLimit as number) < 1 ||
-        (record.detailLimit as number) > 16_000)
+      detailLimitValue !== undefined &&
+      (!Number.isSafeInteger(detailLimitValue) ||
+        (detailLimitValue as number) < 1 ||
+        (detailLimitValue as number) > 16_000)
     ) {
       throw new Error(
         "invalid recall function arguments: detailLimit must be 1-16000",
       );
     }
-    if (
-      record.scope !== undefined &&
-      record.scope !== null &&
-      typeof record.scope !== "string"
-    ) {
+    if (scopeValue !== undefined && typeof scopeValue !== "string") {
       throw new Error(
         "invalid recall function arguments: scope must be a string",
       );
     }
-    const query = record.query ?? "";
-    const id = record.id || undefined;
-    const ids = Array.isArray(record.ids) ? [...record.ids] : undefined;
+    const query = queryValue ?? "";
+    const id = idValue || undefined;
+    const ids = Array.isArray(idsValue) ? [...idsValue] : undefined;
     if (!query.trim() && !id && !ids) {
       throw new Error(
         "invalid recall function arguments: query, id, or ids is required",
       );
     }
     if (
-      (record.detailOffset !== undefined || record.detailLimit !== undefined) &&
+      (detailOffsetValue !== undefined || detailLimitValue !== undefined) &&
       !id
     ) {
       throw new Error(
         "invalid recall function arguments: detail ranges require one id",
       );
     }
-    const scope = record.scope || undefined;
+    const scope = scopeValue || undefined;
     if (
       scope &&
       scope !== "all" &&
@@ -8193,11 +8198,11 @@ export function streamResponsesRecallAware(
       ...(scope ? { scope } : {}),
       ...(id ? { id } : {}),
       ...(ids ? { ids } : {}),
-      ...(typeof record.detailOffset === "number"
-        ? { detailOffset: record.detailOffset }
+      ...(typeof detailOffsetValue === "number"
+        ? { detailOffset: detailOffsetValue }
         : {}),
-      ...(typeof record.detailLimit === "number"
-        ? { detailLimit: record.detailLimit }
+      ...(typeof detailLimitValue === "number"
+        ? { detailLimit: detailLimitValue }
         : {}),
     };
   };

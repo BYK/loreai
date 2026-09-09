@@ -196,6 +196,7 @@ describe("RECALL_GATEWAY_TOOL", () => {
       { required: ["id"] },
       { required: ["ids"] },
     ]);
+    expect(schema).not.toHaveProperty("required");
     expect(schema.additionalProperties).toBe(false);
   });
 

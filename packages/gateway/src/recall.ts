@@ -957,23 +957,34 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   ]);
   const unknown = Object.keys(record).find((key) => !allowed.has(key));
   if (unknown) throw new Error(`Unknown recall property: ${unknown}`);
-  if (record.query !== undefined && typeof record.query !== "string") {
+  // OpenAI strict function schemas require every property to be present. The
+  // wire projection therefore represents omitted optional values as `null`;
+  // normalize those sentinels before applying the provider-neutral contract.
+  const queryValue = record.query === null ? undefined : record.query;
+  const scopeValue = record.scope === null ? undefined : record.scope;
+  const idValue = record.id === null ? undefined : record.id;
+  const idsValue = record.ids === null ? undefined : record.ids;
+  const detailOffsetValue =
+    record.detailOffset === null ? undefined : record.detailOffset;
+  const detailLimitValue =
+    record.detailLimit === null ? undefined : record.detailLimit;
+  if (queryValue !== undefined && typeof queryValue !== "string") {
     throw new Error("Recall query must be a string");
   }
   if (
-    record.id !== undefined &&
-    (typeof record.id !== "string" ||
-      !record.id ||
-      record.id.length > MAX_RECALL_ID_CHARS)
+    idValue !== undefined &&
+    (typeof idValue !== "string" ||
+      !idValue ||
+      idValue.length > MAX_RECALL_ID_CHARS)
   ) {
     throw new Error("Recall id must be a non-empty string");
   }
   if (
-    record.ids !== undefined &&
-    (!Array.isArray(record.ids) ||
-      record.ids.length === 0 ||
-      record.ids.length > MAX_RECALL_BATCH_IDS ||
-      record.ids.some(
+    idsValue !== undefined &&
+    (!Array.isArray(idsValue) ||
+      idsValue.length === 0 ||
+      idsValue.length > MAX_RECALL_BATCH_IDS ||
+      idsValue.some(
         (id) =>
           typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
       ))
@@ -982,31 +993,31 @@ function parseRecallInput(block: GatewayToolUseBlock): {
       `Recall ids must contain from 1 to ${MAX_RECALL_BATCH_IDS} non-empty strings`,
     );
   }
-  if (record.id !== undefined && record.ids !== undefined) {
+  if (idValue !== undefined && idsValue !== undefined) {
     throw new Error("Recall id and ids cannot be used together");
   }
   if (
-    record.detailOffset !== undefined &&
-    (!Number.isSafeInteger(record.detailOffset) ||
-      (record.detailOffset as number) < 0)
+    detailOffsetValue !== undefined &&
+    (!Number.isSafeInteger(detailOffsetValue) ||
+      (detailOffsetValue as number) < 0)
   ) {
     throw new Error("Recall detailOffset must be a non-negative integer");
   }
   if (
-    record.detailLimit !== undefined &&
-    (!Number.isSafeInteger(record.detailLimit) ||
-      (record.detailLimit as number) < 1 ||
-      (record.detailLimit as number) > 16_000)
+    detailLimitValue !== undefined &&
+    (!Number.isSafeInteger(detailLimitValue) ||
+      (detailLimitValue as number) < 1 ||
+      (detailLimitValue as number) > 16_000)
   ) {
     throw new Error("Recall detailLimit must be an integer from 1 to 16000");
   }
-  const query = record.query ?? "";
-  if (!query.trim() && !record.id && !record.ids) {
+  const query = queryValue ?? "";
+  if (!query.trim() && !idValue && !idsValue) {
     throw new Error("Recall query, id, or ids is required");
   }
   if (
-    (record.detailOffset !== undefined || record.detailLimit !== undefined) &&
-    typeof record.id !== "string"
+    (detailOffsetValue !== undefined || detailLimitValue !== undefined) &&
+    typeof idValue !== "string"
   ) {
     throw new Error("Recall detail ranges require exactly one id");
   }
@@ -1017,21 +1028,21 @@ function parseRecallInput(block: GatewayToolUseBlock): {
     "knowledge",
   ]);
   if (
-    record.scope !== undefined &&
-    (typeof record.scope !== "string" || !validScopes.has(record.scope))
+    scopeValue !== undefined &&
+    (typeof scopeValue !== "string" || !validScopes.has(scopeValue))
   ) {
     throw new Error("Invalid recall scope");
   }
   return {
     query,
-    scope: (record.scope as RecallScope | undefined) ?? "all",
-    ...(typeof record.id === "string" && record.id ? { id: record.id } : {}),
-    ...(Array.isArray(record.ids) ? { ids: [...record.ids] } : {}),
-    ...(typeof record.detailOffset === "number"
-      ? { detailOffset: record.detailOffset }
+    scope: (scopeValue as RecallScope | undefined) ?? "all",
+    ...(typeof idValue === "string" && idValue ? { id: idValue } : {}),
+    ...(Array.isArray(idsValue) ? { ids: [...idsValue] } : {}),
+    ...(typeof detailOffsetValue === "number"
+      ? { detailOffset: detailOffsetValue }
       : {}),
-    ...(typeof record.detailLimit === "number"
-      ? { detailLimit: record.detailLimit }
+    ...(typeof detailLimitValue === "number"
+      ? { detailLimit: detailLimitValue }
       : {}),
   };
 }
