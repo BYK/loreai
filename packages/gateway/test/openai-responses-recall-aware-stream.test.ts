@@ -6741,37 +6741,116 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain('"name":"recall"');
   });
 
-  test("accepts nullable strict optional recall arguments", async () => {
-    let seen: { scope?: string; id?: string } | undefined;
-    const client = streamResponsesRecallAware(
-      streamFrom([
-        created("resp_nullable_args", "gpt-5.6-terra"),
-        recallCall(0, { query: "architecture", scope: null, id: null }),
-        completed("resp_nullable_args"),
-      ]),
-      {
-        onComplete: () => {},
-        onRecall: async ({ scope, id }) => {
-          seen = { scope, id };
-          return {
-            anchorText: buildAnchor("architecture"),
-            resultText: "results",
-          };
-        },
-        runFollowUp: async () => ({
-          reader: streamFrom([
-            created("resp_nullable_followup", "gpt-5.6-terra"),
-            textItem(0, "answer"),
-            completed("resp_nullable_followup"),
-          ]).body!.getReader(),
-        }),
+  test.each([
+    {
+      mode: "query",
+      args: {
+        query: "architecture",
+        scope: null,
+        id: null,
+        ids: null,
+        detailOffset: null,
+        detailLimit: null,
       },
-    );
+      expected: {
+        query: "architecture",
+        scope: undefined,
+        id: undefined,
+        ids: undefined,
+        detailOffset: undefined,
+        detailLimit: undefined,
+      },
+    },
+    {
+      mode: "single-id detail",
+      args: {
+        query: null,
+        scope: null,
+        id: "k:one",
+        ids: null,
+        detailOffset: 10,
+        detailLimit: 20,
+      },
+      expected: {
+        query: "",
+        scope: undefined,
+        id: "k:one",
+        ids: undefined,
+        detailOffset: 10,
+        detailLimit: 20,
+      },
+    },
+    {
+      mode: "batch-id",
+      args: {
+        query: null,
+        scope: null,
+        id: null,
+        ids: ["k:one", "k:two"],
+        detailOffset: null,
+        detailLimit: null,
+      },
+      expected: {
+        query: "",
+        scope: undefined,
+        id: undefined,
+        ids: ["k:one", "k:two"],
+        detailOffset: undefined,
+        detailLimit: undefined,
+      },
+    },
+  ])(
+    "accepts nullable strict $mode recall arguments",
+    async ({ args, expected }) => {
+      let seen:
+        | {
+            query: string;
+            scope?: string;
+            id?: string;
+            ids?: string[];
+            detailOffset?: number;
+            detailLimit?: number;
+          }
+        | undefined;
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_nullable_args", "gpt-5.6-terra"),
+          recallCall(0, args),
+          completed("resp_nullable_args"),
+        ]),
+        {
+          onComplete: () => {},
+          onRecall: async ({
+            query,
+            scope,
+            id,
+            ids,
+            detailOffset,
+            detailLimit,
+          }) => {
+            seen = { query, scope, id, ids, detailOffset, detailLimit };
+            return {
+              anchorText: buildAnchor(query || "detail"),
+              resultText: "results",
+            };
+          },
+          runFollowUp: async () => {
+            const response = streamFrom([
+              created("resp_nullable_followup", "gpt-5.6-terra"),
+              textItem(0, "answer"),
+              completed("resp_nullable_followup"),
+            ]);
+            if (!response.body) throw new Error("missing follow-up body");
+            return { reader: response.body.getReader() };
+          },
+        },
+      );
 
-    const out = await drain(client);
-    expect(seen).toEqual({ scope: undefined, id: undefined });
-    expect(out).toContain("answer");
-  });
+      const out = await drain(client);
+      expect(seen).toEqual(expected);
+      expect(out).toContain("answer");
+    },
+  );
 
   test("holds no-index continuation events after chained recall detection", async () => {
     const malformed = streamFrom([
