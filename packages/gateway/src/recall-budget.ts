@@ -6,6 +6,8 @@ export const MAX_RECALL_EXECUTIONS = 24;
 export const MAX_RECALL_CHAIN_TOKENS = 128_000;
 export const MAX_RECALL_CHAIN_RESULT_BYTES = 512 * 1024;
 export const MAX_RECALL_CHAIN_ITEMS = 64;
+/** The formatter's configured maximum for source previews in one search. */
+export const MAX_RECALL_SEARCH_ITEMS = 30;
 export const RECALL_FINALIZATION_RESERVE_MS = 20_000;
 export const RECALL_FINALIZATION_RESERVE_TOKENS = 4_096;
 export const MAX_CONSECUTIVE_RECALL_NO_PROGRESS = 2;
@@ -43,9 +45,12 @@ export class RecallChainBudget {
   private readonly deadlineAt: number;
   private readonly now: () => number;
   private readonly deliveredCoverage = new Set<string>();
+  private readonly deliveredItems = new Set<string>();
   private stop: RecallStopReason | undefined;
   private executions = 0;
   private items = 0;
+  private reservedItems = 0;
+  private readonly itemReservations: number[] = [];
   private resultBytes = 0;
   private inputTokens = 0;
   private outputTokens = 0;
@@ -72,12 +77,12 @@ export class RecallChainBudget {
           );
   }
 
-  /** Reserve one bounded recall operation before dispatching any work. */
-  admit(requestedItems = 1): RecallStopReason | undefined {
+  /** Reserve the maximum source count an operation can expose. */
+  admit(maxDeliveredItems = 1): RecallStopReason | undefined {
     if (this.stop) return this.stop;
-    if (!Number.isSafeInteger(requestedItems) || requestedItems < 1) {
+    if (!Number.isSafeInteger(maxDeliveredItems) || maxDeliveredItems < 1) {
       throw new Error(
-        "recall budget requestedItems must be a positive integer",
+        "recall budget maxDeliveredItems must be a positive integer",
       );
     }
     if (this.now() >= this.deadlineAt) return this.setStop("time");
@@ -85,11 +90,12 @@ export class RecallChainBudget {
       return this.setStop("tokens");
     if (this.resultBytes >= this.maxResultBytes)
       return this.setStop("result_bytes");
-    if (this.items + requestedItems > this.maxItems)
+    if (this.items + this.reservedItems + maxDeliveredItems > this.maxItems)
       return this.setStop("items");
     if (this.executions >= this.maxExecutions) return this.setStop("execution");
     this.executions++;
-    this.items += requestedItems;
+    this.reservedItems += maxDeliveredItems;
+    this.itemReservations.push(maxDeliveredItems);
     return undefined;
   }
 
@@ -120,6 +126,12 @@ export class RecallChainBudget {
       );
     }
     this.resultBytes += input.resultBytes;
+    // Replace this operation's conservative reservation with the distinct
+    // source identities that actually reached the model. Old adapters may not
+    // provide coverage, so consume the reservation instead of undercounting.
+    const reservedItems = this.itemReservations.shift() ?? 0;
+    this.reservedItems = Math.max(0, this.reservedItems - reservedItems);
+    let deliveredItems = input.coverage === undefined ? reservedItems : 0;
     // Older in-process adapters may not yet provide coverage. Do not infer a
     // stall from absent metadata; explicit [] remains a no-progress outcome.
     let progressed = input.coverage === undefined;
@@ -131,7 +143,13 @@ export class RecallChainBudget {
         this.deliveredCoverage.add(key);
         progressed = true;
       }
+      const itemKey = `${item.identity}\u0000${item.revision}`;
+      if (!this.deliveredItems.has(itemKey)) {
+        this.deliveredItems.add(itemKey);
+        deliveredItems++;
+      }
     }
+    this.items += deliveredItems;
     if (progressed) this.consecutiveNoProgress = 0;
     else this.consecutiveNoProgress++;
 
@@ -140,6 +158,7 @@ export class RecallChainBudget {
       this.setStop("execution");
     if (!this.stop && this.resultBytes >= this.maxResultBytes)
       this.setStop("result_bytes");
+    if (!this.stop && this.items >= this.maxItems) this.setStop("items");
     if (!this.stop && this.totalTokens() >= this.maxTokens)
       this.setStop("tokens");
     if (
@@ -158,6 +177,7 @@ export class RecallChainBudget {
   snapshot(): {
     executions: number;
     items: number;
+    reservedItems: number;
     resultBytes: number;
     inputTokens: number;
     outputTokens: number;
@@ -169,6 +189,7 @@ export class RecallChainBudget {
     return {
       executions: this.executions,
       items: this.items,
+      reservedItems: this.reservedItems,
       resultBytes: this.resultBytes,
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
@@ -195,6 +216,19 @@ export class RecallChainBudget {
         RECALL_FINALIZATION_RESERVE_TOKENS,
         Math.floor(this.maxTokens / 4),
       )
+    );
+  }
+
+  /** True when the next provider turn must be dedicated to final synthesis. */
+  mustFinalizeNext(): boolean {
+    const reserve = Math.min(
+      RECALL_FINALIZATION_RESERVE_TOKENS,
+      Math.floor(this.maxTokens / 4),
+    );
+    return (
+      this.stop !== undefined ||
+      this.now() >= this.deadlineAt ||
+      this.totalTokens() >= this.maxTokens - 2 * reserve
     );
   }
 
