@@ -4329,6 +4329,18 @@ describe("streamResponsesRecallAware", () => {
             return {
               anchorText: buildAnchor(`q${recalls}`),
               resultText: "result",
+              // Production recall adapters provide coverage; model the
+              // one-source result so this chain exercises execution policy,
+              // rather than the conservative legacy-adapter reservation.
+              coverage: [
+                {
+                  identity: `t:source-${recalls}`,
+                  revision: `revision-${recalls}`,
+                  offset: 0,
+                  length: 1,
+                  complete: true,
+                },
+              ],
             };
           },
           runFollowUp: async ({ finalRecallRound }) => {
