@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { MAX_RECALL_EXECUTIONS, RecallChainBudget } from "../src/recall-budget";
+import {
+  MAX_RECALL_EXECUTIONS,
+  MAX_RECALL_SEARCH_ITEMS,
+  RecallChainBudget,
+} from "../src/recall-budget";
 
 const coverage = (index: number) => [
   {
@@ -60,6 +64,53 @@ describe("RecallChainBudget", () => {
       "result_bytes",
     );
     expect(byteBudget.admit(1)).toBe("result_bytes");
+  });
+
+  test("reserves and then records the actual search result count", () => {
+    const budget = new RecallChainBudget({ maxItems: 64 });
+    expect(budget.admit(MAX_RECALL_SEARCH_ITEMS)).toBeUndefined();
+    expect(
+      budget.record({ resultBytes: 100, coverage: coverage(1) }),
+    ).toBeUndefined();
+    expect(budget.snapshot()).toMatchObject({ items: 1, reservedItems: 0 });
+
+    // The second broad search can be admitted only because the first one
+    // delivered one source, not its maximum reservation of thirty.
+    expect(budget.admit(MAX_RECALL_SEARCH_ITEMS)).toBeUndefined();
+    expect(
+      budget.record({ resultBytes: 100, coverage: coverage(2) }),
+    ).toBeUndefined();
+    expect(budget.admit(MAX_RECALL_SEARCH_ITEMS)).toBeUndefined();
+    expect(budget.snapshot()).toMatchObject({ items: 2, reservedItems: 30 });
+  });
+
+  test("stops broad searches once their delivered sources exhaust the item budget", () => {
+    const budget = new RecallChainBudget({ maxItems: 64 });
+    const broadCoverage = (offset: number) =>
+      Array.from({ length: MAX_RECALL_SEARCH_ITEMS }, (_, index) => ({
+        identity: `t:broad-${offset + index}`,
+        revision: `revision-${offset + index}`,
+        offset: 0,
+        length: 100,
+        complete: true,
+      }));
+
+    expect(budget.admit(MAX_RECALL_SEARCH_ITEMS)).toBeUndefined();
+    expect(
+      budget.record({ resultBytes: 100, coverage: broadCoverage(0) }),
+    ).toBeUndefined();
+    expect(budget.admit(MAX_RECALL_SEARCH_ITEMS)).toBeUndefined();
+    expect(
+      budget.record({ resultBytes: 100, coverage: broadCoverage(30) }),
+    ).toBeUndefined();
+    expect(budget.snapshot().items).toBe(60);
+    expect(budget.admit(MAX_RECALL_SEARCH_ITEMS)).toBe("items");
+  });
+
+  test("marks the final continuation before the token boundary", () => {
+    const budget = new RecallChainBudget({ maxTokens: 20 });
+    budget.recordUsage({ inputTokens: 10 });
+    expect(budget.mustFinalizeNext()).toBe(true);
   });
 
   test("reserves foreground time for final synthesis before dispatch", () => {
