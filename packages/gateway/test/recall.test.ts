@@ -51,6 +51,7 @@ import {
   MAX_RECALL_STORE_BYTES,
   executeRecall,
 } from "../src/recall";
+import { MAX_RECALL_ID_CHARS } from "@loreai/core";
 import {
   buildOpenAIResponsesUpstreamRequest,
   parseOpenAIResponsesRequest,
@@ -217,6 +218,8 @@ describe("executeRecall malformed input", () => {
     { query: "ok", limit: 0 },
     { query: "ok", limit: 1.5 },
     { ids: [] },
+    { id: `k:${"x".repeat(MAX_RECALL_ID_CHARS)}` },
+    { ids: [`k:${"x".repeat(MAX_RECALL_ID_CHARS)}`] },
     { id: "k:one", ids: ["k:two"] },
     { ids: ["k:one"], detailLimit: 10 },
     { query: "ok", unknown: true },
