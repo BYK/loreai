@@ -10,10 +10,32 @@ import {
   buildStreamingResponse,
   setUpstreamInterceptor,
 } from "../src/pipeline";
-import { executeRecall } from "../src/recall";
+import { executeRecall, MAX_RECALL_DEPTH } from "../src/recall";
 import type { GatewayRequest, SessionState } from "../src/translate/types";
 
 const mockedRecall = vi.mocked(executeRecall);
+
+/** Model a distinct, productive result for every requested recall. */
+function installProductiveRecallMock(): void {
+  let calls = 0;
+  mockedRecall.mockImplementation(async () => {
+    calls++;
+    return {
+      result: "recall results",
+      input: { query: "architecture" },
+      coverage: [
+        {
+          identity: `t:source-${calls}`,
+          revision: `revision-${calls}`,
+          offset: 0,
+          length: 1,
+          complete: true,
+          kind: "detail" as const,
+        },
+      ],
+    };
+  });
+}
 
 function loadLocalConfig() {
   const config = loadConfig();
@@ -177,10 +199,7 @@ describe("Anthropic recall continuation abort", () => {
     "%s abort settles a hostile nonterminal follow-up at round %i",
     async (mode, round) => {
       if (mode === "deadline") vi.useFakeTimers();
-      mockedRecall.mockResolvedValue({
-        result: "recall results",
-        input: { query: "architecture" },
-      });
+      installProductiveRecallMock();
       const continuation = hostileContinuation(mode === "deadline");
       let follows = 0;
       setUpstreamInterceptor(async () =>
@@ -237,10 +256,7 @@ describe.each([true, false])(
       "pause_turn",
       "model_context_window_exceeded",
     ] as const)("last continuation: %s", async (mode) => {
-      mockedRecall.mockResolvedValue({
-        result: "recall results",
-        input: { query: "architecture" },
-      });
+      installProductiveRecallMock();
       const finalText =
         mode === "empty" ? "" : "Finished using available results.";
       const completed = vi.fn();
@@ -251,7 +267,7 @@ describe.each([true, false])(
       req.metadata.tool_choice = { type: "tool", name: "recall" };
       setUpstreamInterceptor(async (upstream) => {
         calls++;
-        if (calls < 10) return recallOnlyResponse();
+        if (calls < MAX_RECALL_DEPTH) return recallOnlyResponse();
         const body = upstream as Record<string, unknown>;
         expect(body.tools).toEqual([
           expect.objectContaining({ name: "recall" }),
@@ -323,7 +339,10 @@ describe.each([true, false])(
         expect(completed).toHaveBeenCalledTimes(1);
         expect(completed.mock.calls[0][0]).toMatchObject({
           content: [{ type: "text", text: finalText }],
-          usage: { inputTokens: 13, outputTokens: 12 },
+          usage: {
+            inputTokens: MAX_RECALL_DEPTH + 3,
+            outputTokens: MAX_RECALL_DEPTH + 2,
+          },
         });
       } else {
         const reader = downstream.body!.getReader();
@@ -343,22 +362,28 @@ describe.each([true, false])(
         // on error and can hide a success terminal already delivered to a client.
         expect(received).not.toContain('"stop_reason":"max_tokens"');
         expect(received.match(/^event: message_delta$/gm) ?? []).toHaveLength(
-          clientSpeaksAnthropic ? 20 : 0,
+          clientSpeaksAnthropic ? MAX_RECALL_DEPTH * 2 : 0,
         );
         expect(received.match(/^event: message_stop$/gm) ?? []).toHaveLength(
-          clientSpeaksAnthropic ? 20 : 0,
+          clientSpeaksAnthropic ? MAX_RECALL_DEPTH * 2 : 0,
         );
         expect(completed).not.toHaveBeenCalled();
         expect(failed).toHaveBeenCalledTimes(1);
-        const tokens = mode === "recall" ? 11 : 10;
+        const tokens =
+          mode === "recall" ? MAX_RECALL_DEPTH + 1 : MAX_RECALL_DEPTH;
         expect(failed.mock.calls[0][0].usage).toMatchObject({
-          inputTokens: mode !== "recall" && mode !== "http-error" ? 13 : tokens,
+          inputTokens:
+            mode !== "recall" && mode !== "http-error"
+              ? MAX_RECALL_DEPTH + 3
+              : tokens,
           outputTokens:
-            mode !== "recall" && mode !== "http-error" ? 12 : tokens,
+            mode !== "recall" && mode !== "http-error"
+              ? MAX_RECALL_DEPTH + 2
+              : tokens,
         });
       }
-      expect(calls).toBe(10);
-      expect(mockedRecall).toHaveBeenCalledTimes(10);
+      expect(calls).toBe(MAX_RECALL_DEPTH);
+      expect(mockedRecall).toHaveBeenCalledTimes(MAX_RECALL_DEPTH);
     });
   },
 );

@@ -24,16 +24,16 @@ describe("executeRecall — alreadyInLtmIds identity across calls", () => {
   beforeEach(() => {
     captured = [];
     spy = vi
-      .spyOn(core, "runRecall")
+      .spyOn(core, "runRecallWithMetadata")
       .mockImplementation(
         async (input: { alreadyInLtmIds?: ReadonlySet<string> }) => {
           captured.push(input.alreadyInLtmIds);
-          return "OK";
+          return { result: "OK", coverage: [] };
         },
       );
   });
 
-  test("the same Set instance is forwarded verbatim to runRecall", async () => {
+  test("the same Set instance is forwarded verbatim to the metadata runner", async () => {
     const ids = new Set(["019f0000-0000-7000-8000-000000000001"]);
 
     const block: GatewayToolUseBlock = {

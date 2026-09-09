@@ -752,12 +752,24 @@ export const LoreConfig = z.object({
             .describe(
               "Absolute RRF score floor; drops weak matches even via the keep-3 backfill. Default: 0 (disabled).",
             ),
+          /** Emergency cap for one request-owned recall chain. Normal stopping
+           * uses time, token, byte, item, and progress budgets first. */
+          chainMaxExecutions: z
+            .number()
+            .int()
+            .min(12)
+            .max(128)
+            .default(24)
+            .describe(
+              "Emergency execution cap for one recall chain. Default: 24; normal resource and stall budgets stop first.",
+            ),
         })
         .default({
           charBudget: 12000,
           relevanceFloor: 0.15,
           maxResults: 15,
           absoluteFloor: 0,
+          chainMaxExecutions: 24,
         })
         .describe("Recall output formatting and result-count limits."),
     })
@@ -783,6 +795,7 @@ export const LoreConfig = z.object({
         relevanceFloor: 0.15,
         maxResults: 15,
         absoluteFloor: 0,
+        chainMaxExecutions: 24,
       },
     })
     .describe(

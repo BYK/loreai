@@ -15,15 +15,18 @@
  *  For recall-only responses, a follow-up call is still made internally
  *  so the model can continue in the same HTTP response (seamless UX).
  *
- * All recall execution delegates to `runRecall()` from `@loreai/core`.
+ * All recall execution delegates to the metadata-aware core recall runner.
  */
 import {
-  runRecall,
+  runRecallWithMetadata,
+  MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_ID_CHARS,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
   log,
   config as loreConfig,
   type RecallScope,
+  type RecallCoverage,
   type LLMClient,
 } from "@loreai/core";
 import { createHash } from "node:crypto";
@@ -41,6 +44,7 @@ import type {
 import { promiseAgainstAbort } from "./abort-race";
 import { cancelAndReleaseReader } from "./stream/anthropic";
 import { looksLikeSSE } from "./translate/types";
+import { MAX_RECALL_EXECUTIONS } from "./recall-budget";
 
 // ---------------------------------------------------------------------------
 // Tool definition
@@ -64,18 +68,46 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
       },
       id: {
         type: "string",
+        minLength: 1,
+        maxLength: MAX_RECALL_ID_CHARS,
         description: RECALL_PARAM_DESCRIPTIONS.id,
       },
+      ids: {
+        type: "array",
+        minItems: 1,
+        maxItems: MAX_RECALL_BATCH_IDS,
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: MAX_RECALL_ID_CHARS,
+        },
+        description: RECALL_PARAM_DESCRIPTIONS.ids,
+      },
+      detailOffset: {
+        type: "integer",
+        minimum: 0,
+        description: RECALL_PARAM_DESCRIPTIONS.detailOffset,
+      },
+      detailLimit: {
+        type: "integer",
+        minimum: 1,
+        maximum: 16_000,
+        description: RECALL_PARAM_DESCRIPTIONS.detailLimit,
+      },
     },
-    required: ["query"],
+    anyOf: [
+      { required: ["query"] },
+      { required: ["id"] },
+      { required: ["ids"] },
+    ],
     additionalProperties: false,
   },
 };
 
 export const RECALL_TOOL_NAME = "recall";
 
-/** Safety-net cap on recall follow-ups per client request (like any agentic loop). */
-export const MAX_RECALL_DEPTH = 10;
+/** @deprecated Compatibility alias for the policy's emergency execution ceiling. */
+export const MAX_RECALL_DEPTH = MAX_RECALL_EXECUTIONS;
 export const MAX_RECALL_STORE_ENTRIES = 128;
 export const MAX_RECALL_STORE_BYTES = 1024 * 1024;
 
@@ -116,8 +148,14 @@ export function buildRecallMarker(
   query: string,
   scope: string = "all",
   id?: string,
+  ids?: readonly string[],
 ): string {
-  if (id) return `📚 Fetching detail for ${id}…`;
+  if (ids && ids.length > 0)
+    return `📚 Fetching details for ${ids.length} sources…`;
+  if (id)
+    return `📚 Fetching detail for ${
+      id.length <= MAX_RECALL_ID_CHARS ? id : "an invalid source"
+    }…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }
 
@@ -140,9 +178,10 @@ export function buildAnchoredRecallMarker(
   query: string,
   scope: string,
   id: string | undefined,
+  ids: readonly string[] | undefined,
   anchorId: string,
 ): string {
-  return `${buildRecallMarker(query, scope, id)}\n${buildRecallAnchor(anchorId)}`;
+  return `${buildRecallMarker(query, scope, id, ids)}\n${buildRecallAnchor(anchorId)}`;
 }
 
 export function parseRecallAnchor(text: string): string | null {
@@ -495,7 +534,42 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     typeof input.query !== "string" ||
     (input.scope !== undefined && typeof input.scope !== "string") ||
     ((item.input as Record<string, unknown>).id !== undefined &&
-      typeof (item.input as Record<string, unknown>).id !== "string")
+      typeof (item.input as Record<string, unknown>).id !== "string") ||
+    ((item.input as Record<string, unknown>).ids !== undefined &&
+      (!Array.isArray((item.input as Record<string, unknown>).ids) ||
+        !((item.input as Record<string, unknown>).ids as unknown[]).every(
+          (id: unknown) => typeof id === "string",
+        ))) ||
+    ((item.input as Record<string, unknown>).detailOffset !== undefined &&
+      (!Number.isSafeInteger(
+        (item.input as Record<string, unknown>).detailOffset,
+      ) ||
+        ((item.input as Record<string, unknown>).detailOffset as number) <
+          0)) ||
+    ((item.input as Record<string, unknown>).detailLimit !== undefined &&
+      (!Number.isSafeInteger(
+        (item.input as Record<string, unknown>).detailLimit,
+      ) ||
+        ((item.input as Record<string, unknown>).detailLimit as number) < 1))
+  ) {
+    return false;
+  }
+  const ids = input.ids;
+  if (
+    (typeof input.id === "string" &&
+      (!input.id || input.id.length > MAX_RECALL_ID_CHARS)) ||
+    (ids !== undefined &&
+      (!Array.isArray(ids) ||
+        ids.length === 0 ||
+        ids.length > MAX_RECALL_BATCH_IDS ||
+        !ids.every(
+          (id): id is string =>
+            typeof id === "string" && !!id && id.length <= MAX_RECALL_ID_CHARS,
+        ))) ||
+    (input.id !== undefined && ids !== undefined) ||
+    ((input.detailOffset !== undefined || input.detailLimit !== undefined) &&
+      typeof input.id !== "string") ||
+    (typeof input.detailLimit === "number" && input.detailLimit > 16_000)
   ) {
     return false;
   }
@@ -864,24 +938,77 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   query: string;
   scope: RecallScope;
   id?: string;
+  ids?: string[];
+  detailOffset?: number;
+  detailLimit?: number;
 } {
   const input = block.input;
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Recall input must be an object");
   }
   const record = input as Record<string, unknown>;
+  const allowed = new Set([
+    "query",
+    "scope",
+    "id",
+    "ids",
+    "detailOffset",
+    "detailLimit",
+  ]);
+  const unknown = Object.keys(record).find((key) => !allowed.has(key));
+  if (unknown) throw new Error(`Unknown recall property: ${unknown}`);
   if (record.query !== undefined && typeof record.query !== "string") {
     throw new Error("Recall query must be a string");
   }
   if (
     record.id !== undefined &&
-    (typeof record.id !== "string" || !record.id)
+    (typeof record.id !== "string" ||
+      !record.id ||
+      record.id.length > MAX_RECALL_ID_CHARS)
   ) {
     throw new Error("Recall id must be a non-empty string");
   }
+  if (
+    record.ids !== undefined &&
+    (!Array.isArray(record.ids) ||
+      record.ids.length === 0 ||
+      record.ids.length > MAX_RECALL_BATCH_IDS ||
+      record.ids.some(
+        (id) =>
+          typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
+      ))
+  ) {
+    throw new Error(
+      `Recall ids must contain from 1 to ${MAX_RECALL_BATCH_IDS} non-empty strings`,
+    );
+  }
+  if (record.id !== undefined && record.ids !== undefined) {
+    throw new Error("Recall id and ids cannot be used together");
+  }
+  if (
+    record.detailOffset !== undefined &&
+    (!Number.isSafeInteger(record.detailOffset) ||
+      (record.detailOffset as number) < 0)
+  ) {
+    throw new Error("Recall detailOffset must be a non-negative integer");
+  }
+  if (
+    record.detailLimit !== undefined &&
+    (!Number.isSafeInteger(record.detailLimit) ||
+      (record.detailLimit as number) < 1 ||
+      (record.detailLimit as number) > 16_000)
+  ) {
+    throw new Error("Recall detailLimit must be an integer from 1 to 16000");
+  }
   const query = record.query ?? "";
-  if (!query.trim() && !record.id) {
-    throw new Error("Recall query or id is required");
+  if (!query.trim() && !record.id && !record.ids) {
+    throw new Error("Recall query, id, or ids is required");
+  }
+  if (
+    (record.detailOffset !== undefined || record.detailLimit !== undefined) &&
+    typeof record.id !== "string"
+  ) {
+    throw new Error("Recall detail ranges require exactly one id");
   }
   const validScopes: ReadonlySet<string> = new Set([
     "all",
@@ -895,18 +1022,17 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   ) {
     throw new Error("Invalid recall scope");
   }
-  if (
-    record.limit !== undefined &&
-    (!Number.isSafeInteger(record.limit) ||
-      (record.limit as number) < 1 ||
-      (record.limit as number) > 50)
-  ) {
-    throw new Error("Recall limit must be an integer from 1 to 50");
-  }
   return {
     query,
     scope: (record.scope as RecallScope | undefined) ?? "all",
     ...(typeof record.id === "string" && record.id ? { id: record.id } : {}),
+    ...(Array.isArray(record.ids) ? { ids: [...record.ids] } : {}),
+    ...(typeof record.detailOffset === "number"
+      ? { detailOffset: record.detailOffset }
+      : {}),
+    ...(typeof record.detailLimit === "number"
+      ? { detailLimit: record.detailLimit }
+      : {}),
   };
 }
 
@@ -931,20 +1057,35 @@ export async function executeRecall(
   deferTransferRecording?: (record: () => void) => void,
 ): Promise<{
   result: string;
-  input: { query: string; scope?: RecallScope; id?: string };
+  input: {
+    query: string;
+    scope?: RecallScope;
+    id?: string;
+    ids?: string[];
+    detailOffset?: number;
+    detailLimit?: number;
+  };
+  coverage?: RecallCoverage[];
 }> {
   let query = "";
   let scope: RecallScope = "all";
   let id: string | undefined;
+  let ids: string[] | undefined;
+  let detailOffset: number | undefined;
+  let detailLimit: number | undefined;
 
   try {
-    ({ query, scope, id } = parseRecallInput(block));
+    ({ query, scope, id, ids, detailOffset, detailLimit } =
+      parseRecallInput(block));
     const cfg = loreConfig();
     signal?.throwIfAborted();
-    const result = await runRecall({
+    const recall = await runRecallWithMetadata({
       query,
       scope,
       id,
+      ids,
+      detailOffset,
+      detailLimit,
       projectPath,
       sessionID,
       knowledgeEnabled: cfg.knowledge?.enabled ?? true,
@@ -958,13 +1099,18 @@ export async function executeRecall(
     });
     signal?.throwIfAborted();
 
-    return { result, input: { query, scope, id } };
+    return {
+      result: recall.result,
+      input: { query, scope, id, ids, detailOffset, detailLimit },
+      coverage: recall.coverage,
+    };
   } catch (e) {
     if (signal?.aborted) throw signal.reason;
     log.error("gateway recall execution failed:", e);
     return {
       result: "Recall search failed. The memory system encountered an error.",
-      input: { query, scope, id },
+      input: { query, scope, id, ids, detailOffset, detailLimit },
+      coverage: [],
     };
   }
 }
@@ -1551,7 +1697,10 @@ export function replaceRecallWithMarker(
     const query = typeof input.query === "string" ? input.query : "";
     const scope = (input.scope as string) ?? "all";
     const id = typeof input.id === "string" && input.id ? input.id : undefined;
-    const text = markers?.get(b.id) ?? buildRecallMarker(query, scope, id);
+    const ids = Array.isArray(input.ids)
+      ? input.ids.filter((value): value is string => typeof value === "string")
+      : undefined;
+    const text = markers?.get(b.id) ?? buildRecallMarker(query, scope, id, ids);
     replaced.set(b.id, text);
     return { type: "text" as const, text };
   });

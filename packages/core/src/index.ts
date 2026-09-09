@@ -59,11 +59,18 @@ export * as conversationImport from "./import";
 
 export {
   runRecall,
+  runRecallWithMetadata,
   searchRecall,
   recallById,
+  recallByIdWithMetadata,
+  MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_ID_CHARS,
+  MAX_RECALL_DETAIL_CHARS,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
   type RecallInput,
+  type RecallCoverage,
+  type RecallRun,
   type RecallResult,
   type RecallScope,
   type ScoredDistillation,

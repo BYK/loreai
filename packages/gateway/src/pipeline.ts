@@ -26,6 +26,8 @@ import {
   FullSourceRequired,
   asString,
   estimateTokens as coreEstimateTokens,
+  MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_ID_CHARS,
 } from "@loreai/core";
 import {
   load,
@@ -351,6 +353,12 @@ import {
 } from "./sentry";
 import { createRecallDiagnostics } from "./recall-diagnostics";
 import {
+  MAX_RECALL_EXECUTIONS,
+  MAX_RECALL_SEARCH_ITEMS,
+  RecallChainBudget,
+  type RecallStopReason,
+} from "./recall-budget";
+import {
   RecallContinuationFailure,
   reportRecallContinuationFailure,
   type RecallContinuationFailureCategory,
@@ -375,7 +383,6 @@ import {
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
-  MAX_RECALL_DEPTH,
   executeRecall,
   findRecallToolUse,
   hasRecallToolUse,
@@ -415,6 +422,19 @@ import {
   parseResolveProjectResult,
   type ResolveProjectResult,
 } from "./synthetic-tools";
+
+/** Reserve the largest source set this untrusted recall input can expose. */
+function recallItemReservation(input: unknown): number {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return MAX_RECALL_SEARCH_ITEMS;
+  }
+  const record = input as Record<string, unknown>;
+  if (Array.isArray(record.ids)) {
+    return Math.min(record.ids.length, MAX_RECALL_BATCH_IDS);
+  }
+  if (typeof record.id === "string") return 1;
+  return MAX_RECALL_SEARCH_ITEMS;
+}
 
 // ---------------------------------------------------------------------------
 // Recall tool commit reminder
@@ -6868,6 +6888,8 @@ export function buildStreamingResponse(
       }>;
       overflow?: Array<{ id: string; category: string; title: string }>;
     };
+    /** Absolute request deadline inherited from the foreground abort scope. */
+    recallDeadlineAt?: number;
   },
   /** When set, prepend a synthetic warning content block to the stream.
    *  Currently used for the worker-degradation warning (#797 removed the
@@ -7136,6 +7158,20 @@ export function buildStreamingResponse(
             let currentModifiedReq = recallContext.modifiedReq;
             let recallDepth = 0;
             let cumulativeUsage = { ...(currentResp.usage ?? ZERO_USAGE) };
+            const recallBudget = new RecallChainBudget({
+              maxExecutions: loreConfig().search.recall.chainMaxExecutions,
+              deadlineAt: recallContext.recallDeadlineAt,
+            });
+            // This response already consumed the model's context/token budget
+            // before it asked for recall. Include it before admitting the first
+            // recall so the chain cannot repeatedly spend an untracked
+            // principal turn plus its continuations.
+            recallBudget.recordUsage(currentResp.usage);
+            const logRecallBudgetStop = (reason: RecallStopReason): void => {
+              log.info(
+                `recall final continuation: budget exhausted reason=${reason}`,
+              );
+            };
             let activeContinuation: RecallAwareAccumulator | undefined;
             recallFailureResponse = () => ({
               ...(activeContinuation ?? currentAccum).getResponse(),
@@ -7170,8 +7206,15 @@ export function buildStreamingResponse(
               ) {
                 throw new RecallContinuationFailure("parallel_recall");
               }
+              const admission = recallBudget.admit(
+                recallItemReservation(recallBlock.input),
+              );
+              if (admission) {
+                logRecallBudgetStop(admission);
+                throw new RecallContinuationFailure("depth_exhausted");
+              }
               recallDepth++;
-              const { result, input } = await promiseAgainstAbort(
+              const { result, input, coverage } = await promiseAgainstAbort(
                 () =>
                   withTenant(
                     recallContext.sessionState.storageTenantId ?? "",
@@ -7189,7 +7232,16 @@ export function buildStreamingResponse(
                 streamSignal,
               );
 
-              recallDiagnostics.record(input, result);
+              recallDiagnostics.record(input, result, coverage);
+              const stopReason = recallBudget.record({
+                resultBytes: Buffer.byteLength(result),
+                coverage,
+              });
+              if (stopReason) logRecallBudgetStop(stopReason);
+              // Reserve one full provider turn for synthesis before the hard
+              // token boundary can turn a follow-up recall into a rollback.
+              const finalRecallRound = recallBudget.mustFinalizeNext();
+              const followUpResult = recallBudgetGuidance(result, stopReason);
               const scope = input.scope ?? "all";
 
               // Store recall result for marker round-trip expansion
@@ -7259,6 +7311,7 @@ export function buildStreamingResponse(
                 input.query,
                 scope,
                 input.id,
+                input.ids,
                 anchorId,
               );
               if (recallContext.clientSpeaksAnthropic) {
@@ -7417,14 +7470,14 @@ export function buildStreamingResponse(
                   streamingRecallCtx,
                   currentModifiedReq,
                   currentResp,
-                  result,
+                  followUpResult,
                   recallBlock,
                   streamSignal,
-                  recallDepth === MAX_RECALL_DEPTH,
+                  finalRecallRound,
                 );
               } catch (error) {
                 if (streamSignal.aborted) throw error;
-                if (recallDepth === MAX_RECALL_DEPTH)
+                if (finalRecallRound)
                   throw new RecallContinuationFailure("follow_up_setup");
                 log.error(
                   `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
@@ -7450,7 +7503,7 @@ export function buildStreamingResponse(
               }
 
               if (!streamingFollowUp.ok) {
-                if (recallDepth === MAX_RECALL_DEPTH)
+                if (finalRecallRound)
                   throw new RecallContinuationFailure("follow_up_failed");
                 log.error(
                   `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
@@ -7540,7 +7593,7 @@ export function buildStreamingResponse(
                   const forwarded = contAccum.processEvent(contEvent, contData);
                   if (
                     forwarded &&
-                    recallDepth === MAX_RECALL_DEPTH &&
+                    finalRecallRound &&
                     (contEvent === "message_delta" ||
                       contEvent === "message_stop")
                   ) {
@@ -7569,7 +7622,10 @@ export function buildStreamingResponse(
                 continuationResp.usage ?? ZERO_USAGE,
               );
               activeContinuation = undefined;
-              if (recallDepth === MAX_RECALL_DEPTH) {
+              const continuationStopReason = recallBudget.recordUsage(
+                continuationResp.usage,
+              );
+              if (finalRecallRound || continuationStopReason) {
                 if (contAccum.hasRecall())
                   throw new RecallContinuationFailure("depth_exhausted");
                 if (!isUsableRecallContinuation(continuationResp))
@@ -7577,7 +7633,11 @@ export function buildStreamingResponse(
               }
 
               // Check if continuation contained recall — if so, loop
-              if (contAccum.hasRecall() && recallDepth < MAX_RECALL_DEPTH) {
+              if (
+                contAccum.hasRecall() &&
+                !finalRecallRound &&
+                !continuationStopReason
+              ) {
                 currentAccum = contAccum;
                 currentResp = contAccum.getResponse();
                 currentBlockOffset = contBlockOffset;
@@ -7610,7 +7670,7 @@ export function buildStreamingResponse(
               }
 
               continuationResp.usage = cumulativeUsage;
-              if (recallDepth === MAX_RECALL_DEPTH)
+              if (finalRecallRound || continuationStopReason)
                 log.info("recall final continuation: completed");
               clearKeepalive();
               recallDiagnostics.finish("completed");
@@ -7759,6 +7819,9 @@ export function streamResponsesRecallAware(
       rollback: () => void;
     }) => void;
     sessionID?: string;
+    /** Emergency ceiling for the request-owned recall chain. */
+    maxRecallExecutions?: number;
+    /** @deprecated Use `maxRecallExecutions`. */
     maxRecallDepth?: number;
     noStore?: boolean;
     maxDeferredBytes?: number;
@@ -7769,6 +7832,8 @@ export function streamResponsesRecallAware(
     validation?: "public" | "codex";
     /** Caller abort combined with the stream's client-disconnect controller. */
     signal?: AbortSignal;
+    /** Absolute request deadline inherited from the foreground abort scope. */
+    recallDeadlineAt?: number;
     /**
      * Called when a `recall` function_call is fully parsed. Runs the recall
      * (LTM search + optional LLM result) and returns the pieces needed to
@@ -7779,6 +7844,9 @@ export function streamResponsesRecallAware(
       query: string;
       scope?: string;
       id?: string;
+      ids?: string[];
+      detailOffset?: number;
+      detailLimit?: number;
       outputIndex: number;
       toolUseId: string;
       /** Position in the normalized GatewayResponse content array. */
@@ -7791,6 +7859,8 @@ export function streamResponsesRecallAware(
     }) => Promise<{
       anchorText: string;
       resultText: string;
+      /** Private source coverage; never emitted to the client. */
+      coverage?: readonly import("@loreai/core").RecallCoverage[];
       commit?: () => void;
       rollback?: () => void;
     }>;
@@ -7975,7 +8045,11 @@ export function streamResponsesRecallAware(
   };
   const encoder = new TextEncoder();
   const sessionID = opts.sessionID;
-  const maxRecallDepth = opts.maxRecallDepth ?? MAX_RECALL_DEPTH;
+  const recallBudget = new RecallChainBudget({
+    maxExecutions:
+      opts.maxRecallExecutions ?? opts.maxRecallDepth ?? MAX_RECALL_EXECUTIONS,
+    deadlineAt: opts.recallDeadlineAt,
+  });
   const maxDeferredBytes = opts.maxDeferredBytes ?? 1024 * 1024;
   const maxHiddenRecallBytes = opts.maxHiddenRecallBytes ?? maxDeferredBytes;
   const maxRetainedStateBytes = opts.maxRetainedStateBytes ?? 16 * 1024 * 1024;
@@ -7991,9 +8065,15 @@ export function streamResponsesRecallAware(
   const sseInactivityMs = FOREGROUND_SSE_INACTIVITY_MS;
   const maxRecallContinuationTransportRetries = 1;
 
-  const parseRecallArguments = (
-    value: unknown,
-  ): { query: string; scope?: string; id?: string } => {
+  type RecallArguments = {
+    query: string;
+    scope?: string;
+    id?: string;
+    ids?: string[];
+    detailOffset?: number;
+    detailLimit?: number;
+  };
+  const parseRecallArguments = (value: unknown): RecallArguments => {
     if (typeof value !== "string") {
       throw new Error(
         "invalid recall function arguments: expected JSON string",
@@ -8009,7 +8089,14 @@ export function streamResponsesRecallAware(
       throw new Error("invalid recall function arguments: expected object");
     }
     const record = input as Record<string, unknown>;
-    const allowed = new Set(["query", "scope", "id"]);
+    const allowed = new Set([
+      "query",
+      "scope",
+      "id",
+      "ids",
+      "detailOffset",
+      "detailLimit",
+    ]);
     const unknown = Object.keys(record).find((key) => !allowed.has(key));
     if (unknown) {
       throw new Error(
@@ -8024,9 +8111,47 @@ export function streamResponsesRecallAware(
     if (
       record.id !== undefined &&
       record.id !== null &&
-      typeof record.id !== "string"
+      (typeof record.id !== "string" ||
+        !record.id ||
+        record.id.length > MAX_RECALL_ID_CHARS)
     ) {
       throw new Error("invalid recall function arguments: id must be a string");
+    }
+    if (
+      record.ids !== undefined &&
+      (!Array.isArray(record.ids) ||
+        record.ids.length === 0 ||
+        record.ids.length > MAX_RECALL_BATCH_IDS ||
+        record.ids.some(
+          (id) =>
+            typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
+        ))
+    ) {
+      throw new Error(
+        `invalid recall function arguments: ids must contain 1-${MAX_RECALL_BATCH_IDS} strings no longer than ${MAX_RECALL_ID_CHARS} characters`,
+      );
+    }
+    if (record.id !== undefined && record.ids !== undefined) {
+      throw new Error("invalid recall function arguments: id and ids conflict");
+    }
+    if (
+      record.detailOffset !== undefined &&
+      (!Number.isSafeInteger(record.detailOffset) ||
+        (record.detailOffset as number) < 0)
+    ) {
+      throw new Error(
+        "invalid recall function arguments: detailOffset must be non-negative",
+      );
+    }
+    if (
+      record.detailLimit !== undefined &&
+      (!Number.isSafeInteger(record.detailLimit) ||
+        (record.detailLimit as number) < 1 ||
+        (record.detailLimit as number) > 16_000)
+    ) {
+      throw new Error(
+        "invalid recall function arguments: detailLimit must be 1-16000",
+      );
     }
     if (
       record.scope !== undefined &&
@@ -8039,9 +8164,18 @@ export function streamResponsesRecallAware(
     }
     const query = record.query ?? "";
     const id = record.id || undefined;
-    if (!query.trim() && !id) {
+    const ids = Array.isArray(record.ids) ? [...record.ids] : undefined;
+    if (!query.trim() && !id && !ids) {
       throw new Error(
-        "invalid recall function arguments: query or id is required",
+        "invalid recall function arguments: query, id, or ids is required",
+      );
+    }
+    if (
+      (record.detailOffset !== undefined || record.detailLimit !== undefined) &&
+      !id
+    ) {
+      throw new Error(
+        "invalid recall function arguments: detail ranges require one id",
       );
     }
     const scope = record.scope || undefined;
@@ -8054,7 +8188,18 @@ export function streamResponsesRecallAware(
     ) {
       throw new Error("invalid recall function arguments: unsupported scope");
     }
-    return { query, ...(scope ? { scope } : {}), ...(id ? { id } : {}) };
+    return {
+      query,
+      ...(scope ? { scope } : {}),
+      ...(id ? { id } : {}),
+      ...(ids ? { ids } : {}),
+      ...(typeof record.detailOffset === "number"
+        ? { detailOffset: record.detailOffset }
+        : {}),
+      ...(typeof record.detailLimit === "number"
+        ? { detailLimit: record.detailLimit }
+        : {}),
+    };
   };
   type PendingResponsesRecall = {
     outputIndex: number;
@@ -8062,12 +8207,15 @@ export function streamResponsesRecallAware(
     query: string;
     scope?: string;
     id?: string;
+    ids?: string[];
+    detailOffset?: number;
+    detailLimit?: number;
     toolUseId: string;
   };
   const collectCompletedRecall = (
     acc: ResponsesAccState,
     outputIndex: number,
-    parsedInputs: Map<number, { query: string; scope?: string; id?: string }>,
+    parsedInputs: Map<number, RecallArguments>,
     pending: PendingResponsesRecall[],
   ): boolean => {
     const rawItem = acc.rawItems.get(outputIndex);
@@ -8099,6 +8247,9 @@ export function streamResponsesRecallAware(
       query: input.query,
       scope: input.scope,
       id: input.id,
+      ids: input.ids,
+      detailOffset: input.detailOffset,
+      detailLimit: input.detailLimit,
       toolUseId,
     });
     parsedInputs.delete(outputIndex);
@@ -9469,6 +9620,8 @@ export function streamResponsesRecallAware(
   const settleRecall = async (
     input: Parameters<typeof opts.onRecall>[0],
   ): ReturnType<typeof opts.onRecall> => {
+    const admission = recallBudget.admit(recallItemReservation(input));
+    if (admission) throw new RecallContinuationFailure("depth_exhausted");
     const operation = opts.onRecall(input);
     const onLateResult = async (): Promise<void> => {
       try {
@@ -9505,13 +9658,27 @@ export function streamResponsesRecallAware(
       }
       throw signal.reason;
     }
-    recallDiagnostics.record(input, result.resultText);
+    recallDiagnostics.record(input, result.resultText, result.coverage);
+    const stopReason = recallBudget.record({
+      resultBytes: Buffer.byteLength(result.resultText),
+      coverage: result.coverage,
+    });
+    if (stopReason)
+      log.info(
+        `recall final continuation: budget exhausted reason=${stopReason}`,
+      );
     return result;
   };
   const settleFollowUp = async (
     input: Parameters<typeof opts.runFollowUp>[0],
   ): ReturnType<typeof opts.runFollowUp> => {
-    const operation = opts.runFollowUp(input);
+    const operation = opts.runFollowUp({
+      ...input,
+      resultText: recallBudgetGuidance(
+        input.resultText,
+        input.finalRecallRound ? recallBudget.stopReason() : undefined,
+      ),
+    });
     const cancelLateReader = async (): Promise<void> => {
       try {
         const late = await operation;
@@ -9855,10 +10022,7 @@ export function streamResponsesRecallAware(
 
           // --- Recall interception state ---
           // `output_index` values whose item is a suppressed `recall` function_call.
-          const parsedRecallInputs = new Map<
-            number,
-            { query: string; scope?: string; id?: string }
-          >();
+          const parsedRecallInputs = new Map<number, RecallArguments>();
           // Ordered list of parsed recall invocations: { outputIndex, block }.
           const pendingRecalls: PendingResponsesRecall[] = [];
           // Whether any NON-recall function_call appeared (mixed-tools case).
@@ -10170,9 +10334,6 @@ export function streamResponsesRecallAware(
               if (pendingRecalls.length > 1) {
                 throw new RecallContinuationFailure("parallel_recall");
               }
-              if (pendingRecalls.length > maxRecallDepth) {
-                throw new RecallContinuationFailure("depth_exhausted");
-              }
               const anchorTexts: string[] = [];
               transactionBaseline = {
                 ...state,
@@ -10181,6 +10342,10 @@ export function streamResponsesRecallAware(
                 rawItems: new Map(state.rawItems),
               };
               transactionProviderUsage = { ...ZERO_USAGE };
+              // The principal Responses stream is part of the same request
+              // budget. Count it once before its first recall is admitted;
+              // continuation streams are accounted for after each follow-up.
+              recallBudget.recordUsage(state.usage);
               const pendingCommits: Array<() => void> = [];
               const transactionalEvents: Uint8Array[] = [];
               let transactionalBytes = 0;
@@ -10211,6 +10376,9 @@ export function streamResponsesRecallAware(
                     query: recall.query,
                     scope: recall.scope,
                     id: recall.id,
+                    ids: recall.ids,
+                    detailOffset: recall.detailOffset,
+                    detailLimit: recall.detailLimit,
                     outputIndex: recall.outputIndex,
                     toolUseId: recall.toolUseId,
                     contentPosition,
@@ -10219,6 +10387,7 @@ export function streamResponsesRecallAware(
                   });
                 } catch (error) {
                   if (signal.aborted) throw error;
+                  if (error instanceof RecallContinuationFailure) throw error;
                   throw new RecallContinuationFailure("recall_execution");
                 }
                 anchorTexts.push(executed.anchorText);
@@ -10263,7 +10432,7 @@ export function streamResponsesRecallAware(
                     continuationFailureCategory = "follow_up_setup";
                     signal.throwIfAborted();
                     let follow = await settleFollowUp({
-                      finalRecallRound: pendingRecalls.length >= maxRecallDepth,
+                      finalRecallRound: recallBudget.mustFinalizeNext(),
                       anchorText: executed.anchorText,
                       resultText: executed.resultText,
                       acc: recallAcc,
@@ -10271,12 +10440,11 @@ export function streamResponsesRecallAware(
                       contentPosition,
                       signal,
                     });
-                    let recallDepth = pendingRecalls.length;
                     let recallContinuationTransportRetries = 0;
                     let continuationFollowUpInput: Parameters<
                       typeof opts.runFollowUp
                     >[0] = {
-                      finalRecallRound: pendingRecalls.length >= maxRecallDepth,
+                      finalRecallRound: recallBudget.mustFinalizeNext(),
                       anchorText: executed.anchorText,
                       resultText: executed.resultText,
                       acc: recallAcc,
@@ -10304,7 +10472,7 @@ export function streamResponsesRecallAware(
                       >();
                       const contRecallInputs = new Map<
                         number,
-                        { query: string; scope?: string; id?: string }
+                        RecallArguments
                       >();
                       const contPending: PendingResponsesRecall[] = [];
                       const contUnresolvedToolIndices = new Set<number>();
@@ -10851,6 +11019,7 @@ export function streamResponsesRecallAware(
                         contState.usage,
                       );
                       mergeUsage(transactionProviderUsage, contState.usage);
+                      recallBudget.recordUsage(contState.usage);
                       if (
                         continuationFailed ||
                         (continuationFollowUpInput.finalRecallRound &&
@@ -10905,12 +11074,11 @@ export function streamResponsesRecallAware(
                         | undefined;
                       let nextAcc: GatewayResponse | undefined;
                       if (contPending.length === 1) {
-                        if (recallDepth >= maxRecallDepth) {
+                        if (continuationFollowUpInput.finalRecallRound) {
                           throw new RecallContinuationFailure(
                             "depth_exhausted",
                           );
                         } else {
-                          recallDepth++;
                           nextAcc = finalizeResponsesAcc(contState);
                           const pendingNextRecall = contPending[0];
                           const contentPosition = nextAcc.content.findIndex(
@@ -10946,6 +11114,8 @@ export function streamResponsesRecallAware(
                             });
                           } catch (error) {
                             if (signal.aborted) throw error;
+                            if (error instanceof RecallContinuationFailure)
+                              throw error;
                             throw new RecallContinuationFailure(
                               "nested_recall_execution",
                             );
@@ -10988,7 +11158,7 @@ export function streamResponsesRecallAware(
                       }
                       follow.commit?.();
                       continuationFollowUpInput = {
-                        finalRecallRound: recallDepth >= maxRecallDepth,
+                        finalRecallRound: recallBudget.mustFinalizeNext(),
                         anchorText: nextExecuted.anchorText,
                         resultText: nextExecuted.resultText,
                         acc: nextAcc ?? finalizeResponsesAcc(contState),
@@ -14480,6 +14650,7 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   signal: AbortSignal;
   abort: (reason?: unknown) => void;
   dispose: () => void;
+  deadlineAt: number;
 } {
   const controller = new AbortController();
   activeForegroundAbortControllers.add(controller);
@@ -14489,6 +14660,7 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   const onCallerAbort = () => abort(caller?.reason);
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
+  const deadlineAt = Date.now() + FOREGROUND_REQUEST_TIMEOUT_MS;
   const timer = setTimeout(
     () =>
       abort(new DOMException("foreground request timed out", "TimeoutError")),
@@ -14497,6 +14669,7 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   return {
     signal: controller.signal,
     abort,
+    deadlineAt,
     dispose: () => {
       activeForegroundAbortControllers.delete(controller);
       clearTimeout(timer);
@@ -15560,6 +15733,18 @@ export function mergeRecallUsage(
     "recall usage token overflow",
   );
   return merged;
+}
+
+/** Compact, provider-neutral finalization guidance appended only to the last tool result. */
+function recallBudgetGuidance(
+  result: string,
+  reason: RecallStopReason | undefined,
+): string {
+  if (!reason) return result;
+  return (
+    `${result}\n\n[Recall policy: stop further recall because ${reason}. ` +
+    "Use the evidence above to answer now or hand back an ordinary tool.]"
+  );
 }
 
 function assertCurrentPipelineGeneration(
@@ -17604,12 +17789,23 @@ async function handleConversationTurn(
   ): Promise<Response> => {
     // --- Recall interception (non-streaming) ---
     // Loop allows the model to call recall multiple times (e.g. drill down
-    // into t:<id> source citations). MAX_RECALL_DEPTH is a safety net only.
+    // into t:<id> source citations). Resource, progress, and time budgets
+    // normally end the chain before its configured emergency ceiling.
     let currentResp = resp;
     let recallDepth = 0;
     let currentModifiedReq = modifiedReq;
     const responsesVisibleContent: GatewayContentBlock[] = [];
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
+    const recallBudget = new RecallChainBudget({
+      maxExecutions: loreConfig().search.recall.chainMaxExecutions,
+      deadlineAt: foregroundAbort.deadlineAt,
+    });
+    // Account the principal response before the first recall admission. Each
+    // subsequent continuation is recorded below exactly once.
+    recallBudget.recordUsage(resp.usage);
+    const logRecallBudgetStop = (reason: RecallStopReason): void => {
+      log.info(`recall final continuation: budget exhausted reason=${reason}`);
+    };
     const bufferedRecallTransaction = createRecallPersistenceTransaction(
       sessionState,
       suppressTemporalStorage,
@@ -17655,7 +17851,7 @@ async function handleConversationTurn(
       pendingKnowledgeDelta,
     );
 
-    while (hasRecallToolUse(currentResp) && recallDepth < MAX_RECALL_DEPTH) {
+    while (hasRecallToolUse(currentResp)) {
       if (
         currentResp.content.filter(
           (block) =>
@@ -17663,11 +17859,18 @@ async function handleConversationTurn(
         ).length > 1
       )
         return failRecall("parallel_recall");
-      recallDepth++;
-      recallPersistenceTransaction ??= bufferedRecallTransaction;
       const recallBlock = findRecallToolUse(currentResp);
       if (!recallBlock) break;
-      const { result, input } = await promiseAgainstAbort(
+      const admission = recallBudget.admit(
+        recallItemReservation(recallBlock.input),
+      );
+      if (admission) {
+        logRecallBudgetStop(admission);
+        return failRecall("depth_exhausted");
+      }
+      recallDepth++;
+      recallPersistenceTransaction ??= bufferedRecallTransaction;
+      const { result, input, coverage } = await promiseAgainstAbort(
         () =>
           executeRecall(
             recallBlock,
@@ -17681,7 +17884,16 @@ async function handleConversationTurn(
         foregroundAbort.signal,
       );
 
-      bufferedRecallDiagnostics.record(input, result);
+      bufferedRecallDiagnostics.record(input, result, coverage);
+      const stopReason = recallBudget.record({
+        resultBytes: Buffer.byteLength(result),
+        coverage,
+      });
+      if (stopReason) logRecallBudgetStop(stopReason);
+      // Keep a whole continuation available to turn the final recall result
+      // into an answer instead of discovering the token boundary afterward.
+      const finalRecallRound = recallBudget.mustFinalizeNext();
+      const followUpResult = recallBudgetGuidance(result, stopReason);
       // Store recall result for marker round-trip expansion
       const scope = input.scope ?? "all";
       const anchorId = crypto.randomUUID();
@@ -17715,6 +17927,7 @@ async function handleConversationTurn(
         input.query,
         scope,
         input.id,
+        input.ids,
         anchorId,
       );
       const markerResp = replaceRecallWithMarker(
@@ -17782,7 +17995,7 @@ async function handleConversationTurn(
             protocol,
             false,
             signal,
-            recallDepth === MAX_RECALL_DEPTH,
+            finalRecallRound,
           ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
@@ -17799,19 +18012,19 @@ async function handleConversationTurn(
               jsonRecallCtx,
               currentModifiedReq,
               currentResp,
-              result,
+              followUpResult,
               recallBlock,
               foregroundAbort.signal,
-              recallDepth === MAX_RECALL_DEPTH,
+              finalRecallRound,
             )
           : await runRecallFollowUpJSON(
               jsonRecallCtx,
               currentModifiedReq,
               currentResp,
-              result,
+              followUpResult,
               recallBlock,
               foregroundAbort.signal,
-              recallDepth === MAX_RECALL_DEPTH,
+              finalRecallRound,
             );
       } catch (fetchErr) {
         if (
@@ -17835,8 +18048,7 @@ async function handleConversationTurn(
         log.error(
           `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
-        if (recallDepth === MAX_RECALL_DEPTH)
-          return failRecall("follow_up_failed");
+        if (finalRecallRound) return failRecall("follow_up_failed");
         bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
@@ -17867,8 +18079,7 @@ async function handleConversationTurn(
           model: currentModifiedReq.model,
           sessionID: sessionState.sessionID,
         });
-        if (recallDepth === MAX_RECALL_DEPTH)
-          return failRecall("follow_up_failed");
+        if (finalRecallRound) return failRecall("follow_up_failed");
         bufferedRecallDiagnostics.finish("failed");
         // Fall back to response with marker (no continuation)
         markerResp.usage = cumulativeUsage;
@@ -17888,6 +18099,7 @@ async function handleConversationTurn(
 
       // Accumulate usage from this iteration
       const contUsage = continuationResp.usage ?? ZERO_USAGE;
+      const continuationStopReason = recallBudget.recordUsage(contUsage);
       Object.assign(
         cumulativeUsage,
         mergeRecallUsage(cumulativeUsage, contUsage),
@@ -17905,17 +18117,20 @@ async function handleConversationTurn(
         ];
       }
       currentResp = continuationResp;
+      if (
+        (finalRecallRound || continuationStopReason) &&
+        hasRecallToolUse(currentResp)
+      ) {
+        return failRecall("depth_exhausted");
+      }
       // Loop continues — hasRecallToolUse checked at top
     }
 
     if (hasRecallToolUse(currentResp)) return failRecall("depth_exhausted");
-    if (
-      recallDepth === MAX_RECALL_DEPTH &&
-      !isUsableRecallContinuation(currentResp)
-    )
+    if (recallBudget.stopReason() && !isUsableRecallContinuation(currentResp))
       return failRecall("follow_up_failed");
     currentResp.usage = cumulativeUsage;
-    if (recallDepth === MAX_RECALL_DEPTH)
+    if (recallBudget.stopReason())
       log.info("recall final continuation: completed");
     finishBufferedResponse(currentResp);
     // Telemetry: flag a completion we're about to hand back with NO usable
@@ -18120,13 +18335,18 @@ async function handleConversationTurn(
                 recallPersistenceTransaction = transaction;
               },
               sessionID: sessionState.sessionID,
-              maxRecallDepth: MAX_RECALL_DEPTH,
+              maxRecallExecutions:
+                loreConfig().search.recall.chainMaxExecutions,
               noStore: suppressTemporalStorage,
               signal: foregroundAbort.signal,
+              recallDeadlineAt: foregroundAbort.deadlineAt,
               onRecall: async ({
                 query,
                 scope,
                 id,
+                ids,
+                detailOffset,
+                detailLimit,
                 toolUseId,
                 contentPosition,
                 acc,
@@ -18137,15 +18357,22 @@ async function handleConversationTurn(
                   pendingKnowledgeDelta,
                 );
                 const deferredTransferRecordings: Array<() => void> = [];
-                const { result, input } = await withTenant(
+                const { result, input, coverage } = await withTenant(
                   sessionState.storageTenantId ?? "",
                   () =>
                     executeRecall(
                       {
                         type: "tool_use",
-                        id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}`,
+                        id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}_${ids?.join(",") ?? ""}`,
                         name: RECALL_TOOL_NAME,
-                        input: { query, scope, id },
+                        input: {
+                          query,
+                          scope,
+                          id,
+                          ids,
+                          detailOffset,
+                          detailLimit,
+                        },
                       },
                       sessionState.projectPath,
                       sessionState.sessionID,
@@ -18217,6 +18444,7 @@ async function handleConversationTurn(
                 return {
                   anchorText,
                   resultText: result,
+                  coverage,
                   commit: () => {
                     if (suppressTemporalStorage) return;
                     for (const record of deferredTransferRecordings) record();
@@ -18395,6 +18623,7 @@ async function handleConversationTurn(
             },
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
+            recallDeadlineAt: foregroundAbort.deadlineAt,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
           }
         : undefined,

@@ -365,8 +365,15 @@ export type GatewayResponse = {
 export type StoredRecall = {
   /** The tool_use ID to reconstruct in the upstream request. */
   toolUseId: string;
-  /** Original recall input (query + scope). */
-  input: { query: string; scope?: string };
+  /** Original recall input, retained verbatim for tool-pair reconstruction. */
+  input: {
+    query: string;
+    scope?: string;
+    id?: string;
+    ids?: string[];
+    detailOffset?: number;
+    detailLimit?: number;
+  };
   /** Position (content block index) in the original assistant message. */
   position: number;
   /** Executed recall result (formatted markdown). */

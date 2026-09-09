@@ -610,9 +610,9 @@ describe("recall vector-hit hydration is batched + offloaded (#966)", () => {
 
   test("checks cancellation again after synchronous ID detail retrieval", async () => {
     const controller = new AbortController();
-    const getSpy = vi.spyOn(ltm, "get").mockImplementation(() => {
+    const logicalIdSpy = vi.spyOn(ltm, "logicalIdOf").mockImplementation(() => {
       controller.abort(new DOMException("client disconnected", "AbortError"));
-      return null;
+      return "missing";
     });
     try {
       await expect(
@@ -623,9 +623,9 @@ describe("recall vector-hit hydration is batched + offloaded (#966)", () => {
           signal: controller.signal,
         }),
       ).rejects.toMatchObject({ name: "AbortError" });
-      expect(getSpy).toHaveBeenCalledWith("missing");
+      expect(logicalIdSpy).toHaveBeenCalledWith("missing");
     } finally {
-      getSpy.mockRestore();
+      logicalIdSpy.mockRestore();
     }
   });
 
