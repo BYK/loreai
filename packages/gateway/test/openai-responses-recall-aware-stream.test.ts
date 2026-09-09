@@ -166,6 +166,7 @@ const doneWithStatus = (id: string, status: string) =>
   });
 
 const PUBLIC_RECALL_ERROR = "Lore could not continue the response after recall";
+const PUBLIC_GATEWAY_ERROR = "Gateway request failed";
 
 const textItem = (
   outputIndex: number,
@@ -399,6 +400,7 @@ describe("streamResponsesRecallAware", () => {
   );
 
   test("suppresses a recall function_call and emits a marker (mixed tools)", async () => {
+    let completedResponse: GatewayResponse | undefined;
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_mixed", "gpt-5.6-terra"),
@@ -433,7 +435,9 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_mixed"),
       ]),
       {
-        onComplete: () => {},
+        onComplete: (response) => {
+          completedResponse = response;
+        },
         onRecall: async ({ query }) => ({
           anchorText: buildAnchor(query),
           resultText: "some results",
@@ -463,6 +467,17 @@ describe("streamResponsesRecallAware", () => {
       "msg_resp_mixed_0",
       "fc_1",
     ]);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(completedResponse?.rawOutputItems).toContainEqual(
+      expect.objectContaining({
+        id: "fc_1",
+        call_id: "call_1",
+        name: "read",
+      }),
+    );
+    expect(completedJSON).not.toContain("what is lore");
+    expect(completedJSON).not.toContain("fc_0");
+    expect(completedJSON).not.toContain("call_0");
   });
 
   test("binds parallel recalls to their own call IDs and fails before an invalid follow-up", async () => {
@@ -620,8 +635,7 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    const out = await drain(client);
-    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
   });
 
   test("bounds suppressed recall argument events", async () => {
@@ -655,11 +669,17 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    const out = await drain(client);
-    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
   });
 
   test("bounds retained output before recall detection", async () => {
+    const errors: string[] = [];
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_retained", "gpt-5.6-terra"),
@@ -675,10 +695,25 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain("response.failed");
+    const out = await drain(client);
+    expect(out).toContain("response.failed");
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(errors).toEqual([
+      "openai-responses recall-aware stream failed category=principal_resource_limit",
+    ]);
   });
 
   test("rejects an SSE event name that disagrees with the payload type", async () => {
+    const failures: RecallContinuationFailureCategory[] = [];
+    const errors: string[] = [];
+    setRecallContinuationFailureHook((category) => failures.push(category));
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_type_mismatch", "gpt-5.6-terra"),
@@ -696,7 +731,86 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain("response.failed");
+    const out = await drain(client);
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(failures).toEqual([]);
+    expect(errors).toEqual([
+      "openai-responses recall-aware stream failed category=principal_protocol",
+    ]);
+  });
+
+  test("sanitizes a principal transport failure before recall", async () => {
+    const failures: RecallContinuationFailureCategory[] = [];
+    const errors: string[] = [];
+    setRecallContinuationFailureHook((category) => failures.push(category));
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
+    const privateCause = "private principal socket failure";
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_principal_transport", "gpt-5.6-terra"),
+            ),
+          );
+          controller.error(new Error(privateCause));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      onComplete: () => {},
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    const out = await drain(client);
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain(privateCause);
+    expect(failures).toEqual([]);
+    expect(errors).toEqual([
+      "openai-responses recall-aware stream failed category=principal_transport",
+    ]);
+  });
+
+  test("classifies a missing principal response body as unexpected", async () => {
+    const failures: RecallContinuationFailureCategory[] = [];
+    const errors: string[] = [];
+    setRecallContinuationFailureHook((category) => failures.push(category));
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
+    const client = streamResponsesRecallAware(new Response(null), {
+      onComplete: () => {},
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    const out = await drain(client);
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain("Upstream response has no body");
+    expect(failures).toEqual([]);
+    expect(errors).toEqual([
+      "openai-responses recall-aware stream failed category=principal_unexpected",
+    ]);
   });
 
   test("rejects response.in_progress changing the created response identity", async () => {
@@ -1230,6 +1344,8 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("rejects terminal function calls changing the streamed tool name", async () => {
+    let completedResponse: GatewayResponse | undefined;
+    let recallCalls = 0;
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_terminal_name", "gpt-5.6-terra"),
@@ -1277,15 +1393,40 @@ describe("streamResponsesRecallAware", () => {
         }),
       ]),
       {
-        onComplete: () => {},
-        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
         runFollowUp: async () => {
           throw new Error("should not run");
         },
       },
     );
 
-    expect(await drain(client)).toContain("response.failed");
+    const output = await drain(client);
+    const terminal = JSON.parse(
+      /event: response\.failed\ndata: (.+)/.exec(output)?.[1] ?? "{}",
+    ) as { response?: { output?: Array<Record<string, unknown>> } };
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(terminal.response?.output).toContainEqual(
+      expect.objectContaining({
+        id: "fc_terminal_name",
+        call_id: "call_terminal_name",
+        name: "read",
+      }),
+    );
+    expect(completedResponse?.rawOutputItems).toContainEqual(
+      expect.objectContaining({
+        id: "fc_terminal_name",
+        call_id: "call_terminal_name",
+        name: "read",
+      }),
+    );
+    expect(recallCalls).toBe(0);
   });
 
   test("rejects malformed terminal output items", async () => {
@@ -1791,6 +1932,129 @@ describe("streamResponsesRecallAware", () => {
     ).toEqual(["ciphertext-B", "ciphertext-D"]);
   });
 
+  test("redacts a done-only failed Codex recall before lifecycle validation", async () => {
+    const privateArguments = JSON.stringify({
+      query: "private done-only query",
+    });
+    let completedResponse: GatewayResponse | undefined;
+    let successful: boolean | undefined;
+    let recallCalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_done_only_failed_recall", "gpt-5.6-terra"),
+        sseEvent("response.output_item.done", {
+          item: {
+            type: "function_call",
+            id: "fc_done_only_failed_recall",
+            call_id: "call_done_only_failed_recall",
+            name: "recall",
+            arguments: privateArguments,
+            status: "failed",
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response, didSucceed) => {
+          completedResponse = response;
+          successful = didSucceed;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "anchor", resultText: "result" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("private done-only query");
+    expect(output).not.toContain("fc_done_only_failed_recall");
+    expect(output).not.toContain("call_done_only_failed_recall");
+    expect(completedJSON).not.toContain("private done-only query");
+    expect(completedJSON).not.toContain("fc_done_only_failed_recall");
+    expect(completedJSON).not.toContain("call_done_only_failed_recall");
+    expect(recallCalls).toBe(0);
+    expect(successful).toBe(false);
+  });
+
+  test("redacts a sparse principal recall when promotion exceeds the hidden budget", async () => {
+    const privateArguments = JSON.stringify({
+      query: "private direct promotion query",
+    });
+    let completedResponse: GatewayResponse | undefined;
+    let successful: boolean | undefined;
+    let recallCalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_sparse_promotion_limit", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_sparse_promotion_limit",
+            call_id: "",
+            name: "",
+            arguments: "",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_sparse_promotion_limit",
+          delta: privateArguments,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_sparse_promotion_limit",
+            call_id: "call_sparse_promotion_limit",
+            name: "recall",
+            arguments: privateArguments,
+            status: "completed",
+          },
+        }),
+        completed("resp_sparse_promotion_limit"),
+      ]),
+      {
+        validation: "codex",
+        maxDeferredBytes: 16 * 1024,
+        maxHiddenRecallBytes: 1,
+        maxRetainedStateBytes: 64 * 1024,
+        onComplete: (response, didSucceed) => {
+          completedResponse = response;
+          successful = didSucceed;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "anchor", resultText: "result" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("private direct promotion query");
+    expect(output).not.toContain("fc_sparse_promotion_limit");
+    expect(output).not.toContain("call_sparse_promotion_limit");
+    expect(completedJSON).not.toContain("private direct promotion query");
+    expect(completedJSON).not.toContain("fc_sparse_promotion_limit");
+    expect(completedJSON).not.toContain("call_sparse_promotion_limit");
+    expect(recallCalls).toBe(0);
+    expect(successful).toBe(false);
+  });
+
   test("seeds data-only Codex items on principal and continuation streams", async () => {
     let recallContent = "";
     let completedResponse: GatewayResponse | undefined;
@@ -2041,6 +2305,336 @@ describe("streamResponsesRecallAware", () => {
     expect(output).not.toContain('"name":"recall"');
     expect(output).not.toContain("fc_terminal_recall");
     expect(output).not.toContain("call_terminal_recall");
+  });
+
+  test("redacts a sparse terminal-discovered recall before status validation", async () => {
+    let recallCalls = 0;
+    let completedResponse: GatewayResponse | undefined;
+    const privateArguments = JSON.stringify({
+      query: "private terminal query",
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_failed_sparse_recall", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_terminal_failed_sparse_recall",
+            call_id: "",
+            name: "",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_terminal_failed_sparse_recall",
+          delta: privateArguments,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_failed_sparse_recall",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_terminal_failed_sparse_recall",
+                call_id: "call_terminal_failed_sparse_recall",
+                name: "recall",
+                arguments: privateArguments,
+                status: "failed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("private terminal query");
+    expect(output).not.toContain("fc_terminal_failed_sparse_recall");
+    expect(output).not.toContain("call_terminal_failed_sparse_recall");
+    expect(completedJSON).not.toContain("private terminal query");
+    expect(completedJSON).not.toContain("fc_terminal_failed_sparse_recall");
+    expect(completedJSON).not.toContain("call_terminal_failed_sparse_recall");
+    expect(recallCalls).toBe(0);
+  });
+
+  test("redacts a sparse terminal recall that changes item identity", async () => {
+    let recallCalls = 0;
+    let completedResponse: GatewayResponse | undefined;
+    const privateArguments = JSON.stringify({
+      query: "private changed identity query",
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_changed_recall", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_streamed_changed_recall",
+            call_id: "",
+            name: "",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_streamed_changed_recall",
+          delta: privateArguments,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_changed_recall",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_terminal_changed_recall",
+                call_id: "call_terminal_changed_recall",
+                name: "recall",
+                arguments: privateArguments,
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("private changed identity query");
+    expect(output).not.toContain("fc_streamed_changed_recall");
+    expect(output).not.toContain("fc_terminal_changed_recall");
+    expect(output).not.toContain("call_terminal_changed_recall");
+    expect(completedJSON).not.toContain("private changed identity query");
+    expect(completedJSON).not.toContain("fc_streamed_changed_recall");
+    expect(completedJSON).not.toContain("fc_terminal_changed_recall");
+    expect(completedJSON).not.toContain("call_terminal_changed_recall");
+    expect(recallCalls).toBe(0);
+  });
+
+  test("redacts a sparse call replaced by a terminal item reference", async () => {
+    let recallCalls = 0;
+    let completedResponse: GatewayResponse | undefined;
+    const privateArguments = JSON.stringify({
+      query: "private referenced query",
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_sparse_reference", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_terminal_sparse_reference",
+            call_id: "",
+            name: "",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_terminal_sparse_reference",
+          delta: privateArguments,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_sparse_reference",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "item_reference",
+                id: "fc_terminal_sparse_reference",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain("private referenced query");
+    expect(output).not.toContain("fc_terminal_sparse_reference");
+    expect(completedJSON).not.toContain("private referenced query");
+    expect(completedJSON).not.toContain("fc_terminal_sparse_reference");
+    expect(recallCalls).toBe(0);
+  });
+
+  test("redacts a sparse call whose terminal item changes type", async () => {
+    let recallCalls = 0;
+    let completedResponse: GatewayResponse | undefined;
+    const privateArguments = JSON.stringify({
+      query: "private changed type query",
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_sparse_changed_type", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_terminal_sparse_changed_type",
+            call_id: "",
+            name: "",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_terminal_sparse_changed_type",
+          delta: privateArguments,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_sparse_changed_type",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                id: "fc_terminal_sparse_changed_type",
+                role: "assistant",
+                status: "completed",
+                content: [],
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain("private changed type query");
+    expect(output).not.toContain("fc_terminal_sparse_changed_type");
+    expect(completedJSON).not.toContain("private changed type query");
+    expect(completedJSON).not.toContain("fc_terminal_sparse_changed_type");
+    expect(recallCalls).toBe(0);
+  });
+
+  test("redacts a sparse call omitted from the terminal output", async () => {
+    let recallCalls = 0;
+    let completedResponse: GatewayResponse | undefined;
+    const privateArguments = JSON.stringify({
+      query: "private omitted query",
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_sparse_omitted", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_terminal_sparse_omitted",
+            call_id: "",
+            name: "",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_terminal_sparse_omitted",
+          delta: privateArguments,
+        }),
+        completed("resp_terminal_sparse_omitted"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain("private omitted query");
+    expect(output).not.toContain("fc_terminal_sparse_omitted");
+    expect(completedJSON).not.toContain("private omitted query");
+    expect(completedJSON).not.toContain("fc_terminal_sparse_omitted");
+    expect(recallCalls).toBe(0);
   });
 
   test("rejects terminal recall arguments that contradict an established final value", async () => {
@@ -3315,7 +3909,8 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const out = await drain(client);
+    expect(out).toContain(PUBLIC_RECALL_ERROR);
   });
 
   test("rejects content-part declarations after value deltas", async () => {
@@ -5762,7 +6357,9 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const out = await drain(client);
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
   });
 
   test("intercepts a chained recall before streaming its final continuation", async () => {
@@ -7012,6 +7609,64 @@ describe("streamResponsesRecallAware", () => {
     expect(failures).toEqual(["follow_up_failed"]);
   });
 
+  test("redacts a done-only failed Codex recall in a continuation", async () => {
+    const privateArguments = JSON.stringify({
+      query: "private done-only continuation query",
+    });
+    const followUp = streamFrom([
+      created("resp_done_only_failed_followup", "gpt-5.6-terra"),
+      sseEvent("response.output_item.done", {
+        item: {
+          type: "function_call",
+          id: "fc_done_only_failed_followup",
+          call_id: "call_done_only_failed_followup",
+          name: "recall",
+          arguments: privateArguments,
+          status: "failed",
+        },
+      }),
+    ]);
+    let completedResponse: GatewayResponse | undefined;
+    let successful: boolean | undefined;
+    let recallCalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_done_only_failed_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "principal query" }),
+        completed("resp_done_only_failed_principal"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: (response, didSucceed) => {
+          completedResponse = response;
+          successful = didSucceed;
+        },
+        onRecall: async () => {
+          recallCalls++;
+          return {
+            anchorText: buildAnchor("principal query"),
+            resultText: "result",
+          };
+        },
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    const completedJSON = JSON.stringify(completedResponse);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain("response.completed");
+    expect(output).not.toContain("private done-only continuation query");
+    expect(output).not.toContain("fc_done_only_failed_followup");
+    expect(output).not.toContain("call_done_only_failed_followup");
+    expect(completedJSON).not.toContain("private done-only continuation query");
+    expect(completedJSON).not.toContain("fc_done_only_failed_followup");
+    expect(completedJSON).not.toContain("call_done_only_failed_followup");
+    expect(recallCalls).toBe(1);
+    expect(successful).toBe(false);
+  });
+
   test("recall continuation diagnostics never alter the fixed public failure", async () => {
     setRecallContinuationFailureHook(() => {
       throw new Error("private telemetry failure");
@@ -7349,6 +8004,13 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("emits response.failed when upstream closes without a terminal event", async () => {
+    const errors: string[] = [];
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_eof", "gpt-5.6-terra"),
@@ -7365,8 +8027,12 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(out).toContain("response.failed");
-    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain("ended without a terminal event");
+    expect(errors).toEqual([
+      "openai-responses recall-aware stream failed category=principal_missing_terminal",
+    ]);
   });
 
   test("does NOT emit a second response.completed when the follow-up has none and no recall", async () => {
