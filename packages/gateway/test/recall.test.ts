@@ -186,7 +186,15 @@ describe("RECALL_GATEWAY_TOOL", () => {
     const props = schema.properties as Record<string, unknown>;
     expect(props).toHaveProperty("query");
     expect(props).toHaveProperty("scope");
-    expect(schema.required).toEqual(["query"]);
+    expect(props).toHaveProperty("id");
+    expect(props).toHaveProperty("ids");
+    expect(props).toHaveProperty("detailOffset");
+    expect(props).toHaveProperty("detailLimit");
+    expect(schema.anyOf).toEqual([
+      { required: ["query"] },
+      { required: ["id"] },
+      { required: ["ids"] },
+    ]);
     expect(schema.additionalProperties).toBe(false);
   });
 
@@ -208,6 +216,10 @@ describe("executeRecall malformed input", () => {
     { query: "ok", scope: "invalid" },
     { query: "ok", limit: 0 },
     { query: "ok", limit: 1.5 },
+    { ids: [] },
+    { id: "k:one", ids: ["k:two"] },
+    { ids: ["k:one"], detailLimit: 10 },
+    { query: "ok", unknown: true },
   ])("returns the safe failure result for %#", async (input) => {
     const result = await executeRecall(
       {
@@ -278,8 +290,8 @@ describe("LORE_COMMIT_REMINDER", () => {
 });
 
 describe("MAX_RECALL_DEPTH", () => {
-  test("is a positive integer safety-net cap", () => {
-    expect(MAX_RECALL_DEPTH).toBeGreaterThan(0);
+  test("is a >10 emergency execution ceiling", () => {
+    expect(MAX_RECALL_DEPTH).toBeGreaterThanOrEqual(12);
     expect(Number.isInteger(MAX_RECALL_DEPTH)).toBe(true);
   });
 });
@@ -409,6 +421,12 @@ describe("buildRecallMarker", () => {
     );
     expect(buildRecallMarker("patterns", "knowledge")).toBe(
       '📚 Searching knowledge base for "patterns"…',
+    );
+  });
+
+  test("labels a bounded detail batch without exposing every source ID", () => {
+    expect(buildRecallMarker("", "all", undefined, ["d:one", "t:two"])).toBe(
+      "📚 Fetching details for 2 sources…",
     );
   });
 });

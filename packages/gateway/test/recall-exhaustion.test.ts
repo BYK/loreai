@@ -6,7 +6,7 @@ import {
   resetPipelineState,
   setUpstreamInterceptor,
 } from "../src/pipeline";
-import { executeRecall } from "../src/recall";
+import { executeRecall, MAX_RECALL_DEPTH } from "../src/recall";
 import type { GatewayRequest } from "../src/translate/types";
 
 vi.mock("../src/recall", async (importOriginal) => {
@@ -293,7 +293,7 @@ describe.each([
         firstBody ??= structuredClone(requestBody);
         expect(requestBody.tools).toEqual(firstBody.tools);
         expect(requestBody.tool_choice).toEqual(firstBody.tool_choice);
-        if (calls === 11) {
+        if (calls === MAX_RECALL_DEPTH + 1) {
           lastBody = requestBody;
           if (mode === "failed")
             return new Response("provider diagnostic must not leak", {
@@ -319,8 +319,10 @@ describe.each([
         expect(vi.mocked(executeRecall)).not.toHaveBeenCalled();
         expect(calls).toBe(1);
       } else {
-        expect(calls).toBe(11);
-        expect(vi.mocked(executeRecall)).toHaveBeenCalledTimes(10);
+        expect(calls).toBe(MAX_RECALL_DEPTH + 1);
+        expect(vi.mocked(executeRecall)).toHaveBeenCalledTimes(
+          MAX_RECALL_DEPTH,
+        );
         expect(lastBody?.tools).toEqual(firstBody?.tools);
         expect(lastBody?.tool_choice).toEqual(firstBody?.tool_choice);
         expect(JSON.stringify(lastBody)).toContain(

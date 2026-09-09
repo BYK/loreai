@@ -18,6 +18,7 @@ import * as entities from "./entities";
 import { currentTenantId } from "./tenant";
 import * as toolTrace from "./tool-trace";
 import * as log from "./log";
+import { createHash } from "node:crypto";
 import { db, ensureProject, projectName } from "./db";
 import type { LoreConfig } from "./config";
 import type { LLMClient } from "./types";
@@ -66,6 +67,12 @@ export type RecallInput = {
   scope?: RecallScope;
   /** Fetch full content of a specific result by its source-prefixed ID (e.g. "k:xxx", "d:xxx"). */
   id?: string;
+  /** Fetch several source details in one bounded invocation. Mutually exclusive with `id`. */
+  ids?: string[];
+  /** Character offset into an `id` detail. Not valid for search or `ids` batches. */
+  detailOffset?: number;
+  /** Maximum detail characters to return for an `id` detail. */
+  detailLimit?: number;
   /** Project root — used by all scoring paths. */
   projectPath: string;
   /** Current session ID — required when `scope === "session"`. */
@@ -113,6 +120,32 @@ export type RecallInput = {
 
 /** Result of a full recall run — markdown-formatted string for the LLM. */
 export type RecallResult = string;
+
+/** Private source coverage returned alongside rendered recall output. */
+export type RecallCoverage = {
+  /** Canonical source identity; aliases resolve to the same value. */
+  identity: string;
+  /** Content revision fingerprint. This never appears in rendered tool output. */
+  revision: string;
+  /** Delivered source-content range, measured in JavaScript string offsets. */
+  offset: number;
+  length: number;
+  complete: boolean;
+  /** Search previews and detail/range reads are distinct delivered coverage. */
+  kind?: "preview" | "detail";
+};
+
+/** Rendered tool result plus private coverage used by gateway recall policy. */
+export type RecallRun = {
+  result: RecallResult;
+  coverage: RecallCoverage[];
+};
+
+/** Keep one tool call bounded while allowing known source details to be batched. */
+export const MAX_RECALL_BATCH_IDS = 8;
+export const DEFAULT_RECALL_DETAIL_CHARS = 12_000;
+export const MAX_RECALL_DETAIL_CHARS = 16_000;
+export const MAX_RECALL_BATCH_CHARS = 32_000;
 
 export type TaggedResult =
   | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
@@ -176,6 +209,40 @@ function taggedResultKey(r: TaggedResult): string {
     case "entity":
       return `e:${r.item.id}`;
   }
+}
+
+/** Private, stable coverage for a rendered search preview. */
+function previewCoverage(tagged: TaggedResult): RecallCoverage {
+  let identity = taggedResultKey(tagged);
+  let revisionSource = "";
+  switch (tagged.source) {
+    case "knowledge":
+    case "cross-knowledge":
+      identity = `k:${tagged.item.logical_id}`;
+      revisionSource = `${tagged.item.updated_at}:${tagged.item.title}:${tagged.item.content}`;
+      break;
+    case "distillation":
+      revisionSource = `${tagged.item.created_at}:${tagged.item.observations}`;
+      break;
+    case "temporal":
+      revisionSource = `${tagged.item.created_at}:${tagged.item.content}`;
+      break;
+    case "lat-section":
+      revisionSource = tagged.item.content_hash;
+      break;
+    case "entity":
+      revisionSource = JSON.stringify(tagged.item);
+      break;
+  }
+  return {
+    identity,
+    revision: createHash("sha256").update(revisionSource).digest("hex"),
+    offset: 0,
+    // A preview is a separate coverage mode, not a fake full-content range.
+    length: 1,
+    complete: false,
+    kind: "preview",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -393,11 +460,19 @@ type TieredResult = ScoredTaggedResult & {
   charBudget: number;
 };
 
+type FormattedRecallResults = {
+  result: string;
+  /** The exact sources rendered into `result`, excluding score-pruned hits. */
+  shown: ScoredTaggedResult[];
+};
+
 function formatFusedResults(
   results: ScoredTaggedResult[],
   config: FormatConfig,
-): string {
-  if (!results.length) return "No results found for this query.";
+): FormattedRecallResults {
+  if (!results.length) {
+    return { result: "No results found for this query.", shown: [] };
+  }
 
   const totalFound = results.length;
   const topScore = results[0].score;
@@ -418,7 +493,9 @@ function formatFusedResults(
     kept = results.filter((r) => r.score >= config.absoluteFloor).slice(0, 3);
   }
 
-  if (!kept.length) return "No results found for this query.";
+  if (!kept.length) {
+    return { result: "No results found for this query.", shown: [] };
+  }
 
   // Step 2: Assign tiers based on relative score.
   const tiered: TieredResult[] = kept.map((r) => ({
@@ -558,7 +635,7 @@ function formatFusedResults(
     }
   }
 
-  return lines.join("\n");
+  return { result: lines.join("\n"), shown: kept };
 }
 
 /**
@@ -1740,16 +1817,243 @@ export function recallById(id: string): string {
   }
 }
 
-/** Full recall run: search every relevant source, fuse with RRF, format as markdown. */
-export async function runRecall(input: RecallInput): Promise<RecallResult> {
-  input.signal?.throwIfAborted();
-  // ID-based detail retrieval — bypass search entirely.
-  if (input.id) {
-    const result = recallById(input.id);
-    input.signal?.throwIfAborted();
-    return result;
-  }
+type RecallDetailOptions = Pick<RecallInput, "detailOffset" | "detailLimit">;
 
+function normalizeDetailOptions(input: RecallDetailOptions): {
+  offset: number;
+  limit: number;
+} {
+  const offset = input.detailOffset ?? 0;
+  const limit = input.detailLimit ?? DEFAULT_RECALL_DETAIL_CHARS;
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error("Recall detailOffset must be a non-negative integer");
+  }
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_RECALL_DETAIL_CHARS
+  ) {
+    throw new Error(
+      `Recall detailLimit must be an integer from 1 to ${MAX_RECALL_DETAIL_CHARS}`,
+    );
+  }
+  return { offset, limit };
+}
+
+function sourceCoverage(
+  id: string,
+): Omit<RecallCoverage, "offset" | "length" | "complete"> | null {
+  const colon = id.indexOf(":");
+  if (colon < 1) return null;
+  const prefix = id.slice(0, colon);
+  const rawId = id.slice(colon + 1);
+  const fingerprint = (value: string) =>
+    createHash("sha256").update(value).digest("hex");
+  switch (prefix) {
+    case "k":
+    case "xk": {
+      // Coverage lookup must stay cheap: resolve a historical version to its
+      // logical ID, then read only identity/revision metadata. Hydrating the
+      // content happens once later, in the detail renderer.
+      const logicalId = ltm.logicalIdOf(rawId);
+      const entry = db()
+        .query(
+          `SELECT id, logical_id, updated_at
+             FROM knowledge_current
+            WHERE tenant_id = ? AND logical_id = ?`,
+        )
+        .get(currentTenantId(), logicalId) as {
+        id: string;
+        logical_id: string;
+        updated_at: number;
+      } | null;
+      if (!entry) return null;
+      return {
+        identity: `k:${entry.logical_id}`,
+        revision: fingerprint(`${entry.id}:${entry.updated_at}`),
+      };
+    }
+    case "d": {
+      const row = db()
+        .query(
+          `SELECT d.id, d.created_at
+             FROM distillations d JOIN projects p ON p.id = d.project_id
+            WHERE p.tenant_id = ? AND d.id = ?`,
+        )
+        .get(currentTenantId(), rawId) as {
+        id: string;
+        created_at: number;
+      } | null;
+      return row
+        ? {
+            identity: `d:${row.id}`,
+            revision: fingerprint(`${row.id}:${row.created_at}`),
+          }
+        : null;
+    }
+    case "t": {
+      const row = db()
+        .query(
+          `SELECT t.id, t.created_at
+             FROM temporal_messages t JOIN projects p ON p.id = t.project_id
+            WHERE p.tenant_id = ? AND t.id = ?`,
+        )
+        .get(currentTenantId(), rawId) as {
+        id: string;
+        created_at: number;
+      } | null;
+      return row
+        ? {
+            identity: `t:${row.id}`,
+            revision: fingerprint(`${row.id}:${row.created_at}`),
+          }
+        : null;
+    }
+    case "lat": {
+      const row = db()
+        .query(
+          `SELECT l.id, l.content_hash
+             FROM lat_sections l JOIN projects p ON p.id = l.project_id
+            WHERE p.tenant_id = ? AND l.id = ?`,
+        )
+        .get(currentTenantId(), rawId) as {
+        id: string;
+        content_hash: string;
+      } | null;
+      return row
+        ? { identity: `lat:${row.id}`, revision: fingerprint(row.content_hash) }
+        : null;
+    }
+    case "e": {
+      const entity = entities.getWithAliases(rawId);
+      return entity
+        ? {
+            identity: `e:${entity.id}`,
+            revision: fingerprint(JSON.stringify(entity)),
+          }
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Fetch a bounded detail plus private source coverage for recall policy. */
+export function recallByIdWithMetadata(
+  id: string,
+  input: RecallDetailOptions = {},
+): RecallRun {
+  const { offset, limit } = normalizeDetailOptions(input);
+  const full = recallById(id);
+  const coverage = sourceCoverage(id);
+  if (!coverage) return { result: full, coverage: [] };
+  const start = Math.min(offset, full.length);
+  const text = full.slice(start, start + limit);
+  const end = start + text.length;
+  const complete = end >= full.length;
+  const suffix = complete
+    ? ""
+    : `\n\n[Detail truncated after characters ${start}-${end} of ${full.length}. Call recall again with id \`${id}\` and detailOffset ${end}.]`;
+  return {
+    result: text + suffix,
+    coverage: [
+      {
+        ...coverage,
+        offset: start,
+        length: text.length,
+        complete,
+        kind: "detail",
+      },
+    ],
+  };
+}
+
+/** Full recall run retaining the legacy string API. */
+export async function runRecall(input: RecallInput): Promise<RecallResult> {
+  return (await runRecallWithMetadata(input)).result;
+}
+
+/**
+ * Run a recall and return private source coverage beside the rendered result.
+ * Coverage is intentionally available only to in-process callers such as the
+ * gateway policy; it is never interpolated into tool output or telemetry.
+ */
+export async function runRecallWithMetadata(
+  input: RecallInput,
+): Promise<RecallRun> {
+  input.signal?.throwIfAborted();
+  if (input.id && input.ids) {
+    throw new Error("Recall id and ids cannot be used together");
+  }
+  if (
+    (input.detailOffset !== undefined || input.detailLimit !== undefined) &&
+    !input.id
+  ) {
+    throw new Error("Recall detail ranges require exactly one id");
+  }
+  if (input.ids) {
+    if (input.ids.length === 0 || input.ids.length > MAX_RECALL_BATCH_IDS) {
+      throw new Error(
+        `Recall ids must be non-empty and contain at most ${MAX_RECALL_BATCH_IDS} items`,
+      );
+    }
+    const seenRequests = new Set<string>();
+    const seenSources = new Set<string>();
+    const coverage: RecallCoverage[] = [];
+    const sections: string[] = [];
+    let remaining = MAX_RECALL_BATCH_CHARS;
+    for (const requestedId of input.ids) {
+      input.signal?.throwIfAborted();
+      if (typeof requestedId !== "string" || !requestedId.trim()) {
+        throw new Error("Recall ids must contain non-empty strings");
+      }
+      if (seenRequests.has(requestedId)) continue;
+      seenRequests.add(requestedId);
+      if (remaining <= 0) {
+        sections.push(
+          `### Detail: ${requestedId}\nOutcome: omitted — batch output limit reached; fetch this ID separately.`,
+        );
+        continue;
+      }
+      // Resolve aliases before reading/rendering content, so k:<version> and
+      // k:<logical-id> do not hydrate the same source twice in one batch.
+      const canonical = sourceCoverage(requestedId);
+      if (canonical && seenSources.has(canonical.identity)) continue;
+      const detail = recallByIdWithMetadata(requestedId, {
+        detailLimit: Math.min(DEFAULT_RECALL_DETAIL_CHARS, remaining),
+      });
+      const source = detail.coverage[0];
+      if (source && seenSources.has(source.identity)) continue;
+      if (source) {
+        seenSources.add(source.identity);
+        coverage.push(source);
+      }
+      const outcome = source
+        ? source.complete
+          ? "delivered"
+          : "partial — fetch the reported remaining range"
+        : "unavailable";
+      sections.push(
+        `### Detail: ${requestedId}\nOutcome: ${outcome}\n\n${detail.result}`,
+      );
+      remaining -= Math.min(remaining, detail.result.length);
+    }
+    input.signal?.throwIfAborted();
+    return {
+      result: ["## Recall Details", ...sections].join("\n\n"),
+      coverage,
+    };
+  }
+  if (input.id) {
+    const detail = recallByIdWithMetadata(input.id, input);
+    input.signal?.throwIfAborted();
+    return detail;
+  }
+  return runRecallSearch(input);
+}
+
+/** Search every relevant source, fuse with RRF, and format a public result. */
+async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
   const fused = await searchRecall(input);
 
   // Record cross-project knowledge transfers (issue #506) — only for genuine
@@ -1792,7 +2096,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
   }
 
   const recallCfg = input.searchConfig?.recall;
-  let out = formatFusedResults(fused, {
+  const formatted = formatFusedResults(fused, {
     charBudget: recallCfg?.charBudget ?? DEFAULT_FORMAT_CONFIG.charBudget,
     relevanceFloor:
       recallCfg?.relevanceFloor ?? DEFAULT_FORMAT_CONFIG.relevanceFloor,
@@ -1801,6 +2105,7 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
       recallCfg?.absoluteFloor ?? DEFAULT_FORMAT_CONFIG.absoluteFloor,
     alreadyInLtmIds: input.alreadyInLtmIds,
   });
+  let out = formatted.result;
 
   // Surface structured tool-failure stats for debugging. Appended outside the
   // RRF scoring/budget logic so it never displaces actual search hits.
@@ -1817,13 +2122,16 @@ export async function runRecall(input: RecallInput): Promise<RecallResult> {
     }
   }
 
-  return out;
+  return {
+    result: out,
+    coverage: formatted.shown.map(({ item }) => previewCoverage(item)),
+  };
 }
 
 /** Standard tool description reused verbatim by each host adapter. */
 export const RECALL_TOOL_DESCRIPTION =
   "Search your persistent memory for this project. Your visible context is a trimmed window — older messages, decisions, and details may not be visible to you even within the current session. Use this tool whenever you need information that isn't in your current context: file paths, past decisions, user preferences, prior approaches, the people/services/tools the user works with, or anything from earlier in this conversation or previous sessions. Always prefer recall over assuming you don't have the information. When the user refers to a project, repository, person, service, or tool by name — especially one not already visible in your context — call recall to resolve it before searching the filesystem or assuming you must explore. Searches long-term knowledge, known entities (people, orgs, services, tools — with their aliases and relationships), distilled history, and raw message archives. When your context has been compressed, the distilled summaries are lossy — specific details (exact error messages, rejected alternatives, file paths, numerical values) are likely omitted, so use recall to verify any specific claim before answering questions about what happened, what was considered, or what the exact values were. IMPORTANT — for values that live in the repository (current code, config, styles, exact line contents): memory is a POINTER, not the source of truth. A remembered value can be stale once the file changes, so use recall to find WHERE something is (the file path / file:line / symbol), then READ that file for the current value — or use git history for what it used to be. Do not answer a current-code question from memory alone when you can read the file." +
-  '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers, tool result placeholders, and truncated recall results. Pass any such ID to this tool\'s `id` parameter to retrieve the full original content. Distillations marked "lossy" have lost specific details — use the ID to drill down.' +
+  '\n\nYour context contains references in the format (prefix:id) — e.g. (d:abc123) for distillations, (t:abc123) for messages. These appear in distillation headers, tool result placeholders, and truncated recall results. Pass one ID to `id`, or several already-known IDs to the bounded `ids` list, to retrieve details. `id` and `ids` are mutually exclusive and ignore `query`. Detail output is bounded: when a result reports a remaining offset, call `id` again with `detailOffset` to retrieve the next range. Distillations marked "lossy" have lost specific details — use IDs to drill down.' +
   '\n\nNever write recall status text (like "📚 Searching…" or "📚 Fetching…") yourself — these are injected by the system automatically when you use this tool.';
 
 /** Standard parameter descriptions reused by each host adapter. */
@@ -1833,4 +2141,9 @@ export const RECALL_PARAM_DESCRIPTIONS = {
   scope:
     "Search scope: 'all' (default) searches everything, 'session' searches current session only, 'project' searches all sessions in this project, 'knowledge' searches only long-term knowledge.",
   id: "Fetch full content of a specific result by its source-prefixed ID (e.g. 'k:abc123', 'd:abc123', 't:abc123', 'e:abc123' for an entity). These IDs appear throughout your context: in distillation headers, tool result placeholders, and truncated recall results. When id is provided, query is ignored.",
+  ids: "Fetch details for up to 8 already-known source IDs in their listed order. Duplicate/alias sources are returned once. Mutually exclusive with id; query is ignored.",
+  detailOffset:
+    "For a single id detail only: the character offset reported by a truncated prior result. Starts at 0.",
+  detailLimit:
+    "For a single id detail only: maximum characters to return. Use the default unless a smaller range is sufficient.",
 };

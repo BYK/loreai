@@ -1,6 +1,9 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { log } from "@loreai/core";
-import { createRecallDiagnostics } from "../src/recall-diagnostics";
+import {
+  createRecallDiagnostics,
+  MAX_RECALL_DIAGNOSTIC_ROUNDS,
+} from "../src/recall-diagnostics";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -49,6 +52,8 @@ test.each([true, false])(
     for (let i = 0; i < 50; i++)
       diagnostics.record({ query: String(i) }, String(i));
     diagnostics.finish("aborted");
-    expect(sink).toHaveBeenCalledTimes(enabled ? 11 : 0);
+    expect(sink).toHaveBeenCalledTimes(
+      enabled ? Math.min(50, MAX_RECALL_DIAGNOSTIC_ROUNDS) + 1 : 0,
+    );
   },
 );

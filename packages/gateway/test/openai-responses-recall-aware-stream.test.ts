@@ -3960,7 +3960,7 @@ describe("streamResponsesRecallAware", () => {
     expect(recalled).toBe(0);
   });
 
-  test("rejects cross-phase usage overflow before chained recall", async () => {
+  test("rejects an over-budget principal response before its first recall", async () => {
     let recalled = 0;
     const followUp = streamFrom([
       created("resp_chained_usage_overflow", "gpt-5.6-terra"),
@@ -3990,7 +3990,9 @@ describe("streamResponsesRecallAware", () => {
     );
 
     expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
-    expect(recalled).toBe(1);
+    // The principal response is counted before the first recall admission, so
+    // a request already beyond the chain token budget never dispatches recall.
+    expect(recalled).toBe(0);
   });
 
   test("preserves content_filter continuation terminal and item metadata", async () => {
@@ -4523,6 +4525,67 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain("final answer");
     expect(out).not.toContain("depth exhausted");
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+  });
+
+  test("reaches a final fact after twelve sequential productive recalls", async () => {
+    let recalls = 0;
+    let followUps = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_twelve_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "source 1" }),
+        completed("resp_twelve_principal"),
+      ]),
+      {
+        maxRecallDepth: 24,
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return {
+            anchorText: buildAnchor(`source ${recalls}`),
+            resultText: `evidence ${recalls}`,
+            coverage: [
+              {
+                identity: `t:source-${recalls}`,
+                revision: `v${recalls}`,
+                offset: 0,
+                length: 10,
+                complete: true,
+              },
+            ],
+          };
+        },
+        runFollowUp: async () => {
+          followUps++;
+          if (recalls === 12) {
+            return {
+              reader: streamFrom([
+                created("resp_twelve_final", "gpt-5.6-terra"),
+                textItem(0, "twelfth source establishes the final fact"),
+                completed("resp_twelve_final"),
+              ]).body!.getReader(),
+            };
+          }
+          return {
+            reader: streamFrom([
+              created(`resp_twelve_${recalls}`, "gpt-5.6-terra"),
+              recallCall(
+                0,
+                { query: `source ${recalls + 1}` },
+                `fc_twelve_${recalls}`,
+                `call_twelve_${recalls}`,
+              ),
+              completed(`resp_twelve_${recalls}`),
+            ]).body!.getReader(),
+          };
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect([recalls, followUps]).toEqual([12, 12]);
+    expect(out).toContain("twelfth source establishes the final fact");
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
   });
 
   test("fails an exhausted continuation recall without executing it", async () => {
