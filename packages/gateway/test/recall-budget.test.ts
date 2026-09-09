@@ -84,6 +84,60 @@ describe("RecallChainBudget", () => {
     expect(budget.snapshot()).toMatchObject({ items: 2, reservedItems: 30 });
   });
 
+  test("counts a preview and a detail of one revision as one delivered item", () => {
+    const budget = new RecallChainBudget();
+    const source = {
+      identity: "k:logical-source",
+      revision: "revision-1",
+      offset: 0,
+      complete: false,
+    };
+    expect(budget.admit(1)).toBeUndefined();
+    expect(
+      budget.record({
+        resultBytes: 100,
+        coverage: [{ ...source, length: 1, kind: "preview" }],
+      }),
+    ).toBeUndefined();
+    expect(budget.admit(1)).toBeUndefined();
+    expect(
+      budget.record({
+        resultBytes: 100,
+        coverage: [{ ...source, length: 100, complete: true, kind: "detail" }],
+      }),
+    ).toBeUndefined();
+    expect(budget.snapshot()).toMatchObject({
+      items: 1,
+      consecutiveNoProgress: 0,
+    });
+  });
+
+  test("treats a completed empty detail as delivered coverage", () => {
+    const budget = new RecallChainBudget({ maxConsecutiveNoProgress: 0 });
+    for (let index = 0; index < 3; index++) {
+      expect(budget.admit(1)).toBeUndefined();
+      expect(
+        budget.record({
+          resultBytes: 100,
+          coverage: [
+            {
+              identity: `e:empty-${index}`,
+              revision: `revision-${index}`,
+              offset: 0,
+              length: 0,
+              complete: true,
+              kind: "detail",
+            },
+          ],
+        }),
+      ).toBeUndefined();
+    }
+    expect(budget.snapshot()).toMatchObject({
+      items: 3,
+      consecutiveNoProgress: 0,
+    });
+  });
+
   test("stops broad searches once their delivered sources exhaust the item budget", () => {
     const budget = new RecallChainBudget({ maxItems: 64 });
     const broadCoverage = (offset: number) =>

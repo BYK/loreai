@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
+import * as entities from "../src/entities";
 import * as ltm from "../src/ltm";
 import {
   MAX_RECALL_BATCH_IDS,
@@ -103,6 +104,33 @@ describe("recall detail batches", () => {
     expect(second.result).not.toEqual(first.result);
   });
 
+  test("paginates astral Unicode without skipping a trailing character", async () => {
+    const id = seed("Unicode source", "x😀z");
+
+    const first = await runRecallWithMetadata({
+      query: "",
+      id: `k:${id}`,
+      detailLimit: 2,
+      projectPath: PROJECT,
+    });
+    expect(first.result).toContain("x😀");
+    expect(first.coverage).toMatchObject([
+      { offset: 0, length: 2, complete: false },
+    ]);
+
+    const second = await runRecallWithMetadata({
+      query: "",
+      id: `k:${id}`,
+      detailOffset: 2,
+      detailLimit: 2,
+      projectPath: PROJECT,
+    });
+    expect(second.result).toContain("z");
+    expect(second.coverage).toMatchObject([
+      { offset: 2, length: 1, complete: true },
+    ]);
+  });
+
   test("renders a detail page without hydrating the full knowledge entry", async () => {
     const id = seed("Paged source", "x".repeat(20_000));
     const get = vi.spyOn(ltm, "get").mockImplementation(() => {
@@ -155,5 +183,81 @@ describe("recall detail batches", () => {
     expect(detail.coverage).toMatchObject([
       { identity: `k:${logicalId}`, kind: "detail", complete: true },
     ]);
+  });
+
+  test("preserves bounded aliases and relations in an entity detail", async () => {
+    const person = entities.create({
+      projectPath: PROJECT,
+      entityType: "person",
+      canonicalName: "Ada Lovelace",
+      aliases: [{ type: "nickname", value: "Ada" }],
+    });
+    const partner = entities.create({
+      projectPath: PROJECT,
+      entityType: "person",
+      canonicalName: "Charles Babbage",
+    });
+    entities.addRelation(person.id, partner.id, "partner");
+
+    try {
+      const result = await runRecall({
+        query: "",
+        id: `e:${person.id}`,
+        projectPath: PROJECT,
+      });
+      expect(result).toContain("nickname:Ada");
+      expect(result).toContain("Relations: partner of Charles Babbage");
+    } finally {
+      entities.remove(person.id);
+      entities.remove(partner.id);
+    }
+  });
+
+  test("advances entity detail coverage when aliases or relations change", async () => {
+    const person = entities.create({
+      projectPath: PROJECT,
+      entityType: "person",
+      canonicalName: "Ada Lovelace",
+    });
+    const partner = entities.create({
+      projectPath: PROJECT,
+      entityType: "person",
+      canonicalName: "Charles Babbage",
+    });
+    const clock = vi.spyOn(Date, "now");
+
+    try {
+      const before = await runRecallWithMetadata({
+        query: "",
+        id: `e:${person.id}`,
+        projectPath: PROJECT,
+      });
+      const now = Date.now();
+      clock.mockReturnValue(now + 1);
+      entities.addAlias(person.id, "nickname", "Ada");
+      const afterAlias = await runRecallWithMetadata({
+        query: "",
+        id: `e:${person.id}`,
+        projectPath: PROJECT,
+      });
+      clock.mockReturnValue(now + 2);
+      entities.addRelation(person.id, partner.id, "partner");
+      const afterRelation = await runRecallWithMetadata({
+        query: "",
+        id: `e:${person.id}`,
+        projectPath: PROJECT,
+      });
+
+      expect(afterAlias.coverage[0].revision).not.toBe(
+        before.coverage[0].revision,
+      );
+      expect(afterRelation.coverage[0].revision).not.toBe(
+        afterAlias.coverage[0].revision,
+      );
+    } finally {
+      clock.mockRestore();
+      entities.remove(person.id);
+      entities.remove(partner.id);
+    }
   });
 });

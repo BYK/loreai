@@ -230,9 +230,23 @@ describe.each([
       "refusal",
       "unfinished",
     ] as const)("final result %s", async (mode) => {
-      vi.mocked(executeRecall).mockResolvedValue({
-        result: "real recall result",
-        input: { query: "architecture" },
+      let recallCalls = 0;
+      vi.mocked(executeRecall).mockImplementation(async () => {
+        recallCalls++;
+        return {
+          result: "real recall result",
+          input: { query: "architecture" },
+          coverage: [
+            {
+              identity: `t:source-${recallCalls}`,
+              revision: `revision-${recallCalls}`,
+              offset: 0,
+              length: 1,
+              complete: true,
+              kind: "detail" as const,
+            },
+          ],
+        };
       });
       const config = loadConfig();
       config.remoteGateway = false;

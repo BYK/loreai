@@ -364,10 +364,28 @@ export function update(
 /** Delete an entity, its aliases, relations, and knowledge refs. */
 export function remove(id: string): void {
   if (!get(id)) return;
+  const related = db()
+    .query(
+      `SELECT CASE WHEN entity_a = ? THEN entity_b ELSE entity_a END AS other_id
+         FROM entity_relations WHERE entity_a = ? OR entity_b = ?`,
+    )
+    .all(id, id, id) as Array<{ other_id: string }>;
   db().query("DELETE FROM knowledge_entity_refs WHERE entity_id = ?").run(id);
   db()
     .query("DELETE FROM entity_relations WHERE entity_a = ? OR entity_b = ?")
     .run(id, id);
+  if (related.length) {
+    const placeholders = related.map(() => "?").join(",");
+    db()
+      .query(
+        `UPDATE entities SET updated_at = ? WHERE tenant_id = ? AND id IN (${placeholders})`,
+      )
+      .run(
+        Date.now(),
+        currentTenantId(),
+        ...related.map((row) => row.other_id),
+      );
+  }
   // Explicitly delete aliases BEFORE the entity so FTS5 content-sync triggers
   // fire correctly (CASCADE deletes do NOT fire AFTER DELETE triggers in SQLite).
   db().query("DELETE FROM entity_aliases WHERE entity_id = ?").run(id);
@@ -688,6 +706,7 @@ export function addAlias(
   if (!get(entityId)) return null;
   const id = uuidv7();
   try {
+    const now = Date.now();
     db()
       .query(
         `INSERT INTO entity_aliases (id, entity_id, alias_type, alias_value, source, created_at, tenant_id)
@@ -699,9 +718,16 @@ export function addAlias(
         aliasType,
         aliasValue,
         source ?? null,
-        Date.now(),
+        now,
         currentTenantId(),
       );
+    // Alias text is part of rendered entity recall detail, so make its
+    // revision visible to the recall coverage ledger as well.
+    db()
+      .query(
+        "UPDATE entities SET updated_at = ? WHERE tenant_id = ? AND id = ?",
+      )
+      .run(now, currentTenantId(), entityId);
     return id;
   } catch (e: unknown) {
     // UNIQUE constraint violation — alias already exists (possibly on another entity)
@@ -715,9 +741,21 @@ export function addAlias(
 
 /** Remove a specific alias by its ID. */
 export function removeAlias(aliasId: string): void {
-  db()
-    .query("DELETE FROM entity_aliases WHERE tenant_id = ? AND id = ?")
-    .run(currentTenantId(), aliasId);
+  const d = db();
+  const alias = d
+    .query(
+      "SELECT entity_id FROM entity_aliases WHERE tenant_id = ? AND id = ?",
+    )
+    .get(currentTenantId(), aliasId) as { entity_id: string } | null;
+  d.query("DELETE FROM entity_aliases WHERE tenant_id = ? AND id = ?").run(
+    currentTenantId(),
+    aliasId,
+  );
+  if (alias) {
+    d.query(
+      "UPDATE entities SET updated_at = ? WHERE tenant_id = ? AND id = ?",
+    ).run(Date.now(), currentTenantId(), alias.entity_id);
+  }
 }
 
 /** Get all aliases for an entity. */
@@ -1482,6 +1520,13 @@ export function addRelation(
         now,
         now,
       );
+    // Relations are rendered in entity detail and therefore belong to both
+    // endpoint revisions, even though they live in a join table.
+    db()
+      .query(
+        "UPDATE entities SET updated_at = ? WHERE tenant_id = ? AND id IN (?, ?)",
+      )
+      .run(now, currentTenantId(), entityA, entityB);
     return id;
   } catch (e: unknown) {
     if (e instanceof Error && /UNIQUE constraint/i.test(e.message)) {
@@ -1496,12 +1541,26 @@ export function addRelation(
 
 /** Remove a relation by its ID. */
 export function removeRelation(id: string): void {
-  db()
+  const d = db();
+  const relation = d
     .query(
-      `DELETE FROM entity_relations
-       WHERE id = ? AND entity_a IN (SELECT id FROM entities WHERE tenant_id = ?)`,
+      `SELECT r.entity_a, r.entity_b FROM entity_relations r
+       JOIN entities a ON a.id = r.entity_a
+       WHERE r.id = ? AND a.tenant_id = ?`,
     )
-    .run(id, currentTenantId());
+    .get(id, currentTenantId()) as {
+    entity_a: string;
+    entity_b: string;
+  } | null;
+  d.query(
+    `DELETE FROM entity_relations
+       WHERE id = ? AND entity_a IN (SELECT id FROM entities WHERE tenant_id = ?)`,
+  ).run(id, currentTenantId());
+  if (relation) {
+    d.query(
+      "UPDATE entities SET updated_at = ? WHERE tenant_id = ? AND id IN (?, ?)",
+    ).run(Date.now(), currentTenantId(), relation.entity_a, relation.entity_b);
+  }
 }
 
 /**

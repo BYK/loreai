@@ -34,6 +34,7 @@ afterEach(async () => {
   clearAllCosts();
   for (const id of createdKnowledge) ltm.remove(id);
   createdKnowledge.clear();
+  productiveRecallIds = undefined;
   vi.restoreAllMocks();
   resetWorkerHealth();
 });
@@ -123,10 +124,12 @@ describe.each(["anthropic", "openai", "openai-responses"] as const)(
       "json",
     ] as const)("retains only validated usage: %s", async (usageKind) => {
       const alias = crypto.randomUUID();
+      prepareProductiveRecallSources();
       let calls = 0;
       setUpstreamInterceptor(async () => {
         calls++;
-        if (calls < 11) return providerResponse(protocol, calls, "recall");
+        if (calls < FINAL_RECALL_CALL)
+          return providerResponse(protocol, calls, "recall");
         if (usageKind === "json")
           return new Response('{"usage":', {
             headers: { "content-type": "application/json" },
@@ -174,11 +177,13 @@ describe.each(["anthropic", "openai", "openai-responses"] as const)(
       await response.text();
       await settled();
       const state = stateFor(alias);
-      expect(calls).toBe(11);
+      expect(calls).toBe(FINAL_RECALL_CALL);
       expect(state.recallStore.size).toBe(0);
       expect(getSessionCosts(state.sessionID)?.conversation).toMatchObject({
-        inputTokens: usageKind === "valid" ? 1030 : 30,
-        outputTokens: usageKind === "valid" ? 120 : 20,
+        inputTokens:
+          TEST_RECALL_EXECUTION_CAP * 3 + (usageKind === "valid" ? 1000 : 0),
+        outputTokens:
+          TEST_RECALL_EXECUTION_CAP * 2 + (usageKind === "valid" ? 100 : 0),
         turns: 1,
       });
     });
@@ -362,6 +367,7 @@ test.each(["answer", "invalid"] as const)(
   "buffers Responses upstream for a streaming Chat client: %s",
   async (outcome) => {
     const id = knowledge();
+    prepareProductiveRecallSources();
     const alias = crypto.randomUUID();
     const req = request("openai", alias);
     req.stream = true;
@@ -371,7 +377,7 @@ test.each(["answer", "invalid"] as const)(
       providerResponse(
         "openai-responses",
         ++calls,
-        calls === 11 ? outcome : "recall",
+        calls === FINAL_RECALL_CALL ? outcome : "recall",
         (body as Record<string, unknown>).stream === true,
       ),
     );
@@ -382,7 +388,7 @@ test.each(["answer", "invalid"] as const)(
     await response.text();
     await settled();
     expect(stateFor(alias).recallStore.size).toBe(
-      outcome === "answer" ? 10 : 0,
+      outcome === "answer" ? TEST_RECALL_EXECUTION_CAP : 0,
     );
     expect(ltm.transferCount(id)).toBe(outcome === "answer" ? 1 : 0);
   },
@@ -412,6 +418,38 @@ test("live Responses no-store recall does not record transfers", async () => {
 
 const query =
   "transactional glacier orchard telescope cobalt lantern mercury compass velvet island";
+let productiveRecallIds: string[] | undefined;
+
+/**
+ * Terminal-recall fixtures start with a search then use distinct detail reads,
+ * so they remain productive. They use the minimum legal emergency cap to test
+ * finalization without coupling the test runtime to the production default.
+ */
+const TEST_RECALL_EXECUTION_CAP = 12;
+const FINAL_RECALL_CALL = TEST_RECALL_EXECUTION_CAP + 1;
+
+function prepareProductiveRecallSources(
+  count = TEST_RECALL_EXECUTION_CAP - 1,
+): void {
+  const currentConfig = core.config();
+  vi.spyOn(core, "config").mockReturnValue({
+    ...currentConfig,
+    search: {
+      ...currentConfig.search,
+      recall: {
+        ...currentConfig.search.recall,
+        chainMaxExecutions: TEST_RECALL_EXECUTION_CAP,
+      },
+    },
+  });
+  productiveRecallIds = Array.from({ length: count }, (_, index) =>
+    // `ltm.create()` intentionally deduplicates same-title entries. Give every
+    // detail round its own logical source while keeping the shared query terms
+    // in its body for the initial search.
+    knowledge(`${query} source ${index + 1}`),
+  );
+}
+
 type Protocol = "anthropic" | "openai" | "openai-responses";
 type Outcome = "recall" | "answer" | "mixed" | "invalid" | "bad-usage";
 
@@ -425,11 +463,14 @@ function providerResponse(
   const invalid = outcome === "invalid" || outcome === "bad-usage";
   const input = outcome === "bad-usage" ? -1000 : invalid ? 1000 : 3;
   const output = invalid ? 100 : 2;
+  const recallInput = productiveRecallIds?.[round - 2]
+    ? { id: `k:${productiveRecallIds[round - 2]}` }
+    : { query };
   const tool = {
     type: "tool_use",
     id: `call_${round}`,
     name: "recall",
-    input: { query },
+    input: recallInput,
   };
   const toolCalls = [
     tool,
@@ -468,7 +509,7 @@ function providerResponse(
                     type: "function",
                     function: {
                       name: block.name,
-                      arguments: JSON.stringify({ query }),
+                      arguments: JSON.stringify(recallInput),
                     },
                   })),
                 }
@@ -489,7 +530,7 @@ function providerResponse(
         id: `fc_${block.id}`,
         call_id: block.id,
         name: block.name,
-        arguments: JSON.stringify({ query }),
+        arguments: JSON.stringify(recallInput),
         status: "completed",
       }))
     : [
@@ -657,6 +698,7 @@ describe.each([
       async (name) => {
         for (const withText of [false, true]) {
           const alias = crypto.randomUUID();
+          prepareProductiveRecallSources();
           const req = request(client, alias);
           req.stream = stream;
           if (upstreamProtocol === "anthropic") {
@@ -670,7 +712,7 @@ describe.each([
             calls++;
             const upstreamStream =
               (body as Record<string, unknown>).stream === true;
-            if (calls < 11)
+            if (calls < FINAL_RECALL_CALL)
               return providerResponse(
                 upstreamProtocol,
                 calls,
@@ -750,7 +792,7 @@ describe.each([
             } else expect(failure).toBeInstanceOf(Error);
             if (client === "anthropic") {
               expect(received.match(/^event: message_stop$/gm)).toHaveLength(
-                20,
+                TEST_RECALL_EXECUTION_CAP * 2,
               );
             } else {
               expect(received).not.toContain("data: [DONE]");
@@ -762,7 +804,7 @@ describe.each([
             await response.text();
           }
           await settled();
-          expect(calls).toBe(11);
+          expect(calls).toBe(FINAL_RECALL_CALL);
           expect(
             db()
               .query(
@@ -1114,14 +1156,18 @@ function config() {
 
 const createdKnowledge = new Set<string>();
 
-function knowledge() {
+function knowledge(title = query) {
   const id = ltm.create({
     projectPath: `/test/buffered-recall-origin/${crypto.randomUUID()}`,
     category: "gotcha",
-    title: query,
+    title,
     content: `${query}: preserve transaction boundaries.`,
     scope: "project",
     crossProject: true,
+    // The fixture deliberately needs independently addressable records. The
+    // production fuzzy-dedup guard otherwise merges these near-identical
+    // test entries into one logical source.
+    id: crypto.randomUUID(),
   });
   createdKnowledge.add(id);
   return id;
@@ -1150,6 +1196,7 @@ describe.each([
     "commits %s anchors and real transfers only after downstream EOF",
     async (outcome) => {
       const id = knowledge();
+      prepareProductiveRecallSources();
       const alias = crypto.randomUUID();
       let calls = 0;
       setUpstreamInterceptor(async (body) => {
@@ -1161,7 +1208,11 @@ describe.each([
         return providerResponse(
           protocol,
           calls,
-          outcome === "mixed" ? "mixed" : calls === 11 ? "answer" : "recall",
+          outcome === "mixed"
+            ? "mixed"
+            : calls === FINAL_RECALL_CALL
+              ? "answer"
+              : "recall",
           (body as Record<string, unknown>).stream === true,
         );
       });
@@ -1176,7 +1227,7 @@ describe.each([
       const body = await response.text();
       await settled();
       expect(calls).toBe(
-        outcome === "answer" ? 11 : outcome === "mixed" ? 1 : 2,
+        outcome === "answer" ? FINAL_RECALL_CALL : outcome === "mixed" ? 1 : 2,
       );
       expect(body).toContain(
         outcome === "answer"
@@ -1195,7 +1246,9 @@ describe.each([
           ),
         ).toBe(false);
       }
-      expect(state.recallStore.size).toBe(outcome === "answer" ? 10 : 1);
+      expect(state.recallStore.size).toBe(
+        outcome === "answer" ? TEST_RECALL_EXECUTION_CAP : 1,
+      );
       expect(
         JSON.parse(loadSessionTracking(state.sessionID)!.recallStore!).length,
       ).toBe(state.recallStore.size);
@@ -1301,16 +1354,19 @@ describe.each([
     "discards anchors and real transfers after final %s failure",
     async (outcome) => {
       const id = knowledge();
+      prepareProductiveRecallSources();
       const alias = crypto.randomUUID();
       let calls = 0;
       setUpstreamInterceptor(async (body) => {
         calls++;
-        if (calls === 11 && outcome === "http")
+        if (calls === FINAL_RECALL_CALL && outcome === "http")
           return new Response("failure", { status: 503 });
         return providerResponse(
           protocol,
           calls,
-          calls === 11 && outcome !== "http" ? outcome : "recall",
+          calls === FINAL_RECALL_CALL && outcome !== "http"
+            ? outcome
+            : "recall",
           (body as Record<string, unknown>).stream === true,
         );
       });
@@ -1322,7 +1378,7 @@ describe.each([
       await response.text();
       await settled();
       const state = stateFor(alias);
-      expect(calls).toBe(11);
+      expect(calls).toBe(FINAL_RECALL_CALL);
       expect.soft(state.recallStore.size).toBe(0);
       expect
         .soft(
@@ -1345,12 +1401,13 @@ describe.each([
     "accounts only validated final %s usage",
     async (outcome) => {
       const alias = crypto.randomUUID();
+      prepareProductiveRecallSources();
       let calls = 0;
       setUpstreamInterceptor(async (body) =>
         providerResponse(
           protocol,
           ++calls,
-          calls === 11 ? outcome : "recall",
+          calls === FINAL_RECALL_CALL ? outcome : "recall",
           (body as Record<string, unknown>).stream === true,
         ),
       );
@@ -1364,8 +1421,10 @@ describe.each([
       expect(
         getSessionCosts(stateFor(alias).sessionID)?.conversation,
       ).toMatchObject({
-        inputTokens: outcome === "invalid" ? 1030 : 30,
-        outputTokens: outcome === "invalid" ? 120 : 20,
+        inputTokens:
+          TEST_RECALL_EXECUTION_CAP * 3 + (outcome === "invalid" ? 1000 : 0),
+        outputTokens:
+          TEST_RECALL_EXECUTION_CAP * 2 + (outcome === "invalid" ? 100 : 0),
         turns: 1,
       });
     },

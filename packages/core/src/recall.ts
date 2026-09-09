@@ -69,9 +69,9 @@ export type RecallInput = {
   id?: string;
   /** Fetch several source details in one bounded invocation. Mutually exclusive with `id`. */
   ids?: string[];
-  /** Character offset into an `id` detail. Not valid for search or `ids` batches. */
+  /** Unicode code-point offset into an `id` detail (SQLite `substr` units). */
   detailOffset?: number;
-  /** Maximum detail characters to return for an `id` detail. */
+  /** Maximum detail Unicode code points to return for an `id` detail. */
   detailLimit?: number;
   /** Project root — used by all scoring paths. */
   projectPath: string;
@@ -127,7 +127,7 @@ export type RecallCoverage = {
   identity: string;
   /** Content revision fingerprint. This never appears in rendered tool output. */
   revision: string;
-  /** Delivered source-content range, measured in JavaScript string offsets. */
+  /** Delivered source-content range, measured in Unicode code points. */
   offset: number;
   length: number;
   complete: boolean;
@@ -148,6 +148,10 @@ export const MAX_RECALL_ID_CHARS = 256;
 export const DEFAULT_RECALL_DETAIL_CHARS = 12_000;
 export const MAX_RECALL_DETAIL_CHARS = 16_000;
 export const MAX_RECALL_BATCH_CHARS = 32_000;
+/** Keep entity drill-down metadata useful without allowing unbounded fan-out. */
+const MAX_RECALL_ENTITY_ALIASES = 8;
+const MAX_RECALL_ENTITY_RELATIONS = 8;
+const MAX_RECALL_ENTITY_LABEL_CHARS = 256;
 
 export type TaggedResult =
   | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
@@ -221,19 +225,21 @@ function previewCoverage(tagged: TaggedResult): RecallCoverage {
     case "knowledge":
     case "cross-knowledge":
       identity = `k:${tagged.item.logical_id}`;
-      revisionSource = `${tagged.item.updated_at}:${tagged.item.title}:${tagged.item.content}`;
+      // Must match sourceCoverage() exactly: a preview and a later detail of
+      // the same source are distinct coverage but one delivered item.
+      revisionSource = `${tagged.item.id}:${tagged.item.updated_at}`;
       break;
     case "distillation":
-      revisionSource = `${tagged.item.created_at}:${tagged.item.observations}`;
+      revisionSource = `${tagged.item.id}:${tagged.item.created_at}`;
       break;
     case "temporal":
-      revisionSource = `${tagged.item.created_at}:${tagged.item.content}`;
+      revisionSource = `${tagged.item.id}:${tagged.item.created_at}`;
       break;
     case "lat-section":
       revisionSource = tagged.item.content_hash;
       break;
     case "entity":
-      revisionSource = JSON.stringify(tagged.item);
+      revisionSource = `${tagged.item.id}:${tagged.item.updated_at}`;
       break;
   }
   return {
@@ -1930,7 +1936,7 @@ function sourceCoverage(
     case "e": {
       const entity = db()
         .query(
-          "SELECT id, updated_at FROM entities WHERE tenant_id = ? AND id = ?",
+          "SELECT e.id, e.updated_at FROM entities e WHERE e.tenant_id = ? AND e.id = ?",
         )
         .get(currentTenantId(), rawId) as {
         id: string;
@@ -1959,16 +1965,21 @@ function detailPage(
   content: string,
   totalLength: number,
   offset: number,
+  /** Small source metadata rendered beside the page, excluded from coverage. */
+  afterContent = "",
 ): RecallRun {
   const start = Math.min(offset, totalLength);
-  const length = Math.min(content.length, totalLength - start);
+  // SQLite `length()` and `substr()` index Unicode code points, while
+  // JavaScript's string.length counts UTF-16 code units. Keep the cursor and
+  // coverage in SQLite's units so an astral symbol cannot skip later content.
+  const length = Math.min(codePointLength(content), totalLength - start);
   const end = start + length;
   const complete = end >= totalLength;
   const suffix = complete
     ? ""
     : `\n\n[Detail truncated after characters ${start}-${end} of ${totalLength}. Call recall again with id \`${id}\` and detailOffset ${end}.]`;
   return {
-    result: `${header}\n\n${inline(content)}${suffix}`,
+    result: `${header}\n\n${inline(content)}${afterContent}${suffix}`,
     coverage: [
       {
         ...coverage,
@@ -1979,6 +1990,10 @@ function detailPage(
       },
     ],
   };
+}
+
+function codePointLength(value: string): number {
+  return Array.from(value).length;
 }
 
 /** Fetch a bounded detail plus private source coverage for recall policy. */
@@ -2016,6 +2031,15 @@ export function recallByIdWithMetadata(
         content_page: string;
       } | null;
       if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      // Detail pages must retain the same code-navigation metadata as search
+      // previews. Both helpers are bounded batch lookups (at most three of
+      // each) and do not hydrate the entry body.
+      const detailAnchors = renderAnchors(
+        ltm.knowledgeRefAnchors([logicalId]).get(logicalId),
+      );
+      const detailFiles = renderFiles(
+        ltm.knowledgeFileRefsBatch([logicalId]).get(logicalId),
+      );
       return detailPage(
         id,
         coverage,
@@ -2023,6 +2047,7 @@ export function recallByIdWithMetadata(
         row.content_page,
         row.content_length,
         offset,
+        `${detailAnchors}${detailFiles}`,
       );
     }
     case "d": {
@@ -2102,25 +2127,80 @@ export function recallByIdWithMetadata(
     case "e": {
       const row = db()
         .query(
-          `SELECT entity_type, substr(canonical_name, 1, 256) AS canonical_name,
+          `SELECT entity_type, substr(canonical_name, 1, ?) AS canonical_name,
                   length(COALESCE(metadata, '')) AS content_length,
                   substr(COALESCE(metadata, ''), ? + 1, ?) AS content_page
              FROM entities WHERE tenant_id = ? AND id = ?`,
         )
-        .get(offset, limit, currentTenantId(), rawId) as {
+        .get(
+          MAX_RECALL_ENTITY_LABEL_CHARS,
+          offset,
+          limit,
+          currentTenantId(),
+          rawId,
+        ) as {
         entity_type: string;
         canonical_name: string;
         content_length: number;
         content_page: string;
       } | null;
       if (!row) return { result: `No entry found for id: ${id}`, coverage: [] };
+      // Preserve the useful parts of legacy entity drill-down without calling
+      // the unbounded entity hydrators: aliases and relations are independently
+      // capped and all untrusted display fields are clipped in SQLite.
+      const aliases = db()
+        .query(
+          `SELECT alias_type, substr(alias_value, 1, ?) AS alias_value
+             FROM entity_aliases WHERE entity_id = ?
+             ORDER BY alias_type, alias_value LIMIT ?`,
+        )
+        .all(
+          MAX_RECALL_ENTITY_LABEL_CHARS,
+          rawId,
+          MAX_RECALL_ENTITY_ALIASES,
+        ) as Array<{ alias_type: string; alias_value: string }>;
+      const aliasInfo = aliases
+        .filter((alias) => alias.alias_value !== row.canonical_name)
+        .map(
+          (alias) => `${inline(alias.alias_type)}:${inline(alias.alias_value)}`,
+        )
+        .join(", ");
+      const relations = db()
+        .query(
+          `SELECT r.relation,
+                  substr(CASE WHEN r.entity_a = ? THEN eb.canonical_name ELSE ea.canonical_name END, 1, ?) AS other_name
+             FROM entity_relations r
+             JOIN entities ea ON ea.id = r.entity_a
+             JOIN entities eb ON eb.id = r.entity_b
+            WHERE ea.tenant_id = ? AND eb.tenant_id = ?
+              AND (r.entity_a = ? OR r.entity_b = ?)
+            ORDER BY r.relation, other_name LIMIT ?`,
+        )
+        .all(
+          rawId,
+          MAX_RECALL_ENTITY_LABEL_CHARS,
+          currentTenantId(),
+          currentTenantId(),
+          rawId,
+          rawId,
+          MAX_RECALL_ENTITY_RELATIONS,
+        ) as Array<{ relation: string; other_name: string }>;
+      const relationInfo = relations.length
+        ? `\n\nRelations: ${relations
+            .map(
+              (relation) =>
+                `${inline(relation.relation)} of ${inline(relation.other_name)}`,
+            )
+            .join(", ")}`
+        : "";
       return detailPage(
         id,
         coverage,
-        `## Recall Detail: ${id}\n\n#### People & Entities\n**${inline(row.canonical_name)}** (${row.entity_type})`,
+        `## Recall Detail: ${id}\n\n#### People & Entities\n**${inline(row.canonical_name)}** (${row.entity_type})${aliasInfo ? ` (aliases: ${aliasInfo})` : ""}`,
         row.content_page,
         row.content_length,
         offset,
+        relationInfo,
       );
     }
     default:

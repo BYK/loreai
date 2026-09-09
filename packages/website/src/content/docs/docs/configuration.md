@@ -170,7 +170,7 @@ Recall and search pipeline tuning: FTS weights, query expansion, vector boost, e
 | `graphExpansion` | boolean | `true` |  | Enable entity-graph fan-in (linked knowledge + 1-hop relation neighbors) for the recall tool. Default: true. |
 | `graphBoostWeight` | number | `1` | min 0, max 5 | RRF weight multiplier for entity-graph fan-in lists. Set to 0 to neutralize. Default: 1.0. |
 | `embeddings` | object | `{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768,"workerOffload":true,"workerPoolSize":2}` |  | Vector embedding search provider, model, and dimensions. |
-| `recall` | object | `{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0}` |  | Recall output formatting and result-count limits. |
+| `recall` | object | `{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0,"chainMaxExecutions":24}` |  | Recall output formatting and result-count limits. |
 
 ### `search.ftsWeights`
 
@@ -207,6 +207,7 @@ Recall output formatting and result-count limits.
 | `relevanceFloor` | number | `0.15` | min 0, max 1 | Minimum RRF score (relative to top) to keep. Set to 0 to disable. Default: 0.15. |
 | `maxResults` | number | `15` | min 3, max 30 | Max results to show in recall output. Default: 15. |
 | `absoluteFloor` | number | `0` | min 0 | Absolute RRF score floor; drops weak matches even via the keep-3 backfill. Default: 0 (disabled). |
+| `chainMaxExecutions` | number | `24` | min 12, max 128 | Emergency execution cap for one recall chain. Default: 24; normal resource and stall budgets stop first. |
 
 
 ## `cache`

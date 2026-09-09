@@ -136,7 +136,15 @@ export class RecallChainBudget {
     // stall from absent metadata; explicit [] remains a no-progress outcome.
     let progressed = input.coverage === undefined;
     for (const item of input.coverage ?? []) {
-      if (item.length <= 0) continue;
+      // An existing source with empty content is still a useful, complete
+      // answer: it establishes that no further body exists. Search previews
+      // always carry a non-zero marker, so only complete detail pages qualify.
+      if (
+        item.length <= 0 &&
+        !(item.kind === "detail" && item.complete && item.length === 0)
+      ) {
+        continue;
+      }
       // Full details and distinct ranges/revisions each carry new coverage.
       const key = `${item.identity}\u0000${item.revision}\u0000${item.kind ?? "detail"}\u0000${item.offset}\u0000${item.length}`;
       if (!this.deliveredCoverage.has(key)) {
