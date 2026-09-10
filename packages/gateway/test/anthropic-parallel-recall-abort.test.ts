@@ -11,6 +11,15 @@
  * The client therefore sees a 200 SSE response that terminates mid-turn with
  * zero text/tool content and no terminal event — which Claude Code renders as
  * "Connection lost before a response was produced".
+ *
+ * NOTE: the gateway now prevents the model from producing this shape at all by
+ * sending `tool_choice.disable_parallel_tool_use` on Anthropic requests that
+ * carry a recall tool (see anthropic-parallel-tool-use-guard.test.ts). This
+ * test pins the residual behaviour, so the hard abort stays a deliberate choice
+ * rather than an accident: if the guard is bypassed (non-conforming endpoint, a
+ * client that sets its own `tool_choice`, a replayed/cached body), the turn is
+ * still lost. Lifting that requires the follow-up — executing every recall call
+ * instead of rejecting the turn.
  */
 import { afterEach, describe, expect, test, vi } from "vitest";
 
