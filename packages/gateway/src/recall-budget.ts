@@ -3,7 +3,7 @@ import type { GatewayUsage } from "./translate/types";
 
 /** Finite backstop only; normal termination is time, tokens, bytes, items, or stall. */
 export const MAX_RECALL_EXECUTIONS = 24;
-export const MAX_RECALL_CHAIN_TOKENS = 128_000;
+export const MAX_RECALL_CHAIN_TOKENS = Number.MAX_SAFE_INTEGER;
 export const MAX_RECALL_CHAIN_RESULT_BYTES = 512 * 1024;
 export const MAX_RECALL_CHAIN_ITEMS = 64;
 /** The formatter's configured maximum for source previews in one search. */
