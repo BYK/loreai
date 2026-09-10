@@ -17142,7 +17142,8 @@ async function handleConversationTurn(
   // stream, so the turn is lost instead of degraded. Ask for at most one tool
   // use per turn while the recall tool is in play, mirroring the guard above.
   if (
-    modifiedReq.protocol === "anthropic" &&
+    (requestUpstreamRoute.effectiveProtocol === "anthropic" ||
+      requestUpstreamRoute.effectiveProtocol === "vertex") &&
     clientHasRecallTool(modifiedReq.tools)
   ) {
     const toolChoice = withParallelToolUseDisabled(
