@@ -103,19 +103,39 @@ export const FOREGROUND_REQUEST_TIMEOUT_MS: number = Math.max(
   FOREGROUND_SSE_INACTIVITY_MS + FOREGROUND_TIMEOUT_HEADROOM_MS,
 );
 
+/** Slack so the finer worker inactivity fault surfaces before the coarser abort. */
+const WORKER_TIMEOUT_HEADROOM_MS = 60_000;
+
 /**
- * Worker (background/auxiliary call) response deadline. Same defect class as
- * the foreground relay: a self-hosted reasoning model can spend longer than
- * 120s in hidden reasoning without emitting a byte. Separate from the
- * foreground pair because worker calls are not user-visible and need not match
- * the client's watchdog budget.
+ * Worker (background/auxiliary call) response inactivity deadline. Same defect
+ * class as the foreground relay: a self-hosted reasoning model can spend
+ * longer than 120s in hidden reasoning without emitting a byte. Separate from
+ * the foreground pair because worker calls are not user-visible and need not
+ * match the client's watchdog budget.
  */
 export const WORKER_RESPONSE_INACTIVITY_MS: number = parseSseInactivityMs(
   // How long a background/auxiliary worker call tolerates upstream silence
-  // before aborting. Separate from the foreground pair because worker calls are
-  // not user-visible and need not match the client's watchdog budget. Positive
-  // integer ms; invalid values fall back to 600000. Env:
-  // LORE_WORKER_RESPONSE_INACTIVITY_MS.
+  // before aborting. Positive integer ms; invalid values fall back to 600000.
+  // Env: LORE_WORKER_RESPONSE_INACTIVITY_MS.
   process.env.LORE_WORKER_RESPONSE_INACTIVITY_MS,
   DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
+);
+
+/**
+ * Worker request deadline: env-overridable, defaults to 900s.
+ *
+ * Clamped above {@link WORKER_RESPONSE_INACTIVITY_MS} for the same reason as
+ * the foreground pair: a request deadline below the inactivity deadline makes
+ * the inactivity retry path unreachable, so tuning inactivity appears inert.
+ */
+export const WORKER_REQUEST_TIMEOUT_MS: number = Math.max(
+  parseSseInactivityMs(
+    // Wall-clock ceiling for a single background/auxiliary worker call.
+    // Automatically raised to stay at least 60s above
+    // LORE_WORKER_RESPONSE_INACTIVITY_MS. Positive integer ms; invalid values
+    // fall back to 900000. Env: LORE_WORKER_REQUEST_TIMEOUT_MS.
+    process.env.LORE_WORKER_REQUEST_TIMEOUT_MS,
+    DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS,
+  ),
+  WORKER_RESPONSE_INACTIVITY_MS + WORKER_TIMEOUT_HEADROOM_MS,
 );

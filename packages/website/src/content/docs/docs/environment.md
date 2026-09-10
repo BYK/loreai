@@ -95,7 +95,8 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 |---|---|
 | `LORE_FOREGROUND_REQUEST_TIMEOUT_MS` | Wall-clock ceiling for a single foreground request: the hard abort of the whole relay (recall deadline + abort scope). Automatically raised to stay at least 60s above LORE_FOREGROUND_SSE_INACTIVITY_MS, so a request timeout can never make the inactivity deadline unreachable. Positive integer ms; invalid values fall back to 900000. Env: LORE_FOREGROUND_REQUEST_TIMEOUT_MS. |
 | `LORE_FOREGROUND_SSE_INACTIVITY_MS` | How long the gateway tolerates upstream silence on a foreground relay before aborting it. Raise this for models whose extended-thinking phases emit nothing for minutes (Opus-class reasoning over large cached prompts), since a too-low value kills the stream mid-thinking and the client reports a connection loss rather than a stall. Positive integer ms; invalid values fall back to 600000. Floored at 1000 and clamped to the 32-bit timer ceiling. Env: LORE_FOREGROUND_SSE_INACTIVITY_MS. |
-| `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a background/auxiliary worker call tolerates upstream silence before aborting. Separate from the foreground pair because worker calls are not user-visible and need not match the client's watchdog budget. Positive integer ms; invalid values fall back to 600000. Env: LORE_WORKER_RESPONSE_INACTIVITY_MS. |
+| `LORE_WORKER_REQUEST_TIMEOUT_MS` | Wall-clock ceiling for a single background/auxiliary worker call. Automatically raised to stay at least 60s above LORE_WORKER_RESPONSE_INACTIVITY_MS. Positive integer ms; invalid values fall back to 900000. Env: LORE_WORKER_REQUEST_TIMEOUT_MS. |
+| `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a background/auxiliary worker call tolerates upstream silence before aborting. Positive integer ms; invalid values fall back to 600000. Env: LORE_WORKER_RESPONSE_INACTIVITY_MS. |
 
 ## Memory engine (`@loreai/core`)
 

@@ -14,6 +14,7 @@ import {
   FOREGROUND_SSE_INACTIVITY_MS,
   FOREGROUND_REQUEST_TIMEOUT_MS,
   WORKER_RESPONSE_INACTIVITY_MS,
+  WORKER_REQUEST_TIMEOUT_MS,
 } from "../src/sse-inactivity";
 
 describe("parseSseInactivityMs", () => {
@@ -77,6 +78,9 @@ describe("inactivity deadline defaults", () => {
     );
     expect(DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS).toBeGreaterThan(
       DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
+    );
+    expect(WORKER_REQUEST_TIMEOUT_MS).toBeGreaterThan(
+      WORKER_RESPONSE_INACTIVITY_MS,
     );
   });
 });

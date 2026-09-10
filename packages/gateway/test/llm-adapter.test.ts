@@ -52,6 +52,10 @@ import {
   _resetTemperatureUnsupportedModels,
   _resetThinkingUnsupportedModels,
 } from "../src/llm-adapter";
+import {
+  WORKER_REQUEST_TIMEOUT_MS,
+  WORKER_RESPONSE_INACTIVITY_MS,
+} from "../src/sse-inactivity";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import { workerModelCandidates } from "../src/worker-model";
 import {
@@ -6240,7 +6244,7 @@ describe("worker transport lifecycle remediation", () => {
       sessionID: "sess-inactivity-retry",
       workerID: "lore-distill",
     });
-    await vi.advanceTimersByTimeAsync(120_500);
+    await vi.advanceTimersByTimeAsync(WORKER_RESPONSE_INACTIVITY_MS + 500);
 
     await expect(pending).resolves.toBe("recovered");
     expect(cancelled).toBe(true);
