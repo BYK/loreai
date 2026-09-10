@@ -8331,6 +8331,10 @@ export function streamResponsesRecallAware(
     event: string,
     parsed: Record<string, unknown>,
     state: ResponsesAccState,
+    onDoneOnlyItem?: (
+      outputIndex: number,
+      item: Record<string, unknown>,
+    ) => void,
   ): number | undefined => {
     const requiresOutputIndex =
       /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_(?:summary|text)|refusal)/.test(
@@ -8357,6 +8361,7 @@ export function streamResponsesRecallAware(
       if (doneItem.type === "message" && doneItem.role === undefined) {
         doneItem.role = "assistant";
       }
+      onDoneOnlyItem?.(outputIndex, doneItem);
       const seedItem = { ...doneItem };
       delete seedItem.status;
       if (seedItem.type === "message") delete seedItem.content;
@@ -9335,6 +9340,7 @@ export function streamResponsesRecallAware(
   const assertTerminalOutputMatches = (
     acc: ResponsesAccState,
     parsed: Record<string, unknown>,
+    onMatched?: (outputIndex: number, item: Record<string, unknown>) => void,
     onSynthesizedDone?: (
       outputIndex: number,
       item: Record<string, unknown>,
@@ -9405,6 +9411,7 @@ export function streamResponsesRecallAware(
       }
       const [outputIndex, streamed] = expected[matchIndex];
       const lifecycle = lifecyclesFor(acc).get(outputIndex);
+      onMatched?.(outputIndex, actual);
       if (
         !isReference &&
         opts.validation === "codex" &&
@@ -10005,6 +10012,26 @@ export function streamResponsesRecallAware(
           | RecallContinuationFailureCategory
           | undefined;
         let continuationFailureReported = false;
+        let recallDetected = false;
+        type PrincipalFailureCategory =
+          | "principal_transport"
+          | "principal_resource_limit"
+          | "principal_protocol"
+          | "principal_missing_terminal"
+          | "principal_unexpected";
+        let principalFailureCategory: PrincipalFailureCategory =
+          "principal_unexpected";
+        const classifyPrincipalFailure = (
+          error: unknown,
+        ): PrincipalFailureCategory => {
+          if (error instanceof SSEStreamTransportError) {
+            return "principal_transport";
+          }
+          if (error instanceof SSEStreamLimitError) {
+            return "principal_resource_limit";
+          }
+          return principalFailureCategory;
+        };
         const reportContinuationFailure = (
           category: RecallContinuationFailureCategory,
         ): void => {
@@ -10015,6 +10042,7 @@ export function streamResponsesRecallAware(
         // Recall items are gateway-internal and must stay hidden on every exit,
         // including failures raised before marker replacement.
         const recallIndices = new Set<number>();
+        const unresolvedToolIndices = new Set<number>();
         const referenceIndices = new Map<number, ReferenceLifecycle>();
 
         try {
@@ -10032,7 +10060,6 @@ export function streamResponsesRecallAware(
           const pendingRecalls: PendingResponsesRecall[] = [];
           // Whether any NON-recall function_call appeared (mixed-tools case).
           let otherToolSeen = false;
-          const unresolvedToolIndices = new Set<number>();
           const unresolvedToolBytes = new Map<number, number>();
           const deferredEvents: Array<{
             chunk: Uint8Array;
@@ -10050,7 +10077,9 @@ export function streamResponsesRecallAware(
             hiddenRecallBytes += unresolvedToolBytes.get(outputIndex) ?? 0;
             unresolvedToolBytes.delete(outputIndex);
             if (hiddenRecallBytes > maxHiddenRecallBytes) {
-              throw new Error("recall stream exceeded deferred event limit");
+              throw new SSEStreamLimitError(
+                "recall stream exceeded deferred event limit",
+              );
             }
           };
 
@@ -10068,9 +10097,12 @@ export function streamResponsesRecallAware(
               formatResponsesEvent(event, data),
             ).byteLength;
             if (streamBytes > maxStreamBytes) {
-              throw new Error("Responses stream exceeded byte limit");
+              throw new SSEStreamLimitError(
+                "Responses stream exceeded byte limit",
+              );
             }
 
+            principalFailureCategory = "principal_protocol";
             let parsed: Record<string, unknown>;
             try {
               parsed = JSON.parse(data) as Record<string, unknown>;
@@ -10084,7 +10116,7 @@ export function streamResponsesRecallAware(
                 if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
                   deferredBytes += chunk.byteLength;
                   if (deferredBytes > maxDeferredBytes) {
-                    throw new Error(
+                    throw new SSEStreamLimitError(
                       "recall stream exceeded deferred event limit",
                     );
                   }
@@ -10098,6 +10130,15 @@ export function streamResponsesRecallAware(
             if (parsed.type !== event) {
               throw new Error(`Responses payload type does not match ${event}`);
             }
+            if (
+              (event === "response.output_item.added" ||
+                event === "response.output_item.done") &&
+              (parsed.item as Record<string, unknown> | undefined)?.type ===
+                "function_call" &&
+              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
+            ) {
+              recallDetected = true;
+            }
             const normalizationState = normalizeCodexEvent(
               state,
               event,
@@ -10110,11 +10151,27 @@ export function streamResponsesRecallAware(
               continue;
             }
 
-            const outputIndex = outputIndexForEvent(event, parsed, state);
+            const outputIndex = outputIndexForEvent(
+              event,
+              parsed,
+              state,
+              (index, item) => {
+                if (
+                  item.type !== "function_call" ||
+                  item.name !== RECALL_TOOL_NAME
+                ) {
+                  return;
+                }
+                recallDetected = true;
+                recallIndices.add(index);
+              },
+            );
             if (outputIndex !== undefined) {
               retainedStateBytes += encoder.encode(data).byteLength;
               if (retainedStateBytes > maxRetainedStateBytes) {
-                throw new Error("Responses retained state exceeded byte limit");
+                throw new SSEStreamLimitError(
+                  "Responses retained state exceeded byte limit",
+                );
               }
               const implicitItem = state.rawItems.get(outputIndex);
               if (
@@ -10128,7 +10185,8 @@ export function streamResponsesRecallAware(
               }
             }
 
-            let resolvedVisibleTool = false;
+            let resolvingRecallTool = false;
+            let resolvingVisibleTool = false;
             // Detect recall and unresolved sparse function-call identities.
             if (
               (event === "response.output_item.added" ||
@@ -10139,10 +10197,9 @@ export function streamResponsesRecallAware(
               const isRecallCall =
                 item?.type === "function_call" && item?.name === "recall";
               if (isRecallCall) {
-                unresolvedToolIndices.delete(outputIndex);
-                discardDeferredCandidate(outputIndex);
-                promoteDeferredCandidate(outputIndex);
+                recallDetected = true;
                 recallIndices.add(outputIndex);
+                resolvingRecallTool = true;
               } else if (item?.type === "function_call") {
                 if (
                   event === "response.output_item.added" &&
@@ -10151,12 +10208,29 @@ export function streamResponsesRecallAware(
                 ) {
                   unresolvedToolIndices.add(outputIndex);
                 } else {
-                  resolvedVisibleTool =
-                    unresolvedToolIndices.delete(outputIndex);
-                  unresolvedToolBytes.delete(outputIndex);
-                  otherToolSeen = true;
+                  resolvingVisibleTool = true;
                 }
               }
+            }
+
+            // Always accumulate into the internal state for postResponse.
+            applyResponsesEvent(state, event, parsed);
+            if (
+              event === "response.output_item.done" &&
+              outputIndex !== undefined
+            ) {
+              preserveStreamedReasoning(state, outputIndex);
+            }
+
+            let resolvedVisibleTool = false;
+            if (outputIndex !== undefined && resolvingRecallTool) {
+              discardDeferredCandidate(outputIndex);
+              promoteDeferredCandidate(outputIndex);
+              unresolvedToolIndices.delete(outputIndex);
+            } else if (outputIndex !== undefined && resolvingVisibleTool) {
+              resolvedVisibleTool = unresolvedToolIndices.delete(outputIndex);
+              unresolvedToolBytes.delete(outputIndex);
+              otherToolSeen = true;
             }
 
             if (
@@ -10176,15 +10250,6 @@ export function streamResponsesRecallAware(
             const isUnresolvedToolEvent =
               outputIndex !== undefined &&
               unresolvedToolIndices.has(outputIndex);
-
-            // Always accumulate into the internal state for postResponse.
-            applyResponsesEvent(state, event, parsed);
-            if (
-              event === "response.output_item.done" &&
-              outputIndex !== undefined
-            ) {
-              preserveStreamedReasoning(state, outputIndex);
-            }
 
             // Suppress all events belonging to a recall item, but still count
             // them so malformed argument streams cannot grow without bound.
@@ -10209,7 +10274,9 @@ export function streamResponsesRecallAware(
                 deferredBytes > maxDeferredBytes ||
                 hiddenRecallBytes > maxHiddenRecallBytes
               ) {
-                throw new Error("recall stream exceeded deferred event limit");
+                throw new SSEStreamLimitError(
+                  "recall stream exceeded deferred event limit",
+                );
               }
               if (
                 event === "response.function_call_arguments.done" &&
@@ -10248,17 +10315,45 @@ export function streamResponsesRecallAware(
               event === "response.failed"
             ) {
               const terminalParsed = stripHiddenReferenceOutput(parsed);
+              const terminalResponse = terminalParsed.response as
+                | Record<string, unknown>
+                | undefined;
+              if (
+                Array.isArray(terminalResponse?.output) &&
+                terminalResponse.output.some(
+                  (item) =>
+                    item !== null &&
+                    typeof item === "object" &&
+                    !Array.isArray(item) &&
+                    (item as Record<string, unknown>).type ===
+                      "function_call" &&
+                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
+                )
+              ) {
+                recallDetected = true;
+              }
               if (opts.validation === "codex") {
                 assertTerminalOutputMatches(
                   state,
                   terminalParsed,
                   (outputIndex, item) => {
+                    if (
+                      item.type !== "function_call" ||
+                      item.name !== RECALL_TOOL_NAME ||
+                      (!recallIndices.has(outputIndex) &&
+                        !unresolvedToolIndices.has(outputIndex))
+                    ) {
+                      return;
+                    }
+                    recallDetected = true;
+                    recallIndices.add(outputIndex);
+                    unresolvedToolIndices.delete(outputIndex);
+                    discardDeferredCandidate(outputIndex);
+                    promoteDeferredCandidate(outputIndex);
+                  },
+                  (outputIndex, item) => {
                     if (item.type !== "function_call") return;
                     if (item.name === RECALL_TOOL_NAME) {
-                      unresolvedToolIndices.delete(outputIndex);
-                      discardDeferredCandidate(outputIndex);
-                      promoteDeferredCandidate(outputIndex);
-                      recallIndices.add(outputIndex);
                       collectCompletedRecall(
                         state,
                         outputIndex,
@@ -10672,7 +10767,8 @@ export function streamResponsesRecallAware(
                               contUnresolvedToolIndices.add(ci);
                             }
                           }
-                          let resolvedVisibleTool = false;
+                          let resolvingRecallTool = false;
+                          let resolvingVisibleTool = false;
                           if (
                             (ce === "response.output_item.added" ||
                               ce === "response.output_item.done") &&
@@ -10685,10 +10781,8 @@ export function streamResponsesRecallAware(
                               item?.type === "function_call" &&
                               item.name === RECALL_TOOL_NAME
                             ) {
-                              contUnresolvedToolIndices.delete(ci);
-                              discardContinuationCandidate(ci);
-                              promoteContinuationCandidate(ci);
                               contRecallIndices.add(ci);
+                              resolvingRecallTool = true;
                             } else if (item?.type === "function_call") {
                               if (
                                 ce === "response.output_item.added" &&
@@ -10697,20 +10791,9 @@ export function streamResponsesRecallAware(
                               ) {
                                 contUnresolvedToolIndices.add(ci);
                               } else {
-                                resolvedVisibleTool =
-                                  contUnresolvedToolIndices.delete(ci);
-                                promoteVisibleContinuationCandidate(ci);
-                                contUnresolvedToolBytes.delete(ci);
-                                contOtherTool = true;
+                                resolvingVisibleTool = true;
                               }
                             }
-                          }
-                          if (
-                            resolvedVisibleTool &&
-                            contRecallIndices.size === 0 &&
-                            contUnresolvedToolIndices.size === 0
-                          ) {
-                            flushHeldContinuation();
                           }
                           applyResponsesEvent(contState, ce, cparsed);
                           if (
@@ -10718,6 +10801,25 @@ export function streamResponsesRecallAware(
                             ci !== undefined
                           ) {
                             preserveStreamedReasoning(contState, ci);
+                          }
+                          let resolvedVisibleTool = false;
+                          if (ci !== undefined && resolvingRecallTool) {
+                            discardContinuationCandidate(ci);
+                            promoteContinuationCandidate(ci);
+                            contUnresolvedToolIndices.delete(ci);
+                          } else if (ci !== undefined && resolvingVisibleTool) {
+                            promoteVisibleContinuationCandidate(ci);
+                            resolvedVisibleTool =
+                              contUnresolvedToolIndices.delete(ci);
+                            contUnresolvedToolBytes.delete(ci);
+                            contOtherTool = true;
+                          }
+                          if (
+                            resolvedVisibleTool &&
+                            contRecallIndices.size === 0 &&
+                            contUnresolvedToolIndices.size === 0
+                          ) {
+                            flushHeldContinuation();
                           }
                           const isContRecall =
                             ci !== undefined && contRecallIndices.has(ci);
@@ -10805,14 +10907,20 @@ export function streamResponsesRecallAware(
                                 contState,
                                 terminalParsed,
                                 (outputIndex, item) => {
+                                  if (
+                                    item.type !== "function_call" ||
+                                    item.name !== RECALL_TOOL_NAME
+                                  ) {
+                                    return;
+                                  }
+                                  contRecallIndices.add(outputIndex);
+                                  contUnresolvedToolIndices.delete(outputIndex);
+                                  discardContinuationCandidate(outputIndex);
+                                  promoteContinuationCandidate(outputIndex);
+                                },
+                                (outputIndex, item) => {
                                   if (item.type !== "function_call") return;
                                   if (item.name === RECALL_TOOL_NAME) {
-                                    contUnresolvedToolIndices.delete(
-                                      outputIndex,
-                                    );
-                                    discardContinuationCandidate(outputIndex);
-                                    promoteContinuationCandidate(outputIndex);
-                                    contRecallIndices.add(outputIndex);
                                     collectCompletedRecall(
                                       contState,
                                       outputIndex,
@@ -11223,6 +11331,7 @@ export function streamResponsesRecallAware(
                     text: anchorTexts[anchorIndex++] ?? "",
                   };
                 }),
+                rawOutputItems: buildOutputItems(),
               };
               if (continuationAttempted) {
                 continuationFailureCategory = "delivery";
@@ -11297,7 +11406,9 @@ export function streamResponsesRecallAware(
             if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
               deferredBytes += chunk.byteLength;
               if (deferredBytes > maxDeferredBytes) {
-                throw new Error("recall stream exceeded deferred event limit");
+                throw new SSEStreamLimitError(
+                  "recall stream exceeded deferred event limit",
+                );
               }
               deferredEvents.push({ chunk });
             } else if (!(await safeEnqueue(chunk))) {
@@ -11305,6 +11416,7 @@ export function streamResponsesRecallAware(
             }
           }
 
+          principalFailureCategory = "principal_missing_terminal";
           throw new Error(
             "upstream Responses stream ended without a terminal event",
           );
@@ -11350,7 +11462,7 @@ export function streamResponsesRecallAware(
                 ? err.category
                 : continuationAttempted
                   ? (continuationFailureCategory ?? "unexpected")
-                  : undefined;
+                  : classifyPrincipalFailure(err);
             log.error(
               `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
             );
@@ -11364,6 +11476,10 @@ export function streamResponsesRecallAware(
               );
             }
           }
+          const recallFailure =
+            recallDetected ||
+            continuationAttempted ||
+            err instanceof RecallContinuationFailure;
           const failedResponse = finalizeResponsesAcc(state);
           try {
             assertUsageMergeable(
@@ -11379,14 +11495,41 @@ export function streamResponsesRecallAware(
             );
           }
           transactionProviderUsage = { ...ZERO_USAGE };
+          const hiddenOutputIndices = new Set([
+            ...recallIndices,
+            ...unresolvedToolIndices,
+          ]);
+          const hiddenOutputIdentities = new Set<string>();
+          for (const outputIndex of hiddenOutputIndices) {
+            const item = state.items.get(outputIndex);
+            const raw = state.rawItems.get(outputIndex);
+            for (const identity of [
+              item?.id,
+              item?.type === "tool_use" ? item.callId : undefined,
+              raw?.id,
+              raw?.call_id,
+            ]) {
+              if (typeof identity === "string" && identity) {
+                hiddenOutputIdentities.add(identity);
+              }
+            }
+          }
           failedResponse.content = failedResponse.content.filter(
             (block) =>
-              (block.type !== "tool_use" || block.name !== RECALL_TOOL_NAME) &&
+              (block.type !== "tool_use" ||
+                (block.name !== RECALL_TOOL_NAME &&
+                  !hiddenOutputIdentities.has(block.id))) &&
               (block.type !== "text" || !parseRecallAnchor(block.text)),
           );
           failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
             (item) =>
-              item.type !== "function_call" || item.name !== RECALL_TOOL_NAME,
+              item.type !== "function_call" ||
+              (item.name !== RECALL_TOOL_NAME &&
+                ![item.id, item.call_id].some(
+                  (identity) =>
+                    typeof identity === "string" &&
+                    hiddenOutputIdentities.has(identity),
+                )),
           );
           await safeEnqueue(
             encoder.encode(
@@ -11400,12 +11543,13 @@ export function streamResponsesRecallAware(
                     created_at: Math.floor(Date.now() / 1000),
                     model: state.model,
                     status: "failed",
-                    output: buildOutputItems(recallIndices),
+                    output: buildOutputItems(hiddenOutputIndices),
                     usage: null,
                     error: {
                       type: "server_error",
-                      message:
-                        "Lore could not continue the response after recall",
+                      message: recallFailure
+                        ? "Lore could not continue the response after recall"
+                        : "Gateway request failed",
                     },
                   },
                 }),
