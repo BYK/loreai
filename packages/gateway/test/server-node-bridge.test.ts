@@ -10,6 +10,7 @@ import {
   setPostResponseStartObserverForTest,
   setUpstreamInterceptor,
 } from "../src/pipeline";
+import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 import { loadConfig } from "../src/config";
 
 class FakeRequest extends EventEmitter {
@@ -488,7 +489,7 @@ test("the application foreground deadline starts before request body decoding", 
       name: "TimeoutError",
     });
     await pulling;
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
     await rejected;
     expect(cancelled).toBe(true);
     expect(source.locked).toBe(false);

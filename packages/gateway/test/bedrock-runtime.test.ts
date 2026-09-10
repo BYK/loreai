@@ -19,6 +19,7 @@ import {
 } from "../src/translate/bedrock-runtime";
 import { setUpstreamDispatcherForTest } from "../src/fetch";
 import { resetPipelineState } from "../src/pipeline";
+import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import { close as closeDB } from "@loreai/core";
@@ -293,7 +294,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       if (mode === "caller") {
         caller.abort(new DOMException("client disconnected", "AbortError"));
       } else {
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       }
       await rejected;
       rejectPull(new Error("late upload rejection"));
@@ -335,7 +336,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       if (mode === "caller") {
         caller.abort(new DOMException("client disconnected", "AbortError"));
       } else {
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       }
       await rejected;
       expect(upstreamSignal?.aborted).toBe(true);
@@ -388,7 +389,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       if (mode === "caller") {
         caller.abort(new DOMException("client disconnected", "AbortError"));
       } else {
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       }
       await rejected;
       expect(cancelled).toBe(true);
@@ -420,7 +421,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       expect(response.status).toBe(201);
       expect(response.headers.get("x-bedrock")).toBe("complete");
       await expect(response.text()).resolves.toBe("complete");
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       expect(upstreamSignal?.aborted).toBe(false);
       expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
     } finally {
@@ -457,7 +458,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       await expect(response.body?.cancel()).resolves.toBeUndefined();
       expect(cancelled).toBe(true);
       expect(upstream.body?.locked).toBe(false);
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       expect(upstreamSignal?.aborted).toBe(false);
     } finally {
       vi.useRealTimers();

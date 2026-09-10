@@ -2556,7 +2556,7 @@ describe("createGatewayLLMClient.prompt", () => {
       const rejected = expect(pending).rejects.toMatchObject({
         name: "TimeoutError",
       });
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
       await rejected;
       expect(mockFetch).not.toHaveBeenCalled();
     } finally {
@@ -2631,7 +2631,7 @@ describe("createGatewayLLMClient.prompt", () => {
       const rejected = expect(pending).rejects.toMatchObject({
         name: "TimeoutError",
       });
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
       await rejected;
       expect(tokenCalls).toBe(2);
     } finally {
@@ -6582,7 +6582,7 @@ describe("worker transport lifecycle remediation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
     await rejected;
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });

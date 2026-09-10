@@ -72,7 +72,10 @@ import {
   streamingPostResponsePendingForTest,
   validatedMetaStream,
 } from "../src/pipeline";
-import { FOREGROUND_SSE_INACTIVITY_MS } from "../src/sse-inactivity";
+import {
+  FOREGROUND_REQUEST_TIMEOUT_MS,
+  FOREGROUND_SSE_INACTIVITY_MS,
+} from "../src/sse-inactivity";
 import { loadConfig as loadBaseConfig } from "../src/config";
 import { authFingerprint } from "../src/auth";
 import { getDegradationWarning } from "../src/worker-health";
@@ -587,7 +590,7 @@ describe("budget throttle cancellation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
     await rejected;
     expect(recorded).toBe(0);
     expect(upstreamStarted).toBe(false);
@@ -6400,7 +6403,7 @@ describe("Pipeline — streaming responses", () => {
         },
         loadLocalConfig(),
       );
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       const response = await pending;
       expect(response.status).toBe(502);
       await expect(response.text()).resolves.toContain(
@@ -6505,7 +6508,7 @@ describe("Pipeline — streaming responses", () => {
           loadLocalConfig(),
         );
         await Promise.resolve();
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
         await expect(downstream.text()).rejects.toMatchObject({
           name: "TimeoutError",
         });
