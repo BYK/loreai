@@ -579,9 +579,11 @@ describe("budget throttle cancellation", () => {
     const foreground = createForegroundAbortScope();
     let recorded = 0;
     let upstreamStarted = false;
+    // Throttle past the foreground deadline so the deadline must win the race.
+    const throttleDelayMs = FOREGROUND_REQUEST_TIMEOUT_MS + 60_000;
     const pending = (async () => {
       await completeBudgetThrottleDelay(
-        600_000,
+        throttleDelayMs,
         foreground.signal,
         () => recorded++,
       );

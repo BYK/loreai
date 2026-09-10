@@ -6533,9 +6533,13 @@ describe("worker transport lifecycle remediation", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  test("one 300-second deadline covers fetch, retry delay, and every attempt", async () => {
+  test("one overall deadline covers fetch, retry delay, and every attempt", async () => {
     vi.useFakeTimers();
     let cancelled = false;
+    // Each attempt consumes almost the entire deadline, so only the first one
+    // can ever start: if the deadline were per-attempt rather than overall,
+    // the retry would launch and mockFetch would be called twice.
+    const attemptDurationMs = WORKER_REQUEST_TIMEOUT_MS - 1_000;
     mockFetch.mockImplementation(
       async () =>
         new Promise<Response>((resolve) => {
@@ -6551,7 +6555,7 @@ describe("worker transport lifecycle remediation", () => {
                   { status: 500, headers: { "retry-after": "32" } },
                 ),
               ),
-            299_000,
+            attemptDurationMs,
           );
         }),
     );
@@ -6563,7 +6567,7 @@ describe("worker transport lifecycle remediation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(299_000);
+    await vi.advanceTimersByTimeAsync(attemptDurationMs);
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(cancelled).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
