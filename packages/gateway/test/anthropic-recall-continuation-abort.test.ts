@@ -11,6 +11,7 @@ import {
   setUpstreamInterceptor,
 } from "../src/pipeline";
 import { executeRecall } from "../src/recall";
+import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 import type { GatewayRequest, SessionState } from "../src/translate/types";
 
 const mockedRecall = vi.mocked(executeRecall);
@@ -215,7 +216,7 @@ describe("Anthropic recall continuation abort", () => {
           () => null,
           (error: unknown) => error,
         );
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
         await expect(outcome).resolves.toMatchObject({ name: "TimeoutError" });
       }
       expect(follows).toBe(round);
