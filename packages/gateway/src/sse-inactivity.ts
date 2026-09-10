@@ -71,6 +71,13 @@ const FOREGROUND_TIMEOUT_HEADROOM_MS = 60_000;
  * Read once at module load; restart the gateway to apply a change.
  */
 export const FOREGROUND_SSE_INACTIVITY_MS: number = parseSseInactivityMs(
+  // How long the gateway tolerates upstream silence on a foreground relay
+  // before aborting it. Raise this for models whose extended-thinking phases
+  // emit nothing for minutes (Opus-class reasoning over large cached prompts),
+  // since a too-low value kills the stream mid-thinking and the client reports
+  // a connection loss rather than a stall. Positive integer ms; invalid values
+  // fall back to 600000. Floored at 1000 and clamped to the 32-bit timer
+  // ceiling. Env: LORE_FOREGROUND_SSE_INACTIVITY_MS.
   process.env.LORE_FOREGROUND_SSE_INACTIVITY_MS,
   DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
 );
@@ -84,6 +91,12 @@ export const FOREGROUND_SSE_INACTIVITY_MS: number = parseSseInactivityMs(
  */
 export const FOREGROUND_REQUEST_TIMEOUT_MS: number = Math.max(
   parseSseInactivityMs(
+    // Wall-clock ceiling for a single foreground request: the hard abort of
+    // the whole relay (recall deadline + abort scope). Automatically raised to
+    // stay at least 60s above LORE_FOREGROUND_SSE_INACTIVITY_MS, so a request
+    // timeout can never make the inactivity deadline unreachable. Positive
+    // integer ms; invalid values fall back to 900000. Env:
+    // LORE_FOREGROUND_REQUEST_TIMEOUT_MS.
     process.env.LORE_FOREGROUND_REQUEST_TIMEOUT_MS,
     DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS,
   ),
@@ -98,6 +111,11 @@ export const FOREGROUND_REQUEST_TIMEOUT_MS: number = Math.max(
  * the client's watchdog budget.
  */
 export const WORKER_RESPONSE_INACTIVITY_MS: number = parseSseInactivityMs(
+  // How long a background/auxiliary worker call tolerates upstream silence
+  // before aborting. Separate from the foreground pair because worker calls are
+  // not user-visible and need not match the client's watchdog budget. Positive
+  // integer ms; invalid values fall back to 600000. Env:
+  // LORE_WORKER_RESPONSE_INACTIVITY_MS.
   process.env.LORE_WORKER_RESPONSE_INACTIVITY_MS,
   DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
 );
