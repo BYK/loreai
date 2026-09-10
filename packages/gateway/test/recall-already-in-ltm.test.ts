@@ -3,7 +3,7 @@
  * non-streaming recall loop (Seer 15623149/1).
  *
  * The pipeline's non-streaming recall loop calls `executeRecall` once per
- * recall iteration (up to MAX_RECALL_DEPTH times). The `alreadyInLtmIds`
+ * recall iteration. The `alreadyInLtmIds`
  * Set is captured once before the loop (from `stableLtmText` +
  * `pendingKnowledgeDelta`) and MUST be the same Set passed to every
  * `executeRecall` invocation — the values don't change between iterations.
@@ -50,7 +50,7 @@ describe("executeRecall — alreadyInLtmIds identity across calls", () => {
     expect(captured[0]).toBe(ids); // identity, not deep-equal
 
     // Second call with the same set also gets the same identity — simulates
-    // the non-streaming recall loop iterating across MAX_RECALL_DEPTH.
+    // the non-streaming recall loop iterating across repeated useful results.
     await executeRecall(block, "/tmp/proj", "sess", undefined, ids);
     expect(captured).toHaveLength(2);
     expect(captured[1]).toBe(ids);

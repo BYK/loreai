@@ -123,6 +123,9 @@ export function parseOpenAIResponsesRequest(
   if (raw.truncation !== undefined) {
     extras.truncation = raw.truncation;
   }
+  if (raw.tool_choice !== undefined) {
+    extras.tool_choice = raw.tool_choice;
+  }
 
   return {
     protocol: "openai-responses",
@@ -153,6 +156,7 @@ const RESPONSES_TOP_LEVEL_KEYS = new Set([
   "previous_response_id",
   "reasoning",
   "truncation",
+  "tool_choice",
 ]);
 
 const CODEX_TOP_LEVEL_KEYS = new Set([
@@ -938,9 +942,14 @@ export function buildOpenAIResponsesUpstreamRequest(
   // Build input items from normalized messages
   body.input = buildResponsesInput(req.messages);
 
+  const requestTools =
+    req.disableRecall && req.codex
+      ? req.tools.filter((tool) => tool.name !== "recall")
+      : req.tools;
+
   // Add tools in Responses API format
-  if (req.tools.length > 0) {
-    body.tools = req.tools.map((t) => {
+  if (requestTools.length > 0) {
+    body.tools = requestTools.map((t) => {
       if (t.name !== "recall" || t.inputSchema.additionalProperties !== false) {
         return {
           type: "function",
@@ -1025,7 +1034,58 @@ export function buildOpenAIResponsesUpstreamRequest(
     return { url: `${upstreamBase}/codex/responses`, headers, body };
   }
 
+  if (req.disableRecall) {
+    body.tool_choice = finalResponsesToolChoice(req);
+  }
+
   return { url: `${upstreamBase}/v1/responses`, headers, body };
+}
+
+function finalResponsesToolChoice(req: GatewayRequest): unknown {
+  const ordinaryNames = [
+    ...new Set(
+      req.tools
+        .filter((tool) => tool.name !== "recall")
+        .map((tool) => tool.name),
+    ),
+  ];
+  if (ordinaryNames.length === 0) return "none";
+
+  const choice = req.extras?.tool_choice;
+  if (choice === "none") return choice;
+  let mode: "auto" | "required" = choice === "required" ? "required" : "auto";
+  let allowedNames = ordinaryNames;
+  if (choice && typeof choice === "object" && !Array.isArray(choice)) {
+    const record = choice as Record<string, unknown>;
+    if (
+      record.type === "function" &&
+      typeof record.name === "string" &&
+      ordinaryNames.includes(record.name)
+    ) {
+      return { type: "function", name: record.name };
+    }
+    if (record.type === "allowed_tools" && Array.isArray(record.tools)) {
+      mode = record.mode === "required" ? "required" : "auto";
+      const requested = new Set(
+        record.tools.flatMap((tool) => {
+          if (!tool || typeof tool !== "object" || Array.isArray(tool))
+            return [];
+          const candidate = tool as Record<string, unknown>;
+          return candidate.type === "function" &&
+            typeof candidate.name === "string"
+            ? [candidate.name]
+            : [];
+        }),
+      );
+      allowedNames = ordinaryNames.filter((name) => requested.has(name));
+      if (allowedNames.length === 0) return "none";
+    }
+  }
+  return {
+    type: "allowed_tools",
+    mode,
+    tools: allowedNames.map((name) => ({ type: "function", name })),
+  };
 }
 
 /**
@@ -1061,7 +1121,37 @@ function applyCodexResponsesDelta(
     body.prompt_cache_key = extras.prompt_cache_key;
   }
   if (extras.text !== undefined) body.text = extras.text;
-  if (extras.tool_choice !== undefined) body.tool_choice = extras.tool_choice;
+  if (req.disableRecall) {
+    const choice = extras.tool_choice;
+    const hasOrdinaryTools = req.tools.some((tool) => tool.name !== "recall");
+    if (!hasOrdinaryTools) {
+      body.tool_choice = "none";
+    } else if (
+      choice === "none" ||
+      choice === "auto" ||
+      choice === "required"
+    ) {
+      body.tool_choice = choice;
+    } else if (
+      choice &&
+      typeof choice === "object" &&
+      !Array.isArray(choice) &&
+      typeof (choice as Record<string, unknown>).name === "string" &&
+      (choice as Record<string, unknown>).name !== "recall" &&
+      req.tools.some(
+        (tool) => tool.name === (choice as Record<string, unknown>).name,
+      )
+    ) {
+      body.tool_choice = {
+        type: "function",
+        name: (choice as Record<string, unknown>).name,
+      };
+    } else {
+      body.tool_choice = "auto";
+    }
+  } else if (extras.tool_choice !== undefined) {
+    body.tool_choice = extras.tool_choice;
+  }
   if (extras.parallel_tool_calls !== undefined) {
     body.parallel_tool_calls = extras.parallel_tool_calls;
   }

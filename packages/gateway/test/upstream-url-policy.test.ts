@@ -178,6 +178,22 @@ describe("caller-selected upstream policy", () => {
     expect(forwardCount).toBe(0);
   });
 
+  it("rejects an unknown runtime protocol before forwarding upstream", async () => {
+    let forwardCount = 0;
+    setUpstreamInterceptor(async () => {
+      forwardCount++;
+      return new Response("unreachable", { status: 200 });
+    });
+    const config = loadConfig();
+    const req = request("https://api.openai.com/v1");
+    (req as { protocol: string }).protocol = "unknown-protocol";
+
+    const response = await handleRequest(req, config);
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(forwardCount).toBe(0);
+  });
+
   it("allows an administrator-configured private upstream in remote mode", async () => {
     mock = new MockAgent();
     mock.disableNetConnect();

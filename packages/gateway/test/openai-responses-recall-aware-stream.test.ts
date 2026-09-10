@@ -11,8 +11,12 @@
  * `response.completed`).
  */
 import { log } from "@loreai/core";
-import { afterEach, describe, test, expect } from "vitest";
-import { streamResponsesRecallAware } from "../src/pipeline";
+import { afterEach, describe, test, expect, vi } from "vitest";
+import {
+  RECALL_FAILURE_WARNING,
+  streamResponsesRecallAware,
+} from "../src/pipeline";
+import { RecallChainBudget } from "../src/recall-budget";
 import {
   setRecallContinuationFailureHook,
   type RecallContinuationFailureCategory,
@@ -27,6 +31,7 @@ const silentLogSink = {
 };
 
 afterEach(() => {
+  vi.restoreAllMocks();
   setRecallContinuationFailureHook(undefined);
   log.registerSink(silentLogSink);
 });
@@ -165,7 +170,7 @@ const doneWithStatus = (id: string, status: string) =>
     },
   });
 
-const PUBLIC_RECALL_ERROR = "Lore could not continue the response after recall";
+const PUBLIC_RECALL_ERROR = "Lore could not retrieve more memory";
 const PUBLIC_GATEWAY_ERROR = "Gateway request failed";
 
 const textItem = (
@@ -223,6 +228,47 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain('"recall"');
     expect(out).not.toContain("lore_marker");
     expect(out).not.toContain("response.failed");
+  });
+
+  test("recovers from malformed recall arguments after a validated principal terminal", async () => {
+    let recalls = 0;
+    let completedResponse: GatewayResponse | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_malformed_recall", "gpt-5.6-terra"),
+        textItem(0, "safe principal text"),
+        recallCall(1, { query: 42 }, "fc_private", "call_private"),
+        completed("resp_malformed_recall"),
+      ]),
+      {
+        onComplete: (response, successful) => {
+          expect(successful).toBe(true);
+          completedResponse = response;
+        },
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "", resultText: "" };
+        },
+        runFollowUp: async () => {
+          throw new Error("must not run follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(recalls).toBe(0);
+    expect(output).toContain("safe principal text");
+    expect(output).toContain(RECALL_FAILURE_WARNING.replaceAll("\n", "\\n"));
+    expect(output).not.toContain("fc_private");
+    expect(output).not.toContain("call_private");
+    expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(output).not.toContain("event: response.failed");
+    expect(completedResponse?.content).toEqual([
+      { type: "text", text: "safe principal text" },
+    ]);
+    expect(completedResponse?.rawOutputItems).not.toContainEqual(
+      expect.objectContaining({ id: "fc_private" }),
+    );
   });
 
   test("finalizes when the client cancels immediately after a no-recall terminal", async () => {
@@ -391,7 +437,9 @@ describe("streamResponsesRecallAware", () => {
       );
 
       const out = await drain(client);
-      expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(out).not.toContain("event: response.failed");
+      expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(out).toContain(PUBLIC_RECALL_ERROR);
       expect(out).not.toContain('"name":"recall"');
       expect(out).not.toContain("call_0");
       expect(JSON.stringify(completedResponse)).not.toContain("recall");
@@ -508,7 +556,8 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(seen).toEqual([]);
-    expect(out).toContain("response.failed");
+    expect(out).not.toContain("response.failed");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(failures).toEqual(["parallel_recall"]);
   });
@@ -562,7 +611,8 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(seen).toEqual([]);
-    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain('name":"recall"');
   });
 
@@ -635,7 +685,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
   });
 
   test("bounds suppressed recall argument events", async () => {
@@ -669,7 +721,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
   });
 
   test("bounds retained output before recall detection", async () => {
@@ -1971,7 +2025,8 @@ describe("streamResponsesRecallAware", () => {
 
     const output = await drain(client);
     const completedJSON = JSON.stringify(completedResponse);
-    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).not.toContain("event: response.failed");
+    expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(output).toContain(PUBLIC_RECALL_ERROR);
     expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(output).not.toContain("private done-only query");
@@ -1981,7 +2036,7 @@ describe("streamResponsesRecallAware", () => {
     expect(completedJSON).not.toContain("fc_done_only_failed_recall");
     expect(completedJSON).not.toContain("call_done_only_failed_recall");
     expect(recallCalls).toBe(0);
-    expect(successful).toBe(false);
+    expect(successful).toBe(true);
   });
 
   test("redacts a sparse principal recall when promotion exceeds the hidden budget", async () => {
@@ -2052,7 +2107,7 @@ describe("streamResponsesRecallAware", () => {
     expect(completedJSON).not.toContain("fc_sparse_promotion_limit");
     expect(completedJSON).not.toContain("call_sparse_promotion_limit");
     expect(recallCalls).toBe(0);
-    expect(successful).toBe(false);
+    expect(successful).toBe(true);
   });
 
   test("seeds data-only Codex items on principal and continuation streams", async () => {
@@ -2367,8 +2422,8 @@ describe("streamResponsesRecallAware", () => {
 
     const output = await drain(client);
     const completedJSON = JSON.stringify(completedResponse);
-    expect(output).toContain(PUBLIC_RECALL_ERROR);
-    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
     expect(output).not.toContain("private terminal query");
     expect(output).not.toContain("fc_terminal_failed_sparse_recall");
     expect(output).not.toContain("call_terminal_failed_sparse_recall");
@@ -2438,8 +2493,8 @@ describe("streamResponsesRecallAware", () => {
 
     const output = await drain(client);
     const completedJSON = JSON.stringify(completedResponse);
-    expect(output).toContain(PUBLIC_RECALL_ERROR);
-    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
     expect(output).not.toContain("private changed identity query");
     expect(output).not.toContain("fc_streamed_changed_recall");
     expect(output).not.toContain("fc_terminal_changed_recall");
@@ -2687,7 +2742,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recallCalls).toBe(0);
   });
 
@@ -3070,7 +3127,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recalls).toBe(0);
     expect(followUps).toBe(0);
   });
@@ -4059,7 +4118,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recalled).toBe(0);
   });
 
@@ -4110,7 +4171,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recalled).toBe(0);
   });
 
@@ -4134,7 +4197,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recalled).toBe(0);
   });
 
@@ -4311,7 +4376,9 @@ describe("streamResponsesRecallAware", () => {
       },
     );
 
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
     expect(recalled).toBe(0);
   });
 
@@ -4555,7 +4622,7 @@ describe("streamResponsesRecallAware", () => {
     expect(recalled).toBe(0);
   });
 
-  test("rejects an over-budget principal response before its first recall", async () => {
+  test("does not apply a cumulative token cap before the first recall", async () => {
     let recalled = 0;
     const followUp = streamFrom([
       created("resp_chained_usage_overflow", "gpt-5.6-terra"),
@@ -4585,9 +4652,7 @@ describe("streamResponsesRecallAware", () => {
     );
 
     expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
-    // The principal response is counted before the first recall admission, so
-    // a request already beyond the chain token budget never dispatches recall.
-    expect(recalled).toBe(0);
+    expect(recalled).toBe(1);
   });
 
   test("preserves content_filter continuation terminal and item metadata", async () => {
@@ -4772,7 +4837,9 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recalled).toBe(0);
   });
 
@@ -4818,7 +4885,9 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recalled).toBe(0);
   });
 
@@ -4897,12 +4966,19 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
   });
 
   test.each([1, 10])(
-    "marks only the final continuation at budget %i and preserves ordinary tools",
-    async (budget) => {
+    "marks only continuation %i as final and preserves ordinary tools",
+    async (finalRound) => {
+      let decisions = 0;
+      vi.spyOn(
+        RecallChainBudget.prototype,
+        "mustFinalizeNext",
+      ).mockImplementation(() => ++decisions === finalRound);
       let recalls = 0;
       let follows = 0;
       let finalResponse: GatewayResponse | undefined;
@@ -4914,7 +4990,6 @@ describe("streamResponsesRecallAware", () => {
           completed("resp_initial", { input_tokens: 1, output_tokens: 2 }),
         ]),
         {
-          maxRecallDepth: budget,
           onComplete: (response, successful) => {
             expect(successful).toBe(true);
             finalResponse = response;
@@ -4950,7 +5025,7 @@ describe("streamResponsesRecallAware", () => {
             return {
               reader: streamFrom([
                 created(`resp_${follows}`, "gpt-5.6-terra"),
-                follows === budget
+                follows === finalRound
                   ? item.replaceAll('"name":"recall"', '"name":"Read"')
                   : item,
                 completed(`resp_${follows}`, {
@@ -4963,10 +5038,10 @@ describe("streamResponsesRecallAware", () => {
         },
       );
       const output = await drain(client);
-      expect(recalls).toBe(budget);
-      expect(follows).toBe(budget);
+      expect(recalls).toBe(finalRound);
+      expect(follows).toBe(finalRound);
       expect(finalFlags).toEqual([
-        ...Array.from({ length: budget - 1 }, () => false),
+        ...Array.from({ length: finalRound - 1 }, () => false),
         true,
       ]);
       expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
@@ -4974,11 +5049,78 @@ describe("streamResponsesRecallAware", () => {
         expect.objectContaining({ type: "tool_use", name: "Read" }),
       );
       expect(finalResponse?.usage).toMatchObject({
-        inputTokens: 1 + budget * 3,
-        outputTokens: 2 + budget * 4,
+        inputTokens: 1 + finalRound * 3,
+        outputTokens: 2 + finalRound * 4,
       });
     },
   );
+
+  test("keeps the final-round decision stable across follow-up setup", async () => {
+    let setupCrossedFinalizationBoundary = false;
+    vi.spyOn(
+      RecallChainBudget.prototype,
+      "mustFinalizeNext",
+    ).mockImplementation(() => setupCrossedFinalizationBoundary);
+    let recalls = 0;
+    let follows = 0;
+    const finalFlags: boolean[] = [];
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_initial", "gpt-5.6-terra"),
+        recallCall(0, { query: "start" }, "fc_initial", "call_initial"),
+        completed("resp_initial", { input_tokens: 1, output_tokens: 2 }),
+      ]),
+      {
+        onComplete: (_response, successful) => expect(successful).toBe(true),
+        onRecall: async () => {
+          recalls++;
+          return {
+            anchorText: buildAnchor(`q${recalls}`),
+            resultText: "result",
+            coverage: [
+              {
+                identity: `t:source-${recalls}`,
+                revision: `revision-${recalls}`,
+                offset: 0,
+                length: 1,
+                complete: true,
+              },
+            ],
+          };
+        },
+        runFollowUp: async ({ finalRecallRound }) => {
+          follows++;
+          finalFlags.push(finalRecallRound);
+          if (follows === 1) setupCrossedFinalizationBoundary = true;
+          const item = recallCall(
+            0,
+            { query: `q${follows}` },
+            `fc_${follows}`,
+            `call_${follows}`,
+          );
+          return {
+            reader: streamFrom([
+              created(`resp_${follows}`, "gpt-5.6-terra"),
+              follows === 2
+                ? item.replaceAll('"name":"recall"', '"name":"Read"')
+                : item,
+              completed(`resp_${follows}`, {
+                input_tokens: 3,
+                output_tokens: 4,
+              }),
+            ]).body!.getReader(),
+          };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(recalls).toBe(2);
+    expect(follows).toBe(2);
+    expect(finalFlags).toEqual([false, true]);
+    expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+  });
 
   test.each([
     "incomplete",
@@ -4988,6 +5130,9 @@ describe("streamResponsesRecallAware", () => {
   ] as const)(
     "final continuation %s fails transactionally without retry",
     async (mode) => {
+      vi.spyOn(RecallChainBudget.prototype, "mustFinalizeNext").mockReturnValue(
+        true,
+      );
       let follows = 0;
       let recalls = 0;
       let commits = 0;
@@ -5000,7 +5145,6 @@ describe("streamResponsesRecallAware", () => {
           completed("resp_initial"),
         ]),
         {
-          maxRecallDepth: 1,
           onComplete: (_, success) => {
             successful = success;
           },
@@ -5067,15 +5211,19 @@ describe("streamResponsesRecallAware", () => {
         },
       );
       const output = await drain(client);
-      expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
-      expect(output).not.toContain("event: response.completed");
+      expect(output).not.toContain("event: response.failed");
+      expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
       expect(output).not.toContain("event: response.incomplete");
-      expect(successful).toBe(false);
+      expect(output).toContain(PUBLIC_RECALL_ERROR);
+      expect(successful).toBe(true);
       expect([recalls, follows, commits, rollbacks]).toEqual([1, 1, 0, 1]);
     },
   );
 
-  test("caps chained recall depth", async () => {
+  test("recovers when a final continuation requests recall again", async () => {
+    vi.spyOn(RecallChainBudget.prototype, "mustFinalizeNext").mockReturnValue(
+      true,
+    );
     const chained = streamFrom([
       created("resp_chained", "gpt-5.6-terra"),
       recallCall(0, { query: "detail" }),
@@ -5088,7 +5236,6 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_first"),
       ]),
       {
-        maxRecallDepth: 0,
         onComplete: () => {},
         onRecall: async ({ query }) => ({
           anchorText: buildAnchor(query),
@@ -5102,7 +5249,10 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain(PUBLIC_RECALL_ERROR);
   });
 
-  test("allows the final answer after one recall at depth one", async () => {
+  test("allows the final answer after one recall on the final round", async () => {
+    vi.spyOn(RecallChainBudget.prototype, "mustFinalizeNext").mockReturnValue(
+      true,
+    );
     const final = streamFrom([
       created("resp_final", "gpt-5.6-terra"),
       textItem(0, "final answer"),
@@ -5115,7 +5265,6 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_first"),
       ]),
       {
-        maxRecallDepth: 1,
         onComplete: () => {},
         onRecall: async () => ({
           anchorText: buildAnchor("architecture"),
@@ -5144,7 +5293,6 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_twelve_principal"),
       ]),
       {
-        maxRecallDepth: 24,
         onComplete: () => {},
         onRecall: async () => {
           recalls++;
@@ -5195,7 +5343,10 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
   });
 
-  test("fails an exhausted continuation recall without executing it", async () => {
+  test("does not execute recall requested by a final continuation", async () => {
+    vi.spyOn(RecallChainBudget.prototype, "mustFinalizeNext").mockReturnValue(
+      true,
+    );
     const followUp = streamFrom([
       created("resp_depth_exhausted_followup", "gpt-5.6-terra"),
       recallCall(0, { query: "more detail" }, "fc_depth", "call_depth"),
@@ -5214,7 +5365,6 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_depth_exhausted_principal"),
       ]),
       {
-        maxRecallDepth: 1,
         onComplete: () => {},
         onRecall: async ({ query }) => {
           recalls++;
@@ -5226,10 +5376,9 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(recalls).toBe(1);
-    expect(out).not.toContain("Recall depth limit reached (1).");
     expect(out).toContain(PUBLIC_RECALL_ERROR);
-    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
-    expect(out).not.toContain("event: response.completed");
+    expect(out).not.toContain("event: response.failed");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
   });
 
   test("recall-only: emits marker, pipes the continuation inline, rebuilds completed", async () => {
@@ -6955,56 +7104,52 @@ describe("streamResponsesRecallAware", () => {
     expect(callbackSignal?.aborted).toBe(true);
   });
 
-  test.each([1, 10])(
-    "foreground abort cancels and unlocks a hostile continuation reader (budget %i)",
-    async (maxRecallDepth) => {
-      const foreground = new AbortController();
-      const continuationStarted = Promise.withResolvers<void>();
-      let cancelled = false;
-      const continuation = new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(
-              new TextEncoder().encode(
-                created("resp_hostile_continuation", "gpt-5.6-terra"),
-              ),
-            );
-          },
-          pull() {
-            continuationStarted.resolve();
-            return new Promise(() => {});
-          },
-          cancel() {
-            cancelled = true;
-            return new Promise<void>(() => {});
-          },
-        }),
-      );
-      const client = streamResponsesRecallAware(
-        streamFrom([
-          created("resp_hostile_principal", "gpt-5.6-terra"),
-          recallCall(0, { query: "architecture" }),
-          completed("resp_hostile_principal"),
-        ]),
-        {
-          maxRecallDepth,
-          signal: foreground.signal,
-          onComplete: () => {},
-          onRecall: async () => ({
-            anchorText: buildAnchor("architecture"),
-            resultText: "results",
-          }),
-          runFollowUp: async () => ({ reader: continuation.body!.getReader() }),
+  test("foreground abort cancels and unlocks a hostile continuation reader", async () => {
+    const foreground = new AbortController();
+    const continuationStarted = Promise.withResolvers<void>();
+    let cancelled = false;
+    const continuation = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_hostile_continuation", "gpt-5.6-terra"),
+            ),
+          );
         },
-      );
-      const pending = drain(client);
-      await continuationStarted.promise;
-      foreground.abort(new DOMException("caller aborted", "AbortError"));
-      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-      expect(cancelled).toBe(true);
-      expect(continuation.body?.locked).toBe(false);
-    },
-  );
+        pull() {
+          continuationStarted.resolve();
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      }),
+    );
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_hostile_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_hostile_principal"),
+      ]),
+      {
+        signal: foreground.signal,
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: buildAnchor("architecture"),
+          resultText: "results",
+        }),
+        runFollowUp: async () => ({ reader: continuation.body!.getReader() }),
+      },
+    );
+    const pending = drain(client);
+    await continuationStarted.promise;
+    foreground.abort(new DOMException("caller aborted", "AbortError"));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelled).toBe(true);
+    expect(continuation.body?.locked).toBe(false);
+  });
 
   test("rejects a chained recall whose arguments never complete", async () => {
     const failures: RecallContinuationFailureCategory[] = [];
@@ -7058,7 +7203,7 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain("call_malformed");
-    expect(out).not.toContain("response.completed");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(failures).toEqual(["follow_up_incomplete_arguments"]);
   });
 
@@ -7101,7 +7246,9 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(executed).toBe(false);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
-    expect(out).toContain("response.failed");
+    expect(out).not.toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain("response.failed");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(out).not.toContain('"name":"recall"');
     expect(out).not.toContain("call_malformed");
     expect(JSON.stringify(completedResponse)).not.toContain("recall");
@@ -7335,6 +7482,7 @@ describe("streamResponsesRecallAware", () => {
     expect(executed).toBe(false);
     expect(out).not.toContain(message);
     expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(out).not.toContain('"name":"recall"');
   });
 
@@ -7485,7 +7633,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain(PUBLIC_RECALL_ERROR);
   });
 
-  test("recall-only: fails the response when the continuation fails", async () => {
+  test("recall-only: recovers when the continuation fails", async () => {
     const failures: RecallContinuationFailureCategory[] = [];
     const errors: string[] = [];
     setRecallContinuationFailureHook((category) => failures.push(category));
@@ -7514,12 +7662,12 @@ describe("streamResponsesRecallAware", () => {
     );
 
     const out = await drain(client);
-    expect(out).toContain("response.failed");
+    expect(out).not.toContain("response.failed");
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain("follow-up unavailable");
     expect(out).not.toContain("lore-recall");
     expect(out).not.toContain("Searching");
-    expect(out).not.toContain("response.completed");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(failures).toEqual(["follow_up_setup"]);
     expect(errors).toEqual([
       "recall follow-up stream failed category=follow_up_setup",
@@ -7555,7 +7703,7 @@ describe("streamResponsesRecallAware", () => {
     expect(failures).toEqual(["recall_execution"]);
   });
 
-  test("recall-only: never converts a failed continuation into completed", async () => {
+  test("recall-only: recovers from a failed continuation", async () => {
     const failures: RecallContinuationFailureCategory[] = [];
     setRecallContinuationFailureHook((category) => failures.push(category));
     const failedFollowUp = streamFrom([
@@ -7594,7 +7742,7 @@ describe("streamResponsesRecallAware", () => {
     );
 
     const out = await drain(client);
-    expect(out).toContain("response.failed");
+    expect(out).not.toContain("response.failed");
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain("recall follow-up returned response.failed");
     expect(out).not.toContain("lore-recall");
@@ -7604,8 +7752,8 @@ describe("streamResponsesRecallAware", () => {
       inputTokens: 1_000,
       outputTokens: 100,
     });
-    expect(successful).toBe(false);
-    expect(out).not.toContain("response.completed");
+    expect(successful).toBe(true);
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(failures).toEqual(["follow_up_failed"]);
   });
 
@@ -7654,9 +7802,9 @@ describe("streamResponsesRecallAware", () => {
 
     const output = await drain(client);
     const completedJSON = JSON.stringify(completedResponse);
-    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).not.toContain("event: response.failed");
     expect(output).toContain(PUBLIC_RECALL_ERROR);
-    expect(output).not.toContain("response.completed");
+    expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
     expect(output).not.toContain("private done-only continuation query");
     expect(output).not.toContain("fc_done_only_failed_followup");
     expect(output).not.toContain("call_done_only_failed_followup");
@@ -7664,7 +7812,7 @@ describe("streamResponsesRecallAware", () => {
     expect(completedJSON).not.toContain("fc_done_only_failed_followup");
     expect(completedJSON).not.toContain("call_done_only_failed_followup");
     expect(recallCalls).toBe(1);
-    expect(successful).toBe(false);
+    expect(successful).toBe(true);
   });
 
   test("recall continuation diagnostics never alter the fixed public failure", async () => {
@@ -7722,8 +7870,9 @@ describe("streamResponsesRecallAware", () => {
       );
 
       const out = await drain(client);
-      expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
-      expect(out).not.toContain('"type":"response.completed"');
+      expect(out).not.toContain("event: response.failed");
+      expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(out).toContain(PUBLIC_RECALL_ERROR);
     },
   );
 
@@ -7837,7 +7986,9 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain(PUBLIC_RECALL_ERROR);
+    const output = await drain(client);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(PUBLIC_GATEWAY_ERROR);
     expect(recalls).toBe(0);
   });
 

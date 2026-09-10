@@ -54,12 +54,18 @@ describe("parseOpenAICodexRequest", () => {
   test("base parser does NOT set the codex flag or capture control fields", () => {
     const req = parseOpenAIResponsesRequest(codexBody, {});
     expect(req.codex).toBeUndefined();
-    // Codex control fields must NOT leak into normal openai-responses parsing.
+    // Native Responses retains tool_choice for internal final-round policy, but
+    // the ordinary builder still never forwards it.
     expect(req.extras?.include).toBeUndefined();
     expect(req.extras?.prompt_cache_key).toBeUndefined();
-    expect(req.extras?.tool_choice).toBeUndefined();
+    expect(req.extras?.tool_choice).toBe("auto");
     expect(req.extras?.parallel_tool_calls).toBeUndefined();
     expect(req.extras?.service_tier).toBeUndefined();
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as Record<string, unknown>;
+    expect(body.tool_choice).toBeUndefined();
   });
 });
 

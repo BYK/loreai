@@ -731,12 +731,16 @@ export function buildOpenAIUpstreamRequest(
     body.max_tokens = req.maxTokens;
   }
 
+  const requestTools = req.disableRecall
+    ? req.tools.filter((tool) => tool.name !== "recall")
+    : req.tools;
+
   // Add tools in OpenAI format. OpenRouter honors Anthropic-style
   // `cache_control` on the last tool definition for Anthropic models, exactly
   // like the native Anthropic path (see buildAnthropicRequest). Tool defs are
   // stable across turns, so a breakpoint here keeps them as cache reads.
-  if (req.tools.length > 0) {
-    const tools = req.tools.map((t) => ({
+  if (requestTools.length > 0) {
+    const tools = requestTools.map((t) => ({
       type: "function" as const,
       function: {
         name: t.name,

@@ -492,9 +492,13 @@ export function buildAnthropicRequest(
 
   body.messages = messages;
 
+  const requestTools = req.disableRecall
+    ? req.tools.filter((tool) => tool.name !== "recall")
+    : req.tools;
+
   // Tools — only include if present
-  if (req.tools.length > 0) {
-    const tools = req.tools.map((t) => ({
+  if (requestTools.length > 0) {
+    const tools = requestTools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.inputSchema,
@@ -520,7 +524,35 @@ export function buildAnthropicRequest(
 
   // Restore all metadata params (temperature, top_p, stop_sequences, etc.)
   for (const [key, value] of Object.entries(req.metadata)) {
+    if (req.disableRecall && key === "tool_choice") continue;
     body[key] = value;
+  }
+  if (req.disableRecall && requestTools.length > 0) {
+    const choice = req.metadata.tool_choice;
+    if (choice && typeof choice === "object" && !Array.isArray(choice)) {
+      const record = choice as Record<string, unknown>;
+      if (
+        record.type === "tool" &&
+        typeof record.name === "string" &&
+        record.name !== "recall" &&
+        requestTools.some((tool) => tool.name === record.name)
+      ) {
+        body.tool_choice = choice;
+      } else if (
+        record.type === "auto" ||
+        record.type === "any" ||
+        record.type === "none"
+      ) {
+        body.tool_choice = choice;
+      } else {
+        body.tool_choice = {
+          type: "auto",
+          ...(typeof record.disable_parallel_tool_use === "boolean"
+            ? { disable_parallel_tool_use: record.disable_parallel_tool_use }
+            : {}),
+        };
+      }
+    }
   }
 
   return {

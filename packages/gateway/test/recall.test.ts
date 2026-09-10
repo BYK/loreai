@@ -22,7 +22,6 @@ import {
   isUsableRecallContinuation,
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
-  MAX_RECALL_DEPTH,
   findRecallToolUse,
   hasRecallToolUse,
   hasOtherToolUse,
@@ -49,6 +48,7 @@ import {
   addRecallStoreEntry,
   MAX_RECALL_STORE_ENTRIES,
   MAX_RECALL_STORE_BYTES,
+  RecallExecutionError,
   executeRecall,
 } from "../src/recall";
 import { MAX_RECALL_ID_CHARS } from "@loreai/core";
@@ -56,6 +56,9 @@ import {
   buildOpenAIResponsesUpstreamRequest,
   parseOpenAIResponsesRequest,
 } from "../src/translate/openai-responses";
+import { buildAnthropicRequest } from "../src/translate/anthropic";
+import { buildGeminiUpstreamRequest } from "../src/translate/gemini";
+import { buildOpenAIUpstreamRequest } from "../src/translate/openai";
 import {
   gatewayMessagesToLore,
   resolveToolResults,
@@ -224,21 +227,19 @@ describe("executeRecall malformed input", () => {
     { id: "k:one", ids: ["k:two"] },
     { ids: ["k:one"], detailLimit: 10 },
     { query: "ok", unknown: true },
-  ])("returns the safe failure result for %#", async (input) => {
-    const result = await executeRecall(
-      {
-        type: "tool_use",
-        id: "recall-malformed",
-        name: RECALL_TOOL_NAME,
-        input,
-      },
-      process.cwd(),
-      "malformed-input",
-    );
-    expect(result.result).toBe(
-      "Recall search failed. The memory system encountered an error.",
-    );
-    expect(result.input).toEqual({ query: "", scope: "all", id: undefined });
+  ])("throws the fixed typed failure for %#", async (input) => {
+    await expect(
+      executeRecall(
+        {
+          type: "tool_use",
+          id: "recall-malformed",
+          name: RECALL_TOOL_NAME,
+          input,
+        },
+        process.cwd(),
+        "malformed-input",
+      ),
+    ).rejects.toEqual(new RecallExecutionError());
   });
 
   test('OpenAI arguments "null" reaches the same safe failure path', async () => {
@@ -260,14 +261,9 @@ describe("executeRecall malformed input", () => {
     });
     const block = parsed.content[0];
     if (block?.type !== "tool_use") throw new Error("missing recall tool use");
-    const result = await executeRecall(
-      block,
-      process.cwd(),
-      "openai-null-input",
-    );
-    expect(result.result).toBe(
-      "Recall search failed. The memory system encountered an error.",
-    );
+    await expect(
+      executeRecall(block, process.cwd(), "openai-null-input"),
+    ).rejects.toEqual(new RecallExecutionError());
   });
 });
 
@@ -290,13 +286,6 @@ describe("LORE_COMMIT_REMINDER", () => {
 
   test("does not start with whitespace (separator belongs at call site)", () => {
     expect(LORE_COMMIT_REMINDER).toMatch(/^\S/);
-  });
-});
-
-describe("MAX_RECALL_DEPTH", () => {
-  test("is a >10 emergency execution ceiling", () => {
-    expect(MAX_RECALL_DEPTH).toBeGreaterThanOrEqual(12);
-    expect(Number.isInteger(MAX_RECALL_DEPTH)).toBe(true);
   });
 });
 
@@ -807,12 +796,10 @@ describe("recallStoreKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildRecallFollowUpRequest", () => {
-  test.each([
-    ["anthropic", { type: "tool", name: "recall" }],
-    ["openai-responses", { type: "function", name: "recall" }],
-  ] as const)(
-    "final %s continuation preserves cached tools and controls",
-    (protocol, choice) => {
+  test.each(["anthropic", "openai-responses"] as const)(
+    "final %s continuation disables recall without mutating cached tools",
+    (protocol) => {
+      const choice = { type: "tool", name: "recall" };
       const req = makeRequest(
         [],
         [
@@ -835,18 +822,444 @@ describe("buildRecallFollowUpRequest", () => {
         true,
         true,
       );
+      expect(follow.disableRecall).toBe(true);
       expect(follow.tools).toBe(req.tools);
       expect(follow.metadata).toBe(req.metadata);
       expect(follow.extras).toBe(req.extras);
       expect(JSON.stringify(follow.messages.at(-1))).toContain("real result");
       expect(JSON.stringify(follow.messages.at(-1))).toContain(
-        "The recall budget for this turn has been used",
+        "Recall must stop now",
       );
       expect(req.tools.map((tool) => tool.name)).toEqual(["Read", "recall"]);
       expect(req.metadata.tool_choice).toBe(choice);
       expect(req.extras?.tool_choice).toBe(choice);
     },
   );
+
+  test("non-final continuation keeps recall enabled", () => {
+    const req = makeRequest(
+      [],
+      [{ name: "recall", description: "Recall", inputSchema: {} }],
+    );
+    const block = makeRecallToolUse("architecture");
+    const follow = buildRecallFollowUpRequest(
+      req,
+      makeResponse([block], "tool_use"),
+      "real result",
+      block,
+      true,
+    );
+
+    expect(follow.disableRecall).toBeUndefined();
+  });
+
+  test("enforces final recall policy in every upstream builder", () => {
+    const req = makeRequest(
+      [],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+        { name: "Bash", description: "Bash", inputSchema: {} },
+      ],
+    );
+    req.disableRecall = true;
+    req.metadata = {
+      tool_choice: { type: "tool", name: "recall" },
+      toolConfig: {
+        functionCallingConfig: {
+          mode: "ANY",
+          allowedFunctionNames: ["recall"],
+        },
+      },
+    };
+    req.extras = {
+      tool_choice: { type: "function", name: "recall" },
+    };
+
+    const anthropic = buildAnthropicRequest(req).body as Record<
+      string,
+      unknown
+    >;
+    expect(
+      (anthropic.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ).toEqual(["Read", "Bash"]);
+    expect(anthropic.tool_choice).toEqual({ type: "auto" });
+
+    const chat = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
+      .body as Record<string, unknown>;
+    expect(
+      (chat.tools as Array<{ function: { name: string } }>).map(
+        (tool) => tool.function.name,
+      ),
+    ).toEqual(["Read", "Bash"]);
+
+    const gemini = buildGeminiUpstreamRequest(
+      req,
+      "https://generativelanguage.googleapis.com",
+    ).body as Record<string, unknown>;
+    expect(
+      (
+        gemini.tools as Array<{
+          functionDeclarations: Array<{ name: string }>;
+        }>
+      )[0]?.functionDeclarations.map((tool) => tool.name),
+    ).toEqual(["Read", "Bash"]);
+    expect(gemini.toolConfig).toEqual({
+      functionCallingConfig: { mode: "AUTO" },
+    });
+
+    req.codex = true;
+    const codex = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    ).body as Record<string, unknown>;
+    expect(
+      (codex.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ).toEqual(["Read", "Bash"]);
+    expect(codex.tool_choice).toBe("auto");
+  });
+
+  test("native Responses preserves cached definitions and allows only ordinary tools", () => {
+    const req = makeRequest(
+      [],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+        { name: "Bash", description: "Bash", inputSchema: {} },
+      ],
+    );
+    req.protocol = "openai-responses";
+    req.disableRecall = true;
+    const originalTools = structuredClone(req.tools);
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as Record<string, unknown>;
+
+    expect(req.tools).toEqual(originalTools);
+    expect(
+      (body.tools as Array<{ name: string }>).map((tool) => tool.name),
+    ).toEqual(["Read", "recall", "Bash"]);
+    expect(body.tool_choice).toEqual({
+      type: "allowed_tools",
+      mode: "auto",
+      tools: [
+        { type: "function", name: "Read" },
+        { type: "function", name: "Bash" },
+      ],
+    });
+  });
+
+  test.each([
+    ["none", "none"],
+    [
+      "required",
+      {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [
+          { type: "function", name: "Read" },
+          { type: "function", name: "Bash" },
+        ],
+      },
+    ],
+    [
+      { type: "function", name: "Read" },
+      { type: "function", name: "Read" },
+    ],
+    [
+      { type: "function", name: "recall" },
+      {
+        type: "allowed_tools",
+        mode: "auto",
+        tools: [
+          { type: "function", name: "Read" },
+          { type: "function", name: "Bash" },
+        ],
+      },
+    ],
+    [
+      {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [
+          { type: "function", name: "recall" },
+          { type: "function", name: "Bash" },
+          { type: "function", name: "missing" },
+        ],
+      },
+      {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [{ type: "function", name: "Bash" }],
+      },
+    ],
+  ])(
+    "native Responses final continuation sanitizes choice %#",
+    (choice, expected) => {
+      const req = makeRequest(
+        [],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+          { name: "Read", description: "duplicate", inputSchema: {} },
+          { name: "Bash", description: "Bash", inputSchema: {} },
+        ],
+      );
+      req.protocol = "openai-responses";
+      req.disableRecall = true;
+      req.extras = { tool_choice: choice };
+
+      const body = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://api.openai.com",
+      ).body as Record<string, unknown>;
+
+      expect(body.tool_choice).toEqual(expected);
+    },
+  );
+
+  test("final recall-only requests expose no callable tools", () => {
+    const req = makeRequest(
+      [],
+      [{ name: "recall", description: "Recall", inputSchema: {} }],
+    );
+    req.disableRecall = true;
+    req.metadata = { tool_choice: { type: "tool", name: "recall" } };
+    req.extras = { tool_choice: { type: "function", name: "recall" } };
+
+    const anthropic = buildAnthropicRequest(req).body as Record<
+      string,
+      unknown
+    >;
+    expect(anthropic.tools).toBeUndefined();
+    expect(anthropic.tool_choice).toBeUndefined();
+
+    req.codex = true;
+    const codex = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    ).body as Record<string, unknown>;
+    expect(codex.tools).toBeUndefined();
+    expect(codex.tool_choice).toBe("none");
+
+    req.codex = false;
+    const responses = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as Record<string, unknown>;
+    expect(responses.tools).toHaveLength(1);
+    expect(responses.tool_choice).toBe("none");
+  });
+
+  test.each(["none", "auto", "required"] as const)(
+    "Codex final continuation preserves safe %s choice",
+    (choice) => {
+      const req = makeRequest(
+        [],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+        ],
+      );
+      req.codex = true;
+      req.disableRecall = true;
+      req.extras = { tool_choice: choice };
+
+      const body = buildOpenAIResponsesUpstreamRequest(
+        req,
+        "https://chatgpt.com/backend-api",
+      ).body as Record<string, unknown>;
+
+      expect(body.tool_choice).toBe(choice);
+      expect(
+        (body.tools as Array<{ name: string }>).map((tool) => tool.name),
+      ).toEqual(["Read"]);
+    },
+  );
+
+  test("Codex final continuation rebuilds a forced ordinary tool", () => {
+    const choice = { type: "function", name: "Read", private: "drop me" };
+    const req = makeRequest(
+      [],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+      ],
+    );
+    req.codex = true;
+    req.disableRecall = true;
+    req.extras = { tool_choice: choice };
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    ).body as Record<string, unknown>;
+
+    expect(body.tool_choice).toEqual({ type: "function", name: "Read" });
+  });
+
+  test("final builders remove every recall definition and restrict Gemini allowlists", () => {
+    const req = makeRequest(
+      [],
+      [
+        { name: "recall", description: "Recall one", inputSchema: {} },
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall two", inputSchema: {} },
+        { name: "Bash", description: "Bash", inputSchema: {} },
+      ],
+    );
+    req.disableRecall = true;
+    req.metadata = {
+      toolConfig: {
+        functionCallingConfig: {
+          mode: "ANY",
+          allowedFunctionNames: ["recall", "Read"],
+        },
+      },
+    };
+
+    const anthropic = buildAnthropicRequest(req).body as {
+      tools: Array<{ name: string }>;
+    };
+    expect(anthropic.tools.map((tool) => tool.name)).toEqual(["Read", "Bash"]);
+
+    const gemini = buildGeminiUpstreamRequest(
+      req,
+      "https://generativelanguage.googleapis.com",
+    ).body as {
+      tools: Array<{ functionDeclarations: Array<{ name: string }> }>;
+      toolConfig: {
+        functionCallingConfig: {
+          mode: string;
+          allowedFunctionNames: string[];
+        };
+      };
+    };
+    expect(
+      gemini.tools[0]?.functionDeclarations.map((tool) => tool.name),
+    ).toEqual(["Read", "Bash"]);
+    expect(gemini.toolConfig.functionCallingConfig).toEqual({
+      mode: "ANY",
+      allowedFunctionNames: ["Read"],
+    });
+  });
+
+  test("Anthropic final continuation preserves a forced ordinary tool and cache breakpoint", () => {
+    const choice = {
+      type: "tool",
+      name: "Read",
+      disable_parallel_tool_use: true,
+    };
+    const req = makeRequest(
+      [],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+      ],
+    );
+    req.disableRecall = true;
+    req.metadata = { tool_choice: choice };
+
+    const body = buildAnthropicRequest(req, {
+      cacheTools: true,
+      systemTTL: "1h",
+    }).body as {
+      tools: Array<{ name: string; cache_control?: unknown }>;
+      tool_choice: unknown;
+    };
+
+    expect(body.tools).toEqual([
+      {
+        name: "Read",
+        description: "Read",
+        input_schema: {},
+        cache_control: { type: "ephemeral", ttl: "1h" },
+      },
+    ]);
+    expect(body.tool_choice).toBe(choice);
+  });
+
+  test.each([
+    { type: "tool", name: "recall", disable_parallel_tool_use: true },
+    { type: "unknown", name: "recall", disable_parallel_tool_use: true },
+  ])("Anthropic final continuation sanitizes unsafe choice %#", (choice) => {
+    const req = makeRequest(
+      [],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+      ],
+    );
+    req.disableRecall = true;
+    req.metadata = { tool_choice: choice };
+
+    const body = buildAnthropicRequest(req).body as Record<string, unknown>;
+
+    expect(body.tool_choice).toEqual({
+      type: "auto",
+      disable_parallel_tool_use: true,
+    });
+  });
+
+  test("Anthropic final continuation preserves an explicit none choice", () => {
+    const choice = { type: "none" };
+    const req = makeRequest(
+      [],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+      ],
+    );
+    req.disableRecall = true;
+    req.metadata = { tool_choice: choice };
+
+    const body = buildAnthropicRequest(req).body as Record<string, unknown>;
+
+    expect(body.tool_choice).toBe(choice);
+  });
+
+  test("Codex final recall-only request overrides required with none", () => {
+    const req = makeRequest(
+      [],
+      [{ name: "recall", description: "Recall", inputSchema: {} }],
+    );
+    req.codex = true;
+    req.disableRecall = true;
+    req.extras = { tool_choice: "required" };
+
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api",
+    ).body as Record<string, unknown>;
+
+    expect(body.tools).toBeUndefined();
+    expect(body.tool_choice).toBe("none");
+  });
+
+  test("Gemini final continuation preserves ANY when ordinary tools remain", () => {
+    const req = makeRequest(
+      [],
+      [
+        { name: "Read", description: "Read", inputSchema: {} },
+        { name: "recall", description: "Recall", inputSchema: {} },
+      ],
+    );
+    req.disableRecall = true;
+    req.metadata = {
+      toolConfig: { functionCallingConfig: { mode: "ANY" } },
+    };
+
+    const body = buildGeminiUpstreamRequest(
+      req,
+      "https://generativelanguage.googleapis.com",
+    ).body as Record<string, unknown>;
+
+    expect(body.toolConfig).toEqual({
+      functionCallingConfig: { mode: "ANY" },
+    });
+  });
 
   test("builds correct follow-up request structure with tool_use/tool_result", () => {
     const req = makeRequest(
@@ -1511,7 +1924,7 @@ describe("runRecallFollowUpStreaming", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.status).toBe(400);
-      expect(result.detail).toBe("bad request");
+      expect(result).not.toHaveProperty("detail");
     }
   });
 
@@ -1611,7 +2024,7 @@ describe("runRecallFollowUpJSON", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.status).toBe(500);
-      expect(result.detail).toBe("server error");
+      expect(result).not.toHaveProperty("detail");
     }
   });
 
@@ -1765,7 +2178,7 @@ describe("runRecallFollowUpStreamAccumulated", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.status).toBe(502);
-      expect(result.detail).toBe("server error");
+      expect(result).not.toHaveProperty("detail");
     }
   });
 

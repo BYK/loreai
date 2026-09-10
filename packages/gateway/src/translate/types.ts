@@ -230,6 +230,8 @@ export type GatewayRequest = {
   system: string;
   messages: GatewayMessage[];
   tools: GatewayTool[];
+  /** Final recall continuations must never permit another recall call. */
+  disableRecall?: boolean;
   stream: boolean;
   maxTokens: number;
   /**

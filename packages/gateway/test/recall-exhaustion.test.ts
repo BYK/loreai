@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { db } from "@loreai/core";
+import { loadSessionTracking } from "@loreai/core";
 import { loadConfig } from "../src/config";
 import {
+  getActiveSessions,
   handleRequest,
+  RECALL_FAILURE_WARNING,
   resetPipelineState,
   setUpstreamInterceptor,
+  streamingPostResponsePendingForTest,
 } from "../src/pipeline";
-import { executeRecall, MAX_RECALL_DEPTH } from "../src/recall";
+import { executeRecall } from "../src/recall";
+import { MAX_CONSECUTIVE_RECALL_NO_PROGRESS } from "../src/recall-budget";
 import type { GatewayRequest } from "../src/translate/types";
 
 vi.mock("../src/recall", async (importOriginal) => {
@@ -24,6 +28,65 @@ function event(type: string, data: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`;
 }
 
+const SAFE_PRE_FAILURE_OUTPUT = "Safe output before recall failure.";
+const RECALLS_BEFORE_FINAL_SYNTHESIS = MAX_CONSECUTIVE_RECALL_NO_PROGRESS + 1;
+const FINAL_SYNTHESIS_CALL = RECALLS_BEFORE_FINAL_SYNTHESIS + 1;
+
+function completedSseResponse(body: string): Record<string, unknown> {
+  const matches = [
+    ...body.matchAll(/^event: response\.completed\ndata: (.+)$/gm),
+  ];
+  expect(matches).toHaveLength(1);
+  const payload = JSON.parse(matches[0][1]) as Record<string, unknown>;
+  expect(payload).toMatchObject({
+    type: "response.completed",
+    response: { status: "completed" },
+  });
+  return payload.response as Record<string, unknown>;
+}
+
+function responseText(
+  body: string,
+  protocol: "anthropic" | "openai" | "openai-responses",
+  stream: boolean,
+): string {
+  const response = (
+    stream ? completedSseResponse(body) : JSON.parse(body)
+  ) as Record<string, unknown>;
+  if (protocol === "anthropic")
+    return (response.content as Array<Record<string, unknown>>)
+      .filter((block: Record<string, unknown>) => block.type === "text")
+      .map((block: Record<string, unknown>) => block.text)
+      .join("");
+  if (protocol === "openai") {
+    const choice = (response.choices as Array<Record<string, unknown>>)[0];
+    const message = choice.message as Record<string, unknown>;
+    return typeof message.content === "string" ? message.content : "";
+  }
+  return (response.output as Array<Record<string, unknown>>)
+    .flatMap((item) =>
+      Array.isArray(item.content)
+        ? (item.content as Array<Record<string, unknown>>)
+        : [],
+    )
+    .filter((part) => part.type === "output_text")
+    .map((part) => part.text)
+    .join("");
+}
+
+function activeSession(headerSessionId: string) {
+  const state = [...getActiveSessions().values()].find(
+    (candidate) => candidate.headerSessionId === headerSessionId,
+  );
+  if (!state) throw new Error("expected an active test session");
+  return state;
+}
+
+async function settlePostResponse(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await vi.waitFor(() => expect(streamingPostResponsePendingForTest()).toBe(0));
+}
+
 function upstream(
   protocol: string,
   streaming: boolean,
@@ -35,6 +98,7 @@ function upstream(
     | "parallel"
     | "reasoning"
     | "refusal"
+    | "safe-recall"
     | "unfinished",
 ): Response {
   if (kind === "unfinished") {
@@ -120,18 +184,28 @@ function upstream(
         )
       : Response.json(response);
   }
-  const tool = {
+  const tool: {
+    type: "tool_use";
+    id: string;
+    name: string;
+    input: { query: string };
+  } = {
     type: "tool_use",
     id: `call_${round}`,
     name: kind === "tool" ? "Read" : "recall",
     input: { query: `query ${round}` },
   };
-  const content =
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "tool_use"; id: string; name: string; input: { query: string } }
+  > =
     kind === "answer"
       ? [{ type: "text", text: "Finished the task." }]
-      : kind === "parallel"
-        ? [tool, { ...tool, id: `call_other_${round}` }]
-        : [tool];
+      : kind === "safe-recall"
+        ? [{ type: "text", text: SAFE_PRE_FAILURE_OUTPUT }, tool]
+        : kind === "parallel"
+          ? [tool, { ...tool, id: `call_other_${round}` }]
+          : [tool];
   if (protocol === "anthropic")
     return Response.json({
       id: `msg_${round}`,
@@ -143,14 +217,30 @@ function upstream(
       stop_sequence: null,
       usage: { input_tokens: 3, output_tokens: 2 },
     });
-  const items = content.map((block, index) =>
+  const items: Array<
+    | {
+        type: "message";
+        id: string;
+        status: string;
+        role: string;
+        content: Array<{ type: "output_text"; text: string }>;
+      }
+    | {
+        type: "function_call";
+        id: string;
+        call_id: string;
+        name: string;
+        arguments: string;
+        status: string;
+      }
+  > = content.map((block, index) =>
     block.type === "text"
       ? {
           type: "message",
           id: `msg_${round}`,
           status: "completed",
           role: "assistant",
-          content: [{ type: "output_text", text: "Finished the task." }],
+          content: [{ type: "output_text", text: block.text }],
         }
       : {
           type: "function_call",
@@ -199,7 +289,7 @@ function upstream(
                   output_index: index,
                   item_id: item.id,
                   content_index: 0,
-                  text: "Finished the task.",
+                  text: item.content[0].text,
                 })) +
             event("response.output_item.done", { output_index: index, item })
           );
@@ -218,7 +308,7 @@ describe.each([
   ["anthropic", false, false, "openai-responses"],
   ["openai", false, false, "openai-responses"],
 ] as const)(
-  "recall exhaustion: %s stream=%s codex=%s upstream=%s",
+  "recall no-progress finalization: %s stream=%s codex=%s upstream=%s",
   (protocol, stream, codex, upstreamProtocol) => {
     test.each([
       "answer",
@@ -230,22 +320,11 @@ describe.each([
       "refusal",
       "unfinished",
     ] as const)("final result %s", async (mode) => {
-      let recallCalls = 0;
       vi.mocked(executeRecall).mockImplementation(async () => {
-        recallCalls++;
         return {
           result: "real recall result",
           input: { query: "architecture" },
-          coverage: [
-            {
-              identity: `t:source-${recallCalls}`,
-              revision: `revision-${recallCalls}`,
-              offset: 0,
-              length: 1,
-              complete: true,
-              kind: "detail" as const,
-            },
-          ],
+          coverage: [],
         };
       });
       const config = loadConfig();
@@ -305,9 +384,11 @@ describe.each([
         calls++;
         const requestBody = body as Record<string, unknown>;
         firstBody ??= structuredClone(requestBody);
-        expect(requestBody.tools).toEqual(firstBody.tools);
-        expect(requestBody.tool_choice).toEqual(firstBody.tool_choice);
-        if (calls === MAX_RECALL_DEPTH + 1) {
+        if (calls === 1) {
+          expect(requestBody.tools).toEqual(firstBody.tools);
+          expect(requestBody.tool_choice).toEqual(firstBody.tool_choice);
+        }
+        if (calls === FINAL_SYNTHESIS_CALL) {
           lastBody = requestBody;
           if (mode === "failed")
             return new Response("provider diagnostic must not leak", {
@@ -317,32 +398,48 @@ describe.each([
             upstreamProtocol,
             requestBody.stream === true,
             calls,
-            mode === "parallel" ? "answer" : mode,
+            mode,
           );
         }
+        if (calls > FINAL_SYNTHESIS_CALL)
+          throw new Error("unexpected provider call after final synthesis");
         return upstream(
           upstreamProtocol,
           requestBody.stream === true,
           calls,
-          mode === "parallel" ? "parallel" : "recall",
+          calls === 1 ? "safe-recall" : "recall",
         );
       });
       const response = await handleRequest(req, config);
       const body = await response.text();
-      if (mode === "parallel") {
-        expect(vi.mocked(executeRecall)).not.toHaveBeenCalled();
-        expect(calls).toBe(1);
+      expect(calls).toBe(FINAL_SYNTHESIS_CALL);
+      expect(vi.mocked(executeRecall)).toHaveBeenCalledTimes(
+        RECALLS_BEFORE_FINAL_SYNTHESIS,
+      );
+      const finalTools = lastBody?.tools as
+        | Array<{
+            name?: string;
+            function?: { name?: string };
+          }>
+        | undefined;
+      const finalToolNames = finalTools?.map(
+        (tool) => tool.name ?? tool.function?.name,
+      );
+      if (upstreamProtocol === "anthropic" || codex) {
+        expect(finalToolNames).toContain("Read");
+        expect(finalToolNames).not.toContain("recall");
+        expect(lastBody?.tool_choice).not.toEqual(
+          expect.objectContaining({ name: "recall" }),
+        );
       } else {
-        expect(calls).toBe(MAX_RECALL_DEPTH + 1);
-        expect(vi.mocked(executeRecall)).toHaveBeenCalledTimes(
-          MAX_RECALL_DEPTH,
-        );
         expect(lastBody?.tools).toEqual(firstBody?.tools);
-        expect(lastBody?.tool_choice).toEqual(firstBody?.tool_choice);
-        expect(JSON.stringify(lastBody)).toContain(
-          "The recall budget for this turn has been used",
-        );
+        expect(lastBody?.tool_choice).toEqual({
+          type: "allowed_tools",
+          mode: "auto",
+          tools: [{ type: "function", name: "Read" }],
+        });
       }
+      expect(JSON.stringify(lastBody)).toContain("Recall must stop now");
       if (mode === "answer" || mode === "tool" || mode === "refusal") {
         expect(response.status).toBe(200);
         expect(body).toContain(
@@ -352,6 +449,7 @@ describe.each([
               ? "I cannot help with that."
               : '"Read"',
         );
+        expect(body).not.toContain("Lore could not retrieve more memory");
         if (mode === "refusal" && protocol === "openai-responses") {
           if (stream) {
             expect(body.match(/^event: response\.completed$/gm)).toHaveLength(
@@ -382,20 +480,44 @@ describe.each([
             "I cannot help with that.",
           );
         }
-        expect(body).not.toContain("Recall depth limit reached");
       } else {
+        expect(response.status).toBe(200);
         if (stream) {
-          expect(body.match(/^event: response\.failed$/gm)).toHaveLength(1);
-          expect(body).not.toContain("event: response.completed");
-        } else expect(response.status).toBe(502);
-        expect(body).not.toContain("provider diagnostic");
+          completedSseResponse(body);
+          expect(body).not.toContain("event: response.failed");
+        }
+        const text = responseText(body, protocol, stream);
+        expect(text.split(RECALL_FAILURE_WARNING)).toHaveLength(2);
+        expect(text.endsWith(RECALL_FAILURE_WARNING)).toBe(true);
+        expect(text).toContain(SAFE_PRE_FAILURE_OUTPUT);
+        expect(body).not.toContain("response.failed");
+        expect(body).not.toContain('"status":"failed"');
+        expect(body).not.toContain("provider diagnostic must not leak");
+        expect(body).not.toContain("real recall result");
+        expect(body).not.toContain("architecture");
+        expect(body).not.toContain("Recall must stop now");
+        expect(body).not.toContain("📚 Searching");
+        expect(body).not.toContain("📚 Fetching");
+        expect(body).not.toContain("lore-recall:");
+        expect(body).not.toContain('"name":"recall"');
+        expect(body).not.toContain("depth_exhausted");
+        expect(body).not.toContain("follow_up_");
+        for (let round = 1; round <= FINAL_SYNTHESIS_CALL; round++) {
+          expect(body).not.toContain(`query ${round}`);
+          expect(body).not.toContain(`call_${round}`);
+          expect(body).not.toContain(`fc_${round}_`);
+        }
+        await settlePostResponse();
+        const state = activeSession(session);
+        expect(state.recallStore.size).toBe(0);
+        const durableRecallStore = loadSessionTracking(
+          state.sessionID,
+        )?.recallStore;
         expect(
-          db()
-            .query(
-              "SELECT count(*) AS count FROM temporal_messages WHERE session_id = ? AND role = 'assistant'",
-            )
-            .get(session),
-        ).toMatchObject({ count: 0 });
+          durableRecallStore === null || durableRecallStore === undefined
+            ? []
+            : JSON.parse(durableRecallStore),
+        ).toEqual([]);
       }
     });
   },

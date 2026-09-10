@@ -166,7 +166,6 @@ describe("LoreConfig — search schema", () => {
     expect(cfg.search.ftsWeights.content).toBe(2.0);
     expect(cfg.search.ftsWeights.category).toBe(3.0);
     expect(cfg.search.recallLimit).toBe(10);
-    expect(cfg.search.recall.chainMaxExecutions).toBe(24);
     expect(cfg.search.queryExpansion).toBe(true);
     expect(cfg.search.embeddings.enabled).toBe(true);
     expect(cfg.search.embeddings.provider).toBe("local");
@@ -190,17 +189,6 @@ describe("LoreConfig — search schema", () => {
 
   test("search.recallLimit rejects values over 50", () => {
     expect(() => LoreConfig.parse({ search: { recallLimit: 100 } })).toThrow();
-  });
-
-  test("search.recall.chainMaxExecutions is independently configurable", () => {
-    expect(
-      LoreConfig.parse({
-        search: { recall: { chainMaxExecutions: 36 } },
-      }).search.recall.chainMaxExecutions,
-    ).toBe(36);
-    expect(() =>
-      LoreConfig.parse({ search: { recall: { chainMaxExecutions: 11 } } }),
-    ).toThrow();
   });
 
   test("search.queryExpansion can be enabled", () => {

@@ -366,10 +366,13 @@ export function buildGeminiUpstreamRequest(
     body.systemInstruction = { parts: [{ text: req.system }] };
   }
 
-  if (req.tools.length > 0) {
+  const requestTools = req.disableRecall
+    ? req.tools.filter((tool) => tool.name !== "recall")
+    : req.tools;
+  if (requestTools.length > 0) {
     body.tools = [
       {
-        functionDeclarations: req.tools.map((t) => ({
+        functionDeclarations: requestTools.map((t) => ({
           name: t.name,
           description: t.description,
           parameters: t.inputSchema,
@@ -388,7 +391,44 @@ export function buildGeminiUpstreamRequest(
 
   if (req.metadata.safetySettings)
     body.safetySettings = req.metadata.safetySettings;
-  if (req.metadata.toolConfig) body.toolConfig = req.metadata.toolConfig;
+  if (req.metadata.toolConfig && !req.disableRecall) {
+    body.toolConfig = req.metadata.toolConfig;
+  } else if (req.disableRecall && requestTools.length > 0) {
+    const toolConfig = req.metadata.toolConfig;
+    const functionCallingConfig =
+      toolConfig && typeof toolConfig === "object" && !Array.isArray(toolConfig)
+        ? (toolConfig as Record<string, unknown>).functionCallingConfig
+        : undefined;
+    if (
+      functionCallingConfig &&
+      typeof functionCallingConfig === "object" &&
+      !Array.isArray(functionCallingConfig)
+    ) {
+      const config = functionCallingConfig as Record<string, unknown>;
+      const allowed = Array.isArray(config.allowedFunctionNames)
+        ? config.allowedFunctionNames.filter(
+            (name): name is string =>
+              typeof name === "string" &&
+              name !== "recall" &&
+              requestTools.some((tool) => tool.name === name),
+          )
+        : undefined;
+      body.toolConfig = {
+        ...(toolConfig as Record<string, unknown>),
+        functionCallingConfig: allowed
+          ? allowed.length > 0
+            ? { ...config, allowedFunctionNames: allowed }
+            : { mode: "AUTO" }
+          : config,
+      };
+    } else if (
+      toolConfig &&
+      typeof toolConfig === "object" &&
+      !Array.isArray(toolConfig)
+    ) {
+      body.toolConfig = toolConfig;
+    }
+  }
   if (req.metadata.cachedContent)
     body.cachedContent = req.metadata.cachedContent;
 

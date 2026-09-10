@@ -55,6 +55,7 @@ import {
   expireProvisionalHeaderMappingsForTest,
   mergeRecallUsage,
   pendingPipelineSessionClaimCountForTest,
+  RECALL_FAILURE_WARNING,
   resetPipelineState,
   scheduleStreamingPostResponseForTest,
   setPipelinePreUpstreamPauseForTest,
@@ -1578,7 +1579,12 @@ describe("Pipeline — streaming responses", () => {
         }),
         loadLocalConfig(),
       );
-      expect(await response.text()).toContain("event: response.failed");
+      const body = await response.text();
+      expect(body).toContain("event: response.completed");
+      expect(body).not.toContain("event: response.failed");
+      expect(body).toContain(RECALL_FAILURE_WARNING.replaceAll("\n", "\\n"));
+      expect(body).not.toContain("provider failed");
+      expect(body).not.toContain("call_recall_accounting");
       const state = [...getActiveSessions().values()].find(
         (candidate) => candidate.headerSessionId === sessionHeader,
       );
@@ -1592,7 +1598,10 @@ describe("Pipeline — streaming responses", () => {
           turns: 1,
         });
       });
-      expect(store).not.toHaveBeenCalled();
+      expect(store).toHaveBeenCalledTimes(1);
+      const stored = JSON.stringify(store.mock.calls);
+      expect(stored).not.toContain(RECALL_FAILURE_WARNING);
+      expect(stored).not.toContain("call_recall_accounting");
     } finally {
       store.mockRestore();
       setUpstreamInterceptor(undefined);
@@ -1848,10 +1857,19 @@ describe("Pipeline — streaming responses", () => {
       });
       request.stream = false;
       const response = await handleRequest(request, loadLocalConfig());
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(200);
       const body = await response.text();
-      expect(body).toContain("Gateway request failed");
+      const parsed = JSON.parse(body) as {
+        output: Array<{ content?: Array<{ text?: string }> }>;
+      };
+      const text = parsed.output
+        .flatMap((item) => item.content ?? [])
+        .flatMap((part) => (typeof part.text === "string" ? [part.text] : []));
+      expect(text).toEqual([RECALL_FAILURE_WARNING]);
       expect(body).not.toContain("private context");
+      expect(body).not.toContain("fc_private_recall");
+      expect(body).not.toContain("call_private_recall");
+      expect(upstreamCall).toBe(2);
     } finally {
       setUpstreamInterceptor(undefined);
       await resetPipelineState();

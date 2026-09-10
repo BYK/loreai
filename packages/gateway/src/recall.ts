@@ -44,7 +44,6 @@ import type {
 import { promiseAgainstAbort } from "./abort-race";
 import { cancelAndReleaseReader } from "./stream/anthropic";
 import { looksLikeSSE } from "./translate/types";
-import { MAX_RECALL_EXECUTIONS } from "./recall-budget";
 
 // ---------------------------------------------------------------------------
 // Tool definition
@@ -106,8 +105,6 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
 
 export const RECALL_TOOL_NAME = "recall";
 
-/** @deprecated Compatibility alias for the policy's emergency execution ceiling. */
-export const MAX_RECALL_DEPTH = MAX_RECALL_EXECUTIONS;
 export const MAX_RECALL_STORE_ENTRIES = 128;
 export const MAX_RECALL_STORE_BYTES = 1024 * 1024;
 
@@ -1050,14 +1047,21 @@ function parseRecallInput(block: GatewayToolUseBlock): {
 /**
  * Execute the recall tool and return formatted results.
  *
- * Wraps `runRecall()` with error handling — on failure returns a
- * user-friendly error string rather than throwing.
+ * Wraps `runRecall()` with privacy-safe error handling. Failures use a fixed
+ * typed error so the pipeline can roll back recall and continue the turn.
  *
  * `alreadyInLtmIds` is forwarded to `runRecall` to surface a hint when the
  * model's recall hits overlap with entries already in its LTM context (system
  * catalog + knowledge-delta pair). Prevents silent 3-token agent loop exits
  * when a query's hits are entirely redundant.
  */
+export class RecallExecutionError extends Error {
+  constructor() {
+    super("recall execution failed");
+    this.name = "RecallExecutionError";
+  }
+}
+
 export async function executeRecall(
   block: GatewayToolUseBlock,
   projectPath: string,
@@ -1115,14 +1119,10 @@ export async function executeRecall(
       input: { query, scope, id, ids, detailOffset, detailLimit },
       coverage: recall.coverage,
     };
-  } catch (e) {
+  } catch {
     if (signal?.aborted) throw signal.reason;
-    log.error("gateway recall execution failed:", e);
-    return {
-      result: "Recall search failed. The memory system encountered an error.",
-      input: { query, scope, id, ids, detailOffset, detailLimit },
-      coverage: [],
-    };
+    log.error("gateway recall execution failed");
+    throw new RecallExecutionError();
   }
 }
 
@@ -1246,7 +1246,7 @@ export function buildRecallFollowUpRequest(
   stream: boolean,
   finalRecallRound = false,
 ): GatewayRequest {
-  if (finalRecallRound) log.info("recall final continuation: budget exhausted");
+  if (finalRecallRound) log.info("recall final continuation: required");
   // Build the follow-up using proper tool_use/tool_result pairs.
   //
   // Why: sending recall results as plain user text causes the LLM to treat
@@ -1307,7 +1307,7 @@ export function buildRecallFollowUpRequest(
             ? [
                 {
                   type: "text" as const,
-                  text: "The recall budget for this turn has been used. Continue the user's task using the results already available. Give your best supported answer, state any remaining uncertainty, or use an available non-recall tool. Do not request recall again.",
+                  text: "Recall must stop now. Continue the user's task using the results already available. Give your best supported answer, state any remaining uncertainty, or use an available non-recall tool. Do not request recall again.",
                 },
               ]
             : []),
@@ -1321,6 +1321,7 @@ export function buildRecallFollowUpRequest(
     // The stream flag is set by the caller-specific helper to match its
     // consumer (JSON vs SSE) — see buildRecallFollowUpRequest's doc comment.
     stream,
+    ...(finalRecallRound ? { disableRecall: true } : {}),
     messages: [...originalReq.messages, assistantMessage, resultMessage],
   };
 }
@@ -1506,8 +1507,6 @@ export interface RecallFollowUpError {
   ok: false;
   /** HTTP status when the upstream responded with a non-OK status. */
   status?: number;
-  /** Human-readable error detail for logging. */
-  detail: string;
 }
 
 /**
@@ -1546,14 +1545,13 @@ export async function runRecallFollowUpStreaming(
     },
   );
   if (!response.ok) {
-    let detail = "";
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
-    } catch (err) {
+      await readResponseTextLimited(response, 500, signal);
+    } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read:", err);
+      log.warn("recall follow-up error body could not be read");
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status };
   }
   const sseResponse = await ensureSSEResponse(response, signal);
   const body = sseResponse.body;
@@ -1599,14 +1597,13 @@ export async function runRecallFollowUpJSON(
     },
   );
   if (!response.ok) {
-    let detail = "";
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
-    } catch (error) {
+      await readResponseTextLimited(response, 500, signal);
+    } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read:", error);
+      log.warn("recall follow-up error body could not be read");
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status };
   }
   assertJSONResponse(response);
   const continuation = await parseFollowUpAgainstAbort(
@@ -1669,14 +1666,13 @@ export async function runRecallFollowUpStreamAccumulated(
     },
   );
   if (!response.ok) {
-    let detail = "";
     try {
-      detail = await readResponseTextLimited(response, 500, signal);
-    } catch (error) {
+      await readResponseTextLimited(response, 500, signal);
+    } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read:", error);
+      log.warn("recall follow-up error body could not be read");
     }
-    return { ok: false, status: response.status, detail };
+    return { ok: false, status: response.status };
   }
   const sseResponse = await ensureSSEResponse(response, signal);
   const continuation = await parseFollowUpAgainstAbort(

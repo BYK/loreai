@@ -8,11 +8,13 @@ import {
   buildStreamingResponse,
   getActiveSessions,
   handleRequest,
+  RECALL_FAILURE_WARNING,
   resetPipelineState,
   setRecallPersistenceCommitObserverForTest,
   setUpstreamInterceptor,
   streamingPostResponsePendingForTest,
 } from "../src/pipeline";
+import { MAX_CONSECUTIVE_RECALL_NO_PROGRESS } from "../src/recall-budget";
 import type { GatewayRequest } from "../src/translate/types";
 import { parseAnthropicResponseJSON } from "../src/translate/anthropic";
 import {
@@ -34,7 +36,6 @@ afterEach(async () => {
   clearAllCosts();
   for (const id of createdKnowledge) ltm.remove(id);
   createdKnowledge.clear();
-  productiveRecallIds = undefined;
   vi.restoreAllMocks();
   resetWorkerHealth();
 });
@@ -122,14 +123,12 @@ describe.each(["anthropic", "openai", "openai-responses"] as const)(
       "cache",
       "missing",
       "json",
-    ] as const)("retains only validated usage: %s", async (usageKind) => {
+    ] as const)("retains only principal usage: %s", async (usageKind) => {
       const alias = crypto.randomUUID();
-      prepareProductiveRecallSources();
       let calls = 0;
       setUpstreamInterceptor(async () => {
         calls++;
-        if (calls < FINAL_RECALL_CALL)
-          return providerResponse(protocol, calls, "recall");
+        if (calls === 1) return providerResponse(protocol, calls, "recall");
         if (usageKind === "json")
           return new Response('{"usage":', {
             headers: { "content-type": "application/json" },
@@ -173,17 +172,18 @@ describe.each(["anthropic", "openai", "openai-responses"] as const)(
         return Response.json(json);
       });
       const response = await handleRequest(request(protocol, alias), config());
-      expect(response.status).toBe(502);
-      await response.text();
+      const body = await response.text();
+      expectRecallRecovery(response, body, protocol, false, [
+        "duplicate",
+        query,
+      ]);
       await settled();
       const state = stateFor(alias);
-      expect(calls).toBe(FINAL_RECALL_CALL);
+      expect(calls).toBe(2);
       expect(state.recallStore.size).toBe(0);
       expect(getSessionCosts(state.sessionID)?.conversation).toMatchObject({
-        inputTokens:
-          TEST_RECALL_EXECUTION_CAP * 3 + (usageKind === "valid" ? 1000 : 0),
-        outputTokens:
-          TEST_RECALL_EXECUTION_CAP * 2 + (usageKind === "valid" ? 100 : 0),
+        inputTokens: 3,
+        outputTokens: 2,
         turns: 1,
       });
     });
@@ -329,26 +329,28 @@ test.each(
         fillCapacity();
         mapBefore = new Map(state.recallStore);
       }
+      if (mode === "failure" && calls === 1)
+        return new Response("private follow-up diagnostic", { status: 503 });
       return providerResponse(
         "anthropic",
         100 + ++calls,
-        mode === "failure" || calls === 1 ? "recall" : "answer",
+        calls === 1 ? "recall" : "answer",
         stream,
       );
     });
-    if (stream) {
-      const response = await handleRequest(req, config());
+    const response = await handleRequest(req, config());
+    const body = await response.text();
+    if (mode === "commit" || mode === "late-capacity") {
       expect(response.status).toBe(200);
-      if (mode === "commit" || mode === "late-capacity") await response.text();
-      else await expect(response.text()).rejects.toBeInstanceOf(Error);
-    } else if (mode === "capacity") {
-      const response = await handleRequest(req, config());
-      expect(response.status).toBe(502);
-      await response.text();
+      expect(responseText(body, "anthropic", stream)).toContain(
+        "Completed answer",
+      );
+      expect(body).not.toContain("Lore could not retrieve more memory");
     } else {
-      const response = await handleRequest(req, config());
-      expect(response.status).toBe(mode === "failure" ? 502 : 200);
-      await response.text();
+      expectRecallRecovery(response, body, "anthropic", stream, [
+        "private follow-up diagnostic",
+        query,
+      ]);
     }
     await settled();
     expect(state.recallStore).toEqual(mapBefore);
@@ -367,7 +369,6 @@ test.each(["answer", "invalid"] as const)(
   "buffers Responses upstream for a streaming Chat client: %s",
   async (outcome) => {
     const id = knowledge();
-    prepareProductiveRecallSources();
     const alias = crypto.randomUUID();
     const req = request("openai", alias);
     req.stream = true;
@@ -377,19 +378,25 @@ test.each(["answer", "invalid"] as const)(
       providerResponse(
         "openai-responses",
         ++calls,
-        calls === FINAL_RECALL_CALL ? outcome : "recall",
+        calls === 2 ? outcome : "recall",
         (body as Record<string, unknown>).stream === true,
       ),
     );
     const response = await handleRequest(req, config());
-    expect(response.status).toBe(outcome === "answer" ? 200 : 502);
+    expect(response.status).toBe(200);
     expect(stateFor(alias).recallStore.size).toBe(0);
     expect(ltm.transferCount(id)).toBe(0);
-    await response.text();
+    const body = await response.text();
+    if (outcome === "answer")
+      expect(responseText(body, "openai", true)).toBe("Completed answer");
+    else
+      expectRecallRecovery(response, body, "openai", true, [
+        query,
+        '"call_1"',
+        '"call_2"',
+      ]);
     await settled();
-    expect(stateFor(alias).recallStore.size).toBe(
-      outcome === "answer" ? TEST_RECALL_EXECUTION_CAP : 0,
-    );
+    expect(stateFor(alias).recallStore.size).toBe(outcome === "answer" ? 1 : 0);
     expect(ltm.transferCount(id)).toBe(outcome === "answer" ? 1 : 0);
   },
 );
@@ -418,36 +425,148 @@ test("live Responses no-store recall does not record transfers", async () => {
 
 const query =
   "transactional glacier orchard telescope cobalt lantern mercury compass velvet island";
-let productiveRecallIds: string[] | undefined;
+const SUCCESSFUL_RECALL_ROUNDS = 2;
+const SUCCESSFUL_ANSWER_CALL = SUCCESSFUL_RECALL_ROUNDS + 1;
 
 /**
- * Terminal-recall fixtures start with a search then use distinct detail reads,
- * so they remain productive. They use the minimum legal emergency cap to test
- * finalization without coupling the test runtime to the production default.
+ * A current liveness fixture forces every recall result to report explicit
+ * no-progress coverage. After the configured consecutive stalls, the next
+ * provider call is the final synthesis round.
  */
-const TEST_RECALL_EXECUTION_CAP = 12;
-const FINAL_RECALL_CALL = TEST_RECALL_EXECUTION_CAP + 1;
+const FINAL_SYNTHESIS_CALL = MAX_CONSECUTIVE_RECALL_NO_PROGRESS + 2;
 
-function prepareProductiveRecallSources(
-  count = TEST_RECALL_EXECUTION_CAP - 1,
-): void {
-  const currentConfig = core.config();
-  vi.spyOn(core, "config").mockReturnValue({
-    ...currentConfig,
-    search: {
-      ...currentConfig.search,
-      recall: {
-        ...currentConfig.search.recall,
-        chainMaxExecutions: TEST_RECALL_EXECUTION_CAP,
-      },
-    },
+function prepareStalledRecall(): void {
+  const runRecall = core.runRecallWithMetadata;
+  vi.spyOn(core, "runRecallWithMetadata").mockImplementation(async (input) => ({
+    ...(await runRecall(input)),
+    coverage: [],
+  }));
+}
+
+type ClientProtocol = Protocol | "gemini";
+
+function dataFrames(body: string): Array<Record<string, unknown>> {
+  return body.split("\n\n").flatMap((frame) => {
+    const data = frame
+      .split("\n")
+      .find((line) => line.startsWith("data: "))
+      ?.slice("data: ".length);
+    if (!data || data === "[DONE]") return [];
+    return [JSON.parse(data) as Record<string, unknown>];
   });
-  productiveRecallIds = Array.from({ length: count }, (_, index) =>
-    // `ltm.create()` intentionally deduplicates same-title entries. Give every
-    // detail round its own logical source while keeping the shared query terms
-    // in its body for the initial search.
-    knowledge(`${query} source ${index + 1}`),
-  );
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function responseText(
+  body: string,
+  protocol: ClientProtocol,
+  stream: boolean,
+): string {
+  if (!stream) {
+    const json = JSON.parse(body);
+    if (protocol === "anthropic")
+      return json.content
+        .filter((block: Record<string, unknown>) => block.type === "text")
+        .map((block: Record<string, unknown>) => block.text)
+        .join("");
+    if (protocol === "openai") return json.choices[0].message.content ?? "";
+    if (protocol === "openai-responses")
+      return json.output
+        .flatMap((item: Record<string, unknown>) => item.content ?? [])
+        .filter((part: Record<string, unknown>) => part.type === "output_text")
+        .map((part: Record<string, unknown>) => part.text)
+        .join("");
+    return json.candidates[0].content.parts
+      .map((part: Record<string, unknown>) => part.text ?? "")
+      .join("");
+  }
+
+  const frames = dataFrames(body);
+  if (protocol === "anthropic")
+    return frames
+      .filter(
+        (frame) =>
+          frame.type === "content_block_delta" &&
+          (frame.delta as Record<string, unknown>).type === "text_delta",
+      )
+      .map((frame) => (frame.delta as Record<string, unknown>).text)
+      .join("");
+  if (protocol === "openai")
+    return frames
+      .map((frame) =>
+        stringValue(
+          (
+            (frame.choices as Array<Record<string, unknown>>)[0]?.delta as
+              | Record<string, unknown>
+              | undefined
+          )?.content,
+        ),
+      )
+      .join("");
+  if (protocol === "openai-responses") {
+    return frames
+      .filter((frame) => frame.type === "response.output_text.delta")
+      .map((frame) => stringValue(frame.delta))
+      .join("");
+  }
+  return (
+    (frames[0].candidates as Array<Record<string, unknown>>)[0].content as {
+      parts: Array<Record<string, unknown>>;
+    }
+  ).parts
+    .map((part) => stringValue(part.text))
+    .join("");
+}
+
+function expectRecallRecovery(
+  response: Response,
+  body: string,
+  protocol: ClientProtocol,
+  stream: boolean,
+  privateValues: readonly string[] = [],
+): void {
+  expect(response.status).toBe(200);
+  const text = responseText(body, protocol, stream);
+  expect(text.split(RECALL_FAILURE_WARNING), body).toHaveLength(2);
+  expect(text.endsWith(RECALL_FAILURE_WARNING), body).toBe(true);
+  expect(body).not.toContain("lore-recall:");
+  expect(body).not.toContain("lore_marker");
+  expect(body).not.toContain('"name":"recall"');
+  expect(body).not.toContain("event: response.failed");
+  expect(body).not.toContain('"status":"failed"');
+  for (const value of privateValues) expect(body).not.toContain(value);
+
+  if (stream) {
+    if (protocol === "anthropic") {
+      expect(body.match(/^event: message_stop$/gm)).toHaveLength(1);
+      expect(body.match(/"stop_reason":"end_turn"/g)).toHaveLength(1);
+    } else if (protocol === "openai") {
+      expect(body.match(/^data: \[DONE]$/gm)).toHaveLength(1);
+      expect(body.match(/"finish_reason":"stop"/g)).toHaveLength(1);
+    } else if (protocol === "openai-responses") {
+      expect(body.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(body).not.toContain("event: response.incomplete");
+      const terminal = dataFrames(body).find(
+        (frame) => frame.type === "response.completed",
+      );
+      expect(terminal?.response).toMatchObject({ status: "completed" });
+    } else {
+      expect(dataFrames(body)).toHaveLength(1);
+      expect(body.match(/"finishReason":"STOP"/g)).toHaveLength(1);
+    }
+    return;
+  }
+
+  const json = JSON.parse(body);
+  if (protocol === "anthropic") expect(json.stop_reason).toBe("end_turn");
+  else if (protocol === "openai")
+    expect(json.choices).toMatchObject([{ finish_reason: "stop" }]);
+  else if (protocol === "openai-responses")
+    expect(json).toMatchObject({ status: "completed" });
+  else expect(json.candidates).toMatchObject([{ finishReason: "STOP" }]);
 }
 
 type Protocol = "anthropic" | "openai" | "openai-responses";
@@ -460,12 +579,11 @@ function providerResponse(
   stream = false,
 ): Response {
   const recalling = outcome === "recall" || outcome === "mixed";
-  const invalid = outcome === "invalid" || outcome === "bad-usage";
-  const input = outcome === "bad-usage" ? -1000 : invalid ? 1000 : 3;
-  const output = invalid ? 100 : 2;
-  const recallInput = productiveRecallIds?.[round - 2]
-    ? { id: `k:${productiveRecallIds[round - 2]}` }
-    : { query };
+  const malformed = outcome === "invalid";
+  const badUsage = outcome === "bad-usage";
+  const input = badUsage ? -1000 : malformed ? 1000 : 3;
+  const output = malformed ? 100 : 2;
+  const recallInput = { query };
   const tool = {
     type: "tool_use",
     id: `call_${round}`,
@@ -480,25 +598,31 @@ function providerResponse(
     ? toolCalls
     : [{ type: "text", text: "Completed answer" }];
   if (protocol === "anthropic") {
+    const malformedTool = {
+      type: "tool_use",
+      id: "duplicate",
+      name: "Read",
+      input: {},
+    };
     const response = {
       id: `msg_${round}`,
       model: "claude-test",
       type: "message",
       role: "assistant",
-      content,
-      stop_reason: invalid ? null : recalling ? "tool_use" : "end_turn",
+      content: malformed ? [malformedTool, malformedTool] : content,
+      stop_reason: malformed || recalling ? "tool_use" : "end_turn",
       usage: { input_tokens: input, output_tokens: output },
     };
     return stream ? anthropicStream(response) : Response.json(response);
   }
   if (protocol === "openai") {
-    return Response.json({
+    const response = {
       id: `chatcmpl_${round}`,
       model: "gpt-test",
       choices: [
         {
           index: 0,
-          finish_reason: invalid ? null : recalling ? "tool_calls" : "stop",
+          finish_reason: malformed || recalling ? "tool_calls" : "stop",
           message: {
             role: "assistant",
             content: recalling ? null : "Completed answer",
@@ -522,7 +646,9 @@ function providerResponse(
         completion_tokens: output,
         total_tokens: input + output,
       },
-    });
+    };
+    if (malformed) response.choices.push(response.choices[0]);
+    return Response.json(response);
   }
   const items = recalling
     ? toolCalls.map((block) => ({
@@ -545,11 +671,8 @@ function providerResponse(
   const response = {
     id: `resp_${round}`,
     model: "gpt-test",
-    status: invalid ? (stream ? "failed" : "in_progress") : "completed",
-    ...(invalid && stream
-      ? { error: { type: "server_error", message: "did not complete" } }
-      : {}),
-    output: items,
+    status: "completed",
+    output: malformed ? [items[0], items[0]] : items,
     usage: { input_tokens: input, output_tokens: output },
   };
   if (!stream) return Response.json(response);
@@ -696,9 +819,9 @@ describe.each([
     test.each(["", " \t\n"])(
       "rejects name %j alone or with valid text",
       async (name) => {
+        prepareStalledRecall();
         for (const withText of [false, true]) {
           const alias = crypto.randomUUID();
-          prepareProductiveRecallSources();
           const req = request(client, alias);
           req.stream = stream;
           if (upstreamProtocol === "anthropic") {
@@ -712,7 +835,7 @@ describe.each([
             calls++;
             const upstreamStream =
               (body as Record<string, unknown>).stream === true;
-            if (calls < FINAL_RECALL_CALL)
+            if (calls < FINAL_SYNTHESIS_CALL)
               return providerResponse(
                 upstreamProtocol,
                 calls,
@@ -765,53 +888,19 @@ describe.each([
               : Response.json(json);
           });
           const response = await handleRequest(req, config());
-          if (stream) {
-            const reader = response.body!.getReader();
-            let received = "";
-            let failure: unknown;
-            try {
-              for (;;) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                received += new TextDecoder().decode(value);
-              }
-            } catch (error) {
-              failure = error;
-            } finally {
-              reader.releaseLock();
-            }
-            // Responses may represent failure on the wire; neither failure
-            // form may deliver a successful terminal to an incremental reader.
-            if (
-              client === "openai-responses" &&
-              received.includes("event: response.failed")
-            ) {
-              expect(received.match(/^event: response.failed$/gm)).toHaveLength(
-                1,
-              );
-            } else expect(failure).toBeInstanceOf(Error);
-            if (client === "anthropic") {
-              expect(received.match(/^event: message_stop$/gm)).toHaveLength(
-                TEST_RECALL_EXECUTION_CAP * 2,
-              );
-            } else {
-              expect(received).not.toContain("data: [DONE]");
-              expect(received).not.toContain("event: response.completed");
-              expect(received).not.toMatch(/"finish_reason":"|"finishReason":/);
-            }
-          } else {
-            expect(response.status).toBe(502);
-            await response.text();
-          }
+          const body = await response.text();
+          expectRecallRecovery(response, body, client, stream, [
+            '"call_1"',
+            '"call_2"',
+            `"call_${FINAL_SYNTHESIS_CALL}"`,
+            '"fc_call_1"',
+            '"fc_call_2"',
+            `"fc_call_${FINAL_SYNTHESIS_CALL}"`,
+            query,
+          ]);
           await settled();
-          expect(calls).toBe(FINAL_RECALL_CALL);
-          expect(
-            db()
-              .query(
-                "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ? AND role = 'assistant'",
-              )
-              .get(stateFor(alias).sessionID),
-          ).toEqual({ count: 0 });
+          expect(calls).toBe(FINAL_SYNTHESIS_CALL);
+          expect(stateFor(alias).recallStore.size).toBe(0);
         }
       },
     );
@@ -928,14 +1017,19 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
       "answer",
       "mixed",
       "fallback",
-      "exhausted",
+      "stalled",
       "cancel",
       "abort",
       "storage",
       "commit",
+      "callback",
     ] as const)("stages effects through %s", async (mode) => {
       const id = knowledge();
-      if (mode === "exhausted") prepareProductiveRecallSources();
+      if (mode === "stalled") prepareStalledRecall();
+      if (mode === "callback")
+        vi.spyOn(core, "runRecallWithMetadata").mockRejectedValueOnce(
+          new Error("private recall callback diagnostic"),
+        );
       const alias = crypto.randomUUID();
       const req = request(client, alias);
       req.stream = true;
@@ -981,7 +1075,7 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
           calls,
           mode === "mixed"
             ? "mixed"
-            : mode !== "exhausted" && calls === 3
+            : mode !== "stalled" && calls === 3
               ? "answer"
               : "recall",
           true,
@@ -1015,16 +1109,17 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
       reader.releaseLock();
       await settled();
       const state = stateFor(alias);
-      const successful =
-        mode === "answer" || mode === "mixed" || mode === "fallback";
+      const successful = mode === "answer" || mode === "mixed";
       expect(calls).toBe(
-        mode === "exhausted"
-          ? FINAL_RECALL_CALL
+        mode === "stalled"
+          ? FINAL_SYNTHESIS_CALL
           : mode === "mixed"
             ? 1
-            : ["cancel", "abort", "fallback"].includes(mode)
-              ? 2
-              : 3,
+            : mode === "callback"
+              ? 1
+              : ["cancel", "abort", "fallback"].includes(mode)
+                ? 2
+                : 3,
       );
       expect(snapshots).toEqual(
         snapshots.map(() => ({ anchors: 0, tracking: null, transfers: 0 })),
@@ -1037,11 +1132,7 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
         expect(
           loadSessionTracking(state.sessionID)?.recallStore ?? null,
         ).toBeNull();
-      if (mode === "exhausted") {
-        if (client === "openai-responses")
-          expect(wire).toContain("event: response.failed");
-        else expect(failure).toBeInstanceOf(Error);
-      } else if (successful) {
+      if (successful) {
         expect(failure).toBeUndefined();
         expect(wire).toContain(
           mode === "answer" ? "Completed answer" : "lore-recall:",
@@ -1049,6 +1140,19 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
         expect(
           JSON.parse(loadSessionTracking(state.sessionID)!.recallStore!).length,
         ).toBe(state.recallStore.size);
+      } else if (["storage", "commit"].includes(mode)) {
+        expect(failure).toBeUndefined();
+        expect(responseText(wire, client, true)).toContain("Completed answer");
+        expect(wire).not.toContain("Lore could not retrieve more memory");
+      } else if (!["cancel", "abort"].includes(mode)) {
+        expect(failure).toBeUndefined();
+        expectRecallRecovery(response, wire, client, true, [
+          "private recall callback diagnostic",
+          "failure",
+          query,
+        ]);
+      } else {
+        expect(wire).not.toContain("Lore could not retrieve more memory");
       }
       if (mode === "commit") expect(commits).toBe(1);
       if (mode === "storage") expect(commits).toBe(0);
@@ -1196,10 +1300,9 @@ describe.each([
   ["openai-responses", true],
 ] as const)("buffered recall transaction: %s codex=%s", (protocol, codex) => {
   test.each(["answer", "mixed", "fallback"] as const)(
-    "commits %s anchors and real transfers only after downstream EOF",
+    "finalizes %s recall effects only after downstream EOF",
     async (outcome) => {
       const id = knowledge();
-      prepareProductiveRecallSources();
       const alias = crypto.randomUUID();
       let calls = 0;
       setUpstreamInterceptor(async (body) => {
@@ -1213,7 +1316,7 @@ describe.each([
           calls,
           outcome === "mixed"
             ? "mixed"
-            : calls === FINAL_RECALL_CALL
+            : calls === SUCCESSFUL_ANSWER_CALL
               ? "answer"
               : "recall",
           (body as Record<string, unknown>).stream === true,
@@ -1230,16 +1333,23 @@ describe.each([
       const body = await response.text();
       await settled();
       expect(calls).toBe(
-        outcome === "answer" ? FINAL_RECALL_CALL : outcome === "mixed" ? 1 : 2,
-      );
-      expect(body).toContain(
         outcome === "answer"
-          ? "Completed answer"
+          ? SUCCESSFUL_ANSWER_CALL
           : outcome === "mixed"
-            ? "Read"
-            : "lore-recall:",
+            ? 1
+            : 2,
       );
-      if (protocol === "openai-responses" && outcome !== "answer") {
+      if (outcome === "fallback") {
+        expectRecallRecovery(response, body, protocol, false, [
+          "failure",
+          query,
+        ]);
+      } else {
+        expect(body).toContain(
+          outcome === "answer" ? "Completed answer" : "Read",
+        );
+      }
+      if (protocol === "openai-responses" && outcome === "mixed") {
         const envelope = JSON.parse(body);
         expect(body).toContain("lore-recall:");
         expect(
@@ -1250,12 +1360,16 @@ describe.each([
         ).toBe(false);
       }
       expect(state.recallStore.size).toBe(
-        outcome === "answer" ? TEST_RECALL_EXECUTION_CAP : 1,
+        outcome === "answer"
+          ? SUCCESSFUL_RECALL_ROUNDS
+          : outcome === "mixed"
+            ? 1
+            : 0,
       );
-      expect(
-        JSON.parse(loadSessionTracking(state.sessionID)!.recallStore!).length,
-      ).toBe(state.recallStore.size);
-      expect(ltm.transferCount(id)).toBeGreaterThan(0);
+      const tracking = loadSessionTracking(state.sessionID)?.recallStore;
+      if (outcome === "fallback") expect(tracking ?? null).toBeNull();
+      else expect(JSON.parse(tracking!).length).toBe(state.recallStore.size);
+      expect(ltm.transferCount(id)).toBe(outcome === "fallback" ? 0 : 1);
       expect(getSessionCosts(state.sessionID)?.conversation.turns).toBe(1);
       ltm.remove(id);
     },
@@ -1333,7 +1447,11 @@ describe.each([
         config(),
       );
       expect(response.status).toBe(200);
-      await response.text();
+      const body = await response.text();
+      expect(responseText(body, protocol, false)).toBe("Completed answer");
+      expect(body).not.toContain("Lore could not retrieve more memory");
+      expect(body).not.toContain("injected storage failure");
+      expect(body).not.toContain("injected commit failure");
       await settled();
       const state = stateFor(alias);
       expect(commits).toBe(mode === "commit" ? 1 : 0);
@@ -1354,22 +1472,21 @@ describe.each([
   );
 
   test.each(["recall", "invalid", "bad-usage", "http"] as const)(
-    "discards anchors and real transfers after final %s failure",
+    "discards anchors and real transfers after %s failure",
     async (outcome) => {
       const id = knowledge();
-      prepareProductiveRecallSources();
+      if (outcome === "recall") prepareStalledRecall();
       const alias = crypto.randomUUID();
       let calls = 0;
       setUpstreamInterceptor(async (body) => {
         calls++;
-        if (calls === FINAL_RECALL_CALL && outcome === "http")
-          return new Response("failure", { status: 503 });
+        const failureCall = outcome === "recall" ? FINAL_SYNTHESIS_CALL : 2;
+        if (calls === failureCall && outcome === "http")
+          return new Response("private provider diagnostic", { status: 503 });
         return providerResponse(
           protocol,
           calls,
-          calls === FINAL_RECALL_CALL && outcome !== "http"
-            ? outcome
-            : "recall",
+          calls === failureCall && outcome !== "http" ? outcome : "recall",
           (body as Record<string, unknown>).stream === true,
         );
       });
@@ -1377,11 +1494,15 @@ describe.each([
         request(protocol, alias, codex),
         config(),
       );
-      expect(response.status).toBe(502);
-      await response.text();
+      const responseBody = await response.text();
+      expectRecallRecovery(response, responseBody, protocol, false, [
+        "private provider diagnostic",
+        query,
+        '"call_1"',
+      ]);
       await settled();
       const state = stateFor(alias);
-      expect(calls).toBe(FINAL_RECALL_CALL);
+      expect(calls).toBe(outcome === "recall" ? FINAL_SYNTHESIS_CALL : 2);
       expect.soft(state.recallStore.size).toBe(0);
       expect
         .soft(
@@ -1401,16 +1522,15 @@ describe.each([
   );
 
   test.each(["invalid", "bad-usage"] as const)(
-    "accounts only validated final %s usage",
+    "excludes failed continuation %s usage",
     async (outcome) => {
       const alias = crypto.randomUUID();
-      prepareProductiveRecallSources();
       let calls = 0;
       setUpstreamInterceptor(async (body) =>
         providerResponse(
           protocol,
           ++calls,
-          calls === FINAL_RECALL_CALL ? outcome : "recall",
+          calls === 2 ? outcome : "recall",
           (body as Record<string, unknown>).stream === true,
         ),
       );
@@ -1418,16 +1538,14 @@ describe.each([
         request(protocol, alias, codex),
         config(),
       );
-      expect(response.status).toBe(502);
-      await response.text();
+      const body = await response.text();
+      expectRecallRecovery(response, body, protocol, false, [query]);
       await settled();
       expect(
         getSessionCosts(stateFor(alias).sessionID)?.conversation,
       ).toMatchObject({
-        inputTokens:
-          TEST_RECALL_EXECUTION_CAP * 3 + (outcome === "invalid" ? 1000 : 0),
-        outputTokens:
-          TEST_RECALL_EXECUTION_CAP * 2 + (outcome === "invalid" ? 100 : 0),
+        inputTokens: 3,
+        outputTokens: 2,
         turns: 1,
       });
     },

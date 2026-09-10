@@ -63,6 +63,7 @@ describe("parseOpenAIResponsesRequest", () => {
         { type: "function", name: "read", parameters: { type: "object" } },
       ],
       reasoning: { effort: "high" },
+      tool_choice: { type: "function", name: "read" },
     };
     const bytes = gzipSync(JSON.stringify(body));
     const request = new Request("http://gateway.local/v1/responses", {
