@@ -69,6 +69,7 @@ import {
   SSEStreamLimitError,
   SSEStreamTransportError,
 } from "./stream/anthropic";
+import { WORKER_RESPONSE_INACTIVITY_MS } from "./sse-inactivity";
 import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
 import {
   ANTHROPIC_CONTENT_BLOCK_TYPES,
@@ -572,7 +573,6 @@ const MAX_WORKER_REQUEST_BYTES = 4 * 1024 * 1024;
 // `\u00xx` escape. Cap raw prompt bytes at the derived worst-case ratio so the
 // serializer itself cannot transiently allocate far beyond the wire cap.
 const MAX_WORKER_PROMPT_SOURCE_BYTES = Math.floor(MAX_WORKER_REQUEST_BYTES / 6);
-const WORKER_RESPONSE_INACTIVITY_MS = 120_000;
 const WORKER_REQUEST_TIMEOUT_MS = 300_000;
 
 /** Retain endpoint routing while stripping userinfo, query, and fragment. */

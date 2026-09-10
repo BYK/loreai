@@ -72,6 +72,7 @@ import {
   streamingPostResponsePendingForTest,
   validatedMetaStream,
 } from "../src/pipeline";
+import { FOREGROUND_SSE_INACTIVITY_MS } from "../src/sse-inactivity";
 import { loadConfig as loadBaseConfig } from "../src/config";
 import { authFingerprint } from "../src/auth";
 import { getDegradationWarning } from "../src/worker-health";
@@ -822,7 +823,7 @@ describe("Pipeline — streaming responses", () => {
     try {
       const downstream = buildStreamingResponse(upstream, () => {});
       await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(120_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_SSE_INACTIVITY_MS);
       await expect(downstream.text()).rejects.toThrow(
         "SSE stream inactivity deadline exceeded",
       );

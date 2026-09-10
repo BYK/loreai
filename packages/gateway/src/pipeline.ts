@@ -252,6 +252,10 @@ import {
   type RecallAwareAccumulator,
 } from "./stream/anthropic";
 import {
+  FOREGROUND_REQUEST_TIMEOUT_MS,
+  FOREGROUND_SSE_INACTIVITY_MS,
+} from "./sse-inactivity";
+import {
   gatewayMessagesToLore,
   deterministicID,
   legacyDeterministicID,
@@ -11293,7 +11297,6 @@ export function streamResponsesRecallAware(
  */
 const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
-const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
 const FOREGROUND_ERROR_BODY_TIMEOUT_MS = 10_000;
 const MAX_RELAY_RETRY_AFTER_MS = 300_000;
 let foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
@@ -14440,8 +14443,6 @@ export async function passthroughResponsesCompact(
 // ---------------------------------------------------------------------------
 // Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
 // ---------------------------------------------------------------------------
-
-const FOREGROUND_REQUEST_TIMEOUT_MS = 300_000;
 
 export function abortAwareDelay(
   delayMs: number,
