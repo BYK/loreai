@@ -1,6 +1,10 @@
 import fc from "fast-check";
 import { describe, expect, test } from "vitest";
-import { RecallChainBudget } from "../src/recall-budget";
+import {
+  MAX_RETAINED_RECALL_COVERAGE,
+  MAX_RETAINED_RECALL_COVERAGE_KEY_CHARS,
+  RecallChainBudget,
+} from "../src/recall-budget";
 
 const coverage = (index: number) => [
   {
@@ -94,6 +98,35 @@ describe("RecallChainBudget", () => {
     for (let index = 0; index < 100; index++) {
       expect(budget.record()).toBeUndefined();
     }
+  });
+
+  test("bounds retained coverage without treating evicted keys as stalled", () => {
+    const budget = new RecallChainBudget({
+      deadlineAt: 1_000_000,
+      maxConsecutiveNoProgress: 0,
+      now: () => 0,
+    });
+    for (let index = 0; index <= MAX_RETAINED_RECALL_COVERAGE; index++) {
+      expect(budget.record(coverage(index))).toBeUndefined();
+    }
+    expect(budget.record(coverage(0))).toBeUndefined();
+    expect(budget.record(coverage(0))).toBe("stalled");
+  });
+
+  test("treats oversized coverage keys as unknown progress", () => {
+    const budget = new RecallChainBudget({
+      deadlineAt: 1_000_000,
+      maxConsecutiveNoProgress: 0,
+      now: () => 0,
+    });
+    const oversized = [
+      {
+        ...coverage(0)[0],
+        identity: "x".repeat(MAX_RETAINED_RECALL_COVERAGE_KEY_CHARS + 1),
+      },
+    ];
+    expect(budget.record(oversized)).toBeUndefined();
+    expect(budget.record(oversized)).toBeUndefined();
   });
 
   test("reserves foreground time for final synthesis", () => {

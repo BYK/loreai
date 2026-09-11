@@ -2,6 +2,10 @@ import type { RecallCoverage } from "@loreai/core";
 
 export const RECALL_FINALIZATION_RESERVE_MS = 20_000;
 export const MAX_CONSECUTIVE_RECALL_NO_PROGRESS = 2;
+/** One full search result, retained only to prove immediate duplicate coverage. */
+export const MAX_RETAINED_RECALL_COVERAGE = 30;
+/** Bound adversarial identity and revision strings in request-owned liveness state. */
+export const MAX_RETAINED_RECALL_COVERAGE_KEY_CHARS = 512;
 
 export type RecallStopReason = "time" | "stalled";
 
@@ -60,9 +64,28 @@ export class RecallChainBudget {
       ) {
         continue;
       }
-      const key = `${item.identity}\u0000${item.revision}\u0000${item.kind ?? "detail"}\u0000${item.offset}\u0000${item.length}`;
+      const kind = item.kind ?? "detail";
+      const offset = String(item.offset);
+      const length = String(item.length);
+      const keyLength =
+        item.identity.length +
+        item.revision.length +
+        kind.length +
+        offset.length +
+        length.length +
+        4;
+      if (keyLength > MAX_RETAINED_RECALL_COVERAGE_KEY_CHARS) {
+        progressed = true;
+        continue;
+      }
+      const key = `${item.identity}\u0000${item.revision}\u0000${kind}\u0000${offset}\u0000${length}`;
       if (!this.deliveredCoverage.has(key)) {
         this.deliveredCoverage.add(key);
+        // Bound liveness state without turning eviction into proof of a stall.
+        if (this.deliveredCoverage.size > MAX_RETAINED_RECALL_COVERAGE) {
+          const oldest = this.deliveredCoverage.values().next();
+          if (!oldest.done) this.deliveredCoverage.delete(oldest.value);
+        }
         progressed = true;
       }
     }
