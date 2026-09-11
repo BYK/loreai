@@ -522,3 +522,100 @@ describe.each([
     });
   },
 );
+
+test("continues through 25 productive recall calls before the final answer", async () => {
+  const config = loadConfig();
+  config.remoteGateway = false;
+  config.hostedMode = false;
+  const session = `productive-recalls-${crypto.randomUUID()}`;
+  const productiveRecallRounds = 25;
+  const req: GatewayRequest = {
+    protocol: "openai-responses",
+    stream: true,
+    codex: false,
+    model: "gpt-5.6-terra",
+    system: "You are a coding agent.",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Finish the task using project memory." },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: "Read",
+        description: "Read a file",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ],
+    maxTokens: 1024,
+    metadata: {},
+    extras: { tool_choice: { type: "function", name: "recall" } },
+    rawHeaders: {
+      authorization: "Bearer test-key",
+      "x-lore-session-id": session,
+      "x-lore-agent": "coder",
+      "x-lore-project": process.cwd(),
+      "x-lore-provider": "openai",
+      "x-lore-upstream-url": "https://api.openai.com/v1",
+    },
+  };
+  let recallCalls = 0;
+  vi.mocked(executeRecall).mockImplementation(async () => {
+    recallCalls++;
+    return {
+      result: `source ${recallCalls}`,
+      input: { query: `query ${recallCalls}` },
+      coverage: [
+        {
+          identity: `k:source-${recallCalls}`,
+          revision: "revision-1",
+          offset: 0,
+          length: 1,
+          complete: false,
+          kind: "detail",
+        },
+      ],
+    };
+  });
+  const requestBodies: Array<Record<string, unknown>> = [];
+  setUpstreamInterceptor(async (body) => {
+    const requestBody = body as Record<string, unknown>;
+    requestBodies.push(structuredClone(requestBody));
+    const round = requestBodies.length;
+    return upstream(
+      "openai-responses",
+      requestBody.stream === true,
+      round,
+      round <= productiveRecallRounds ? "recall" : "answer",
+    );
+  });
+
+  const response = await handleRequest(req, config);
+  const body = await response.text();
+
+  expect(requestBodies).toHaveLength(productiveRecallRounds + 1);
+  expect(response.status).toBe(200);
+  expect(recallCalls).toBe(productiveRecallRounds);
+  for (const requestBody of requestBodies) {
+    const toolNames = (
+      requestBody.tools as Array<{
+        name?: string;
+        function?: { name?: string };
+      }>
+    ).map((tool) => tool.name ?? tool.function?.name);
+    expect(toolNames).toContain("recall");
+    expect(requestBody.tool_choice).not.toEqual(
+      expect.objectContaining({ type: "allowed_tools" }),
+    );
+  }
+  expect(body).toContain("Finished the task.");
+  expect(body).not.toContain(RECALL_FAILURE_WARNING);
+  expect(body).not.toContain("source 1");
+  expect(body).not.toContain("source 25");
+  expect(body.match(/^event: response.completed$/gm)).toHaveLength(1);
+  await settlePostResponse();
+  expect(activeSession(session).recallStore.size).toBe(productiveRecallRounds);
+});
