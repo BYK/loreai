@@ -26,6 +26,7 @@ import {
 import {
   buildRecallAnchor,
   recallAnchorContext,
+  MAX_RECALL_STORE_BYTES,
   MAX_RECALL_STORE_ENTRIES,
 } from "../src/recall";
 
@@ -340,7 +341,7 @@ test.each(
     });
     const response = await handleRequest(req, config());
     const body = await response.text();
-    if (mode === "commit" || mode === "late-capacity") {
+    if (mode !== "failure") {
       expect(response.status).toBe(200);
       expect(responseText(body, "anthropic", stream)).toContain(
         "Completed answer",
@@ -357,11 +358,100 @@ test.each(
     expect(loadSessionTracking(state.sessionID)?.recallStore).toBe(
       existingTracking,
     );
-    expect(
-      db()
-        .query("SELECT SUM(hit_count) AS count FROM knowledge_transfers")
-        .get(),
-    ).toEqual(transfersBefore);
+    const transfersAfter = db()
+      .query("SELECT SUM(hit_count) AS count FROM knowledge_transfers")
+      .get() as { count: number };
+    if (mode === "capacity" || mode === "late-capacity") {
+      expect(transfersAfter.count).toBe(
+        (transfersBefore as { count: number }).count + 1,
+      );
+    } else {
+      expect(transfersAfter).toEqual(transfersBefore);
+    }
+  },
+);
+
+test.each([false, true])(
+  "continues a recall-only round when the replay store is full (stream=%s)",
+  async (stream) => {
+    knowledge();
+    const alias = crypto.randomUUID();
+    const req = request("anthropic", alias);
+    setUpstreamInterceptor(async () =>
+      providerResponse("anthropic", 1, "mixed"),
+    );
+    const seed = await handleRequest(req, config());
+    const seedContent = parseAnthropicResponseJSON(await seed.json()).content;
+    await settled();
+    const state = stateFor(alias);
+    const [existingKey, existingValue] = [...state.recallStore][0];
+    req.messages.push(
+      { role: "assistant", content: seedContent },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "read",
+            content: [{ type: "text", text: "file contents" }],
+          },
+        ],
+      },
+    );
+    const fillCapacity = (): void => {
+      for (let index = 1; index < MAX_RECALL_STORE_ENTRIES; index++) {
+        const anchorId = crypto.randomUUID();
+        state.recallStore.set(`anchor:${anchorId}`, {
+          ...existingValue,
+          anchorId,
+          anchorContextId: recallAnchorContext(
+            req.messages,
+            1,
+            req.messages[1].content,
+          ),
+        });
+      }
+    };
+    const privateResult = "private capacity recall result";
+    vi.spyOn(core, "runRecallWithMetadata").mockResolvedValue({
+      result: privateResult,
+      coverage: [coverage("full-store")],
+    });
+    req.stream = stream;
+    let calls = 0;
+    let mapBefore: typeof state.recallStore | undefined;
+    let trackingBefore: string | null | undefined;
+    setUpstreamInterceptor(async (body) => {
+      calls++;
+      if (calls === 1) {
+        fillCapacity();
+        expect(state.recallStore.has(existingKey)).toBe(true);
+        mapBefore = new Map(state.recallStore);
+        trackingBefore = loadSessionTracking(state.sessionID)?.recallStore;
+      }
+      return providerResponse(
+        "anthropic",
+        100 + calls,
+        calls === 1 ? "recall" : "answer",
+        (body as Record<string, unknown>).stream === true,
+      );
+    });
+
+    const response = await handleRequest(req, config());
+    const body = await response.text();
+    await settled();
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(2);
+    expect(responseText(body, "anthropic", stream)).toBe("Completed answer");
+    expect(body).not.toContain(RECALL_FAILURE_WARNING);
+    expect(body).not.toContain(privateResult);
+    expect(body).not.toContain("lore-recall:");
+    expect(mapBefore).toBeDefined();
+    expect(state.recallStore).toEqual(mapBefore);
+    expect(loadSessionTracking(state.sessionID)?.recallStore).toBe(
+      trackingBefore,
+    );
   },
 );
 
@@ -396,10 +486,106 @@ test.each(["answer", "invalid"] as const)(
         '"call_2"',
       ]);
     await settled();
-    expect(stateFor(alias).recallStore.size).toBe(outcome === "answer" ? 1 : 0);
+    expect(stateFor(alias).recallStore.size).toBe(0);
     expect(ltm.transferCount(id)).toBe(outcome === "answer" ? 1 : 0);
   },
 );
+
+test("continues native Responses recall-only after oversized replay admission", async () => {
+  const alias = crypto.randomUUID();
+  const req = request("openai-responses", alias);
+  req.stream = true;
+  const privatePrefix = "private oversized recall result:";
+  vi.spyOn(core, "runRecallWithMetadata").mockResolvedValue({
+    result: privatePrefix + "x".repeat(MAX_RECALL_STORE_BYTES + 1),
+    coverage: [coverage("oversized")],
+  });
+  let calls = 0;
+  setUpstreamInterceptor(async (body) =>
+    providerResponse(
+      "openai-responses",
+      ++calls,
+      calls === 1 ? "recall" : "answer",
+      (body as Record<string, unknown>).stream === true,
+    ),
+  );
+
+  const response = await handleRequest(req, config());
+  const body = await response.text();
+  await settled();
+  const state = stateFor(alias);
+
+  expect(response.status).toBe(200);
+  expect(calls).toBe(2);
+  expect(body).toContain("Completed answer");
+  expect(body.match(/^event: response\.completed$/gm) ?? []).toHaveLength(1);
+  expect(body).not.toContain(RECALL_FAILURE_WARNING);
+  expect(body).not.toContain(privatePrefix);
+  expect(body).not.toContain("lore-recall:");
+  expect(body).not.toContain('"name":"recall"');
+  expect(state.recallStore).toEqual(new Map());
+  expect(loadSessionTracking(state.sessionID)?.recallStore ?? null).toBeNull();
+  expect(
+    db()
+      .query(
+        "SELECT role, content FROM temporal_messages WHERE session_id = ? AND role = 'assistant' ORDER BY rowid",
+      )
+      .all(state.sessionID),
+  ).toEqual([{ role: "assistant", content: "Completed answer" }]);
+});
+
+test("keeps exact native Responses replay state for mixed tools", async () => {
+  const alias = crypto.randomUUID();
+  const req = request("openai-responses", alias);
+  req.stream = true;
+  const privateResult = "private mixed recall result";
+  vi.spyOn(core, "runRecallWithMetadata").mockResolvedValue({
+    result: privateResult,
+    coverage: [coverage("mixed")],
+  });
+  let calls = 0;
+  setUpstreamInterceptor(async (body) => {
+    calls++;
+    return providerResponse(
+      "openai-responses",
+      calls,
+      "mixed",
+      (body as Record<string, unknown>).stream === true,
+    );
+  });
+
+  const response = await handleRequest(req, config());
+  const body = await response.text();
+  await settled();
+  const state = stateFor(alias);
+
+  expect(response.status).toBe(200);
+  expect(calls).toBe(1);
+  expect(body).toContain('"name":"Read"');
+  expect(body).not.toContain('"name":"recall"');
+  expect(body).not.toContain(privateResult);
+  expect(body.match(/^event: response\.completed$/gm) ?? []).toHaveLength(1);
+  expect(state.recallStore.size).toBe(1);
+  const [[key, stored]] = [...state.recallStore];
+  expect(key).toBe(`anchor:${stored.anchorId}`);
+  expect(body).toContain(buildRecallAnchor(stored.anchorId!));
+  expect(stored).toMatchObject({
+    toolUseId: "call_1",
+    position: 0,
+    result: privateResult,
+    companionToolUses: [
+      {
+        id: "read",
+        name: "Read",
+        input: { query },
+        side: "after",
+      },
+    ],
+  });
+  expect(loadSessionTracking(state.sessionID)?.recallStore).toBe(
+    JSON.stringify([...state.recallStore]),
+  );
+});
 
 test("live Responses no-store recall does not record transfers", async () => {
   const id = knowledge();
@@ -434,6 +620,17 @@ const SUCCESSFUL_ANSWER_CALL = SUCCESSFUL_RECALL_ROUNDS + 1;
  * provider call is the final synthesis round.
  */
 const FINAL_SYNTHESIS_CALL = MAX_CONSECUTIVE_RECALL_NO_PROGRESS + 2;
+
+function coverage(identity: string) {
+  return {
+    identity: `k:${identity}`,
+    revision: "revision-1",
+    offset: 0,
+    length: 1,
+    complete: true,
+    kind: "detail" as const,
+  };
+}
 
 function prepareStalledRecall(): void {
   const runRecall = core.runRecallWithMetadata;
@@ -799,7 +996,7 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
       await settled();
       expect(calls).toBe(2);
       expect(ltm.transferCount(id)).toBe(noStore ? 0 : 1);
-      expect(stateFor(alias).recallStore.size).toBe(noStore ? 0 : 1);
+      expect(stateFor(alias).recallStore.size).toBe(0);
     });
   },
 );
@@ -1124,9 +1321,7 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
       expect(snapshots).toEqual(
         snapshots.map(() => ({ anchors: 0, tracking: null, transfers: 0 })),
       );
-      expect(state.recallStore.size).toBe(
-        successful ? (mode === "answer" ? 2 : 1) : 0,
-      );
+      expect(state.recallStore.size).toBe(mode === "mixed" ? 1 : 0);
       expect(ltm.transferCount(id)).toBe(successful ? 1 : 0);
       if (!successful)
         expect(
@@ -1137,9 +1332,16 @@ describe.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
         expect(wire).toContain(
           mode === "answer" ? "Completed answer" : "lore-recall:",
         );
-        expect(
-          JSON.parse(loadSessionTracking(state.sessionID)!.recallStore!).length,
-        ).toBe(state.recallStore.size);
+        if (mode === "mixed") {
+          expect(
+            JSON.parse(loadSessionTracking(state.sessionID)!.recallStore!)
+              .length,
+          ).toBe(state.recallStore.size);
+        } else {
+          expect(
+            loadSessionTracking(state.sessionID)?.recallStore ?? null,
+          ).toBeNull();
+        }
       } else if (["storage", "commit"].includes(mode)) {
         expect(failure).toBeUndefined();
         expect(responseText(wire, client, true)).toContain("Completed answer");
@@ -1237,7 +1439,7 @@ test.each(["success", "cancel", "late-recall"] as const)(
         const { done, value } = await reader.read();
         expect(done).toBe(false);
         wire += new TextDecoder().decode(value);
-      } while ((wire.match(/^event: message_stop$/gm)?.length ?? 0) < 3);
+      } while ((wire.match(/^event: message_stop$/gm)?.length ?? 0) < 2);
       await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(1));
       expect(state.recallStore.size).toBe(0);
       expect(ltm.transferCount(id)).toBe(0);
@@ -1245,7 +1447,7 @@ test.each(["success", "cancel", "late-recall"] as const)(
       else expect((await reader.read()).done).toBe(true);
     }
     reader.releaseLock();
-    expect(state.recallStore.size).toBe(mode === "success" ? 1 : 0);
+    expect(state.recallStore.size).toBe(0);
     expect(ltm.transferCount(id)).toBe(mode === "success" ? 1 : 0);
     if (mode !== "success")
       expect(loadSessionTracking(state.sessionID)?.recallStore ?? null).toBe(
@@ -1359,16 +1561,13 @@ describe.each([
           ),
         ).toBe(false);
       }
-      expect(state.recallStore.size).toBe(
-        outcome === "answer"
-          ? SUCCESSFUL_RECALL_ROUNDS
-          : outcome === "mixed"
-            ? 1
-            : 0,
-      );
+      expect(state.recallStore.size).toBe(outcome === "mixed" ? 1 : 0);
       const tracking = loadSessionTracking(state.sessionID)?.recallStore;
-      if (outcome === "fallback") expect(tracking ?? null).toBeNull();
-      else expect(JSON.parse(tracking!).length).toBe(state.recallStore.size);
+      if (outcome === "mixed") {
+        expect(JSON.parse(tracking!).length).toBe(state.recallStore.size);
+      } else {
+        expect(tracking ?? null).toBeNull();
+      }
       expect(ltm.transferCount(id)).toBe(outcome === "fallback" ? 0 : 1);
       expect(getSessionCosts(state.sessionID)?.conversation.turns).toBe(1);
       ltm.remove(id);

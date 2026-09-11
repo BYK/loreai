@@ -3643,12 +3643,15 @@ describe("Pipeline — streaming responses", () => {
         const chunk = await reader?.read();
         if (chunk?.done) break;
       }
-      await vi.waitFor(() => expect(state?.recallStore.size).toBe(1));
+      await vi.waitFor(() =>
+        expect(ltm.transferCount(knowledgeId)).toBeGreaterThan(0),
+      );
 
       expect(upstreamCall).toBe(2);
+      expect(state?.recallStore.size).toBe(0);
       expect(
         loadSessionTracking(state?.sessionID ?? "")?.recallStore,
-      ).not.toBeNull();
+      ).toBeNull();
       const temporalCount = db()
         .query(
           "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",

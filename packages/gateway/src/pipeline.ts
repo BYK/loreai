@@ -6797,13 +6797,16 @@ function createRecallPersistenceTransaction(
         // Snapshot only within this synchronous commit, never across an await.
         baseline = new Map(sessionState.recallStore);
         for (const record of pendingTransfers) record();
+        if (pendingRecalls.size === 0) recallPersistenceCommitObserver?.();
         for (const [key, value] of pendingRecalls) {
           sessionState.recallStore.set(key, value);
           recallPersistenceCommitObserver?.();
         }
-        saveSessionTracking(sessionState.sessionID, {
-          recallStore: serializeRecallStore(sessionState.recallStore),
-        });
+        if (pendingRecalls.size > 0) {
+          saveSessionTracking(sessionState.sessionID, {
+            recallStore: serializeRecallStore(sessionState.recallStore),
+          });
+        }
       }
       committed = true;
       pendingRecalls.clear();
@@ -6886,11 +6889,11 @@ export function buildStreamingResponse(
       commit: () => void;
       rollback: () => void;
     }) => void;
-    /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether the
-     *  recall marker is emitted as its own Anthropic SSE message envelope
+    /** True iff the inbound CLIENT speaks Anthropic SSE. Controls whether a
+     *  mixed-tool replay marker uses its own Anthropic SSE message envelope
      *  (split) or as an inline synthetic text content block (which the
      *  OpenAI/Responses/Gemini translators forward as their native text
-     *  chunk). Either way the marker reaches the client — the difference
+     *  chunk). For mixed tools the marker reaches the client — the difference
      *  is whether it lands as a distinct assistant message in the client's
      *  transcript (Anthropic native) or as inline text content (others). */
     clientSpeaksAnthropic: boolean;
@@ -7327,9 +7330,13 @@ export function buildStreamingResponse(
               const followUpResult = result;
               const scope = input.scope ?? "all";
 
-              // Store recall result for marker round-trip expansion
-              const anchorId = crypto.randomUUID();
-              const storeKey = `anchor:${anchorId}`;
+              const hasCompanionTools = currentAccum.hasOtherTools();
+              // Only mixed-tool turns return before the model consumes the
+              // recall result, so only they need a client replay anchor.
+              const anchorId = hasCompanionTools
+                ? crypto.randomUUID()
+                : undefined;
+              const storeKey = anchorId ? `anchor:${anchorId}` : undefined;
               const position = currentResp.content.indexOf(recallBlock);
               const markerPrefix = recallContext.clientSpeaksAnthropic
                 ? currentResp.content.filter(
@@ -7363,7 +7370,7 @@ export function buildStreamingResponse(
                   ];
                 },
               );
-              if (!recallContext.noStore) {
+              if (!recallContext.noStore && anchorId && storeKey) {
                 recallPersistence!.stage(storeKey, {
                   toolUseId: recallBlock.id,
                   anchorId,
@@ -7377,49 +7384,48 @@ export function buildStreamingResponse(
                 });
               }
 
-              // Emit marker — split into its own SSE message envelope for Anthropic-native
-              // clients (so the marker renders as a DISTINCT assistant message in
-              // the transcript, not inline with the model's preamble); for
-              // non-Anthropic clients (OpenAI Chat Completions / Responses /
-              // Gemini), emit it as a SYNTHETIC text content block in the Anthropic SSE.
+              // Mixed-tool handoffs need a marker: use a separate SSE message
+              // envelope for Anthropic-native clients and a synthetic text
+              // block for OpenAI Chat, Responses, and Gemini clients.
               // The OpenAI/Responses/Gemini adapters (stream/openai.ts, stream/openai-responses.ts,
               // stream/gemini.ts) each translate text content blocks into their native
-              // streaming format automatically — so the marker reaches the OpenAI client
-              // as a delta.content chunk, the Responses client as an output_text delta,
-              // and the Gemini client as a text part. This preserves the recall context
-              // across turns (the client's persisted transcript has SOMETHING for
-              // expandRecallMarkers to find next turn, fixing the silent-recall-loss bug
-              // that would result from dropping the marker entirely for these clients).
-              const markerText = buildAnchoredRecallMarker(
-                input.query,
-                scope,
-                input.id,
-                input.ids,
-                anchorId,
-              );
-              if (recallContext.clientSpeaksAnthropic) {
-                recallVisibleContent.push(...markerPrefix, {
-                  type: "text",
-                  text: markerText,
-                });
-              } else {
-                recallVisibleContent.push(
-                  ...currentResp.content.map((block) =>
-                    block.type === "tool_use" && block.id === recallBlock.id
-                      ? { type: "text" as const, text: markerText }
-                      : block,
-                  ),
-                );
+              // streaming format automatically. For mixed tools this preserves
+              // recall context across turns so expandRecallMarkers can restore
+              // the result when the client returns its companion tool output.
+              const markerText = anchorId
+                ? buildAnchoredRecallMarker(
+                    input.query,
+                    scope,
+                    input.id,
+                    input.ids,
+                    anchorId,
+                  )
+                : undefined;
+              if (markerText) {
+                if (recallContext.clientSpeaksAnthropic) {
+                  recallVisibleContent.push(...markerPrefix, {
+                    type: "text",
+                    text: markerText,
+                  });
+                } else {
+                  recallVisibleContent.push(
+                    ...currentResp.content.map((block) =>
+                      block.type === "tool_use" && block.id === recallBlock.id
+                        ? { type: "text" as const, text: markerText }
+                        : block,
+                    ),
+                  );
+                }
               }
-              let syntheticMarker: string;
-              if (recallContext.clientSpeaksAnthropic) {
+              let syntheticMarker: string | undefined;
+              if (markerText && recallContext.clientSpeaksAnthropic) {
                 const syntheticMessageId = `lore_marker_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
                 syntheticMarker = buildSSEMarkerMessage(
                   syntheticMessageId,
                   currentResp.model,
                   markerText,
                 );
-              } else {
+              } else if (markerText) {
                 // Inline synthetic text block at the index where the recall
                 // tool_use was suppressed. Existing translators forward text
                 // blocks to the client's native streaming format — see
@@ -7481,14 +7487,24 @@ export function buildStreamingResponse(
                 }
               }
 
-              if (currentAccum.hasOtherTools()) {
+              if (hasCompanionTools) {
+                if (!syntheticMarker) {
+                  throw new Error(
+                    "mixed recall response missing replay anchor",
+                  );
+                }
                 if (!(await safeEnqueue(encoder.encode(syntheticMarker)))) {
                   clearKeepalive();
                   return;
                 }
-              } else queueRecallEvent(syntheticMarker);
+              } else if (syntheticMarker) queueRecallEvent(syntheticMarker);
 
-              if (currentAccum.hasOtherTools()) {
+              if (hasCompanionTools) {
+                if (!markerText) {
+                  throw new Error(
+                    "mixed recall response missing replay anchor",
+                  );
+                }
                 // Mixed tools — forward held-back events, close stream
                 log.info(
                   `recall (stream, mixed, depth=${recallDepth}): stored result for session ` +
@@ -7595,7 +7611,9 @@ export function buildStreamingResponse(
               //    stream per OpenAI Chat Completions / Responses / Gemini).
               const contBlockOffset = recallContext.clientSpeaksAnthropic
                 ? 0
-                : currentAccum.clientBlockCount() + currentBlockOffset + 1;
+                : currentAccum.clientBlockCount() +
+                  currentBlockOffset +
+                  (syntheticMarker ? 1 : 0);
               const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
                 scaleClientUsage: true,
                 maxReportedUsage,
@@ -7830,10 +7848,10 @@ export function buildStreamingResponse(
  *  - **Recall + other tools (mixed)**: suppresses the recall item and its
  *    flow events, emits a synthetic marker text item, then rebuilds the
  *    terminal `response.completed` reflecting only client-visible output.
- *  - **Recall only**: suppresses the recall item, emits a synthetic marker
- *    text item, runs the (streaming) recall follow-up, pipes the continuation
- *    events inline continuing the `output_index` numbering, then rebuilds the
- *    terminal `response.completed` reflecting marker + continuation.
+ *  - **Recall only**: suppresses the recall item without a replay marker, runs
+ *    the streaming follow-up, pipes continuation events inline with shifted
+ *    `output_index` values, then rebuilds `response.completed` from visible
+ *    continuation output while retaining the recall in private state.
  *
  * `onComplete` mirrors `streamResponsesPassthrough` (invoked exactly once with
  * the accumulated internal response for `postResponse`/calibration).
@@ -7885,7 +7903,8 @@ export function streamResponsesRecallAware(
       acc: GatewayResponse;
       signal: AbortSignal;
     }) => Promise<{
-      anchorText: string;
+      /** Present only when a client-visible mixed-tool replay anchor is needed. */
+      anchorText?: string;
       resultText: string;
       /** Private source coverage; never emitted to the client. */
       coverage?: readonly import("@loreai/core").RecallCoverage[];
@@ -9437,7 +9456,19 @@ export function streamResponsesRecallAware(
       }
       const [outputIndex, streamed] = expected[matchIndex];
       const lifecycle = lifecyclesFor(acc).get(outputIndex);
-      onMatched?.(outputIndex, actual);
+      // Codex may repeat a completed reasoning item with an empty summary in
+      // the terminal snapshot. Preserve only the summaries already validated
+      // through the streamed lifecycle; non-empty terminal values stay strict.
+      const reconciledActual =
+        opts.validation === "codex" &&
+        actual.type === "reasoning" &&
+        (actual.summary === undefined ||
+          (Array.isArray(actual.summary) && actual.summary.length === 0)) &&
+        Array.isArray(streamed.summary) &&
+        streamed.summary.length > 0
+          ? { ...actual, summary: streamed.summary }
+          : actual;
+      onMatched?.(outputIndex, reconciledActual);
       if (
         !isReference &&
         opts.validation === "codex" &&
@@ -9446,31 +9477,35 @@ export function streamResponsesRecallAware(
       ) {
         outputIndexForEvent(
           "response.output_item.done",
-          { output_index: outputIndex, item: actual },
+          { output_index: outputIndex, item: reconciledActual },
           acc,
         );
         applyResponsesEvent(acc, "response.output_item.done", {
           output_index: outputIndex,
-          item: actual,
+          item: reconciledActual,
         });
         preserveStreamedReasoning(acc, outputIndex);
-        onSynthesizedDone?.(outputIndex, actual);
+        onSynthesizedDone?.(outputIndex, reconciledActual);
       } else if (
         !isReference &&
-        !responsesTerminalItemMatches(actual, streamed)
+        !responsesTerminalItemMatches(reconciledActual, streamed)
       ) {
         throw new Error("Responses terminal output changed streamed item");
       }
-      if (!isReference && actual.type === "reasoning") {
+      if (!isReference && reconciledActual.type === "reasoning") {
         if (!lifecycle) {
           throw new Error(
             `missing Responses lifecycle for index ${outputIndex}`,
           );
         }
-        assertTerminalReasoningMatchesLifecycle(lifecycle, actual, outputIndex);
+        assertTerminalReasoningMatchesLifecycle(
+          lifecycle,
+          reconciledActual,
+          outputIndex,
+        );
       }
       if (!isReference) {
-        acc.rawItems.set(outputIndex, { ...streamed, ...actual });
+        acc.rawItems.set(outputIndex, { ...streamed, ...reconciledActual });
       }
       expectedIndex = matchIndex + 1;
     }
@@ -10408,7 +10443,7 @@ export function streamResponsesRecallAware(
               // Recall was detected. The principal terminal has fully
               // validated, so recall failures can now safely recover from its
               // output without retaining any recall-only state.
-              const anchorTexts: string[] = [];
+              const anchorTexts = new Map<string, string>();
               transactionBaseline = {
                 ...state,
                 usage: { ...state.usage },
@@ -10475,19 +10510,26 @@ export function streamResponsesRecallAware(
                   if (error instanceof RecallContinuationFailure) throw error;
                   throw new RecallContinuationFailure("recall_execution");
                 }
-                anchorTexts.push(executed.anchorText);
+                if (otherToolSeen && executed.anchorText) {
+                  anchorTexts.set(recall.toolUseId, executed.anchorText);
+                }
                 if (executed.commit) pendingCommits.push(executed.commit);
                 if (executed.rollback) {
                   transactionRollbacks.push(executed.rollback);
                 }
-                const anchorChunk = encoder.encode(
-                  emitTextItem(
-                    recall.outputIndex,
-                    executed.anchorText,
-                    syntheticId,
-                  ),
-                );
                 if (otherToolSeen) {
+                  if (!executed.anchorText) {
+                    throw new Error(
+                      "mixed recall response missing replay anchor",
+                    );
+                  }
+                  const anchorChunk = encoder.encode(
+                    emitTextItem(
+                      recall.outputIndex,
+                      executed.anchorText,
+                      syntheticId,
+                    ),
+                  );
                   state.items.set(recall.outputIndex, {
                     type: "text",
                     id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
@@ -10498,7 +10540,6 @@ export function streamResponsesRecallAware(
                     queueTransactional(deferred.chunk);
                   }
                 } else {
-                  queueTransactional(anchorChunk);
                   for (const deferred of deferredEvents) {
                     queueTransactional(deferred.chunk);
                   }
@@ -10521,7 +10562,7 @@ export function streamResponsesRecallAware(
                       typeof opts.runFollowUp
                     >[0] = {
                       finalRecallRound,
-                      anchorText: executed.anchorText,
+                      anchorText: executed.anchorText ?? "",
                       resultText: executed.resultText,
                       acc: recallAcc,
                       toolUseId: recall.toolUseId,
@@ -11158,7 +11199,7 @@ export function streamResponsesRecallAware(
                       let nextRecall: (typeof contPending)[number] | undefined;
                       let nextExecuted:
                         | {
-                            anchorText: string;
+                            anchorText?: string;
                             resultText: string;
                             commit?: () => void;
                             rollback?: () => void;
@@ -11219,20 +11260,33 @@ export function streamResponsesRecallAware(
                           if (nextExecuted.rollback) {
                             transactionRollbacks.push(nextExecuted.rollback);
                           }
+                          if (contOtherTool && nextExecuted.anchorText) {
+                            anchorTexts.set(
+                              nextRecall.toolUseId,
+                              nextExecuted.anchorText,
+                            );
+                          }
                           const nextRecallIndex = nextRecall.outputIndex;
-                          contState.items.set(nextRecallIndex, {
-                            type: "text",
-                            id: nextSyntheticId,
-                            text: nextExecuted.anchorText,
-                          });
-                          queueTransactional(
-                            encoder.encode(
-                              emitTextItem(
-                                shiftedRecallIndex,
-                                nextExecuted.anchorText,
+                          if (contOtherTool) {
+                            if (!nextExecuted.anchorText) {
+                              throw new Error(
+                                "mixed recall response missing replay anchor",
+                              );
+                            }
+                            contState.items.set(nextRecallIndex, {
+                              type: "text",
+                              id: nextSyntheticId,
+                              text: nextExecuted.anchorText,
+                            });
+                            queueTransactional(
+                              encoder.encode(
+                                emitTextItem(
+                                  shiftedRecallIndex,
+                                  nextExecuted.anchorText,
+                                ),
                               ),
-                            ),
-                          );
+                            );
+                          }
                         }
                       }
                       flushHeldContinuation();
@@ -11251,7 +11305,7 @@ export function streamResponsesRecallAware(
                       follow.commit?.();
                       continuationFollowUpInput = {
                         finalRecallRound: recallBudget.mustFinalizeNext(),
-                        anchorText: nextExecuted.anchorText,
+                        anchorText: nextExecuted.anchorText ?? "",
                         resultText: nextExecuted.resultText,
                         acc: nextAcc ?? finalizeResponsesAcc(contState),
                         toolUseId: nextRecall.toolUseId,
@@ -11271,11 +11325,6 @@ export function streamResponsesRecallAware(
                       continuationFailureCategory = "follow_up_protocol";
                       recallContinuationTransportRetries = 0;
                     }
-                    state.items.set(recall.outputIndex, {
-                      type: "text",
-                      id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
-                      text: executed.anchorText,
-                    });
                   } catch (err) {
                     const category =
                       err instanceof RecallContinuationFailure
@@ -11298,19 +11347,29 @@ export function streamResponsesRecallAware(
               // Rebuild the terminal response.completed reflecting only the
               // continuation (recall-only) or the client-owned tools (mixed).
               const finalResp = finalizeResponsesAcc(state);
-              let anchorIndex = 0;
+              const hiddenRecallIndices = new Set(
+                [...recallIndices].filter((index) => {
+                  const item = state.items.get(index);
+                  const raw = state.rawItems.get(index);
+                  const toolUseId =
+                    item?.type === "tool_use"
+                      ? item.id
+                      : asString(raw?.call_id ?? raw?.id);
+                  return !anchorTexts.has(toolUseId);
+                }),
+              );
               const visibleResp = {
                 ...finalResp,
-                content: finalResp.content.map((block) => {
+                content: finalResp.content.flatMap((block) => {
                   if (block.type !== "tool_use" || block.name !== "recall") {
-                    return block;
+                    return [block];
                   }
-                  return {
-                    type: "text" as const,
-                    text: anchorTexts[anchorIndex++] ?? "",
-                  };
+                  const anchorText = anchorTexts.get(block.id);
+                  return anchorText
+                    ? [{ type: "text" as const, text: anchorText }]
+                    : [];
                 }),
-                rawOutputItems: buildOutputItems(),
+                rawOutputItems: buildOutputItems(hiddenRecallIndices),
               };
               if (continuationAttempted) {
                 continuationFailureCategory = "delivery";
@@ -11325,7 +11384,11 @@ export function streamResponsesRecallAware(
               }
               if (
                 !(await safeEnqueue(
-                  encoder.encode(buildTerminal(visibleResp)),
+                  encoder.encode(
+                    buildTerminal(visibleResp, {
+                      hiddenOutputIndices: hiddenRecallIndices,
+                    }),
+                  ),
                   () => {
                     terminalDelivered = true;
                     const successful =
@@ -18131,7 +18194,7 @@ async function handleConversationTurn(
         const side: "before" | "after" = index < position ? "before" : "after";
         return [{ id: block.id, name: block.name, input: block.input, side }];
       });
-      if (!suppressTemporalStorage) {
+      if (!suppressTemporalStorage && companionToolUses.length > 0) {
         const storedRecall: StoredRecall = {
           toolUseId: recallBlock.id,
           anchorId,
@@ -18144,25 +18207,24 @@ async function handleConversationTurn(
         bufferedRecallTransaction.stage(storeKey, storedRecall);
       }
 
-      const markerText = buildAnchoredRecallMarker(
-        input.query,
-        scope,
-        input.id,
-        input.ids,
-        anchorId,
-      );
-      const markerResp = replaceRecallWithMarker(
-        currentResp,
-        new Map([[recallBlock.id, markerText]]),
-      );
-      responsesVisibleContent.push(
-        ...responsesProvenanceContent(
+      if (hasOtherToolUse(currentResp)) {
+        const markerText = buildAnchoredRecallMarker(
+          input.query,
+          scope,
+          input.id,
+          input.ids,
+          anchorId,
+        );
+        const markerResp = replaceRecallWithMarker(
           currentResp,
           new Map([[recallBlock.id, markerText]]),
-        ),
-      );
-
-      if (hasOtherToolUse(currentResp)) {
+        );
+        responsesVisibleContent.push(
+          ...responsesProvenanceContent(
+            currentResp,
+            new Map([[recallBlock.id, markerText]]),
+          ),
+        );
         // Mixed tools — return response with marker, client handles the rest
         log.info(
           `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
@@ -18616,49 +18678,75 @@ async function handleConversationTurn(
                     ];
                   },
                 );
-                const storeKey = `anchor:${anchorId}`;
-                const storedRecall = {
-                  toolUseId,
-                  anchorId,
-                  anchorContextId,
-                  input,
-                  position,
-                  result,
-                  ...(companionToolUses.length > 0
-                    ? { companionToolUses }
-                    : {}),
-                } satisfies StoredRecall;
-                const persistStore = (): void => {
-                  saveSessionTracking(sessionState.sessionID, {
-                    recallStore: serializeRecallStore(sessionState.recallStore),
-                  });
-                };
-                const anchorText = buildRecallAnchor(anchorId);
-                responsesVisibleContent.push(
-                  ...responsesProvenanceContent(
-                    acc,
-                    new Map([[toolUseId, anchorText]]),
-                  ),
-                );
+                const requiresReplay = companionToolUses.length > 0;
+                const anchorText = requiresReplay
+                  ? buildRecallAnchor(anchorId)
+                  : undefined;
+                let storeKey: string | undefined;
+                let storedRecall: StoredRecall | undefined;
+                if (requiresReplay) {
+                  storeKey = `anchor:${anchorId}`;
+                  storedRecall = {
+                    toolUseId,
+                    anchorId,
+                    anchorContextId,
+                    input,
+                    position,
+                    result,
+                    companionToolUses,
+                  };
+                  // Admission must happen before a replay anchor reaches the
+                  // client; otherwise a full store would create an orphan.
+                  if (!suppressTemporalStorage) {
+                    addRecallStoreEntry(
+                      new Map(sessionState.recallStore),
+                      storeKey,
+                      storedRecall,
+                    );
+                  }
+                  if (!anchorText) {
+                    throw new Error(
+                      "mixed recall response missing replay anchor",
+                    );
+                  }
+                  responsesVisibleContent.push(
+                    ...responsesProvenanceContent(
+                      acc,
+                      new Map([[toolUseId, anchorText]]),
+                    ),
+                  );
+                }
                 return {
-                  anchorText,
+                  ...(anchorText ? { anchorText } : {}),
                   resultText: result,
                   coverage,
                   commit: () => {
                     if (suppressTemporalStorage) return;
                     for (const record of deferredTransferRecordings) record();
+                    if (!storeKey || !storedRecall) {
+                      recallPersistenceCommitObserver?.();
+                      return;
+                    }
                     addRecallStoreEntry(
                       sessionState.recallStore,
                       storeKey,
                       storedRecall,
                     );
-                    persistStore();
+                    saveSessionTracking(sessionState.sessionID, {
+                      recallStore: serializeRecallStore(
+                        sessionState.recallStore,
+                      ),
+                    });
                     recallPersistenceCommitObserver?.();
                   },
                   rollback: () => {
-                    if (suppressTemporalStorage) return;
+                    if (suppressTemporalStorage || !storeKey) return;
                     if (sessionState.recallStore.delete(storeKey))
-                      persistStore();
+                      saveSessionTracking(sessionState.sessionID, {
+                        recallStore: serializeRecallStore(
+                          sessionState.recallStore,
+                        ),
+                      });
                   },
                 };
               },

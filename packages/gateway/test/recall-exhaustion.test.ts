@@ -615,7 +615,8 @@ test("continues through 25 productive recall calls before the final answer", asy
   expect(body).not.toContain(RECALL_FAILURE_WARNING);
   expect(body).not.toContain("source 1");
   expect(body).not.toContain("source 25");
+  expect(body).not.toContain("lore-recall:");
   expect(body.match(/^event: response.completed$/gm)).toHaveLength(1);
   await settlePostResponse();
-  expect(activeSession(session).recallStore.size).toBe(productiveRecallRounds);
+  expect(activeSession(session).recallStore.size).toBe(0);
 });

@@ -1821,6 +1821,182 @@ describe("streamResponsesRecallAware", () => {
     );
   });
 
+  test.each(["empty", "omitted"] as const)(
+    "accepts %s sparse Codex terminal reasoning after multiple streamed summaries",
+    async (terminalSummary) => {
+      let completedResponse: GatewayResponse | undefined;
+      const onRecall = vi.fn(async () => ({ anchorText: "", resultText: "" }));
+      const runFollowUp = vi.fn(async () => {
+        throw new Error("should not run");
+      });
+      const reasoningItem = {
+        type: "reasoning",
+        id: `rs_${terminalSummary}_terminal_summaries`,
+        status: "completed",
+        summary: [],
+      };
+      const terminalReasoningItem = {
+        type: reasoningItem.type,
+        id: reasoningItem.id,
+        status: reasoningItem.status,
+        ...(terminalSummary === "empty" ? { summary: [] } : {}),
+      };
+      const summaryEvents = ["first summary", "second summary"].flatMap(
+        (text, summaryIndex) => [
+          sseEvent("response.reasoning_summary_part.added", {
+            output_index: 0,
+            item_id: reasoningItem.id,
+            summary_index: summaryIndex,
+            part: { type: "summary_text", text: "" },
+          }),
+          sseEvent("response.reasoning_summary_text.delta", {
+            output_index: 0,
+            item_id: reasoningItem.id,
+            summary_index: summaryIndex,
+            delta: text,
+          }),
+          sseEvent("response.reasoning_summary_text.done", {
+            output_index: 0,
+            item_id: reasoningItem.id,
+            summary_index: summaryIndex,
+            text,
+          }),
+          sseEvent("response.reasoning_summary_part.done", {
+            output_index: 0,
+            item_id: reasoningItem.id,
+            summary_index: summaryIndex,
+            part: { type: "summary_text", text },
+          }),
+        ],
+      );
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created(
+            `resp_${terminalSummary}_terminal_summaries`,
+            "gpt-5.6-terra",
+          ),
+          sseEvent("response.output_item.added", {
+            output_index: 0,
+            item: {
+              type: "reasoning",
+              id: reasoningItem.id,
+              summary: [],
+            },
+          }),
+          ...summaryEvents,
+          sseEvent("response.output_item.done", {
+            output_index: 0,
+            item: reasoningItem,
+          }),
+          sseEvent("response.completed", {
+            response: {
+              id: `resp_${terminalSummary}_terminal_summaries`,
+              model: "gpt-5.6-terra",
+              status: "completed",
+              output: [terminalReasoningItem],
+            },
+          }),
+        ]),
+        {
+          validation: "codex",
+          onComplete: (response) => {
+            completedResponse = response;
+          },
+          onRecall,
+          runFollowUp,
+        },
+      );
+
+      const out = await drain(client);
+      expect(out.match(/^event: response\.completed$/gm) ?? []).toHaveLength(1);
+      expect(out).not.toContain("response.failed");
+      expect(completedResponse?.rawOutputItems).toContainEqual(
+        expect.objectContaining({
+          id: reasoningItem.id,
+          summary: [
+            { type: "summary_text", text: "first summary" },
+            { type: "summary_text", text: "second summary" },
+          ],
+        }),
+      );
+      expect(onRecall).not.toHaveBeenCalled();
+      expect(runFollowUp).not.toHaveBeenCalled();
+    },
+  );
+
+  test("rejects a non-empty Codex terminal reasoning summary contradiction", async () => {
+    const reasoningItem = {
+      type: "reasoning",
+      id: "rs_terminal_summary_changed",
+      status: "completed",
+      summary: [],
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_summary_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: reasoningItem.id,
+            summary: [],
+          },
+        }),
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          part: { type: "summary_text", text: "" },
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          delta: "streamed summary",
+        }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          text: "streamed summary",
+        }),
+        sseEvent("response.reasoning_summary_part.done", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          part: { type: "summary_text", text: "streamed summary" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: reasoningItem,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_summary_changed",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                ...reasoningItem,
+                summary: [{ type: "summary_text", text: "changed summary" }],
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
+  });
+
   test("uses completed reasoning ciphertext in a recall continuation", async () => {
     let completedResponse: GatewayResponse | undefined;
     let continuationCiphertext: unknown;
@@ -5381,7 +5557,7 @@ describe("streamResponsesRecallAware", () => {
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
   });
 
-  test("recall-only: emits marker, pipes the continuation inline, rebuilds completed", async () => {
+  test("recall-only: hides its marker, pipes the continuation inline, rebuilds completed", async () => {
     // The follow-up stream includes its OWN lifecycle/terminal events
     // (response.created, response.in_progress, response.completed). These must
     // NEVER reach the client — the principal stream already emitted
@@ -5403,14 +5579,14 @@ describe("streamResponsesRecallAware", () => {
       {
         onComplete: (r) => {
           // The completed response has no recall tool_use and includes the
-          // continuation text (merged) + hidden replay anchor.
+          // continuation text without a replay anchor for the consumed recall.
           expect(r.content.some((b) => b.type === "tool_use")).toBe(false);
           const text = r.content
             .filter((b) => b.type === "text")
             .map((b) => b.text)
             .join("");
           expect(text).toContain("Here is the answer from the continuation.");
-          expect(text).toContain(buildAnchor("architecture"));
+          expect(text).not.toContain(buildAnchor("architecture"));
         },
         onRecall: async ({ query }) => ({
           anchorText: buildAnchor(query),
@@ -5425,7 +5601,7 @@ describe("streamResponsesRecallAware", () => {
     );
     const out = await drain(client);
 
-    expect(out).toContain(buildAnchor("architecture"));
+    expect(out).not.toContain(buildAnchor("architecture"));
     expect(out).not.toContain("Searching");
     // Continuation text streamed inline.
     expect(out).toContain("Here is the answer from the continuation.");
@@ -5897,7 +6073,6 @@ describe("streamResponsesRecallAware", () => {
   test("charges a resolved sparse continuation candidate to the transactional spool", async () => {
     const failures: RecallContinuationFailureCategory[] = [];
     setRecallContinuationFailureHook((category) => failures.push(category));
-    const anchorText = "a".repeat(4 * 1024);
     const followUp = streamFrom([
       created("resp_sparse_transactional_limit", "gpt-5.6-terra"),
       sparseVisibleFunctionCall(0, `{"path":"${"x".repeat(10 * 1024)}"}`),
@@ -5911,11 +6086,11 @@ describe("streamResponsesRecallAware", () => {
       ]),
       {
         maxDeferredBytes: 16 * 1024,
-        maxRetainedStateBytes: 32 * 1024,
+        maxRetainedStateBytes: 16 * 1024,
         validation: "codex",
         onComplete: () => {},
         onRecall: async () => ({
-          anchorText,
+          anchorText: "",
           resultText: "result",
         }),
         runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
@@ -6745,7 +6920,7 @@ describe("streamResponsesRecallAware", () => {
     );
 
     const out = await drain(client);
-    expect(out).toContain("lore-recall");
+    expect(out).not.toContain("lore-recall");
     expect(out).toContain("answer");
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
     expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
@@ -6908,7 +7083,7 @@ describe("streamResponsesRecallAware", () => {
     for (;;) {
       const { done, value } = await reader.read();
       expect(done).toBe(false);
-      if (value && decoder.decode(value).includes("lore-recall")) break;
+      if (value && decoder.decode(value).includes("answer")) break;
     }
     await reader.cancel();
     await rollbackObserved.promise;
