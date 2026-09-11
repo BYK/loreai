@@ -45,6 +45,23 @@ function completedSseResponse(body: string): Record<string, unknown> {
   return payload.response as Record<string, unknown>;
 }
 
+function expectVisibleOutputIndicesToMatchTerminal(body: string): void {
+  const terminal = completedSseResponse(body);
+  const output = terminal.output as Array<{ id?: unknown }>;
+  for (const [, data] of body.matchAll(/^event: .+\ndata: (.+)$/gm)) {
+    const event = JSON.parse(data) as Record<string, unknown>;
+    if (!Number.isSafeInteger(event.output_index)) continue;
+    const item = event.item as Record<string, unknown> | undefined;
+    const id =
+      typeof event.item_id === "string"
+        ? event.item_id
+        : typeof item?.id === "string"
+          ? item.id
+          : undefined;
+    if (id) expect(output[event.output_index as number]?.id).toBe(id);
+  }
+}
+
 function responseText(
   body: string,
   protocol: "anthropic" | "openai" | "openai-responses",
@@ -485,6 +502,9 @@ describe.each([
         if (stream) {
           completedSseResponse(body);
           expect(body).not.toContain("event: response.failed");
+          if (protocol === "openai-responses") {
+            expectVisibleOutputIndicesToMatchTerminal(body);
+          }
         }
         const text = responseText(body, protocol, stream);
         expect(text.split(RECALL_FAILURE_WARNING)).toHaveLength(2);
