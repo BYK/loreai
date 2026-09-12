@@ -4,8 +4,8 @@
  * The real hazard: the worker can be mid-inference in an uninterruptible
  * single-threaded ONNX batch and never emit "exit", which used to hang process
  * shutdown indefinitely. These tests verify the cooperative path, the
- * force-terminate timeout path, and the already-gone path — all without
- * spawning a real worker thread.
+ * force-terminate timeout path, and exit confirmation after a failed post —
+ * all without spawning a real worker thread.
  */
 import { describe, test, expect, vi } from "vitest";
 import { awaitWorkerShutdown } from "../src/embedding";
@@ -58,11 +58,22 @@ describe("awaitWorkerShutdown", () => {
     expect(calls.terminated).toBe(1);
   });
 
-  test("resolves immediately when postMessage throws (already gone)", async () => {
+  test("confirms termination when postMessage throws", async () => {
     const { worker, calls } = makeFakeWorker({ throwOnPost: true });
     const terminateSpy = vi.spyOn(worker, "terminate");
     await awaitWorkerShutdown(worker, 1000);
-    expect(calls.terminated).toBe(0);
-    expect(terminateSpy).not.toHaveBeenCalled();
+    expect(calls.terminated).toBe(1);
+    expect(terminateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects when forced termination cannot be confirmed", async () => {
+    const { worker } = makeFakeWorker({ throwOnPost: true });
+    vi.spyOn(worker, "terminate").mockRejectedValue(
+      new Error("terminate boom"),
+    );
+
+    await expect(awaitWorkerShutdown(worker, 1000)).rejects.toThrow(
+      "embedding worker termination was not confirmed",
+    );
   });
 });

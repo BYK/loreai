@@ -1,11 +1,11 @@
 /**
  * Tests for the bounded-shutdown helpers (cli/shutdown.ts).
  *
- * These guarantee Ctrl+C can never hang the process: `runShutdownWithDeadline`
- * always resolves (fast path, timeout, or shutdown error); the signal-handler
- * factories run a bounded shutdown / forward to the child on the first signal
- * and force-exit on the second; and `signalExitCode` maps signals to
- * POSIX-conventional codes.
+ * These verify bounded asynchronous teardown while the main event loop remains
+ * schedulable: `runShutdownWithDeadline` resolves on the fast path, timeout, or
+ * shutdown error; the signal-handler factories run teardown / forward to the
+ * child on the first signal and force-exit on the second; and `signalExitCode`
+ * maps signals to POSIX-conventional codes.
  *
  * The signal-handler exit paths now use `forcedExit` (not `safeExit`) because
  * the bounded shutdown may have timed out and the embedding worker may still
@@ -16,6 +16,7 @@
  * (both are `never`-typed in production and never return).
  */
 import { describe, test, expect, vi, afterEach } from "vitest";
+import type { GatewayProcessRecord } from "../src/pidfile";
 
 const { safeExitMock, forcedExitMock } = vi.hoisted(() => ({
   safeExitMock: vi.fn((code: number) => {
@@ -430,6 +431,93 @@ describe("makeChildForwardHandler", () => {
 });
 
 describe("install*", () => {
+  test("a signal at the exact discovery-publication gate reaches teardown", async () => {
+    let onSigterm: (() => void) | undefined;
+    vi.spyOn(process, "on").mockImplementation((event, listener) => {
+      if (event === "SIGTERM") onSigterm = listener as () => void;
+      return process;
+    });
+    vi.spyOn(process, "off").mockReturnValue(process);
+    const exitNormally = vi.fn((_code: number) => undefined as never);
+    const lifecycle = installProcessSignalLifecycle({
+      deadlineMs: 1000,
+      safeExit: exitNormally,
+      forcedExit: vi.fn((_code: number) => undefined as never),
+    });
+    const core = await import("@loreai/core");
+    vi.spyOn(
+      core.temporalEmbeddingQueue,
+      "settleTemporalEmbeddingScheduler",
+    ).mockResolvedValue(true);
+    vi.spyOn(core.embedding, "settleDocumentEmbeds").mockResolvedValue(
+      undefined,
+    );
+    vi.spyOn(core.embedding, "shutdownProvider").mockResolvedValue(undefined);
+    vi.spyOn(core, "shutdownVectorPoolAsync").mockResolvedValue(undefined);
+    vi.spyOn(core, "close").mockImplementation(() => {});
+
+    let processRecord: GatewayProcessRecord | null = null;
+    let releasePublication!: () => void;
+    const publicationGate = new Promise<void>((resolve) => {
+      releasePublication = resolve;
+    });
+    let markPublished!: () => void;
+    const published = new Promise<void>((resolve) => {
+      markPublished = resolve;
+    });
+    const stop = vi.fn(async () => {});
+    const { startGateway } = await import("../src/cli/start");
+    const starting = startGateway(
+      {
+        port: 0,
+        local: true,
+        quiet: true,
+        processBoundary: true,
+        processShutdownController: lifecycle.processShutdown,
+      },
+      {
+        readProcess: () => processRecord,
+        authenticate: async () => null,
+        writePort: () => {},
+        removePort: () => {},
+        writeProcess: (record) => {
+          processRecord = record;
+        },
+        removeProcess: () => {
+          processRecord = null;
+        },
+        resetPipelineState: async () => {},
+        startServer: async () => ({
+          stop,
+          port: 49331,
+          hosts: ["127.0.0.1"],
+          ready: Promise.resolve(),
+        }),
+        afterPublication: async () => {
+          markPublished();
+          await publicationGate;
+        },
+      },
+    );
+
+    try {
+      await published;
+      expect(processRecord).not.toBeNull();
+      onSigterm?.();
+      expect(lifecycle.isShutdownStarted()).toBe(true);
+      releasePublication();
+      const handle = await starting;
+      lifecycle.attachShutdown(handle.shutdown);
+
+      await vi.waitFor(() => expect(exitNormally).toHaveBeenCalledWith(143));
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(processRecord).toBeNull();
+    } finally {
+      releasePublication();
+      lifecycle.dispose();
+    }
+  });
+
   test("early signal starts the deadline and waits for startup to attach teardown", async () => {
     let onSigterm: (() => void) | undefined;
     vi.spyOn(process, "on").mockImplementation((event, listener) => {

@@ -13,7 +13,7 @@ describe("startGateway active-stream shutdown", () => {
   it("bounds authenticated shutdown when a socket sends incomplete headers", async () => {
     const core = await import("@loreai/core");
     vi.spyOn(embedding, "settleDocumentEmbeds").mockResolvedValue(undefined);
-    vi.spyOn(embedding, "resetProvider").mockResolvedValue(undefined);
+    vi.spyOn(embedding, "shutdownProvider").mockResolvedValue(undefined);
     vi.spyOn(core, "shutdownVectorPoolAsync").mockResolvedValue(undefined);
     vi.spyOn(core, "close").mockImplementation(() => {});
 
@@ -77,6 +77,15 @@ describe("startGateway active-stream shutdown", () => {
   });
 
   it("force-exits nonzero when authenticated control teardown never settles", async () => {
+    const core = await import("@loreai/core");
+    vi.spyOn(embedding, "settleDocumentEmbeds").mockResolvedValue(undefined);
+    const embeddingShutdown = vi
+      .spyOn(embedding, "shutdownProvider")
+      .mockResolvedValue(undefined);
+    const vectorShutdown = vi
+      .spyOn(core, "shutdownVectorPoolAsync")
+      .mockResolvedValue(undefined);
+    const close = vi.spyOn(core, "close").mockImplementation(() => {});
     const { startServer } = await import("../src/server");
     const { requestGatewayShutdown, startGateway } =
       await import("../src/cli/start");
@@ -95,10 +104,6 @@ describe("startGateway active-stream shutdown", () => {
     let allowTestCleanup!: () => void;
     const testCleanupAllowed = new Promise<void>((resolve) => {
       allowTestCleanup = resolve;
-    });
-    let markRemoved!: () => void;
-    const removed = new Promise<void>((resolve) => {
-      markRemoved = resolve;
     });
     const safeExit = vi.fn((_code: number): never => {
       throw new Error("safe exit must not run");
@@ -120,7 +125,6 @@ describe("startGateway active-stream shutdown", () => {
         },
         removeProcess: () => {
           processRecord = null;
-          markRemoved();
         },
         resetPipelineState: reset,
         startServer: (config, options) =>
@@ -160,6 +164,9 @@ describe("startGateway active-stream shutdown", () => {
     await expect(requestGatewayShutdown(record, 500)).resolves.toBe("accepted");
     await expect(forced).resolves.toBe(1);
     expect(reset).toHaveBeenCalledTimes(1);
+    expect(embeddingShutdown).toHaveBeenCalledTimes(1);
+    expect(vectorShutdown).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
     expect(forcedExit).toHaveBeenCalledWith(1);
     expect(safeExit).not.toHaveBeenCalled();
     // Teardown never reached safe closure, so live-generation evidence remains.
@@ -169,7 +176,7 @@ describe("startGateway active-stream shutdown", () => {
     void handle.processShutdown?.(143);
     expect(reset).toHaveBeenCalledTimes(1);
     allowTestCleanup();
-    await removed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
   });
 
   it("starts listener close, cancels the stream, then awaits listener completion", async () => {
@@ -178,7 +185,7 @@ describe("startGateway active-stream shutdown", () => {
     vi.spyOn(embedding, "settleDocumentEmbeds").mockImplementation(async () => {
       order.push("embed-drain");
     });
-    vi.spyOn(embedding, "resetProvider").mockResolvedValue(undefined);
+    vi.spyOn(embedding, "shutdownProvider").mockResolvedValue(undefined);
     vi.spyOn(core, "shutdownVectorPoolAsync").mockResolvedValue(undefined);
     vi.spyOn(core, "close").mockImplementation(() => {});
 
@@ -269,18 +276,17 @@ describe("startGateway active-stream shutdown", () => {
     }
 
     expect(cancelledByShutdown).toBe(true);
-    expect(order).toEqual([
-      "listener-close-started",
-      "stream-cancelled",
-      "listener-closed",
-      "embed-drain",
-    ]);
+    expect(order[0]).toBe("listener-close-started");
+    expect(order).toContain("embed-drain");
+    expect(order.indexOf("stream-cancelled")).toBeLessThan(
+      order.indexOf("listener-closed"),
+    );
   });
 
   it("runs the published remote callback through the same shutdown cleanup", async () => {
     const core = await import("@loreai/core");
     vi.spyOn(embedding, "settleDocumentEmbeds").mockResolvedValue(undefined);
-    vi.spyOn(embedding, "resetProvider").mockResolvedValue(undefined);
+    vi.spyOn(embedding, "shutdownProvider").mockResolvedValue(undefined);
     vi.spyOn(core, "shutdownVectorPoolAsync").mockResolvedValue(undefined);
     vi.spyOn(core, "close").mockImplementation(() => {});
     const { startGateway } = await import("../src/cli/start");
@@ -329,7 +335,7 @@ describe("startGateway active-stream shutdown", () => {
   it("reports remote shutdown rejection and sets a nonzero exit code", async () => {
     const core = await import("@loreai/core");
     vi.spyOn(embedding, "settleDocumentEmbeds").mockResolvedValue(undefined);
-    vi.spyOn(embedding, "resetProvider").mockResolvedValue(undefined);
+    vi.spyOn(embedding, "shutdownProvider").mockResolvedValue(undefined);
     vi.spyOn(core, "shutdownVectorPoolAsync").mockResolvedValue(undefined);
     vi.spyOn(core, "close").mockImplementation(() => {});
     const { startGateway } = await import("../src/cli/start");

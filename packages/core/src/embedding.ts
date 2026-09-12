@@ -818,7 +818,9 @@ export function maybeSelfHealEmbeddingProvider(nowMs = Date.now()): boolean {
     "self-heal: re-probing a previously-latched local embedding provider " +
       "(a fresh worker retries init on the next embed; re-latches if it fails again)",
   );
-  void resetProvider();
+  void resetProvider().catch((error: unknown) => {
+    log.error("self-heal embedding worker shutdown was not confirmed", error);
+  });
   return true;
 }
 
@@ -1019,6 +1021,10 @@ class LocalProvider implements EmbeddingProvider {
   private initPromise: Promise<void> | null = null;
   private closing = false;
   private shutdownPromise: Promise<void> | null = null;
+  /** Superseded workers remain owned until terminate() confirms their exit. */
+  private readonly retiredWorkerShutdowns = new Set<Promise<void>>();
+  /** A rejected termination remains fatal for this provider generation. */
+  private readonly retiredWorkerShutdownErrors: unknown[] = [];
   private modelId: string;
   private dimensions: number;
   /** Memory-aware input token cap, owned by the main thread and passed to the
@@ -1635,14 +1641,15 @@ class LocalProvider implements EmbeddingProvider {
     // survives refactors (defense against the workerReady race Seer flagged).
     this.workerReady = false;
     if (dead) {
-      // Fire-and-forget: we don't await termination (the fresh worker is
-      // independent). terminate() never rejects in practice; swallow to be safe.
+      // The fresh worker is independent, so fallback need not wait for a slow
+      // native teardown. Keep owning the old generation, though: final process
+      // shutdown must join it and must fail closed if Node cannot confirm exit.
       // NOTE: terminate() DOES emit an async `exit(1)` on the dead worker. That
       // event is harmless here only because each handler is bound to its own
       // `spawned` worker and early-returns when `this.worker` has moved on (see
       // ensureWorker) — otherwise the stale exit would latch the provider broken
       // and clobber the fresh WASM worker (#1387-B1).
-      void dead.terminate().catch(() => {});
+      this.trackRetiredWorkerTermination(dead);
     }
     try {
       await this.ensureWorker();
@@ -1678,6 +1685,58 @@ class LocalProvider implements EmbeddingProvider {
       }
     }
     this.updateWorkerRef();
+  }
+
+  private trackRetiredWorkerTermination(worker: ShutdownableWorker): void {
+    let termination: Promise<number>;
+    try {
+      termination = worker.terminate();
+    } catch (error) {
+      termination = Promise.reject(error);
+    }
+    let tracked: Promise<void>;
+    tracked = termination
+      .then(
+        () => {},
+        (error: unknown) => {
+          this.retiredWorkerShutdownErrors.push(error);
+        },
+      )
+      .finally(() => this.retiredWorkerShutdowns.delete(tracked));
+    this.retiredWorkerShutdowns.add(tracked);
+  }
+
+  private async settleRetiredWorkers(timeoutMs: number): Promise<void> {
+    const deadlineAt = Date.now() + Math.max(0, timeoutMs);
+    while (this.retiredWorkerShutdowns.size > 0) {
+      const remainingMs = Math.max(0, deadlineAt - Date.now());
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(this.retiredWorkerShutdowns),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    "retired embedding worker did not settle before shutdown deadline",
+                  ),
+                ),
+              remainingMs,
+            );
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    if (this.retiredWorkerShutdownErrors.length > 0) {
+      throw new AggregateError(
+        this.retiredWorkerShutdownErrors,
+        "embedding worker termination was not confirmed",
+      );
+    }
   }
 
   async embed(
@@ -1779,7 +1838,7 @@ class LocalProvider implements EmbeddingProvider {
    *  Returns a promise that resolves once the worker has fully exited. Callers
    *  that need a clean teardown (tests, config change) should await the result.
    *  Fire-and-forget callers (process exit) can ignore it. */
-  shutdown(): Promise<void> {
+  shutdown(timeoutMs = WORKER_SHUTDOWN_TIMEOUT_MS): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.closing = true;
     this.workerReady = false;
@@ -1799,11 +1858,26 @@ class LocalProvider implements EmbeddingProvider {
       const worker = this.worker;
       this.worker = null;
       this.initPromise = null;
-      if (!worker) return;
-      // Don't let a mid-backfill ref keep the event loop alive while we wait for
-      // the worker to exit.
-      worker.unref();
-      await awaitWorkerShutdown(worker, WORKER_SHUTDOWN_TIMEOUT_MS);
+      const outcomes = await Promise.allSettled([
+        (async () => {
+          if (!worker) return;
+          // Don't let a mid-backfill ref keep the event loop alive while we wait
+          // for the worker to exit.
+          worker.unref();
+          await awaitWorkerShutdown(worker, timeoutMs);
+        })(),
+        this.settleRetiredWorkers(timeoutMs),
+      ]);
+      const failures = outcomes.flatMap((outcome) =>
+        outcome.status === "rejected" ? [outcome.reason] : [],
+      );
+      if (failures.length > 0) {
+        if (failures.length === 1) throw failures[0];
+        throw new AggregateError(
+          failures,
+          "embedding worker termination was not confirmed",
+        );
+      }
     })();
     return this.shutdownPromise;
   }
@@ -2009,6 +2083,7 @@ class EmbeddingPool implements EmbeddingProvider {
   private readonly ceiling: number;
   private readonly slots: EmbedSlot[] = [];
   private readonly retiredShutdowns = new Set<Promise<void>>();
+  private readonly retiredShutdownErrors: unknown[] = [];
   /** Queue on the host so at most one native batch is posted to each worker.
    * Caller cancellation can then detach without changing worker lifetime. */
   private readonly queue: PoolOperation[] = [];
@@ -2152,7 +2227,12 @@ class EmbeddingPool implements EmbeddingProvider {
     if (index === -1) return Promise.resolve();
     this.slots.splice(index, 1);
     this.preserveHealthyServiceAfterExhaustion();
-    const retirement = slot.provider.shutdown().catch(() => {});
+    const retirement = slot.provider.shutdown().catch((error: unknown) => {
+      // Runtime recovery must not create an unhandled rejection, but a later
+      // process/config shutdown still needs to know that this worker's exit was
+      // never confirmed.
+      this.retiredShutdownErrors.push(error);
+    });
     slot.retirement = retirement;
     this.retiredShutdowns.add(retirement);
     void retirement.finally(() => {
@@ -2595,7 +2675,7 @@ class EmbeddingPool implements EmbeddingProvider {
 
   /** Shut every worker down and clear the pool. Resolves once all have exited
    *  (or been force-terminated). Idempotent. */
-  shutdown(): Promise<void> {
+  shutdown(timeoutMs = WORKER_SHUTDOWN_TIMEOUT_MS): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.closing = true;
     this.clearRetryDispatchTimer();
@@ -2618,11 +2698,27 @@ class EmbeddingPool implements EmbeddingProvider {
     this.tokenBatchCheckpoints.clear();
     const providers = this.slots.splice(0).map((s) => s.provider);
     this.shutdownPromise = (async () => {
-      await Promise.all(providers.map((p) => p.shutdown()));
+      const recordedRetirementFailures = this.retiredShutdownErrors.length;
+      const failures = [...this.retiredShutdownErrors];
+      const active = await Promise.allSettled(
+        providers.map((provider) => provider.shutdown(timeoutMs)),
+      );
+      for (const outcome of active) {
+        if (outcome.status === "rejected") failures.push(outcome.reason);
+      }
       // Retirements can be added by request rejection microtasks triggered by
       // the active shutdowns above, so drain until the owned set stays empty.
       while (this.retiredShutdowns.size > 0) {
         await Promise.all(this.retiredShutdowns);
+      }
+      failures.push(
+        ...this.retiredShutdownErrors.slice(recordedRetirementFailures),
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          "embedding worker termination was not confirmed",
+        );
       }
     })();
     return this.shutdownPromise;
@@ -2639,8 +2735,9 @@ export interface ShutdownableWorker {
 
 /**
  * Ask a worker to exit cooperatively, but never wait longer than `timeoutMs`:
- * on timeout, force-`terminate()` it. Resolves once the worker has exited (or
- * been terminated), or immediately if `postMessage` throws (already gone).
+ * on timeout, force-`terminate()` it. Resolves only once the worker has exited
+ * or `terminate()` confirms its exit; rejects if termination cannot be
+ * confirmed.
  *
  * Exported (underscore-free name is fine; it's a real helper) so the bounded
  * shutdown can be unit-tested with a fake worker — the real failure mode is a
@@ -2651,33 +2748,43 @@ export function awaitWorkerShutdown(
   worker: ShutdownableWorker,
   timeoutMs: number,
 ): Promise<void> {
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     let done = false;
+    let forceStarted = false;
     const finish = () => {
       if (done) return;
       done = true;
       clearTimeout(killTimer);
       resolve();
     };
+    const forceTerminate = (): void => {
+      if (done || forceStarted) return;
+      forceStarted = true;
+      void worker.terminate().then(finish, (cause: unknown) => {
+        if (done) return;
+        done = true;
+        clearTimeout(killTimer);
+        reject(
+          new Error("embedding worker termination was not confirmed", {
+            cause,
+          }),
+        );
+      });
+    };
     // Hard cap: if the worker is mid-inference (an uninterruptible
     // single-threaded ONNX batch) and never emits "exit", force-terminate it
     // so process shutdown can't hang. Terminating is safe — all SQLite state
     // lives on the main thread; the worker is stateless.
-    const killTimer = setTimeout(() => {
-      void worker
-        .terminate()
-        .catch(() => {})
-        .finally(finish);
-    }, timeoutMs);
+    const killTimer = setTimeout(forceTerminate, Math.max(0, timeoutMs));
     killTimer.unref?.();
 
     worker.on("exit", finish);
     try {
       worker.postMessage({ type: "shutdown" } satisfies WorkerInbound);
     } catch {
-      // Worker already exited (e.g. process.exit(1) from WASM fatal) —
-      // resolve immediately since the desired end state is already reached.
-      finish();
+      // Posting can also fail during a termination race. Ask Node to terminate
+      // and use that promise as the authoritative exit confirmation.
+      forceTerminate();
     }
   });
 }
@@ -2706,8 +2813,45 @@ function getProviderApiKey(provider: string): string | undefined {
 }
 
 let cachedProvider: EmbeddingProvider | null | undefined;
+/** One-way process-shutdown latch. Config resets must never reopen admission. */
+let providerAdmissionClosed = false;
+/** Every local-provider generation remains owned until worker exit is known. */
+const providerGenerationShutdowns = new Set<Promise<void>>();
+/** An unconfirmed exit is permanent for this process generation. */
+const providerGenerationShutdownErrors: unknown[] = [];
+
+function trackProviderGenerationShutdown(
+  shutdown: Promise<void>,
+): Promise<void> {
+  let tracked: Promise<void>;
+  tracked = shutdown
+    .then(
+      () => {},
+      (error: unknown) => {
+        providerGenerationShutdownErrors.push(error);
+      },
+    )
+    .finally(() => providerGenerationShutdowns.delete(tracked));
+  providerGenerationShutdowns.add(tracked);
+  return shutdown;
+}
+
+async function settleProviderGenerations(): Promise<void> {
+  // Completion callbacks can add a retirement while an active generation is
+  // settling, so drain until ownership stays empty.
+  while (providerGenerationShutdowns.size > 0) {
+    await Promise.all(providerGenerationShutdowns);
+  }
+  if (providerGenerationShutdownErrors.length > 0) {
+    throw new AggregateError(
+      providerGenerationShutdownErrors,
+      "embedding worker termination was not confirmed",
+    );
+  }
+}
 
 function getProvider(): EmbeddingProvider | null {
+  if (providerAdmissionClosed) return null;
   if (cachedProvider !== undefined) return cachedProvider;
 
   const cfg = config().search.embeddings;
@@ -2760,26 +2904,42 @@ function getProvider(): EmbeddingProvider | null {
  *  Shuts down the worker thread(s) if the current provider is a local pool.
  *  Returns a promise that resolves once all workers have fully exited.
  *  Callers that need clean teardown (tests) should await the result. */
-export function resetProvider(): Promise<void> {
+export function resetProvider(timeoutMs?: number): Promise<void> {
   let shutdownPromise: Promise<void> = Promise.resolve();
   if (cachedProvider instanceof EmbeddingPool) {
-    shutdownPromise = cachedProvider.shutdown();
+    shutdownPromise = trackProviderGenerationShutdown(
+      cachedProvider.shutdown(timeoutMs),
+    );
   }
-  cachedProvider = undefined;
+  // A config reset normally admits a fresh generation. Once process shutdown
+  // owns teardown, preserve the closed latch so a late callback cannot reopen
+  // the pool after shutdownProvider has snapshotted all owned generations.
+  cachedProvider = providerAdmissionClosed ? null : undefined;
   return shutdownPromise;
 }
 
 /** Shut down the current provider and prevent any new provider from being
  *  created. After this call, `embed()` throws and `isAvailable()` returns
- *  false. Test-only: prevents fire-and-forget embeds (queued by other test
- *  files) from spawning a new worker after cleanup. */
-export function _shutdownAndDisable(): Promise<void> {
-  let shutdownPromise: Promise<void> = Promise.resolve();
+ *  false. Waits for every previous provider generation too, so a config reset
+ *  racing process shutdown cannot orphan its old worker. */
+export async function shutdownProvider(timeoutMs?: number): Promise<void> {
+  providerAdmissionClosed = true;
   if (cachedProvider instanceof EmbeddingPool) {
-    shutdownPromise = cachedProvider.shutdown();
+    void trackProviderGenerationShutdown(cachedProvider.shutdown(timeoutMs));
   }
   cachedProvider = null; // null (not undefined) → getProvider() returns null, won't create new
-  return shutdownPromise;
+  await settleProviderGenerations();
+}
+
+/** @deprecated Test compatibility alias; use {@link shutdownProvider}. */
+export const _shutdownAndDisable = shutdownProvider;
+
+/** Test-only: clear settled generation failures between isolated cases. */
+export function _resetProviderShutdownTrackingForTest(): void {
+  if (providerGenerationShutdowns.size > 0) {
+    throw new Error("cannot reset embedding shutdown tracking while active");
+  }
+  providerGenerationShutdownErrors.length = 0;
 }
 
 /** Save the current cached provider reference (including the live worker)
@@ -2791,7 +2951,11 @@ export function _shutdownAndDisable(): Promise<void> {
  *  Test-only helper: lets suites temporarily swap in a mock/unavailable
  *  provider without killing the real worker. */
 export function _saveAndClearProvider(): unknown {
-  const saved = { provider: cachedProvider };
+  const saved = {
+    provider: cachedProvider,
+    admissionClosed: providerAdmissionClosed,
+  };
+  providerAdmissionClosed = false;
   cachedProvider = undefined;
   return saved;
 }
@@ -2803,7 +2967,9 @@ export function _saveAndClearProvider(): unknown {
 export function _restoreProvider(token: unknown): void {
   const saved = token as {
     provider: EmbeddingProvider | null | undefined;
+    admissionClosed?: boolean;
   };
+  providerAdmissionClosed = saved.admissionClosed ?? false;
   cachedProvider = saved.provider;
 }
 

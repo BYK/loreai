@@ -32,15 +32,6 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import {
-  initializeSupervisedGatewayChild,
-  runGatewaySupervisor,
-  shouldSuperviseGatewayCommand,
-} from "./supervisor";
-
-// Establish child supervision before extracting assets or importing gateway
-// code. A stale or dead owner marker fails closed instead of orphaning a child.
-initializeSupervisedGatewayChild();
 
 const VERSION = LORE_CLI_VERSION;
 
@@ -148,27 +139,12 @@ if (vendorEnabled) {
 // ---------------------------------------------------------------------------
 // 3. Hand off to main CLI
 // ---------------------------------------------------------------------------
-const userArgv = process.argv.slice(2);
-if (shouldSuperviseGatewayCommand(userArgv, process.env)) {
-  // SEA executables expose user arguments from argv[2], and re-executing
-  // process.execPath needs no script-path prefix. The child marker prevents
-  // recursion. Asset extraction above is deliberately allowed to finish in
-  // the parent: no gateway resources exist yet, and a signal during that
-  // synchronous startup window still has Node's default terminating behavior.
-  void runGatewaySupervisor({ childArgs: userArgv })
-    .then((code) => {
-      process.exitCode = code;
-    })
-    .catch((err) => {
-      console.error(err);
-      process.exitCode = 1;
-    });
-} else {
-  // Dynamic import so the bin module body evaluates after the globalThis
-  // registrations above (static imports get hoisted). Wrapped because CJS
-  // bundles do not support top-level await.
-  void import("./bin").catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
-}
+// Dynamic import so the bin module body evaluates after the
+// globalThis registrations above (static imports get hoisted).
+// Wrapped in an IIFE because CJS bundles don't support top-level await.
+(async () => {
+  await import("./bin");
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

@@ -9,19 +9,22 @@
  * tick and never awaited, so a reader could outlive the writer close.
  *
  * `shutdownVectorPoolAsync(deadlineMs)` posts `shutdown`, waits for each
- * worker's `exit`, and on the deadline force-`terminate()`s the survivors —
- * always resolving, never rejecting, never exceeding the budget. These tests
- * cover the four acceptance-criteria paths: no workers, healthy workers, a
- * worker that never exits (deadline forces terminate), and idempotency.
+ * worker's `exit`, and on the deadline force-`terminate()`s the survivors. It
+ * rejects if Node cannot confirm termination, preventing the writer from being
+ * closed underneath a possibly-live reader. These tests cover no workers,
+ * healthy workers, forced termination, failed termination, and idempotency.
  */
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
+import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
   shutdownVectorPoolAsync,
+  awaitVectorWorkerShutdown,
   tryPoolVectorSearch,
   DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
+  VECTOR_SEARCH_TIMED_OUT,
 } from "../src/vector-pool";
 import type {
   VectorWorkerInbound,
@@ -179,8 +182,7 @@ describe("shutdownVectorPoolAsync — healthy workers", () => {
         expect(w.posted.map((m) => m.type)).toContain("shutdown");
         expect(w.terminated).toBe(false);
       }
-      // And the pool dropped every reference — the next dispatch would build
-      // a fresh worker, not reuse a closed one.
+      // And the pool dropped every reference.
       expect(total).toBeGreaterThan(0);
     } finally {
       config().search.embeddings.workerPoolSize = prev;
@@ -189,6 +191,35 @@ describe("shutdownVectorPoolAsync — healthy workers", () => {
 });
 
 describe("shutdownVectorPoolAsync — stuck workers", () => {
+  it("degrades an in-flight request during shutdown without falling back", async () => {
+    _setTestVectorWorkerFactory(
+      (() => new FakeWorker(() => {})) as unknown as (
+        d: VectorWorkerInitData,
+      ) => never,
+    );
+    const request = tryPoolVectorSearch(
+      { kind: "knowledge", limit: 10 },
+      new Float32Array([1, 0, 0]),
+    );
+    const workerCount = FakeWorker.instances.length;
+    expect(workerCount).toBeGreaterThan(0);
+
+    const shutdown = shutdownVectorPoolAsync(500);
+    await expect(request).resolves.toBe(VECTOR_SEARCH_TIMED_OUT);
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(FakeWorker.instances).toHaveLength(workerCount);
+  });
+
+  it("force-terminates a real noncooperative worker thread", async () => {
+    const worker = new Worker("setInterval(() => {}, 1000)", { eval: true });
+    await once(worker, "online");
+
+    await expect(
+      awaitVectorWorkerShutdown(worker, 20),
+    ).resolves.toBeUndefined();
+    expect(worker.threadId).toBe(-1);
+  });
+
   it("force-terminates workers that never emit exit, within the deadline", async () => {
     _setTestVectorWorkerFactory(factory({ neverExits: true }));
     await tryPoolVectorSearch(
@@ -212,7 +243,7 @@ describe("shutdownVectorPoolAsync — stuck workers", () => {
     expect(worker.terminated).toBe(true);
   });
 
-  it("always resolves even when terminate() rejects", async () => {
+  it("rejects when terminate() cannot confirm worker exit", async () => {
     _setTestVectorWorkerFactory(factory({ neverExits: true }));
     await tryPoolVectorSearch(
       { kind: "knowledge", limit: 10 },
@@ -220,10 +251,12 @@ describe("shutdownVectorPoolAsync — stuck workers", () => {
     );
     const [worker] = FakeWorker.instances;
     if (!worker) throw new Error("expected at least one FakeWorker instance");
-    // Make terminate() reject — the helper must still resolve.
+    // Make terminate() reject — the graceful path must not claim success.
     const originalTerminate = worker.terminate.bind(worker);
     worker.terminate = () => Promise.reject(new Error("terminate boom"));
-    await expect(shutdownVectorPoolAsync(30)).resolves.toBeUndefined();
+    await expect(shutdownVectorPoolAsync(30)).rejects.toThrow(
+      "vector worker termination was not confirmed",
+    );
     // Restore so afterEach teardown works.
     worker.terminate = originalTerminate;
   });
@@ -253,6 +286,100 @@ describe("shutdownVectorPoolAsync — stuck workers", () => {
       config().search.embeddings.workerPoolSize = prev;
     }
   });
+
+  it("waits for a runtime-retired reader generation", async () => {
+    const previousTimeout = process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
+    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = "5";
+    let releaseRetired!: () => void;
+    _setTestVectorWorkerFactory((() => {
+      const index = FakeWorker.instances.length;
+      const worker = new FakeWorker((w, msg) => {
+        if (index > 0) {
+          w.emit("message", { type: "result", id: msg.id, hits: [] });
+        }
+      });
+      if (index === 0) {
+        worker.terminate = () =>
+          new Promise<number>((resolve) => {
+            releaseRetired = () => {
+              worker.terminated = true;
+              worker.emit("exit", 0);
+              resolve(0);
+            };
+          });
+      }
+      return worker;
+    }) as unknown as (d: VectorWorkerInitData) => never);
+    try {
+      await expect(
+        tryPoolVectorSearch(
+          { kind: "knowledge", limit: 10 },
+          new Float32Array([1, 0, 0]),
+        ),
+      ).resolves.toBe(VECTOR_SEARCH_TIMED_OUT);
+      await tryPoolVectorSearch(
+        { kind: "knowledge", limit: 10 },
+        new Float32Array([0, 1, 0]),
+      );
+      // The default pool may retain a healthy sibling and replenish only the
+      // retired slot; either way the retired first generation is absent from
+      // the current live-array snapshot exercised by final shutdown below.
+      expect(FakeWorker.instances.length).toBeGreaterThan(1);
+
+      let settled = false;
+      const shutdown = shutdownVectorPoolAsync(500).then(() => {
+        settled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+      releaseRetired();
+      await shutdown;
+      expect(settled).toBe(true);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
+      } else {
+        process.env.LORE_VEC_SEARCH_TIMEOUT_MS = previousTimeout;
+      }
+    }
+  });
+
+  it("rejects final shutdown after a runtime retirement is unconfirmed", async () => {
+    const previousTimeout = process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
+    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = "5";
+    _setTestVectorWorkerFactory((() => {
+      const index = FakeWorker.instances.length;
+      const worker = new FakeWorker((w, msg) => {
+        if (index > 0) {
+          w.emit("message", { type: "result", id: msg.id, hits: [] });
+        }
+      });
+      if (index === 0) {
+        worker.terminate = () => Promise.reject(new Error("retire boom"));
+      }
+      return worker;
+    }) as unknown as (d: VectorWorkerInitData) => never);
+    try {
+      await tryPoolVectorSearch(
+        { kind: "knowledge", limit: 10 },
+        new Float32Array([1, 0, 0]),
+      );
+      await tryPoolVectorSearch(
+        { kind: "knowledge", limit: 10 },
+        new Float32Array([0, 1, 0]),
+      );
+
+      await expect(shutdownVectorPoolAsync(500)).rejects.toThrow(
+        "vector worker termination was not confirmed",
+      );
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
+      } else {
+        process.env.LORE_VEC_SEARCH_TIMEOUT_MS = previousTimeout;
+      }
+    }
+  });
 });
 
 describe("shutdownVectorPoolAsync — idempotency", () => {
@@ -280,6 +407,26 @@ describe("shutdownVectorPoolAsync — idempotency", () => {
     await expect(
       Promise.all([shutdownVectorPoolAsync(500), shutdownVectorPoolAsync(500)]),
     ).resolves.toEqual([undefined, undefined]);
+  });
+
+  it("permanently closes admission without an in-process fallback", async () => {
+    _setTestVectorWorkerFactory(factory());
+    await tryPoolVectorSearch(
+      { kind: "knowledge", limit: 10 },
+      new Float32Array([1, 0, 0]),
+    );
+    expect(FakeWorker.instances.length).toBeGreaterThan(0);
+
+    await shutdownVectorPoolAsync(500);
+    const workerCount = FakeWorker.instances.length;
+
+    await expect(
+      tryPoolVectorSearch(
+        { kind: "knowledge", limit: 10 },
+        new Float32Array([1, 0, 0]),
+      ),
+    ).resolves.toBe(VECTOR_SEARCH_TIMED_OUT);
+    expect(FakeWorker.instances).toHaveLength(workerCount);
   });
 });
 

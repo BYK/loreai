@@ -7,11 +7,13 @@ import {
   LocalProviderUnavailableError,
   _persistEmbedCap,
   _resetLocalProviderProbe,
+  _resetProviderShutdownTrackingForTest,
   _restoreProvider,
   _saveAndClearProvider,
   _setConstrainedMemoryForTest,
   _setContainerFreeForTest,
   _setTestWorkerFactory,
+  shutdownProvider,
 } from "../src/embedding";
 import { EMBED_OOM_EXIT_CODE } from "../src/embedding-worker-types";
 import type { WorkerInitData } from "../src/embedding-worker-types";
@@ -99,6 +101,7 @@ describe("embedding native→WASM fallback (#1379)", () => {
     _setContainerFreeForTest(null);
     _setConstrainedMemoryForTest(null);
     _resetLocalProviderProbe();
+    _resetProviderShutdownTrackingForTest();
     _restoreProvider(savedProvider);
     if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
     if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
@@ -262,5 +265,73 @@ describe("embedding native→WASM fallback (#1379)", () => {
     const vectors = await promise;
     expect(vectors).toHaveLength(1);
     expect(isAvailable()).toBe(true);
+  });
+
+  it("joins a superseded native worker during final provider shutdown", async () => {
+    const spawns = installFakeWorkers();
+    const request = embed(["hello world"], "query");
+    await flush();
+
+    let releaseNative!: () => void;
+    spawns[0].fake.terminate = () =>
+      new Promise<number>((resolve) => {
+        releaseNative = () => {
+          spawns[0].fake.terminated = true;
+          spawns[0].fake.emit("exit", 1);
+          resolve(0);
+        };
+      });
+    spawns[0].fake.emit("message", {
+      type: "init-needs-wasm",
+      error: "protobuf parsing failed",
+    });
+    await flush();
+    const resubmitted = spawns[1].fake.lastPosted();
+    spawns[1].fake.emit("message", {
+      type: "result",
+      id: resubmitted.id,
+      vectors: [new Float32Array([0.1])],
+    });
+    await request;
+
+    let settled = false;
+    const shutdown = shutdownProvider(1000).then(() => {
+      settled = true;
+    });
+    await flush();
+    spawns[1].fake.emit("exit", 0);
+    await flush();
+    expect(settled).toBe(false);
+
+    releaseNative();
+    await shutdown;
+    expect(settled).toBe(true);
+  });
+
+  it("rejects final shutdown when superseded-worker exit is unconfirmed", async () => {
+    const spawns = installFakeWorkers();
+    const request = embed(["hello world"], "query");
+    await flush();
+    spawns[0].fake.terminate = () =>
+      Promise.reject(new Error("native terminate boom"));
+    spawns[0].fake.emit("message", {
+      type: "init-needs-wasm",
+      error: "protobuf parsing failed",
+    });
+    await flush();
+    const resubmitted = spawns[1].fake.lastPosted();
+    spawns[1].fake.emit("message", {
+      type: "result",
+      id: resubmitted.id,
+      vectors: [new Float32Array([0.1])],
+    });
+    await request;
+
+    const shutdown = shutdownProvider(1000);
+    await flush();
+    spawns[1].fake.emit("exit", 0);
+    await expect(shutdown).rejects.toThrow(
+      "embedding worker termination was not confirmed",
+    );
   });
 });

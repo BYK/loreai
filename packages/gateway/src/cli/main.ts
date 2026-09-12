@@ -17,7 +17,6 @@ import { parseArgs } from "node:util";
 import { stringifyUnknown, UsageError } from "./lib/errors";
 import { entityOperationPolicy } from "./lib/entity-policy";
 import { printHelp, printVersion } from "./help";
-import { LEGACY_OPTIONS as OPTIONS } from "./legacy-options";
 import { commandStart, type StartOptions } from "./start";
 import {
   abortPendingVersionCheck,
@@ -91,6 +90,96 @@ function extractAgentArgs(argv: string[], tokens: ParseToken[]): string[] {
 }
 
 /** Options shared by all commands. */
+const OPTIONS = {
+  port: { type: "string" as const, short: "p" },
+  host: { type: "string" as const, short: "H", multiple: true },
+  debug: { type: "boolean" as const, short: "d" },
+  remote: { type: "string" as const, short: "r" },
+  version: { type: "boolean" as const, short: "v" },
+  help: { type: "boolean" as const, short: "h" },
+  yes: { type: "boolean" as const, short: "y" },
+  interactive: { type: "boolean" as const, short: "i" },
+  noPlugin: { type: "boolean" as const },
+  // `lore logs` flags
+  follow: { type: "boolean" as const, short: "f" },
+  n: { type: "string" as const },
+  lines: { type: "string" as const },
+  path: { type: "boolean" as const },
+  // `lore data move` flags
+  to: { type: "string" as const },
+  project: { type: "string" as const },
+  limit: { type: "string" as const },
+  json: { type: "boolean" as const },
+  // `lore lint` flags
+  base: { type: "string" as const },
+  head: { type: "string" as const },
+  model: { type: "string" as const },
+  effort: { type: "string" as const },
+  "import-lore-md": { type: "boolean" as const },
+  gate: { type: "boolean" as const },
+  "dry-run": { type: "boolean" as const },
+  purge: { type: "boolean" as const },
+  "no-children": { type: "boolean" as const },
+  // `lore import` flag — restrict detection to the current directory only
+  // (skip sibling git worktrees / clone paths of the same repo).
+  "no-worktrees": { type: "boolean" as const },
+  // `lore import` — filter to a single source/agent (e.g. --agent engram).
+  agent: { type: "string" as const },
+  // `lore import` — structured-memory flags (Engram / mem0 migration).
+  // `--file` points at an explicit export dump; `--source` forces the source
+  // type; `--global` imports every entry as cross-project.
+  file: { type: "string" as const },
+  source: { type: "string" as const },
+  global: { type: "boolean" as const },
+  // `lore import --source mem0` deployment-shape overrides.
+  "mem0-qdrant": { type: "string" as const },
+  "mem0-collection": { type: "string" as const },
+  "mem0-server": { type: "string" as const },
+  "mem0-token": { type: "string" as const },
+  "mem0-path": { type: "string" as const },
+  "mem0-user": { type: "string" as const },
+  "min-confidence": { type: "string" as const },
+  "no-backup": { type: "boolean" as const },
+  // `lore data clear` flags
+  knowledge: { type: "boolean" as const },
+  temporal: { type: "boolean" as const },
+  distillations: { type: "boolean" as const },
+  all: { type: "boolean" as const },
+  // `lore start --local` — disable hosted mode (keep FS ops active)
+  local: { type: "boolean" as const, short: "l" },
+  // `lore start --bg` / `--daemon` — run the gateway detached in the background
+  bg: { type: "boolean" as const },
+  daemon: { type: "boolean" as const },
+  "allow-remote-management": { type: "boolean" as const },
+  // `lore login` / `lore whoami` flags
+  email: { type: "string" as const },
+  role: { type: "string" as const },
+  offline: { type: "boolean" as const },
+  // `lore team discover --invite <team>` (E-5-d-2): mint invites for discovered contributors.
+  invite: { type: "string" as const },
+  verify: { type: "boolean" as const },
+  "no-browser": { type: "boolean" as const },
+  // Hidden diagnostic: prints the vendored-model registration set by
+  // the binary build wrapper (or "none" in npm mode). Used by CI to verify
+  // the embed-asset pipeline actually wired up. Not in help text.
+  "print-vendor-info": { type: "boolean" as const },
+  // Hidden diagnostic: actually exercises the local embedding provider
+  // (loads transformers.js → embeds a sample string) and prints success
+  // or the failure reason. Used by CI to catch model-load regressions
+  // that --print-vendor-info alone wouldn't surface.
+  "check-embeddings": { type: "boolean" as const },
+  // Hidden diagnostic: verifies the native sqlite-vec extension actually
+  // loaded (prints `ok vec_version=...`) or that the binary fell back to the
+  // JS brute-force path (`fallback ...`). Used by CI to confirm the SEA binary
+  // embeds + loads the vec0 extension.
+  "check-vec": { type: "boolean" as const },
+  // Hidden diagnostic: round-trips a trivial generic read job through the
+  // off-thread read-worker pool (prints `ok read-offload via worker`) to prove
+  // the embedded vector-worker asset + read-job seam works inside the SEA
+  // binary — the path recall/forSession fan-out rides on (#1029).
+  "check-read-offload": { type: "boolean" as const },
+} as const;
+
 // Populate the set used by extractAgentArgs to distinguish lore's own flags
 // from unknown flags that should be forwarded to the agent.
 for (const [name, def] of Object.entries(OPTIONS)) {

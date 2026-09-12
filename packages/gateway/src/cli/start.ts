@@ -29,7 +29,6 @@ import {
   log,
   close as closeDb,
   shutdownVectorPoolAsync,
-  DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
 } from "@loreai/core";
 import { safeExit } from "./exit";
 import {
@@ -37,9 +36,9 @@ import {
   makeProcessShutdownController,
   SHUTDOWN_DEADLINE_MS,
   type ProcessShutdownController,
+  type ProcessShutdownContext,
 } from "./shutdown";
 import { openRuntimeFileForAppend } from "../runtime-files";
-import { supervisedGatewayOwnerPid } from "./supervision-protocol";
 import { nodeHttpFetch } from "../fetch";
 import {
   currentProcessIdentity,
@@ -50,35 +49,37 @@ import {
   type ProcessInspection,
 } from "../lifecycle-lock";
 
-/**
- * Bound for the in-flight document-embed drain on graceful shutdown (#1331).
- * Kept comfortably under {@link SHUTDOWN_DEADLINE_MS} so the drain plus the
- * subsequent worker `resetProvider()` both finish inside the hard shutdown
- * deadline — a slow/stuck embed can never reintroduce the Ctrl+C hang. Whatever
- * doesn't complete in time is re-indexed by `runStartupBackfill` on next boot.
- */
-const EMBED_DRAIN_DEADLINE_MS = Math.max(
-  500,
-  Math.floor(SHUTDOWN_DEADLINE_MS * 0.6),
-);
+/** Reserve the tail of the shared process budget for SQLite + discovery. */
+const DB_FINALIZATION_MAX_MS = 250;
+/** A short cooperative drain precedes forced worker termination. */
+const EMBED_DRAIN_MAX_MS = 250;
 
-/**
- * Bound for the bounded vector-pool shutdown on graceful shutdown (#1599).
- * The pool teardown must wait for every worker's SQLite reader to close before
- * the writer can TRUNCATE the WAL — leaving readers up would strand the `-wal`
- * file and force WAL recovery on the next boot. Sized to fit under the global
- * deadline after the embedding drain (60%) so a stuck worker still leaves room
- * for the writer's checkpoint+close. Mirrors {@link EMBED_DRAIN_DEADLINE_MS}'s
- * safety floor of 500ms so an aggressive `LORE_SHUTDOWN_TIMEOUT_MS` (e.g.
- * 1000ms) doesn't shrink the pool budget into a guaranteed timeout.
- */
-const VECTOR_POOL_SHUTDOWN_DEADLINE_MS = Math.max(
-  Math.min(
-    DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
-    SHUTDOWN_DEADLINE_MS - 500,
-  ),
-  500,
-);
+function remainingShutdownMs(deadlineAt: number): number {
+  return Math.max(0, deadlineAt - Date.now());
+}
+
+async function settleBeforeDeadline(
+  work: Promise<void>,
+  deadlineAt: number,
+  label: string,
+): Promise<void> {
+  const timeoutMs = remainingShutdownMs(deadlineAt);
+  if (timeoutMs <= 0) throw new Error(`${label} exhausted shutdown budget`);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} exceeded shutdown budget`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export interface StartOptions {
   port?: number;
@@ -116,7 +117,7 @@ export interface GatewayHandle {
   /** Owner-only token used to authenticate the gateway control endpoint. */
   managementToken: string;
   /** Shut down the gateway. No-op when `owned` is false. */
-  shutdown: () => Promise<void>;
+  shutdown: (context?: ProcessShutdownContext) => Promise<void>;
   /** @internal One-shot CLI process shutdown shared by signals and control. */
   processShutdown?: ProcessShutdownController;
 }
@@ -146,6 +147,8 @@ export interface StartGatewayIO {
   startServer: typeof startServer;
   resetPipelineState: typeof resetPipelineState;
   createProcessShutdownController: typeof makeProcessShutdownController;
+  /** Test seam invoked after both discovery records are durably published. */
+  afterPublication: () => void | Promise<void>;
 }
 
 const realStartGatewayIO: StartGatewayIO = {
@@ -164,6 +167,7 @@ const realStartGatewayIO: StartGatewayIO = {
   startServer,
   resetPipelineState,
   createProcessShutdownController: makeProcessShutdownController,
+  afterPublication: () => {},
 };
 
 function isLoopbackProbeUrl(value: string): boolean {
@@ -630,11 +634,7 @@ async function terminateTimedOutDaemon(
     };
   }
 
-  // The detached PID is the supervisor. Give its independent child deadline a
-  // small scheduling/reaping margin before considering a last-resort SIGKILL
-  // of the supervisor itself; killing both at the exact same deadline could
-  // orphan a stalled gateway child just before the supervisor escalates it.
-  const cleanupTimeout = io.cleanupTimeoutMs ?? SHUTDOWN_DEADLINE_MS + 1_000;
+  const cleanupTimeout = io.cleanupTimeoutMs ?? SHUTDOWN_DEADLINE_MS;
   let signalled = false;
   const termResult = await signalDaemonGeneration(
     pid,
@@ -968,15 +968,10 @@ async function startGatewayLocked(
     ? [config.port]
     : [...DEFAULT_PORTS, 0];
   const controlToken = randomBytes(32).toString("base64url");
-  // A packaged foreground/background start runs behind a minimal supervisor.
-  // Publish that independently responsive parent as the externally managed
-  // generation so PID-file signals cannot bypass the shutdown deadline.
-  const processBoundaryPid =
-    (opts.processBoundary ? supervisedGatewayOwnerPid() : null) ?? process.pid;
   // Windows has no race-free creation-time query in Node. Publish an explicit
   // unverified identity so discovery works, while destructive stop fails closed.
   const processIdentity =
-    currentProcessIdentity(processBoundaryPid) ?? `unverified:${controlToken}`;
+    currentProcessIdentity() ?? `unverified:${controlToken}`;
 
   // With no explicit port, reuse an authenticated gateway wherever it actually
   // bound (including a fallback/random port). The process record is the source
@@ -1061,7 +1056,6 @@ async function startGatewayLocked(
       server = await withoutLifecycleLock(() =>
         io.startServer(config, {
           controlToken,
-          processBoundaryPid,
           onShutdown: () => {
             if (!remoteShutdown) {
               notify(
@@ -1090,13 +1084,14 @@ async function startGatewayLocked(
         lifecycleLock.assertOwned();
         const processRecord: GatewayProcessRecord = {
           version: 2,
-          pid: processBoundaryPid,
+          pid: process.pid,
           port: actualPort,
           hosts: server.hosts,
           token: controlToken,
           processIdentity,
         };
         io.writeProcess(processRecord);
+        await io.afterPublication();
       } catch (publicationError) {
         let closeError: unknown;
         try {
@@ -1113,12 +1108,12 @@ async function startGatewayLocked(
             io.removePort(actualPort, controlToken);
           } finally {
             if (
-              published?.pid === processBoundaryPid &&
+              published?.pid === process.pid &&
               published.token === controlToken &&
               published.processIdentity === processIdentity
             ) {
               lifecycleLock.assertOwned();
-              io.removeProcess(processBoundaryPid, published);
+              io.removeProcess(process.pid, published);
             }
           }
         } else {
@@ -1133,84 +1128,138 @@ async function startGatewayLocked(
 
       const boundServer = server;
       let shutdownPromise: Promise<void> | undefined;
-      const shutdown = (): Promise<void> => {
+      const shutdown = (context?: ProcessShutdownContext): Promise<void> => {
+        const startedAt = Date.now();
+        const deadlineAt =
+          context?.deadlineAt ?? startedAt + SHUTDOWN_DEADLINE_MS;
         shutdownPromise ??= withLifecycleLock(
           "gateway-shutdown",
           async (shutdownLock) => {
             notify("Shutting down…");
-            let shutdownError: unknown;
-            let listenerClose: Promise<void> | undefined;
-            let listenerCloseError: unknown;
+            const failures: unknown[] = [];
+            const recordFailure = (error: unknown): void => {
+              failures.push(error);
+            };
+
+            // One absolute budget is split into milestones. Pipeline/listener
+            // quiescing begins immediately and runs concurrently with the
+            // worker phases. The latter therefore remain reachable even when
+            // an aborted request refuses to settle.
+            const availableMs = remainingShutdownMs(deadlineAt);
+            const dbReserveMs = Math.max(
+              1,
+              Math.min(DB_FINALIZATION_MAX_MS, Math.floor(availableMs * 0.1)),
+            );
+            const finalizeBy = Math.max(startedAt, deadlineAt - dbReserveMs);
+            const embeddingWorkerBy =
+              startedAt + Math.floor((finalizeBy - startedAt) / 2);
+            const drainBy =
+              startedAt +
+              Math.min(
+                EMBED_DRAIN_MAX_MS,
+                Math.max(0, Math.floor((embeddingWorkerBy - startedAt) / 4)),
+              );
+
+            let listenerClose = Promise.resolve();
             try {
               shutdownLock.assertOwned();
               // server.close() synchronously stops accepting new work, but its
-              // promise waits for active streams. Start closure first, then
-              // cancel/reset pipeline work so those streams can settle.
-              listenerClose = boundServer.stop().catch((error: unknown) => {
-                listenerCloseError = error;
-              });
+              // promise waits for active streams. Start closure first and cap
+              // socket drain at the embedding milestone so workers and SQLite
+              // retain the latter half of the shared budget.
+              listenerClose = boundServer
+                .stop(remainingShutdownMs(embeddingWorkerBy))
+                .catch(recordFailure);
             } catch (error) {
-              listenerCloseError = error;
-            }
-            try {
-              shutdownLock.assertOwned();
-              await io.resetPipelineState({ fast: true });
-            } catch (error) {
-              shutdownError ??= error;
-            }
-            if (listenerClose) {
-              await listenerClose;
-            }
-            shutdownError ??= listenerCloseError;
-            // Preserve current-main embed/vector/DB ordering while the
-            // lifecycle lock excludes a successor start.
-            temporalEmbeddingQueue.stopTemporalEmbeddingScheduler();
-            try {
-              shutdownLock.assertOwned();
-              await temporalEmbeddingQueue.settleTemporalEmbeddingScheduler(
-                EMBED_DRAIN_DEADLINE_MS,
-              );
-            } catch (error) {
-              shutdownError ??= error;
-            }
-            try {
-              shutdownLock.assertOwned();
-              await embedding.settleDocumentEmbeds(EMBED_DRAIN_DEADLINE_MS);
-            } catch (error) {
-              shutdownError ??= error;
-            }
-            try {
-              shutdownLock.assertOwned();
-              await embedding.resetProvider();
-            } catch (error) {
-              shutdownError ??= error;
-            }
-            try {
-              shutdownLock.assertOwned();
-              await shutdownVectorPoolAsync(VECTOR_POOL_SHUTDOWN_DEADLINE_MS);
-            } catch (error) {
-              shutdownError ??= error;
-            }
-            try {
-              shutdownLock.assertOwned();
-              closeDb();
-            } catch (error) {
-              // SQLite recovery handles a failed best-effort checkpoint. Keep
-              // the established current-main behavior: warn but do not wedge
-              // shutdown or retain an otherwise-stale process record for it.
-              notify(
-                `Database close warning: ${error instanceof Error ? error.message : String(error)}`,
-              );
+              recordFailure(error);
             }
 
-            if (shutdownError) throw shutdownError;
+            let pipelineReset = Promise.resolve();
+            try {
+              shutdownLock.assertOwned();
+              pipelineReset = io
+                .resetPipelineState({ fast: true })
+                .catch(recordFailure);
+            } catch (error) {
+              recordFailure(error);
+            }
+
+            // Stop producers synchronously, then allow a short cooperative
+            // drain. Work that misses this milestone is rejected by the
+            // embedding-pool shutdown and recovered by startup backfill.
+            temporalEmbeddingQueue.stopTemporalEmbeddingScheduler();
+            shutdownLock.assertOwned();
+            const drainMs = remainingShutdownMs(drainBy);
+            await Promise.all([
+              temporalEmbeddingQueue
+                .settleTemporalEmbeddingScheduler(drainMs)
+                .catch(recordFailure),
+              embedding.settleDocumentEmbeds(drainMs).catch(recordFailure),
+            ]);
+
+            // Disable new embedding workers before terminating the owned set.
+            // A rejected terminate() is a hard failure: do not close SQLite or
+            // erase discovery evidence while a native worker may still live.
+            try {
+              shutdownLock.assertOwned();
+              await embedding.shutdownProvider(
+                remainingShutdownMs(embeddingWorkerBy),
+              );
+            } catch (error) {
+              recordFailure(error);
+            }
+            try {
+              shutdownLock.assertOwned();
+              await shutdownVectorPoolAsync(remainingShutdownMs(finalizeBy));
+            } catch (error) {
+              recordFailure(error);
+            }
+
+            // The short drain above is only cooperative. Confirm that every
+            // DB-capable producer has actually settled after worker teardown;
+            // a timeout here is a hard shutdown failure, so SQLite remains open
+            // and discovery evidence remains available for forced cleanup.
+            const temporalQuiescence = temporalEmbeddingQueue
+              .settleTemporalEmbeddingScheduler(remainingShutdownMs(finalizeBy))
+              .then((settled) => {
+                if (!settled) {
+                  throw new Error(
+                    "temporal embedding scheduler did not settle before shutdown deadline",
+                  );
+                }
+              });
+            const documentQuiescence = embedding.settleDocumentEmbeds({
+              deadlineMs: remainingShutdownMs(finalizeBy),
+            });
+            const quiesce = await Promise.allSettled([
+              settleBeforeDeadline(pipelineReset, finalizeBy, "pipeline reset"),
+              settleBeforeDeadline(listenerClose, finalizeBy, "listener close"),
+              temporalQuiescence,
+              documentQuiescence,
+            ]);
+            for (const outcome of quiesce) {
+              if (outcome.status === "rejected") {
+                recordFailure(outcome.reason);
+              }
+            }
+
+            if (failures.length > 0) {
+              if (failures.length === 1) throw failures[0];
+              throw new AggregateError(failures, "gateway shutdown incomplete");
+            }
+
+            // Only close the writer after every DB-capable task and vector
+            // reader has confirmed exit. A failure retains the exact-generation
+            // discovery files and routes the CLI through forcedExit.
+            shutdownLock.assertOwned();
+            closeDb();
 
             // Discovery is removed only after listener and worker teardown.
             shutdownLock.assertOwned();
             io.removePort(actualPort, controlToken);
             const current = io.readProcess();
             if (
-              current?.pid === processBoundaryPid &&
+              current?.pid === process.pid &&
               current.token === controlToken &&
               current.processIdentity === processIdentity
             ) {

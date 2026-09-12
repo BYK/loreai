@@ -12,9 +12,11 @@ import {
   LocalProviderUnavailableError,
   recallEmbedsInFlight,
   resetProvider,
+  shutdownProvider,
   _configuredEmbedPoolSize,
   _getLocalInitRetryAtForTest,
   _resetLocalProviderProbe,
+  _resetProviderShutdownTrackingForTest,
   _restoreProvider,
   _saveAndClearProvider,
   _setConstrainedMemoryForTest,
@@ -191,6 +193,7 @@ describe("EmbeddingPool dispatch (#999)", () => {
     _setConstrainedMemoryForTest(null);
     _setRecallEmbedsInFlightForTest(0); // defensive: don't leak a stuck count
     _resetLocalProviderProbe();
+    _resetProviderShutdownTrackingForTest();
     _restoreProvider(savedProvider);
     if (savedVoyage !== undefined) process.env.VOYAGE_API_KEY = savedVoyage;
     if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
@@ -1268,6 +1271,82 @@ describe("EmbeddingPool dispatch (#999)", () => {
     fakes[0].exit();
     await reset;
     expect(resetDone).toBe(true);
+  });
+
+  it("rejects reset when forced worker termination cannot be confirmed", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    const warm = embed(["warm"], "document");
+    await flush();
+    fakes[0].completeAll();
+    await warm;
+    fakes[0].exitOnShutdown = false;
+    fakes[0].terminate = () =>
+      Promise.reject(new Error("embedding terminate boom"));
+
+    await expect(resetProvider(10)).rejects.toThrow(
+      "embedding worker termination was not confirmed",
+    );
+  });
+
+  it("process shutdown joins a provider generation already being reset", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    const warm = embed(["warm"], "document");
+    await flush();
+    fakes[0].completeAll();
+    await warm;
+    fakes[0].exitOnShutdown = false;
+
+    const reset = resetProvider(1000);
+    let shutdownDone = false;
+    const shutdown = shutdownProvider(1000).then(() => {
+      shutdownDone = true;
+    });
+    await flush();
+    expect(shutdownDone).toBe(false);
+
+    fakes[0].exit();
+    await Promise.all([reset, shutdown]);
+    expect(shutdownDone).toBe(true);
+  });
+
+  it("process shutdown propagates a failed prior-generation termination", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    const warm = embed(["warm"], "document");
+    await flush();
+    fakes[0].completeAll();
+    await warm;
+    fakes[0].exitOnShutdown = false;
+    fakes[0].terminate = () => Promise.reject(new Error("terminate boom"));
+
+    const reset = resetProvider(10);
+    const shutdown = shutdownProvider(1000);
+    await expect(reset).rejects.toThrow(
+      "embedding worker termination was not confirmed",
+    );
+    await expect(shutdown).rejects.toThrow(
+      "embedding worker termination was not confirmed",
+    );
+  });
+
+  it("keeps provider admission closed across a late config reset", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    const warm = embed(["warm"], "document");
+    await flush();
+    fakes[0].completeAll();
+    await warm;
+
+    await shutdownProvider(1000);
+    const workerCount = fakes.length;
+    await resetProvider();
+
+    expect((await settle(embed(["must not respawn"], "document"))).ok).toBe(
+      false,
+    );
+    expect(fakes).toHaveLength(workerCount);
   });
 
   it("keeps a proven sibling available after transient failures", async () => {

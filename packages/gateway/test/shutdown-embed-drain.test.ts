@@ -6,9 +6,10 @@
  * short/fast sessions.
  *
  * The `shutdown` closure built in `startGateway()` must call
- * `embedding.settleDocumentEmbeds(<bounded>)` BEFORE `embedding.resetProvider()`
- * (which kills the worker), and the drain must be bounded so a stuck embed can
- * never reintroduce the Ctrl+C hang.
+ * `embedding.settleDocumentEmbeds(<bounded>)` before
+ * `embedding.shutdownProvider()` (which kills the worker), then confirm full
+ * quiescence afterward. Both waits must be bounded so a stuck embed can never
+ * reintroduce the Ctrl+C hang.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { embedding } from "@loreai/core";
@@ -28,11 +29,13 @@ describe("startGateway shutdown drains in-flight embeds (issue #1331)", () => {
     }
   });
 
-  it("calls settleDocumentEmbeds(bounded) before resetProvider on shutdown", async () => {
+  it("drains document embeds before disabling the provider on shutdown", async () => {
     const { startGateway } = await import("../src/cli/start");
 
     const order: string[] = [];
-    let drainArg: number | undefined = -1;
+    const drainArgs: Array<
+      Parameters<typeof embedding.settleDocumentEmbeds>[0]
+    > = [];
     const drainSpy = vi
       .spyOn(embedding, "settleDocumentEmbeds")
       .mockImplementation(
@@ -40,11 +43,11 @@ describe("startGateway shutdown drains in-flight embeds (issue #1331)", () => {
           timeoutMs?: Parameters<typeof embedding.settleDocumentEmbeds>[0],
         ) => {
           order.push("drain");
-          drainArg = typeof timeoutMs === "number" ? timeoutMs : undefined;
+          drainArgs.push(timeoutMs);
         },
       );
     const resetSpy = vi
-      .spyOn(embedding, "resetProvider")
+      .spyOn(embedding, "shutdownProvider")
       .mockImplementation(async () => {
         order.push("reset");
       });
@@ -54,15 +57,20 @@ describe("startGateway shutdown drains in-flight embeds (issue #1331)", () => {
 
     await handle.shutdown();
 
-    // Drain must run, and run BEFORE the worker is reset/killed.
-    expect(order).toEqual(["drain", "reset"]);
-    expect(drainSpy).toHaveBeenCalledTimes(1);
+    // First allow cooperative completion, then disable/stop the worker and
+    // confirm no DB-capable continuation remains before SQLite can close.
+    expect(order).toEqual(["drain", "reset", "drain"]);
+    expect(drainSpy).toHaveBeenCalledTimes(2);
     expect(resetSpy).toHaveBeenCalledTimes(1);
 
-    // The drain is BOUNDED (a finite, positive deadline) — never an unbounded
-    // wait that could hang Ctrl+C.
-    expect(typeof drainArg).toBe("number");
-    expect(drainArg).toBeGreaterThan(0);
-    expect(Number.isFinite(drainArg)).toBe(true);
+    // Both phases are bounded. The final options form throws on deadline
+    // instead of treating a still-live producer as quiescent.
+    expect(typeof drainArgs[0]).toBe("number");
+    expect(drainArgs[0]).toBeGreaterThan(0);
+    expect(Number.isFinite(drainArgs[0])).toBe(true);
+    expect(drainArgs[1]).toEqual({ deadlineMs: expect.any(Number) });
+    expect((drainArgs[1] as { deadlineMs: number }).deadlineMs).toBeGreaterThan(
+      0,
+    );
   });
 });

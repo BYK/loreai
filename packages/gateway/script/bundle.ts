@@ -46,7 +46,6 @@ const pkg = JSON.parse(
 
 const jsPath = join(distDir, "index.cjs");
 const mapPath = join(distDir, "index.cjs.map");
-const supervisorPath = join(distDir, "supervisor.cjs");
 
 // ---------------------------------------------------------------------------
 // Clean + create dist
@@ -120,23 +119,6 @@ await esbuild.build({
     LORE_CLI_VERSION: JSON.stringify(pkg.version),
     __SENTRY_DEBUG_ID__: JSON.stringify(PLACEHOLDER_DEBUG_ID),
   },
-});
-
-// Minimal foreground-gateway supervisor. Keep this in its own bundle so the
-// parent process does not initialize SQLite, Sentry, workers, or gateway state;
-// its signal handler and hard-deadline timer remain independently responsive.
-await esbuild.build({
-  entryPoints: [join(packageDir, "src", "cli", "supervisor.ts")],
-  bundle: true,
-  format: "cjs",
-  target: "node22",
-  platform: "node",
-  external: ["node:*"],
-  outfile: supervisorPath,
-  sourcemap: false,
-  minify: true,
-  logLevel: "info",
-  legalComments: "none",
 });
 
 // ---------------------------------------------------------------------------
@@ -446,23 +428,10 @@ const binScript = `#!/usr/bin/env node
     return _emit.apply(this, [name, ...args]);
   };
 }
-const supervisor = require("./supervisor.cjs");
-supervisor.initializeSupervisedGatewayChild();
-const argv = process.argv.slice(2);
-if (supervisor.shouldSuperviseGatewayCommand(argv, process.env)) {
-  supervisor
-    .runGatewaySupervisor({ childArgs: [__filename, ...argv] })
-    .then((code) => { process.exitCode = code; })
-    .catch((e) => {
-      if (e) console.error(e);
-      process.exitCode = 1;
-    });
-} else {
-  require("./index.cjs").runCli().catch((e) => {
-    if (e) console.error(e);
-    process.exitCode = 1;
-  });
-}
+require("./index.cjs").runCli().catch((e) => {
+  if (e) console.error(e);
+  process.exitCode = 1;
+});
 `;
 
 writeFileSync(join(distDir, "bin.cjs"), binScript, { mode: 0o755 });
@@ -567,4 +536,3 @@ console.log(`  dist/vector-worker.js     — vector-search worker ESM (Bun)`);
 console.log(`  dist/ort-wasm-simd-threaded.{mjs,wasm} — ONNX WASM runtime`);
 console.log(`  dist/bin.cjs              — CLI wrapper`);
 console.log(`  dist/index.d.cts          — type declarations`);
-console.log(`  dist/supervisor.cjs       — foreground gateway supervisor`);

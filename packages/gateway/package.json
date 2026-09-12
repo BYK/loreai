@@ -47,7 +47,6 @@
     "dist/index.d.cts",
     "dist/ort-wasm-simd-threaded.mjs",
     "dist/ort-wasm-simd-threaded.wasm",
-    "dist/supervisor.cjs",
     "dist/vector-worker.cjs",
     "dist/vector-worker.js"
   ],
