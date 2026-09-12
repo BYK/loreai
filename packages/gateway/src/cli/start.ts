@@ -33,12 +33,13 @@ import {
 } from "@loreai/core";
 import { safeExit } from "./exit";
 import {
-  installSignalShutdown,
+  installProcessSignalLifecycle,
   makeProcessShutdownController,
   SHUTDOWN_DEADLINE_MS,
   type ProcessShutdownController,
 } from "./shutdown";
 import { openRuntimeFileForAppend } from "../runtime-files";
+import { supervisedGatewayOwnerPid } from "./supervision-protocol";
 import { nodeHttpFetch } from "../fetch";
 import {
   currentProcessIdentity,
@@ -103,6 +104,8 @@ export interface StartOptions {
   bg?: boolean;
   /** @internal CLI-owned process boundary; never set by in-process plugins. */
   processBoundary?: boolean;
+  /** @internal Early-installed CLI signal owner shared with gateway control. */
+  processShutdownController?: ProcessShutdownController;
 }
 
 export interface GatewayHandle {
@@ -627,7 +630,11 @@ async function terminateTimedOutDaemon(
     };
   }
 
-  const cleanupTimeout = io.cleanupTimeoutMs ?? SHUTDOWN_DEADLINE_MS;
+  // The detached PID is the supervisor. Give its independent child deadline a
+  // small scheduling/reaping margin before considering a last-resort SIGKILL
+  // of the supervisor itself; killing both at the exact same deadline could
+  // orphan a stalled gateway child just before the supervisor escalates it.
+  const cleanupTimeout = io.cleanupTimeoutMs ?? SHUTDOWN_DEADLINE_MS + 1_000;
   let signalled = false;
   const termResult = await signalDaemonGeneration(
     pid,
@@ -961,10 +968,15 @@ async function startGatewayLocked(
     ? [config.port]
     : [...DEFAULT_PORTS, 0];
   const controlToken = randomBytes(32).toString("base64url");
+  // A packaged foreground/background start runs behind a minimal supervisor.
+  // Publish that independently responsive parent as the externally managed
+  // generation so PID-file signals cannot bypass the shutdown deadline.
+  const processBoundaryPid =
+    (opts.processBoundary ? supervisedGatewayOwnerPid() : null) ?? process.pid;
   // Windows has no race-free creation-time query in Node. Publish an explicit
   // unverified identity so discovery works, while destructive stop fails closed.
   const processIdentity =
-    currentProcessIdentity() ?? `unverified:${controlToken}`;
+    currentProcessIdentity(processBoundaryPid) ?? `unverified:${controlToken}`;
 
   // With no explicit port, reuse an authenticated gateway wherever it actually
   // bound (including a fallback/random port). The process record is the source
@@ -1049,6 +1061,7 @@ async function startGatewayLocked(
       server = await withoutLifecycleLock(() =>
         io.startServer(config, {
           controlToken,
+          processBoundaryPid,
           onShutdown: () => {
             if (!remoteShutdown) {
               notify(
@@ -1077,7 +1090,7 @@ async function startGatewayLocked(
         lifecycleLock.assertOwned();
         const processRecord: GatewayProcessRecord = {
           version: 2,
-          pid: process.pid,
+          pid: processBoundaryPid,
           port: actualPort,
           hosts: server.hosts,
           token: controlToken,
@@ -1100,12 +1113,12 @@ async function startGatewayLocked(
             io.removePort(actualPort, controlToken);
           } finally {
             if (
-              published?.pid === process.pid &&
+              published?.pid === processBoundaryPid &&
               published.token === controlToken &&
               published.processIdentity === processIdentity
             ) {
               lifecycleLock.assertOwned();
-              io.removeProcess(process.pid, published);
+              io.removeProcess(processBoundaryPid, published);
             }
           }
         } else {
@@ -1197,7 +1210,7 @@ async function startGatewayLocked(
             io.removePort(actualPort, controlToken);
             const current = io.readProcess();
             if (
-              current?.pid === process.pid &&
+              current?.pid === processBoundaryPid &&
               current.token === controlToken &&
               current.processIdentity === processIdentity
             ) {
@@ -1212,7 +1225,8 @@ async function startGatewayLocked(
         return shutdownPromise;
       };
       const processShutdown = opts.processBoundary
-        ? io.createProcessShutdownController(shutdown)
+        ? (opts.processShutdownController ??
+          io.createProcessShutdownController(shutdown))
         : undefined;
       remoteShutdown = () => {
         if (processShutdown) {
@@ -1306,12 +1320,33 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     return startDaemon(opts);
   }
 
-  const { config, port, owned, shutdown, processShutdown } = await startGateway(
-    {
+  const signalLifecycle = installProcessSignalLifecycle();
+  let handle: GatewayHandle;
+  try {
+    handle = await startGateway({
       ...opts,
       processBoundary: true,
-    },
-  );
+      processShutdownController: signalLifecycle.processShutdown,
+    });
+  } catch (error) {
+    // startGateway unwinds any partially-acquired listener before rejecting.
+    // Release an already-signalled lifecycle only after that unwind completes.
+    signalLifecycle.attachShutdown(async () => {});
+    if (signalLifecycle.isShutdownStarted()) {
+      return signalLifecycle.processShutdown(1);
+    }
+    signalLifecycle.dispose();
+    throw error;
+  }
+  const { config, port, owned, shutdown } = handle;
+  signalLifecycle.attachShutdown(shutdown);
+
+  // A signal may have arrived while startGateway was awaiting bind,
+  // publication, or lifecycle-lock work. Do not publish a ready banner or do
+  // any more startup work once the shared shutdown has begun.
+  if (signalLifecycle.isShutdownStarted()) {
+    return signalLifecycle.processShutdown(0);
+  }
 
   const addrs = config.hosts.map((host) => probeUrlFor(host, port));
 
@@ -1327,6 +1362,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
         "[lore] Note: hosted mode setting reflects the running instance, not this invocation.",
       );
     }
+    signalLifecycle.dispose();
     safeExit(0);
   }
 
@@ -1408,9 +1444,6 @@ export async function commandStart(opts: StartOptions): Promise<never> {
       `  LORE_REMOTE_GATEWAY     Remote-gateway mode — bucket path-less sessions per-session (current: ${config.remoteGateway}, default for \`lore start\`: true, pass --local to disable)`,
     );
   }
-  // Block until signal — bounded shutdown + force-exit on a second interrupt.
-  installSignalShutdown(shutdown, processShutdown);
-
   // Keep the process alive (the HTTP server already does this, but be explicit)
   return new Promise(() => {});
 }

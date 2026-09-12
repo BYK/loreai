@@ -206,7 +206,11 @@ describe("server routing", () => {
 
   test("owner control identity requires the exact configured token", async () => {
     const token = "test-control-token".repeat(3);
-    const controlled = await startServer(makeConfig(), { controlToken: token });
+    const processBoundaryPid = process.pid + 10_000;
+    const controlled = await startServer(makeConfig(), {
+      controlToken: token,
+      processBoundaryPid,
+    });
     try {
       const url = `http://127.0.0.1:${controlled.port}/_lore/control`;
       expect((await fetch(url)).status).toBe(404);
@@ -224,7 +228,7 @@ describe("server routing", () => {
       expect(await res.json()).toMatchObject({
         status: "ok",
         service: "lore",
-        pid: process.pid,
+        pid: processBoundaryPid,
       });
       expect(
         (

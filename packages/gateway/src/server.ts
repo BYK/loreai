@@ -753,6 +753,8 @@ export async function startServer(
   config: GatewayConfig,
   options: {
     controlToken?: string;
+    /** PID of the externally managed process boundary (normally this process). */
+    processBoundaryPid?: number;
     /** Invoked asynchronously after an authenticated shutdown response flushes. */
     onShutdown?: () => void | Promise<void>;
     /** Focused lifecycle seam for exercising listener-close failures. */
@@ -1032,7 +1034,7 @@ export async function startServer(
         const response = jsonResponse({
           status: "ok",
           service: "lore",
-          pid: process.pid,
+          pid: options.processBoundaryPid ?? process.pid,
           ...(method === "POST" ? { shutdown: "requested" } : {}),
         });
         if (method === "POST") {

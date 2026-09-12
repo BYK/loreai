@@ -38,6 +38,7 @@ import {
   makeSignalShutdownHandler,
   makeProcessShutdownController,
   makeChildForwardHandler,
+  installProcessSignalLifecycle,
   installSignalShutdown,
   installChildSignalForwarding,
 } from "../src/cli/shutdown";
@@ -429,6 +430,36 @@ describe("makeChildForwardHandler", () => {
 });
 
 describe("install*", () => {
+  test("early signal starts the deadline and waits for startup to attach teardown", async () => {
+    let onSigterm: (() => void) | undefined;
+    vi.spyOn(process, "on").mockImplementation((event, listener) => {
+      if (event === "SIGTERM") onSigterm = listener as () => void;
+      return process;
+    });
+    const offSpy = vi.spyOn(process, "off").mockReturnValue(process);
+    const exitNormally = vi.fn((_code: number) => undefined as never);
+    const shutdown = vi.fn(async () => {});
+    const lifecycle = installProcessSignalLifecycle({
+      deadlineMs: 1000,
+      safeExit: exitNormally,
+      forcedExit: vi.fn((_code: number) => undefined as never),
+    });
+
+    expect(onSigterm).toBeTypeOf("function");
+    onSigterm?.();
+    expect(lifecycle.isShutdownStarted()).toBe(true);
+    expect(shutdown).not.toHaveBeenCalled();
+    expect(exitNormally).not.toHaveBeenCalled();
+
+    lifecycle.attachShutdown(shutdown);
+    await vi.waitFor(() => expect(exitNormally).toHaveBeenCalledWith(143));
+    expect(shutdown).toHaveBeenCalledTimes(1);
+
+    lifecycle.dispose();
+    expect(offSpy).toHaveBeenCalledWith("SIGINT", expect.any(Function));
+    expect(offSpy).toHaveBeenCalledWith("SIGTERM", expect.any(Function));
+  });
+
   test("installSignalShutdown registers SIGINT and SIGTERM handlers", () => {
     const onSpy = vi.spyOn(process, "on").mockReturnValue(process);
     installSignalShutdown(async () => {});

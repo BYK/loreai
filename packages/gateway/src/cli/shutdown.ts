@@ -13,6 +13,11 @@
  */
 import { forcedExit, safeExit } from "./exit";
 import { SHUTDOWN_DEADLINE_MS } from "../shutdown-deadline";
+import {
+  SHUTDOWN_STARTED_MESSAGE,
+  attachSupervisorShutdownHandler,
+  supervisedGatewayOwnerPid,
+} from "./supervision-protocol";
 
 export {
   parseShutdownDeadline,
@@ -93,6 +98,8 @@ export interface ProcessShutdownOptions {
   deadlineMs?: number;
   safeExit?: (code: number) => never;
   forcedExit?: (code: number) => never;
+  /** Called synchronously when the one-shot teardown starts. */
+  onShutdownStarted?: () => void;
 }
 
 export interface OwnedChildProcess {
@@ -111,6 +118,22 @@ export interface ProcessShutdownController {
   killChildAndWait: (exitCode: number) => Promise<never>;
   /** Record and reap a child outcome, upgrading a pending successful exit. */
   childExited: (exitCode: number) => Promise<never>;
+}
+
+/**
+ * Signal ownership installed before a CLI command starts acquiring resources.
+ *
+ * `attachShutdown()` opens the startup gate and supplies the teardown closure
+ * once startup has either completed or unwound. A signal received before that
+ * point starts the process deadline immediately, then waits at the gate rather
+ * than falling through to Node's default signal disposition.
+ */
+export interface ProcessSignalLifecycle {
+  processShutdown: ProcessShutdownController;
+  attachShutdown: (shutdown: () => Promise<void>) => void;
+  attachChild: (child: OwnedChildProcess) => void;
+  isShutdownStarted: () => boolean;
+  dispose: () => void;
 }
 
 /**
@@ -207,29 +230,36 @@ export function makeProcessShutdownController(
   ): Promise<never> => {
     preserveOutcome(exitCode);
     if (childSignal && !childSignalSent) requestedChildSignal = childSignal;
-    shutdownPromise ??= (async (): Promise<never> => {
-      shutdownStartedAt = Date.now();
-      // Register escalation before the outer deadline. Even if both timers are
-      // observed in one delayed timers turn, SIGKILL is therefore dispatched
-      // first; the parsed deadline also keeps this timer strictly earlier.
-      signalChild();
-      const result = await runShutdownWithDeadline(async () => {
-        const outcomes = await Promise.allSettled([
-          Promise.resolve().then(shutdown),
-          childExit,
-        ]);
-        const failure = outcomes.find(
-          (outcome): outcome is PromiseRejectedResult =>
-            outcome.status === "rejected",
-        );
-        if (failure) throw failure.reason;
-      }, deadlineMs);
-      clearChildEscalation();
-      if (result.timedOut || result.failed || childEscalationFailed) {
-        return exitForcibly(requestedExitCode === 0 ? 1 : requestedExitCode);
+    if (!shutdownPromise) {
+      try {
+        options.onShutdownStarted?.();
+      } catch {
+        // Observability/supervision notification must never block teardown.
       }
-      return exitNormally(requestedExitCode);
-    })();
+      shutdownPromise = (async (): Promise<never> => {
+        shutdownStartedAt = Date.now();
+        // Register escalation before the outer deadline. Even if both timers are
+        // observed in one delayed timers turn, SIGKILL is therefore dispatched
+        // first; the parsed deadline also keeps this timer strictly earlier.
+        signalChild();
+        const result = await runShutdownWithDeadline(async () => {
+          const outcomes = await Promise.allSettled([
+            Promise.resolve().then(shutdown),
+            childExit,
+          ]);
+          const failure = outcomes.find(
+            (outcome): outcome is PromiseRejectedResult =>
+              outcome.status === "rejected",
+          );
+          if (failure) throw failure.reason;
+        }, deadlineMs);
+        clearChildEscalation();
+        if (result.timedOut || result.failed || childEscalationFailed) {
+          return exitForcibly(requestedExitCode === 0 ? 1 : requestedExitCode);
+        }
+        return exitNormally(requestedExitCode);
+      })();
+    }
     return shutdownPromise;
   }) as ProcessShutdownController;
 
@@ -274,6 +304,92 @@ export function makeProcessShutdownController(
   };
 
   return controller;
+}
+
+/**
+ * Install SIGINT/SIGTERM ownership synchronously, before gateway startup.
+ *
+ * This closes the publication race where the listener and discovery record
+ * were externally visible before the old late-installed handlers existed. It
+ * also starts the one shared shutdown deadline at signal receipt, including
+ * while asynchronous startup is still in progress.
+ */
+export function installProcessSignalLifecycle(
+  options: ProcessShutdownOptions = {},
+): ProcessSignalLifecycle {
+  let attached = false;
+  let resolveShutdown!: (shutdown: () => Promise<void>) => void;
+  const shutdownReady = new Promise<() => Promise<void>>((resolve) => {
+    resolveShutdown = resolve;
+  });
+  const deferredShutdown = async (): Promise<void> => {
+    const shutdown = await shutdownReady;
+    await shutdown();
+  };
+  const processShutdown = makeProcessShutdownController(deferredShutdown, {
+    ...options,
+    onShutdownStarted: () => {
+      options.onShutdownStarted?.();
+      // The packaged foreground supervisor creates this IPC channel. Notify it
+      // for direct-to-child signals and authenticated control shutdown too, so
+      // its independent deadline is not limited to signals sent to the wrapper.
+      if (
+        supervisedGatewayOwnerPid() !== null &&
+        typeof process.send === "function"
+      ) {
+        process.send({ type: SHUTDOWN_STARTED_MESSAGE });
+      }
+    },
+  });
+  let childAttached = false;
+  let signalCount = 0;
+
+  const handle = (signal: NodeJS.Signals): void => {
+    signalCount++;
+    const code = signalExitCode(signal);
+    if (signalCount >= 2) {
+      if (childAttached) {
+        console.error(
+          "[lore] Received second interrupt — force-stopping child.",
+        );
+        void processShutdown.killChildAndWait(code);
+      } else {
+        console.error("[lore] Received second interrupt — forcing exit.");
+        (options.forcedExit ?? forcedExit)(code);
+      }
+      return;
+    }
+    void processShutdown(code, childAttached ? signal : undefined);
+  };
+  const onSigint = (): void => handle("SIGINT");
+  const onSigterm = (): void => handle("SIGTERM");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+  const detachSupervisorShutdownHandler =
+    attachSupervisorShutdownHandler(handle);
+
+  return {
+    processShutdown,
+    attachShutdown(shutdown): void {
+      if (attached)
+        throw new Error("Process shutdown lifecycle is already attached");
+      attached = true;
+      resolveShutdown(shutdown);
+    },
+    attachChild(child): void {
+      if (childAttached) {
+        throw new Error("Process shutdown lifecycle already owns a child");
+      }
+      processShutdown.attachChild(child);
+      childAttached = true;
+    },
+    isShutdownStarted: processShutdown.isShutdownStarted,
+    dispose(): void {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+      detachSupervisorShutdownHandler();
+    },
+  };
 }
 
 /**
