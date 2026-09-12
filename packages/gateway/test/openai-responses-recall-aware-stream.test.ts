@@ -11,7 +11,7 @@
  * `response.completed`).
  */
 import { log } from "@loreai/core";
-import { afterEach, describe, test, expect } from "vitest";
+import { afterEach, describe, test, expect, vi } from "vitest";
 import { streamResponsesRecallAware } from "../src/pipeline";
 import {
   setRecallContinuationFailureHook,
@@ -204,6 +204,45 @@ const textItem = (
       content: [{ type: "output_text", text }],
     },
   });
+
+const reasoningSummaryEvents = (
+  outputIndex: number,
+  itemId: string,
+  summaries: readonly string[],
+  firstSummaryIndex = 0,
+): string[] =>
+  summaries.flatMap((text, offset) => {
+    const summaryIndex = firstSummaryIndex + offset;
+    return [
+      sseEvent("response.reasoning_summary_part.added", {
+        output_index: outputIndex,
+        item_id: itemId,
+        summary_index: summaryIndex,
+        part: { type: "summary_text", text: "" },
+      }),
+      sseEvent("response.reasoning_summary_text.delta", {
+        output_index: outputIndex,
+        item_id: itemId,
+        summary_index: summaryIndex,
+        delta: text,
+      }),
+      sseEvent("response.reasoning_summary_text.done", {
+        output_index: outputIndex,
+        item_id: itemId,
+        summary_index: summaryIndex,
+        text,
+      }),
+      sseEvent("response.reasoning_summary_part.done", {
+        output_index: outputIndex,
+        item_id: itemId,
+        summary_index: summaryIndex,
+        part: { type: "summary_text", text },
+      }),
+    ];
+  });
+
+const reasoningSummaryParts = (summaries: readonly string[]) =>
+  summaries.map((text) => ({ type: "summary_text", text }));
 
 describe("streamResponsesRecallAware", () => {
   test("forwards events live with NO recall — no header hold-back", async () => {
@@ -2086,6 +2125,703 @@ describe("streamResponsesRecallAware", () => {
         summary: [{ type: "summary_text", text: "summary" }],
       }),
     );
+  });
+
+  test.each(["empty", "omitted"] as const)(
+    "accepts %s sparse Codex terminal reasoning after multiple streamed summaries",
+    async (terminalSummary) => {
+      let completedResponse: GatewayResponse | undefined;
+      const onRecall = vi.fn(async () => ({ anchorText: "", resultText: "" }));
+      const runFollowUp = vi.fn(async () => {
+        throw new Error("should not run");
+      });
+      const reasoningItem = {
+        type: "reasoning",
+        id: `rs_${terminalSummary}_terminal_summaries`,
+        status: "completed",
+        summary: [],
+      };
+      const terminalReasoningItem = {
+        type: reasoningItem.type,
+        id: reasoningItem.id,
+        status: reasoningItem.status,
+        ...(terminalSummary === "empty" ? { summary: [] } : {}),
+      };
+      const summaryEvents = reasoningSummaryEvents(0, reasoningItem.id, [
+        "first summary",
+        "second summary",
+      ]);
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created(
+            `resp_${terminalSummary}_terminal_summaries`,
+            "gpt-5.6-terra",
+          ),
+          sseEvent("response.output_item.added", {
+            output_index: 0,
+            item: {
+              type: "reasoning",
+              id: reasoningItem.id,
+              summary: [],
+            },
+          }),
+          ...summaryEvents,
+          sseEvent("response.completed", {
+            response: {
+              id: `resp_${terminalSummary}_terminal_summaries`,
+              model: "gpt-5.6-terra",
+              status: "completed",
+              output: [terminalReasoningItem],
+            },
+          }),
+        ]),
+        {
+          validation: "codex",
+          onComplete: (response) => {
+            completedResponse = response;
+          },
+          onRecall,
+          runFollowUp,
+        },
+      );
+
+      const out = await drain(client);
+      expect(out.match(/^event: response\.completed$/gm) ?? []).toHaveLength(1);
+      expect(out).not.toContain("response.failed");
+      expect(completedResponse?.rawOutputItems).toContainEqual(
+        expect.objectContaining({
+          id: reasoningItem.id,
+          summary: [
+            { type: "summary_text", text: "first summary" },
+            { type: "summary_text", text: "second summary" },
+          ],
+        }),
+      );
+      expect(onRecall).not.toHaveBeenCalled();
+      expect(runFollowUp).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each(["empty", "omitted"] as const)(
+    "preserves %s added-only Codex summaries from a recall continuation",
+    async (terminalSummary) => {
+      let completedResponse: GatewayResponse | undefined;
+      const reasoningId = `rs_added_only_continuation_${terminalSummary}_summary`;
+      const followUp = streamFrom([
+        created("resp_added_only_summary_followup", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: reasoningId, summary: [] },
+        }),
+        ...reasoningSummaryEvents(0, reasoningId, [
+          "first continuation summary",
+          "second continuation summary",
+        ]),
+        textItem(1, "continuation answer", "msg_added_only_summary_answer"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_added_only_summary_followup",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "reasoning",
+                id: reasoningId,
+                status: "completed",
+                ...(terminalSummary === "empty" ? { summary: [] } : {}),
+              },
+            ],
+          },
+        }),
+      ]);
+      if (!followUp.body) throw new Error("follow-up stream has no body");
+      const followUpBody = followUp.body;
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_added_only_summary_principal", "gpt-5.6-terra"),
+          recallCall(0, { query: "added-only continuation summary" }),
+          completed("resp_added_only_summary_principal"),
+        ]),
+        {
+          validation: "codex",
+          onComplete: (response) => {
+            completedResponse = response;
+          },
+          onRecall: async () => ({
+            anchorText: "anchor",
+            resultText: "memory",
+          }),
+          runFollowUp: async () => ({ reader: followUpBody.getReader() }),
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).toContain("continuation answer");
+      expect(output).not.toContain("response.failed");
+      expect(completedResponse?.rawOutputItems).toContainEqual(
+        expect.objectContaining({
+          id: reasoningId,
+          summary: [
+            { type: "summary_text", text: "first continuation summary" },
+            { type: "summary_text", text: "second continuation summary" },
+          ],
+        }),
+      );
+    },
+  );
+
+  test.each(["empty", "omitted"] as const)(
+    "reconstructs a %s sparse Codex terminal summary after matching principal added and done items",
+    async (terminalSummary) => {
+      let completedResponse: GatewayResponse | undefined;
+      const responseId = `resp_matching_principal_${terminalSummary}_summary`;
+      const reasoningId = `rs_matching_principal_${terminalSummary}_summary`;
+      const summary = reasoningSummaryParts(["principal summary"]);
+      const completedReasoning = {
+        type: "reasoning",
+        id: reasoningId,
+        status: "completed",
+        summary,
+      };
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created(responseId, "gpt-5.6-terra"),
+          sseEvent("response.output_item.added", {
+            output_index: 0,
+            item: { type: "reasoning", id: reasoningId, summary },
+          }),
+          sseEvent("response.output_item.done", {
+            output_index: 0,
+            item: completedReasoning,
+          }),
+          sseEvent("response.completed", {
+            response: {
+              id: responseId,
+              model: "gpt-5.6-terra",
+              status: "completed",
+              output: [
+                {
+                  type: "reasoning",
+                  id: reasoningId,
+                  status: "completed",
+                  ...(terminalSummary === "empty" ? { summary: [] } : {}),
+                },
+              ],
+            },
+          }),
+        ]),
+        {
+          validation: "codex",
+          onComplete: (response) => {
+            completedResponse = response;
+          },
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not run");
+          },
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).not.toContain("response.failed");
+      expect(completedResponse?.rawOutputItems).toContainEqual(
+        expect.objectContaining({ id: reasoningId, summary }),
+      );
+    },
+  );
+
+  test.each(["empty", "omitted"] as const)(
+    "reconstructs a %s sparse Codex terminal summary after matching continuation added and done items",
+    async (terminalSummary) => {
+      let completedResponse: GatewayResponse | undefined;
+      const reasoningId = `rs_matching_continuation_${terminalSummary}_summary`;
+      const summary = reasoningSummaryParts(["continuation summary"]);
+      const followUp = streamFrom([
+        created("resp_matching_continuation_summary", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: reasoningId, summary },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: reasoningId,
+            status: "completed",
+            summary,
+          },
+        }),
+        textItem(1, "continuation answer", "msg_matching_summary_answer"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_matching_continuation_summary",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "reasoning",
+                id: reasoningId,
+                status: "completed",
+                ...(terminalSummary === "empty" ? { summary: [] } : {}),
+              },
+            ],
+          },
+        }),
+      ]);
+      if (!followUp.body) throw new Error("follow-up stream has no body");
+      const followUpBody = followUp.body;
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_matching_summary_principal", "gpt-5.6-terra"),
+          recallCall(0, { query: "matching continuation summary" }),
+          completed("resp_matching_summary_principal"),
+        ]),
+        {
+          validation: "codex",
+          onComplete: (response) => {
+            completedResponse = response;
+          },
+          onRecall: async () => ({
+            anchorText: "anchor",
+            resultText: "memory",
+          }),
+          runFollowUp: async () => ({ reader: followUpBody.getReader() }),
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).toContain("continuation answer");
+      expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+      expect(output).not.toContain("response.failed");
+      expect(completedResponse?.rawOutputItems).toContainEqual(
+        expect.objectContaining({ id: reasoningId, summary }),
+      );
+    },
+  );
+
+  test("rejects an oversized output_item.added reasoning summary before seeding lifecycle state", async () => {
+    const summary = reasoningSummaryParts(
+      Array.from(
+        { length: 17 },
+        (_, index) => `oversized added summary ${index}`,
+      ),
+    );
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_oversized_added_summary", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_oversized_added_summary",
+            summary,
+          },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_oversized_added_summary",
+            status: "completed",
+            summary,
+          },
+        }),
+        completed("resp_oversized_added_summary"),
+      ]),
+      {
+        validation: "codex",
+        maxSSEFrames: 16,
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("response.failed");
+    expect(output).not.toContain("oversized added summary 16");
+  });
+
+  test("rejects an oversized done-only output_item.done reasoning summary before seeding lifecycle state", async () => {
+    const summary = reasoningSummaryParts(
+      Array.from(
+        { length: 17 },
+        (_, index) => `oversized done summary ${index}`,
+      ),
+    );
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_oversized_done_summary", "gpt-5.6-terra"),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_oversized_done_summary",
+            status: "completed",
+            summary,
+          },
+        }),
+        completed("resp_oversized_done_summary"),
+      ]),
+      {
+        validation: "codex",
+        maxSSEFrames: 16,
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("response.failed");
+    expect(output).not.toContain("oversized done summary 16");
+  });
+
+  test.each(["principal", "continuation"] as const)(
+    "rejects forged reasoning summary event names on the %s stream",
+    async (streamKind) => {
+      const secret = `private forged ${streamKind} summary`;
+      const completions: Array<{
+        response: GatewayResponse;
+        successful: boolean;
+      }> = [];
+      let recalls = 0;
+      let followUps = 0;
+      const forgedStream = [
+        created(`resp_forged_${streamKind}`, "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: `rs_forged_${streamKind}`,
+            summary: [],
+          },
+        }),
+        sseEvent("response.reasoning_summary_private.done", {
+          output_index: 0,
+          item_id: `rs_forged_${streamKind}`,
+          summary_index: 0,
+          text: secret,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: `rs_forged_${streamKind}`,
+            status: "completed",
+            summary: [{ type: "summary_text", text: secret }],
+          },
+        }),
+        completed(`resp_forged_${streamKind}`),
+      ];
+      const followUp = streamFrom(forgedStream);
+      if (!followUp.body) throw new Error("follow-up stream has no body");
+      const followUpBody = followUp.body;
+      const client = streamResponsesRecallAware(
+        streamKind === "principal"
+          ? streamFrom(forgedStream)
+          : streamFrom([
+              created("resp_forged_principal", "gpt-5.6-terra"),
+              recallCall(0, { query: "forged continuation summary" }),
+              completed("resp_forged_principal"),
+            ]),
+        {
+          validation: "codex",
+          onComplete: (response, successful) => {
+            completions.push({ response, successful });
+          },
+          onRecall: async () => {
+            recalls++;
+            return { anchorText: "anchor", resultText: "memory" };
+          },
+          runFollowUp: async () => {
+            followUps++;
+            return { reader: followUpBody.getReader() };
+          },
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).toContain("response.failed");
+      expect(output).not.toContain(secret);
+      expect(JSON.stringify(completions)).not.toContain(secret);
+      expect(completions.at(-1)?.successful).toBe(false);
+      expect(recalls).toBe(streamKind === "principal" ? 0 : 1);
+      expect(followUps).toBe(streamKind === "principal" ? 0 : 1);
+    },
+  );
+
+  test.each(["principal", "continuation"] as const)(
+    "preserves a completed %s reasoning summary when the terminal omits the whole item",
+    async (streamKind) => {
+      const summary = "whole-item omitted summary";
+      const reasoningId = `rs_whole_item_omitted_${streamKind}`;
+      const responseId = `resp_whole_item_omitted_${streamKind}`;
+      const reasoningStream = [
+        created(responseId, "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: reasoningId, summary: [] },
+        }),
+        ...reasoningSummaryEvents(0, reasoningId, [summary]),
+        completed(responseId),
+      ];
+      const followUp = streamFrom(reasoningStream);
+      if (!followUp.body) throw new Error("follow-up stream has no body");
+      const followUpBody = followUp.body;
+      let completedResponse: GatewayResponse | undefined;
+      let successful: boolean | undefined;
+      let recalls = 0;
+      let followUps = 0;
+      const client = streamResponsesRecallAware(
+        streamKind === "principal"
+          ? streamFrom(reasoningStream)
+          : streamFrom([
+              created("resp_whole_item_principal", "gpt-5.6-terra"),
+              recallCall(0, { query: "whole item omitted summary" }),
+              completed("resp_whole_item_principal"),
+            ]),
+        {
+          validation: "codex",
+          onComplete: (response, didSucceed) => {
+            completedResponse = response;
+            successful = didSucceed;
+          },
+          onRecall: async () => {
+            recalls++;
+            return { anchorText: "anchor", resultText: "memory" };
+          },
+          runFollowUp: async () => {
+            followUps++;
+            return { reader: followUpBody.getReader() };
+          },
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).not.toContain("response.failed");
+      expect(completedResponse?.rawOutputItems).toContainEqual(
+        expect.objectContaining({
+          id: reasoningId,
+          summary: [{ type: "summary_text", text: summary }],
+        }),
+      );
+      expect(successful).toBe(true);
+      expect(recalls).toBe(streamKind === "principal" ? 0 : 1);
+      expect(followUps).toBe(streamKind === "principal" ? 0 : 1);
+    },
+  );
+
+  test.each([
+    {
+      name: "malformed",
+      maxSSEFrames: undefined,
+      addedSummary: reasoningSummaryParts(["tracked malformed summary"]),
+      summaryEvents: [],
+      doneSummary: [{ type: "summary_text", text: 42 }],
+      terminalSummary: [{ type: "summary_text", text: 42 }],
+    },
+    {
+      name: "untracked",
+      maxSSEFrames: undefined,
+      addedSummary: [],
+      summaryEvents: [],
+      doneSummary: [{ type: "summary_text", text: "untracked" }],
+      terminalSummary: [{ type: "summary_text", text: "untracked" }],
+    },
+    {
+      name: "sparse",
+      maxSSEFrames: undefined,
+      addedSummary: [],
+      summaryEvents: reasoningSummaryEvents(0, "rs_invalid_sparse", [
+        "tracked before sparse gap",
+        "tracked sparse gap",
+        "sparse summary sentinel",
+      ]),
+      doneSummary: [
+        { type: "summary_text", text: "tracked before sparse gap" },
+        null,
+        { type: "summary_text", text: "sparse summary sentinel" },
+      ],
+      terminalSummary: undefined,
+    },
+    {
+      name: "gapped",
+      maxSSEFrames: undefined,
+      addedSummary: [],
+      summaryEvents: [
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: "rs_invalid_gapped",
+          summary_index: 1,
+          part: { type: "summary_text", text: "gapped summary sentinel" },
+        }),
+      ],
+      doneSummary: [],
+      terminalSummary: [],
+      rejectedMarker: "gapped summary sentinel",
+    },
+    {
+      name: "over-limit",
+      maxSSEFrames: 16,
+      addedSummary: reasoningSummaryParts(
+        Array.from({ length: 16 }, (_, index) => `bounded summary ${index}`),
+      ),
+      summaryEvents: [
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: "rs_invalid_over-limit",
+          summary_index: 16,
+          part: { type: "summary_text", text: "over-limit summary sentinel" },
+        }),
+      ],
+      doneSummary: [],
+      terminalSummary: [],
+      acceptedMarker: "bounded summary 15",
+      rejectedMarker: "over-limit summary sentinel",
+    },
+  ])("rejects $name Codex done reasoning summaries", async (testCase) => {
+    const responseId = `resp_invalid_${testCase.name}_summary`;
+    const reasoningId = `rs_invalid_${testCase.name}`;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created(responseId, "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: reasoningId,
+            summary: testCase.addedSummary,
+          },
+        }),
+        ...testCase.summaryEvents,
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: reasoningId,
+            status: "completed",
+            summary: testCase.doneSummary,
+          },
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: responseId,
+            model: "gpt-5.6-terra",
+            status: "completed",
+            ...(testCase.terminalSummary === undefined
+              ? {}
+              : {
+                  output: [
+                    {
+                      type: "reasoning",
+                      id: reasoningId,
+                      status: "completed",
+                      summary: testCase.terminalSummary,
+                    },
+                  ],
+                }),
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        ...(testCase.maxSSEFrames === undefined
+          ? {}
+          : { maxSSEFrames: testCase.maxSSEFrames }),
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("response.failed");
+    if (testCase.acceptedMarker) {
+      expect(output).toContain(testCase.acceptedMarker);
+    }
+    if (testCase.rejectedMarker) {
+      expect(output).not.toContain(testCase.rejectedMarker);
+    }
+  });
+
+  test("rejects a non-empty Codex terminal reasoning summary contradiction", async () => {
+    const reasoningItem = {
+      type: "reasoning",
+      id: "rs_terminal_summary_changed",
+      status: "completed",
+      summary: [],
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_summary_changed", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: reasoningItem.id,
+            summary: [],
+          },
+        }),
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          part: { type: "summary_text", text: "" },
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          delta: "streamed summary",
+        }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          text: "streamed summary",
+        }),
+        sseEvent("response.reasoning_summary_part.done", {
+          output_index: 0,
+          item_id: reasoningItem.id,
+          summary_index: 0,
+          part: { type: "summary_text", text: "streamed summary" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: reasoningItem,
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_summary_changed",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                ...reasoningItem,
+                summary: [{ type: "summary_text", text: "changed summary" }],
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    expect(await drain(client)).toContain("response.failed");
   });
 
   test("uses completed reasoning ciphertext in a recall continuation", async () => {
@@ -8286,6 +9022,7 @@ describe("streamResponsesRecallAware", () => {
           output_index: 0,
           item: { type: "reasoning", id: "rs_0", summary: [] },
         }),
+        ...reasoningSummaryEvents(0, "rs_0", ["reasoned"]),
         recallCall(1, { query: "architecture" }),
         sseEvent("response.output_item.done", {
           output_index: 0,
