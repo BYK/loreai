@@ -19,6 +19,74 @@ import { GATEWAY_AUTH_HEADER, log } from "@loreai/core";
 import * as http from "node:http";
 import * as https from "node:https";
 
+export interface EmbeddedGatewayResource {
+  owned: boolean;
+  shutdown: () => Promise<void>;
+}
+
+export interface EmbeddedGatewayLease {
+  release: () => Promise<void>;
+}
+
+/**
+ * Own process-wide resources shared by every OpenCode plugin instance.
+ *
+ * OpenCode creates one plugin instance per workspace, while Lore embeds one
+ * gateway per host process. The last plugin disposer therefore owns teardown;
+ * earlier disposers must leave the shared gateway and fetch interceptor alive.
+ */
+export class EmbeddedGatewayLifecycle {
+  private leases = 0;
+  private gatewayShutdown: (() => Promise<void>) | undefined;
+  private fetchCleanup: (() => void) | undefined;
+  private teardown: Promise<void> | undefined;
+
+  constructor(private readonly onIdle: () => void = () => {}) {}
+
+  async acquire(): Promise<EmbeddedGatewayLease> {
+    if (this.teardown) await this.teardown;
+    this.leases += 1;
+    let released = false;
+
+    return {
+      release: async () => {
+        if (released) return;
+        released = true;
+        this.leases -= 1;
+        if (this.leases !== 0) return;
+
+        const shutdown = this.gatewayShutdown;
+        const cleanup = this.fetchCleanup;
+        this.gatewayShutdown = undefined;
+        this.fetchCleanup = undefined;
+
+        const teardown = (async () => {
+          try {
+            await shutdown?.();
+          } finally {
+            cleanup?.();
+          }
+        })();
+        this.teardown = teardown;
+        this.onIdle();
+        try {
+          await teardown;
+        } finally {
+          if (this.teardown === teardown) this.teardown = undefined;
+        }
+      },
+    };
+  }
+
+  ownGateway(resource: EmbeddedGatewayResource): void {
+    if (resource.owned) this.gatewayShutdown = resource.shutdown;
+  }
+
+  ownFetchInterceptor(cleanup: () => void): void {
+    this.fetchCleanup = cleanup;
+  }
+}
+
 function isLoopbackUrl(value: string): boolean {
   try {
     const hostname = new URL(value).hostname

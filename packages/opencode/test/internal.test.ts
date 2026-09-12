@@ -2,10 +2,88 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { PluginInput } from "@opencode-ai/plugin";
 import { log } from "@loreai/core";
 import {
+  EmbeddedGatewayLifecycle,
   gatewayAccessHeadersForRemote,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
 } from "../src/internal";
+
+describe("embedded gateway lifecycle", () => {
+  test("the final plugin lease shuts down shared process resources once", async () => {
+    const shutdown = vi.fn(async () => {});
+    const cleanup = vi.fn();
+    const onIdle = vi.fn();
+    const lifecycle = new EmbeddedGatewayLifecycle(onIdle);
+    const first = await lifecycle.acquire();
+    const second = await lifecycle.acquire();
+    lifecycle.ownGateway({ owned: true, shutdown });
+    lifecycle.ownFetchInterceptor(cleanup);
+
+    await first.release();
+    expect(shutdown).not.toHaveBeenCalled();
+    expect(cleanup).not.toHaveBeenCalled();
+
+    await second.release();
+    await second.release();
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(onIdle).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not stop a gateway owned by another process", async () => {
+    const shutdown = vi.fn(async () => {});
+    const lifecycle = new EmbeddedGatewayLifecycle();
+    const lease = await lifecycle.acquire();
+    lifecycle.ownGateway({ owned: false, shutdown });
+
+    await lease.release();
+    expect(shutdown).not.toHaveBeenCalled();
+  });
+
+  test("a new lease waits until the previous teardown settles", async () => {
+    let finishShutdown: (() => void) | undefined;
+    const lifecycle = new EmbeddedGatewayLifecycle();
+    const first = await lifecycle.acquire();
+    lifecycle.ownGateway({
+      owned: true,
+      shutdown: () =>
+        new Promise<void>((resolve) => {
+          finishShutdown = resolve;
+        }),
+    });
+
+    const release = first.release();
+    let acquired = false;
+    const next = lifecycle.acquire().then((lease) => {
+      acquired = true;
+      return lease;
+    });
+    await Promise.resolve();
+    expect(acquired).toBe(false);
+
+    finishShutdown?.();
+    await release;
+    const second = await next;
+    expect(acquired).toBe(true);
+    await second.release();
+  });
+
+  test("restores the fetch interceptor even when gateway shutdown fails", async () => {
+    const cleanup = vi.fn();
+    const lifecycle = new EmbeddedGatewayLifecycle();
+    const lease = await lifecycle.acquire();
+    lifecycle.ownGateway({
+      owned: true,
+      shutdown: async () => {
+        throw new Error("shutdown failed");
+      },
+    });
+    lifecycle.ownFetchInterceptor(cleanup);
+
+    await expect(lease.release()).rejects.toThrow("shutdown failed");
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("remote gateway access headers", () => {
   const token = "opencode-remote-gateway-token-at-least-32";

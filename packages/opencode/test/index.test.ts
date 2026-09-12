@@ -47,7 +47,12 @@ async function initPlugin() {
   return {
     hooks,
     tmpDir,
-    cleanup: () => rmSync(tmpDir, { recursive: true, force: true }),
+    cleanup: async () => {
+      await (
+        hooks as typeof hooks & { dispose?: () => Promise<void> }
+      ).dispose?.();
+      rmSync(tmpDir, { recursive: true, force: true });
+    },
   };
 }
 
@@ -60,7 +65,7 @@ describe("LorePlugin config hook", () => {
 
       expect(cfg.compaction).toEqual({ auto: false, prune: false });
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
@@ -102,7 +107,7 @@ describe("LorePlugin config hook", () => {
         expect(agents[name].hidden).toBe(true);
       }
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
@@ -121,7 +126,7 @@ describe("LorePlugin config hook", () => {
       });
       expect(agents["lore-distill"]).toBeDefined();
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
@@ -250,12 +255,23 @@ describe("LorePlugin config hook", () => {
 });
 
 describe("LorePlugin hooks", () => {
+  test("exposes an awaited disposal hook for host shutdown", async () => {
+    const { hooks, cleanup } = await initPlugin();
+    try {
+      expect(
+        (hooks as typeof hooks & { dispose?: () => Promise<void> }).dispose,
+      ).toBeTypeOf("function");
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("returns an empty tool map", async () => {
     const { hooks, cleanup } = await initPlugin();
     try {
       expect(hooks.tool).toEqual({});
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 
@@ -270,7 +286,7 @@ describe("LorePlugin hooks", () => {
       expect(hooks["experimental.chat.messages.transform"]).toBeUndefined();
       expect(hooks["experimental.session.compacting"]).toBeUndefined();
     } finally {
-      cleanup();
+      await cleanup();
     }
   });
 });
