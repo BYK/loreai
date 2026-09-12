@@ -324,7 +324,7 @@
 </tr>
 <tr>
 <td><code dir="auto">LORE_EMBED_POOL_SIZE</code></td>
-<td>Resolve the configured embedding-pool ceiling: <code dir="auto">LORE_EMBED_POOL_SIZE</code> wins (the escape hatch — <code dir="auto">=1</code> forces today’s single worker), then <code dir="auto">search.embeddings.embedPoolSize</code>, else <code dir="auto">undefined</code> (memory-gated default). Read per-construction (not cached) so config reloads / env changes take effect on the next provider. Invalid values are ignored (fall through).</td>
+<td>Number of local ONNX embedding worker threads (each loads its own ~137MB model). Distinct from workerPoolSize (the cheap DB-only vector pool) because an embedding worker’s memory footprint is far larger. Omit to let lore size the pool from available memory (1 on constrained hosts, up to 2 when there’s headroom). Override with LORE_EMBED_POOL_SIZE.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_NO_DB_TRACING</code></td>
