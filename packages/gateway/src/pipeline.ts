@@ -389,6 +389,7 @@ import {
   isUsableRecallContinuation,
   hasOtherToolUse,
   clientHasRecallTool,
+  withParallelToolUseDisabled,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
@@ -17467,6 +17468,27 @@ async function handleConversationTurn(
       ...modifiedReq.extras,
       parallel_tool_calls: false,
     };
+  }
+  // Anthropic has no `parallel_tool_calls`; its equivalent lives on
+  // `tool_choice`. Without it a turn that emits two recall tool_use blocks
+  // reaches the recall loop's `parallel_recall` guard, which throws — and on
+  // this wire that error escapes to the relay's catch and errors the client
+  // stream, so the turn is lost instead of degraded. Ask for at most one tool
+  // use per turn while the recall tool is in play, mirroring the guard above.
+  if (
+    (requestUpstreamRoute.effectiveProtocol === "anthropic" ||
+      requestUpstreamRoute.effectiveProtocol === "vertex") &&
+    clientHasRecallTool(modifiedReq.tools)
+  ) {
+    const toolChoice = withParallelToolUseDisabled(
+      modifiedReq.metadata.tool_choice,
+    );
+    if (toolChoice) {
+      modifiedReq.metadata = {
+        ...modifiedReq.metadata,
+        tool_choice: toolChoice,
+      };
+    }
   }
 
   // --- 8c. Synthetic project-resolution: inject probe if eligible ---
