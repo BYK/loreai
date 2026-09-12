@@ -293,7 +293,6 @@ import {
   evictIdleSessions,
 } from "./idle";
 import { flushPendingImport } from "./pending-import";
-import { makeTemporalBackfillGate } from "./backfill-gate";
 import { buildSessionMetadata } from "./session-metadata";
 import { hasWorkerSessionAuth } from "./worker-auth";
 import {
@@ -1235,27 +1234,6 @@ const subagentParentPendingLogged = new Set<string>();
 /** Read-only access to live session states (for dashboard rendering). */
 export function getActiveSessions(): ReadonlyMap<string, SessionState> {
   return sessions;
-}
-
-/**
- * Build the idle-gate handed to the temporal re-chunk backfill, wired to live
- * gateway state: park the walk while the background circuit breaker is tripped
- * OR the shared embedding worker is serving a live recall lookup. Exported so
- * the wiring (not just the pure {@link makeTemporalBackfillGate} policy) is
- * unit-testable.
- */
-export function buildTemporalBackfillGate(): () => boolean {
-  return makeTemporalBackfillGate({
-    // Global breaker: a coarse "system is degraded" backstop. It chiefly tracks
-    // remote LLM failures, so it just avoids piling work on during an outage.
-    isPaused: () => isBackgroundPaused(),
-    // The real throttle: yield the shared embedding worker to latency-sensitive
-    // recall. Session activity was the old signal, but "a session pinged us
-    // recently" says nothing about the embed worker's spare capacity right now —
-    // on a busy multi-session host it kept the walk parked indefinitely. An
-    // empty recall-embed queue is the direct, live measure of that capacity.
-    isEmbedBusy: () => embedding.recallEmbedsInFlight() > 0,
-  });
 }
 
 /**
@@ -4250,7 +4228,7 @@ async function initIfNeeded(
     // embed is in flight, resume the instant the worker drains.
     const startupBackfill = spanStartupBackfill(() => {
       const backfill = embedding.runStartupBackfill({
-        shouldPause: buildTemporalBackfillGate(),
+        shouldPause: () => isBackgroundPaused(),
       });
       // When embeddings are available, runStartupBackfill synchronously
       // reconciles config and attempts vec0 cutover before its first await.

@@ -2,6 +2,7 @@ import { afterEach, describe, test, expect, beforeEach, vi } from "vitest";
 import { existsSync } from "node:fs";
 import { db, ensureProject, withTransaction } from "../src/db";
 import { LOCAL_MODEL_PATH_ENV } from "../src/embedding-vendor";
+import { EmbeddingProviderError } from "../src/embedding/contract";
 import {
   cosineSimilarity,
   l2Normalize,
@@ -19,6 +20,7 @@ import {
   _setRecallEmbedsInFlightForTest,
   runStartupBackfill,
   LocalProviderUnavailableError,
+  EmbeddingRequestAbortedError,
   pickRemoteFallback,
   _resetLocalProviderProbe,
   _markLocalProviderUnavailable,
@@ -232,9 +234,72 @@ describe("recallEmbedsInFlight (temporal backfill idle signal)", () => {
       const p = embed(["boom"], "query");
       expect(recallEmbedsInFlight()).toBe(1);
       reject(new Error("provider blew up"));
-      await expect(p).rejects.toThrow("provider blew up");
+      await expect(p).rejects.toBeInstanceOf(EmbeddingProviderError);
       // A leaked "busy" here would wedge the backfill forever.
       expect(recallEmbedsInFlight()).toBe(0);
+    } finally {
+      _restoreProvider(saved);
+    }
+  });
+
+  test("sanitizes forged and hostile provider failures", async () => {
+    const saved = _saveAndClearProvider();
+    const marker = "PRIVATE_PROVIDER_DIAGNOSTIC";
+    const forged = new EmbeddingProviderError(marker);
+    Object.defineProperty(forged, "cause", {
+      enumerable: true,
+      value: marker,
+    });
+    const hostile = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new Error(marker);
+        },
+      },
+    );
+    try {
+      for (const failure of [forged, hostile]) {
+        _restoreProvider({
+          provider: {
+            maxBatchSize: 1,
+            async embed() {
+              throw failure;
+            },
+          },
+        });
+        const error = await embed(["query"], "query").catch(
+          (reason: unknown) => reason,
+        );
+        expect(error).toBeInstanceOf(EmbeddingProviderError);
+        expect(String(error)).not.toContain(marker);
+        expect(Object.keys(error as object)).toEqual([]);
+        expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+        expect(error).not.toBe(failure);
+      }
+    } finally {
+      _restoreProvider(saved);
+    }
+  });
+
+  test("normalizes custom-provider cancellation", async () => {
+    const saved = _saveAndClearProvider();
+    const abort = new AbortController();
+    abort.abort(new Error("PRIVATE_ABORT_REASON"));
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 1,
+          async embed() {
+            throw abort.signal.reason;
+          },
+        },
+      });
+      const error = await embed(["query"], "query", abort.signal).catch(
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(EmbeddingRequestAbortedError);
+      expect(JSON.stringify(error)).not.toContain("PRIVATE_ABORT_REASON");
     } finally {
       _restoreProvider(saved);
     }
@@ -471,6 +536,11 @@ describe("pickRemoteFallback", () => {
     expect(pickRemoteFallback()).toBeNull();
   });
 
+  test("rejects API keys containing whitespace", () => {
+    process.env.OPENAI_API_KEY = "sk-test-key-with\tinternal-whitespace";
+    expect(pickRemoteFallback()).toBeNull();
+  });
+
   test("Voyage failures expose status but never the response body or statusText", async () => {
     const bodyMarker = "PRIVATE_VOYAGE_RESPONSE_BODY_MARKER";
     const reasonMarker = "PRIVATE_VOYAGE_REASON_MARKER";
@@ -487,6 +557,10 @@ describe("pickRemoteFallback", () => {
     if (!fallback) throw new Error("expected Voyage fallback");
 
     const promise = fallback.provider.embed(["query"], "query");
+    const error = await promise.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(EmbeddingProviderError);
+    expect(Object.keys(error as object)).toEqual([]);
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
     await expect(promise).rejects.toThrow("503");
     await expect(promise).rejects.not.toThrow(bodyMarker);
     await expect(promise).rejects.not.toThrow(reasonMarker);
@@ -530,6 +604,24 @@ describe("pickRemoteFallback", () => {
     await expect(promise).rejects.not.toThrow(userinfoMarker);
     await expect(promise).rejects.not.toThrow(queryMarker);
     await expect(promise).rejects.not.toThrow(fragmentMarker);
+  });
+
+  test("OpenAI failures use the cause-free provider boundary", async () => {
+    const marker = "PRIVATE_OPENAI_FAILURE";
+    process.env.OPENAI_API_KEY = "sk-test-key-that-is-long-enough";
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error(marker);
+    });
+    const fallback = pickRemoteFallback();
+    if (!fallback) throw new Error("expected OpenAI fallback");
+
+    const error = await fallback.provider
+      .embed(["query"], "query")
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(EmbeddingProviderError);
+    expect(String(error)).not.toContain(marker);
+    expect(Object.keys(error as object)).toEqual([]);
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
   });
 });
 

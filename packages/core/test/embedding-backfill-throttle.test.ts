@@ -9,6 +9,7 @@ import { enqueueTemporalEmbedding } from "../src/temporal-embedding-admission";
 import {
   backfillTemporalEmbeddings,
   resetTemporalRechunkProgress,
+  _setRecallEmbedsInFlightForTest,
   _restoreProvider,
   _saveAndClearProvider,
 } from "../src/embedding";
@@ -51,9 +52,22 @@ describe("temporal re-chunk backfill CPU throttle", () => {
   });
 
   afterEach(() => {
+    _setRecallEmbedsInFlightForTest(0);
     vi.restoreAllMocks();
     _restoreProvider(providerToken);
     delete process.env.LORE_BACKFILL_CPU_DUTY;
+  });
+
+  it("parks while a recall embed occupies the shared pool", async () => {
+    insertMsg("recall-busy", pid);
+    _setRecallEmbedsInFlightForTest(1);
+
+    const backfill = backfillTemporalEmbeddings();
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(getKV("lore:temporal_rechunk.cursor")).toBe("");
+
+    _setRecallEmbedsInFlightForTest(0);
+    await expect(backfill).resolves.toBe(1);
   });
 
   it.each([false, true])(

@@ -35,6 +35,7 @@ import { Worker } from "node:worker_threads";
 import { config } from "./config";
 import { dbPath } from "./db";
 import * as log from "./log";
+import { OwnedRetirements } from "./owned-retirements";
 import type { ReadJobSpec } from "./read-job";
 import type {
   DistillationVectorHit,
@@ -133,11 +134,7 @@ let shuttingDown = false;
 /** Shared confirmation for the one process-generation pool teardown. */
 let vectorPoolShutdownPromise: Promise<void> | null = null;
 /** Runtime-retired generations remain owned until their exits are confirmed. */
-let retiredVectorWorkerShutdowns = new Set<Promise<void>>();
-/** Prevent duplicate terminate/shutdown attempts for the same worker object. */
-let ownedRetiredVectorWorkers = new WeakSet<object>();
-/** A rejected termination remains fatal for this process generation. */
-let retiredVectorWorkerShutdownErrors: unknown[] = [];
+let retiredVectorWorkers = new OwnedRetirements<ShutdownableVectorWorker>();
 
 /** Test seam: when set, the pool builds workers with this factory instead of
  *  spawning a real `node:worker_threads` Worker. Never set in production. */
@@ -253,28 +250,10 @@ function trackVectorWorkerShutdown(
   worker: ShutdownableVectorWorker,
   shutdown: () => Promise<void>,
 ): void {
-  if (ownedRetiredVectorWorkers.has(worker)) return;
-  ownedRetiredVectorWorkers.add(worker);
-  // Capture the generation containers so the test-only reset can replace them
-  // without a late completion mutating the next isolated test generation.
-  const ownedShutdowns = retiredVectorWorkerShutdowns;
-  const ownedErrors = retiredVectorWorkerShutdownErrors;
-  let operation: Promise<void>;
-  try {
-    operation = shutdown();
-  } catch (error) {
-    operation = Promise.reject(error);
-  }
-  let tracked: Promise<void>;
-  tracked = operation
-    .then(
-      () => {},
-      (error: unknown) => {
-        ownedErrors.push(error);
-      },
-    )
-    .finally(() => ownedShutdowns.delete(tracked));
-  ownedShutdowns.add(tracked);
+  // Capture the generation registry so the test-only reset can replace the
+  // module-level owner without a late completion mutating the next test.
+  const generation = retiredVectorWorkers;
+  void generation.retireOnce(worker, shutdown);
 }
 
 function terminateRetiredVectorWorker(worker: ShutdownableVectorWorker): void {
@@ -284,36 +263,12 @@ function terminateRetiredVectorWorker(worker: ShutdownableVectorWorker): void {
 }
 
 async function settleRetiredVectorWorkers(deadlineMs: number): Promise<void> {
-  const deadlineAt = Date.now() + Math.max(0, deadlineMs);
-  while (retiredVectorWorkerShutdowns.size > 0) {
-    const remainingMs = Math.max(0, deadlineAt - Date.now());
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        Promise.all(retiredVectorWorkerShutdowns),
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  "retired vector worker did not settle before shutdown deadline",
-                ),
-              ),
-            remainingMs,
-          );
-          timer.unref?.();
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-  if (retiredVectorWorkerShutdownErrors.length > 0) {
-    throw new AggregateError(
-      retiredVectorWorkerShutdownErrors,
-      "vector worker termination was not confirmed",
-    );
-  }
+  await retiredVectorWorkers.settle({
+    timeoutMs: deadlineMs,
+    timeoutMessage:
+      "retired vector worker did not settle before shutdown deadline",
+    failureMessage: "vector worker termination was not confirmed",
+  });
 }
 
 /**
@@ -1024,9 +979,7 @@ function waitForOneWorkerExit(
 export function _resetVectorPoolForTest(): void {
   shutdownVectorPool();
   vectorPoolShutdownPromise = null;
-  retiredVectorWorkerShutdowns = new Set();
-  ownedRetiredVectorWorkers = new WeakSet();
-  retiredVectorWorkerShutdownErrors = [];
+  retiredVectorWorkers = new OwnedRetirements<ShutdownableVectorWorker>();
   poolBroken = false;
   nextRequestId = 0;
   structuralFailures = 0;
