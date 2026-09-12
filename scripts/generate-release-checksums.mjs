@@ -27,12 +27,17 @@ async function sha256(path) {
   return hash.digest("hex");
 }
 
+const protocolPath = join(compressedDirectory, "install-protocol-v1");
+await writeFile(protocolPath, "1\n", { mode: 0o644 });
+
 const files = TARGETS.flatMap((target) => [
   { name: target, path: join(rawDirectory, target) },
   { name: `${target}.gz`, path: join(compressedDirectory, `${target}.gz`) },
-]).sort((left, right) =>
-  left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
-);
+])
+  .concat([{ name: "install-protocol-v1", path: protocolPath }])
+  .sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+  );
 
 const lines = [];
 for (const file of files) {

@@ -378,7 +378,7 @@ export function assertNoSymlinkPathComponents(
   let current = root;
   for (const part of absolute
     .slice(root.length)
-    .split(/[\\/]+/)
+    .split(process.platform === "win32" ? /[\\/]+/ : /\/+/)
     .filter(Boolean)) {
     current = join(current, part);
     let stats: ReturnType<typeof lstatBigInt>;
@@ -405,7 +405,7 @@ export function ensureTrustedDirectory(directory: string): void {
   let current = root;
   for (const part of absolute
     .slice(root.length)
-    .split(/[\\/]+/)
+    .split(process.platform === "win32" ? /[\\/]+/ : /\/+/)
     .filter(Boolean)) {
     const parent = current;
     current = join(current, part);
@@ -447,9 +447,9 @@ export function trustedFileExists(file: string): boolean {
  */
 export function readTrustedTextFile(
   file: string,
-  options: { allowMissing?: boolean } = {},
+  options: { allowMissing?: boolean; followSymlinks?: boolean } = {},
 ): TrustedTextFile | null {
-  file = trustedRealPath(file);
+  if (options.followSymlinks !== false) file = trustedRealPath(file);
   const parent = inspectTrustedDirectory(dirname(file), options.allowMissing);
   if (!parent) return null;
   const before = inspectTrustedFile(file);
@@ -517,9 +517,10 @@ export function atomicWriteTrustedFile(
     expectedIdentity?: TrustedFileIdentity | null;
     mode?: number;
     preserveDisplaced?: (artifact: TrustedFileArtifact) => void;
+    followSymlinks?: boolean;
   } = {},
 ): TrustedFileIdentity {
-  file = trustedRealPath(file);
+  if (options.followSymlinks !== false) file = trustedRealPath(file);
   const parent = inspectTrustedDirectory(dirname(file));
   if (!parent) throw unsafePath(file, "parent directory does not exist");
   const current = inspectTrustedFile(file);
@@ -671,8 +672,9 @@ export function removeTrustedFile(
   file: string,
   expectedIdentity?: TrustedFileIdentity | null,
   preserveRemoved?: (artifact: TrustedFileArtifact) => void,
+  options: { followSymlinks?: boolean } = {},
 ): boolean {
-  file = trustedRealPath(file);
+  if (options.followSymlinks !== false) file = trustedRealPath(file);
   const parent = inspectTrustedDirectory(dirname(file), true);
   if (!parent) return false;
   const current = inspectTrustedFile(file);
