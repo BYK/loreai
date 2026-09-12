@@ -11788,7 +11788,14 @@ export function streamResponsesRecallAware(
                     created_at: Math.floor(Date.now() / 1000),
                     model: state.model,
                     status: "failed",
-                    output: buildOutputItems(hiddenOutputIndices),
+                    // A blocked recall arrived below a visible output index.
+                    // The earlier lifecycle frames cannot be compacted after
+                    // delivery, so omit the terminal snapshot rather than
+                    // contradicting their public coordinates.
+                    output:
+                      blockedRecallIndices.size > 0
+                        ? []
+                        : buildOutputItems(hiddenOutputIndices),
                     usage: null,
                     error: {
                       type: "server_error",

@@ -340,6 +340,10 @@ describe("streamResponsesRecallAware", () => {
     expect(output).toContain(PUBLIC_GATEWAY_ERROR);
     expect(output).not.toContain("private query");
     expect(output).not.toContain("private result");
+    expect(
+      responseEvents(output).find(({ event }) => event === "response.failed")
+        ?.data.response,
+    ).toMatchObject({ status: "failed", output: [] });
   });
 
   test("finalizes when the client cancels immediately after a no-recall terminal", async () => {
