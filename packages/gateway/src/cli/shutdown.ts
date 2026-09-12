@@ -6,8 +6,8 @@
  * embedding-worker exit) can, in pathological cases, take a long time — which
  * is why Ctrl+C used to appear to "hang for minutes" with no way to break out.
  *
- * These helpers guarantee that:
- *   1. shutdown can never block the process longer than a hard deadline, and
+ * While the main event loop remains schedulable, these helpers ensure that:
+ *   1. asynchronous teardown does not outlive one process deadline, and
  *   2. a *second* child-owning SIGINT/SIGTERM immediately escalates the child
  *      while retaining the hard wrapper deadline.
  */
@@ -47,10 +47,14 @@ export interface ShutdownResult {
 }
 
 /**
- * Run `shutdown()` but never block longer than `deadlineMs`. A shutdown error
- * is logged and swallowed (so the caller still proceeds to exit); a timeout
- * resolves the race and is reported via `timedOut: true` so the caller can
- * pick the right exit path. Always resolves — never rejects.
+ * Run `shutdown()` with one event-loop deadline. A shutdown error is logged and
+ * swallowed (so the caller still proceeds to exit); a timeout resolves the
+ * race and is reported via `timedOut: true` so the caller can pick the right
+ * exit path. Always resolves — never rejects.
+ *
+ * Like every Node timer and signal callback, the deadline requires a
+ * schedulable main event loop. Long-running synchronous work must live in a
+ * worker/process; this helper bounds asynchronous teardown, not blocked JS.
  */
 export async function runShutdownWithDeadline(
   shutdown: () => Promise<void>,
@@ -95,6 +99,15 @@ export interface ProcessShutdownOptions {
   forcedExit?: (code: number) => never;
 }
 
+/** One absolute budget shared by every stage of process teardown. */
+export interface ProcessShutdownContext {
+  deadlineAt: number;
+}
+
+export type ProcessTeardown = (
+  context?: ProcessShutdownContext,
+) => Promise<void>;
+
 export interface OwnedChildProcess {
   kill: (signal: NodeJS.Signals) => boolean;
   exitCode?: number | null;
@@ -114,6 +127,23 @@ export interface ProcessShutdownController {
 }
 
 /**
+ * Signal ownership installed before a CLI command starts acquiring resources.
+ *
+ * `attachShutdown()` opens the startup gate and supplies the teardown closure
+ * once startup has either completed or unwound. A signal received before that
+ * point starts the process deadline immediately (once the signal callback is
+ * scheduled), then waits at the gate rather than falling through to Node's
+ * default signal disposition.
+ */
+export interface ProcessSignalLifecycle {
+  processShutdown: ProcessShutdownController;
+  attachShutdown: (shutdown: ProcessTeardown) => void;
+  attachChild: (child: OwnedChildProcess) => void;
+  isShutdownStarted: () => boolean;
+  dispose: () => void;
+}
+
+/**
  * Create the one-shot shutdown controller used at process command/control
  * boundaries. The whole teardown gets one deadline; a timeout or rejection
  * force-exits nonzero, while a completed teardown exits normally. Repeated
@@ -123,7 +153,7 @@ export interface ProcessShutdownController {
  * process boundary, not to in-process plugin callers.
  */
 export function makeProcessShutdownController(
-  shutdown: () => Promise<void>,
+  shutdown: ProcessTeardown,
   options: ProcessShutdownOptions = {},
 ): ProcessShutdownController {
   const exitNormally = options.safeExit ?? safeExit;
@@ -209,13 +239,16 @@ export function makeProcessShutdownController(
     if (childSignal && !childSignalSent) requestedChildSignal = childSignal;
     shutdownPromise ??= (async (): Promise<never> => {
       shutdownStartedAt = Date.now();
+      const context: ProcessShutdownContext = {
+        deadlineAt: shutdownStartedAt + deadlineMs,
+      };
       // Register escalation before the outer deadline. Even if both timers are
       // observed in one delayed timers turn, SIGKILL is therefore dispatched
       // first; the parsed deadline also keeps this timer strictly earlier.
       signalChild();
       const result = await runShutdownWithDeadline(async () => {
         const outcomes = await Promise.allSettled([
-          Promise.resolve().then(shutdown),
+          Promise.resolve().then(() => shutdown(context)),
           childExit,
         ]);
         const failure = outcomes.find(
@@ -274,6 +307,80 @@ export function makeProcessShutdownController(
   };
 
   return controller;
+}
+
+/**
+ * Install SIGINT/SIGTERM ownership synchronously, before gateway startup.
+ *
+ * This closes the publication race where the listener and discovery record
+ * were externally visible before the old late-installed handlers existed. It
+ * also starts the one shared shutdown deadline at signal receipt, including
+ * while asynchronous startup is still in progress.
+ */
+export function installProcessSignalLifecycle(
+  options: ProcessShutdownOptions = {},
+): ProcessSignalLifecycle {
+  let attached = false;
+  let resolveShutdown!: (shutdown: ProcessTeardown) => void;
+  const shutdownReady = new Promise<ProcessTeardown>((resolve) => {
+    resolveShutdown = resolve;
+  });
+  const deferredShutdown = async (
+    context?: ProcessShutdownContext,
+  ): Promise<void> => {
+    const shutdown = await shutdownReady;
+    await shutdown(context);
+  };
+  const processShutdown = makeProcessShutdownController(
+    deferredShutdown,
+    options,
+  );
+  let childAttached = false;
+  let signalCount = 0;
+
+  const handle = (signal: NodeJS.Signals): void => {
+    signalCount++;
+    const code = signalExitCode(signal);
+    if (signalCount >= 2) {
+      if (childAttached) {
+        console.error(
+          "[lore] Received second interrupt — force-stopping child.",
+        );
+        void processShutdown.killChildAndWait(code);
+      } else {
+        console.error("[lore] Received second interrupt — forcing exit.");
+        (options.forcedExit ?? forcedExit)(code);
+      }
+      return;
+    }
+    void processShutdown(code, childAttached ? signal : undefined);
+  };
+  const onSigint = (): void => handle("SIGINT");
+  const onSigterm = (): void => handle("SIGTERM");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+
+  return {
+    processShutdown,
+    attachShutdown(shutdown): void {
+      if (attached)
+        throw new Error("Process shutdown lifecycle is already attached");
+      attached = true;
+      resolveShutdown(shutdown);
+    },
+    attachChild(child): void {
+      if (childAttached) {
+        throw new Error("Process shutdown lifecycle already owns a child");
+      }
+      processShutdown.attachChild(child);
+      childAttached = true;
+    },
+    isShutdownStarted: processShutdown.isShutdownStarted,
+    dispose(): void {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+    },
+  };
 }
 
 /**

@@ -64,7 +64,7 @@ async function mockCoreShutdown(): Promise<{
     "settleTemporalEmbeddingScheduler",
   ).mockResolvedValue(true);
   vi.spyOn(embedding, "settleDocumentEmbeds").mockResolvedValue(undefined);
-  vi.spyOn(embedding, "resetProvider").mockResolvedValue(undefined);
+  vi.spyOn(embedding, "shutdownProvider").mockResolvedValue(undefined);
   return { core };
 }
 
@@ -126,7 +126,7 @@ describe("startGateway shutdown — strict order (#1599)", () => {
         order.push("drain");
       },
     );
-    vi.spyOn(embedding, "resetProvider").mockImplementation(async () => {
+    vi.spyOn(embedding, "shutdownProvider").mockImplementation(async () => {
       order.push("reset");
     });
     vi.spyOn(core, "shutdownVectorPoolAsync").mockImplementation(
@@ -150,14 +150,17 @@ describe("startGateway shutdown — strict order (#1599)", () => {
 
     // Strict order: the writer's WAL TRUNCATE in core close() REQUIRES no
     // reader WAL read-marks, so vector-pool shutdown MUST run before close.
-    // Likewise the embedding worker must be gone before vector-pool shutdown
-    // so an in-flight embedding can't keep the reader pool alive.
+    // Likewise the embedding worker must be gone before vector-pool shutdown.
+    // Producers are then checked a second time so no DB continuation can race
+    // the writer close after its worker request is rejected.
     expect(order).toEqual([
       "scheduler-stop",
       "scheduler-settle",
       "drain",
       "reset",
       "pool",
+      "scheduler-settle",
+      "drain",
       "close",
     ]);
   });
@@ -216,6 +219,57 @@ describe("startGateway shutdown — vector-pool variants (#1599)", () => {
     const handle = await startGateway({ port: 0, local: true, quiet: true });
     await expect(handle.shutdown()).resolves.toBeUndefined();
   });
+
+  it("does not close the writer when reader-worker termination is unconfirmed", async () => {
+    const { core } = await mockCoreShutdown();
+    vi.mocked(core.shutdownVectorPoolAsync).mockRejectedValue(
+      new Error("vector worker termination was not confirmed"),
+    );
+    const close = vi.spyOn(core, "close").mockImplementation(() => {});
+
+    db();
+    const { startGateway } = await import("../src/cli/start");
+    const handle = await startGateway({ port: 0, local: true, quiet: true });
+
+    await expect(handle.shutdown()).rejects.toThrow(
+      "vector worker termination was not confirmed",
+    );
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("does not close the writer when the temporal producer remains active", async () => {
+    const { core } = await mockCoreShutdown();
+    vi.mocked(temporalEmbeddingQueue.settleTemporalEmbeddingScheduler)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const close = vi.spyOn(core, "close").mockImplementation(() => {});
+
+    db();
+    const { startGateway } = await import("../src/cli/start");
+    const handle = await startGateway({ port: 0, local: true, quiet: true });
+
+    await expect(handle.shutdown()).rejects.toThrow(
+      "temporal embedding scheduler did not settle",
+    );
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("does not close the writer when final document quiescence fails", async () => {
+    const { core } = await mockCoreShutdown();
+    vi.mocked(embedding.settleDocumentEmbeds)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("document embeds still active"));
+    const close = vi.spyOn(core, "close").mockImplementation(() => {});
+
+    db();
+    const { startGateway } = await import("../src/cli/start");
+    const handle = await startGateway({ port: 0, local: true, quiet: true });
+
+    await expect(handle.shutdown()).rejects.toThrow(
+      "document embeds still active",
+    );
+    expect(close).not.toHaveBeenCalled();
+  });
 });
 
 describe("startGateway shutdown — close() call invariants (#1599)", () => {
@@ -267,10 +321,10 @@ describe("startGateway shutdown — close() call invariants (#1599)", () => {
     expect(() => closeDb()).not.toThrow();
   });
 
-  it("a close failure does not block process exit (best-effort)", async () => {
-    // The gateway's shutdown closure wraps closeDb() in try/catch — a busy
-    // reader / failed checkpoint must never propagate and block the forced-
-    // exit path. Verify by making close() throw.
+  it("reports a writer-close failure so the process boundary force-exits", async () => {
+    // A failed writer close means graceful teardown was not confirmed. Surface
+    // it so the process controller retains discovery evidence and takes its
+    // forced-exit path instead of reporting a clean shutdown.
     const { core } = await mockCoreShutdown();
     vi.spyOn(core, "close").mockImplementation(() => {
       throw new Error("checkpoint busy");
@@ -279,8 +333,7 @@ describe("startGateway shutdown — close() call invariants (#1599)", () => {
     db();
     const { startGateway } = await import("../src/cli/start");
     const handle = await startGateway({ port: 0, local: true, quiet: true });
-    // Must not reject — the gateway catches the close error.
-    await expect(handle.shutdown()).resolves.toBeUndefined();
+    await expect(handle.shutdown()).rejects.toThrow("checkpoint busy");
   });
 });
 

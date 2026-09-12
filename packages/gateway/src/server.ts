@@ -749,6 +749,14 @@ async function handleOpenAICodexResponses(
 
 const responseCompletionCallbacks = new WeakMap<Response, () => void>();
 
+// Socket drain is an inner stage of the process-wide shutdown. It must expire
+// before the outer deadline so destroying a stalled/partial connection still
+// leaves time to terminate workers and close SQLite cleanly.
+const SERVER_DRAIN_DEADLINE_MS = Math.max(
+  1,
+  Math.floor(SHUTDOWN_DEADLINE_MS / 2),
+);
+
 export async function startServer(
   config: GatewayConfig,
   options: {
@@ -763,16 +771,18 @@ export async function startServer(
     peerAddressForRequest?: (request: IncomingMessage) => string | undefined;
   } = {},
 ): Promise<{
-  stop: () => Promise<void>;
+  stop: (deadlineMs?: number) => Promise<void>;
   port: number;
   hosts: string[];
   /** Resolves when all bound servers are listening. */
   ready: Promise<void>;
 }> {
-  const closeBoundServer =
-    options.closeServer ??
-    ((server: Server) =>
-      closeServer(server, options.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS));
+  const closeBoundServer = (server: Server, deadlineMs?: number) =>
+    options.closeServer?.(server) ??
+    closeServer(
+      server,
+      options.shutdownDeadlineMs ?? deadlineMs ?? SERVER_DRAIN_DEADLINE_MS,
+    );
   // Defensive defaults for public API consumers who may pass incomplete config.
   // loadConfig() always provides these, but startServer is a public export.
   config = config ?? ({} as GatewayConfig);
@@ -1278,7 +1288,7 @@ export async function startServer(
     // A later host failed to bind (e.g. EADDRINUSE) after earlier hosts
     // already bound — close the successfully-bound servers so we don't leak
     // file descriptors, then re-throw for startGateway() to handle.
-    await Promise.all(servers.map(closeBoundServer));
+    await Promise.all(servers.map((server) => closeBoundServer(server)));
     throw e;
   }
 
@@ -1297,8 +1307,10 @@ export async function startServer(
 
   let stopPromise: Promise<void> | undefined;
   const result = {
-    stop: (): Promise<void> => {
-      stopPromise ??= Promise.all(servers.map(closeBoundServer)).then(() => {});
+    stop: (deadlineMs?: number): Promise<void> => {
+      stopPromise ??= Promise.all(
+        servers.map((server) => closeBoundServer(server, deadlineMs)),
+      ).then(() => {});
       return stopPromise;
     },
     port: resolvedPort,

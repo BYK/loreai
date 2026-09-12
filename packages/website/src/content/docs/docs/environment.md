@@ -87,7 +87,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
-| `LORE_SHUTDOWN_TIMEOUT_MS` | Bound for the bounded vector-pool shutdown on graceful shutdown (#1599). The pool teardown must wait for every worker's SQLite reader to close before the writer can TRUNCATE the WAL — leaving readers up would strand the `-wal` file and force WAL recovery on the next boot. Sized to fit under the global deadline after the embedding drain (60%) so a stuck worker still leaves room for the writer's checkpoint+close. Mirrors {@link EMBED_DRAIN_DEADLINE_MS}'s safety floor of 500ms so an aggressive `LORE_SHUTDOWN_TIMEOUT_MS` (e.g. 1000ms) doesn't shrink the pool budget into a guaranteed timeout. |
+| `LORE_SHUTDOWN_TIMEOUT_MS` | Environment variable: LORE_SHUTDOWN_TIMEOUT_MS overrides the single process-wide deadline shared by signal-driven and authenticated-control shutdown. Values are milliseconds and are clamped to the minimum safe deadline; invalid values use the default. |
 
 ## Memory engine (`@loreai/core`)
 

@@ -22,9 +22,7 @@ import {
 import { providerForUpstreamOrigin } from "../config";
 import { safeExit } from "./exit";
 import {
-  installSignalShutdown,
-  installChildSignalForwarding,
-  makeProcessShutdownController,
+  installProcessSignalLifecycle,
   signalExitCode,
   type ProcessShutdownController,
 } from "./shutdown";
@@ -402,8 +400,7 @@ export async function commandRun(
   const config = loadConfig();
   let gatewayUrl: string;
   let owned: boolean;
-  let shutdown: () => Promise<void>;
-  let processShutdown: ProcessShutdownController | undefined;
+  let publishedProcessShutdown: ProcessShutdownController | undefined;
   // The config actually in effect for the running gateway. In local mode
   // startGateway() re-runs loadConfig() AFTER upstream adoption has set
   // LORE_UPSTREAM_*, so handle.config reflects the adopted upstream while the
@@ -442,17 +439,29 @@ export async function commandRun(
     }
   }
 
+  // Take ownership of SIGINT/SIGTERM before the first gateway/network
+  // resource is acquired. The lifecycle's shutdown gate is attached after the
+  // selected startup path has either completed or unwound.
+  const signalLifecycle = installProcessSignalLifecycle();
+
   if (opts.remoteUrl || config.remoteUrl) {
     // Remote mode: delegate to an existing remote gateway.
     // The local CLI still runs on the developer's machine, so it can
     // safely compute the git remote and inject it as a header.
     const remoteUrl = opts.remoteUrl || config.remoteUrl;
     if (!remoteUrl) {
+      signalLifecycle.attachShutdown(async () => {});
+      signalLifecycle.dispose();
       console.error("[lore] Remote gateway URL is not configured.");
       return safeExit(1);
     }
     const alive = await probeGateway(remoteUrl);
     if (!alive) {
+      signalLifecycle.attachShutdown(async () => {});
+      if (signalLifecycle.isShutdownStarted()) {
+        return signalLifecycle.processShutdown(1);
+      }
+      signalLifecycle.dispose();
       console.error(`[lore] Remote gateway at ${remoteUrl} is not reachable.`);
       console.error(
         `[lore] Check LORE_REMOTE_URL and ensure the gateway is running.`,
@@ -462,14 +471,17 @@ export async function commandRun(
     gatewayUrl = remoteUrl;
     remoteGateway = true;
     owned = false;
-    shutdown = async () => {};
-    processShutdown = undefined;
+    signalLifecycle.attachShutdown(async () => {});
+    if (signalLifecycle.isShutdownStarted()) {
+      return signalLifecycle.processShutdown(0);
+    }
     console.log(`[lore] Using remote gateway at ${gatewayUrl}`);
     // In remote mode, adopt via header injection only (no local gateway env).
     if (selection?.def) {
       try {
         adopted = adoptForRemote(selection.def, gatewayUrl);
       } catch (err) {
+        signalLifecycle.dispose();
         console.error(
           `[lore] ${err instanceof Error ? err.message : String(err)}.`,
         );
@@ -482,15 +494,30 @@ export async function commandRun(
   } else {
     // Local mode: start (or reuse) a local gateway.
     // `lore run` always runs locally — agent is on the same machine.
-    const handle = await startGateway({
-      ...opts,
-      local: true,
-      processBoundary: true,
-    });
+    let handle: Awaited<ReturnType<typeof startGateway>>;
+    try {
+      handle = await startGateway({
+        ...opts,
+        local: true,
+        processBoundary: true,
+        processShutdownController: signalLifecycle.processShutdown,
+      });
+    } catch (error) {
+      // startGateway closes any listener acquired before its rejection.
+      signalLifecycle.attachShutdown(async () => {});
+      if (signalLifecycle.isShutdownStarted()) {
+        return signalLifecycle.processShutdown(1);
+      }
+      signalLifecycle.dispose();
+      throw error;
+    }
     gatewayUrl = `http://${bracketHost(handle.config.hosts[0])}:${handle.port}`;
     owned = handle.owned;
-    shutdown = handle.shutdown;
-    processShutdown = handle.processShutdown;
+    signalLifecycle.attachShutdown(handle.shutdown);
+    if (signalLifecycle.isShutdownStarted()) {
+      return signalLifecycle.processShutdown(0);
+    }
+    publishedProcessShutdown = handle.processShutdown;
     // Post-adoption config (LORE_UPSTREAM_* now reflected). Used for autoImport.
     effectiveConfig = handle.config;
 
@@ -538,10 +565,6 @@ export async function commandRun(
     );
     console.log(`[lore]   export ANTHROPIC_BASE_URL=${gatewayUrl}`);
 
-    if (owned) {
-      installSignalShutdown(shutdown, processShutdown);
-    }
-
     // Block forever
     return new Promise(() => {});
   }
@@ -563,12 +586,21 @@ export async function commandRun(
     log.silenceStderr();
   }
 
-  const childProcessShutdown =
-    processShutdown ?? makeProcessShutdownController(shutdown);
+  const childProcessShutdown = signalLifecycle.processShutdown;
 
   // Authenticated shutdown may have started while auto-import was awaited.
   // This check, spawn, and attachment are deliberately one synchronous section:
   // no timer, signal, or HTTP callback can interleave on the JS event loop.
+  // Production startGateway returns the early controller. Retaining this check
+  // also prevents a custom StartGatewayIO controller from racing child spawn.
+  if (
+    publishedProcessShutdown &&
+    publishedProcessShutdown !== childProcessShutdown &&
+    publishedProcessShutdown.isShutdownStarted()
+  ) {
+    signalLifecycle.dispose();
+    return publishedProcessShutdown(0);
+  }
   if (childProcessShutdown.isShutdownStarted()) {
     return childProcessShutdown(0);
   }
@@ -576,7 +608,7 @@ export async function commandRun(
 
   // The first signal starts the one shared child + gateway teardown deadline
   // immediately. Attachment is synchronous with spawn, before callbacks run.
-  installChildSignalForwarding(child, childProcessShutdown);
+  signalLifecycle.attachChild(child);
 
   // Child completion joins (or starts) the same coordinated teardown.
   return new Promise<void>((_resolve) => {

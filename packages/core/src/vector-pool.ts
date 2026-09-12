@@ -20,9 +20,10 @@
  *       · the result, on success;
  *       · `null` when the pool is disabled/broken/errored → caller runs the
  *         in-process path;
- *       · a TIMED_OUT sentinel when the worker was alive but too slow → caller
- *         returns an EMPTY result WITHOUT re-running the scan on the main thread
- *         (re-running re-blocks the loop — the #1006 stall bug). The wedged
+ *       · a TIMED_OUT sentinel when the worker was alive but too slow, or pool
+ *         shutdown has begun → caller returns an EMPTY result WITHOUT re-running
+ *         the scan on the main thread (re-running re-blocks the loop — the #1006
+ *         stall bug, and during shutdown could race SQLite close). A wedged
  *         worker is terminated so the pool recovers; a timeout is slowness, not
  *         a structural failure, so it never latches the pool broken.
  *   - In tests the pool is inert unless a worker factory is installed via
@@ -54,7 +55,8 @@ import type {
 const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS = 10_000;
 
 /** Resolved (never rejected) by {@link tryPoolVectorSearch} when the pool was
- *  used but the request exceeded {@link vectorSearchTimeoutMs}. Distinct from
+ *  used but the request exceeded {@link vectorSearchTimeoutMs}, or when pool
+ *  shutdown has begun. Distinct from
  *  `null` — which means the pool was disabled / broken / errored and the caller
  *  SHOULD run the in-process path. On a timeout the caller must instead return
  *  an empty result and leave the main thread free. */
@@ -62,7 +64,8 @@ export const VECTOR_SEARCH_TIMED_OUT = Symbol("vector-search-timed-out");
 
 /** The read-job analogue of {@link VECTOR_SEARCH_TIMED_OUT}: resolved (never
  *  rejected) by {@link tryPoolRead} when a worker was used but the read exceeded
- *  the timeout. Distinct from `null` (pool disabled/broken/errored → run the
+ *  the timeout, or when pool shutdown has begun. Distinct from `null` (pool
+ *  disabled/broken/errored → run the
  *  query in-process). On a timeout the caller must DEGRADE to an empty result —
  *  re-running the same scan in-process would re-block the loop the offload
  *  exists to keep free (#1006). The wedged worker is terminated either way. */
@@ -127,6 +130,14 @@ let structuralFailures = 0;
 /** True while shutting the pool down, so terminate()-induced exits aren't
  *  counted as structural failures. */
 let shuttingDown = false;
+/** Shared confirmation for the one process-generation pool teardown. */
+let vectorPoolShutdownPromise: Promise<void> | null = null;
+/** Runtime-retired generations remain owned until their exits are confirmed. */
+let retiredVectorWorkerShutdowns = new Set<Promise<void>>();
+/** Prevent duplicate terminate/shutdown attempts for the same worker object. */
+let ownedRetiredVectorWorkers = new WeakSet<object>();
+/** A rejected termination remains fatal for this process generation. */
+let retiredVectorWorkerShutdownErrors: unknown[] = [];
 
 /** Test seam: when set, the pool builds workers with this factory instead of
  *  spawning a real `node:worker_threads` Worker. Never set in production. */
@@ -238,6 +249,73 @@ function timeoutAll(pw: PoolWorker): void {
   pw.inflight.clear();
 }
 
+function trackVectorWorkerShutdown(
+  worker: ShutdownableVectorWorker,
+  shutdown: () => Promise<void>,
+): void {
+  if (ownedRetiredVectorWorkers.has(worker)) return;
+  ownedRetiredVectorWorkers.add(worker);
+  // Capture the generation containers so the test-only reset can replace them
+  // without a late completion mutating the next isolated test generation.
+  const ownedShutdowns = retiredVectorWorkerShutdowns;
+  const ownedErrors = retiredVectorWorkerShutdownErrors;
+  let operation: Promise<void>;
+  try {
+    operation = shutdown();
+  } catch (error) {
+    operation = Promise.reject(error);
+  }
+  let tracked: Promise<void>;
+  tracked = operation
+    .then(
+      () => {},
+      (error: unknown) => {
+        ownedErrors.push(error);
+      },
+    )
+    .finally(() => ownedShutdowns.delete(tracked));
+  ownedShutdowns.add(tracked);
+}
+
+function terminateRetiredVectorWorker(worker: ShutdownableVectorWorker): void {
+  trackVectorWorkerShutdown(worker, async () => {
+    await worker.terminate();
+  });
+}
+
+async function settleRetiredVectorWorkers(deadlineMs: number): Promise<void> {
+  const deadlineAt = Date.now() + Math.max(0, deadlineMs);
+  while (retiredVectorWorkerShutdowns.size > 0) {
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(retiredVectorWorkerShutdowns),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  "retired vector worker did not settle before shutdown deadline",
+                ),
+              ),
+            remainingMs,
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  if (retiredVectorWorkerShutdownErrors.length > 0) {
+    throw new AggregateError(
+      retiredVectorWorkerShutdownErrors,
+      "vector worker termination was not confirmed",
+    );
+  }
+}
+
 /**
  * Cancel a timed-out search by retiring its worker.
  *
@@ -266,11 +344,7 @@ function retireTimedOutWorker(pw: PoolWorker): void {
   if (pw.dead) return;
   pw.dead = true;
   timeoutAll(pw);
-  try {
-    void pw.worker.terminate();
-  } catch {
-    // best-effort — the exit handler (markDead) is already a no-op via `dead`.
-  }
+  terminateRetiredVectorWorker(pw.worker);
 }
 
 /**
@@ -288,11 +362,7 @@ function recordStructuralFailure(): void {
     "vector worker pool disabled (repeated worker failures) — using in-process vector search",
   );
   for (const w of workers) {
-    try {
-      void w.worker.terminate();
-    } catch {
-      // best-effort
-    }
+    terminateRetiredVectorWorker(w.worker);
   }
   workers = [];
 }
@@ -384,15 +454,16 @@ function makeWorker(): PoolWorker | null {
 /** Ensure the pool is populated with live workers; replace dead slots. Returns
  *  the live workers (possibly empty if spawning failed). */
 function ensurePool(): PoolWorker[] {
+  // Process shutdown permanently closes admission for this pool generation.
+  // This guard is intentionally duplicated in dispatchToPool: ensurePool is
+  // the only function that can spawn, so a later refactor cannot accidentally
+  // repopulate workers after shutdownVectorPoolAsync snapshots ownership.
+  if (shuttingDown) return [];
   // Terminate and drop dead workers. A worker that hit init-error keeps its
   // message loop alive, so we must terminate it explicitly or it leaks a thread.
   for (const w of workers) {
     if (w.dead) {
-      try {
-        void w.worker.terminate();
-      } catch {
-        // best-effort
-      }
+      terminateRetiredVectorWorker(w.worker);
     }
   }
   workers = workers.filter((w) => !w.dead);
@@ -417,11 +488,13 @@ function leastBusy(live: PoolWorker[]): PoolWorker | null {
 
 /** Discriminated outcome of {@link dispatchToPool}. `ok` carries the worker's
  *  reply payload; `unavailable` means run in-process; `timeout` means degrade to
- *  empty (the worker was wedged and has been retired). */
+ *  empty (the worker was wedged and has been retired); `shutting-down` also
+ *  degrades to empty, because fallback work could race the writer close. */
 type DispatchResult =
   | { status: "ok"; value: unknown }
   | { status: "unavailable" }
-  | { status: "timeout" };
+  | { status: "timeout" }
+  | { status: "shutting-down" };
 
 /**
  * Dispatch one request to the least-busy live worker and await its reply.
@@ -443,6 +516,9 @@ async function dispatchToPool(
   makeMessage: (id: number) => VectorWorkerInbound,
   label: string,
 ): Promise<DispatchResult> {
+  // Once shutdown owns the worker set, neither spawn a replacement nor route
+  // this DB-capable operation to the synchronous main-thread fallback.
+  if (shuttingDown) return { status: "shutting-down" };
   if (!poolEnabled()) return { status: "unavailable" };
   // Everything below is wrapped so the "never throws" contract holds by
   // construction — any unexpected throw (e.g. from ensurePool) resolves to
@@ -488,6 +564,10 @@ async function dispatchToPool(
       ? { status: "timeout" }
       : { status: "ok", value: settled };
   } catch (err) {
+    // shutdownVectorPoolAsync rejects in-flight work via failAll(). Treat that
+    // transition as closed admission, not as a reason to run the same SQLite
+    // operation in-process while the writer is being closed.
+    if (shuttingDown) return { status: "shutting-down" };
     log.info(
       `${label} failed; using in-process fallback:`,
       err instanceof Error ? err.message : String(err),
@@ -513,7 +593,9 @@ export async function tryPoolVectorSearch(
     (id) => ({ type: "search", id, spec, embedding }),
     "vector worker search",
   );
-  if (r.status === "timeout") return VECTOR_SEARCH_TIMED_OUT;
+  if (r.status === "timeout" || r.status === "shutting-down") {
+    return VECTOR_SEARCH_TIMED_OUT;
+  }
   if (r.status === "unavailable") return null;
   // A successful search always returns an array (never null), so the unwrap to
   // Hits is safe.
@@ -538,7 +620,9 @@ export async function tryPoolRead(
     (id) => ({ type: "read", id, spec }),
     "read worker job",
   );
-  if (r.status === "timeout") return READ_JOB_TIMED_OUT;
+  if (r.status === "timeout" || r.status === "shutting-down") {
+    return READ_JOB_TIMED_OUT;
+  }
   if (r.status === "unavailable") return null;
   return { rows: r.value };
 }
@@ -802,7 +886,7 @@ export function shutdownVectorPool(): void {
       // worker may already be gone
     }
     try {
-      void pw.worker.terminate();
+      void pw.worker.terminate().catch(() => {});
     } catch {
       // best-effort
     }
@@ -829,7 +913,7 @@ interface ShutdownableVectorWorker {
   on(event: "exit", listener: ExitListener): unknown;
   /** Posts the cooperative shutdown message. May throw if the worker is gone. */
   postMessage(value: VectorWorkerInbound): void;
-  /** Force-kills the worker thread. May reject; we ignore that. */
+  /** Force-kills the worker thread. Resolves only once the worker exits. */
   terminate(): Promise<number>;
 }
 
@@ -838,16 +922,17 @@ interface ShutdownableVectorWorker {
  * `deadlineMs`. Each worker:
  *
  *   1. Has its in-flight requests rejected with "vector pool shutting down"
- *      (so any caller awaiting a result gets routed to the in-process
- *      fallback — which will itself fail fast because `shuttingDown` latches
- *      the pool off);
+ *      (dispatch converts that shutdown rejection to the no-fallback sentinel,
+ *      so no synchronous SQLite work can race writer close);
  *   2. Receives a cooperative `shutdown` message so `vector-worker.ts` can
  *      run its `reader.db.close()` flush + `process.exit(0)`;
  *   3. If the deadline fires before the worker emits `exit`, is force-
  *      `terminate()`d so its reader cannot outlive the budget.
  *
- * Always resolves — never rejects. Idempotent (a second call after the first
- * resolves is a no-op). Designed for graceful gateway shutdown (#1599): the
+ * Rejects when a worker's exit cannot be confirmed, allowing the process
+ * boundary to choose a forced exit without closing SQLite underneath a live
+ * reader. Idempotent: concurrent/repeated calls share one result. Designed for
+ * graceful gateway shutdown (#1599): the
  * writer's TRUNCATE checkpoint requires no reader WAL read-marks, so the
  * readers MUST be gone before the writer `close()`s — otherwise the WAL is
  * stranded and the next boot pays the WAL-recovery tax.
@@ -855,33 +940,32 @@ interface ShutdownableVectorWorker {
 export function shutdownVectorPoolAsync(
   deadlineMs: number = DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
 ): Promise<void> {
+  if (vectorPoolShutdownPromise) return vectorPoolShutdownPromise;
   shuttingDown = true;
   // Snapshot the current worker list, then drop our reference so a stray
   // postMessage from a dead worker can't see the pool as "still alive".
   const live = workers;
   workers = [];
-  if (live.length === 0) return Promise.resolve();
-
   // Reject in-flight requests FIRST so callers stop awaiting results — that
   // also lets the cooperative `shutdown` message reach the worker ahead of any
   // inflight reply the worker is preparing to post.
   for (const pw of live) {
     failAll(pw, new Error("vector pool shutting down"));
+    trackVectorWorkerShutdown(pw.worker, () =>
+      waitForOneWorkerExit(pw.worker, deadlineMs),
+    );
   }
 
-  return Promise.all(
-    live.map((pw) => waitForOneWorkerExit(pw.worker, deadlineMs)),
-  )
-    .then(
-      () => undefined,
-      () => undefined,
-    )
-    .then(() => undefined);
+  // Includes workers removed during timeout recovery or structural failure,
+  // not just the current array snapshot. Their SQLite readers must also be
+  // gone before gateway shutdown may close the writer connection.
+  vectorPoolShutdownPromise = settleRetiredVectorWorkers(deadlineMs);
+  return vectorPoolShutdownPromise;
 }
 
 /** Cooperative shutdown for one worker: post `shutdown`, wait for its `exit`
- *  event up to `deadlineMs`, then force-terminate. Always resolves. Exported
- *  only for tests. */
+ *  event up to `deadlineMs`, then force-terminate. Rejects when termination
+ *  cannot be confirmed. Exported only for tests. */
 export function awaitVectorWorkerShutdown(
   worker: ShutdownableVectorWorker,
   deadlineMs: number,
@@ -893,25 +977,33 @@ function waitForOneWorkerExit(
   worker: ShutdownableVectorWorker,
   deadlineMs: number,
 ): Promise<void> {
-  return new Promise<void>((resolve) => {
+  return new Promise<void>((resolve, reject) => {
     let done = false;
+    let forceStarted = false;
     const finish = () => {
       if (done) return;
       done = true;
       clearTimeout(killTimer);
       resolve();
     };
+    const forceTerminate = (): void => {
+      if (done || forceStarted) return;
+      forceStarted = true;
+      void worker.terminate().then(finish, (cause: unknown) => {
+        if (done) return;
+        done = true;
+        clearTimeout(killTimer);
+        reject(
+          new Error("vector worker termination was not confirmed", { cause }),
+        );
+      });
+    };
     // Hard cap: a worker whose reader open is wedged or whose `shutdown`
     // handler never flushes would otherwise hang the gateway's bounded
     // shutdown. Terminate is safe — the reader's SQLite state lives on a
     // per-thread connection; the main thread's WAL just has to recover any
     // uncheckpointed read on next open, which SQLite handles natively.
-    const killTimer = setTimeout(() => {
-      worker
-        .terminate()
-        .catch(() => {})
-        .finally(finish);
-    }, deadlineMs);
+    const killTimer = setTimeout(forceTerminate, Math.max(0, deadlineMs));
     // Don't keep the event loop alive for this timer — `runShutdownWithDeadline`
     // already has its own hard cap at SHUTDOWN_DEADLINE_MS, and the worker is
     // unref'd so its termination already won't block exit. See review #989.
@@ -921,8 +1013,9 @@ function waitForOneWorkerExit(
     try {
       worker.postMessage({ type: "shutdown" });
     } catch {
-      // Worker already exited — desired end state reached.
-      finish();
+      // Posting can fail during a termination race. Node's termination promise
+      // is the authoritative confirmation that the reader thread is gone.
+      forceTerminate();
     }
   });
 }
@@ -930,6 +1023,10 @@ function waitForOneWorkerExit(
 /** For tests: reset all pool state (workers, latches, counters, request ids). */
 export function _resetVectorPoolForTest(): void {
   shutdownVectorPool();
+  vectorPoolShutdownPromise = null;
+  retiredVectorWorkerShutdowns = new Set();
+  ownedRetiredVectorWorkers = new WeakSet();
+  retiredVectorWorkerShutdownErrors = [];
   poolBroken = false;
   nextRequestId = 0;
   structuralFailures = 0;
