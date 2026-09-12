@@ -19,72 +19,48 @@ import { GATEWAY_AUTH_HEADER, log } from "@loreai/core";
 import * as http from "node:http";
 import * as https from "node:https";
 
-export interface EmbeddedGatewayResource {
-  owned: boolean;
-  shutdown: () => Promise<void>;
-}
-
-export interface EmbeddedGatewayLease {
-  release: () => Promise<void>;
+export interface SigtermHost {
+  prependOnceListener: (event: "SIGTERM", listener: () => void) => unknown;
+  removeListener: (event: "SIGTERM", listener: () => void) => unknown;
+  exit: (code?: number) => unknown;
 }
 
 /**
- * Own process-wide resources shared by every OpenCode plugin instance.
+ * Bridge the host process' SIGTERM to an embedded gateway's bounded shutdown.
  *
- * OpenCode creates one plugin instance per workspace, while Lore embeds one
- * gateway per host process. The last plugin disposer therefore owns teardown;
- * earlier disposers must leave the shared gateway and fetch interceptor alive.
+ * OpenCode's plugin `dispose` hook follows its per-workspace instance cache and
+ * can run during ordinary reloads, so it cannot own a process-wide gateway.
+ * Its headless `serve` command also does not dispose that cache on SIGTERM.
+ * Start Lore teardown first, then explicitly finish the requested process exit.
  */
-export class EmbeddedGatewayLifecycle {
-  private leases = 0;
-  private gatewayShutdown: (() => Promise<void>) | undefined;
-  private fetchCleanup: (() => void) | undefined;
-  private teardown: Promise<void> | undefined;
+export function installEmbeddedGatewaySigtermHandler(
+  shutdown: () => Promise<void>,
+  host: SigtermHost = process,
+): () => void {
+  let installed = true;
+  const onSigterm = (): void => {
+    if (!installed) return;
+    installed = false;
+    host.removeListener("SIGTERM", onSigterm);
+    void (async () => {
+      try {
+        await shutdown();
+      } catch {
+        // The process is terminating anyway. Record only a categorical error;
+        // process exit is the final bounded worker/thread cleanup mechanism.
+        log.error("embedded gateway shutdown failed during SIGTERM");
+      } finally {
+        host.exit(0);
+      }
+    })();
+  };
 
-  constructor(private readonly onIdle: () => void = () => {}) {}
-
-  async acquire(): Promise<EmbeddedGatewayLease> {
-    if (this.teardown) await this.teardown;
-    this.leases += 1;
-    let released = false;
-
-    return {
-      release: async () => {
-        if (released) return;
-        released = true;
-        this.leases -= 1;
-        if (this.leases !== 0) return;
-
-        const shutdown = this.gatewayShutdown;
-        const cleanup = this.fetchCleanup;
-        this.gatewayShutdown = undefined;
-        this.fetchCleanup = undefined;
-
-        const teardown = (async () => {
-          try {
-            await shutdown?.();
-          } finally {
-            cleanup?.();
-          }
-        })();
-        this.teardown = teardown;
-        this.onIdle();
-        try {
-          await teardown;
-        } finally {
-          if (this.teardown === teardown) this.teardown = undefined;
-        }
-      },
-    };
-  }
-
-  ownGateway(resource: EmbeddedGatewayResource): void {
-    if (resource.owned) this.gatewayShutdown = resource.shutdown;
-  }
-
-  ownFetchInterceptor(cleanup: () => void): void {
-    this.fetchCleanup = cleanup;
-  }
+  host.prependOnceListener("SIGTERM", onSigterm);
+  return () => {
+    if (!installed) return;
+    installed = false;
+    host.removeListener("SIGTERM", onSigterm);
+  };
 }
 
 function isLoopbackUrl(value: string): boolean {
