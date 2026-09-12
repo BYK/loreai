@@ -1827,6 +1827,249 @@ describe("streamResponsesRecallAware", () => {
     expect(JSON.stringify(completedResponse)).not.toContain("item_reference");
   });
 
+  test("compacts visible output after a hidden item_reference", async () => {
+    const reference = { type: "item_reference", id: "msg_server_only" };
+    const message = {
+      type: "message",
+      id: "msg_visible_after_reference",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "visible answer" }],
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_before_message", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: reference,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: reference,
+        }),
+        textItem(7, "visible answer", "msg_visible_after_reference"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_reference_before_message",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [reference, message],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).not.toContain("msg_server_only");
+    expect(output).not.toContain("item_reference");
+    expect(output).not.toContain("response.failed");
+    expectVisibleOutputIndicesToMatchTerminal(output);
+  });
+
+  test("rebuilds sparse Codex terminal output after a hidden item_reference", async () => {
+    const reference = { type: "item_reference", id: "msg_sparse_server_only" };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_sparse_reference_terminal", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: reference,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: reference,
+        }),
+        textItem(7, "sparse visible answer", "msg_sparse_reference_visible"),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_sparse_reference_terminal",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [reference],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("sparse visible answer");
+    expect(output).not.toContain("msg_sparse_server_only");
+    expect(output).not.toContain("item_reference");
+    expect(output).not.toContain("response.failed");
+    expectVisibleOutputIndicesToMatchTerminal(output);
+  });
+
+  test("keeps recovery output coordinates distinct after a hidden item_reference", async () => {
+    const reference = {
+      type: "item_reference",
+      id: "msg_recovery_server_only",
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_recovery", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: reference,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: reference,
+        }),
+        textItem(7, "safe visible answer", "msg_recovery_visible"),
+        recallCall(9, { query: 42 }, "fc_recovery_private"),
+        completed("resp_reference_recovery"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "",
+          resultText: "private result",
+        }),
+        runFollowUp: async () => {
+          throw new Error("must not run follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("safe visible answer");
+    expect(output).toContain(RECALL_FAILURE_WARNING.replaceAll("\n", "\\n"));
+    expect(output).not.toContain("msg_recovery_server_only");
+    expect(output).not.toContain("item_reference");
+    expect(output).not.toContain("fc_recovery_private");
+    expect(output).not.toContain("private result");
+    expectVisibleOutputIndicesToMatchTerminal(output);
+  });
+
+  test("rejects a lower-index item_reference after visible output reaches the client", async () => {
+    const reference = { type: "item_reference", id: "msg_late_server_only" };
+    let completedResponse: GatewayResponse | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_late_reference", "gpt-5.6-terra"),
+        textItem(1, "already visible", "msg_before_reference"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: reference,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: reference,
+        }),
+        completed("resp_late_reference"),
+      ]),
+      {
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("already visible");
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("msg_late_server_only");
+    expect(output).not.toContain("item_reference");
+    const events = responseEvents(output);
+    expect(
+      events.filter(({ event }) => event === "response.failed"),
+    ).toHaveLength(1);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ event: "response.completed" }),
+    );
+    expect(events.map(({ data }) => data.sequence_number)).toEqual(
+      events.map((_, index) => index),
+    );
+    expect(
+      events.find(({ event }) => event === "response.failed")?.data.response,
+    ).toMatchObject({ status: "failed", output: [] });
+    expect(JSON.stringify(completedResponse)).not.toContain(
+      "msg_late_server_only",
+    );
+    expect(JSON.stringify(completedResponse)).not.toContain("item_reference");
+  });
+
+  test("compacts sparse continuation output after a hidden item_reference", async () => {
+    const reference = {
+      type: "item_reference",
+      id: "msg_continuation_server_only",
+    };
+    const message = {
+      type: "message",
+      id: "msg_continuation_visible",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "continuation answer" }],
+    };
+    const followUp = streamFrom([
+      created("resp_reference_continuation", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        output_index: 0,
+        item: reference,
+      }),
+      sseEvent("response.output_item.done", {
+        output_index: 0,
+        item: reference,
+      }),
+      textItem(7, "continuation answer", "msg_continuation_visible"),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_reference_continuation",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [reference, message],
+        },
+      }),
+    ]);
+    let completedResponse: GatewayResponse | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_reference_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "private query" }, "fc_reference_principal"),
+        completed("resp_reference_principal"),
+      ]),
+      {
+        onComplete: (response) => {
+          completedResponse = response;
+        },
+        onRecall: async () => ({
+          anchorText: "",
+          resultText: "private result",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("continuation answer");
+    expect(output).not.toContain("msg_continuation_server_only");
+    expect(output).not.toContain("item_reference");
+    expect(output).not.toContain("private query");
+    expect(output).not.toContain("private result");
+    expect(output).not.toContain("response.failed");
+    expect(JSON.stringify(completedResponse)).not.toContain("item_reference");
+    expectVisibleOutputIndicesToMatchTerminal(output);
+  });
+
   test("rejects an item_reference missing output_item.done", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([

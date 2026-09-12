@@ -9302,9 +9302,11 @@ export function streamResponsesRecallAware(
   const assertOutputLifecyclesComplete = (
     acc: ResponsesAccState,
     allowedIncompleteIndices: ReadonlySet<number> = new Set(),
+    referenceIndices: ReadonlySet<number> = new Set(),
   ): void => {
     const lifecycles = lifecyclesFor(acc);
     for (const index of acc.rawItems.keys()) {
+      if (referenceIndices.has(index)) continue;
       if (lifecycles.get(index)?.outputDone) continue;
       if (allowedIncompleteIndices.has(index)) continue;
       if (opts.validation !== "codex") {
@@ -9517,7 +9519,7 @@ export function streamResponsesRecallAware(
     references: Map<number, ReferenceLifecycle>,
     event: string,
     parsed: Record<string, unknown>,
-  ): boolean => {
+  ): number | undefined => {
     const rawIndex = parsed.output_index;
     const item = parsed.item as Record<string, unknown> | undefined;
     if (
@@ -9549,12 +9551,13 @@ export function streamResponsesRecallAware(
       }
       references.set(outputIndex, { id: item.id, done: false });
       referenceIdentities.add(item.id);
-      return true;
+      applyResponsesEvent(acc, event, parsed);
+      return outputIndex;
     }
-    if (!Number.isSafeInteger(rawIndex)) return false;
+    if (!Number.isSafeInteger(rawIndex)) return undefined;
     const outputIndex = rawIndex as number;
     const reference = references.get(outputIndex);
-    if (!reference) return false;
+    if (!reference) return undefined;
     if (
       event !== "response.output_item.done" ||
       reference.done ||
@@ -9568,7 +9571,8 @@ export function streamResponsesRecallAware(
       );
     }
     reference.done = true;
-    return true;
+    applyResponsesEvent(acc, event, parsed);
+    return outputIndex;
   };
   const assertReferenceLifecyclesComplete = (
     references: ReadonlyMap<number, ReferenceLifecycle>,
@@ -10027,6 +10031,19 @@ export function streamResponsesRecallAware(
     chunk: Uint8Array,
     visibleIndices: ReadonlyMap<number, number>,
   ): Uint8Array {
+    return remapOutputIndices(chunk, (outputIndex) => {
+      const visibleIndex = visibleIndices.get(outputIndex);
+      if (visibleIndex === undefined) {
+        throw new Error("hidden Responses output item reached the client");
+      }
+      return visibleIndex;
+    });
+  }
+
+  function remapOutputIndices(
+    chunk: Uint8Array,
+    remap: (outputIndex: number) => number,
+  ): Uint8Array {
     const text = new TextDecoder().decode(chunk);
     if (!text.startsWith("event: ")) return chunk;
     let output = "";
@@ -10054,13 +10071,12 @@ export function streamResponsesRecallAware(
         output += `${frame}\n\n`;
         continue;
       }
-      const visibleIndex = visibleIndices.get(parsed.output_index as number);
-      if (visibleIndex === undefined) {
-        throw new Error("hidden Responses output item reached the client");
-      }
       output += formatResponsesEvent(
         event,
-        JSON.stringify({ ...parsed, output_index: visibleIndex }),
+        JSON.stringify({
+          ...parsed,
+          output_index: remap(parsed.output_index as number),
+        }),
       );
     }
     return encoder.encode(output);
@@ -10182,16 +10198,25 @@ export function streamResponsesRecallAware(
         // Recall items are gateway-internal and must stay hidden on every exit,
         // including failures raised before marker replacement.
         const recallIndices = new Set<number>();
-        // A late lower-index recall cannot be hidden without changing an item
-        // already sent at a higher client-visible coordinate.
+        // A hidden item discovered after visible output cannot retroactively
+        // change a coordinate already sent to the client.
         const blockedRecallIndices = new Set<number>();
+        const blockedReferenceIndices = new Set<number>();
         const forwardedVisibleOutputIndices = new Set<number>();
-        const wouldReindexVisibleOutput = (outputIndex: number): boolean =>
-          [...forwardedVisibleOutputIndices].some(
-            (visibleIndex) => visibleIndex > outputIndex,
-          );
         const unresolvedToolIndices = new Set<number>();
         const referenceIndices = new Map<number, ReferenceLifecycle>();
+        const wouldReindexVisibleOutput = (outputIndex: number): boolean => {
+          const hiddenIndices = new Set([
+            ...recallIndices,
+            ...unresolvedToolIndices,
+            ...referenceIndices.keys(),
+            outputIndex,
+          ]);
+          const visibleIndices = visibleOutputIndexMap(hiddenIndices);
+          return [...forwardedVisibleOutputIndices].some(
+            (sourceIndex) => visibleIndices.get(sourceIndex) !== sourceIndex,
+          );
+        };
 
         try {
           if (!upstreamResponse.body) {
@@ -10286,7 +10311,28 @@ export function streamResponsesRecallAware(
             validateResponseLifecycle(state, event, parsed);
             seedImplicitCodexItem(state, normalizationState, event, parsed);
 
-            if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
+            const referenceOutputIndex = consumeReferenceEvent(
+              state,
+              referenceIndices,
+              event,
+              parsed,
+            );
+            if (referenceOutputIndex !== undefined) {
+              retainedStateBytes += encoder.encode(data).byteLength;
+              if (retainedStateBytes > maxRetainedStateBytes) {
+                throw new SSEStreamLimitError(
+                  "Responses retained state exceeded byte limit",
+                );
+              }
+              if (
+                event === "response.output_item.added" &&
+                wouldReindexVisibleOutput(referenceOutputIndex)
+              ) {
+                blockedReferenceIndices.add(referenceOutputIndex);
+                throw new Error(
+                  "Responses item_reference output_index precedes client-visible output",
+                );
+              }
               continue;
             }
 
@@ -10389,7 +10435,8 @@ export function streamResponsesRecallAware(
             if (
               resolvedVisibleTool &&
               recallIndices.size === 0 &&
-              unresolvedToolIndices.size === 0
+              unresolvedToolIndices.size === 0 &&
+              referenceIndices.size === 0
             ) {
               for (const deferred of deferredEvents) {
                 if (!(await safeEnqueue(deferred.chunk))) break;
@@ -10458,7 +10505,7 @@ export function streamResponsesRecallAware(
               if (opts.validation === "codex") {
                 assertTerminalOutputMatches(
                   state,
-                  terminalParsed,
+                  parsed,
                   (outputIndex, item) => {
                     if (
                       item.type !== "function_call" ||
@@ -10488,10 +10535,18 @@ export function streamResponsesRecallAware(
                     }
                   },
                 );
-                assertOutputLifecyclesComplete(state);
+                assertOutputLifecyclesComplete(
+                  state,
+                  new Set(),
+                  new Set(referenceIndices.keys()),
+                );
               } else {
-                assertOutputLifecyclesComplete(state);
-                assertTerminalOutputMatches(state, terminalParsed);
+                assertOutputLifecyclesComplete(
+                  state,
+                  new Set(),
+                  new Set(referenceIndices.keys()),
+                );
+                assertTerminalOutputMatches(state, parsed);
               }
               assertReferenceLifecyclesComplete(referenceIndices);
               assertRecallItemsCompleted(state, [...recallIndices]);
@@ -10506,24 +10561,50 @@ export function streamResponsesRecallAware(
                     "recall stream ended before function arguments completed",
                   );
                 }
+                const visibleIndices = visibleOutputIndexMap(
+                  new Set(referenceIndices.keys()),
+                );
                 for (const deferred of deferredEvents) {
-                  if (!(await safeEnqueue(deferred.chunk))) break;
+                  if (
+                    !(await safeEnqueue(
+                      remapVisibleOutputIndices(deferred.chunk, visibleIndices),
+                    ))
+                  )
+                    break;
                   if (deferred.candidateIndex !== undefined) {
                     forwardedVisibleOutputIndices.add(deferred.candidateIndex);
                   }
                 }
                 deferredEvents.length = 0;
                 deferredBytes = 0;
-                // No recall — forward the terminal event verbatim.
+                // Suppressing references makes Lore own the public projection.
+                // Rebuild that output from validated private state because Codex
+                // may omit streamed items from its terminal snapshot.
+                const visibleTerminalParsed =
+                  referenceIndices.size === 0
+                    ? terminalParsed
+                    : {
+                        ...terminalParsed,
+                        response: {
+                          ...(terminalParsed.response as Record<
+                            string,
+                            unknown
+                          >),
+                          output: buildOutputItems(
+                            new Set(referenceIndices.keys()),
+                          ),
+                        },
+                      };
+                // No recall — preserve the provider terminal envelope.
                 const finalResponse = finalizeResponsesAcc(state);
                 if (
                   !(await safeEnqueue(
                     encoder.encode(
                       formatResponsesEvent(
                         event,
-                        terminalParsed === parsed
+                        visibleTerminalParsed === parsed
                           ? data
-                          : JSON.stringify(terminalParsed),
+                          : JSON.stringify(visibleTerminalParsed),
                       ),
                     ),
                     () => {
@@ -10866,14 +10947,20 @@ export function streamResponsesRecallAware(
                             ce,
                             cparsed,
                           );
-                          if (
+                          const contReferenceOutputIndex =
                             consumeReferenceEvent(
                               contState,
                               contReferenceIndices,
                               ce,
                               cparsed,
-                            )
-                          ) {
+                            );
+                          if (contReferenceOutputIndex !== undefined) {
+                            retainedStateBytes += encoder.encode(cd).byteLength;
+                            if (retainedStateBytes > maxRetainedStateBytes) {
+                              throw new RecallContinuationFailure(
+                                "resource_limit",
+                              );
+                            }
                             continue;
                           }
                           const ci = outputIndexForEvent(
@@ -11023,8 +11110,6 @@ export function streamResponsesRecallAware(
                             ce === "response.incomplete" ||
                             ce === "response.failed"
                           ) {
-                            const terminalParsed =
-                              stripHiddenReferenceOutput(cparsed);
                             const incompleteRecallIndices = new Set(
                               [...contRecallIndices].filter(
                                 (outputIndex) =>
@@ -11037,7 +11122,7 @@ export function streamResponsesRecallAware(
                             if (opts.validation === "codex") {
                               assertTerminalOutputMatches(
                                 contState,
-                                terminalParsed,
+                                cparsed,
                                 (outputIndex, item) => {
                                   if (
                                     item.type !== "function_call" ||
@@ -11071,16 +11156,15 @@ export function streamResponsesRecallAware(
                               assertOutputLifecyclesComplete(
                                 contState,
                                 incompleteRecallIndices,
+                                new Set(contReferenceIndices.keys()),
                               );
                             } else {
                               assertOutputLifecyclesComplete(
                                 contState,
                                 incompleteRecallIndices,
+                                new Set(contReferenceIndices.keys()),
                               );
-                              assertTerminalOutputMatches(
-                                contState,
-                                terminalParsed,
-                              );
+                              assertTerminalOutputMatches(contState, cparsed);
                             }
                             assertReferenceLifecyclesComplete(
                               contReferenceIndices,
@@ -11564,7 +11648,11 @@ export function streamResponsesRecallAware(
 
             // Non-terminal, non-recall event: forward verbatim.
             const chunk = encoder.encode(formatResponsesEvent(event, data));
-            if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
+            if (
+              recallIndices.size > 0 ||
+              unresolvedToolIndices.size > 0 ||
+              referenceIndices.size > 0
+            ) {
               deferredBytes += chunk.byteLength;
               if (deferredBytes > maxDeferredBytes) {
                 throw new SSEStreamLimitError(
@@ -11670,6 +11758,8 @@ export function streamResponsesRecallAware(
           const hiddenOutputIndices = new Set([
             ...recallIndices,
             ...blockedRecallIndices,
+            ...referenceIndices.keys(),
+            ...blockedReferenceIndices,
             ...unresolvedToolIndices,
           ]);
           const hiddenOutputIdentities = new Set<string>();
@@ -11788,12 +11878,13 @@ export function streamResponsesRecallAware(
                     created_at: Math.floor(Date.now() / 1000),
                     model: state.model,
                     status: "failed",
-                    // A blocked recall arrived below a visible output index.
+                    // A blocked hidden item arrived below a visible output index.
                     // The earlier lifecycle frames cannot be compacted after
                     // delivery, so omit the terminal snapshot rather than
                     // contradicting their public coordinates.
                     output:
-                      blockedRecallIndices.size > 0
+                      blockedRecallIndices.size > 0 ||
+                      blockedReferenceIndices.size > 0
                         ? []
                         : buildOutputItems(hiddenOutputIndices),
                     usage: null,
