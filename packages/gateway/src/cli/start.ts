@@ -118,6 +118,8 @@ export interface GatewayHandle {
   managementToken: string;
   /** Shut down the gateway. No-op when `owned` is false. */
   shutdown: (context?: ProcessShutdownContext) => Promise<void>;
+  /** @internal Direct request path available only for an owned embedded gateway. */
+  dispatch?: (request: Request) => Promise<Response>;
   /** @internal One-shot CLI process shutdown shared by signals and control. */
   processShutdown?: ProcessShutdownController;
 }
@@ -1302,6 +1304,7 @@ async function startGatewayLocked(
         owned: true,
         managementToken: controlToken,
         shutdown,
+        dispatch: server.dispatch,
         processShutdown,
       };
     } catch (e) {

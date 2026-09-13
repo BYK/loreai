@@ -774,6 +774,8 @@ export async function startServer(
   stop: (deadlineMs?: number) => Promise<void>;
   port: number;
   hosts: string[];
+  /** Route an in-process request without traversing the loopback socket. */
+  dispatch?: (request: Request) => Promise<Response>;
   /** Resolves when all bound servers are listening. */
   ready: Promise<void>;
 }> {
@@ -1323,6 +1325,7 @@ export async function startServer(
     // Report the hosts we actually bound (unavailable ones were skipped), so
     // callers and /health probes don't reference an interface that's down.
     hosts: boundHosts,
+    dispatch: (request: Request) => fetch(request, "127.0.0.1"),
     ready: Promise.all(readyPromises).then(() => {}),
   };
 

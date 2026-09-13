@@ -434,6 +434,15 @@ describe("server routing", () => {
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
 
+  test("owned callers can dispatch through the router without a loopback socket", async () => {
+    expect(server.dispatch).toBeTypeOf("function");
+    const res = await server.dispatch!(
+      new Request(`http://127.0.0.1:${server.port}/health`),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "ok" });
+  });
+
   test("unknown route returns a 404 error envelope", async () => {
     const res = await localRequest(server.port, "/definitely-not-a-route");
     expect(res.status).toBe(404);

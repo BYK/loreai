@@ -89,6 +89,63 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       );
     });
 
+    test("dispatches an intercepted request directly to an owned gateway", async () => {
+      let dispatched: Request | undefined;
+      cleanup();
+      cleanup = installFetchInterceptor({
+        gatewayBase: GATEWAY,
+        gatewayFetch: async (request) => {
+          dispatched = request;
+          return new Response("direct");
+        },
+        getHeaders: () => ({ "x-lore-session-id": "sess-direct" }),
+      });
+      const body = JSON.stringify({ model: "gpt-5", input: [] });
+
+      const response = await fetch(
+        "https://chatgpt.com/backend-api/codex/responses",
+        {
+          method: "POST",
+          headers: { authorization: "Bearer test" },
+          body,
+        },
+      );
+
+      expect(await response.text()).toBe("direct");
+      expect(realFetch).not.toHaveBeenCalled();
+      expect(dispatched?.url).toBe(`${GATEWAY}/v1/codex/responses`);
+      expect(dispatched?.method).toBe("POST");
+      expect(dispatched?.headers.get("authorization")).toBe("Bearer test");
+      expect(dispatched?.headers.get("x-lore-session-id")).toBe("sess-direct");
+      expect(await dispatched?.text()).toBe(body);
+    });
+
+    test("preserves a Request object's body on direct dispatch", async () => {
+      let dispatched: Request | undefined;
+      cleanup();
+      cleanup = installFetchInterceptor({
+        gatewayBase: GATEWAY,
+        gatewayFetch: async (request) => {
+          dispatched = request;
+          return new Response("direct");
+        },
+        getHeaders: () => ({}),
+      });
+      const body = JSON.stringify({ model: "gpt-5", input: ["hello"] });
+
+      await fetch(
+        new Request("https://chatgpt.com/backend-api/codex/responses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        }),
+      );
+
+      expect(realFetch).not.toHaveBeenCalled();
+      expect(dispatched?.method).toBe("POST");
+      expect(await dispatched?.text()).toBe(body);
+    });
+
     test("preserves original headers and injects X-Lore-* context", async () => {
       await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",

@@ -36,6 +36,11 @@ import {
 /** Default ports to probe when looking for a running gateway (must match gateway defaults). */
 const KNOWN_GATEWAY_PORTS = [3207, 5673];
 
+type GatewayTarget = {
+  url: string;
+  dispatch?: (request: Request) => Promise<Response>;
+};
+
 /**
  * Resolve the gateway URL by probing known ports and reading the port file.
  *
@@ -87,7 +92,7 @@ async function resolveGatewayUrl(): Promise<string | null> {
  * (3207 → 5673 → random) and port file management automatically.
  * Returns the URL of the started gateway, or null on failure.
  */
-async function startInProcess(): Promise<string | null> {
+async function startInProcess(): Promise<GatewayTarget | null> {
   try {
     // Dynamic import — the gateway may be resolved from src (workspace) or
     // dist/index.cjs (npm). Use a variable to prevent tsc from resolving the
@@ -103,7 +108,7 @@ async function startInProcess(): Promise<string | null> {
       log.info(`reusing existing gateway at ${url}`);
     }
 
-    return url;
+    return { url, dispatch: handle.owned ? handle.dispatch : undefined };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     lastGatewayStartError = msg;
@@ -123,6 +128,7 @@ let lastGatewayStartError: string | null = null;
 let processInitDone = false;
 let processLoreActive = false;
 let processLoreBase = "";
+let processLoreDispatch: GatewayTarget["dispatch"];
 
 // Per-project state. The OpenCode plugin function can be called multiple
 // times in the same process (different projects, or after a project switch),
@@ -220,7 +226,7 @@ async function resolveParentSession(
 }
 
 /** Memoized lore init promise — ensures concurrent plugin calls don't race. */
-let loreInitPromise: Promise<string | null> | null = null;
+let loreInitPromise: Promise<GatewayTarget | null> | null = null;
 
 /**
  * Whether the plugin should stay inert (skip gateway probe/start and the
@@ -248,6 +254,7 @@ export const LorePlugin: Plugin = async (ctx) => {
     process.env.LORE_DISABLED === "1" || process.env.LORE_DISABLED === "true";
   let loreActive = processLoreActive;
   let gatewayBase = processLoreBase;
+  let gatewayFetch = processLoreDispatch;
   if (!processInitDone) {
     const inTestEnv = isInertTestEnv();
 
@@ -268,14 +275,14 @@ export const LorePlugin: Plugin = async (ctx) => {
           const existingUrl = await resolveGatewayUrl();
           if (existingUrl) {
             log.info(`gateway detected at ${existingUrl}`);
-            return existingUrl;
+            return { url: existingUrl };
           }
           // No running gateway — start one in-process (handles fallback chain).
           log.info("starting gateway in-process…");
-          const startedUrl = await startInProcess();
-          if (startedUrl) {
-            log.info(`gateway started in-process at ${startedUrl}`);
-            return startedUrl;
+          const started = await startInProcess();
+          if (started) {
+            log.info(`gateway started in-process at ${started.url}`);
+            return started;
           }
           return null;
         })();
@@ -283,11 +290,13 @@ export const LorePlugin: Plugin = async (ctx) => {
       const result = await loreInitPromise;
       if (result) {
         loreActive = true;
-        gatewayBase = result;
+        gatewayBase = result.url;
+        gatewayFetch = result.dispatch;
       }
     }
     processLoreActive = loreActive;
     processLoreBase = gatewayBase;
+    processLoreDispatch = gatewayFetch;
   }
 
   if (!loreActive && !loreDisabled) {
@@ -472,6 +481,7 @@ export const LorePlugin: Plugin = async (ctx) => {
         // preserving original auth headers and URLs.
         installFetchInterceptor({
           gatewayBase,
+          gatewayFetch,
           getHeaders: () => {
             const headers: Record<string, string> = {
               ...gatewayAccessHeadersForRemote(gatewayBase),

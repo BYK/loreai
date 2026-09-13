@@ -47,12 +47,14 @@ describe("startGateway authenticated reuse", () => {
     const { startGateway } = await import("../src/cli/start");
     const existing = await startGateway({ port: 0, local: true, quiet: true });
     teardowns.push(() => existing.shutdown());
+    expect(existing.dispatch).toBeTypeOf("function");
     const handle = await startGateway({
       port: existing.port,
       local: true,
       quiet: true,
     });
     expect(handle.owned).toBe(false);
+    expect(handle.dispatch).toBeUndefined();
     expect(handle.port).toBe(existing.port);
     expect(handle.managementToken).toBe(existing.managementToken);
   });

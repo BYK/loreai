@@ -15,6 +15,8 @@ import * as log from "./log";
 export type FetchInterceptorConfig = {
   /** Base URL of the Lore gateway (e.g., "http://127.0.0.1:3207"). */
   gatewayBase: string;
+  /** Dispatch directly when this process owns the embedded gateway. */
+  gatewayFetch?: (request: Request) => Promise<Response>;
   /**
    * Dynamic headers to inject on every intercepted request.
    * Called per-request so values can change (e.g., session ID).
@@ -418,6 +420,34 @@ function observeRequestHeaders(
   }
 }
 
+function fetchThroughGateway(
+  gatewayUrl: string,
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  headers: Headers,
+  config: FetchInterceptorConfig,
+  originalFetch: typeof globalThis.fetch,
+): Promise<Response> {
+  if (!config.gatewayFetch) {
+    return originalFetch(gatewayUrl, { ...init, headers });
+  }
+
+  if (typeof input === "string" || input instanceof URL) {
+    return config.gatewayFetch(new Request(gatewayUrl, { ...init, headers }));
+  }
+
+  const source = new Request(input, init);
+  return config.gatewayFetch(
+    new Request(gatewayUrl, {
+      method: source.method,
+      headers,
+      body: source.body,
+      signal: source.signal,
+      ...(source.body ? { duplex: "half" } : {}),
+    }),
+  );
+}
+
 export function installFetchInterceptor(
   config: FetchInterceptorConfig,
 ): () => void {
@@ -513,7 +543,14 @@ export function installFetchInterceptor(
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
-      return originalFetch(rewrite.gatewayUrl, { ...init, headers });
+      return fetchThroughGateway(
+        rewrite.gatewayUrl,
+        input,
+        init,
+        headers,
+        config,
+        originalFetch,
+      );
     }
 
     // ---- Path 2: URL didn't match, but the body shape may reveal an LLM call ----
@@ -537,7 +574,14 @@ export function installFetchInterceptor(
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );
-        return originalFetch(rewrite.gatewayUrl, { ...init, headers });
+        return fetchThroughGateway(
+          rewrite.gatewayUrl,
+          input,
+          init,
+          headers,
+          config,
+          originalFetch,
+        );
       }
 
       // LLM-looking path we couldn't intercept (no body, or unrecognized
