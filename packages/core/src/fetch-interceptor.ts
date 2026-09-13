@@ -267,6 +267,17 @@ export function interceptUrlForProtocol(
  */
 const warnedPaths = new Set<string>();
 
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    host === "localhost" ||
+    host === "localhost." ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(host)
+  );
+}
+
 /**
  * Determine whether a fetch request should be intercepted and rerouted
  * through the Lore gateway.
@@ -285,16 +296,7 @@ export function shouldIntercept(url: string, gatewayBase: string): boolean {
     if (url.startsWith(gatewayBase)) return false;
     // Never intercept local requests (could be local LLM or gateway itself)
     const host = parsed.hostname;
-    if (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "0.0.0.0" ||
-      // URL.hostname KEEPS brackets on IPv6 addresses (unlike the WHATWG
-      // URL spec we expected). Treat "[::1]" the same as "::1".
-      host === "::1" ||
-      host === "[::1]"
-    )
-      return false;
+    if (isLoopbackHostname(host)) return false;
     // Intercept known LLM API paths only
     return matchesLLMApiPath(parsed.pathname);
   } catch {
@@ -371,6 +373,7 @@ function buildGatewayHeaders(
   upstreamBase: string,
   upstreamPath: string,
   config: FetchInterceptorConfig,
+  closeConnection: boolean,
 ): Headers {
   // Handle both `fetch(url, {headers})` and `fetch(new Request(url, {headers}))`.
   const existingHeaders =
@@ -402,6 +405,13 @@ function buildGatewayHeaders(
   } catch (e) {
     log.error("fetch-interceptor: getHeaders() failed:", e);
   }
+
+  // A pooled loopback socket can race node:http's keep-alive close boundary.
+  // Reusing it there resets a POST before the gateway sees the request, so the
+  // caller retries the whole model turn.
+  // A fresh loopback TCP connection is cheap and removes that ambiguity. Do
+  // not impose this on remote gateways, where TLS connection reuse matters.
+  if (closeConnection) headers.set("connection", "close");
 
   return headers;
 }
@@ -437,6 +447,7 @@ export function installFetchInterceptor(
   // every fetch call in the process (tool executions, file downloads, etc.).
   const gateway = new URL(config.gatewayBase);
   const gatewayBase = config.gatewayBase;
+  const closeGatewayConnection = isLoopbackHostname(gateway.hostname);
 
   const interceptor = async (
     input: RequestInfo | URL,
@@ -483,13 +494,7 @@ export function installFetchInterceptor(
 
     // Never intercept local requests (could be local LLM or gateway itself)
     const host = upstream.hostname;
-    if (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "0.0.0.0" ||
-      host === "::1" ||
-      host === "[::1]"
-    ) {
+    if (isLoopbackHostname(host)) {
       return originalFetch(input, init);
     }
 
@@ -508,6 +513,7 @@ export function installFetchInterceptor(
         rewrite.upstreamBase,
         rewrite.upstreamPath,
         config,
+        closeGatewayConnection,
       );
       observeRequestHeaders(headers, config);
       log.info(
@@ -532,6 +538,7 @@ export function installFetchInterceptor(
           rewrite.upstreamBase,
           rewrite.upstreamPath,
           config,
+          closeGatewayConnection,
         );
         observeRequestHeaders(headers, config);
         log.info(
