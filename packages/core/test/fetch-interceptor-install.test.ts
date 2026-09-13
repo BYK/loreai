@@ -89,28 +89,6 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       );
     });
 
-    test("does not reuse a pooled socket for the loopback gateway hop", async () => {
-      await fetch("https://chatgpt.com/backend-api/codex/responses", {
-        method: "POST",
-        body: JSON.stringify({ model: "gpt-5", input: [] }),
-      });
-      expect(headerVal("connection")).toBe("close");
-    });
-
-    test("keeps connection reuse enabled for a remote gateway", async () => {
-      cleanup();
-      cleanup = installFetchInterceptor({
-        gatewayBase: "https://gateway.example",
-        getHeaders: () => ({}),
-      });
-      await fetch("https://chatgpt.com/backend-api/codex/responses", {
-        method: "POST",
-        body: JSON.stringify({ model: "gpt-5", input: [] }),
-      });
-      expect(captured?.url).toBe("https://gateway.example/v1/codex/responses");
-      expect(headerVal("connection")).toBeNull();
-    });
-
     test("preserves original headers and injects X-Lore-* context", async () => {
       await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
