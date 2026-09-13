@@ -1121,6 +1121,12 @@ export async function startServer(
         ? withManagementCors(notFound, allowedManagementOrigin)
         : withoutCors(notFound);
     } catch (e) {
+      // A disconnect aborts the Web Request before the node:http bridge has
+      // necessarily unwound this router. There is no client left to receive an
+      // error response, and parse/stream errors caused by that abort are not
+      // gateway failures. The bridge observes the same signal and owns socket
+      // cleanup, so settle this late route result quietly.
+      if (req.signal.aborted) return new Response(null, { status: 499 });
       const msg = e instanceof Error ? e.message : "Internal server error";
       log.error(`uncaught error: ${msg}`);
       if (managementPath) {

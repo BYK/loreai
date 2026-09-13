@@ -11,7 +11,7 @@
  * The upstream is pointed at a refused port so /v1/models fails fast (502)
  * without real network access; the other routes never reach the pipeline.
  */
-import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import { describe, test, expect, beforeAll, afterAll, vi } from "vitest";
 import { once } from "node:events";
 import { connect } from "node:net";
 import {
@@ -20,6 +20,7 @@ import {
 } from "node:http";
 import { Readable } from "node:stream";
 import { brotliCompressSync, gzipSync, zstdCompressSync } from "node:zlib";
+import { log } from "@loreai/core";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import type { GatewayConfig } from "../src/config";
@@ -140,6 +141,35 @@ afterAll(async () => {
 });
 
 describe("server routing", () => {
+  test("does not report a disconnected client as an uncaught server error", async () => {
+    const error = vi.spyOn(log, "error").mockImplementation(() => {});
+    const socket = connect(server.port, "127.0.0.1");
+    try {
+      await once(socket, "connect");
+      await new Promise<void>((resolve, reject) => {
+        socket.write(
+          "POST /v1/codex/responses HTTP/1.1\r\n" +
+            "Host: 127.0.0.1\r\n" +
+            "Content-Type: application/json\r\n" +
+            "Content-Length: 1024\r\n" +
+            "Connection: close\r\n\r\n" +
+            '{"model":"gpt-5.4",',
+          (writeError) => (writeError ? reject(writeError) : resolve()),
+        );
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const closed = once(socket, "close");
+      socket.destroy();
+      await closed;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      socket.destroy();
+      error.mockRestore();
+    }
+  });
+
   test.each(["/v1/responses", "/v1/codex/responses"])(
     "closes a malformed streamed request that never finishes: %s",
     async (pathname) => {
