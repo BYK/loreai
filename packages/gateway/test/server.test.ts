@@ -455,6 +455,7 @@ describe("server routing", () => {
         },
         body: JSON.stringify({
           model: "gpt-5.4",
+          instructions: "x".repeat(300 * 1024),
           input: [{ role: "user", content: "hello" }],
           stream: true,
         }),

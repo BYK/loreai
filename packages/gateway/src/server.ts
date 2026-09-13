@@ -48,7 +48,9 @@ import { parseAnthropicRequest } from "./translate/anthropic";
 import { parseOpenAIRequest } from "./translate/openai";
 import { parseGeminiRequest } from "./translate/gemini";
 import {
+  parseOpenAICodexRequest,
   parseOpenAICodexRequestChunks,
+  parseOpenAIResponsesRequest,
   parseOpenAIResponsesRequestChunks,
 } from "./translate/openai-responses";
 import {
@@ -678,15 +680,26 @@ async function handleGeminiGenerateContent(
 async function handleOpenAIResponses(
   req: Request,
   config: GatewayConfig,
+  bufferedBody = false,
 ): Promise<Response> {
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = await parseOpenAIResponsesRequestChunks(
-      decodedRequestChunks(req, req.signal),
-      headersToRecord(req.headers),
-    );
+    const headers = headersToRecord(req.headers);
+    gatewayReq = bufferedBody
+      ? parseOpenAIResponsesRequest(
+          JSON.parse(await decodeRequestBody(req, req.signal)),
+          headers,
+        )
+      : await parseOpenAIResponsesRequestChunks(
+          decodedRequestChunks(req, req.signal),
+          headers,
+        );
     gatewayReq.signal = req.signal;
-  } catch {
+  } catch (error) {
+    if (bufferedBody) {
+      const reason = error instanceof Error ? error.message : String(error);
+      log.error(`embedded Responses request parse failed: ${reason}`);
+    }
     // A malformed stream can remain unfinished after parsing fails. Closing the
     // connection cancels Node's request body once the fixed 400 is delivered.
     return closingErrorResponse(
@@ -718,15 +731,26 @@ async function handleOpenAIResponses(
 async function handleOpenAICodexResponses(
   req: Request,
   config: GatewayConfig,
+  bufferedBody = false,
 ): Promise<Response> {
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = await parseOpenAICodexRequestChunks(
-      decodedRequestChunks(req, req.signal),
-      headersToRecord(req.headers),
-    );
+    const headers = headersToRecord(req.headers);
+    gatewayReq = bufferedBody
+      ? parseOpenAICodexRequest(
+          JSON.parse(await decodeRequestBody(req, req.signal)),
+          headers,
+        )
+      : await parseOpenAICodexRequestChunks(
+          decodedRequestChunks(req, req.signal),
+          headers,
+        );
     gatewayReq.signal = req.signal;
-  } catch {
+  } catch (error) {
+    if (bufferedBody) {
+      const reason = error instanceof Error ? error.message : String(error);
+      log.error(`embedded Codex request parse failed: ${reason}`);
+    }
     return closingErrorResponse(
       400,
       "invalid_request_error",
@@ -835,6 +859,7 @@ export async function startServer(
     req: Request,
     peerAddress: string | undefined,
     rawHeaders?: readonly string[],
+    embeddedDispatch = false,
   ): Promise<Response> => {
     const url = new URL(req.url);
     const { pathname } = url;
@@ -976,7 +1001,7 @@ export async function startServer(
       // POST /v1/codex/responses — Codex (ChatGPT) ingress (Responses format)
       if (method === "POST" && pathname === "/v1/codex/responses") {
         return await handleForegroundBodyRoute(req, (scoped) =>
-          handleOpenAICodexResponses(scoped, config),
+          handleOpenAICodexResponses(scoped, config, embeddedDispatch),
         );
       }
 
@@ -988,7 +1013,7 @@ export async function startServer(
       // a host-aware responses path (like buildOpenAIChatCompletionsUrl) first.
       if (method === "POST" && pathname === "/v1/responses") {
         return await handleForegroundBodyRoute(req, (scoped) =>
-          handleOpenAIResponses(scoped, config),
+          handleOpenAIResponses(scoped, config, embeddedDispatch),
         );
       }
 
@@ -1325,7 +1350,8 @@ export async function startServer(
     // Report the hosts we actually bound (unavailable ones were skipped), so
     // callers and /health probes don't reference an interface that's down.
     hosts: boundHosts,
-    dispatch: (request: Request) => fetch(request, "127.0.0.1"),
+    dispatch: (request: Request) =>
+      fetch(request, "127.0.0.1", undefined, true),
     ready: Promise.all(readyPromises).then(() => {}),
   };
 
