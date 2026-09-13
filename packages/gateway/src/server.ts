@@ -63,7 +63,11 @@ import {
 import { upstreamFetch } from "./fetch";
 import { responseAgainstAbort } from "./abort-race";
 import { cancelAndReleaseReader, readStreamChunk } from "./stream/anthropic";
-import { decodeRequestBody, decodedRequestChunks } from "./http-body";
+import {
+  decodeRequestBody,
+  decodedRequestChunks,
+  MAX_EMBEDDED_REQUEST_BODY_BYTES,
+} from "./http-body";
 import { SHUTDOWN_DEADLINE_MS } from "./shutdown-deadline";
 import {
   BEDROCK_RUNTIME_PATH_RE,
@@ -469,6 +473,11 @@ function rejectWebSocketUpgrade(pathname: string): Response {
 // Route handlers
 // ---------------------------------------------------------------------------
 
+const EMBEDDED_REQUEST_BODY_LIMITS = {
+  compressedBytes: MAX_EMBEDDED_REQUEST_BODY_BYTES,
+  decompressedBytes: MAX_EMBEDDED_REQUEST_BODY_BYTES,
+} as const;
+
 async function handleAnthropicMessages(
   req: Request,
   config: GatewayConfig,
@@ -687,7 +696,13 @@ async function handleOpenAIResponses(
     const headers = headersToRecord(req.headers);
     gatewayReq = bufferedBody
       ? parseOpenAIResponsesRequest(
-          JSON.parse(await decodeRequestBody(req, req.signal)),
+          JSON.parse(
+            await decodeRequestBody(
+              req,
+              req.signal,
+              EMBEDDED_REQUEST_BODY_LIMITS,
+            ),
+          ),
           headers,
         )
       : await parseOpenAIResponsesRequestChunks(
@@ -738,7 +753,13 @@ async function handleOpenAICodexResponses(
     const headers = headersToRecord(req.headers);
     gatewayReq = bufferedBody
       ? parseOpenAICodexRequest(
-          JSON.parse(await decodeRequestBody(req, req.signal)),
+          JSON.parse(
+            await decodeRequestBody(
+              req,
+              req.signal,
+              EMBEDDED_REQUEST_BODY_LIMITS,
+            ),
+          ),
           headers,
         )
       : await parseOpenAICodexRequestChunks(

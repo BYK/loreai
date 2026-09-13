@@ -24,7 +24,10 @@ import { log } from "@loreai/core";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import type { GatewayConfig } from "../src/config";
-import { MAX_HTTP_REQUEST_DECOMPRESSED_BYTES } from "../src/http-body";
+import {
+  MAX_HTTP_REQUEST_COMPRESSED_BYTES,
+  MAX_HTTP_REQUEST_DECOMPRESSED_BYTES,
+} from "../src/http-body";
 import {
   loopbackRequest,
   type LoopbackRequestInit,
@@ -455,7 +458,7 @@ describe("server routing", () => {
         },
         body: JSON.stringify({
           model: "gpt-5.4",
-          instructions: "x".repeat(300 * 1024),
+          instructions: "x".repeat(MAX_HTTP_REQUEST_COMPRESSED_BYTES + 1024),
           input: [{ role: "user", content: "hello" }],
           stream: true,
         }),

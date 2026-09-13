@@ -123,6 +123,21 @@ describe("decodeRequestBody", () => {
     expect(await decodeRequestBody(reqWith(SAMPLE, "identity"))).toBe(SAMPLE);
   });
 
+  test("allows a trusted caller to select a higher body limit", async () => {
+    await expect(
+      decodeRequestBody(reqWith("hello"), undefined, {
+        compressedBytes: 5,
+        decompressedBytes: 5,
+      }),
+    ).resolves.toBe("hello");
+    await expect(
+      decodeRequestBody(reqWith("hello"), undefined, {
+        compressedBytes: 4,
+        decompressedBytes: 5,
+      }),
+    ).rejects.toThrow("exceeded 4 byte limit");
+  });
+
   test("rejects malformed compressed bytes (would 400 in the handler)", async () => {
     const garbage = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
     await expect(decodeRequestBody(reqWith(garbage, "zstd"))).rejects.toThrow();
