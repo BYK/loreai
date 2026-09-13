@@ -12,9 +12,8 @@ import {
 // (`undefined is not an object (evaluating 'A.event')`). See ./internal.ts.
 import {
   applyLoreProviderConfig,
-  EmbeddedGatewayLifecycle,
-  type EmbeddedGatewayLease,
   gatewayAccessHeadersForRemote,
+  installEmbeddedGatewaySigtermHandler,
   probeGateway,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
@@ -96,10 +95,11 @@ async function startInProcess(): Promise<string | null> {
     const gw = "@loreai/gateway";
     const { startGateway } = await import(/* webpackIgnore: true */ gw);
     const handle = await startGateway({ quiet: true, local: true });
-    processLifecycle.ownGateway(handle);
     const url = `http://127.0.0.1:${handle.port}`;
 
-    if (!handle.owned) {
+    if (handle.owned) {
+      installEmbeddedGatewaySigtermHandler(handle.shutdown);
+    } else {
       log.info(`reusing existing gateway at ${url}`);
     }
 
@@ -222,19 +222,6 @@ async function resolveParentSession(
 /** Memoized lore init promise — ensures concurrent plugin calls don't race. */
 let loreInitPromise: Promise<string | null> | null = null;
 
-function resetProcessState(): void {
-  processInitDone = false;
-  processLoreActive = false;
-  processLoreBase = "";
-  loreInitPromise = null;
-  lastGatewayStartError = null;
-  currentProject = undefined;
-  projectState.clear();
-  sessionParent.clear();
-}
-
-const processLifecycle = new EmbeddedGatewayLifecycle(resetProcessState);
-
 /**
  * Whether the plugin should stay inert (skip gateway probe/start and the
  * process-wide fetch interceptor). True under test runners — `NODE_ENV=test`
@@ -255,10 +242,7 @@ function isInertTestEnv(): boolean {
   );
 }
 
-async function initializeLorePlugin(
-  ctx: PluginInput,
-  lifecycleLease: EmbeddedGatewayLease,
-): Promise<Hooks> {
+export const LorePlugin: Plugin = async (ctx) => {
   // Initialize lore — only probe/start once per process.
   const loreDisabled =
     process.env.LORE_DISABLED === "1" || process.env.LORE_DISABLED === "true";
@@ -354,11 +338,7 @@ async function initializeLorePlugin(
   currentProject = { path: thisProjectPath, gitRemote: thisGitRemote };
 
   try {
-    // OpenCode 1.18+ awaits this hook from its instance finalizer. Keep the
-    // local intersection until our minimum supported plugin SDK declares it.
-    const hooks: Hooks & { dispose: () => Promise<void> } = {
-      dispose: lifecycleLease.release,
-
+    const hooks: Hooks = {
       // Disable built-in compaction (gateway handles it), register hidden
       // worker agents, and redirect all provider baseURLs through the gateway.
       config: async (input) => {
@@ -490,24 +470,22 @@ async function initializeLorePlugin(
         // Install the fetch interceptor once per process. It transparently
         // reroutes outgoing LLM API calls through the gateway while
         // preserving original auth headers and URLs.
-        processLifecycle.ownFetchInterceptor(
-          installFetchInterceptor({
-            gatewayBase,
-            getHeaders: () => {
-              const headers: Record<string, string> = {
-                ...gatewayAccessHeadersForRemote(gatewayBase),
-              };
-              const cur = currentProject;
-              if (cur?.path) {
-                headers["x-lore-project"] = cur.path;
-                // Only emit the remote paired with the path it was resolved FOR,
-                // never a remote left over from a different project's plugin call.
-                if (cur.gitRemote) headers["x-lore-git-remote"] = cur.gitRemote;
-              }
-              return headers;
-            },
-          }),
-        );
+        installFetchInterceptor({
+          gatewayBase,
+          getHeaders: () => {
+            const headers: Record<string, string> = {
+              ...gatewayAccessHeadersForRemote(gatewayBase),
+            };
+            const cur = currentProject;
+            if (cur?.path) {
+              headers["x-lore-project"] = cur.path;
+              // Only emit the remote paired with the path it was resolved FOR,
+              // never a remote left over from a different project's plugin call.
+              if (cur.gitRemote) headers["x-lore-git-remote"] = cur.gitRemote;
+            }
+            return headers;
+          },
+        });
         log.info(`routing through ${gatewayBase}`);
         log.info(`dashboard: ${gatewayBase}/ui`);
       }
@@ -524,24 +502,6 @@ async function initializeLorePlugin(
     const detail = e instanceof Error ? e.stack || e.message : String(e);
     log.error(`init failed: ${detail}`);
     throw e;
-  }
-}
-
-export const LorePlugin: Plugin = async (ctx) => {
-  const lifecycleLease = await processLifecycle.acquire();
-  try {
-    return await initializeLorePlugin(ctx, lifecycleLease);
-  } catch (error) {
-    try {
-      await lifecycleLease.release();
-    } catch (cleanupError) {
-      const detail =
-        cleanupError instanceof Error
-          ? cleanupError.stack || cleanupError.message
-          : String(cleanupError);
-      log.error(`cleanup after init failure failed: ${detail}`);
-    }
-    throw error;
   }
 };
 

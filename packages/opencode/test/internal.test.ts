@@ -1,87 +1,82 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import type { PluginInput } from "@opencode-ai/plugin";
 import { log } from "@loreai/core";
 import {
-  EmbeddedGatewayLifecycle,
   gatewayAccessHeadersForRemote,
+  installEmbeddedGatewaySigtermHandler,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
 } from "../src/internal";
 
-describe("embedded gateway lifecycle", () => {
-  test("the final plugin lease shuts down shared process resources once", async () => {
-    const shutdown = vi.fn(async () => {});
-    const cleanup = vi.fn();
-    const onIdle = vi.fn();
-    const lifecycle = new EmbeddedGatewayLifecycle(onIdle);
-    const first = await lifecycle.acquire();
-    const second = await lifecycle.acquire();
-    lifecycle.ownGateway({ owned: true, shutdown });
-    lifecycle.ownFetchInterceptor(cleanup);
+describe("embedded gateway SIGTERM", () => {
+  function fakeHost() {
+    const events = new EventEmitter();
+    let resolveExit: ((code: number | undefined) => void) | undefined;
+    const exited = new Promise<number | undefined>((resolve) => {
+      resolveExit = resolve;
+    });
+    return {
+      events,
+      exited,
+      host: {
+        prependOnceListener: (event: "SIGTERM", listener: () => void) =>
+          events.prependOnceListener(event, listener),
+        removeListener: (event: "SIGTERM", listener: () => void) =>
+          events.removeListener(event, listener),
+        exit: (code?: number) => resolveExit?.(code),
+      },
+    };
+  }
 
-    await first.release();
-    expect(shutdown).not.toHaveBeenCalled();
-    expect(cleanup).not.toHaveBeenCalled();
-
-    await second.release();
-    await second.release();
-    expect(shutdown).toHaveBeenCalledTimes(1);
-    expect(cleanup).toHaveBeenCalledTimes(1);
-    expect(onIdle).toHaveBeenCalledTimes(1);
-  });
-
-  test("does not stop a gateway owned by another process", async () => {
-    const shutdown = vi.fn(async () => {});
-    const lifecycle = new EmbeddedGatewayLifecycle();
-    const lease = await lifecycle.acquire();
-    lifecycle.ownGateway({ owned: false, shutdown });
-
-    await lease.release();
-    expect(shutdown).not.toHaveBeenCalled();
-  });
-
-  test("a new lease waits until the previous teardown settles", async () => {
+  test("awaits embedded gateway shutdown before completing SIGTERM", async () => {
     let finishShutdown: (() => void) | undefined;
-    const lifecycle = new EmbeddedGatewayLifecycle();
-    const first = await lifecycle.acquire();
-    lifecycle.ownGateway({
-      owned: true,
-      shutdown: () =>
+    const shutdown = vi.fn(
+      () =>
         new Promise<void>((resolve) => {
           finishShutdown = resolve;
         }),
-    });
+    );
+    const { events, exited, host } = fakeHost();
+    installEmbeddedGatewaySigtermHandler(shutdown, host);
 
-    const release = first.release();
-    let acquired = false;
-    const next = lifecycle.acquire().then((lease) => {
-      acquired = true;
-      return lease;
+    events.emit("SIGTERM");
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    let didExit = false;
+    void exited.then(() => {
+      didExit = true;
     });
     await Promise.resolve();
-    expect(acquired).toBe(false);
+    expect(didExit).toBe(false);
 
     finishShutdown?.();
-    await release;
-    const second = await next;
-    expect(acquired).toBe(true);
-    await second.release();
+    await expect(exited).resolves.toBe(0);
   });
 
-  test("restores the fetch interceptor even when gateway shutdown fails", async () => {
-    const cleanup = vi.fn();
-    const lifecycle = new EmbeddedGatewayLifecycle();
-    const lease = await lifecycle.acquire();
-    lifecycle.ownGateway({
-      owned: true,
-      shutdown: async () => {
+  test("still completes termination when gateway shutdown fails", async () => {
+    const { events, exited, host } = fakeHost();
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    log.silenceStderr(false);
+    try {
+      installEmbeddedGatewaySigtermHandler(async () => {
         throw new Error("shutdown failed");
-      },
-    });
-    lifecycle.ownFetchInterceptor(cleanup);
+      }, host);
+      events.emit("SIGTERM");
+      await expect(exited).resolves.toBe(0);
+    } finally {
+      stderr.mockRestore();
+      log.silenceStderr(false);
+    }
+  });
 
-    await expect(lease.release()).rejects.toThrow("shutdown failed");
-    expect(cleanup).toHaveBeenCalledTimes(1);
+  test("cleanup removes the process signal listener", () => {
+    const shutdown = vi.fn(async () => {});
+    const { events, host } = fakeHost();
+    const cleanup = installEmbeddedGatewaySigtermHandler(shutdown, host);
+
+    cleanup();
+    events.emit("SIGTERM");
+    expect(shutdown).not.toHaveBeenCalled();
   });
 });
 
