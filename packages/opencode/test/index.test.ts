@@ -47,12 +47,7 @@ async function initPlugin() {
   return {
     hooks,
     tmpDir,
-    cleanup: async () => {
-      await (
-        hooks as typeof hooks & { dispose?: () => Promise<void> }
-      ).dispose?.();
-      rmSync(tmpDir, { recursive: true, force: true });
-    },
+    cleanup: () => rmSync(tmpDir, { recursive: true, force: true }),
   };
 }
 
@@ -65,7 +60,7 @@ describe("LorePlugin config hook", () => {
 
       expect(cfg.compaction).toEqual({ auto: false, prune: false });
     } finally {
-      await cleanup();
+      cleanup();
     }
   });
 
@@ -107,7 +102,7 @@ describe("LorePlugin config hook", () => {
         expect(agents[name].hidden).toBe(true);
       }
     } finally {
-      await cleanup();
+      cleanup();
     }
   });
 
@@ -126,7 +121,7 @@ describe("LorePlugin config hook", () => {
       });
       expect(agents["lore-distill"]).toBeDefined();
     } finally {
-      await cleanup();
+      cleanup();
     }
   });
 
@@ -255,14 +250,14 @@ describe("LorePlugin config hook", () => {
 });
 
 describe("LorePlugin hooks", () => {
-  test("exposes an awaited disposal hook for host shutdown", async () => {
+  test("does not bind process-wide gateway ownership to instance disposal", async () => {
     const { hooks, cleanup } = await initPlugin();
     try {
       expect(
         (hooks as typeof hooks & { dispose?: () => Promise<void> }).dispose,
-      ).toBeTypeOf("function");
+      ).toBeUndefined();
     } finally {
-      await cleanup();
+      cleanup();
     }
   });
 
@@ -271,7 +266,7 @@ describe("LorePlugin hooks", () => {
     try {
       expect(hooks.tool).toEqual({});
     } finally {
-      await cleanup();
+      cleanup();
     }
   });
 
@@ -286,7 +281,7 @@ describe("LorePlugin hooks", () => {
       expect(hooks["experimental.chat.messages.transform"]).toBeUndefined();
       expect(hooks["experimental.session.compacting"]).toBeUndefined();
     } finally {
-      await cleanup();
+      cleanup();
     }
   });
 });
