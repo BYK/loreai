@@ -443,6 +443,28 @@ describe("server routing", () => {
     expect(await res.json()).toMatchObject({ status: "ok" });
   });
 
+  test("owned dispatch preserves a Codex request body through the router", async () => {
+    expect(server.dispatch).toBeTypeOf("function");
+    const res = await server.dispatch!(
+      new Request(`http://127.0.0.1:${server.port}/v1/codex/responses`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test",
+          "content-type": "application/json",
+          "x-lore-upstream-url": "http://127.0.0.1:9",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.4",
+          input: [{ role: "user", content: "hello" }],
+          stream: true,
+        }),
+      }),
+    );
+
+    expect(res.status).not.toBe(400);
+    expect(await res.text()).not.toContain("Invalid JSON body");
+  });
+
   test("unknown route returns a 404 error envelope", async () => {
     const res = await localRequest(server.port, "/definitely-not-a-route");
     expect(res.status).toBe(404);

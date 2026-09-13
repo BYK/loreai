@@ -420,7 +420,20 @@ function observeRequestHeaders(
   }
 }
 
-function fetchThroughGateway(
+async function isInvalidJsonBodyResponse(response: Response): Promise<boolean> {
+  if (response.status !== 400) return false;
+  try {
+    const body = (await response.clone().json()) as {
+      message?: unknown;
+      error?: { message?: unknown };
+    };
+    return (body.error?.message ?? body.message) === "Invalid JSON body";
+  } catch {
+    return false;
+  }
+}
+
+async function fetchThroughGateway(
   gatewayUrl: string,
   input: RequestInfo | URL,
   init: RequestInit | undefined,
@@ -432,20 +445,47 @@ function fetchThroughGateway(
     return originalFetch(gatewayUrl, { ...init, headers });
   }
 
+  let directRequest: Request;
+  let requestClone: Request | undefined;
   if (typeof input === "string" || input instanceof URL) {
-    return config.gatewayFetch(new Request(gatewayUrl, { ...init, headers }));
-  }
-
-  const source = new Request(input, init);
-  return config.gatewayFetch(
-    new Request(gatewayUrl, {
+    directRequest = new Request(gatewayUrl, { ...init, headers });
+  } else {
+    const source = new Request(input, init);
+    directRequest = new Request(gatewayUrl, {
       method: source.method,
       headers,
       body: source.body,
       signal: source.signal,
       ...(source.body ? { duplex: "half" } : {}),
-    }),
+    });
+    // A Request body cannot be reconstructed after dispatch consumes it. Keep
+    // one replay branch for the narrow, pre-pipeline JSON rejection fallback.
+    requestClone = directRequest.clone();
+  }
+
+  const response = await config.gatewayFetch(directRequest);
+  if (!(await isInvalidJsonBodyResponse(response))) {
+    if (requestClone?.body) {
+      void requestClone.body.cancel().catch(() => {});
+    }
+    return response;
+  }
+
+  // This exact 400 is emitted before Lore enters the provider pipeline, so a
+  // single retry cannot duplicate an upstream model turn. Keep this as a
+  // compatibility escape hatch for Web Request stream implementations that
+  // do not survive the synthetic in-process Request handoff correctly.
+  log.warn(
+    "fetch-interceptor: embedded gateway rejected the request body; retrying through loopback HTTP",
   );
+  try {
+    const retryRequest =
+      requestClone ?? new Request(gatewayUrl, { ...init, headers });
+    return await originalFetch(retryRequest);
+  } catch (error) {
+    log.error("fetch-interceptor: loopback JSON-body retry failed:", error);
+    return response;
+  }
 }
 
 export function installFetchInterceptor(

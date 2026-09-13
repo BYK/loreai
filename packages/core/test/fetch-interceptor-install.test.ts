@@ -146,6 +146,43 @@ describe("installFetchInterceptor — end-to-end routing", () => {
       expect(await dispatched?.text()).toBe(body);
     });
 
+    test("retries an embedded JSON parse rejection through the loopback adapter", async () => {
+      cleanup();
+      realFetch = vi.fn(async (input: RequestInfo | URL) => {
+        const request =
+          input instanceof Request ? input : new Request(input.toString());
+        expect(request.url).toBe(`${GATEWAY}/v1/codex/responses`);
+        expect(await request.text()).toBe(
+          JSON.stringify({ model: "gpt-5", input: ["hello"] }),
+        );
+        return new Response("loopback");
+      });
+      globalThis.fetch = realFetch;
+      cleanup = installFetchInterceptor({
+        gatewayBase: GATEWAY,
+        gatewayFetch: async () =>
+          Response.json(
+            {
+              error: {
+                type: "invalid_request_error",
+                message: "Invalid JSON body",
+              },
+            },
+            { status: 400 },
+          ),
+        getHeaders: () => ({}),
+      });
+      const body = JSON.stringify({ model: "gpt-5", input: ["hello"] });
+
+      const response = await fetch(
+        "https://chatgpt.com/backend-api/codex/responses",
+        { method: "POST", body },
+      );
+
+      expect(await response.text()).toBe("loopback");
+      expect(realFetch).toHaveBeenCalledOnce();
+    });
+
     test("preserves original headers and injects X-Lore-* context", async () => {
       await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
