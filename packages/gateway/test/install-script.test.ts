@@ -24,7 +24,7 @@ import {
 } from "../src/lifecycle-lock";
 import { standaloneInstallProvenance } from "../src/cli/uninstall";
 
-const installer = resolve(import.meta.dirname, "../../website/public/install");
+const installer = resolve(import.meta.dirname, "./fixtures/install-v1.sh");
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {

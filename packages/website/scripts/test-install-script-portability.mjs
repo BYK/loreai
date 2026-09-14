@@ -22,7 +22,9 @@ import { gzipSync } from "node:zlib";
 // utilities on macOS. Linux also emulates devfs's misleading path metadata.
 const installer =
   process.env.LORE_TEST_INSTALLER ??
-  fileURLToPath(new URL("../public/install", import.meta.url));
+  fileURLToPath(
+    new URL("../../gateway/test/fixtures/install-v1.sh", import.meta.url),
+  );
 const source = readFileSync(installer, "utf8");
 const boundary = source.indexOf("\ncanonical_home=");
 assert.ok(boundary > 0);
