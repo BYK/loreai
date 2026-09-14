@@ -37,6 +37,7 @@ describe("bounded holistic semantic review", () => {
     };
     const result = buildHolisticReviewInput({
       ...input,
+      availableInvariantCount: 3,
       inputTokenBudget: estimateHolisticInputTokens(input) + 1,
     });
     expect(result.kind).toBe("fit");
@@ -47,9 +48,9 @@ describe("bounded holistic semantic review", () => {
         availableHunks: 1,
         includedHunks: 1,
         omittedHunks: 0,
-        availableInvariants: 1,
+        availableInvariants: 3,
         includedInvariants: 1,
-        omittedInvariants: 0,
+        omittedInvariants: 2,
       });
       expect(result.input.prContext?.title).toBe("Move the request guard");
       expect(result.input.hunks).toEqual(hunks);

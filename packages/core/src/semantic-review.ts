@@ -113,12 +113,21 @@ export function buildHolisticReviewInput(input: {
   invariants: HolisticInvariant[];
   hunks: HolisticHunk[];
   prContext?: HolisticReviewInput["prContext"];
+  /**
+   * Total retrieved invariants before candidate selection. The review input
+   * may intentionally contain only the bounded selected subset.
+   */
+  availableInvariantCount?: number;
   inputTokenBudget?: number;
 }):
   | { kind: "fit"; input: HolisticReviewInput; coverage: ReviewCoverage }
   | { kind: "too-large"; coverage: ReviewCoverage } {
   const inputTokenBudget =
     input.inputTokenBudget ?? DEFAULT_HOLISTIC_INPUT_TOKEN_BUDGET;
+  const availableInvariantCount = Math.max(
+    input.invariants.length,
+    input.availableInvariantCount ?? input.invariants.length,
+  );
   const inputTokens = estimateHolisticInputTokens(input);
   const contextTruncated =
     input.prContext?.titleTruncated === true ||
@@ -134,9 +143,11 @@ export function buildHolisticReviewInput(input: {
     availableHunks: input.hunks.length,
     includedHunks: fits ? input.hunks.length : 0,
     omittedHunks: fits ? 0 : input.hunks.length,
-    availableInvariants: input.invariants.length,
+    availableInvariants: availableInvariantCount,
     includedInvariants: fits ? input.invariants.length : 0,
-    omittedInvariants: fits ? 0 : input.invariants.length,
+    omittedInvariants: fits
+      ? availableInvariantCount - input.invariants.length
+      : availableInvariantCount,
   };
   if (!fits) return { kind: "too-large", coverage };
   return {

@@ -1706,6 +1706,7 @@ export async function checkInvariants(
           invariants: holisticInvariants,
           hunks: holisticHunks,
           prContext: input.prContext,
+          availableInvariantCount: allEntries.length,
           inputTokenBudget: input.holisticInputTokenBudget,
         })
       : null;
@@ -1715,7 +1716,7 @@ export async function checkInvariants(
           availableHunks: hunks.length,
           includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
             .size,
-          availableInvariants: selectedInvariantIndices.length,
+          availableInvariants: allEntries.length,
           includedInvariants: selectedInvariantIndices.length,
           inputTokens: holisticPlan.coverage.inputTokens,
           inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
@@ -1727,7 +1728,7 @@ export async function checkInvariants(
             includedHunks: new Set(
               selected.map((candidate) => candidate.hunkIdx),
             ).size,
-            availableInvariants: selectedInvariantIndices.length,
+            availableInvariants: allEntries.length,
             includedInvariants: selectedInvariantIndices.length,
             inputTokens: 0,
             inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
