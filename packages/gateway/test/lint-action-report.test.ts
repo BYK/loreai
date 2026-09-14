@@ -28,7 +28,7 @@ afterEach(() => {
 
 function report(): SemanticLintReport {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "complete",
     model: "test/model",
     effort: "off",
@@ -316,7 +316,7 @@ describe("semantic lint action reporter", () => {
   });
 
   test("makes malformed reports visible but nonblocking in advisory mode", () => {
-    const malformed = { ...report(), schemaVersion: 2 };
+    const malformed = { ...report(), schemaVersion: 1 };
     const result = runReporter(malformed, false, 3);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("health failure");
