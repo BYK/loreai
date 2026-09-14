@@ -38,6 +38,8 @@ export interface SemanticLintOptions {
   primeLoreDb?: boolean;
   deadlineMs: number;
   candidateTimeoutMs: number;
+  /** Approximate total input-token budget for one holistic small-PR review. */
+  holisticInputTokens?: number;
   onDiagnostic?: (message: string) => void;
   onJudge?: (current: number, total: number) => void;
   /** Called after validation and before gateway cleanup. */
@@ -201,6 +203,7 @@ export async function runSemanticLint(
         sessionID: `invariant-check-${Date.now()}`,
         signal: deadlineController.signal,
         deadlineMs: Math.max(0, deadlineAt - Date.now()),
+        holisticInputTokenBudget: options.holisticInputTokens,
       });
       throwIfDeadlineExceeded();
       const gate = invariantCheck.gateDecision(
@@ -342,6 +345,8 @@ export async function runSemanticLint(
       range,
       prContext,
       judge,
+      holisticJudge: judge,
+      holisticInputTokenBudget: options.holisticInputTokens,
       model,
       effort,
       sessionID: `invariant-check-${Date.now()}`,
@@ -435,6 +440,7 @@ export async function commandInvariantCheck(
     primeLoreDb: values["prime-lore-db"] === true,
     deadlineMs: Number(values["deadline-ms"] ?? 1_200_000),
     candidateTimeoutMs: Number(values["candidate-timeout-ms"] ?? 90_000),
+    holisticInputTokens: Number(values["holistic-input-tokens"] ?? 16_000),
     onDiagnostic: (message) => console.error(`[lore] ${message}`),
     onJudge: (current, total) =>
       process.stderr.write(`\r[lore]   judging ${current}/${total}...`),

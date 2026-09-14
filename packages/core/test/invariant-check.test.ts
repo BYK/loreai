@@ -31,6 +31,7 @@ import {
   splitDiff,
   type DiffHunk,
   type Finding,
+  type HolisticReviewInput,
   type InvariantJudge,
   type InvariantVec,
   type JudgeOutcome,
@@ -1840,5 +1841,111 @@ describe("checkInvariants typed judge outcomes", () => {
         0,
       ),
     ).toBe(result.transportAttempts);
+  });
+});
+
+
+describe("holistic review orchestration", () => {
+  it("uses one complete whole-diff review and cites only returned evidence", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-small-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => {
+        throw new Error("isolated judge should not run for a fitting review");
+      });
+      const holisticReview = vi.fn(async (input: HolisticReviewInput) => ({
+        kind: "reviews" as const,
+        reviews: input.invariants.map((invariant) => ({
+          invariantId: invariant.id,
+          verdict: "violates" as const,
+          reason: "The complete change bypasses the boundary.",
+          evidence: [
+            { hunkId: input.hunks[0].id, reason: "The changed call is here." },
+          ],
+        })),
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/transport.ts",
+            text: "@@ -1 +1 @@\n-old\n+new",
+          },
+        ],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { review: holisticReview },
+        holisticInputTokenBudget: 16_000,
+        sessionID: "holistic-small",
+      });
+
+      expect(holisticReview).toHaveBeenCalledTimes(1);
+      expect(isolated.judgeCall).not.toHaveBeenCalled();
+      expect(result.review).toMatchObject({
+        strategy: "holistic",
+        contextComplete: true,
+        includedHunks: 1,
+        omittedHunks: 0,
+      });
+      expect(result.semanticCalls).toBe(1);
+      expect(result.candidates).toBe(1);
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0].hunk).toContain("+new");
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to isolated hunks when the complete diff exceeds the budget", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-large-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "satisfies",
+        reason: "The isolated hunk is compliant.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const holisticReview = vi.fn(async () => {
+        throw new Error("holistic judge should not run over budget");
+      });
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/transport.ts",
+            text: "@@\\n+" + "x".repeat(20_000),
+          },
+        ],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { review: holisticReview },
+        holisticInputTokenBudget: 2_000,
+        sessionID: "holistic-large",
+      });
+
+      expect(holisticReview).not.toHaveBeenCalled();
+      expect(isolated.judgeCall).toHaveBeenCalledTimes(1);
+      expect(result.review.strategy).toBe("isolated-hunk");
+      expect(result.review.contextComplete).toBe(false);
+      expect(result.semanticCalls).toBe(1);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
   });
 });

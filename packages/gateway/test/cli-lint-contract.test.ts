@@ -23,12 +23,24 @@ function completeReport(
   overrides: Partial<SemanticLintReport> = {},
 ): SemanticLintReport {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "complete",
     model: "github-copilot/gpt-5.6-luna",
     effort: "off",
     elapsedMs: 25,
     range: { base: "base", head: "head", source: "test" },
+    review: {
+      strategy: "none",
+      contextComplete: false,
+      inputTokens: 0,
+      inputTokenBudget: 16_000,
+      availableHunks: 0,
+      includedHunks: 0,
+      omittedHunks: 0,
+      availableInvariants: 0,
+      includedInvariants: 0,
+      omittedInvariants: 0,
+    },
     health: {
       range: { status: "healthy" },
       diff: { status: "healthy" },
@@ -97,6 +109,18 @@ describe("typed lore lint contract", () => {
       result: {
         status: "complete",
         range: { base: "base", head: "head", source: "test" },
+        review: {
+          strategy: "holistic",
+          contextComplete: true,
+          inputTokens: 2_000,
+          inputTokenBudget: 16_000,
+          availableHunks: 1,
+          includedHunks: 1,
+          omittedHunks: 0,
+          availableInvariants: 1,
+          includedInvariants: 1,
+          omittedInvariants: 0,
+        },
         health: {
           diff: { status: "healthy" },
           invariantVectors: {
@@ -191,6 +215,7 @@ describe("typed lore lint contract", () => {
       "--report-file",
       "--deadline-ms",
       "--candidate-timeout-ms",
+      "--holistic-input-tokens",
       "--json",
     ]) {
       expect(help).toContain(flag);
@@ -355,7 +380,7 @@ describe("typed lore lint contract", () => {
     const path = join(directory, "report.json");
     await writeSemanticLintReport(path, failed);
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(failed);
-    expect(failed.schemaVersion).toBe(1);
+    expect(failed.schemaVersion).toBe(2);
     expect(failed.status).toBe("failed");
     expect(semanticLintExitCode(failed)).toBe(3);
   });

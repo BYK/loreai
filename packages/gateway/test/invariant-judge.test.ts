@@ -276,3 +276,99 @@ describe("invariant worker recovery", () => {
     });
   }
 });
+
+
+describe("holistic gateway judge", () => {
+  const holisticInput = {
+    invariants: [
+      {
+        id: "inv-1",
+        title: "Boundary",
+        content: "The shared boundary must remain enforced.",
+      },
+    ],
+    hunks: [
+      {
+        id: "hunk-0001",
+        file: "src/a.ts",
+        text: "@@ -1 +1 @@\n-old\n+new",
+      },
+    ],
+    inputTokenBudget: 16_000,
+    semanticCallBudget: 2,
+  };
+
+  test("parses a complete review set and counts transport attempts", async () => {
+    const client = clientWith([
+      {
+        kind: "success",
+        text: JSON.stringify({
+          reviews: [
+            {
+              invariantId: "inv-1",
+              verdict: "satisfies",
+              reason: "The changed call remains inside the boundary.",
+              evidence: [],
+            },
+          ],
+        }),
+        model: "github-copilot/gpt-5.6-luna",
+        protocol: "openai-responses",
+        attempts: 2,
+      },
+    ]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "holistic-review",
+    });
+
+    const outcome = await judge.review(holisticInput);
+    expect(outcome).toMatchObject({
+      kind: "reviews",
+      stats: { semanticCalls: 1, transportAttempts: 2 },
+    });
+  });
+
+  test("repairs an invalid holistic response within the semantic budget", async () => {
+    const client = clientWith([
+      {
+        kind: "success",
+        text: "not json",
+        model: "github-copilot/gpt-5.6-luna",
+        protocol: "openai-responses",
+        attempts: 1,
+      },
+      {
+        kind: "success",
+        text: JSON.stringify({
+          reviews: [
+            {
+              invariantId: "inv-1",
+              verdict: "violates",
+              reason: "The new call bypasses the boundary.",
+              evidence: [
+                { hunkId: "hunk-0001", reason: "The changed call is here." },
+              ],
+            },
+          ],
+        }),
+        model: "github-copilot/gpt-5.6-luna",
+        protocol: "openai-responses",
+        attempts: 1,
+      },
+    ]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "holistic-repair",
+    });
+
+    const outcome = await judge.review(holisticInput);
+    expect(outcome.kind).toBe("reviews");
+    expect(outcome.stats).toEqual({
+      semanticCalls: 2,
+      transportAttempts: 2,
+    });
+  });
+});

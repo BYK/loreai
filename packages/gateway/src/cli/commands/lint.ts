@@ -22,6 +22,7 @@ type LintFlags = {
   "report-file"?: string;
   "deadline-ms": number;
   "candidate-timeout-ms": number;
+  "holistic-input-tokens": number;
 };
 
 function positiveInteger(value: string): number {
@@ -121,6 +122,12 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
         brief: "Per-candidate judge timeout in milliseconds",
         default: "90000",
       },
+      "holistic-input-tokens": {
+        kind: "parsed",
+        parse: positiveInteger,
+        brief: "Total input-token budget for holistic small-PR review",
+        default: "16000",
+      },
     },
   },
   config: {
@@ -141,6 +148,7 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
       primeLoreDb: flags["prime-lore-db"],
       deadlineMs: flags["deadline-ms"],
       candidateTimeoutMs: flags["candidate-timeout-ms"],
+      holisticInputTokens: flags["holistic-input-tokens"],
       onDiagnostic: (message) =>
         this.process.stderr.write(`[lore] ${message}\n`),
       onJudge: (current, total) =>

@@ -540,6 +540,8 @@ describe("semantic lint action reporter", () => {
     const action = readFileSync(join(actionDirectory, "action.yml"), "utf8");
     expect(action).toContain('default: "1200"');
     expect(action).toContain('default: "90"');
+    expect(action).toContain('default: "16000"');
+    expect(action).toContain("--holistic-input-tokens");
     expect(action).toContain('default: "restore"');
     expect(action).toContain(
       "LORE_PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}",

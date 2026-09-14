@@ -28,6 +28,7 @@ const candidateFailureCodes = new Set([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "insufficient-context",
 ]);
 const phaseFailureCodes = new Set([
   "range-resolution-failed",
@@ -82,11 +83,64 @@ function count(value, name) {
   }
 }
 
+function validateReview(review, counters) {
+  if (!review || typeof review !== "object" || Array.isArray(review)) {
+    throw new TypeError("review must be an object");
+  }
+  if (!["none", "isolated-hunk", "holistic"].includes(review.strategy)) {
+    throw new TypeError("invalid review strategy");
+  }
+  if (typeof review.contextComplete !== "boolean") {
+    throw new TypeError("invalid review contextComplete");
+  }
+  for (const name of [
+    "inputTokens",
+    "inputTokenBudget",
+    "availableHunks",
+    "includedHunks",
+    "omittedHunks",
+    "availableInvariants",
+    "includedInvariants",
+    "omittedInvariants",
+  ]) {
+    count(review[name], `review.${name}`);
+  }
+  if (review.inputTokenBudget <= 0) {
+    throw new TypeError("review input-token budget must be positive");
+  }
+  if (
+    review.availableHunks !== counters.hunks ||
+    review.includedHunks > review.availableHunks ||
+    review.omittedHunks !== review.availableHunks - review.includedHunks
+  ) {
+    throw new TypeError("review hunk coverage disagrees with counters");
+  }
+  if (
+    review.includedInvariants > review.availableInvariants ||
+    review.omittedInvariants !==
+      review.availableInvariants - review.includedInvariants
+  ) {
+    throw new TypeError("review invariant coverage does not add up");
+  }
+  if (review.strategy === "holistic") {
+    if (
+      !review.contextComplete ||
+      review.includedHunks !== review.availableHunks ||
+      review.includedInvariants !== review.availableInvariants ||
+      review.inputTokens > review.inputTokenBudget
+    ) {
+      throw new TypeError("holistic review coverage is incomplete");
+    }
+  } else if (review.contextComplete) {
+    throw new TypeError("non-holistic review cannot claim complete context");
+  }
+}
+
 function validateReport(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("report root must be an object");
   }
-  if (value.schemaVersion !== 1)
+  if (value.schemaVersion !== 2)
     throw new TypeError("unsupported schemaVersion");
   if (!["complete", "partial", "failed"].includes(value.status)) {
     throw new TypeError("invalid status");
@@ -178,6 +232,7 @@ function validateReport(value) {
   }
 
   const counters = value.counters;
+  validateReview(value.review, counters);
   for (const name of [
     "hunks",
     "invariants",

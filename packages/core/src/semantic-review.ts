@@ -55,12 +55,18 @@ export interface HolisticReviewEvidence {
 
 export interface HolisticReview {
   invariantId: string;
-  verdict: "violates" | "fixes" | "satisfies" | "unrelated";
+  verdict:
+    | "violates"
+    | "fixes"
+    | "satisfies"
+    | "unrelated"
+    | "insufficient-context";
   reason: string;
   evidence: HolisticReviewEvidence[];
 }
 
 export const DEFAULT_HOLISTIC_INPUT_TOKEN_BUDGET = 16_000;
+export const MAX_HOLISTIC_INVARIANTS = 20;
 export const HOLISTIC_SYSTEM_TOKEN_RESERVE = 2_000;
 export const APPROX_BYTES_PER_TOKEN = 4;
 

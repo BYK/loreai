@@ -5194,7 +5194,7 @@ export interface GatewayInvariantJudgeOptions {
 /** Bridge detailed gateway transport outcomes into core's semantic judge. */
 export function createGatewayInvariantJudge(
   options: GatewayInvariantJudgeOptions,
-): invariantCheck.InvariantJudge {
+): invariantCheck.InvariantJudge & invariantCheck.HolisticInvariantJudge {
   return {
     async judge(input): Promise<invariantCheck.JudgeOutcome> {
       let semanticCalls = 0;
@@ -5298,6 +5298,189 @@ export function createGatewayInvariantJudge(
         ? { kind: "verdict", ...verdict, stats: stats() }
         : invalidGatewayVerdict(stats());
     },
+    async review(
+      input: invariantCheck.HolisticReviewInput,
+    ): Promise<invariantCheck.HolisticReviewOutcome> {
+      let semanticCalls = 0;
+      let transportAttempts = 0;
+      const timeoutSignal =
+        options.candidateTimeoutMs == null
+          ? undefined
+          : AbortSignal.timeout(options.candidateTimeoutMs);
+      const signal =
+        options.signal && timeoutSignal
+          ? AbortSignal.any([options.signal, timeoutSignal])
+          : (options.signal ?? timeoutSignal);
+      const stats = (): invariantCheck.JudgeStats => ({
+        semanticCalls,
+        transportAttempts,
+      });
+      const call = async (user: string): Promise<PromptOutcome> => {
+        semanticCalls++;
+        const outcome = await options.client.promptDetailed(
+          invariantCheck.INVARIANT_HOLISTIC_REVIEW_SYSTEM,
+          user,
+          {
+            model: options.model,
+            ...(options.upstreamUrl
+              ? {
+                  upstreamUrl: options.upstreamUrl,
+                  upstreamProviderID: options.model.providerID,
+                }
+              : {}),
+            workerID: "lore-invariant-check",
+            thinking: false,
+            reasoningEffort: options.effort,
+            urgent: true,
+            sessionID: options.sessionID,
+            maxTokens: invariantCheck.judgeMaxTokens(options.effort),
+            temperature: 0,
+            signal,
+          },
+        );
+        transportAttempts += outcome.attempts;
+        if (signal?.aborted) {
+          return {
+            kind: "failure",
+            code:
+              signal.reason instanceof DOMException &&
+              signal.reason.name === "TimeoutError"
+                ? "timeout"
+                : "aborted",
+            message: "Holistic invariant review cancelled before accepting output",
+            retryable: !options.signal?.aborted,
+            model: outcome.model,
+            attempts: outcome.attempts,
+          };
+        }
+        return outcome;
+      };
+
+      let outcome: PromptOutcome;
+      try {
+        outcome = await call(
+          invariantCheck.invariantHolisticJudgeUser(input),
+        );
+      } catch (error) {
+        return holisticTransportFailure(error, stats(), options.signal);
+      }
+      if (outcome.kind === "failure") {
+        return promptFailureToHolisticReviewOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+
+      let reviews = invariantCheck.parseHolisticReviews(
+        outcome.text,
+        new Set(input.invariants.map((invariant) => invariant.id)),
+        new Set(input.hunks.map((hunk) => hunk.id)),
+      );
+      if (reviews) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-invariant-check",
+        );
+        return { kind: "reviews", reviews, stats: stats() };
+      }
+      if (input.semanticCallBudget < 2) {
+        return invalidHolisticGatewayReview(stats());
+      }
+
+      try {
+        outcome = await call(
+          invariantCheck.invariantHolisticJudgeRepairUser({
+            ...input,
+            invalidResponse: outcome.text.slice(0, 4_000),
+          }),
+        );
+      } catch (error) {
+        return holisticTransportFailure(error, stats(), options.signal);
+      }
+      if (outcome.kind === "failure") {
+        return promptFailureToHolisticReviewOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+      reviews = invariantCheck.parseHolisticReviews(
+        outcome.text,
+        new Set(input.invariants.map((invariant) => invariant.id)),
+        new Set(input.hunks.map((hunk) => hunk.id)),
+      );
+      if (reviews) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-invariant-check",
+        );
+        return { kind: "reviews", reviews, stats: stats() };
+      }
+      return invalidHolisticGatewayReview(stats());
+    },
+  };
+}
+
+function invalidHolisticGatewayReview(
+  stats: invariantCheck.JudgeStats,
+): invariantCheck.HolisticReviewOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "invalid-verdict",
+      message: "Holistic judge response did not match the required review schema",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
+  };
+}
+
+function holisticTransportFailure(
+  error: unknown,
+  stats: invariantCheck.JudgeStats,
+  overallSignal?: AbortSignal,
+): invariantCheck.HolisticReviewOutcome {
+  const name = error instanceof Error ? error.name : "";
+  const code: invariantCheck.JudgeFailureCode =
+    name === "AbortError"
+      ? "abort"
+      : name === "TimeoutError"
+        ? "timeout"
+        : "transport-error";
+  return {
+    kind: "unresolved",
+    failure: {
+      code,
+      message: error instanceof Error ? error.message.slice(0, 400) : String(error).slice(0, 400),
+      scope: (code === "abort" || code === "timeout") && overallSignal?.aborted
+        ? "run"
+        : "candidate",
+      retryable: code !== "abort",
+    },
+    stats,
+  };
+}
+
+function promptFailureToHolisticReviewOutcome(
+  outcome: Extract<PromptOutcome, { kind: "failure" }>,
+  stats: invariantCheck.JudgeStats,
+  overallSignal?: AbortSignal,
+): invariantCheck.HolisticReviewOutcome {
+  const translated = promptFailureToJudgeOutcome(outcome, stats, overallSignal);
+  if (translated.kind === "unresolved") {
+    return translated;
+  }
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "transport-error",
+      message: "Holistic invariant review transport failed",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
   };
 }
 

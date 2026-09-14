@@ -41,8 +41,35 @@ import {
   invariantJudgeRepairUser,
   invariantJudgeUser,
 } from "./prompt";
+import {
+  buildHolisticReviewInput,
+  emptyReviewCoverage,
+  MAX_HOLISTIC_INVARIANTS,
+  type HolisticInvariant,
+  type HolisticReview,
+  type HolisticReviewInput,
+  type ReviewCoverage,
+} from "./semantic-review";
 import { extractReferences } from "./references";
 import type { LLMClient } from "./types";
+
+export {
+  INVARIANT_HOLISTIC_REVIEW_SYSTEM,
+  invariantHolisticJudgeRepairUser,
+  invariantHolisticJudgeUser,
+} from "./prompt";
+export {
+  buildHolisticReviewInput,
+  emptyReviewCoverage,
+  estimateHolisticInputTokens,
+  MAX_HOLISTIC_INVARIANTS,
+} from "./semantic-review";
+export type {
+  HolisticInvariant,
+  HolisticReview,
+  HolisticReviewInput,
+  ReviewCoverage,
+} from "./semantic-review";
 
 // ---------------------------------------------------------------------------
 // Constants (mirror contradiction.ts bounds so cost stays capped)
@@ -732,6 +759,115 @@ export function parseInvariantVerdict(
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate one complete holistic judge response. The response must contain
+ * exactly one review for every expected invariant, with evidence IDs that
+ * belong to the complete supplied hunk set. The payload is still untrusted:
+ * strings are bounded and never interpreted as instructions.
+ */
+function isHolisticVerdict(
+  value: unknown,
+): value is HolisticReview["verdict"] {
+  return isVerdict(value) || value === "insufficient-context";
+}
+
+export function parseHolisticReviews(
+  text: string | null,
+  expectedInvariantIds: ReadonlySet<string>,
+  expectedHunkIds: ReadonlySet<string>,
+): HolisticReview[] | null {
+  if (!text) return null;
+  let payload = text.trim();
+  const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(
+    payload,
+  );
+  if (fenced) payload = fenced[1];
+  else if (payload.startsWith("```") || payload.endsWith("```")) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (!isRecord(parsed) || Object.keys(parsed).length !== 1) return null;
+    if (!Array.isArray(parsed.reviews)) return null;
+    if (parsed.reviews.length !== expectedInvariantIds.size) return null;
+
+    const seen = new Set<string>();
+    const reviews: HolisticReview[] = [];
+    for (const value of parsed.reviews) {
+      if (!isRecord(value)) return null;
+      const keys = Object.keys(value).sort();
+      if (
+        keys.length !== 4 ||
+        keys[0] !== "evidence" ||
+        keys[1] !== "invariantId" ||
+        keys[2] !== "reason" ||
+        keys[3] !== "verdict"
+      ) {
+        return null;
+      }
+      if (
+        typeof value.invariantId !== "string" ||
+        !expectedInvariantIds.has(value.invariantId) ||
+        seen.has(value.invariantId) ||
+        typeof value.reason !== "string" ||
+        value.reason.trim().length === 0 ||
+        value.reason.length > 400 ||
+        !isHolisticVerdict(value.verdict) ||
+        !Array.isArray(value.evidence)
+      ) {
+        return null;
+      }
+
+      const evidence: HolisticReview["evidence"] = [];
+      const seenHunks = new Set<string>();
+      for (const evidenceValue of value.evidence) {
+        if (!isRecord(evidenceValue)) return null;
+        const evidenceKeys = Object.keys(evidenceValue).sort();
+        if (
+          evidenceKeys.length !== 2 ||
+          evidenceKeys[0] !== "hunkId" ||
+          evidenceKeys[1] !== "reason" ||
+          typeof evidenceValue.hunkId !== "string" ||
+          !expectedHunkIds.has(evidenceValue.hunkId) ||
+          seenHunks.has(evidenceValue.hunkId) ||
+          typeof evidenceValue.reason !== "string" ||
+          evidenceValue.reason.trim().length === 0 ||
+          evidenceValue.reason.length > 400
+        ) {
+          return null;
+        }
+        seenHunks.add(evidenceValue.hunkId);
+        evidence.push({
+          hunkId: evidenceValue.hunkId,
+          reason: evidenceValue.reason,
+        });
+      }
+      if (
+        (value.verdict === "violates" || value.verdict === "fixes") &&
+        evidence.length === 0
+      ) {
+        return null;
+      }
+      seen.add(value.invariantId);
+      reviews.push({
+        invariantId: value.invariantId,
+        verdict: value.verdict,
+        reason: value.reason,
+        evidence,
+      });
+    }
+
+    return seen.size === expectedInvariantIds.size ? reviews : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Candidate pairing
 // ---------------------------------------------------------------------------
@@ -915,7 +1051,8 @@ export type JudgeFailureCode =
   | "transport-error"
   | "invalid-verdict"
   | "judge-contract-error"
-  | "semantic-budget-exhausted";
+  | "semantic-budget-exhausted"
+  | "insufficient-context";
 
 export interface JudgeFailure {
   code: JudgeFailureCode;
@@ -953,6 +1090,22 @@ export interface InvariantJudgeInput {
  */
 export interface InvariantJudge {
   judge(input: InvariantJudgeInput): Promise<JudgeOutcome>;
+}
+
+export type HolisticReviewOutcome =
+  | {
+      kind: "reviews";
+      reviews: HolisticReview[];
+      stats: JudgeStats;
+    }
+  | {
+      kind: "unresolved";
+      failure: JudgeFailure;
+      stats: JudgeStats;
+    };
+
+export interface HolisticInvariantJudge {
+  review(input: HolisticReviewInput): Promise<HolisticReviewOutcome>;
 }
 
 interface CandidateOutcomeBase {
@@ -1016,6 +1169,7 @@ export interface CheckResult {
   range: ResolvedRange;
   status: "complete" | "partial" | "failed";
   health: CheckHealth;
+  review: ReviewCoverage;
   hunks: number;
   invariants: number;
   candidates: number;
@@ -1351,6 +1505,10 @@ export interface CheckInvariantsInput {
   range: ResolvedRange;
   /** Preferred typed judge boundary. */
   judge?: InvariantJudge;
+  /** Optional whole-diff judge used when the bounded input is complete. */
+  holisticJudge?: HolisticInvariantJudge;
+  /** Approximate total input-token budget for one holistic review. */
+  holisticInputTokenBudget?: number;
   /** @deprecated Gateway compatibility; use `judge`. */
   llm?: LLMClient;
   model?: { providerID: string; modelID: string };
@@ -1512,6 +1670,89 @@ export async function checkInvariants(
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
   const selected = selectCandidates(clusters, hunkVecs, invariants, hunks);
 
+  const judge =
+    input.judge ??
+    (input.llm
+      ? createLLMInvariantJudge({
+          llm: input.llm,
+          model: input.model,
+          effort: input.effort,
+          sessionID: input.sessionID,
+          signal: input.signal,
+        })
+      : null);
+
+  // A small PR gets one bounded whole-diff review only when every available
+  // hunk and selected invariant fits. Larger or incomplete inputs retain the
+  // isolated-hunk path below; they are never silently truncated.
+  const selectedInvariantIndices = uniqueInvariantIndices(
+    selected,
+    MAX_HOLISTIC_INVARIANTS,
+  );
+  const holisticHunks = hunks.map((hunk, index) => ({
+    id: holisticHunkId(index),
+    file: hunk.file,
+    text: hunk.text,
+  }));
+  const holisticInvariants: HolisticInvariant[] = selectedInvariantIndices.map(
+    (index) => ({
+      id: invariants[index].entry.id,
+      title: invariants[index].entry.title,
+      content: invariants[index].entry.content,
+    }),
+  );
+  const hasTruncatedHunk = hunks.some((hunk) =>
+    hunk.text.includes("hunk truncated by Lore"),
+  );
+  const holisticPlan =
+    input.holisticJudge &&
+    holisticInvariants.length > 0 &&
+    !hasTruncatedHunk
+      ? buildHolisticReviewInput({
+          invariants: holisticInvariants,
+          hunks: holisticHunks,
+          prContext: input.prContext,
+          inputTokenBudget: input.holisticInputTokenBudget,
+        })
+      : null;
+  const review =
+    holisticPlan?.kind === "too-large"
+      ? isolatedReviewCoverage({
+          availableHunks: hunks.length,
+          includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
+            .size,
+          availableInvariants: selectedInvariantIndices.length,
+          includedInvariants: selectedInvariantIndices.length,
+          inputTokens: holisticPlan.coverage.inputTokens,
+          inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
+        })
+      : holisticPlan?.kind === "fit"
+        ? holisticPlan.coverage
+        : isolatedReviewCoverage({
+            availableHunks: hunks.length,
+            includedHunks: new Set(
+              selected.map((candidate) => candidate.hunkIdx),
+            ).size,
+            availableInvariants: selectedInvariantIndices.length,
+            includedInvariants: selectedInvariantIndices.length,
+            inputTokens: 0,
+            inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
+          });
+
+  if (holisticPlan?.kind === "fit" && input.holisticJudge) {
+    return runHolisticReview({
+      input,
+      holisticJudge: input.holisticJudge,
+      plan: holisticPlan,
+      hunks,
+      invariants,
+      selected,
+      selectedInvariantIndices,
+      invariantVectorHealth: invariantVecResult.health,
+      hunkVectorHealth: hunkVecResult.health,
+    });
+  }
+
   // Map a representative hunk index → its cluster members, for verdict fan-out.
   const membersByRep = new Map<number, number[]>();
   for (const c of clusters) membersByRep.set(c.repIdx, c.memberIdxs);
@@ -1525,17 +1766,6 @@ export async function checkInvariants(
   let semanticCalls = 0;
   let transportAttempts = 0;
   let stopFailure: JudgeFailure | null = null;
-  const judge =
-    input.judge ??
-    (input.llm
-      ? createLLMInvariantJudge({
-          llm: input.llm,
-          model: input.model,
-          effort: input.effort,
-          sessionID: input.sessionID,
-          signal: input.signal,
-        })
-      : null);
 
   for (
     let candidateIndex = 0;
@@ -1688,6 +1918,7 @@ export async function checkInvariants(
     range: input.range,
     status: overallStatus(health),
     health,
+    review,
     hunks: hunks.length,
     invariants: allEntries.length,
     candidates: selected.length,
@@ -1735,6 +1966,7 @@ const JUDGE_FAILURE_CODES = new Set<JudgeFailureCode>([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "insufficient-context",
 ]);
 
 function isVerdict(value: unknown): value is Verdict {
@@ -1857,6 +2089,72 @@ function judgeContractFailure(): JudgeOutcome {
   };
 }
 
+function validateHolisticReviewOutcome(
+  outcome: unknown,
+  expectedInvariantIds: ReadonlySet<string>,
+  expectedHunkIds: ReadonlySet<string>,
+): HolisticReviewOutcome {
+  if (!isRecord(outcome) || !isRecord(outcome.stats)) {
+    return holisticContractFailure();
+  }
+  const stats = outcome.stats;
+  if (
+    !Number.isSafeInteger(stats.semanticCalls) ||
+    stats.semanticCalls < 0 ||
+    stats.semanticCalls > Math.min(2, MAX_JUDGE_CALLS) ||
+    !Number.isSafeInteger(stats.transportAttempts) ||
+    stats.transportAttempts < 0
+  ) {
+    return holisticContractFailure();
+  }
+  const normalizedStats: JudgeStats = {
+    semanticCalls: stats.semanticCalls,
+    transportAttempts: stats.transportAttempts,
+  };
+  if (outcome.kind === "reviews") {
+    const reviews = parseHolisticReviews(
+      JSON.stringify({ reviews: outcome.reviews }),
+      expectedInvariantIds,
+      expectedHunkIds,
+    );
+    return reviews
+      ? { kind: "reviews", reviews, stats: normalizedStats }
+      : holisticContractFailure();
+  }
+  if (
+    outcome.kind === "unresolved" &&
+    isRecord(outcome.failure) &&
+    typeof outcome.failure.code === "string" &&
+    JUDGE_FAILURE_CODES.has(outcome.failure.code as JudgeFailureCode) &&
+    typeof outcome.failure.message === "string" &&
+    outcome.failure.message.trim().length > 0 &&
+    outcome.failure.message.length <= 400 &&
+    (outcome.failure.scope === "candidate" || outcome.failure.scope === "run") &&
+    (outcome.failure.retryable === undefined ||
+      typeof outcome.failure.retryable === "boolean")
+  ) {
+    return {
+      kind: "unresolved",
+      failure: outcome.failure as unknown as JudgeFailure,
+      stats: normalizedStats,
+    };
+  }
+  return holisticContractFailure();
+}
+
+function holisticContractFailure(): HolisticReviewOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "judge-contract-error",
+      message: "HolisticInvariantJudge returned an invalid outcome",
+      scope: "run",
+      retryable: false,
+    },
+    stats: { semanticCalls: 0, transportAttempts: 0 },
+  };
+}
+
 function healthyVectorHealth(
   expected: number,
   available: number,
@@ -1936,6 +2234,10 @@ function emptyCheckResult(
     range,
     status: overallStatus(health),
     health,
+    review: emptyReviewCoverage(
+      counts.hunks ?? health.diff.hunks,
+      counts.invariants ?? 0,
+    ),
     hunks: counts.hunks ?? health.diff.hunks,
     invariants: counts.invariants ?? 0,
     candidates: 0,
@@ -1953,6 +2255,272 @@ function emptyCheckResult(
   };
 }
 
+function holisticHunkId(index: number): string {
+  return `hunk-${String(index + 1).padStart(4, "0")}`;
+}
+
+function uniqueInvariantIndices(
+  selected: Candidate[],
+  limit: number,
+): number[] {
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const candidate of selected) {
+    if (seen.has(candidate.invariantIdx)) continue;
+    seen.add(candidate.invariantIdx);
+    out.push(candidate.invariantIdx);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function isolatedReviewCoverage(input: {
+  availableHunks: number;
+  includedHunks: number;
+  availableInvariants: number;
+  includedInvariants: number;
+  inputTokens: number;
+  inputTokenBudget: number;
+}): ReviewCoverage {
+  return {
+    strategy: "isolated-hunk",
+    contextComplete: false,
+    inputTokens: input.inputTokens,
+    inputTokenBudget: input.inputTokenBudget,
+    availableHunks: input.availableHunks,
+    includedHunks: input.includedHunks,
+    omittedHunks: Math.max(0, input.availableHunks - input.includedHunks),
+    availableInvariants: input.availableInvariants,
+    includedInvariants: input.includedInvariants,
+    omittedInvariants: Math.max(
+      0,
+      input.availableInvariants - input.includedInvariants,
+    ),
+  };
+}
+
+async function runHolisticReview(args: {
+  input: CheckInvariantsInput;
+  holisticJudge: HolisticInvariantJudge;
+  plan: { kind: "fit"; input: HolisticReviewInput; coverage: ReviewCoverage };
+  hunks: DiffHunk[];
+  invariants: InvariantVec[];
+  selected: Candidate[];
+  selectedInvariantIndices: number[];
+  invariantVectorHealth: VectorHealth;
+  hunkVectorHealth: VectorHealth;
+}): Promise<CheckResult> {
+  const { input: checkInput, plan, hunks, invariants, selected } = args;
+  const anchorByInvariant = new Map<number, Candidate>();
+  for (const candidate of selected) {
+    if (!anchorByInvariant.has(candidate.invariantIdx)) {
+      anchorByInvariant.set(candidate.invariantIdx, candidate);
+    }
+  }
+
+  checkInput.onJudge?.(1, 1);
+  let outcome: unknown;
+  try {
+    outcome = await args.holisticJudge.review({
+      ...plan.input,
+      semanticCallBudget: Math.min(2, MAX_JUDGE_CALLS),
+    });
+  } catch (error) {
+    outcome = {
+      kind: "unresolved",
+      failure: {
+        code: "judge-contract-error",
+        message: boundedMessage(error, "HolisticInvariantJudge threw"),
+        scope: "run",
+      },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    };
+  }
+
+  const validated = validateHolisticReviewOutcome(
+    outcome,
+    new Set(plan.input.invariants.map((invariant) => invariant.id)),
+    new Set(plan.input.hunks.map((hunk) => hunk.id)),
+  );
+  if (validated.kind === "unresolved") {
+    const failure = validated.failure;
+    const candidateOutcomes: CandidateOutcome[] = [];
+    for (let i = 0; i < args.selectedInvariantIndices.length; i++) {
+      const invariantIndex = args.selectedInvariantIndices[i];
+      const invariant = invariants[invariantIndex];
+      const anchor = anchorByInvariant.get(invariantIndex);
+      if (!anchor) continue;
+      const base = candidateOutcomeBase(
+        i,
+        anchor,
+        invariant,
+        hunks[anchor.hunkIdx],
+      );
+      candidateOutcomes.push({
+        ...base,
+        state: i === 0 ? "unresolved" : "not-attempted",
+        failure,
+        stats:
+          i === 0
+            ? validated.stats
+            : { semanticCalls: 0, transportAttempts: 0 },
+      });
+    }
+    const unresolved = candidateOutcomes.filter(
+      (candidate) => candidate.state === "unresolved",
+    ).length;
+    const notAttempted = candidateOutcomes.length - unresolved;
+    const judgeHealth = calculateJudgeHealth(
+      candidateOutcomes.length,
+      0,
+      unresolved,
+      notAttempted,
+    );
+    const health: CheckHealth = {
+      diff: { status: "healthy", hunks: hunks.length },
+      invariantVectors: args.invariantVectorHealth,
+      hunkVectors: args.hunkVectorHealth,
+      judge: judgeHealth,
+    };
+    return {
+      range: checkInput.range,
+      status: overallStatus(health),
+      health,
+      review: plan.coverage,
+      hunks: hunks.length,
+      invariants: args.invariants.length,
+      candidates: candidateOutcomes.length,
+      attempted: unresolved,
+      resolved: 0,
+      unresolved,
+      notAttempted,
+      semanticCalls: validated.stats.semanticCalls,
+      transportAttempts: validated.stats.transportAttempts,
+      candidateOutcomes,
+      findings: [],
+      judged: unresolved,
+      judgeCalls: validated.stats.semanticCalls,
+      unparseable: unresolved,
+    };
+  }
+
+  const reviewsByInvariant = new Map(
+    validated.reviews.map((review) => [review.invariantId, review]),
+  );
+  const candidateOutcomes: CandidateOutcome[] = [];
+  for (let i = 0; i < args.selectedInvariantIndices.length; i++) {
+    const invariantIndex = args.selectedInvariantIndices[i];
+    const invariant = invariants[invariantIndex];
+    const anchor = anchorByInvariant.get(invariantIndex);
+    const review = reviewsByInvariant.get(invariant.entry.id);
+    if (!anchor || !review) continue;
+    const base = candidateOutcomeBase(
+      i,
+      anchor,
+      invariant,
+      hunks[anchor.hunkIdx],
+    );
+    const stats =
+      i === 0 ? validated.stats : { semanticCalls: 0, transportAttempts: 0 };
+    if (review.verdict === "insufficient-context") {
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure: {
+          code: "insufficient-context",
+          message: review.reason,
+          scope: "candidate",
+          retryable: false,
+        },
+        stats,
+      });
+      continue;
+    }
+    candidateOutcomes.push({
+      ...base,
+      state: "resolved",
+      verdict: review.verdict,
+      reason: review.reason,
+      stats,
+    });
+  }
+
+  const findings: Finding[] = [];
+  const seen = new Set<string>();
+  const hunkById = new Map(
+    plan.input.hunks.map((hunk, index) => [hunk.id, hunks[index]]),
+  );
+  for (const review of validated.reviews) {
+    if (review.verdict !== "violates") continue;
+    const invariantIndex = args.selectedInvariantIndices.find(
+      (index) => invariants[index].entry.id === review.invariantId,
+    );
+    if (invariantIndex === undefined) continue;
+    const anchor = anchorByInvariant.get(invariantIndex);
+    const invariant = invariants[invariantIndex];
+    if (!anchor) continue;
+    const severity = enforcementLevel(invariant.entry);
+    for (const evidence of review.evidence) {
+      const hunk = hunkById.get(evidence.hunkId);
+      if (!hunk) continue;
+      const dedupKey = `${review.invariantId}\x1f${hunk.file}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      findings.push({
+        invariantId: invariant.entry.id,
+        invariantTitle: invariant.entry.title,
+        invariantContent: invariant.entry.content,
+        file: hunk.file,
+        similarity: anchor.similarity,
+        refHit: anchor.refHit,
+        reason: review.reason,
+        hunk: hunk.text,
+        severity,
+      });
+    }
+  }
+
+  const resolved = candidateOutcomes.filter(
+    (candidate) => candidate.state === "resolved",
+  ).length;
+  const unresolved = candidateOutcomes.filter(
+    (candidate) => candidate.state === "unresolved",
+  ).length;
+  const notAttempted =
+    args.selectedInvariantIndices.length - candidateOutcomes.length;
+  const attempted = resolved + unresolved;
+  const health: CheckHealth = {
+    diff: { status: "healthy", hunks: hunks.length },
+    invariantVectors: args.invariantVectorHealth,
+    hunkVectors: args.hunkVectorHealth,
+    judge: calculateJudgeHealth(
+      args.selectedInvariantIndices.length,
+      resolved,
+      unresolved,
+      notAttempted,
+    ),
+  };
+  return {
+    range: checkInput.range,
+    status: overallStatus(health),
+    health,
+    review: plan.coverage,
+    hunks: hunks.length,
+    invariants: args.invariants.length,
+    candidates: candidateOutcomes.length,
+    attempted,
+    resolved,
+    unresolved,
+    notAttempted,
+    semanticCalls: validated.stats.semanticCalls,
+    transportAttempts: validated.stats.transportAttempts,
+    candidateOutcomes,
+    findings,
+    judged: attempted,
+    judgeCalls: validated.stats.semanticCalls,
+    unparseable: unresolved,
+  };
+}
 function candidateOutcomeBase(
   candidateIndex: number,
   candidate: Candidate,
