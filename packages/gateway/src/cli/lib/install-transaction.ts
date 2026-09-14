@@ -2,11 +2,12 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  constants,
   fsyncSync,
   linkSync,
+  lstatSync,
   openSync,
   renameSync,
-  lstatSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -85,7 +86,10 @@ export function _setInstallPublicationHookForTest(
 
 function syncDirectory(path: string): void {
   if (process.platform === "win32") return;
-  const fd = openSync(path, "r");
+  const fd = openSync(
+    path,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
   try {
     fsyncSync(fd);
   } finally {
