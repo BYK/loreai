@@ -125,7 +125,8 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
       },
       "allow-author-overrides": {
         kind: "boolean",
-        brief: "Allow commit trailers to override soft findings (trusted use only)",
+        brief:
+          "Allow commit trailers to override soft findings (trusted use only)",
         default: false,
       },
       "holistic-input-tokens": {
