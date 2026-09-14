@@ -12,6 +12,7 @@ const temporaryDirectories: string[] = [];
 afterEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  vi.doUnmock("../src/cli/semantic-lint");
   await Promise.all(
     temporaryDirectories
       .splice(0)

@@ -1682,7 +1682,7 @@ describe("checkInvariants typed judge outcomes", () => {
     expect(result.health.judge.status).toBe("not-run");
   });
 
-  it("reports a healthy run only when every selected candidate resolves", async () => {
+  it("reports partial coverage when isolated candidate judging resolves", async () => {
     const project = "/tmp/ic-test-typed-healthy";
     const hunks = await seedCandidateSet(project, 3);
     const { judge, judgeCall } = stubJudge(() => ({
@@ -1702,7 +1702,7 @@ describe("checkInvariants typed judge outcomes", () => {
 
     expect(judgeCall).toHaveBeenCalledTimes(3);
     expect(result).toMatchObject({
-      status: "complete",
+      status: "partial",
       candidates: 3,
       attempted: 3,
       resolved: 3,

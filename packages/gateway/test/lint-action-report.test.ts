@@ -273,10 +273,16 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value)).toBe(true);
   });
 
-  test("accepts complete diff context with bounded invariant coverage", () => {
+  test("accepts partial diff context with bounded invariant coverage", () => {
     const value = resolvedReport(1);
+    value.status = "partial";
     value.counters.hunks = 2;
-    value.health.hunkVectors.expected = 2;
+    value.health.hunkVectors = {
+      status: "healthy",
+      expected: 2,
+      available: 2,
+      missing: 0,
+    };
     value.coverage = {
       strategy: "holistic",
       contextComplete: true,
