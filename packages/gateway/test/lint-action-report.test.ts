@@ -245,7 +245,7 @@ describe("semantic lint action reporter", () => {
       },
       gateMode: "advisory",
     });
-    value.health.diff = { status: "healthy", hunks: 1 };
+    value.health.diff = { status: "healthy" };
     value.health.hunkVectors = {
       status: "not-run",
       expected: 1,
